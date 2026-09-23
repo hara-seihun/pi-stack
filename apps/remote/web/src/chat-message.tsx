@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { API } from "../../server/api";
 import type { MessagingMessage } from "../../server/messaging/protocol";
+import { extractMessageLinks } from "../../server/messaging/links";
 import type { ResponseMetrics } from "../../server/protocol";
 import { AGENT_AVATAR } from "../../server/agent-identity";
 import { appPath } from "./app-path";
 import { messagingAvatarUrl } from "./messaging-avatar";
 import { resourceUrl } from "./resource-url";
+import { MessageLinkPreviews } from "./link-previews";
 import { formatResponseMetrics } from "./response-metrics";
 import { copyText, useMessageMenu, type MessageMenuItem } from "./message-menu";
 import { speech, speechTitle, useSpeech } from "./speech";
@@ -36,6 +38,7 @@ export type ChatMessageSegment = {
   id: string;
   text: string;
   timestamp?: number;
+  previewMessageId?: string;
   attachments?: ChatAttachment[];
   delivery?: ChatDelivery;
   onCheck?(): void;
@@ -53,6 +56,7 @@ export type ChatMessageProps = {
   text: string;
   timestamp?: number;
   responseMetrics?: ResponseMetrics;
+  previewMessageId?: string;
   /** Extra long-press / right-click actions after Copy. */
   menu?: MessageMenuItem[];
   attachments?: ChatAttachment[];
@@ -117,6 +121,7 @@ export function ChatMessage(props: ChatMessageProps) {
   return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={timestamp} menu={menu}>
     <MessageBody attachments={attachments} delivery={delivery} checking={checking} onCheck={onCheck} onRetry={onRetry} onEditImage={onEditImage}>
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}
+      {props.previewMessageId && <MessageLinkPreviews key={props.previewMessageId} messageId={props.previewMessageId} />}
       {responseMetrics && <footer className="message-metrics">{formatResponseMetrics(responseMetrics)}</footer>}
     </MessageBody>
   </MessageFrame>;
@@ -147,6 +152,7 @@ export function ChatMessageGroup({ kind, label, avatar, segments, checking = fal
       return <div className="message-segment" key={segment.id} data-message-id={segment.id} title={time?.toLocaleString()}>
         <MessageBody attachments={segment.attachments} delivery={delivery} checking={checking} onCheck={segment.onCheck} onRetry={segment.onRetry} onEditImage={onEditImage}>
           {segment.text && <p className="message-text">{segment.text}</p>}
+          {segment.previewMessageId && <MessageLinkPreviews key={segment.previewMessageId} messageId={segment.previewMessageId} />}
         </MessageBody>
       </div>;
     })}
@@ -155,8 +161,8 @@ export function ChatMessageGroup({ kind, label, avatar, segments, checking = fal
 
 /** One Signal message as a segment of a sender's block; check/retry handlers are wired by the caller. */
 export function messagingMessageSegment(message: MessagingMessage, handlers: { onCheck?(): void; onRetry?(): void } = {}): ChatMessageSegment {
-  const { text, timestamp, attachments, delivery } = messagingMessageProps(message);
-  return { id: message.id, text, timestamp, attachments, delivery, ...handlers };
+  const { text, timestamp, attachments, delivery, previewMessageId } = messagingMessageProps(message);
+  return { id: message.id, text, timestamp, attachments, delivery, previewMessageId, ...handlers };
 }
 
 export function messagingMessageProps(message: MessagingMessage, backendId = ""): ChatMessageProps {
@@ -166,6 +172,7 @@ export function messagingMessageProps(message: MessagingMessage, backendId = "")
     label: outgoing ? "You" : message.senderName || message.sender,
     avatar: outgoing ? undefined : messagingAvatarUrl(backendId, message.sender, message.senderAvatar),
     text: message.text,
+    previewMessageId: (message.status === "received" || message.status === "sent") && extractMessageLinks(message.text, 1).length > 0 ? message.id : undefined,
     contentFormat: "literal",
     timestamp: message.timestamp,
     attachments: message.attachments.map(attachment => ({
