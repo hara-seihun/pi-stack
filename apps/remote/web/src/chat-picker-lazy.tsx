@@ -4,6 +4,7 @@
 
 import { forwardRef, lazy, Suspense, useCallback, useImperativeHandle, useRef, useState } from "react";
 import type { ChatPickerEntry, ChatPickerHandle, ChatPickerProps } from "./thread-start-menu";
+import "./chat-picker-trigger.css";
 
 const RealChatPicker = lazy(() => import("./thread-start-menu").then(module => ({ default: module.ChatPicker })));
 
