@@ -27,7 +27,7 @@ import { MessagingCallProvider, SignalCallButton } from "./messaging-call";
 import { RequestIndicator } from "./RequestIndicator";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
 import { shouldUndoClose, UndoCloses } from "./undo-closes";
-import "./undo-closes.css";
+import { toast, ToastViewport } from "./toasts";
 import { useSystemBack } from "./app/system-back";
 import { back, currentRoute, navigate, routeChatId, routeHome, routeThreadId, useRoute, withoutPanel, type Panel, type Route, type Tab } from "./app/routes";
 import { Inbox } from "./features/chats/Inbox";
@@ -197,7 +197,6 @@ function RemoteApp() {
   const [closing, setClosing] = useState<PendingCloses>(() => new Set());
   const undoCloses = useMemo(() => new UndoCloses(), []);
   const undoState = useSyncExternalStore(undoCloses.subscribe, undoCloses.snapshot, undoCloses.snapshot);
-  const [dismissedUndo, setDismissedUndo] = useState<number | null>(null);
   const [prompt, setPrompt] = useState("");
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -582,6 +581,17 @@ function RemoteApp() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [undoClose, undoCloses]);
+  useEffect(() => {
+    const entry = undoState.entries.at(-1);
+    if (!entry || undoState.restoring) return;
+    const description = entry.chat.kind === "ai" ? "Undo restores the chat, not stopped work." : "Restore this chat to your inbox.";
+    const show = undoState.error ? toast.error : toast;
+    const id = show(undoState.error ? `Could not restore ${entry.chat.title}` : `Closed ${entry.chat.title}`, {
+      description: undoState.error || description,
+      action: { label: undoState.error ? "Retry Undo" : "Undo", onClick: () => { void undoClose(); } },
+    });
+    return () => { toast.dismiss(id); };
+  }, [undoState, undoClose]);
   const openInboxChat = useCallback((chat: Chat) => { void selectChat(chat).catch(cause => setChatError(String(cause))); }, [selectChat]);
   const closeInboxChat = useCallback((chat: Chat) => { void closeChat(chat); }, [closeChat]);
   const chatPicker = useRef<ChatPickerHandle>(null);
@@ -818,18 +828,12 @@ function RemoteApp() {
     : route.tab === "files" ? filesScreen(layout === "phone" ? "stack" : "split")
     : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
 
+  const showTabs = route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
   return <MessagingCallProvider snapshot={state.messaging}>
-    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail}
+    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
         <SpeechBar />
-        {undoState.entries.length > 0 && (undoState.entries.at(-1)!.order !== dismissedUndo || undoState.error) && <div className="undo-close" role="status" aria-live="polite">
-          <div className="undo-close-copy"><strong>{undoState.restoring ? "Restoring chat…" : `Closed ${undoState.entries.at(-1)!.chat.title}`}</strong>
-            <span>{undoState.entries.at(-1)!.chat.kind === "ai" ? "Undo restores the chat, not stopped work." : "Restore this chat to your inbox."}{undoState.entries.length > 1 ? ` ${undoState.entries.length} chats to undo.` : ""}</span>
-            {undoState.error && <span className="undo-close-error" role="alert">Could not restore: {undoState.error}</span>}
-          </div>
-          <button type="button" onClick={() => void undoClose()} disabled={undoState.restoring}>{undoState.error ? "Retry Undo" : "Undo"}</button>
-          {!undoState.error && <button type="button" className="undo-close-dismiss" aria-label="Dismiss undo notice" onClick={() => setDismissedUndo(undoState.entries.at(-1)!.order)}>×</button>}
-        </div>}
+        <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && !messagingActive && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
         {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
         {/* The sheets and the paste dialog mount when they open, so their
