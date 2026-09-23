@@ -230,6 +230,58 @@ test("proved source ancestry clears failures but never hides host restoration cu
   assert.deepEqual(issues(root, inbox).issues.map(issue => issue.requestId), [publishedId]);
 });
 
+test("publication history retains delivery proof across unrelated source roots", async t => {
+  const { root, receipt, inbox } = await fixture(t);
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  function git(...args) {
+    const result = spawnSync("git", args, { cwd: repository, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  }
+  git("init", "--quiet");
+  const commit = message => {
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "--allow-empty", "-m", message);
+    return git("rev-parse", "HEAD");
+  };
+  const source = commit("requested source");
+  const delivered = commit("successful integration");
+  git("checkout", "--quiet", "--orphan", "public");
+  const publicRoot = commit("public source root");
+  git("checkout", "--quiet", "--orphan", "undelivered");
+  const missing = commit("unfinished work");
+  const request = JSON.parse(readFileSync(receipt, "utf8"));
+  writeFileSync(receipt, JSON.stringify({ ...request, sourceSha: source }));
+  const deliveredId = "PUB-1123456789abcdef01234567";
+  const publicId = "PUB-2123456789abcdef01234567";
+  const missingId = "PUB-3123456789abcdef01234567";
+  for (const [id, sha, publishedAt] of [[deliveredId, delivered, "2026-09-15"], [publicId, publicRoot, "2026-09-16"]]) {
+    writeFileSync(join(root, "requests", `${id}.json`), JSON.stringify({
+      requestId: id, sourceSha: sha, integrationSha: sha, status: "published", publishedAt,
+      finalProof: { path: `/fixture/${id}.json` },
+    }));
+  }
+  writeFileSync(join(root, "requests", `${missingId}.json`), JSON.stringify({ ...request, requestId: missingId, sourceSha: missing }));
+  const index = issues(root, inbox);
+  assert.deepEqual(index.issues.map(issue => issue.requestId), [missingId]);
+  assert.deepEqual(index.resolved.find(item => item.requestId === requestId).resolution, {
+    requestId: deliveredId, integrationSha: delivered, proof: `/fixture/${deliveredId}.json`,
+  });
+});
+
+test("issue inspection remains read-only while the publication worker holds its lock", async t => {
+  const { root, inbox } = await fixture(t);
+  const holder = spawn("flock", [join(root, "worker.lock"), process.execPath, "-e",
+    "process.stdout.write('locked'); process.stdin.resume()"], { stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => holder.stdin.end());
+  await new Promise((resolve, reject) => {
+    holder.stdout.once("data", resolve);
+    holder.once("error", reject);
+  });
+  assert.equal(issues(root, inbox).issues[0].requestId, requestId);
+  assert.deepEqual(readdirSync(inbox), []);
+});
+
 test("an unattended failure backlog stays bounded and preserves every issue in its owner", async t => {
   const { run, root, inbox, receipt } = await fixture(t);
   const request = JSON.parse(readFileSync(receipt, "utf8"));
