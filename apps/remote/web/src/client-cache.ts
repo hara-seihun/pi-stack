@@ -1,5 +1,5 @@
 import type { InlineImageSnapshot, TranscriptItemBody } from "../../server/protocol";
-import { ResourceCache } from "./resource-cache";
+import { ResourceCache } from "../../shared/resource-cache";
 import { CACHED_HEADS, deleteCachedWindow, readCachedBody, readCachedWindow, writeCachedBody, writeCachedWindow, type CachedWindow } from "./transcript-cache";
 
 export interface CachedThread { transcript: CachedWindow | null; images: InlineImageSnapshot | null }
