@@ -14,7 +14,7 @@ execFileSync(process.execPath, [
   fileURLToPath(new URL("../../node_modules", import.meta.url)),
 ], { stdio: "inherit" });
 
-const testFiles = ["server", "web"].flatMap((directory) =>
+const testFiles = ["server", "web", "shared"].flatMap((directory) =>
   readdirSync(new URL(directory, import.meta.url), { recursive: true })
     .filter((file) => /\.test\.tsx?$/.test(file))
     .map((file) => join(directory, file)))

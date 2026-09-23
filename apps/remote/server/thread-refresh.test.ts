@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Session, StreamSubscription } from "./protocol";
-import { ClientStream, applySessionDelta, sessionDelta } from "./stream";
+import { ClientStream } from "./stream";
+import { ReconcileReplica } from "../shared/reconcile";
 import { startThreadRefresh } from "./thread-refresh";
 
 function worker(): Session {
@@ -19,17 +20,16 @@ for (const subscription of [{ dashboard: false }, { session: "local-chat", viewi
     const stream = new ClientStream({ write: value => frames.push(value), close() {} });
     stream.subscription = subscription;
     const peer = worker();
-    stream.sentSessions.set(peer.id, JSON.stringify(peer));
+    const replica = new ReconcileReplica();
+    stream.publish({ type: "state", sessions: [peer], archivedTotal: 0, ownerErrors: [] });
+    for (const frame of frames.splice(0)) expect(replica.apply(JSON.parse(frame.split("data: ")[1])).ok).toBe(true);
     // The owner changes without a Remote request, reconnect or Machine visit.
     Object.assign(peer, { state: "idle", held: true, activity: "idle", revision: 2 });
     const received = Promise.withResolvers<void>();
     const stop = startThreadRefresh({
       subscriptions: () => [stream.subscription],
       async refreshPeers() {
-        const rows = [{ session: peer, encoded: JSON.stringify(peer) }];
-        const delta = sessionDelta(stream.sentSessions, rows);
-        applySessionDelta(stream.sentSessions, rows, delta.removed);
-        stream.send({ type: "state", version: 2, reset: false, ...delta, archivedTotal: 0, ownerErrors: [] });
+        stream.publish({ type: "state", sessions: [peer], archivedTotal: 0, ownerErrors: [] });
         received.resolve();
       },
       async inspect(id) { expect(id).toBe("local-chat"); },
@@ -37,8 +37,9 @@ for (const subscription of [{ dashboard: false }, { session: "local-chat", viewi
     }, 5);
     try {
       await received.promise;
-      expect(frames.join("")).toContain('"state":"idle","held":true,"activity":"idle"');
-      expect(JSON.parse(stream.sentSessions.get("bonsai")!).state).toBe("idle");
+      for (const frame of frames) expect(replica.apply(JSON.parse(frame.split("data: ")[1])).ok).toBe(true);
+      const state = replica.get("state")!.value as { sessions: Session[] };
+      expect(state.sessions[0]).toMatchObject({ state: "idle", held: true, activity: "idle" });
     } finally { stop(); stream.close(); }
   });
 }

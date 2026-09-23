@@ -9,7 +9,7 @@ type Patch =
   | { op: "string"; start: number; deleteCount: number; insert: string }
   | { op: "object"; set: Record<string, Json>; remove: string[]; edit: Record<string, Patch> }
   | { op: "array"; start: number; deleteCount: number; insert: Json[]; edit: Record<string, Patch> }
-  | { op: "keyed"; keyField: "seq" | "id"; order: string[]; set: Record<string, Json>; edit: Record<string, Patch> }; 
+  | { op: "keyed"; keyField: "seq" | "id"; order?: string[]; set: Record<string, Json>; edit: Record<string, Patch> };
 
 export type ReconcileFrame =
   | { resource: string; revision: Revision; base: null; kind: "full"; value: unknown }
@@ -62,6 +62,11 @@ function revision(text: string): Revision {
   return Array.from(hash(new TextEncoder().encode(text)), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** A receipt for exactly the JSON held locally, including a persisted snapshot. */
+export function revisionOf(value: unknown): Revision {
+  return revision(encode(value, defaults.maxValueBytes));
+}
+
 function itemKey(item: unknown, field: "seq" | "id"): string | undefined {
   if (!object(item) || !own(item, field)) return undefined;
   const id = item[field];
@@ -95,12 +100,10 @@ function keyedDiff(before: Json[], after: Json[], depth: number): Patch | undefi
       }
     }
     const order = [...newItems.keys()];
-    if (!Object.keys(set).length && !Object.keys(edit).length &&
-      order.length === oldItems.size) {
-      const oldOrder = [...oldItems.keys()];
-      if (order.every((key, index) => key === oldOrder[index])) return undefined;
-    }
-    return { op: "keyed", keyField, order, set, edit };
+    const oldOrder = [...oldItems.keys()];
+    const sameOrder = order.length === oldOrder.length && order.every((key, index) => key === oldOrder[index]);
+    if (sameOrder && !Object.keys(set).length && !Object.keys(edit).length) return undefined;
+    return { op: "keyed", keyField, ...(sameOrder ? {} : { order }), set, edit };
   }
   return undefined;
 }
@@ -163,14 +166,14 @@ function patchValue(before: Json, patch: Patch, depth = 0): Json {
   }
   if (patch.op === "keyed") {
     if (!Array.isArray(before) || (patch.keyField !== "seq" && patch.keyField !== "id") ||
-      !Array.isArray(patch.order) || !object(patch.set) || !object(patch.edit)) throw new Error("Invalid keyed patch");
+      (patch.order !== undefined && !Array.isArray(patch.order)) || !object(patch.set) || !object(patch.edit)) throw new Error("Invalid keyed patch");
     const previous = keyed(before, patch.keyField);
     if (!previous) throw new Error("Non-unique base keys");
     const remaining = new Set(Object.keys(patch.set));
     const edits = new Set(Object.keys(patch.edit));
     const seen = new Set<string>();
     const next: Json[] = [];
-    for (const key of patch.order) {
+    for (const key of patch.order ?? previous.keys()) {
       if (typeof key !== "string" || seen.has(key)) throw new Error("Duplicate or invalid keyed order");
       seen.add(key);
       const old = previous.get(key);
@@ -233,9 +236,9 @@ export class ReconcilePublisher {
   publish(resource: string, value: unknown): Revision {
     if (!resource) throw new RangeError("Resource must be nonempty");
     const text = encode(value, this.limits.maxValueBytes);
-    const next = { text, revision: revision(text) };
     const previous = this.resources.get(resource);
     if (previous?.current.text === text) return previous.current.revision;
+    const next = { text, revision: revision(text) };
     const history = previous ? [previous.current, ...previous.history].slice(0, this.limits.maxHistoryPerResource) : [];
     while (history.length && (history.length + 1 > this.limits.maxEntries ||
       history.reduce((size, snapshot) => size + snapshot.text.length * 2, text.length * 2) > this.limits.maxBytes)) history.pop();

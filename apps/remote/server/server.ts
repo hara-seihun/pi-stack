@@ -42,7 +42,9 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
-import { applySessionDelta, ClientStream, inboxMessaging, liveTextChange, mergeSubscription, PING_INTERVAL_MS, readSubscription, sessionDelta } from "./stream";
+import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
+import { ReconcilePublisher } from "../shared/reconcile";
+import { ResourceCache } from "../shared/resource-cache";
 import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-items";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
@@ -305,16 +307,23 @@ async function refreshPeers() {
   }).finally(() => { peerRefresh = null; });
   return peerRefresh;
 }
+const inspectingThreads = new Map<string, Promise<void>>();
 async function refreshThreadInspection(id: string) {
   const local = threads.get(id);
   if (local && !peerInspections.has(id) && storedContext(id)) return;
+  const known = peerInspections.get(id);
+  const listed = peerThreads.get(id);
+  if (!local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
+  const pending = inspectingThreads.get(id);
+  if (pending) return pending;
+  const operation = inspectThread(id, Boolean(local)).finally(() => inspectingThreads.delete(id));
+  inspectingThreads.set(id, operation);
+  return operation;
+}
+async function inspectThread(id: string, local: boolean) {
   const result = await directory.inspect(id);
   if (!result.ok) throw new Error(result.error.message);
   const inspection = result.value;
-  if (!local) {
-    const children = unwrap(await directory.list({ parentId: id, limit: 1 }));
-    peerChildren.set(id, children.threads.length > 0);
-  }
   const changed = !local && (peerThreads.get(id)?.revision !== inspection.thread.revision
     || JSON.stringify(peerInspections.get(id)?.pending) !== JSON.stringify(inspection.pending));
   if (!local) peerThreads.set(id, inspection.thread);
@@ -389,6 +398,7 @@ const inlineImages = new InlineImages(db, join(DATA, "inline-images"), async (in
 
 /** Live event streams by id, the only thing a client keeps open. */
 const streams = new Map<string, ClientStream>();
+const reconciledState = new ReconcilePublisher({ maxHistoryPerResource: 32 });
 
 // Anything that can change the inbox projection, the messaging snapshot or a
 // client's images calls this. The projection is rebuilt once per burst, and a
@@ -436,7 +446,7 @@ function refreshDashboard(): Promise<void> {
       dashboardSnapshot = next;
       dashboardEncoded = encoded;
       dashboardVersion++;
-      for (const stream of streams.values()) if (stream.subscription.dashboard) stream.send({ type: "dashboard", dashboard: next });
+      for (const stream of streams.values()) if (stream.subscription.dashboard) stream.publish({ type: "dashboard", dashboard: next });
     } catch (cause) {
       console.error("Dashboard refresh failed", cause);
     } finally {
@@ -474,8 +484,11 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-const storedContextCache = new Map<string, { capturedAt: number; document: string; hash: string } | null>();
-const displayContexts = new Map<string, { sourceHash: string; document: string; hash: string; images: Map<string, ContextImage> }>();
+type StoredContext = { capturedAt: number; document: string; hash: string };
+const contextCacheLimits = { entries: 32, bytes: 64 * 1024 * 1024 };
+const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheLimits);
+const displayContexts = new ResourceCache<{ sourceHash: string; document: string; hash: string; images: Map<string, ContextImage> }>(contextCacheLimits);
+const inspectedContexts = new WeakMap<ThreadInspection, StoredContext | null>();
 
 /** The newest user and assistant messages of this thread, from the context the
  * agent actually holds. Naming and Voice both want to read the conversation,
@@ -520,11 +533,7 @@ function streamedThinkingByMessage(sessionId: string): Map<string, string> {
 
 function displayContext(sessionId: string, sourceHash: string, sourceDocument: string) {
   const cached = displayContexts.get(sessionId);
-  if (cached?.sourceHash === sourceHash) {
-    displayContexts.delete(sessionId);
-    displayContexts.set(sessionId, cached);
-    return cached;
-  }
+  if (cached?.sourceHash === sourceHash) return cached;
   const progress = liveProjections.get(sessionId)?.toolProgress;
   if (progress?.size) {
     for (const message of JSON.parse(sourceDocument).messages ?? []) {
@@ -538,9 +547,7 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     return API.sessionImage.path({ sessionId, hash });
   }, liveProjections.get(sessionId)?.toolProgress.values(), responseMetricsByMessage(sessionId));
   const projected = { sourceHash, document, hash: sha256(document), images };
-  displayContexts.delete(sessionId);
-  displayContexts.set(sessionId, projected);
-  while (displayContexts.size > 4) displayContexts.delete(displayContexts.keys().next().value!);
+  displayContexts.set(sessionId, projected, document.length * 2 + [...images.values()].reduce((bytes, image) => bytes + image.data.length * 2, 0));
   return projected;
 }
 
@@ -553,9 +560,7 @@ function cacheStoredContext(sessionId: string, stored: { capturedAt: number; doc
       if (message?.role === "toolResult") progress.delete(message.toolCallId);
     }
   }
-  storedContextCache.delete(sessionId);
-  storedContextCache.set(sessionId, stored);
-  while (storedContextCache.size > 4) storedContextCache.delete(storedContextCache.keys().next().value!);
+  storedContextCache.set(sessionId, stored, stored ? stored.document.length * 2 : 4);
   if (known?.hash !== stored?.hash) signalTranscript(sessionId);
 }
 
@@ -568,15 +573,14 @@ function invalidateDisplayContext(sessionId: string) {
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
   const peer = peerInspections.get(sessionId);
   if (peer) {
-    if (!peer.context) return null;
-    const document = JSON.stringify(peer.context);
-    return { capturedAt: peer.thread.updatedAt, document, hash: sha256(document) };
-  }
-  if (storedContextCache.has(sessionId)) {
-    const stored = storedContextCache.get(sessionId) ?? null;
-    cacheStoredContext(sessionId, stored);
+    if (inspectedContexts.has(peer)) return inspectedContexts.get(peer)!;
+    const document = peer.context ? JSON.stringify(peer.context) : null;
+    const stored = document === null ? null : { capturedAt: peer.thread.updatedAt, document, hash: sha256(document) };
+    inspectedContexts.set(peer, stored);
     return stored;
   }
+  const cached = storedContextCache.get(sessionId);
+  if (cached !== undefined) return cached;
   const stored = readContext(db, sessionId);
   cacheStoredContext(sessionId, stored);
   return stored;
@@ -1095,10 +1099,8 @@ function bootstrap(): Bootstrap {
   return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null };
 }
 
-let stateVersion = 1;
 let stateEncoded = "";
 let stateSnapshot: SupervisorState = { sessions: [], archivedTotal: 0, ownerErrors: [] };
-let stateRows: Array<{ session: Session; encoded: string }> = [];
 
 function currentState(): SupervisorState {
   if (!stateEncoded) projectState();
@@ -1112,8 +1114,6 @@ function projectState(): void {
   if (encoded === stateEncoded) return;
   stateEncoded = encoded;
   stateSnapshot = state;
-  stateRows = state.sessions.map(session => ({ session, encoded: JSON.stringify(session) }));
-  stateVersion++;
 }
 
 function refreshState(): void {
@@ -1121,7 +1121,7 @@ function refreshState(): void {
     if (stream.subscription.viewing && stream.subscription.session) markSessionViewed(stream.subscription.session);
   }
   projectState();
-  for (const stream of streams.values()) sendState(stream, false);
+  for (const stream of streams.values()) sendState(stream);
   pushMessaging();
   pushBootstrap();
   for (const stream of streams.values()) sendImages(stream);
@@ -1135,49 +1135,29 @@ function pushBootstrap(): void {
   if (encoded === bootstrapEncoded) return;
   const known = Boolean(bootstrapEncoded);
   bootstrapEncoded = encoded;
-  if (known) for (const stream of streams.values()) stream.send({ type: "bootstrap", bootstrap: current });
+  if (known) for (const stream of streams.values()) stream.publish({ type: "bootstrap", bootstrap: current });
 }
 
-function streamRows(stream: ClientStream): Array<{ session: Session; encoded: string }> {
+function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
-  if (!selected) return stateRows;
-  return stateRows.map(row => {
-    if (row.session.id !== selected) return row;
-    const session = { ...row.session, queuedMessages: queuedMessagesFor(selected) };
-    return { session, encoded: JSON.stringify(session) };
-  });
-}
-
-function sendState(stream: ClientStream, reset: boolean): void {
-  const rows = streamRows(stream);
-  const summary = JSON.stringify({ archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
-  if (reset) stream.sentSessions.clear();
-  const delta = reset
-    ? { sessions: rows.map(row => row.session), patches: [], removed: [] as string[] }
-    : sessionDelta(stream.sentSessions, rows);
-  if (!reset && !delta.sessions.length && !delta.patches.length && !delta.removed.length && summary === stream.sentSummary) return;
-  applySessionDelta(stream.sentSessions, rows, delta.removed);
-  stream.sentSummary = summary;
-  stream.send({ type: "state", version: stateVersion, reset, sessions: delta.sessions, patches: delta.patches, removed: delta.removed,
-    archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
+  const sessions = selected ? stateSnapshot.sessions.map(session => session.id === selected
+    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session) : stateSnapshot.sessions;
+  stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
 }
 
 let messagingVersion = -1;
 function pushMessaging(target?: ClientStream): void {
   const snapshot = inboxMessaging(messaging.snapshot());
-  if (target) { target.send({ type: "messaging", snapshot }); return; }
+  if (target) { target.publish({ type: "messaging", snapshot }); return; }
   if (snapshot.version === messagingVersion) return;
   messagingVersion = snapshot.version;
-  for (const stream of streams.values()) stream.send({ type: "messaging", snapshot });
+  for (const stream of streams.values()) stream.publish({ type: "messaging", snapshot });
 }
 
 function sendImages(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
-  const version = inlineImages.version(sessionId);
-  if (version === stream.sentImagesVersion) return;
-  stream.sentImagesVersion = version;
-  stream.send({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
+  stream.publish({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
 }
 
 function sendEvents(stream: ClientStream): void {
@@ -1201,24 +1181,17 @@ function pushNotifications(target?: ClientStream): void {
   }
 }
 
-function sendLive(stream: ClientStream, reset: boolean): void {
+function sendLive(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
   const runtime = liveProjections.get(sessionId);
-  const text = runtime?.liveText ?? "";
-  const thinking = runtime?.liveThinking ?? "";
-  const textChange = reset ? { reset: text } : liveTextChange(stream.sentText, text);
-  const wantsThinking = stream.subscription.thinking === true;
-  const thinkingChange = !wantsThinking ? null : reset ? { reset: thinking } : liveTextChange(stream.sentThinking, thinking);
-  if (!textChange && !thinkingChange) return;
-  if (textChange) stream.sentText = text;
-  if (thinkingChange) stream.sentThinking = thinking;
-  stream.send({ type: "live", sessionId, ...(textChange ? { text: textChange } : {}), ...(thinkingChange ? { thinking: thinkingChange } : {}) });
+  stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "",
+    ...(stream.subscription.thinking ? { thinking: runtime?.liveThinking ?? "" } : {}) });
 }
 
 function pushLive(): void {
   for (const stream of streams.values()) {
-    sendLive(stream, false);
+    sendLive(stream);
     sendEvents(stream);
   }
 }
@@ -1231,12 +1204,7 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
   return [...streams.values()].filter(stream => stream.subscription.session === sessionId);
 }
 
-/**
- * Derive this session's items from the display projection and give every
- * client looking at it what that client is missing. A derivation reports what
- * changed since the previous one exactly once, so the fan-out happens here
- * rather than at each caller.
- */
+/** Project a captured context once; the reconciler owns each client's differences. */
 function refreshTranscript(sessionId: string) {
   const stored = storedContext(sessionId);
   const display = stored ? displayContext(sessionId, stored.hash, stored.document) : null;
@@ -1256,50 +1224,47 @@ function signalTranscript(sessionId: string): void {
 function sendTranscript(stream: ClientStream, update: ReturnType<typeof refreshTranscript>): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
-  if (!update) {
-    // No captured context, or a cleared one after a failed compaction: the
-    // client drops what it holds and waits for the next capture.
-    if (!stream.transcript) return;
-    stream.transcript = null;
-    stream.send({ type: "transcript", sessionId, generation: "", total: 0, reset: true, items: [] });
-    return;
-  }
-  const { current, changed } = update;
-  if (stream.transcript?.sessionId === sessionId && stream.transcript.generation === current.generation) {
-    if (!changed.length) return;
-    stream.send({ type: "transcript", sessionId, generation: current.generation, total: current.items.length, reset: false, items: changed });
-    return;
-  }
-  stream.transcript = { sessionId, generation: current.generation };
-  stream.send({ type: "transcript", sessionId, generation: current.generation, total: current.items.length,
-    reset: true, items: transcriptWindow(current.items) });
+  const current = update?.current;
+  const from = stream.subscription.transcriptFrom;
+  const limit = from == null ? 60 : Math.max(60, (current?.items.length ?? 0) - from);
+  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.items.length ?? 0,
+    items: current ? transcriptWindow(current.items, limit) : [] });
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
 async function applySubscription(stream: ClientStream, patch: Partial<StreamSubscription>): Promise<void> {
   const before = stream.subscription;
-  stream.subscription = mergeSubscription(before, patch);
+  stream.declare(patch);
+  const revision = stream.revision;
   const sessionId = stream.subscription.session ?? null;
   const changedSession = (before.session ?? null) !== sessionId;
-  if (changedSession) stream.resetSession();
   if (sessionId && stream.subscription.viewing) markSessionViewed(sessionId);
-  if (patch.dashboard) {
-    if (!dashboardSnapshot) await refreshDashboard();
-    if (dashboardSnapshot) stream.send({ type: "dashboard", dashboard: dashboardSnapshot });
-  }
-  if (patch.notificationsAfter !== undefined) pushNotifications(stream);
   if (sessionId) {
-    if (changedSession && sessionRow.get(sessionId)) {
-      try { await refreshThreadInspection(sessionId); }
-      catch (cause) { console.error("Thread inspection failed", cause); }
-    }
-    if (stream.closed) return;
-    refreshTranscript(sessionId);
-    sendLive(stream, changedSession || (patch.thinking === true && before.thinking !== true));
+    const captured = storedContext(sessionId);
+    if (captured) refreshTranscript(sessionId);
+    sendLive(stream);
     sendImages(stream);
     sendEvents(stream);
+    if (sessionRow.get(sessionId) && (changedSession || !captured)) {
+      void refreshThreadInspection(sessionId).then(() => {
+        if (stream.closed || stream.revision !== revision) return;
+        refreshTranscript(sessionId);
+        sendLive(stream);
+      }, cause => {
+        if (stream.closed || stream.revision !== revision) return;
+        stream.send({ type: "error", message: `Could not refresh thread: ${cause instanceof Error ? cause.message : String(cause)}` });
+      });
+    } else if (!captured) refreshTranscript(sessionId);
   }
-  if (changedSession) { projectState(); sendState(stream, false); }
+  projectState();
+  sendState(stream);
+  pushMessaging(stream);
+  stream.publish({ type: "bootstrap", bootstrap: bootstrap() });
+  if (patch.notificationsAfter !== undefined) pushNotifications(stream);
+  if (stream.subscription.dashboard) {
+    if (!dashboardSnapshot) await refreshDashboard();
+    if (!stream.closed && stream.revision === revision && dashboardSnapshot) stream.publish({ type: "dashboard", dashboard: dashboardSnapshot });
+  }
 }
 
 function closeStream(stream: ClientStream): void {
@@ -1822,7 +1787,7 @@ const server = Bun.serve<AudioSocketData>({
     if (transcriptRequest) {
       const id = transcriptRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      try { await refreshThreadInspection(id); } catch (cause) { console.error("Thread inspection failed", cause); }
+      if (!storedContext(id)) await refreshThreadInspection(id);
       const update = refreshTranscript(id);
       if (!update) return json({ sessionId: id, generation: "", total: 0, items: [] });
       const items = update.current.items;
@@ -1843,8 +1808,11 @@ const server = Bun.serve<AudioSocketData>({
     if (itemRequest) {
       const id = itemRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      try { await refreshThreadInspection(id); } catch (cause) { console.error("Thread inspection failed", cause); }
-      const body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
+      let body = transcripts.get(id)?.bodies.get(itemRequest.itemId);
+      if (!body) {
+        if (!storedContext(id)) await refreshThreadInspection(id);
+        body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
+      }
       if (!body) return error("Transcript item not found", 404);
       const headers: Record<string, string> = {
         ...API_CORS_HEADERS,
@@ -2069,7 +2037,7 @@ const server = Bun.serve<AudioSocketData>({
           stream = new ClientStream({
             write: (chunk) => controller.enqueue(encoder.encode(chunk)),
             close: () => { try { controller.close(); } catch {} },
-          });
+          }, reconciledState);
         },
         cancel: () => { closeStream(stream); },
       });
@@ -2085,9 +2053,6 @@ const server = Bun.serve<AudioSocketData>({
       const facts = bootstrap();
       bootstrapEncoded = JSON.stringify(facts);
       stream.send({ type: "hello", epoch: SUPERVISOR_EPOCH, streamId: stream.id, bootstrap: facts });
-      projectState();
-      sendState(stream, true);
-      pushMessaging(stream);
       void applySubscription(stream, patch).catch((cause) => {
         stream.send({ type: "error", message: cause instanceof Error ? cause.message : String(cause) });
       });
