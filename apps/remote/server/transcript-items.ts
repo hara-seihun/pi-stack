@@ -166,6 +166,18 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
     if (items.length > from && isResponseMetrics(metrics)) items.at(-1)!.head.responseMetrics = metrics;
   };
 
+  const attachIdentity = (message: any, from: number) => {
+    if (!message.identity?.id) return;
+    for (let i = items.length - 1; i >= from; i--) {
+      const head = items[i]!.head;
+      if (head.kind !== "user" && head.kind !== "assistant") continue;
+      head.identity = message.identity;
+      head.reactions = message.reactions ?? [];
+      head.label = message.identity.sender.name || message.identity.sender.id;
+      break;
+    }
+  };
+
   if (!context) return items;
   lazy("system", "system", "System", String(context.systemPrompt || ""));
   for (const tool of (context.tools || []) as any[]) {
@@ -218,6 +230,7 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
         inline("notice", `notice:assistant:${identity}`, `${AGENT_NAME} error`, String(message.errorMessage), stamp);
       }
       attachResponseMetrics(message, itemsBefore);
+      attachIdentity(message, itemsBefore);
       continue;
     }
     if (role === "toolResult" && paired.has(message)) continue;
@@ -233,6 +246,7 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
       if (message?.isError) inline("notice", `notice:${key}`, label, text, stamp);
       else lazy("tool", key, label, text, stamp);
     } else lazy("tool", `message:${role}:${identity}`, role, text, stamp);
+    attachIdentity(message, itemsBefore);
   }
   return items;
 }

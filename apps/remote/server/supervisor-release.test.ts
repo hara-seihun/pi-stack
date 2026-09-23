@@ -45,18 +45,30 @@ test("handoff accepts the real Pi shutdown context while refusing new work", asy
   try {
     process.env.PI_REMOTE_SESSION_ID = "00000000-0000-0000-0000-000000000001";
     process.env.PI_REMOTE_SERVER_URL = server.url.origin;
+    process.env.PI_REMOTE_SENDER_ID = "release-user";
+    process.env.PI_REMOTE_SENDER_NAME = "Release user";
     delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
     contextMirror({ on(type: string, handler: (...args: any[]) => any) { handlers.set(type, handler); }, getActiveTools: () => [], getAllTools: () => [] } as unknown as ExtensionAPI);
     const pending = release.release(75);
     expect(release.release(75)).toBe(pending);
     expect(await pending).toEqual(ok);
-    expect(stored).toEqual([{ systemPrompt: "Final context", tools: [], messages: [{ role: "user", content: "Retain this context", timestamp: 1 }] }]);
+    expect(stored).toEqual([{
+      systemPrompt: "Final context", tools: [],
+      messages: [{
+        role: "user", content: "Retain this context", timestamp: 1,
+        identity: {
+          id: "pi/00000000-0000-0000-0000-000000000001/user",
+          timestamp: 1,
+          sender: { id: "release-user", name: "Release user" },
+        },
+      }],
+    }]);
     expect(events).toEqual(["suspend", "context", "detached", "images", "listener", "database", "exit:75"]);
     expect(await release.release(75)).toEqual(ok);
     expect(events.filter(event => event.startsWith("exit"))).toHaveLength(1);
   } finally {
     server.stop(true);
-    for (const key of ["PI_REMOTE_SESSION_ID", "PI_REMOTE_SERVER_URL", "PI_REMOTE_CONTEXT_OWNER_PID"]) {
+    for (const key of ["PI_REMOTE_SESSION_ID", "PI_REMOTE_SERVER_URL", "PI_REMOTE_CONTEXT_OWNER_PID", "PI_REMOTE_SENDER_ID", "PI_REMOTE_SENDER_NAME"]) {
       if (environment[key] === undefined) delete process.env[key]; else process.env[key] = environment[key];
     }
   }

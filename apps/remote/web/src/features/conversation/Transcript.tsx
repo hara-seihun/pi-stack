@@ -94,6 +94,8 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit }: {
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
     text={text}
     timestamp={entry.messageTimestamp || undefined}
+    identity={entry.identity}
+    reactions={entry.reactions}
     responseMetrics={entry.kind === "assistant" ? entry.responseMetrics : undefined}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}

@@ -21,6 +21,8 @@ export interface ContextEntry {
   bodyLoaded?: boolean;
   argumentsTruncated?: boolean;
   messageTimestamp?: number;
+  identity?: import("../../server/message-protocol").MessageIdentity;
+  reactions?: import("../../server/message-protocol").MessageReaction[];
   responseMetrics?: import("../../server/protocol").ResponseMetrics;
   toolCall?: any;
   toolResult?: any;

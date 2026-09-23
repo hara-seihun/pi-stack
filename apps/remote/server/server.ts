@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { projectThreadNotifications } from "./thread-notifications";
@@ -48,6 +48,9 @@ import { ResourceCache } from "../shared/resource-cache";
 import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-items";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
+import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
+import { SlackReactions } from "./slack-reactions";
+import { AGENT_NAME } from "./agent-identity";
 import { createSpeechService } from "./speech/service";
 import { closeAiChat } from "./chat-lifecycle";
 import { archivedSessions } from "./archived-sessions";
@@ -78,6 +81,7 @@ const ENVIRONMENT_REQUIRES_UNLOCK = process.env.PI_REMOTE_REQUIRES_UNLOCK === "t
 if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_ENVIRONMENT_ID must be a stable lowercase identifier");
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
+const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
@@ -217,6 +221,8 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
+const piReactions = new PiReactions(db, MESSAGE_OWNER);
+const slackReactions = new SlackReactions(process.env.PI_REMOTE_SLACK_REACTIONS);
 const orchestrator = new OrchestratorClient({
   ledgerPath: ORCHESTRATOR_DB_PATH,
 });
@@ -541,7 +547,7 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     }
   }
   const images = new Map<string, ContextImage>();
-  const document = displayContextDocument(sourceDocument, streamedThinkingByMessage(sessionId), (image) => {
+  const document = displayContextDocument(piReactions.project(sessionId, sourceDocument), streamedThinkingByMessage(sessionId), (image) => {
     const hash = sha256(`${image.mimeType}\0${image.data}`);
     images.set(hash, image);
     return API.sessionImage.path({ sessionId, hash });
@@ -701,6 +707,8 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
     audience === "thread" ? chosenContextFiles(sessionId) : "",
     meetingInstructions(sessionId, audience),
     registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
+    piReactions.session(sessionId).size ? `Message reactions, keyed by stable message ID: ${JSON.stringify(Object.fromEntries(piReactions.session(sessionId)))}` : "",
+    slackReactions.instructions(),
   ].filter(Boolean).join("\n\n");
 }
 
@@ -1530,6 +1538,7 @@ function threadEnvironment(thread: Thread) {
   return { ...process.env, HOME,
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
+    PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
@@ -1730,6 +1739,29 @@ const server = Bun.serve<AudioSocketData>({
       return httpServer.upgrade(req, { data: { callId } })
         ? undefined
         : error("WebSocket upgrade failed", 400);
+    }
+    const agentReaction = API.sessionReaction.match(req.method, url.pathname);
+    if (agentReaction || API.messageReaction.match(req.method, url.pathname)) {
+      httpServer.timeout(req, 60);
+      if (agentReaction && !threads.get(agentReaction.sessionId)) return json({ ok: false, error: { code: "not_found", message: "Agent thread not found" } }, 404);
+      let input: unknown;
+      try { input = await req.json(); } catch { return json({ ok: false, error: { code: "invalid_request", message: "Expected a JSON reaction request" } }, 400); }
+      const sender = agentReaction ? { id: "assistant", name: AGENT_NAME } : MESSAGE_OWNER;
+      const result = await reactToMessage(input, sender, {
+        pi: async (target, emoji, remove, actor) => {
+          const thread = threads.get(target.sessionId);
+          if (!thread || !await nativeMessageExists(thread.sessionFile, target.messageId)) {
+            return { ok: false, error: { code: "not_found", message: "Message not found in this account's thread" } };
+          }
+          const reactions = piReactions.set(target, emoji, actor, remove);
+          displayContexts.delete(target.sessionId);
+          signalTranscript(target.sessionId);
+          return { ok: true, value: reactions };
+        },
+        messaging: (id, emoji, remove) => messaging.react(id, emoji, remove),
+        slack: (target, emoji, remove) => slackReactions.react(target, emoji, remove),
+      });
+      return result.ok ? json({ ok: true, reactions: result.value }) : json(result, ["not_found", "message_not_found"].includes(result.error.code) ? 404 : 400);
     }
     const messagingResponse = await messaging.handle(req);
     if (messagingResponse) return messagingResponse;

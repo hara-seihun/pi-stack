@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { threadStateInstructions } from "./thread-context-state";
 import { API } from "./api";
 import { registerMeetTools } from "./meet/tools";
+import { registerReactionTools } from "./reaction-tools";
 import { sessionEnvironment } from "./session-environment";
 
 function alertNotice(directory: string | undefined): string | undefined {
@@ -28,6 +29,7 @@ function alertNotice(directory: string | undefined): string | undefined {
 export default function threadContext(pi: ExtensionAPI) {
   const environment = sessionEnvironment();
   if (environment.PI_REMOTE_MEETING_ID) registerMeetTools(pi);
+  if (environment.PI_REMOTE_SERVER_URL && environment.PI_REMOTE_SESSION_ID) registerReactionTools(pi);
 
   pi.on("before_agent_start", async (event, ctx) => {
     let meetingInstructions = "";
@@ -43,6 +45,7 @@ export default function threadContext(pi: ExtensionAPI) {
       fileTag: environment.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
       home: environment.HOME || homedir(),
       inlineImages: !!(environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL),
+      activeTime: environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL ? Date.now() : undefined,
     }) + (meetingInstructions ? `\n\n${meetingInstructions}` : "");
     // Pi persists the incoming user message after before_agent_start.
     const hasConversation = ctx.sessionManager.getBranch().some((entry) =>

@@ -44,3 +44,18 @@ test("invalid environment names fail before starting a runtime child", () => {
   expect(result.stderr.toString()).toContain("Invalid environment key");
   expect(result.stdout.toString()).toBe("");
 });
+
+test("message sender identity comes from the owning person registry", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-remote-person-identity-"));
+  try {
+    const config = join(root, "person.json");
+    writeFileSync(config, JSON.stringify({ version: 1, user: "hara", displayName: "Hara", environment: {} }));
+    const result = Bun.spawnSync([process.execPath, "--eval", `
+      import { applyLocalConfig } from ${JSON.stringify(join(import.meta.dir, "config.ts"))};
+      applyLocalConfig(${JSON.stringify(config)});
+      console.log(JSON.stringify({ id: process.env.PI_REMOTE_SENDER_ID, name: process.env.PI_REMOTE_SENDER_NAME }));
+    `], { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 2_000 });
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toEqual({ id: "hara", name: "Hara" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

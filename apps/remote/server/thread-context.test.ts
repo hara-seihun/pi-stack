@@ -58,7 +58,7 @@ describe("thread lifecycle context", () => {
         else process.env[key] = value;
       }
       threadContext(pi as any);
-      expect(tools).toEqual([]);
+      expect(tools).toEqual(remote ? ["message_react"] : []);
       const result = await handlers.get("before_agent_start")!(
         { prompt: "Help", systemPrompt: "System" },
         { sessionManager: { getBranch: () => [{ type: "session_info", name: "83" }] } },

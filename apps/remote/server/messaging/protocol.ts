@@ -1,3 +1,5 @@
+import type { MessageIdentity, MessageReaction } from "../message-protocol.js";
+
 export type MessagingResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
 
 export interface MessagingCapabilities {
@@ -112,6 +114,8 @@ export interface MessagingMessage {
   status: "received" | "sending" | "sent" | "failed" | "unknown";
   error: string | null;
   attachments: MessagingAttachment[];
+  identity?: MessageIdentity;
+  reactions?: MessageReaction[];
 }
 
 export interface MessagingSnapshot {

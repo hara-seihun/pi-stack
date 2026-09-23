@@ -98,6 +98,10 @@ Every ordinary thread receives the same model-facing operations. `thread_spawn` 
 
 Parentage is durable thread metadata used for discovery and completion notifications. A subthread has its own execution state, native session and settings. Its state never rolls up into its parent. When its execution settles, the thread service commits the outcome and a stable parent-message receipt together. A busy parent receives that message after its current tools, an idle parent wakes, and a held parent keeps holding it. The notification includes thread and work IDs, the outcome and the final assistant message or an explicit absence.
 
+## Message identity and reactions
+
+Pi Remote supplies the AI with stable message IDs, sender identities and original message timestamps, plus the current system time for each turn. Historical timestamps and stored message bodies remain unchanged. The shared `message_react` tool and client reaction controls use one operation for Pi messages, Signal and configured Slack workspaces. Incoming Signal reactions update the same message-level data that the shared renderer displays. Slack delegates to the existing Work host command and currently supports adds only. [Message identity and reactions](docs/reactions.md) covers the protocol, storage, model context and [Slack setup](docs/slack-reactions.md).
+
 ## Human messaging
 
 Human and AI conversations use one chats inbox, picker and chat selection. Their backends share the composer, attachments, pasted documents and drawing editor. Pi-specific execution controls and native model context remain available only for AI chats; human messages never start agent threads. Profiles, backend credentials, message history and files live inside the owning person's encrypted folder; unencrypted accounts cannot enable messaging. The first plugin uses Signal CLI as a linked device, and the owner links their phone from the picker. [Messaging setup and plugin interface](docs/messaging.md) covers configuration, account linking, send receipts and supported features.
