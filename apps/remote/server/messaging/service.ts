@@ -3,12 +3,13 @@ import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } f
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { API } from "../api";
+import { isReactionEmoji, messageReference, type MessageReaction } from "../message-protocol";
 import { extractMessageLinks } from "./links";
 import { linkPreview, PreviewOverloaded } from "./link-previews";
 import { API_CORS_HEADERS } from "../cors";
 import { storeUpload, uploadName } from "../uploads";
-import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
-import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingCall, MessagingCallState, MessagingConversation, MessagingHistory, MessagingLink, MessagingMessage, MessagingSend, MessagingSnapshot } from "./protocol";
+import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendReaction, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
+import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingCall, MessagingCallState, MessagingConversation, MessagingHistory, MessagingLink, MessagingMessage, MessagingResult, MessagingSend, MessagingSnapshot } from "./protocol";
 
 const DEVICE_NAME = /^[\p{L}\p{N} .,'()_-]{1,64}$/u;
 
@@ -123,7 +124,10 @@ export class MessagingService {
       CREATE INDEX IF NOT EXISTS attachment_message ON attachments(message_id);
       CREATE TABLE IF NOT EXISTS message_attachments(message_id TEXT NOT NULL REFERENCES messages(id),attachment_id TEXT NOT NULL REFERENCES attachments(id),PRIMARY KEY(message_id,attachment_id));
       CREATE TABLE IF NOT EXISTS messaging_senders(backend_id TEXT NOT NULL,id TEXT NOT NULL,name TEXT,PRIMARY KEY(backend_id,id));
+      CREATE TABLE IF NOT EXISTS messaging_accounts(backend_id TEXT PRIMARY KEY,sender_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS messaging_sender_aliases(backend_id TEXT NOT NULL,alias TEXT NOT NULL,sender_id TEXT NOT NULL,PRIMARY KEY(backend_id,alias),FOREIGN KEY(backend_id,sender_id) REFERENCES messaging_senders(backend_id,id));
+      CREATE TABLE IF NOT EXISTS messaging_reactions(backend_id TEXT NOT NULL,conversation_external_id TEXT NOT NULL,target_author TEXT NOT NULL,target_timestamp INTEGER NOT NULL,sender TEXT NOT NULL,account TEXT NOT NULL,emoji TEXT NOT NULL,removed INTEGER NOT NULL,event_timestamp INTEGER NOT NULL,PRIMARY KEY(backend_id,conversation_external_id,target_author,target_timestamp,sender));
+      CREATE INDEX IF NOT EXISTS messaging_reaction_target ON messaging_reactions(backend_id,conversation_external_id,target_timestamp);
       CREATE TABLE IF NOT EXISTS messaging_state(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS messaging_avatars(backend_id TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(backend_id,id));
       INSERT OR IGNORE INTO messaging_state VALUES(1,1);`);
@@ -159,11 +163,23 @@ export class MessagingService {
         dataDir,
         conversation: value => { if (!this.closed) this.upsertConversation(backend.config.id, value); },
         sender: value => { if (!this.closed) this.upsertSender(backend.config.id, value); },
+        self: id => {
+          if (this.closed || !id) return;
+          if (this.db.query(`INSERT INTO messaging_accounts(backend_id,sender_id) VALUES(?,?)
+            ON CONFLICT(backend_id) DO UPDATE SET sender_id=excluded.sender_id WHERE sender_id<>excluded.sender_id`).run(backend.config.id, id).changes) this.changed();
+        },
         message: value => {
           if (this.closed) return Promise.reject(new Error("Messaging is closed"));
           const task = this.receive(backend.config.id, value);
           this.receives.add(task);
           void task.then(() => this.receives.delete(task), () => this.receives.delete(task));
+          return task;
+        },
+        reaction: value => {
+          if (this.closed) return Promise.reject(new Error("Messaging is closed"));
+          const task = this.receiveReaction(backend.config.id, value);
+          this.receives.add(task);
+          void task.finally(() => this.receives.delete(task)).catch(() => {});
           return task;
         },
         call: value => { if (!this.closed) this.receiveCall(backend, value); },
@@ -608,6 +624,61 @@ export class MessagingService {
   private attachment(row: AttachmentRow): MessagingAttachment {
     return { id: row.id, name: row.name, mimeType: row.mime_type, size: row.size };
   }
+  private canonical(backendId: string, id: string): string {
+    const alias = this.db.query("SELECT sender_id FROM messaging_sender_aliases WHERE backend_id=? AND alias=?").get(backendId, id) as { sender_id: string } | null;
+    return alias?.sender_id ?? id;
+  }
+  private reactions(row: MessageRow): MessageReaction[] {
+    const conversation = this.conversationRow(row.conversation_id);
+    const events = this.db.query(`SELECT * FROM messaging_reactions WHERE backend_id=? AND conversation_external_id=? AND target_timestamp=? ORDER BY event_timestamp DESC,rowid DESC`)
+      .all(conversation.backend_id, conversation.external_id, row.timestamp) as Array<{ target_author: string; sender: string; account: string; emoji: string; removed: number; event_timestamp: number }>;
+    const reactions = new Map<string, MessageReaction>();
+    const seen = new Set<string>();
+    for (const event of events) {
+      const account = this.canonical(conversation.backend_id, event.account);
+      const target = this.canonical(conversation.backend_id, event.target_author);
+      if (row.direction === "outgoing" ? target !== account : target !== this.canonical(conversation.backend_id, row.sender)) continue;
+      const sender = this.canonical(conversation.backend_id, event.sender);
+      if (seen.has(sender)) continue;
+      seen.add(sender);
+      if (event.removed) continue;
+      const name = this.db.query("SELECT name FROM messaging_senders WHERE backend_id=? AND id=?").get(conversation.backend_id, sender) as { name: string | null } | null;
+      reactions.set(sender, { emoji: event.emoji, sender: { id: sender, ...(name?.name ? { name: name.name } : {}) }, timestamp: event.event_timestamp, own: sender === account });
+    }
+    return [...reactions.values()].sort((a, b) => a.timestamp - b.timestamp || a.sender.id.localeCompare(b.sender.id));
+  }
+  private async receiveReaction(backendId: string, value: BackendReaction): Promise<void> {
+    if (!value.target.author || !value.account || !value.sender || !Number.isSafeInteger(value.target.timestamp)
+      || !Number.isSafeInteger(value.timestamp) || !value.emoji || value.emoji.length > 64) throw new Error("Backend returned an invalid reaction");
+    this.upsertConversation(backendId, value.conversation);
+    const changed = this.db.query(`INSERT INTO messaging_reactions(backend_id,conversation_external_id,target_author,target_timestamp,sender,account,emoji,removed,event_timestamp)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(backend_id,conversation_external_id,target_author,target_timestamp,sender)
+      DO UPDATE SET account=excluded.account,emoji=excluded.emoji,removed=excluded.removed,event_timestamp=excluded.event_timestamp
+      WHERE excluded.event_timestamp>messaging_reactions.event_timestamp`)
+      .run(backendId, value.conversation.id, value.target.author, value.target.timestamp, value.sender, value.account, value.emoji, Number(value.remove), value.timestamp).changes;
+    if (changed) this.changed();
+  }
+  /** The id is the local messaging message id, not the Signal timestamp or universal reference. */
+  react(messageId: string, emoji: string, remove: boolean): Promise<MessagingResult<MessageReaction[]>> {
+    if (this.closing || this.closed) return Promise.resolve({ ok: false, error: { code: "closed", message: "Messaging is handing over" } });
+    return this.track(this.dispatchReaction(messageId, emoji, remove));
+  }
+  private async dispatchReaction(messageId: string, emoji: string, remove: boolean): Promise<MessagingResult<MessageReaction[]>> {
+    if (typeof emoji !== "string" || !isReactionEmoji(emoji) || typeof remove !== "boolean")
+      return { ok: false, error: { code: "invalid_reaction", message: "A single emoji and remove boolean are required" } };
+    const row = this.db.query("SELECT * FROM messages WHERE id=?").get(messageId) as MessageRow | null;
+    if (!row || !row.external_id || row.status === "failed" || row.status === "unknown") return { ok: false, error: { code: "message_not_found", message: "No confirmed messaging message with that id" } };
+    const conversation = this.conversationRow(row.conversation_id);
+    const backend = this.backends.get(conversation.backend_id);
+    if (!backend?.plugin?.react) return { ok: false, error: { code: "reactions_unsupported", message: "This messaging backend does not support reactions" } };
+    if (backend.info.status !== "ready") return { ok: false, error: { code: "backend_unavailable", message: backend.info.detail } };
+    let result;
+    try { result = await backend.plugin.react({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { author: row.sender, timestamp: row.timestamp }, emoji, remove); }
+    catch (cause) { return { ok: false, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } }; }
+    if (!result.ok) return result;
+    await this.receiveReaction(conversation.backend_id, { conversation: { id: conversation.external_id, title: conversation.title, kind: conversation.kind }, target: { author: row.direction === "outgoing" ? result.value.sender : row.sender, timestamp: row.timestamp }, account: result.value.sender, sender: result.value.sender, emoji, remove, timestamp: result.value.timestamp });
+    return { ok: true, value: this.reactions(row) };
+  }
   private message(row: MessageRow): MessagingMessage {
     const attachments = (this.db.query("SELECT a.* FROM attachments a JOIN message_attachments ma ON ma.attachment_id=a.id WHERE ma.message_id=? ORDER BY a.rowid").all(row.id) as AttachmentRow[]).map(item => this.attachment(item));
     if (row.request_body) {
@@ -618,7 +689,14 @@ export class MessagingService {
       JOIN messaging_sender_aliases a ON a.backend_id=c.backend_id AND a.alias=?
       JOIN messaging_senders s ON s.backend_id=a.backend_id AND s.id=a.sender_id
       LEFT JOIN messaging_avatars v ON v.backend_id=s.backend_id AND v.id=s.id WHERE c.id=?`).get(row.sender, row.conversation_id) as { name: string | null; avatar: number | null } | null;
-    return { id: row.id, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), ...(sender?.avatar ? { senderAvatar: sender.avatar } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments };
+    const account = row.direction === "outgoing" && row.sender === "You"
+      ? this.db.query(`SELECT sender_id FROM messaging_accounts WHERE backend_id=(SELECT backend_id FROM conversations WHERE id=?)`).get(row.conversation_id) as { sender_id: string } | null : null;
+    return { id: row.id, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), ...(sender?.avatar ? { senderAvatar: sender.avatar } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
+      ...((row.status === "received" || row.status === "sent") && row.external_id ? {
+        identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account?.sender_id ?? row.sender, ...(sender?.name ? { name: sender.name } : {}) } },
+      } : {}),
+      reactions: this.reactions(row),
+    };
   }
   history(conversationId: string, before?: number, limit = 60): MessagingHistory {
     this.conversationRow(conversationId);

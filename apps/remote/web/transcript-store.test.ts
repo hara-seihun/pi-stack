@@ -102,7 +102,8 @@ test("heads become the entries the transcript renders", () => {
     { seq: 4, id: "sc4", kind: "tool", size: 1_200, label: "bash", preview: "Run a command" },
   ]);
 
-  expect(entries[0]).toMatchObject({ key: "user:0", signature: "u0", kind: "user", text: "do the thing", messageTimestamp: 1_000, itemId: "u0", bodyLoaded: false });
+  expect(entries[0]).toMatchObject({ key: "user:0", kind: "user", text: "do the thing", messageTimestamp: 1_000, itemId: "u0", bodyLoaded: false });
+  expect(entries[0].signature).toBe(entryFromHead(user(0, "do the thing")).signature);
   expect(entries[1]).toMatchObject({ key: "system:1", kind: "system", preview: "You are Pi", size: 40_000 });
   expect(entries[1].text).toBeUndefined();
   expect(entries[2]).toMatchObject({ kind: "thinking", label: "Thinking", preview: "Consider the file" });
@@ -116,4 +117,24 @@ test("heads become the entries the transcript renders", () => {
   const landed = entryFromHead(call(3, { result: { isError: true, size: 90, preview: "boom", imageCount: 1, timestamp: 2_900 } }), true);
   expect(landed.signature).toBe("t3:body");
   expect(landed.toolResult).toMatchObject({ isError: true, preview: "boom", imageCount: 1 });
+});
+
+test.each(["user", "assistant"] as const)("%s identity and reaction changes invalidate rendering without changing the body ID", kind => {
+  const head: TranscriptItemHead = { seq: 0, id: "body-hash", kind, size: 5, timestamp: 1_000, text: "Hello" };
+  const initial = entryFromHead(head);
+  const identity = { id: "pi/thread/native-entry", timestamp: 1_000, sender: { id: kind } };
+  const addressed = entryFromHead({ ...head, identity });
+  expect(addressed.identity).toEqual(identity);
+  expect(addressed.signature).not.toBe(initial.signature);
+
+  const reactions = [{ emoji: "❤️", sender: { id: "reader", name: "Reader" }, timestamp: 2_000, own: true }];
+  const reacted = entryFromHead({ ...head, identity, reactions });
+  expect(reacted.reactions).toEqual(reactions);
+  expect(reacted.signature).not.toBe(addressed.signature);
+  expect(entryFromHead({ ...head, identity, reactions: structuredClone(reactions) }).signature).toBe(reacted.signature);
+  expect(entryFromHead({ ...head, identity, reactions: [] }).signature).toBe(addressed.signature);
+
+  for (const entry of [addressed, reacted]) {
+    expect(entry).toMatchObject({ key: initial.key, itemId: initial.itemId, text: initial.text, messageTimestamp: initial.messageTimestamp });
+  }
 });

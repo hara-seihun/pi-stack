@@ -303,6 +303,8 @@ interface TranscriptItemBase {
 
 /** Text that is always inline: the person's and the agent's visible words. */
 export interface InlineTextItem extends TranscriptItemBase {
+  identity?: import("./message-protocol.js").MessageIdentity;
+  reactions?: import("./message-protocol.js").MessageReaction[];
   kind: "user" | "assistant" | "notice";
   label?: string;
   text: string;

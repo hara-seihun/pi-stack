@@ -3,6 +3,8 @@ import { API } from "../../server/api";
 import type { MessagingMessage } from "../../server/messaging/protocol";
 import { extractMessageLinks } from "../../server/messaging/links";
 import type { ResponseMetrics } from "../../server/protocol";
+import type { MessageIdentity, MessageReaction } from "../../server/message-protocol";
+import { MessageReactions } from "./message-reactions";
 import { AGENT_AVATAR } from "../../server/agent-identity";
 import { appPath } from "./app-path";
 import { messagingAvatarUrl } from "./messaging-avatar";
@@ -39,6 +41,8 @@ export type ChatMessageSegment = {
   text: string;
   timestamp?: number;
   previewMessageId?: string;
+  identity?: MessageIdentity;
+  reactions?: MessageReaction[];
   attachments?: ChatAttachment[];
   delivery?: ChatDelivery;
   onCheck?(): void;
@@ -57,6 +61,8 @@ export type ChatMessageProps = {
   timestamp?: number;
   responseMetrics?: ResponseMetrics;
   previewMessageId?: string;
+  identity?: MessageIdentity;
+  reactions?: MessageReaction[];
   /** Extra long-press / right-click actions after Copy. */
   menu?: MessageMenuItem[];
   attachments?: ChatAttachment[];
@@ -117,13 +123,14 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
 }
 
 export function ChatMessage(props: ChatMessageProps) {
-  const { kind, label, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage } = props;
+  const { kind, label, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions } = props;
   return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={timestamp} menu={menu}>
     <MessageBody attachments={attachments} delivery={delivery} checking={checking} onCheck={onCheck} onRetry={onRetry} onEditImage={onEditImage}>
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}
       {props.previewMessageId && <MessageLinkPreviews key={props.previewMessageId} messageId={props.previewMessageId} />}
       {responseMetrics && <footer className="message-metrics">{formatResponseMetrics(responseMetrics)}</footer>}
     </MessageBody>
+    {identity && <MessageReactions identity={identity} reactions={reactions} />}
   </MessageFrame>;
 }
 
@@ -154,6 +161,7 @@ export function ChatMessageGroup({ kind, label, avatar, segments, checking = fal
           {segment.text && <p className="message-text">{segment.text}</p>}
           {segment.previewMessageId && <MessageLinkPreviews key={segment.previewMessageId} messageId={segment.previewMessageId} />}
         </MessageBody>
+        {segment.identity && <MessageReactions identity={segment.identity} reactions={segment.reactions} />}
       </div>;
     })}
   </MessageFrame>;
@@ -161,8 +169,8 @@ export function ChatMessageGroup({ kind, label, avatar, segments, checking = fal
 
 /** One Signal message as a segment of a sender's block; check/retry handlers are wired by the caller. */
 export function messagingMessageSegment(message: MessagingMessage, handlers: { onCheck?(): void; onRetry?(): void } = {}): ChatMessageSegment {
-  const { text, timestamp, attachments, delivery, previewMessageId } = messagingMessageProps(message);
-  return { id: message.id, text, timestamp, attachments, delivery, previewMessageId, ...handlers };
+  const { text, timestamp, attachments, delivery, previewMessageId, identity, reactions } = messagingMessageProps(message);
+  return { id: message.id, text, timestamp, attachments, delivery, previewMessageId, identity, reactions, ...handlers };
 }
 
 export function messagingMessageProps(message: MessagingMessage, backendId = ""): ChatMessageProps {
@@ -175,6 +183,8 @@ export function messagingMessageProps(message: MessagingMessage, backendId = "")
     previewMessageId: (message.status === "received" || message.status === "sent") && extractMessageLinks(message.text, 1).length > 0 ? message.id : undefined,
     contentFormat: "literal",
     timestamp: message.timestamp,
+    identity: message.identity,
+    reactions: message.reactions,
     attachments: message.attachments.map(attachment => ({
       id: attachment.id,
       name: attachment.name,
