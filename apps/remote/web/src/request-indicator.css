@@ -1,0 +1,8 @@
+.request-indicator { position: fixed; top: env(safe-area-inset-top, 0px); left: 0; right: 0; z-index: 90; height: 2px; overflow: hidden; background: color-mix(in srgb, var(--accent) 25%, transparent); pointer-events: none; animation: request-indicator-in 120ms 80ms both; }
+.request-indicator::after { content: ""; position: absolute; inset: 0; width: 40%; background: var(--accent); animation: request-indicator-sweep 1s ease-in-out infinite; }
+@keyframes request-indicator-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes request-indicator-sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) {
+  .request-indicator, .request-indicator::after { animation: none; }
+  .request-indicator::after { width: 100%; }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@hara-seihun/pi-claude-oauth-runtime",
+  "version": "1.0.0",
+  "description": "Load the release-owned Claude OAuth adapter",
+  "license": "MIT",
+  "type": "module",
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" }
+}

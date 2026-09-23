@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d10">
+  <title>Pi Remote</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <!-- Neither the Markdown renderer nor KaTeX is in the page at startup. The
+       inbox, Workers, Files and Machine screens need no Markdown at all, and
+       most conversations contain no formula: src/markdown-engine.ts fetches
+       markdown-it, texmath and the delimiter shim when the first Markdown
+       block mounts, and src/math-engine.ts fetches KaTeX on the first
+       formula. -->
+  <script type="module" src="./src/main.tsx"></script>
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>

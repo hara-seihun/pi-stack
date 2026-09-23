@@ -1,0 +1,37 @@
+.environment-picker {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  gap: 6px;
+}
+
+.environment-picker select {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  height: auto;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-2);
+  color: var(--text);
+  background: var(--surface-2);
+  font: inherit;
+  font-size: 16px;
+}
+
+.environment-picker select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.environment-picker-status,
+.environment-picker-error {
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.environment-picker-status { color: var(--muted); }

@@ -1,0 +1,15 @@
+[Unit]
+Description=Pi Remote local live backend for %i
+After=pi-remote@%i.service pi-stack-voice.service
+Requires=pi-stack-voice.service
+BindsTo=pi-remote@%i.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+EnvironmentFile=/etc/pi-stack/dev-remote-%i.env
+ExecStart=/usr/bin/env node ${PI_STACK_SOURCE}/apps/remote/dev-supervisor.mjs pi-remote@%i.service
+ExecStopPost=/usr/bin/env node ${PI_STACK_SOURCE}/apps/remote/dev-supervisor.mjs pi-remote@%i.service --restore
+KillMode=process
+TimeoutStartSec=45
+TimeoutStopSec=30

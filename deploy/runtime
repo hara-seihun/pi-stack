@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Publish the pinned Pi, agent-browser, and the runtime extensions under
+# /srv/pi/runtime, backed by one production dependency tree that every other
+# component links instead of copying. Then point each Pi account's ~/.local/bin
+# at the selected release.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+link_user=""
+if [[ ${1:-} == --links-only && $# == 2 ]]; then
+  link_user=$2
+elif (( $# )); then
+  echo 'usage: deploy/runtime [--links-only USER]' >&2; exit 64
+fi
+runtime_source="$root/packages/runtime"
+dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
+PI_VERSION=0.87.1
+BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).packages["node_modules/agent-browser"].version' "$root/package-lock.json")"
+stage=""
+dependency_stage=""
+cleanup() {
+  [[ -z $stage ]] || rm -rf "$stage"
+  [[ -z $dependency_stage ]] || pi_stack_as_root rm -rf "$dependency_stage"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+commit=$(git -C "$root" rev-parse HEAD)
+
+check_release() {
+  local release=$1 version browser_version
+  version=$("$release/node_modules/.bin/pi" --version)
+  browser_version=$("$release/node_modules/.bin/agent-browser" --version)
+  [[ $version == "$PI_VERSION" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
+  [[ $browser_version == "$BROWSER_VERSION" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
+  local claude_version
+  claude_version=$(node -p 'require(process.argv[1]).claudeCodeVersion' "$runtime_source/extensions/claude-oauth/client.json")
+  grep -Fq "const CLAUDE_CODE_VERSION = \"$claude_version\";" "$release/node_modules/@pi-plugins/claude-oauth/dist/index.mjs"
+  node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/shared-rpc-mode.js"
+  grep -q 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
+  grep -rlq 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
+  for writer in session-manager settings-manager auth-storage; do
+    grep -q 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js"
+    node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js"
+  done
+  grep -rlq 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
+  cmp -s "$runtime_source/browser-doctor.mjs" "$release/node_modules/.bin/pi-agent-browser-doctor" || {
+    echo "the browser doctor does not match this release" >&2; exit 1;
+  }
+}
+
+# Every Pi account reaches the release through ~/.local/bin, so the links are
+# reconciled on every run, including the already-deployed fast path: a person
+# added since the last release must not wait for the next one.
+reconcile_links() {
+  local user home bin owner group
+  while IFS= read -r user; do
+    home=$(pi_stack_home "$user")
+    [[ -n $home && -d $home ]] || continue
+    bin="$home/.local/bin"
+    owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
+    pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$bin"
+    for name in pi agent-browser pi-agent-browser-doctor; do
+      pi_stack_as_root ln -sfn "$dest/node_modules/.bin/$name" "$bin/$name"
+      pi_stack_as_root chown -h "$owner:$group" "$bin/$name"
+    done
+    pi_stack_as_root rm -f "$bin/codex" "$bin/pro" "$bin/prompt-eval"
+  done < <(if [[ -n $link_user ]]; then printf '%s\n' "$link_user"; else pi_stack_users; fi)
+}
+
+if [[ -n $link_user ]]; then
+  pi_stack_require_release "$dest" "$commit"
+  for name in pi agent-browser pi-agent-browser-doctor; do
+    [[ -x $dest/node_modules/.bin/$name ]] || { echo "runtime command is missing: $name" >&2; exit 66; }
+  done
+  reconcile_links
+  exit 0
+fi
+
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/node_modules/.bin/pi ]]; then
+  check_release "$dest"
+  reconcile_links
+  printf 'Pi %s from %s is already deployed\n' "$PI_VERSION" "$commit"
+  exit 0
+fi
+
+cd "$root"
+pi_stack_as_root install -d -m 755 "$dependencies_root"
+dependency_hash=$({
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-codex-service-recovery.mjs packages/runtime/codex-service-recovery.js packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
+  sha256sum packages/runtime/patch-claude-oauth.mjs packages/runtime/extensions/claude-oauth/client.json
+  printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1-durable-sessions-v1
+} | sha256sum | cut -d' ' -f1)
+dependency_release="$dependencies_root/$dependency_hash"
+if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime-dependencies.XXXXXXXX")
+  install -m 644 package.json package-lock.json "$stage/"
+  install -d "$stage/vendor/pi"
+  install -m 644 vendor/pi/*.tgz "$stage/vendor/pi/"
+  while IFS= read -r manifest; do
+    install -d "$stage/$(dirname "$manifest")"
+    install -m 644 "$manifest" "$stage/$manifest"
+  done < <(find apps packages tools -name node_modules -prune -o -name package.json -print)
+  (cd "$stage" && npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund)
+  install -m 755 packages/runtime/browser-doctor.mjs "$stage/browser-doctor.mjs"
+  ln -sfn ../../browser-doctor.mjs "$stage/node_modules/.bin/pi-agent-browser-doctor"
+  node "$runtime_source/patch-claude-oauth.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-codex-sse.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-codex-service-recovery.mjs" "$stage/node_modules"
+  browser_job="$stage/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/input-modes/job.js"
+  node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
+  node --check "$browser_job"
+  node "$runtime_source/patch-compaction-errors.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-session-durability.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-shared-custody.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
+  rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
+  rm -rf "$stage/node_modules/@hara-seihun"
+  dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
+  pi_stack_as_root install -d -m 755 "$dependency_stage"
+  pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$dependency_stage/"
+  pi_stack_as_root mv -T "$dependency_stage" "$dependency_release"
+  dependency_stage=""
+  rm -rf "$stage"
+  stage=""
+fi
+settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"
+grep -q 'renameSync(temporary, path)' "$settings_manager"
+node --check "$settings_manager"
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime.XXXXXXXX")
+install -d -m 755 "$stage/release/extensions"
+while IFS= read -r extension; do
+  rsync -a --chmod=D755,Fu=rwX,Fgo=rX "$root/$extension" "$stage/release/extensions/"
+done < <(jq -r '.packages[].source | select(startswith("packages/runtime/extensions/"))' "$root/config/packages.json")
+ln -s "$dependency_release/node_modules" "$stage/release/node_modules"
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage/release" "$dest" runtime
+
+check_release "$dest"
+reconcile_links
+printf 'deployed Pi %s and %s from %s to %s\n' "$PI_VERSION" "$BROWSER_VERSION" "$commit" "$dest"

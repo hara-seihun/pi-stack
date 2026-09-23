@@ -1,0 +1,13 @@
+{
+  "name": "@hara-seihun/pi-codex-compaction",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Codex V2 checkpoints in Pi's native compaction lifecycle",
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "0.87.x",
+    "@earendil-works/pi-coding-agent": "0.87.x"
+  }
+}

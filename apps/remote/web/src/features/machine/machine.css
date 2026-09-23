@@ -1,0 +1,217 @@
+.machine-screen {
+  height: 100%;
+  min-width: 0;
+  overflow: auto;
+  padding: max(var(--space-5), env(safe-area-inset-top)) var(--space-4) calc(var(--space-6) + env(safe-area-inset-bottom));
+  color: var(--text);
+}
+
+.machine-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  min-width: 0;
+}
+
+.machine-card { min-width: 0; }
+.machine-card h2 {
+  margin: 0 0 var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.machine-card small, .machine-secondary { color: var(--muted); }
+.machine-secondary { margin: 0; font-size: var(--text-sm); }
+
+.machine-provider { display: flex; align-items: center; gap: var(--space-2); }
+.machine-provider img { width: 18px; height: 18px; }
+
+.machine-plan-row {
+  min-width: 0;
+  padding: var(--space-3) 0;
+}
+.machine-plan-heading {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+.machine-plan-name {
+  min-width: 120px;
+  flex: 1 1 180px;
+  display: grid;
+  gap: 2px;
+}
+.machine-plan-name strong { font-size: var(--text-sm); }
+.machine-plan-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.machine-plan-heading > span {
+  flex: 0 1 auto;
+  margin-left: auto;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.machine-bar {
+  width: 100%;
+  height: 6px;
+  position: relative;
+  display: block;
+  margin: var(--space-2) 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-3);
+  cursor: pointer;
+}
+.machine-bar::before { content: ""; position: absolute; inset: -19px 0; }
+.machine-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.machine-bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.machine-bar span[data-risk="warning"] { background: var(--warning); }
+.machine-bar span[data-risk="danger"] { background: var(--danger); }
+.machine-plan-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.machine-plan-details-button {
+  min-height: var(--touch);
+  margin: var(--space-1) 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  text-align: left;
+}
+.machine-plan-detail { display: grid; gap: var(--space-4); }
+.machine-plan-detail > header { display: grid; gap: var(--space-1); }
+.machine-plan-detail > header > strong { font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
+.machine-plan-detail > header > span { color: var(--muted); font-size: var(--text-sm); }
+.machine-account {
+  min-width: 0;
+  padding: var(--space-4);
+  border-radius: var(--radius-3);
+  background: var(--surface-2);
+}
+.machine-account > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+.machine-account > header > div { min-width: 0; display: grid; gap: 2px; }
+.machine-account > header small { overflow-wrap: anywhere; }
+.machine-account > header > span { font-variant-numeric: tabular-nums; }
+.machine-account > p { margin: var(--space-3) 0 0; color: var(--muted); font-size: var(--text-sm); }
+.machine-account dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-4) 0 0;
+}
+.machine-account dt { color: var(--muted); }
+.machine-account dd { min-width: 0; margin: 0; font-variant-numeric: tabular-nums; }
+.machine-account dd:has(small) { display: grid; gap: 2px; }
+.machine-account dd small { color: var(--muted); }
+
+.machine-governor {
+  min-width: 0;
+  min-height: var(--touch);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+}
+.machine-governor button,
+.machine-action,
+.machine-app-detail button,
+.machine-errors button {
+  min-height: var(--touch);
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-2);
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 600;
+}
+.machine-governor button {
+  min-width: 140px;
+  font-variant-numeric: tabular-nums;
+}
+
+.machine-actions { display: grid; gap: var(--space-1); }
+.machine-action {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  text-align: left;
+}
+.machine-action strong { color: var(--muted); font-size: var(--text-sm); }
+.machine-action[aria-checked="true"] strong { color: var(--success); }
+
+.machine-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-3) var(--space-5);
+}
+.machine-usage-tile { display: grid; gap: var(--space-1); padding: var(--space-2) 0; }
+.machine-usage-tile > span, .machine-usage-tile small { color: var(--muted); }
+.machine-usage-tile strong { font-size: var(--text-xl); }
+
+.machine-app-detail {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+}
+.machine-app-detail dt { color: var(--muted); }
+.machine-app-detail dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+}
+.machine-app-detail dd:has(button) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-family: inherit;
+}
+
+.machine-errors { margin: 0; padding: 0; list-style: none; }
+.machine-errors li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+.machine-errors span { display: grid; gap: var(--space-1); }
+.machine-errors strong { font-size: var(--text-sm); }
+
+@media (min-width: 900px) {
+  .machine-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .machine-screen * { transition: none !important; }
+}

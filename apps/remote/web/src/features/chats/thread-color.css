@@ -1,0 +1,19 @@
+.thread-color-toggle { width: var(--touch); min-height: var(--touch); padding: 0; display: grid; place-items: center; background: transparent; color: var(--text); }
+.thread-color-dot { width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid var(--text); background: var(--thread-color, var(--bg)); }
+.thread-color-toggle:hover, .thread-color-toggle:focus-visible { background: var(--surface-2); }
+.inbox-row.has-thread-color::before { content: ""; position: absolute; pointer-events: none; inset: 0 0 0 auto; width: min(45%, 180px); background: var(--thread-color); opacity: .17; clip-path: polygon(65% 0, 100% 0, 45% 100%, 10% 100%); }
+.inbox-row.has-thread-color > .inbox-open, .inbox-row.has-thread-color > .inbox-close, .inbox-row.has-thread-color > .thread-color-toggle { position: relative; }
+.thread-color-palette { position: fixed; z-index: 120; width: 224px; height: 224px; pointer-events: none; }
+.thread-color-palette::before { content: ""; position: absolute; inset: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 50%; box-shadow: 0 8px 28px #0005; opacity: 0; transform: scale(.25) rotate(-35deg); transition: opacity .2s, transform .24s; }
+.thread-color-palette.is-open::before { opacity: .98; transform: scale(1) rotate(0); animation: color-palette-in .24s ease; }
+.thread-color-palette button { position: absolute; width: 44px; height: 44px; display: grid; place-items: center; padding: 0; background: transparent; border-radius: 50%; opacity: 0; transform: translate(var(--origin-x), var(--origin-y)) rotate(-100deg) scale(.1); transition: transform .24s ease, opacity .18s; }
+.thread-color-palette.is-open { pointer-events: auto; }
+.thread-color-palette.is-open button { opacity: 1; transform: translate(var(--x, 90px), var(--y, 90px)) rotate(0) scale(1); animation: color-swatch-in .24s ease; }
+@keyframes color-palette-in { from { opacity: 0; transform: scale(.25) rotate(-35deg); } }
+@keyframes color-swatch-in { from { opacity: 0; transform: translate(var(--origin-x), var(--origin-y)) rotate(-100deg) scale(.1); } }
+.thread-color-option span { width: 29px; height: 29px; border-radius: 50%; background: var(--swatch); border: 1px solid #fff8; }
+.thread-color-option[aria-pressed=true] span { outline: 2px solid var(--text); outline-offset: 3px; }
+.thread-color-palette button:hover, .thread-color-palette button:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.thread-color-palette .thread-color-clear { color: var(--muted); font-size: 25px; }
+.thread-color-error { grid-column: 1 / -1; }
+@media (prefers-reduced-motion: reduce) { .thread-color-palette::before, .thread-color-palette button { transition: none; animation: none; } }

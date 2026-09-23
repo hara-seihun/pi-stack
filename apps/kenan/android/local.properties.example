@@ -1,0 +1,4 @@
+# Copy to local.properties, which Git ignores. Set sdk.dir if Gradle cannot find your SDK.
+# This URL is embedded in the APK and must be reachable from the phone.
+piRemoteRouterUrl=https://router.example.test/pi-stack
+# sdk.dir=/path/to/android-sdk

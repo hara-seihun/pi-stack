@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+source_dir="$root/apps/remote/server/meet/asr"
+key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" | sha256sum | cut -d' ' -f1)
+base=${PI_STACK_TRANSCRIPTION_DEST:-/srv/pi/transcription}
+tree="$(dirname "$base")/.pi-transcription/$key"
+if [[ ! -f "$tree/ready" ]]; then
+  command -v uv >/dev/null || { echo 'PiStack transcription requires uv on the host PATH' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$(dirname "$tree")" "$tree"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
+  uv venv --python 3.12 "$tree/venv"
+  uv pip sync --python "$tree/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
+  "$tree/venv/bin/python" - "$source_dir/model.json" "$tree/model" <<'PY'
+import json, sys
+from huggingface_hub import snapshot_download
+source=json.load(open(sys.argv[1]))
+snapshot_download(source['repository'], revision=source['revision'], local_dir=sys.argv[2], allow_patterns=source['files'], token=False)
+from faster_whisper import WhisperModel
+WhisperModel(sys.argv[2], device='cpu', compute_type='int8', cpu_threads=4)
+PY
+  chmod -R a+rX "$tree"
+  touch "$tree/ready"
+fi
+[[ -x $tree/venv/bin/python && -d $tree/model ]] || {
+  echo "PiStack transcription runtime is incomplete at $tree" >&2
+  exit 66
+}
+next="$base.next.$$"
+trap 'pi_stack_as_root rm -f "$next"' EXIT
+pi_stack_as_root ln -s "$tree" "$next"
+pi_stack_as_root mv -Tf "$next" "$base"
+echo "PiStack transcription ready: $key"

@@ -1,0 +1,11 @@
+{
+  "name": "@hara-seihun/bash-timeout-guard",
+  "version": "1.0.0",
+  "description": "Require explicit bounded timeouts for Pi bash calls",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0" },
+  "scripts": { "test": "node --test guard.test.mjs" }
+}

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Read-only service assertions shared by the host release wrappers.
+set -euo pipefail
+fleet_user=${1:?usage: check-services FLEET_USER ENVIRONMENT_ID}
+environment=${2:?usage: check-services FLEET_USER ENVIRONMENT_ID [--json]}
+format=${3:-text}
+[[ $format == text || $format == --json ]] || { echo 'invalid output format' >&2; exit 64; }
+units='{}'
+[[ $fleet_user =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo 'invalid fleet user' >&2; exit 64; }
+base="http://127.0.0.1:${PI_REMOTE_ROUTER_PORT:-8788}"
+require_active() {
+  systemctl is-active --quiet "$1" || { echo "$1 is not active" >&2; exit 1; }
+  units=$(jq -c --arg unit "$1" '. + {($unit):"active"}' <<< "$units")
+}
+for unit in "pi-orchestrator@$fleet_user.service" pi-remote-router.service pi-stack-voice.service; do
+  require_active "$unit"
+done
+router=$(curl -fsS --max-time 5 "$base/v1/router-health")
+if ! jq -e --arg environment "$environment" '
+  .ok == true and .environmentId == $environment and
+  (.people | type == "array") and
+  all(.people[];
+    (.user | type == "string") and (.user | test("^[a-z_][a-z0-9_-]*$")) and
+    (.unlocked | type == "boolean"))
+' <<< "$router" >/dev/null; then
+  echo 'router health is invalid or names the wrong environment' >&2
+  exit 1
+fi
+users=$(jq -r '.people[] | select(.unlocked) | .user' <<< "$router")
+while IFS= read -r user; do
+  [[ -n $user ]] || continue
+  require_active "pi-remote@$user.service"
+done <<< "$users"
+failed=$(systemctl --failed --legend=no --plain --no-pager | awk '$1 ~ /^pi-/ {print $1}')
+[[ -z $failed ]] || { printf 'failed Pi units after release:\n%s\n' "$failed" >&2; exit 1; }
+if [[ $format == --json ]]; then
+  jq -n --argjson router "$router" --argjson units "$units" '{router:$router,units:$units}'
+else
+  echo "services: $environment shared services and every unlocked supervisor are active"
+fi

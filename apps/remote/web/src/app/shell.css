@@ -1,0 +1,26 @@
+.shell { display: grid; width: 100%; height: 100%; min-height: 0; background: var(--bg); }
+.pane { min-width: 0; min-height: 0; }
+.pane[hidden] { display: none !important; }
+
+/* Phone: one pane, bottom tab bar under the list, none under a conversation. */
+.layout-phone { grid-template-rows: minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); }
+.layout-phone .pane { grid-row: 1; grid-column: 1; }
+.tabbar { grid-row: 2; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; height: var(--tabbar); padding-bottom: env(safe-area-inset-bottom); background: var(--surface); }
+.tab { position: relative; display: grid; place-items: center; padding: 0; color: var(--muted); background: transparent; }
+.tab[aria-current] { color: var(--accent); }
+.tab-icon { position: relative; display: grid; place-items: center; width: 48px; height: 36px; border-radius: 18px; }
+.tab[aria-current] .tab-icon { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.tab-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tab-badge { position: absolute; top: -4px; right: 4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--surface-3); color: var(--text); font-size: 10px; line-height: 16px; text-align: center; }
+.tab-badge.attention { background: var(--status-held); color: var(--bg); }
+
+/* Desktop: rail, list, detail. */
+.layout-desktop, .layout-wide { grid-template-columns: var(--rail) var(--list) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.rail { display: grid; grid-auto-rows: max-content; align-content: start; gap: var(--space-1); padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-1); background: var(--bg); }
+.rail .tab { height: 56px; border-radius: var(--radius-2); }
+.rail .tab:hover { background: var(--surface-2); }
+.layout-desktop .pane-list, .layout-wide .pane-list { background: var(--bg); }
+.layout-desktop.single, .layout-wide.single { grid-template-columns: var(--rail) minmax(0, 1fr); }
+.layout-desktop .machine-screen, .layout-wide .machine-screen { padding: var(--space-5); }
+.layout-desktop .machine-grid, .layout-wide .machine-grid { max-width: 1200px; margin: 0 auto; }
+.layout-desktop .inbox-empty:not(.search-empty), .layout-wide .inbox-empty:not(.search-empty) { display: none; }

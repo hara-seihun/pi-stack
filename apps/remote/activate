@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# SIGHUP asks Pi Remote's launcher to replace the supervisor while its runtime
+# hosts keep active Pi turns running.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage: activate
+
+Activate the selected Pi Remote release. The supervisor is replaced now;
+active Pi turns stay in their runtime hosts and continue without replay.
+USAGE
+}
+
+case ${1:-} in
+  --help|-h) usage; exit 0 ;;
+  "") ;;
+  *) echo "activate: unknown argument: $1" >&2; usage >&2; exit 64 ;;
+esac
+if (($# > 1)); then
+  echo "activate: expected no arguments" >&2
+  usage >&2
+  exit 64
+fi
+
+owner=${PI_REMOTE_USER:-${USER:-$(id -un)}}
+if [[ -n ${PI_REMOTE_SERVICE:-} ]]; then
+  service=$PI_REMOTE_SERVICE
+else
+  template_service="pi-remote@$owner.service"
+  if systemctl is-active --quiet "$template_service"; then
+    service=$template_service
+  elif systemctl is-active --quiet pi-remote.service; then
+    service=pi-remote.service
+  else
+    service=$template_service
+  fi
+fi
+
+sudo -n systemctl reload --no-block "$service"
+printf 'requested live activation for %s\n' "$service"

@@ -1,0 +1,127 @@
+import groovy.json.JsonSlurper
+
+apply plugin: 'com.android.application'
+
+Properties remote = new Properties()
+File remoteFile = rootProject.file('local.properties')
+if (remoteFile.exists()) remoteFile.withInputStream { remote.load(it) }
+def routerUrl = remote.getProperty('piRemoteRouterUrl', '').trim().replaceAll('/+$', '')
+if (routerUrl.isEmpty()) throw new GradleException('Set piRemoteRouterUrl in android/local.properties')
+def routerUri = new URI(routerUrl)
+if (!(routerUri.scheme in ['http', 'https']) || !routerUri.host || routerUri.userInfo || routerUri.query || routerUri.fragment
+    || !(routerUri.rawPath ==~ /(?:\/[A-Za-z0-9_~.-]+)*/) || routerUri.normalize() != routerUri
+    || routerUri.rawPath.tokenize('/').any { it == '.' || it == '..' }) {
+    throw new GradleException('piRemoteRouterUrl must be a credential-free HTTP(S) URL with an optional plain directory prefix, without a query or fragment')
+}
+def javaString = { value -> '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"' }
+def packageConfig = new JsonSlurper().parse(rootProject.file('../package.json'))
+def releaseInfoJson = providers.exec {
+    commandLine 'node', rootProject.file('../release-info.mjs').absolutePath
+}.standardOutput.asText.get().trim()
+def releaseInfo = new JsonSlurper().parseText(releaseInfoJson)
+def applicationIdValue = releaseInfo.applicationId
+def versionNameValue = packageConfig.version
+
+android {
+    namespace = applicationIdValue
+    compileSdk = rootProject.ext.compileSdkVersion
+    buildToolsVersion "36.0.0"
+    defaultConfig {
+        applicationId applicationIdValue
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode releaseInfo.versionCode
+        versionName versionNameValue
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "String", "ROUTER_URL", javaString(routerUrl)
+        buildConfigField "String", "RELEASE_REVISION", javaString(releaseInfo.revision)
+        buildConfigField "String", "SHELL_ID", javaString(releaseInfo.shellId)
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    buildFeatures { buildConfig true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+def releaseAssets = layout.buildDirectory.dir('generated/appReleaseAssets')
+def generateAppRelease = tasks.register('generateAppRelease') {
+    inputs.property('releaseInfo', releaseInfoJson)
+    outputs.dir(releaseAssets)
+    doLast {
+        File target = new File(releaseAssets.get().asFile, 'app-release.json')
+        target.parentFile.mkdirs()
+        target.text = releaseInfoJson + '\n'
+    }
+}
+android.sourceSets.main.assets.srcDir(releaseAssets)
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach {
+    dependsOn(generateAppRelease)
+}
+
+def liveServerUrl = providers.gradleProperty('piRemoteLiveServerUrl').orElse('').get().trim()
+if (!liveServerUrl.isEmpty()) {
+    def liveUri = new URI(liveServerUrl)
+    if (liveUri.scheme != 'https' || !liveUri.host || liveUri.userInfo || liveUri.query || liveUri.fragment) {
+        throw new GradleException('piRemoteLiveServerUrl must be an HTTPS frontend URL')
+    }
+    def liveAssets = layout.buildDirectory.dir('generated/liveClientAssets')
+    def generateLiveClientConfig = tasks.register('generateLiveClientConfig') {
+        inputs.property('liveServerUrl', liveServerUrl)
+        inputs.file('src/main/assets/capacitor.config.json')
+        outputs.dir(liveAssets)
+        doLast {
+            def config = new JsonSlurper().parse(file('src/main/assets/capacitor.config.json'))
+            config.server = (config.server ?: [:]) + [url: liveServerUrl]
+            File target = new File(liveAssets.get().asFile, 'capacitor.config.json')
+            target.parentFile.mkdirs()
+            target.text = groovy.json.JsonOutput.toJson(config)
+        }
+    }
+    android.sourceSets.debug.assets.srcDir(liveAssets)
+    tasks.matching { it.name == 'mergeDebugAssets' }.configureEach {
+        dependsOn(generateLiveClientConfig)
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.json:json:20240303"
+    testImplementation "com.squareup.okhttp3:mockwebserver:4.12.0"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

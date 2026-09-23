@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Link one account to the installed release without publishing shared artifacts.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+export PI_STACK_ROOT_DIR=$root
+source "$root/deploy/lib"
+[[ $# == 1 && $1 =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo 'usage: sudo deploy/account USER' >&2; exit 64; }
+[[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]] || { echo 'account onboarding requires root' >&2; exit 77; }
+pi_stack_enforce_deploy_deadline "$0" "$@"
+if [[ ${PI_STACK_HOST_LOCK_HELD:-0} != 1 ]]; then
+  exec {host_lock}>"${PI_STACK_HOST_LOCK_FILE:-/srv/pi/.pi-stack-deploy.lock}"
+  flock -n "$host_lock" || { echo 'Pi stack deployment is in progress; retry account onboarding after it finishes' >&2; exit 75; }
+  export PI_STACK_HOST_LOCK_HELD=1
+fi
+pi_stack_enter_deployment "$0" "$root" "$@"
+user=$1
+home=$(pi_stack_home "$user")
+[[ -n $home && -d $home ]] || { echo "no home directory for $user" >&2; exit 64; }
+commit=$(git -C "$root" rev-parse HEAD)
+for destination in \
+  "${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}" \
+  "${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}" \
+  "${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}" \
+  "${PI_STACK_TOOLS_DEST:-/srv/pi/tools}" \
+  "${PI_STACK_SKILLS_DEST:-/srv/pi/skills}"; do
+  pi_stack_require_release "$destination" "$commit"
+done
+
+"$root/deploy/runtime" --links-only "$user"
+"$root/deploy/tools" --links-only "$user"
+"$root/deploy/skills" --links-only "$user"
+"$root/deploy/settings" "$user"
+printf 'linked Pi stack %s for %s without changing shared releases\n' "$commit" "$user"

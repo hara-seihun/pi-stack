@@ -1,0 +1,40 @@
+# One Pi Remote supervisor per person, started by the front door. PrivateMounts
+# gives the unit its own mount namespace; the launcher mounts the person's
+# encrypted folder there when she has one and then becomes the generation
+# launcher. Stopping the unit destroys the namespace and the plaintext view.
+# Reference unit for a Debian host; NixOS declares the same unit.
+[Unit]
+Description=Pi Remote supervisor for %i
+After=network-online.target
+# A wrong key fails the mount and the unit restarts; five quick failures make
+# systemd give up, which is how the front door tells a wrong key from a slow one.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/srv/pi/pi-remote
+Environment=HOME=/home/%i
+Environment=PATH=/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PI_BIN=/home/%i/.local/bin/pi
+Environment=PI_AGENT_DIR=/home/%i/.pi/agent
+Environment=PI_REMOTE_CONFIG=/var/lib/pi-remote/persons/%i.json
+Environment=PI_REMOTE_HOST=127.0.0.1
+LoadCredential=key:/run/pi-remote-keys/%i
+PrivateMounts=yes
+ExecStart=/srv/pi/pi-remote/server/pi-remote-launch /usr/local/bin/bun /srv/pi/pi-remote/server/main.ts
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=10
+UMask=0077
+LimitNOFILE=1048576
+# Shared SDK sessions and all their tool/browser children share this budget.
+# Keep reclaim from freezing the supervisor; the runner queues new sessions
+# at 80% of the cgroup limit and the hard cap contains a runaway child.
+MemoryHigh=16G
+MemoryMax=16G
+MemorySwapMax=1G
+OOMPolicy=continue

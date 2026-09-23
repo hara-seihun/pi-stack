@@ -1,0 +1,21 @@
+.sheet { position: fixed; inset: 0; width: 100%; max-width: 100%; height: 100dvh; max-height: 100%; margin: 0; padding: 0; border: 0; background: var(--bg); color: var(--text); overflow: hidden; }
+.sheet::backdrop { background: var(--bg); }
+.sheet:not([open]) { display: none; }
+.sheet-frame { width: min(100%, 720px); height: 100%; margin: 0 auto; display: flex; flex-direction: column; background: var(--bg); }
+.sheet.wide .sheet-frame { width: min(100%, 960px); }
+.sheet-header { flex: 0 0 auto; display: flex; align-items: center; gap: var(--space-3); min-height: 72px; padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3) var(--space-5); }
+.sheet-title { flex: 1; min-width: 0; margin: 0; font-size: var(--text-lg); font-weight: 650; overflow-wrap: anywhere; }
+.sheet-actions { display: flex; align-items: center; gap: var(--space-1); }
+.sheet-close { width: var(--touch); height: var(--touch); display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--radius-2); color: var(--muted); background: transparent; }
+.sheet-close:hover { color: var(--text); background: var(--surface-2); }
+.sheet-close svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.sheet-body { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3) var(--space-5) calc(var(--space-6) + env(safe-area-inset-bottom)); overscroll-behavior: contain; }
+.sheet.sheet-sidebar { inset: 0 0 0 auto; z-index: 30; width: min(420px, calc(100vw - 48px)); height: 100dvh; max-height: 100dvh; border-left: 1px solid var(--border); box-shadow: -12px 0 32px rgb(0 0 0 / 25%); }
+.sheet-sidebar .sheet-frame { width: 100%; }
+.sheet-sidebar::backdrop { display: none; }
+.sheet-sidebar .sheet-header { min-height: 64px; padding: max(var(--space-2), env(safe-area-inset-top)) var(--space-4) var(--space-2); }
+.sheet-sidebar .sheet-body { padding: var(--space-3) var(--space-4) calc(var(--space-6) + env(safe-area-inset-bottom)); }
+@media (min-width: 900px) {
+  .sheet-header { padding-top: var(--space-6); padding-bottom: var(--space-4); }
+  .sheet-body { padding-top: var(--space-4); }
+}

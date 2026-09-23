@@ -1,0 +1,1315 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pi Stack durable completions",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/completions/{requestId}": {
+      "parameters": [
+        {
+          "name": "requestId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "submitCompletion",
+        "description": "Atomically stores caller input and one tool-free Orchestrator run. Same ID and identical input replay the existing record; changed input conflicts. Network disconnect does not cancel work. Luna accepts native strict JSON schema; maxOutputTokens is rejected before admission on the Codex route.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompletionInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable completion status. Replaying the same request ID never creates another logical request. Only explicit pre-execution rate-limit rejections may receive another durable attempt; unknown outcomes remain fenced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionRecord"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Durable completion status. Replaying the same request ID never creates another logical request. Only explicit pre-execution rate-limit rejections may receive another durable attempt; unknown outcomes remain fenced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request ID conflict or invalid state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported native provider option",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Orchestrator failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getCompletion",
+        "responses": {
+          "200": {
+            "description": "Durable completion status. Replaying the same request ID never creates another logical request. Only explicit pre-execution rate-limit rejections may receive another durable attempt; unknown outcomes remain fenced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request ID conflict or invalid state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported native provider option",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Orchestrator failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/completions/{requestId}/retry": {
+      "parameters": [
+        {
+          "name": "requestId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "retryRejectedCompletion",
+        "description": "Requeues only an explicit pre-execution rate-limit rejection, preserving request/run IDs and immutable attempt receipts. Idempotent for queued, running and completed requests. Indeterminate and cancelled outcomes cannot be retried.",
+        "responses": {
+          "200": {
+            "description": "Durable completion status. Replaying the same request ID never creates another logical request. Only explicit pre-execution rate-limit rejections may receive another durable attempt; unknown outcomes remain fenced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request ID conflict or invalid state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported native provider option",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Orchestrator failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/completions/{requestId}/attempts": {
+      "parameters": [
+        {
+          "name": "requestId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "completionAttempts",
+        "responses": {
+          "200": {
+            "description": "Append-only provider attempt custody and rejection recovery provenance.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionAttempts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request ID conflict or invalid state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported native provider option",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Orchestrator failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/completions/{requestId}/cancel": {
+      "parameters": [
+        {
+          "name": "requestId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "cancelCompletion",
+        "description": "Cancels durable work. Terminal results remain unchanged. An in-flight provider call may already have spent tokens.",
+        "responses": {
+          "200": {
+            "description": "Durable completion status. Replaying the same request ID never creates another logical request. Only explicit pre-execution rate-limit rejections may receive another durable attempt; unknown outcomes remain fenced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request ID conflict or invalid state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported native provider option",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Orchestrator failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CompletionAttempts": {
+        "type": "object",
+        "required": [
+          "attempts"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "attemptId",
+                "runId",
+                "accountId",
+                "provider",
+                "model",
+                "startedAt"
+              ],
+              "properties": {
+                "attemptId": {
+                  "type": "string"
+                },
+                "runId": {
+                  "type": "string"
+                },
+                "accountId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "startedAt": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "outcome": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "result"
+                      ],
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "const": "completed"
+                        },
+                        "result": {
+                          "type": "object",
+                          "required": [
+                            "text",
+                            "provider",
+                            "model",
+                            "usage",
+                            "stopReason"
+                          ],
+                          "properties": {
+                            "text": {
+                              "type": "string"
+                            },
+                            "provider": {
+                              "type": "string"
+                            },
+                            "model": {
+                              "type": "string"
+                            },
+                            "responseId": {
+                              "type": "string"
+                            },
+                            "usage": {
+                              "type": "object",
+                              "required": [
+                                "input",
+                                "output",
+                                "cacheRead",
+                                "cacheWrite",
+                                "totalTokens"
+                              ],
+                              "properties": {
+                                "input": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "output": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "cacheRead": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "cacheWrite": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "totalTokens": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "reasoning": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "stopReason": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "const": "stop"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "length"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "error"
+                      ],
+                      "properties": {
+                        "state": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "const": "failed"
+                            },
+                            {
+                              "type": "string",
+                              "const": "cancelled"
+                            },
+                            {
+                              "type": "string",
+                              "const": "indeterminate"
+                            }
+                          ]
+                        },
+                        "error": {
+                          "type": "object",
+                          "required": [
+                            "code",
+                            "message"
+                          ],
+                          "properties": {
+                            "code": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "const": "invalid-request"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "unsupported-option"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "not-found"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "request-conflict"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "invalid-state"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "provider"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "authentication"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "cancelled"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "indeterminate"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "missing-provider-evidence"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "transport"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "protocol"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "rate-limited"
+                                }
+                              ]
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "httpStatus": {
+                              "type": "integer",
+                              "minimum": 100,
+                              "maximum": 599
+                            },
+                            "retryAfterMs": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "recoveryReason": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CompletionInput": {
+        "type": "object",
+        "required": [
+          "model",
+          "prompt"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "const": "luna"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "systemPrompt": {
+            "type": "string"
+          },
+          "thinkingLevel": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "off"
+              },
+              {
+                "type": "string",
+                "const": "minimal"
+              },
+              {
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "type": "string",
+                "const": "medium"
+              },
+              {
+                "type": "string",
+                "const": "high"
+              },
+              {
+                "type": "string",
+                "const": "xhigh"
+              },
+              {
+                "type": "string",
+                "const": "max"
+              }
+            ]
+          },
+          "speed": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "standard"
+              },
+              {
+                "type": "string",
+                "const": "priority"
+              }
+            ]
+          },
+          "maxOutputTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Reserved provider-native output cap. Codex Luna rejects this option with HTTP 422 unsupported-option; it is never silently ignored."
+          },
+          "responseFormat": {
+            "type": "object",
+            "required": [
+              "type",
+              "name",
+              "schema"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "json_schema"
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              "schema": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {}
+                }
+              },
+              "strict": {
+                "type": "boolean",
+                "default": true
+              }
+            },
+            "additionalProperties": false
+          },
+          "metadata": {
+            "type": "object",
+            "patternProperties": {
+              "^.*$": {}
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CompletionRecord": {
+        "anyOf": [
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "runId",
+              "model",
+              "createdAt",
+              "updatedAt",
+              "state"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string",
+                "const": "luna"
+              },
+              "metadata": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {}
+                }
+              },
+              "createdAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updatedAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "attemptCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "retryAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "state": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "queued"
+                  },
+                  {
+                    "type": "string",
+                    "const": "running"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "runId",
+              "model",
+              "createdAt",
+              "updatedAt",
+              "state",
+              "result"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string",
+                "const": "luna"
+              },
+              "metadata": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {}
+                }
+              },
+              "createdAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updatedAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "attemptCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "retryAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "state": {
+                "type": "string",
+                "const": "completed"
+              },
+              "result": {
+                "type": "object",
+                "required": [
+                  "text",
+                  "provider",
+                  "model",
+                  "usage",
+                  "stopReason"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "responseId": {
+                    "type": "string"
+                  },
+                  "usage": {
+                    "type": "object",
+                    "required": [
+                      "input",
+                      "output",
+                      "cacheRead",
+                      "cacheWrite",
+                      "totalTokens"
+                    ],
+                    "properties": {
+                      "input": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "output": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "cacheRead": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "cacheWrite": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "totalTokens": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "reasoning": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "stopReason": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "stop"
+                      },
+                      {
+                        "type": "string",
+                        "const": "length"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "runId",
+              "model",
+              "createdAt",
+              "updatedAt",
+              "state",
+              "error"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string",
+                "const": "luna"
+              },
+              "metadata": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {}
+                }
+              },
+              "createdAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updatedAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "attemptCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "retryAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "state": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  {
+                    "type": "string",
+                    "const": "cancelled"
+                  },
+                  {
+                    "type": "string",
+                    "const": "indeterminate"
+                  }
+                ]
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "invalid-request"
+                      },
+                      {
+                        "type": "string",
+                        "const": "unsupported-option"
+                      },
+                      {
+                        "type": "string",
+                        "const": "not-found"
+                      },
+                      {
+                        "type": "string",
+                        "const": "request-conflict"
+                      },
+                      {
+                        "type": "string",
+                        "const": "invalid-state"
+                      },
+                      {
+                        "type": "string",
+                        "const": "provider"
+                      },
+                      {
+                        "type": "string",
+                        "const": "authentication"
+                      },
+                      {
+                        "type": "string",
+                        "const": "cancelled"
+                      },
+                      {
+                        "type": "string",
+                        "const": "indeterminate"
+                      },
+                      {
+                        "type": "string",
+                        "const": "missing-provider-evidence"
+                      },
+                      {
+                        "type": "string",
+                        "const": "transport"
+                      },
+                      {
+                        "type": "string",
+                        "const": "protocol"
+                      },
+                      {
+                        "type": "string",
+                        "const": "rate-limited"
+                      }
+                    ]
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "httpStatus": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 599
+                  },
+                  "retryAfterMs": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "CompletionResult": {
+        "type": "object",
+        "required": [
+          "text",
+          "provider",
+          "model",
+          "usage",
+          "stopReason"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "responseId": {
+            "type": "string"
+          },
+          "usage": {
+            "type": "object",
+            "required": [
+              "input",
+              "output",
+              "cacheRead",
+              "cacheWrite",
+              "totalTokens"
+            ],
+            "properties": {
+              "input": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "output": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "cacheRead": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "cacheWrite": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "totalTokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "reasoning": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": false
+          },
+          "stopReason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "stop"
+              },
+              {
+                "type": "string",
+                "const": "length"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CompletionUsage": {
+        "type": "object",
+        "required": [
+          "input",
+          "output",
+          "cacheRead",
+          "cacheWrite",
+          "totalTokens"
+        ],
+        "properties": {
+          "input": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "output": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "cacheRead": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "cacheWrite": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "totalTokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reasoning": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "additionalProperties": false
+      },
+      "CompletionErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "invalid-request"
+                  },
+                  {
+                    "type": "string",
+                    "const": "unsupported-option"
+                  },
+                  {
+                    "type": "string",
+                    "const": "not-found"
+                  },
+                  {
+                    "type": "string",
+                    "const": "request-conflict"
+                  },
+                  {
+                    "type": "string",
+                    "const": "invalid-state"
+                  },
+                  {
+                    "type": "string",
+                    "const": "provider"
+                  },
+                  {
+                    "type": "string",
+                    "const": "authentication"
+                  },
+                  {
+                    "type": "string",
+                    "const": "cancelled"
+                  },
+                  {
+                    "type": "string",
+                    "const": "indeterminate"
+                  },
+                  {
+                    "type": "string",
+                    "const": "missing-provider-evidence"
+                  },
+                  {
+                    "type": "string",
+                    "const": "transport"
+                  },
+                  {
+                    "type": "string",
+                    "const": "protocol"
+                  },
+                  {
+                    "type": "string",
+                    "const": "rate-limited"
+                  }
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "httpStatus": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599
+              },
+              "retryAfterMs": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

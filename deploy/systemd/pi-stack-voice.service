@@ -1,0 +1,24 @@
+[Unit]
+Description=PiStack Meet and Voice OpenAI API connection
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/srv/pi/pi-remote/server/voice/service.ts
+
+[Service]
+Type=notify
+NotifyAccess=all
+DynamicUser=yes
+StateDirectory=pi-stack-voice-runtime
+StateDirectoryMode=0700
+LoadCredential=openai-api-key:/var/lib/pi-stack-voice/openai-api-key
+Environment=PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PI_STACK_REMOTE_SOURCE=/srv/pi/pi-remote
+ExecStart=/usr/bin/env bun ${PI_STACK_REMOTE_SOURCE}/server/voice/service.ts
+Restart=on-failure
+RestartSec=1
+TimeoutStartSec=10
+TimeoutStopSec=10
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

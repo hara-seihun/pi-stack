@@ -1,0 +1,315 @@
+#!/usr/bin/env node
+// Spends banked Codex rate-limit resets across the orchestrator's OpenAI pool.
+//
+// OpenAI grants each ChatGPT plan a small number of savable rate-limit resets.
+// Redeeming one returns the account's weekly meter to 0% and restarts the
+// window from its next use. Unspent balance is lost rather than banked, so a
+// reset is only worth spending on an account that has actually run out; the
+// default threshold is therefore 100% used.
+//
+// Credentials come from the orchestrator's shared credential store and are
+// read, never refreshed: refresh tokens are single-use and an independent
+// refresh would revoke the family out from under running sessions.
+// After a redemption the fresh meter reading is written into the orchestrator
+// ledger and the account's cooldown is cleared, so scheduling sees the new
+// allowance without waiting for the next sampler pass.
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { request } from "node:https";
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
+// Hosts differ in where the orchestrator keeps its state: a system service
+// owns /var/lib/pi-orchestrator, a user service owns the per-account path
+// below, and one host links the latter at the former. Resolve the ledger the
+// way the orchestrator's own config does, then take the credential store
+// beside the ledger's real location, so a symlinked home path and a plain
+// system path both land on one file.
+function resolveLedger() {
+  if (process.env.PI_ORCHESTRATOR_LEDGER) return process.env.PI_ORCHESTRATOR_LEDGER;
+  const candidates = [join(homedir(), ".local/share/pi-orchestrator/ledger.sqlite3"), "/var/lib/pi-orchestrator/ledger.sqlite3"];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+function resolveAuth(ledger) {
+  if (process.env.PI_ORCHESTRATOR_AUTH) return process.env.PI_ORCHESTRATOR_AUTH;
+  try {
+    return join(dirname(realpathSync(ledger)), "auth.json");
+  } catch {
+    return join(dirname(ledger), "auth.json");
+  }
+}
+
+const LEDGER_PATH = resolveLedger();
+const AUTH_PATH = resolveAuth(LEDGER_PATH);
+const STORE_MODULE = process.env.PI_ORCHESTRATOR_STORE ?? "/srv/pi/pi-orchestrator/dist/store.js";
+const API = "https://chatgpt.com/backend-api/";
+
+const HELP = `Usage: codex-reset [status|redeem] [options]
+
+  status            Show each OpenAI account's weekly meter and banked resets (default).
+  redeem            Spend exactly one banked reset on each eligible account.
+
+Options:
+  --account ID      Restrict to one account alias; repeatable.
+  --min-used PCT    Only redeem at or above this weekly used percent (default 100).
+  --dry-run         With redeem, report what would be spent and change nothing.
+  --json            Machine-readable output.
+  -h, --help        This text.
+
+A redemption resets the weekly window to 0% and discards whatever allowance was
+left, so spending one below 100% throws away the remainder. Each invocation
+spends at most one credit per account.`;
+
+function parseArgs(argv) {
+  const options = { command: "status", accounts: [], minUsed: 100, dryRun: false, json: false };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "-h" || arg === "--help") return { help: true };
+    else if (arg === "status" || arg === "redeem") options.command = arg;
+    else if (arg === "--account") options.accounts.push(required(argv, ++i, arg));
+    else if (arg === "--min-used") options.minUsed = number(required(argv, ++i, arg), arg);
+    else if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--json") options.json = true;
+    else fail(`unknown argument ${arg}`, 64);
+  }
+  return options;
+}
+function required(argv, index, name) {
+  const value = argv[index];
+  if (value === undefined) fail(`${name} needs a value`, 64);
+  return value;
+}
+function number(value, name) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) fail(`${name} takes a percent between 0 and 100`, 64);
+  return parsed;
+}
+function fail(message, code = 1) {
+  process.stderr.write(`codex-reset: ${message}\n`);
+  process.exit(code);
+}
+
+function call(path, credential, method = "GET", body) {
+  return new Promise((resolve) => {
+    const encoded = body === undefined ? undefined : JSON.stringify(body);
+    const headers = {
+      Authorization: `Bearer ${credential.access}`,
+      "chatgpt-account-id": credential.accountId,
+      Accept: "application/json",
+      "User-Agent": "codex-reset",
+      originator: "codex-reset",
+      "Accept-Encoding": "identity",
+    };
+    if (encoded !== undefined) {
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = Buffer.byteLength(encoded);
+    }
+    const req = request(`${API}${path}`, { method, headers, signal: AbortSignal.timeout(20_000) }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        let value;
+        try {
+          value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        } catch {}
+        resolve({ status: res.statusCode ?? 0, value });
+      });
+    });
+    req.on("error", (error) => resolve({ status: 0, error: error.message }));
+    req.end(encoded);
+  });
+}
+
+/** Available credits, soonest expiry first, so a redemption spends the perishable one. */
+function availableCredits(value) {
+  const credits = Array.isArray(value?.credits) ? value.credits : [];
+  return credits
+    .filter((credit) => (credit?.status ?? "available") === "available" && typeof credit?.id === "string")
+    .sort((a, b) => Date.parse(a.expires_at ?? "9999-12-31") - Date.parse(b.expires_at ?? "9999-12-31"));
+}
+
+/** Meters are named by window length; a window the ledger does not model is ignored, not guessed at. */
+function usageWindows(value, now) {
+  const raw = [value?.rate_limit?.primary_window, value?.rate_limit?.secondary_window];
+  return raw.flatMap((window) => {
+    if (!window || typeof window.used_percent !== "number" || typeof window.limit_window_seconds !== "number") return [];
+    const seconds = window.limit_window_seconds;
+    const meterId =
+      Math.abs(seconds - 5 * 3600) <= 1800 ? "codex-5h" : Math.abs(seconds - 168 * 3600) <= 60_480 ? "codex-7d" : undefined;
+    if (!meterId) return [];
+    const resetAt =
+      typeof window.reset_at === "number"
+        ? window.reset_at * 1000
+        : typeof window.reset_after_seconds === "number"
+          ? now + window.reset_after_seconds * 1000
+          : undefined;
+    return [{ meterId, usedPercent: Math.round(Math.max(0, Math.min(100, window.used_percent))), resetAt }];
+  });
+}
+
+function credentials(filter) {
+  let auth;
+  try {
+    auth = JSON.parse(readFileSync(AUTH_PATH, "utf8"));
+  } catch (error) {
+    fail(`cannot read ${AUTH_PATH}: ${error.message}`);
+  }
+  const rows = Object.entries(auth)
+    .filter(([alias, credential]) => alias.startsWith("openai-codex") && credential?.type === "oauth")
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (filter.length === 0) return rows;
+  const known = new Set(rows.map(([alias]) => alias));
+  for (const alias of filter) if (!known.has(alias)) fail(`no OpenAI credential named ${alias}`, 64);
+  return rows.filter(([alias]) => filter.includes(alias));
+}
+
+async function observe(alias, credential) {
+  const now = Date.now();
+  const listed = await call("wham/rate-limit-reset-credits", credential);
+  const usage = await call("codex/usage", credential);
+  const windows = usage.status === 200 ? usageWindows(usage.value, now) : [];
+  const weekly = windows.find((window) => window.meterId === "codex-7d");
+  return {
+    alias,
+    label: credential.label,
+    tokenMinutes: typeof credential.expires === "number" ? Math.round((credential.expires - now) / 60_000) : null,
+    creditStatus: listed.status,
+    credits: listed.status === 200 ? availableCredits(listed.value) : [],
+    usageStatus: usage.status,
+    windows,
+    weeklyUsedPercent: weekly?.usedPercent ?? null,
+  };
+}
+
+function formatStatus(rows) {
+  const lines = [["ACCOUNT", "WEEKLY", "5H", "RESETS", "TOKEN"].join("\t")];
+  for (const row of rows) {
+    const five = row.windows.find((window) => window.meterId === "codex-5h");
+    lines.push(
+      [
+        row.alias,
+        row.usageStatus === 200 ? `${row.weeklyUsedPercent ?? "-"}%` : `usage:${row.usageStatus}`,
+        five ? `${five.usedPercent}%` : "-",
+        row.creditStatus === 200 ? String(row.credits.length) : `list:${row.creditStatus}`,
+        row.tokenMinutes === null ? "-" : row.tokenMinutes < 0 ? "expired" : `${Math.round(row.tokenMinutes / 60)}h`,
+      ].join("\t"),
+    );
+  }
+  return lines.join("\n");
+}
+
+async function settledUsage(credential, previousWeekly) {
+  const deadline = Date.now() + 90_000;
+  let last = { now: Date.now(), windows: [] };
+  for (;;) {
+    const now = Date.now();
+    const usage = await call("codex/usage", credential);
+    const windows = usage.status === 200 ? usageWindows(usage.value, now) : [];
+    last = { now, windows };
+    const weekly = windows.find((window) => window.meterId === "codex-7d");
+    if (weekly === undefined || previousWeekly === null || weekly.usedPercent < previousWeekly) return last;
+    if (Date.now() >= deadline) return { now: last.now, windows: [] };
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+  }
+}
+
+async function redeem(row, credential, ledger) {
+  const credit = row.credits[0];
+  const consumed = await call("wham/rate-limit-reset-credits/consume", credential, "POST", {
+    credit_id: credit.id,
+    redeem_request_id: randomUUID(),
+    account_id: credential.accountId,
+  });
+  const code = typeof consumed.value?.code === "string" ? consumed.value.code : `http_${consumed.status}`;
+  if (code !== "reset" && code !== "already_redeemed") return { alias: row.alias, outcome: code, status: consumed.status };
+
+  // The usage endpoint serves the pre-reset percent for up to a minute after a
+  // redemption. Recording that reading would put a stale exhausted meter in the
+  // ledger and hold the account out of scheduling, so wait for the drop.
+  const { now, windows } = await settledUsage(credential, row.weeklyUsedPercent);
+  if (ledger) {
+    ledger.transaction(() => {
+      ledger.setCooldown(row.alias);
+      for (const window of windows) ledger.recordReading(row.alias, window.meterId, { at: now, usedPercent: window.usedPercent, resetAt: window.resetAt });
+    });
+  }
+  const after = await call("wham/rate-limit-reset-credits", credential);
+  const credits = after.status === 200 ? availableCredits(after.value) : undefined;
+  if (ledger && credits) {
+    const nextExpiresAt = Date.parse(credits[0]?.expires_at ?? "");
+    ledger.recordResetCredits(row.alias, {
+      at: Date.now(),
+      available: credits.length,
+      ...(Number.isFinite(nextExpiresAt) ? { nextExpiresAt } : {}),
+    });
+  }
+  return {
+    alias: row.alias,
+    outcome: code,
+    windowsReset: consumed.value?.windows_reset ?? null,
+    usedPercent: Object.fromEntries(windows.map((window) => [window.meterId, window.usedPercent])),
+    remaining: credits?.length ?? null,
+  };
+}
+
+const options = parseArgs(process.argv.slice(2));
+if (options.help) {
+  process.stdout.write(`${HELP}\n`);
+  process.exit(0);
+}
+
+const pool = credentials(options.accounts);
+const rows = [];
+for (const [alias, credential] of pool) rows.push(await observe(alias, credential));
+
+if (options.command === "status") {
+  process.stdout.write(options.json ? `${JSON.stringify(rows, null, 2)}\n` : `${formatStatus(rows)}\n`);
+  process.exit(0);
+}
+
+const plan = rows.map((row) => {
+  if (row.creditStatus !== 200) return { row, skip: `credit list returned ${row.creditStatus}` };
+  if (row.usageStatus !== 200) return { row, skip: `usage returned ${row.usageStatus}` };
+  if (row.credits.length === 0) return { row, skip: "no banked reset" };
+  if (row.weeklyUsedPercent === null) return { row, skip: "no weekly meter reported" };
+  if (row.weeklyUsedPercent < options.minUsed) return { row, skip: `weekly at ${row.weeklyUsedPercent}% (below ${options.minUsed}%)` };
+  return { row };
+});
+
+const results = [];
+let ledger;
+if (!options.dryRun && plan.some((entry) => !entry.skip)) {
+  const { Store } = await import(STORE_MODULE);
+  ledger = Store.open(LEDGER_PATH);
+}
+try {
+  for (const entry of plan) {
+    if (entry.skip) {
+      results.push({ alias: entry.row.alias, outcome: "skipped", reason: entry.skip, weeklyUsedPercent: entry.row.weeklyUsedPercent });
+      continue;
+    }
+    if (options.dryRun) {
+      results.push({ alias: entry.row.alias, outcome: "would-redeem", weeklyUsedPercent: entry.row.weeklyUsedPercent, banked: entry.row.credits.length });
+      continue;
+    }
+    const credential = pool.find(([alias]) => alias === entry.row.alias)[1];
+    results.push(await redeem(entry.row, credential, ledger));
+  }
+} finally {
+  ledger?.close();
+}
+
+if (options.json) process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
+else
+  for (const result of results) {
+    const detail =
+      result.outcome === "skipped"
+        ? result.reason
+        : result.outcome === "would-redeem"
+          ? `weekly ${result.weeklyUsedPercent}%, ${result.banked} banked`
+          : `weekly now ${result.usedPercent?.["codex-7d"] ?? "?"}%, ${result.remaining ?? "?"} banked left`;
+    process.stdout.write(`${result.alias}\t${result.outcome}\t${detail}\n`);
+  }
+
+const failed = results.filter((result) => !["reset", "already_redeemed", "skipped", "would-redeem"].includes(result.outcome));
+process.exit(failed.length === 0 ? 0 : 1);

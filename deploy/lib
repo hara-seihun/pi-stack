@@ -1,0 +1,263 @@
+# shellcheck shell=bash
+source "$(dirname "${BASH_SOURCE[0]}")/release-checkout"
+PI_STACK_MAX_DEPLOY_SECONDS=50
+# Deployment only reads Git state. Without this, `git status` refreshes and
+# rewrites .git/index; run under sudo from Kenan's release checkout that left a
+# root-owned index and the next publication's release wrapper exited 128
+# (PUB-c9b623c2102c426ca3d5389c).
+export GIT_OPTIONAL_LOCKS=0
+
+pi_stack_enforce_deploy_deadline() {
+  local script=$1 seconds=${PI_STACK_DEPLOY_TIMEOUT_SECONDS:-$PI_STACK_MAX_DEPLOY_SECONDS}
+  shift
+  if [[ ${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-0} == 1 ]]; then
+    return
+  fi
+  if [[ ! $seconds =~ ^[1-9][0-9]*$ ]] || ((seconds > PI_STACK_MAX_DEPLOY_SECONDS)); then
+    echo "PI_STACK_DEPLOY_TIMEOUT_SECONDS must be an integer from 1 through $PI_STACK_MAX_DEPLOY_SECONDS" >&2
+    exit 64
+  fi
+  export PI_STACK_DEPLOY_DEADLINE_ACTIVE=1
+  exec timeout --signal=TERM --kill-after=2s "${seconds}s" "$(realpath "$script")" "$@"
+}
+
+pi_stack_acquire_deploy_lock() {
+  local root=$1 lock
+  pi_stack_acquire_host_lock || return
+  if [[ ${PI_STACK_DEPLOY_LOCK_HELD:-0} == 1 ]]; then
+    return
+  fi
+  lock=$(git -C "$root" rev-parse --path-format=absolute --git-path pi-stack-deploy.lock)
+  exec {PI_STACK_DEPLOY_LOCK_FD}>"$lock"
+  flock "$PI_STACK_DEPLOY_LOCK_FD"
+  export PI_STACK_DEPLOY_LOCK_FD PI_STACK_DEPLOY_LOCK_HELD=1
+}
+
+pi_stack_enter_deployment() {
+  local script=$1 root=$2
+  shift 2
+  pi_stack_enforce_deploy_deadline "$script" "$@"
+  export PI_STACK_ROOT_DIR="$root"
+  # Executing this checkout's deploy script already trusts its source. Keep that
+  # exact Git trust process-local, including root services without HOME/SUDO_UID.
+  if [[ ${PI_STACK_GIT_CHECKOUT:-} != "$root" ]]; then
+    local config_count=${GIT_CONFIG_COUNT:-0}
+    [[ $config_count =~ ^[0-9]+$ ]] || { echo 'invalid GIT_CONFIG_COUNT' >&2; exit 64; }
+    export "GIT_CONFIG_KEY_${config_count}=safe.directory" "GIT_CONFIG_VALUE_${config_count}=$(realpath "$root")"
+    export GIT_CONFIG_COUNT=$((config_count + 1)) PI_STACK_GIT_CHECKOUT="$root"
+  fi
+  pi_stack_acquire_host_lock || exit $?
+  if [[ ${PI_STACK_DEPLOY_LOCK_HELD:-0} == 1 ]]; then
+    # A child of a deployment that already holds the lock and checked the tree.
+    return
+  fi
+  pi_stack_acquire_deploy_lock "$root"
+  if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+    echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+    exit 65
+  fi
+}
+
+pi_stack_dependency_key() {
+  local root=$1
+  sha256sum "$root/package.json" "$root/package-lock.json" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1
+}
+
+pi_stack_prepare_dependencies() {
+  local root=$1 key stamp hidden_lock hidden_hash expected
+  key=$(pi_stack_dependency_key "$root")
+  stamp="$root/node_modules/.pi-stack-dependency-key"
+  hidden_lock="$root/node_modules/.package-lock.json"
+  if [[ -f $stamp && -f $hidden_lock ]]; then
+    hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
+    expected=$(printf '%s %s\n' "$key" "$hidden_hash")
+    if [[ $(<"$stamp") == "$expected" ]]; then
+      export PI_STACK_DEPENDENCIES_READY=$key
+      return
+    fi
+  fi
+  (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund)
+  hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
+  printf '%s %s\n' "$key" "$hidden_hash" > "$stamp"
+  export PI_STACK_DEPENDENCIES_READY=$key
+}
+
+pi_stack_prepare_builds() (
+  set -euo pipefail
+  local root=$1 orchestrator_pid remote_pid failed=0
+  pi_stack_prepare_dependencies "$root"
+  node "$root/scripts/build-workspace.mjs" orchestrator &
+  orchestrator_pid=$!
+  node "$root/scripts/build-workspace.mjs" remote &
+  remote_pid=$!
+  wait "$orchestrator_pid" || failed=1
+  wait "$remote_pid" || failed=1
+  return "$failed"
+)
+
+pi_stack_as_root() {
+  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
+# The host file says what this machine adds to the stack: which user runs the
+# fleet daemon, and which local packages and skills every person loads besides
+# the reviewed ones. Persons themselves live in Pi Remote's registry.
+pi_stack_host_file() { printf '%s\n' "${PI_STACK_HOST_FILE:-/etc/pi-stack/host.json}"; }
+pi_stack_host_value() {
+  local file
+  file=$(pi_stack_host_file)
+  [[ -f $file ]] || { echo "Pi stack host file is missing: $file" >&2; return 1; }
+  jq -r "$1" "$file"
+}
+pi_stack_persons_dir() { printf '%s\n' "${PI_REMOTE_PERSONS_DIR:-/var/lib/pi-remote/persons}"; }
+pi_stack_fleet_user() { pi_stack_host_value '.fleetUser // empty'; }
+
+pi_stack_check_person_configs() {
+  local dir file user
+  dir=$(pi_stack_persons_dir)
+  [[ -d $dir ]] || return 0
+  for file in "$dir"/*.json; do
+    [[ -f $file ]] || continue
+    user=$(pi_stack_as_root jq -er '.user | select(type == "string")' "$file") || return 1
+    [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ && $file == "$dir/$user.json" ]] || {
+      echo "invalid person identity in $file" >&2; return 1;
+    }
+    if ! pi_stack_run_as "$user" jq -e 'type == "object" and .version == 1' "$file" >/dev/null; then
+      echo "$file is not readable valid configuration for $user; repair it with pi-remote person update before deployment" >&2
+      return 1
+    fi
+  done
+}
+
+# Deployment reads the private supervisor listener as root, not as a named
+# client. Host UID rules admit root on every supervisor/control port.
+pi_stack_supervisor_health() {
+  local user=$1 port
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || return 64
+  port=$(pi_stack_as_root jq -er '.port | select(type == "number" and . > 0 and . < 65536)' "$(pi_stack_persons_dir)/$user.json") || return
+  pi_stack_as_root curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/health"
+}
+# Every unix account that runs Pi here: each Pi Remote person plus the fleet user.
+pi_stack_users() {
+  local dir file
+  dir=$(pi_stack_persons_dir)
+  {
+    pi_stack_fleet_user
+    if [[ -d $dir ]]; then
+      for file in "$dir"/*.json; do
+        [[ -f $file ]] && pi_stack_as_root jq -r '.user' "$file"
+      done
+    fi
+  } | awk 'NF && !seen[$0]++'
+}
+pi_stack_daemon_units() {
+  local running user state fleet
+  running=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-orchestrator@*.service') || return
+  fleet=$(pi_stack_fleet_user) || return
+  local -a units=()
+  [[ -z $fleet ]] || units+=("pi-orchestrator@$fleet.service")
+  # list-unit-files lists templates, not their enabled instances on NixOS.
+  for user in "$@"; do
+    state=$(pi_stack_as_root systemctl show --property=UnitFileState --value "pi-orchestrator@$user.service") || return
+    case "$state" in
+      enabled|enabled-runtime) units+=("pi-orchestrator@$user.service");;
+    esac
+  done
+  {
+    printf '%s\n' "$running" | awk '$1 ~ /^pi-orchestrator@.+\.service$/ {print $1}'
+    printf '%s\n' "${units[@]}"
+  } | awk 'NF' | sort -u
+}
+# Another account may not be able to read the checkout's .git; the parent hands
+# the commit down instead.
+pi_stack_commit() { printf '%s\n' "${PI_STACK_COMMIT:-$(git -C "${PI_STACK_ROOT_DIR:-.}" rev-parse HEAD)}"; }
+pi_stack_home() {
+  # Tests point the invoking account at a scratch home.
+  if [[ $1 == "$(id -un)" && -n ${PI_STACK_HOME_OVERRIDE:-} ]]; then printf '%s\n' "$PI_STACK_HOME_OVERRIDE"; return; fi
+  getent passwd "$1" | cut -d: -f6
+}
+# Run a command as another account with the deployment already entered, so the
+# child neither waits on the lock its parent holds nor starts a second deadline.
+pi_stack_run_as() {
+  local user=$1
+  shift
+  if [[ $user == "$(id -un)" ]]; then
+    env HOME="$(pi_stack_home "$user")" "$@"
+    return
+  fi
+  local -a become
+  if [[ $EUID == 0 ]]; then become=(runuser -u "$user" --); else become=(sudo -n -u "$user"); fi
+  "${become[@]}" env HOME="$(pi_stack_home "$user")" \
+    PI_STACK_HOST_LOCK_HELD=1 PI_STACK_DEPLOY_LOCK_HELD=1 PI_STACK_DEPLOY_DEADLINE_ACTIVE=1 PI_STACK_COMMIT="$(pi_stack_commit)" \
+    PI_STACK_DEPENDENCIES_READY="${PI_STACK_DEPENDENCIES_READY:-}" \
+    PI_STACK_HOST_FILE="$(pi_stack_host_file)" PI_REMOTE_PERSONS_DIR="$(pi_stack_persons_dir)" \
+    PI_STACK_DEPLOY_NO_SUDO="${PI_STACK_DEPLOY_NO_SUDO:-0}" "$@"
+}
+
+pi_stack_require_release() {
+  local destination=$1 commit=$2
+  [[ -f $destination/.pi-stack-commit && $(<"$destination/.pi-stack-commit") == "$commit" ]] || {
+    echo "$destination does not carry Pi stack $commit; deploy this source before onboarding accounts" >&2
+    return 66
+  }
+}
+
+pi_stack_release_for_commit() {
+  local root=$1 releases=$2
+  printf '%s/%s\n' "$releases" "$(git -C "$root" rev-parse HEAD)"
+}
+
+pi_stack_publish_release() {
+  local root=$1 stage=$2 dest=$3 name=$4 commit releases release root_stage candidate
+  commit=$(git -C "$root" rev-parse HEAD)
+  releases=${PI_STACK_RELEASES_ROOT:-$(dirname "$dest")/.pi-stack-releases}/$name
+  release=$(pi_stack_release_for_commit "$root" "$releases")
+  pi_stack_as_root install -d -m 755 "$releases"
+  if ! pi_stack_as_root test -d "$release"; then
+    root_stage="$releases/.stage.$$.${RANDOM}"
+    pi_stack_as_root install -d -m 755 "$root_stage"
+    if ! pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$root_stage/"; then
+      pi_stack_as_root rm -rf "$root_stage"
+      return 1
+    fi
+    pi_stack_as_root mv -T "$root_stage" "$release"
+  fi
+  [[ $(pi_stack_as_root cat "$release/.pi-stack-commit") == "$commit" ]] || {
+    echo "$release does not carry Pi stack $commit" >&2
+    return 1
+  }
+  if [[ -L $dest && $(readlink -f "$dest") == "$release" ]]; then
+    return
+  fi
+  candidate="$releases/.activate.$$.${RANDOM}"
+  pi_stack_as_root ln -s "$release" "$candidate"
+  if pi_stack_as_root test -L "$dest"; then
+    # POSIX rename semantics make this an atomic symlink replacement. Unlike
+    # `mv --exchange`, `mv -T` is available on both fleet hosts.
+    pi_stack_as_root mv -Tf "$candidate" "$dest"
+  elif pi_stack_as_root test -e "$dest"; then
+    # The first release migration may replace a populated directory. Linux can
+    # exchange it atomically, but older coreutils does not expose renameat2.
+    pi_stack_as_root python3 - "$candidate" "$dest" <<'PY'
+import ctypes
+import os
+import sys
+
+source, destination = (os.fsencode(path) for path in sys.argv[1:])
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = libc.renameat2
+renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+renameat2.restype = ctypes.c_int
+if renameat2(-100, source, -100, destination, 2) != 0:  # AT_FDCWD, RENAME_EXCHANGE
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+PY
+    pi_stack_as_root rm -rf "$candidate"
+  else
+    pi_stack_as_root mv -T "$candidate" "$dest"
+  fi
+}

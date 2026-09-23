@@ -1,0 +1,34 @@
+{
+  "name": "@hara-seihun/pi-runtime",
+  "version": "1.0.0",
+  "description": "Reusable Pi extensions",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "coding-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/codex-compaction/index.mjs",
+      "./extensions/bash-timeout-guard/index.mjs",
+      "./extensions/browser/index.mjs",
+      "./extensions/local-models/index.mjs",
+      "./extensions/web-search/index.mjs"
+    ]
+  },
+  "scripts": {
+    "test": "node --test *.test.mjs extensions/*/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0",
+    "agent-browser": "*",
+    "pi-agent-browser-native": "*",
+    "typebox": ">=1.3.0 <2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "typebox": "1.3.16"
+  }
+}

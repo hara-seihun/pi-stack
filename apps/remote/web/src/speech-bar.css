@@ -1,0 +1,13 @@
+.speech-bar { position: fixed; z-index: 55; top: calc(env(safe-area-inset-top) + var(--space-2)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: var(--space-1); width: min(560px, calc(100vw - 2 * var(--space-3))); padding: var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-3); background: var(--surface-2); box-shadow: 0 12px 32px rgb(0 0 0 / 45%); }
+.layout-desktop .speech-bar, .layout-wide .speech-bar { left: auto; right: var(--space-4); transform: none; }
+.speech-control { width: var(--touch); height: var(--touch); display: grid; place-items: center; padding: 0; border-radius: var(--radius-2); color: var(--text); background: transparent; }
+.speech-control:hover, .speech-rate:hover { background: var(--surface-3); }
+.speech-control svg { width: 22px; height: 22px; fill: currentColor; }
+.speech-bar.loading .speech-control:first-child svg { animation: speech-pulse 1s ease-in-out infinite; }
+.speech-text { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-2); color: var(--muted); font-size: var(--text-sm); }
+.speech-status { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.speech-bar.error .speech-status { color: var(--danger); }
+.speech-voice { min-width: 0; max-width: 12em; border: 0; padding: 0; color: var(--muted); background: transparent; font: inherit; }
+.speech-rate { min-width: 52px; height: var(--touch); padding: 0 var(--space-2); border-radius: var(--radius-2); color: var(--accent); background: transparent; font-weight: 700; font-variant-numeric: tabular-nums; }
+@keyframes speech-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .speech-bar.loading .speech-control:first-child svg { animation: none; } }

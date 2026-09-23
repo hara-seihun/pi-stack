@@ -1,0 +1,189 @@
+#!/usr/bin/env node
+import { readFileSync, accessSync, realpathSync, constants } from "node:fs";
+import { join, resolve } from "node:path";
+import { userInfo } from "node:os";
+import { spawnSync } from "node:child_process";
+import { parseArgs } from "node:util";
+import { scanSessions } from "./sessions.mjs";
+import { estimateUsage } from "./economics.mjs";
+
+const HELP = `usage: pi-user-usage [USER] [OPTIONS]
+
+Read a person's Pi Remote conversation logs and estimate their subscription cost.
+No model requests, quota polling, unlocks, or database writes. Defaults to yourself.
+
+  --since TIME       ISO timestamp/date, or lookback such as 24h or 7d; default all logs
+  --until TIME       exclusive ISO timestamp/date; default now
+  --plan-usd NUMBER  price of one subscription month; default 200 USD
+  --month-days N     month length used to normalize weekly quota; default 30
+  --accounts IDS     comma-separated calibration accounts known to be metered here
+  --json             structured report including calibration samples and exclusions
+  --sessions DIR     explicit session directory instead of person discovery
+  --ledger FILE      orchestrator ledger instead of the person's configured ledger
+  --evidence FILE    saved 'pi-orchestrator usage-evidence' JSON instead of live evidence
+  --help             show this help
+
+Encrypted persons must already be unlocked. Cross-person reads enter their running
+supervisor's mount namespace as that person using passwordless sudo.
+API value comes from logged prices. Plan dollars are estimates, never invoices.
+Only recorded conversation responses count, not voice, fleet work, or unsaved naming calls.`;
+
+function command(program, args, input) {
+  const result = spawnSync(program, args, { input, encoding: "utf8", timeout: 45_000, maxBuffer: 32 * 1024 * 1024 });
+  if (result.error || result.status !== 0) return { ok: false,
+    error: `${program} failed: ${result.error?.message ?? result.stderr.trim() ?? result.signal}` };
+  return { ok: true, value: result.stdout };
+}
+
+function personCommand(user, encrypted, argv, input) {
+  if (encrypted) {
+    const pid = command("systemctl", ["show", `pi-remote@${user}`, "--property=MainPID", "--value"]);
+    if (!pid.ok) return pid;
+    if (!/^[1-9]\d*$/.test(pid.value.trim())) return { ok: false,
+      error: `${user} is locked or her supervisor is stopped. Unlock Pi Remote before reading her logs.` };
+    return command("sudo", ["-n", "nsenter", "-t", pid.value.trim(), "-m", "--", "sudo", "-n", "-u", user, ...argv], input);
+  }
+  return command("sudo", ["-n", "-u", user, ...argv], input);
+}
+
+function executable(name) {
+  for (const directory of (process.env.PATH ?? "").split(":")) {
+    const path = resolve(directory, name);
+    try { accessSync(path, constants.X_OK); return { ok: true, value: realpathSync(path) }; }
+    catch { /* Continue executable lookup through PATH, just as the shell does. */ }
+  }
+  return { ok: false, error: `${name} is not installed on PATH` };
+}
+
+function timestamp(value, now, duration = false) {
+  if (duration && /^\d+[hdw]$/.test(value)) {
+    return now - Number(value.slice(0, -1)) * ({ h: 3_600_000, d: 86_400_000, w: 604_800_000 }[value.at(-1)]);
+  }
+  // Reject ambiguous locale dates and local times without an offset.
+  if (!/^\d{4}-\d{2}-\d{2}(?:T.*(?:Z|[+-]\d{2}:\d{2}))?$/.test(value)) return NaN;
+  return Date.parse(value);
+}
+
+async function personUsage(user, values, since, until) {
+  if (values.sessions) {
+    const root = resolve(values.sessions), result = await scanSessions(root, since, until);
+    return result.ok ? { ok: true, value: { usage: result.value, root, ledger: values.ledger } } : result;
+  }
+  if (!/^[a-z_][a-z0-9_-]*\$?$/.test(user)) return { ok: false, error: "Invalid Unix person name" };
+  let person;
+  try {
+    person = JSON.parse(readFileSync(join(process.env.PI_REMOTE_PERSONS_DIR ?? "/var/lib/pi-remote/persons", `${user}.json`), "utf8"));
+  } catch (error) { return { ok: false, error: `Cannot read person ${user}: ${String(error)}` }; }
+  const data = person.environment?.PI_REMOTE_DATA;
+  if (person.user !== user || typeof data !== "string" || !data.startsWith("/")) {
+    return { ok: false, error: `Person ${user} has no valid PI_REMOTE_DATA directory` };
+  }
+  const root = join(data, "sessions"), ledger = values.ledger ?? person.environment.PI_REMOTE_ORCHESTRATOR_DB;
+  const reader = { user, encrypted: Boolean(person.unlock) };
+  let readable = false;
+  try { accessSync(root, constants.R_OK | constants.X_OK); readable = true; } catch { /* The mount may exist only in the supervisor. */ }
+  if (readable) {
+    const result = await scanSessions(root, since, until);
+    return result.ok ? { ok: true, value: { usage: result.value, root, ledger, reader } } : result;
+  }
+  // A task checkout can be private to its owner. Send the self-contained scanner over stdin.
+  const source = readFileSync(new URL("sessions.mjs", import.meta.url), "utf8") + `
+const [root, since, until] = process.argv.slice(2);
+const result = await scanSessions(root, Number(since), Number(until));
+if (result.ok) console.log(JSON.stringify(result));
+else { console.error(result.error); process.exitCode = 1; }
+`;
+  const scan = [process.execPath, "--input-type=module", "-", root, String(since), String(until)];
+  const child = personCommand(user, Boolean(person.unlock), scan, source);
+  if (!child.ok) return child;
+  try {
+    const result = JSON.parse(child.value);
+    return result.ok ? { ok: true, value: { usage: result.value, root, ledger, reader } } : result;
+  } catch (error) { return { ok: false, error: `Invalid person scanner response: ${String(error)}` }; }
+}
+
+const money = n => `$${n.toFixed(2)}`;
+const number = n => Math.round(n).toLocaleString("en-US");
+function render(report) {
+  const { usage, estimate } = report;
+  console.log(`${report.user} · recorded Pi Remote conversation usage`);
+  console.log(usage.firstAt === null ? "No recorded tokens in this interval." :
+    `${new Date(usage.firstAt).toISOString()} to ${new Date(usage.lastAt).toISOString()}`);
+  console.log(`${number(usage.totalTokens)} tokens across ${number(usage.responses)} responses`);
+  console.log(`  fresh input ${number(usage.tokens.input)} · cached input ${number(usage.tokens.cacheRead)} · cache writes ${number(usage.tokens.cacheWrite)} · output ${number(usage.tokens.output)}`);
+  console.log(`Logged API value${usage.unpricedResponses ? " subtotal" : ""}: ${money(usage.loggedApiUsd)}`);
+  if (estimate?.usd != null) {
+    console.log(`Estimated subscription equivalent: ${money(estimate.usd)} at ${money(estimate.planUsd)} per ${estimate.monthDays}-day plan`);
+    console.log(`${(estimate.usd / estimate.planUsd * 100).toFixed(3)}% of one plan-month`);
+  } else {
+    console.log(`Subscription equivalent: unavailable${estimate?.estimatedSubtotalUsd ? `; known subtotal ${money(estimate.estimatedSubtotalUsd)}` : ""}`);
+    if (report.calibrationError) console.log(`  ${report.calibrationError}`);
+  }
+  for (const model of usage.models) {
+    console.log(`  ${model.provider}/${model.model}: ${number(model.totalTokens)} tokens · ${money(model.loggedApiUsd)} logged API value`);
+    const comparison = estimate?.models.find(m => m.provider === model.provider && m.model === model.model);
+    if (comparison?.state === "unavailable") console.log(`    ${comparison.reason}`);
+    for (const meter of comparison?.meters ?? []) if (meter.state === "estimated") {
+      console.log(`    ${meter.meterId}: ~${number(meter.observedTokensPerPlanMonth)} tokens/plan-month at the sampled mix; ${meter.samples.length} accounts, ${meter.usedPercent.toFixed(1)} quota points`);
+    }
+  }
+  if (usage.unpricedResponses || usage.missingUsage || usage.incompleteTails) {
+    console.log(`Coverage gaps: ${usage.unpricedResponses} unpriced responses; ${usage.missingUsage} responses without usage; ${usage.incompleteTails} unfinished JSONL tails.`);
+  }
+  console.log("Estimate, not a bill. Assumes sampled accounts are fully metered here and have comparable plans.");
+  console.log("Uses recent weekly quota and logged token-price weights; burst limits and unsaved calls are excluded. --json shows the evidence.");
+}
+
+async function main() {
+  let parsed;
+  try {
+    parsed = parseArgs({ allowPositionals: true, options: {
+      help: { type: "boolean", short: "h" }, json: { type: "boolean" },
+      since: { type: "string" }, until: { type: "string" }, "plan-usd": { type: "string" },
+      "month-days": { type: "string" }, accounts: { type: "string" }, sessions: { type: "string" },
+      ledger: { type: "string" }, evidence: { type: "string" },
+    } });
+  } catch (error) { return { ok: false, error: String(error) }; }
+  const { values, positionals } = parsed;
+  if (values.help) { console.log(HELP); return { ok: true }; }
+  if (positionals.length > 1) return { ok: false, error: "Pass one Unix person name" };
+  const now = Date.now(), until = values.until ? timestamp(values.until, now) : now;
+  const since = values.since ? timestamp(values.since, now, true) : 0;
+  const planUsd = Number(values["plan-usd"] ?? 200), monthDays = Number(values["month-days"] ?? 30);
+  if (!Number.isFinite(since) || !Number.isFinite(until) || since >= until || until > now) {
+    return { ok: false, error: "Use a valid --since before --until, no later than now" };
+  }
+  if (![planUsd, monthDays].every(n => Number.isFinite(n) && n > 0)) {
+    return { ok: false, error: "--plan-usd and --month-days must be positive finite numbers" };
+  }
+  const user = positionals[0] ?? userInfo().username;
+  const scanned = await personUsage(user, values, since, until);
+  if (!scanned.ok) return scanned;
+  let evidence, calibrationError = null;
+  try {
+    if (values.evidence) evidence = JSON.parse(readFileSync(values.evidence, "utf8"));
+    else {
+      const args = ["usage-evidence"];
+      if (scanned.value.ledger) args.push("--ledger", scanned.value.ledger);
+      const cli = executable("pi-orchestrator"), reader = scanned.value.reader;
+      const result = !cli.ok ? cli : reader && reader.user !== userInfo().username && !values.ledger
+        ? personCommand(reader.user, reader.encrypted, [cli.value, ...args])
+        : command(cli.value, args);
+      if (result.ok) evidence = JSON.parse(result.value); else calibrationError = result.error;
+    }
+  } catch (error) { calibrationError = `Cannot load quota evidence: ${String(error)}`; }
+  let estimate = null;
+  if (evidence) {
+    const result = estimateUsage(scanned.value.usage, evidence, { planUsd, monthDays,
+      accounts: values.accounts ? values.accounts.split(",").map(a => a.trim()).filter(Boolean) : [] });
+    if (result.ok) estimate = result.value; else calibrationError = result.error;
+  }
+  const report = { version: 1, user, capturedAt: now, since, until, sessionsDirectory: scanned.value.root,
+    scope: "Recorded Pi Remote conversation responses on this host, including abandoned branches; copied entries deduplicated. Excludes unsaved calls, voice and fleet work.",
+    usage: scanned.value.usage, estimate, calibrationError };
+  if (values.json) console.log(JSON.stringify(report, null, 2)); else render(report);
+  return { ok: true };
+}
+
+const result = await main();
+if (!result.ok) { console.error(`pi-user-usage: ${result.error}`); process.exitCode = 1; }

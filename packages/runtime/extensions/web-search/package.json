@@ -1,0 +1,14 @@
+{
+  "name": "@hara-seihun/web-search",
+  "version": "1.0.0",
+  "description": "Register a native web_search tool backed by a host-selected search backend",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0",
+    "typebox": ">=1.3.0 <2"
+  },
+  "scripts": { "test": "node --test web-search.test.mjs" }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "kenan",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Kenan Android shell for the shared Pi Remote client",
+  "scripts": {
+    "build": "node build.mjs",
+    "android:sync": "npm run build && cap sync android",
+    "android:build": "npm run android:sync && cd android && ./gradlew assembleDebug --no-daemon",
+    "android:test": "node --test release-info.test.mjs && bun test connect-adb.test.ts && npm run android:sync && cd android && ./gradlew testDebugUnitTest assembleDebug --no-daemon",
+    "android:open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.0",
+    "@capacitor/core": "8.5.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.4.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

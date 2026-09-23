@@ -1,0 +1,14 @@
+[Unit]
+Description=Pi Remote live frontend for %i
+After=network.target pi-remote-router.service
+
+[Service]
+Type=simple
+User=%i
+EnvironmentFile=/etc/pi-stack/dev-remote-%i.env
+ExecStart=/usr/bin/env sh -c 'cd "$$PI_STACK_SOURCE/apps/remote" && exec npm exec --workspace=pi-remote -- vite'
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

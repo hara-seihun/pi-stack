@@ -1,0 +1,164 @@
+#!/usr/bin/env node
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { takeFlag, takeOption } from "../shared/arguments.mjs";
+import { listThreads, renderThreadInputs, renderThread, resolveThread } from "./thread-reader.mjs";
+import { subagentPage, threadPage } from "./thread-pages.mjs";
+
+import { READ_THREAD_CONTRACT, readerHelp } from "./contract.mjs";
+
+function integer(value, label, minimum = 1) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) throw new Error(`${label} must be an integer >= ${minimum}`);
+  return parsed;
+}
+
+function defaultDatabase() {
+  if (process.env.PI_THREAD_DATABASE) return process.env.PI_THREAD_DATABASE;
+  if (process.env.PI_REMOTE_DATA) return join(process.env.PI_REMOTE_DATA, "threads.sqlite3");
+  const personFile = join(process.env.PI_REMOTE_PERSONS_DIR ?? "/var/lib/pi-remote/persons", `${userInfo().username}.json`);
+  if (existsSync(personFile)) {
+    const data = JSON.parse(readFileSync(personFile, "utf8")).environment?.PI_REMOTE_DATA;
+    if (typeof data !== "string" || !data) throw new Error(`${personFile} must configure PI_REMOTE_DATA`);
+    return join(data, "threads.sqlite3");
+  }
+  return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "pi-orchestrator", "threads.sqlite3");
+}
+
+function main() {
+  const args = process.argv.slice(2);
+  if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
+    console.log(readerHelp());
+    return;
+  }
+  if (takeFlag(args, "--contract")) {
+    if (args.length) throw new Error("--contract takes no other arguments");
+    console.log(JSON.stringify(READ_THREAD_CONTRACT));
+    return;
+  }
+  const list = takeFlag(args, "--list");
+  const subagents = takeFlag(args, "--subagents");
+  const includeIdle = takeFlag(args, "--include-idle");
+  const json = takeFlag(args, "--json");
+  const limitOption = takeOption(args, "--limit");
+  const cursor = takeOption(args, "--cursor");
+  const entryId = takeOption(args, "--entry");
+  const offsetOption = takeOption(args, "--offset");
+  const maxCharsOption = takeOption(args, "--max-chars");
+  const pathOnly = takeFlag(args, "--path");
+  const options = {
+    work: takeFlag(args, "--work"),
+    full: takeFlag(args, "--full"),
+    raw: takeFlag(args, "--raw"),
+    all: takeFlag(args, "--all"),
+    regex: takeFlag(args, "--regex"),
+    leaf: takeOption(args, "--leaf"),
+    search: takeOption(args, "--search"),
+  };
+  const sinceOption = takeOption(args, "--since");
+  const tailOption = takeOption(args, "--tail");
+  const output = takeOption(args, "--output");
+  const database = takeOption(args, "--db");
+  const unknown = args.find((arg) => arg.startsWith("--"));
+  if (unknown) throw new Error(`unknown option ${unknown}`);
+  if (args.length > 1) throw new Error("pass one selector; quote titles and paths containing spaces");
+  if (list && args.length > 0) throw new Error("--list does not take a thread selector");
+  const paged = subagents || json;
+  if (subagents && json) throw new Error("Choose --json or --subagents");
+  if (options.all && options.leaf !== undefined) throw new Error("--all and --leaf are mutually exclusive");
+  if (options.search === "") throw new Error("--search cannot be empty");
+  if (options.regex && options.search === undefined) throw new Error("--regex requires --search");
+  if (options.raw && (options.search !== undefined || options.work || options.full)) throw new Error("--raw cannot be combined with --search, --work or --full");
+  if (paged && (list || pathOnly || options.search !== undefined || options.raw || options.all || options.leaf !== undefined || options.full || sinceOption !== undefined || tailOption !== undefined || output !== undefined)) {
+    throw new Error("Paged reads cannot be combined with --list, --path, --search, --raw, --all, --leaf, --full, --since, --tail or --output");
+  }
+  if (includeIdle && !subagents) throw new Error("--include-idle requires --subagents");
+  if (subagents && options.work) throw new Error("--work requires a transcript read");
+  if ((cursor !== undefined || entryId !== undefined || maxCharsOption !== undefined) && !paged) throw new Error("Page options require --json or --subagents");
+  if ((limitOption !== undefined || offsetOption !== undefined) && !paged && options.search === undefined) throw new Error("--limit and --offset require --search, --json or --subagents");
+  if (subagents && (entryId !== undefined || offsetOption !== undefined || maxCharsOption !== undefined)) throw new Error("Entry options require --json");
+  if (json && (offsetOption !== undefined || maxCharsOption !== undefined) && entryId === undefined) throw new Error("Chunk options require --entry");
+  if (entryId !== undefined && (cursor !== undefined || limitOption !== undefined)) throw new Error("Choose --entry chunks or --cursor/--limit pages");
+  if (cursor === "" || entryId === "") throw new Error("--cursor and --entry cannot be empty");
+  const transcriptOptions = Object.values(options).some((value) => value !== false && value !== undefined)
+    || sinceOption !== undefined || tailOption !== undefined || output !== undefined;
+  if (pathOnly && transcriptOptions) throw new Error("--path cannot be combined with transcript options");
+  if ((list || args.length === 0) && (pathOnly || transcriptOptions) && !subagents) throw new Error("these options require self, a JSONL path, or a Remote thread selector");
+  options.since = sinceOption === undefined ? undefined : Date.parse(sinceOption);
+  if (sinceOption !== undefined && !Number.isFinite(options.since)) throw new Error("--since must be an ISO timestamp");
+  options.tail = tailOption === undefined ? undefined : integer(tailOption, "--tail");
+  options.limit = limitOption === undefined ? undefined : integer(limitOption, "--limit");
+  if (!paged && options.limit > 50) throw new Error("--limit must be <= 50");
+  options.offset = offsetOption === undefined ? 0 : integer(offsetOption, "--offset", 0);
+  const maxChars = maxCharsOption === undefined ? undefined : integer(maxCharsOption, "--max-chars");
+
+  let db;
+  try {
+    let selector = args[0];
+    if (subagents && (!selector || selector === "self")) selector = process.env.PI_THREAD_ID ?? process.env.PI_REMOTE_SESSION_ID;
+    if (paged && !selector) throw new Error("A thread selector is required; --subagents can use PI_REMOTE_SESSION_ID");
+    let row;
+    if (selector === "self" || (selector && (isAbsolute(selector) || selector.startsWith("./") || selector.startsWith("../") || selector.endsWith(".jsonl") || existsSync(selector)))) {
+      if (subagents) throw new Error("--subagents requires a Remote thread title or id, not a JSONL path");
+      const file = selector === "self" ? process.env.PI_SESSION_FILE : selector;
+      if (!file) throw new Error("self requires PI_SESSION_FILE from a persistent Pi shell tool; alternatively pass an explicit JSONL path");
+      const path = resolve(file);
+      if (!existsSync(path)) throw new Error(`Pi session JSONL not found at ${path}; a new session may not have flushed its first assistant message yet`);
+      row = { id: selector === "self" ? process.env.PI_SESSION_ID ?? path : path, name: basename(path), session_path: path, updated_at: "read from stored JSONL" };
+    } else {
+      const dbPath = resolve(database ?? defaultDatabase());
+      if (!existsSync(dbPath)) throw new Error(`Thread database not found at ${dbPath}; set PI_THREAD_DATABASE or pass --db. self and JSONL paths do not need a database`);
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const rows = db.prepare("SELECT id,title AS name,session_file AS session_path,state,updated_at,json_extract(metadata,'$.archivedAt') AS archived_at FROM thread ORDER BY updated_at DESC").all()
+        .map(row => ({ ...row, updated_at: new Date(row.updated_at).toISOString() }));
+      if (list || !selector) {
+        console.log(listThreads(rows));
+        return;
+      }
+      row = resolveThread(rows, selector);
+    }
+    if (paged) {
+      const page = subagents ? subagentPage(db, row.id, { includeIdle, limit: options.limit, cursor })
+        : threadPage(db, row, { includeTools: options.work, limit: options.limit, cursor, entryId,
+          offset: options.offset, maxChars });
+      console.log(JSON.stringify(page));
+      return;
+    }
+    const hasSession = row.session_path && existsSync(row.session_path);
+    if (pathOnly) {
+      if (!hasSession) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session file; omit --path to inspect its accepted inputs`);
+      console.log(resolve(row.session_path));
+      return;
+    }
+    if (!hasSession && (options.all || options.leaf || options.raw || options.search !== undefined || options.full)) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session JSONL to read or search`);
+    const transcript = hasSession ? renderThread(row, options) : renderThreadInputs(
+      row,
+      db.prepare("SELECT text,status AS state,error AS last_error,created_at FROM thread_work WHERE thread_id=? ORDER BY ordinal").all(row.id)
+        .map(item => ({ ...item, created_at: new Date(item.created_at).toISOString() })),
+      options,
+    );
+    if (output) {
+      const destination = resolve(output);
+      if (hasSession && existsSync(destination)) {
+        const source = statSync(row.session_path);
+        const target = statSync(destination);
+        if (source.dev === target.dev && source.ino === target.ino) throw new Error("--output cannot overwrite the source session JSONL");
+      }
+      writeFileSync(destination, `${transcript}\n`);
+      console.log(destination);
+    } else {
+      console.log(transcript);
+    }
+  } finally {
+    db?.close();
+  }
+}
+
+try {
+  main();
+} catch (error) {
+  console.error(`read-thread: ${error?.message ?? error}`);
+  process.exitCode = 1;
+}

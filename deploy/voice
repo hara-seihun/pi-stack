@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+base=${PI_STACK_VOICE_URL:-http://127.0.0.1:8796}
+
+case ${1:---activate} in
+  --check)
+    [[ $(systemctl show pi-stack-voice.service -p LoadState --value) == loaded ]] || {
+      echo 'Install the host pi-stack-voice.service declaration before deploying PiStack.' >&2
+      exit 66
+    }
+    pi_stack_as_root test -s /var/lib/pi-stack-voice/openai-api-key || {
+      echo 'PiStack Voice needs its OpenAI API key at /var/lib/pi-stack-voice/openai-api-key. Provision it through the host credential owner; deployment never copies credentials.' >&2
+      exit 66
+    }
+    development_units=$(systemctl list-units --type=service --state=active --no-legend --plain \
+      'pi-remote-dev-supervisor*.service' 'pi-remote-dev-web*.service')
+    if [[ -n $development_units ]]; then
+      printf 'Stop live-development units and restore the normal frontend route before release:\n%s\nSee docs/deployment.md#leaving-live-development.\n' "$development_units" >&2
+      exit 66
+    fi
+    if systemctl show pi-stack-voice.service -p Environment --value | grep -qE 'PI_STACK_REMOTE_SOURCE=[^ ]+'; then
+      systemctl show pi-stack-voice.service -p Environment --value | tr ' ' '\n' | grep -Fxq "PI_STACK_REMOTE_SOURCE=$remote" || {
+        echo 'Remove the Voice live-source override and reload systemd before release.' >&2
+        exit 66
+      }
+    fi
+    ;;
+  --activate)
+    pi_stack_as_root systemctl enable pi-stack-voice.service
+    expected=$(<"$remote/.pi-stack-commit")
+    current=$(pi_stack_as_root curl -fsS --max-time 2 "$base/status" 2>/dev/null | jq -r '.releaseCommit // empty') || current=""
+    if [[ $current != "$expected" ]]; then
+      pi_stack_as_root systemctl reset-failed pi-stack-voice.service
+      pi_stack_as_root systemctl restart pi-stack-voice.service
+    fi
+    systemctl is-active --quiet pi-stack-voice.service
+    pi_stack_as_root curl -fsS --max-time 2 "$base/status" | jq -e --arg commit "$expected" '.enabled == true and .releaseCommit == $commit' >/dev/null
+    ;;
+  *) echo 'usage: deploy/voice [--check|--activate]' >&2; exit 64 ;;
+esac

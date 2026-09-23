@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Walk the live front door the way the clients do, right after a deployment.
+# A release that passes its tests can still lock a person out of the app if
+# the front door and the client disagree about a header, a preflight, or a
+# route; this is the check that catches that before anybody opens their phone.
+#
+#   deploy/smoke [BASE_URL]      defaults to http://127.0.0.1:8788
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+base=${1:-http://127.0.0.1:${PI_REMOTE_ROUTER_PORT:-8788}}
+[[ $base =~ ^http://(127\.0\.0\.1|localhost):[0-9]+$ ]] || {
+  echo 'smoke: authenticated deployment probes require a local router URL' >&2
+  exit 64
+}
+failures=0
+fail() { echo "smoke: $*" >&2; failures=$((failures + 1)); }
+get() { curl -sS -o "$2" -w '%{http_code}' --max-time 10 "${@:3}" "$base$1" 2>/dev/null || echo 000; }
+
+scratch=$(mktemp -d)
+body=$scratch/body
+headers=$scratch/auth
+trap 'rm -rf "$scratch"' EXIT
+
+# The web client, served to anyone: it is what asks for a name and a key.
+for page in / /meet.html /voice.html; do
+  code=$(get "$page" "$body")
+  [[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET $page returned $code without the web client"
+  # The client is built for a browser mount path, so its assets are relative
+  # (`./assets/...`); at the front door's root they resolve against `/`.
+  mapfile -t assets < <(grep -oE '(src|href)="\.?/[^"]+"' "$body" | cut -d\" -f2 | sed 's#^\./#/#' | sort -u)
+  (( ${#assets[@]} > 0 )) || fail "GET $page named no client assets"
+  for asset in "${assets[@]}"; do
+    code=$(get "$asset" "$body")
+    [[ $code == 200 ]] || fail "GET $asset returned $code"
+  done
+done
+code=$(get /meet-adapter.js "$body")
+[[ $code == 200 ]] && grep -q startMeetAdapter "$body" || fail 'Meet external adapter bundle is missing'
+
+# Native requests carry both the person hint and the router session.
+code=$(get /v1/environment "$body" -X OPTIONS -H 'origin: http://localhost' \
+  -H 'access-control-request-method: GET' -H 'access-control-request-headers: x-pi-remote-user,x-pi-remote-session,content-type' \
+  -D "$body.headers")
+[[ $code == 204 ]] || fail "preflight returned $code"
+for header in x-pi-remote-user x-pi-remote-session content-type; do
+  grep -qi "^access-control-allow-headers:.*$header" "$body.headers" 2>/dev/null || fail "preflight does not allow $header"
+done
+rm -f "$body.headers"
+
+# What an unnamed client learns: the environment and who it could be.
+code=$(get /v1/environment "$body" -H 'origin: http://localhost' -D "$body.headers")
+[[ $code == 200 ]] || fail "GET /v1/environment returned $code"
+grep -qi '^access-control-allow-origin:' "$body.headers" 2>/dev/null || fail "GET /v1/environment carries no CORS header"
+rm -f "$body.headers"
+environment=$(jq -r '.environment.id // empty' "$body" 2>/dev/null)
+[[ -n $environment ]] || fail "GET /v1/environment carries no environment id"
+for path in /v1/environments /v1/health /v1/sessions; do
+  code=$(get "$path" "$body")
+  [[ $code == 423 ]] || fail "unauthenticated GET $path returned $code, expected 423"
+done
+code=$(get /v1/router-health "$scratch/router")
+[[ $code == 200 ]] && jq -e '.people | type == "array"' "$scratch/router" >/dev/null 2>&1 || {
+  fail "GET /v1/router-health returned $code or no people list"
+  exit 1
+}
+
+oauth=$(jq -r '.authentication == "oidc"' "$scratch/router")
+if [[ $oauth == true ]]; then
+  code=$(get /v1/auth/session "$body")
+  [[ $code == 423 ]] || fail "unauthenticated OAuth session returned $code"
+  code=$(get /v1/unlock "$body" -X POST -H 'content-type: application/json' --data '{}')
+  [[ $code == 423 ]] || fail "OAuth host accepted key bootstrap: $code"
+fi
+
+# Every person: the front door knows her, and if her supervisor is up, the
+# supervisor answers the calls the app makes first.
+persons_dir=$(pi_stack_persons_dir)
+for file in "$persons_dir"/*.json; do
+  [[ -f $file ]] || continue
+  person_failures=$failures
+  user=$(pi_stack_as_root jq -r '.user' "$file")
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || { fail 'invalid person user'; continue; }
+  code=$(get /v1/health "$body" -H "x-pi-remote-user: $user")
+  [[ $code == 423 ]] || fail "$user: a name without a session returned $code, expected 423"
+  if ! jq -e --arg user "$user" '.people[] | select(.user == $user and .unlocked == true)' "$scratch/router" >/dev/null; then
+    echo "smoke: $user is locked; leaving her locked"
+    continue
+  fi
+  if [[ $oauth == true ]] || pi_stack_as_root jq -e '.auth == "oidc"' "$file" >/dev/null; then
+    # Deployment has root authority, not an OAuth user's browser session.
+    # Keep the public router closed and probe the UID-gated supervisor directly.
+    port=$(pi_stack_as_root jq -r '.port' "$file")
+    [[ $port =~ ^[0-9]+$ ]] || { fail "$user: invalid supervisor port"; continue; }
+    for path in /v1/health /v1/environment /v1/sessions /v1/actions /v1/workspaces /v1/voice /v1/meet; do
+      if ! pi_stack_as_root curl -fsS --max-time 10 "http://127.0.0.1:$port$path" > "$body"; then
+        fail "$user: private GET $path failed"
+        continue
+      fi
+      case "$path" in
+        /v1/health)
+          [[ $(jq -r '.environmentId // empty' "$body") == "$environment" ]] || fail "$user: wrong environment"
+          release=$(jq -r '.releaseCommit // empty' "$body") ;;
+        /v1/voice) jq -e --arg commit "$release" '.enabled == true and .releaseCommit == $commit' "$body" >/dev/null || fail "$user: Voice release mismatch" ;;
+        /v1/meet) jq -e '.transcriptionAvailable == true' "$body" >/dev/null || fail "$user: transcription unavailable" ;;
+      esac
+    done
+    echo "smoke: $user private services probed; public access requires OAuth"
+    continue
+  fi
+  # Keys and session headers travel through pipes/files, never process arguments.
+  if pi_stack_as_root jq -e '.unlock != null' "$file" >/dev/null; then
+    key_args=(--rawfile key "${PI_REMOTE_KEY_DIR:-/run/pi-remote-keys}/$user")
+  else
+    key_args=(--arg key '')
+  fi
+  if ! pi_stack_as_root jq -n "${key_args[@]}" '{key:$key}' |
+    curl -fsS --max-time 10 -H "x-pi-remote-user: $user" -H 'content-type: application/json' \
+      --data-binary @- "$base/v1/unlock" |
+    jq -er 'select(.session | type == "string" and length > 0) | "x-pi-remote-session: " + .session' > "$headers"; then
+    fail "$user: could not mint a deployment session"
+    continue
+  fi
+  for path in /v1/health /v1/environment /v1/lock-status /v1/environments /v1/sessions /v1/actions /v1/workspaces; do
+    code=$(get "$path" "$body" -H "@$headers" -H "x-pi-remote-user: $user" -H 'origin: http://localhost' -D "$body.headers")
+    [[ $code == 200 ]] || fail "$user: GET $path returned $code"
+    grep -qi '^access-control-allow-origin:' "$body.headers" 2>/dev/null || fail "$user: GET $path carries no CORS header"
+    rm -f "$body.headers"
+  done
+  code=$(get /v1/environments "$body" -H "@$headers")
+  expected=$(pi_stack_as_root jq -c --arg own "$environment" '.remoteAccess // [$own]' "$file")
+  [[ $code == 200 ]] && jq -e --arg own "$environment" --argjson expected "$expected" '
+    (.environments | map(.id) | sort) == ($expected | sort) and
+    all(.environments[]; (has("upstreams") | not) and
+      .baseUrl == (if .id == $own then "" else "/v1/remotes/" + .id end))
+  ' "$body" >/dev/null 2>&1 || fail "$user: endpoint list differs from her grants or exposes upstream configuration"
+  code=$(get /v1/health "$body" -H "@$headers")
+  [[ $(jq -r '.environmentId // empty' "$body") == "$environment" ]] || fail "$user: supervisor reports a different environment than the front door"
+  release=$(jq -r '.releaseCommit // empty' "$body")
+  code=$(get /v1/voice "$body" -H "@$headers")
+  [[ $code == 200 ]] && jq -e --arg commit "$release" '.enabled == true and .releaseCommit == $commit' "$body" >/dev/null 2>&1 || fail "$user: Voice is not running the supervisor release"
+  code=$(get /v1/meet "$body" -H "@$headers")
+  [[ $code == 200 ]] && jq -e '.transcriptionAvailable == true' "$body" >/dev/null 2>&1 || fail "$user: Meet transcription runtime is unavailable"
+  if (( failures == person_failures )); then
+    echo "smoke: $user is unlocked and her supervisor, Meet and Voice answer"
+  fi
+done
+
+if (( failures > 0 )); then
+  echo "smoke: $failures failure(s) against $base" >&2
+  exit 1
+fi
+echo "smoke: the front door at $base answers every client path"

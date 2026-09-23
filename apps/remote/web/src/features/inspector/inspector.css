@@ -1,0 +1,27 @@
+.inspector-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-5); border-bottom: 1px solid var(--border); }
+.inspector-tabs button { min-height: var(--touch); padding: 0 var(--space-1); margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: var(--text-sm); font-weight: 650; }
+.inspector-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.inspector-panel { display: grid; gap: var(--space-5); }
+.inspector-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.inspector-controls button { min-height: var(--touch); padding: 0 var(--space-4); border-radius: var(--radius-2); color: var(--text); background: var(--surface-2); font-weight: 700; }
+.inspector-facts { margin: 0; display: grid; gap: var(--space-2); }
+.inspector-row { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: var(--space-3); font-size: var(--text-sm); line-height: 1.5; }
+.inspector-row dt { color: var(--muted); }
+.inspector-row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.inspector-row code { font: 12px/1.4 var(--font-mono); }
+.inspector-id { user-select: all; }
+.inspector-section { display: grid; gap: var(--space-2); }
+.inspector-section h3 { margin: 0; font-size: var(--text-sm); font-weight: 800; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+.inspector-section h3 span { margin-left: var(--space-2); font-weight: 600; text-transform: none; letter-spacing: 0; }
+.inspector-link { padding: var(--space-2) 0; color: var(--accent); background: transparent; text-align: left; font-weight: 600; }
+.inspector-hint { margin: 0; font-size: var(--text-xs); }
+.inspector-timeline { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-3); }
+.inspector-timeline li { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: var(--space-1) var(--space-3); padding: var(--space-1) 0; font-size: var(--text-xs); }
+.inspector-timeline time { color: var(--muted); }
+.inspector-timeline strong { font-family: var(--font-mono); font-weight: 700; }
+.inspector-timeline span { grid-column: 2; color: var(--muted); overflow-wrap: anywhere; }
+.inspector-debug { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.inspector-debug button, .inspector-debug a { min-height: var(--touch); display: inline-flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-3); border-radius: var(--radius-2); color: var(--text); background: var(--surface-2); text-decoration: none; font-weight: 600; font-size: var(--text-sm); }
+.inspector-debug svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.inspector-debug .live { color: var(--bg); background: var(--accent); }
+.inspector-debug .error { color: var(--danger); }

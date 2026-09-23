@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo 'usage: connect-adb [HOST:PORT]'
+  echo 'Find the authorized phone through ADB, a saved endpoint, or wireless-debugging mDNS.'
+}
+case ${1:-} in --help|-h) usage; exit 0 ;; esac
+(($# <= 1)) || { usage >&2; exit 64; }
+explicit=${1:-}
+[[ -z $explicit || ( $explicit == *:* && $explicit != -* ) ]] || { usage >&2; exit 64; }
+model=${PI_REMOTE_ANDROID_MODEL:-Pixel_7}
+state_dir=${XDG_CACHE_HOME:-$HOME/.cache}/pi-remote
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
+cd "$state_dir"
+endpoint_file=android-adb-endpoint
+
+verify_endpoint() {
+  local endpoint=$1
+  if [[ $endpoint == *:* ]]; then timeout 8 adb connect "$endpoint" >/dev/null 2>&1 || true; fi
+  [[ $(timeout 3 adb -s "$endpoint" get-state 2>/dev/null || true) == device ]]
+}
+remember_endpoint() {
+  printf '%s\n' "$1" > "$endpoint_file"
+  chmod 600 "$endpoint_file"
+  printf '%s\n' "$1"
+}
+
+if [[ -n $explicit ]]; then
+  if verify_endpoint "$explicit"; then remember_endpoint "$explicit"; exit 0; fi
+  echo "ADB could not authorize $explicit. Enable Wireless debugging and pair this host if Android requests it." >&2
+  exit 1
+fi
+
+endpoint=$(timeout 3 adb devices -l | awk -v model="model:$model" '$2 == "device" && index($0, model) { print $1; exit }')
+if [[ -n $endpoint ]] && verify_endpoint "$endpoint"; then remember_endpoint "$endpoint"; exit 0; fi
+
+if [[ -s $endpoint_file ]]; then
+  endpoint=$(<"$endpoint_file")
+  if verify_endpoint "$endpoint"; then remember_endpoint "$endpoint"; exit 0; fi
+fi
+
+mapfile -t candidates < <(timeout 5 adb mdns services | awk '$2 ~ /^_adb-tls-connect\._tcp\.?$/ && !seen[$3]++ { print $3; if (++n == 8) exit }')
+for endpoint in "${candidates[@]}"; do
+  if verify_endpoint "$endpoint"; then
+    connected=$(timeout 1 adb devices -l | awk -v endpoint="$endpoint" -v model="model:$model" '$1 == endpoint && $2 == "device" && index($0, model) { print $1; exit }')
+    if [[ -n $connected ]]; then remember_endpoint "$endpoint"; exit 0; fi
+  fi
+done
+
+echo "No authorized $model ADB endpoint is available. Enable Wireless debugging and pass its HOST:PORT to connect-adb; pair this host if needed. Off-LAN discovery requires an explicit reachable endpoint." >&2
+exit 1

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+link_user=""
+if [[ ${1:-} == --links-only && $# == 2 ]]; then
+  link_user=$2
+elif (( $# )); then
+  echo 'usage: deploy/tools [--links-only USER]' >&2; exit 64
+fi
+dest=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+skip_links=${PI_STACK_SKIP_TOOL_LINKS:-0}
+manifest="$root/config/tools.json"
+cd "$root"
+commit=$(git rev-parse HEAD)
+if [[ -n $link_user ]]; then
+  pi_stack_require_release "$dest" "$commit"
+  pi_stack_require_release "$remote" "$commit"
+else
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-tools.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+[[ -f $runtime/.pi-stack-commit && $(<"$runtime/.pi-stack-commit") == "$commit" ]] || {
+  echo "deploy Pi Runtime $commit before Pi tools" >&2
+  exit 66
+}
+dependencies=$(readlink -f "$runtime/node_modules")
+[[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
+
+mkdir -p "$stage/release"
+rsync -a --chmod=D755,F644 tools/shared/ "$stage/release/shared/"
+while IFS= read -r tool; do
+  rsync -a --chmod=D755,F644 --exclude=deploy "tools/$tool/" "$stage/release/$tool/"
+  while IFS= read -r entry; do
+    chmod 755 "$stage/release/$tool/$entry"
+  done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[].entry' "$manifest")
+done < <(jq -r '.tools[].id' "$manifest")
+
+[[ -f $orchestrator/.pi-stack-commit && $(<"$orchestrator/.pi-stack-commit") == "$commit" ]] || {
+  echo "deploy Pi Orchestrator $commit before Pi tools" >&2
+  exit 66
+}
+mkdir -p "$stage/release/node_modules"
+for dependency in "$dependencies"/*; do
+  name=$(basename "$dependency")
+  [[ $name == pi-orchestrator ]] && continue
+  ln -s "$dependency" "$stage/release/node_modules/$name"
+done
+ln -s "$(readlink -f "$orchestrator")" "$stage/release/node_modules/pi-orchestrator"
+node "$stage/release/read-condensed-session/read-thread" --contract >/dev/null
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage/release" "$dest" tools
+fi
+
+# Every Pi account gets every command, plus the Pi Remote person CLI, through
+# ~/.local/bin. Links this deployment no longer declares are removed.
+# One privileged shell per account: a sudo round trip per link made this the
+# slowest part of an unchanged release on Converge.
+reconcile_links() {
+  local home=$1 owner group expected
+  owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
+  expected=$({
+    jq -r --arg dest "$dest" '.tools[] | .id as $tool | .commands[] | [.name, "\($dest)/\($tool)/\(.entry)"] | @tsv' "$manifest"
+    printf 'pi-remote\t%s/server/pi-remote\n' "$remote"
+  })
+  pi_stack_as_root env PI_STACK_TOOL_LINKS="$expected" bash -s -- "$home" "$owner" "$group" "$dest" "$remote" <<'ROOT'
+set -euo pipefail
+home=$1 owner=$2 group=$3 dest=$4 remote=$5 bin="$1/.local/bin"
+declare -A expected=()
+while IFS=$'\t' read -r name target; do
+  [[ -n $name ]] && expected["$name"]=$target
+done <<<"$PI_STACK_TOOL_LINKS"
+install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$bin"
+while IFS= read -r -d '' link; do
+  target=$(readlink "$link")
+  name=$(basename "$link")
+  if [[ ( $target == "$dest/"* || $target == "$remote/"* ) && ${expected[$name]:-} != "$target" ]]; then
+    rm -- "$link"
+  fi
+done < <(find "$bin" -maxdepth 1 -type l -print0)
+for name in "${!expected[@]}"; do
+  ln -sfn "${expected[$name]}" "$bin/$name"
+  chown -h "$owner:$group" "$bin/$name"
+done
+ROOT
+}
+
+if [[ -n $link_user ]]; then
+  home=$(pi_stack_home "$link_user")
+  [[ -n $home && -d $home ]] || { echo "no home directory for $link_user" >&2; exit 64; }
+  reconcile_links "$home"
+elif [[ $skip_links != 1 ]]; then
+  while IFS= read -r user; do
+    home=$(pi_stack_home "$user")
+    [[ -n $home && -d $home ]] && reconcile_links "$home"
+  done < <(pi_stack_users)
+fi
+
+printf 'deployed Pi tools from %s to %s\n' "$commit" "$dest"

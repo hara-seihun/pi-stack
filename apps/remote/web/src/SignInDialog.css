@@ -1,0 +1,6 @@
+.sign-in-dialog { width: min(420px, calc(100vw - 28px)); box-sizing: border-box; padding: 24px; border: 1px solid var(--border, #363a43); color: var(--text, #eee); background: var(--surface, #191c23); border-radius: 12px; }
+.sign-in-dialog::backdrop { background: var(--bg, #0b0d10); }
+.sign-in-dialog h2 { margin: 0; font-size: 20px; }
+.sign-in-dialog p { color: var(--muted, #b3b7c1); line-height: 1.5; }
+.sign-in-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+.sign-in-actions button { min-height: 44px; padding: 10px 16px; font: inherit; color: inherit; background: var(--surface-2, #303540); border: 1px solid var(--border, #515767); border-radius: 8px; cursor: pointer; }

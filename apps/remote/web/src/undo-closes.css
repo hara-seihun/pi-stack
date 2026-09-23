@@ -1,0 +1,28 @@
+.undo-close {
+  position: fixed;
+  z-index: 25;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: min(480px, calc(100vw - 24px));
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-3);
+  color: var(--text);
+  background: var(--surface-2);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 45%);
+}
+.undo-close-copy { display: grid; gap: 2px; flex: 1; min-width: 0; font-size: 13px; }
+.undo-close-copy strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; }
+.undo-close-copy span { color: var(--muted); }
+.undo-close-copy .undo-close-error { color: var(--danger); }
+.undo-close button { flex: none; min-width: 64px; min-height: 44px; padding: 0 12px; font-weight: 700; color: var(--bg); background: var(--text); border-radius: var(--radius-2); }
+.undo-close button:disabled { opacity: .6; }
+.undo-close .undo-close-dismiss { min-width: 44px; width: 44px; padding: 0; color: var(--muted); background: transparent; font-size: 24px; }
+@media (max-width: 899px) {
+  .layout-phone .undo-close { top: calc(12px + env(safe-area-inset-top)); bottom: auto; }
+  .layout-phone .tabbar ~ .undo-close { top: auto; bottom: calc(var(--tabbar) + 8px); }
+}

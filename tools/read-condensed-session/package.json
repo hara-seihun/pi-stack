@@ -1,0 +1,12 @@
+{
+  "name": "@hara-seihun/read-condensed-session",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "read-condensed-session": "./main",
+    "read-thread": "./read-thread"
+  },
+  "dependencies": { "pi-orchestrator": "0.2.1" },
+  "scripts": { "test": "node --test \"*.test.mjs\"" }
+}

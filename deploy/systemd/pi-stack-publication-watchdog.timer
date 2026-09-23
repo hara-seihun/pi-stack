@@ -1,0 +1,11 @@
+[Unit]
+Description=Check publication progress independently of the worker
+
+[Timer]
+OnBootSec=5s
+OnUnitInactiveSec=10s
+AccuracySec=1s
+Unit=pi-stack-publication-watchdog.service
+
+[Install]
+WantedBy=timers.target

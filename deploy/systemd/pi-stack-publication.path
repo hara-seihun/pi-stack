@@ -1,0 +1,9 @@
+[Unit]
+Description=Wake Pi Stack publication immediately after durable enqueue
+
+[Path]
+PathChanged=@PUBLICATION_WAKE@
+Unit=pi-stack-publication.service
+
+[Install]
+WantedBy=default.target

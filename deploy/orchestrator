@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+commit=$(git -C "$root" rev-parse HEAD)
+
+# Every account that runs orchestrator commands reaches the CLI through
+# ~/.local/bin/pi-orchestrator, so the links are reconciled on every run,
+# including the already-deployed fast path.
+reconcile_cli_links() {
+  local user home owner group link
+  while IFS= read -r user; do
+    home=$(pi_stack_home "$user")
+    [[ -n $home && -d $home ]] || continue
+    owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
+    link=$home/.local/bin/pi-orchestrator
+    pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$home/.local/bin"
+    pi_stack_as_root ln -sfn "$dest/dist/cli.js" "$link"
+    pi_stack_as_root chown -h "$owner:$group" "$link"
+  done < <(pi_stack_users)
+}
+
+normalize_model_defaults() {
+  local fleet home config
+  fleet=$(pi_stack_fleet_user)
+  [[ -n $fleet ]] || return 0
+  home=$(pi_stack_home "$fleet")
+  config=${PI_ORCHESTRATOR_CONFIG:-$home/.config/pi-orchestrator/config.json}
+  [[ -f $config ]] || return 0
+  pi_stack_as_root node - "$config" <<'NODE'
+const fs = require('node:fs'), path = require('node:path');
+const file = fs.realpathSync(process.argv[2]), stat = fs.statSync(file);
+const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+let changed = false;
+for (const candidates of Object.values(value.profiles ?? {})) for (const candidate of candidates) {
+  for (const key of ['thinking', 'thinkingPair']) if (key in candidate) { delete candidate[key]; changed = true; }
+}
+if (changed) {
+  const temporary = `${file}.${process.pid}.tmp`, fd = fs.openSync(temporary, 'wx', stat.mode);
+  try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fchownSync(fd, stat.uid, stat.gid); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  fs.renameSync(temporary, file);
+  const directory = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+NODE
+}
+normalize_model_defaults
+
+# The fleet user's operator config names the lane manifest. A release whose
+# daemon cannot parse the live manifest must not be selected.
+validate_manifest() {
+  local fleet home config manifest
+  fleet=$(pi_stack_fleet_user)
+  [[ -n $fleet ]] || return 0
+  home=$(pi_stack_home "$fleet")
+  config=${PI_ORCHESTRATOR_CONFIG:-$home/.config/pi-orchestrator/config.json}
+  [[ -f $config ]] || return 0
+  manifest=$(pi_stack_as_root jq -r '.taskManifest // empty' "$config")
+  [[ -n $manifest ]] || return 0
+  pi_stack_as_root test -f "$manifest" || { echo "orchestrator lane manifest does not exist: $manifest" >&2; return 1; }
+  PI_STACK_LANE_MANIFEST="$(pi_stack_as_root cat "$manifest")" node - <<'NODE'
+const manifest = JSON.parse(process.env.PI_STACK_LANE_MANIFEST);
+if (manifest.version !== 2 || !Array.isArray(manifest.lanes)) throw new Error("lane manifest version 2 required");
+for (const lane of manifest.lanes) {
+  for (const key of ["id", "cwd", "profile"]) if (typeof lane[key] !== "string" || !lane[key]) throw new Error(`lane ${key} is required`);
+  if ((typeof lane.prompt !== "string" || !lane.prompt) && (typeof lane.promptFile !== "string" || !lane.promptFile)) throw new Error(`lane ${lane.id} needs prompt or promptFile`);
+  if (!(Number(lane.weight) > 0)) throw new Error(`lane ${lane.id} needs a positive weight`);
+}
+NODE
+}
+
+# Loading the CLI takes about two seconds; it overlaps the manifest and link work.
+check_cli() { "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'; }
+
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js ]]; then
+  check_cli &
+  cli_pid=$!
+  validate_manifest
+  reconcile_cli_links
+  wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
+  printf 'Pi Orchestrator from %s is already deployed\n' "$commit"
+  exit 0
+fi
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-orchestrator.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
+cd "$root"
+pi_stack_prepare_dependencies "$root"
+[[ -f $runtime/.pi-stack-commit && $(<"$runtime/.pi-stack-commit") == "$commit" ]] || {
+  echo "deploy Pi Runtime $commit before Pi Orchestrator" >&2
+  exit 66
+}
+dependencies=$(readlink -f "$runtime/node_modules")
+[[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
+node "$root/scripts/build-workspace.mjs" orchestrator
+
+mkdir -p "$stage/release"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src \
+  packages/orchestrator/package.json "$stage/release/"
+chmod 755 "$stage/release/dist/cli.js"
+ln -s "$dependencies" "$stage/release/node_modules"
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+validate_manifest
+pi_stack_publish_release "$root" "$stage/release" "$dest" orchestrator
+
+check_cli &
+cli_pid=$!
+reconcile_cli_links
+wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
+printf 'deployed Pi Orchestrator from %s to %s\n' "$commit" "$dest"

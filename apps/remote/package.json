@@ -1,0 +1,53 @@
+{
+  "name": "pi-remote",
+  "version": "0.47.0",
+  "description": "Self-hosted web and Android controller for persistent Pi sessions",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./server/context-mirror.ts"
+    ]
+  },
+  "scripts": {
+    "start": "bun server/main.ts",
+    "dev": "vite",
+    "build": "vite build && npm run build:meet-adapter && node compress-dist.mjs",
+    "build:meet-adapter": "vite build --config vite.meet-adapter.config.ts",
+    "typecheck": "tsc -p tsconfig.web.json && tsc -p tsconfig.json",
+    "test": "npm run build && node check.mjs"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.87.1",
+    "@headless-tree/core": "^1.7.0",
+    "@headless-tree/react": "^1.7.0",
+    "@tanstack/react-virtual": "^3.14.10",
+    "gpt-tokenizer": "4.0.0",
+    "openid-client": "^6.8.8",
+    "pi-orchestrator": "0.2.1",
+    "playwright-core": "^1.58.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "typebox": "^1.3.16"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@types/bun": "^1.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "fake-indexeddb": "^6.2.5",
+    "typescript": "^5.9.2",
+    "vite": "^8.2.2"
+  }
+}

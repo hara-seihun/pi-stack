@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "packages": [
+    { "id": "orchestrator", "source": "packages/orchestrator", "deployed": "/srv/pi/pi-orchestrator" },
+    { "id": "anthropic-beta-guard", "source": "packages/runtime/extensions/anthropic-beta-guard", "deployed": "/srv/pi/runtime/extensions/anthropic-beta-guard" },
+    { "id": "claude-oauth", "source": "packages/runtime/extensions/claude-oauth", "deployed": "/srv/pi/runtime/extensions/claude-oauth" },
+    { "id": "codex-compaction", "source": "packages/runtime/extensions/codex-compaction", "deployed": "/srv/pi/runtime/extensions/codex-compaction" },
+    { "id": "bash-timeout-guard", "source": "packages/runtime/extensions/bash-timeout-guard", "deployed": "/srv/pi/runtime/extensions/bash-timeout-guard" },
+    { "id": "browser-native", "source": "packages/runtime/extensions/browser", "deployed": "/srv/pi/runtime/extensions/browser" },
+    { "id": "local-models", "source": "packages/runtime/extensions/local-models", "deployed": "/srv/pi/runtime/extensions/local-models" },
+    { "id": "web-search", "source": "packages/runtime/extensions/web-search", "deployed": "/srv/pi/runtime/extensions/web-search" },
+    { "id": "remote", "source": "apps/remote", "deployed": "/srv/pi/pi-remote" }
+  ],
+  "contextObserver": "remote"
+}

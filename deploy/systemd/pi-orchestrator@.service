@@ -1,0 +1,26 @@
+# The Pi Orchestrator daemon for the account that runs the fleet. It owns policy
+# and the SQLite ledger and starts each admitted run as a transient unit in that
+# account's own user manager, so a daemon restart never kills active work.
+# Reference unit for a Debian host; NixOS declares the same unit.
+[Unit]
+Description=Pi Orchestrator daemon for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i
+Environment=HOME=/home/%i
+Environment=PATH=/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PI_CODING_AGENT_DIR=/home/%i/.pi/agent
+ExecStart=/usr/local/bin/node /srv/pi/pi-orchestrator/dist/cli.js daemon
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+UMask=0007
+MemoryHigh=4G
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target

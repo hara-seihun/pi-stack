@@ -1,0 +1,26 @@
+.signal-call-button svg, .signal-call-actions svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.signal-call { position: fixed; z-index: 90; inset: max(12px, env(safe-area-inset-top)) 12px auto; display: flex; justify-content: center; pointer-events: none; }
+.signal-call-card { width: min(560px, 100%); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 14px; border: 1px solid color-mix(in srgb, var(--border), transparent 20%); border-radius: 24px; color: var(--text); background: color-mix(in srgb, var(--surface-2), transparent 4%); box-shadow: 0 18px 60px rgb(0 0 0 / 48%); backdrop-filter: blur(20px); pointer-events: auto; }
+.signal-call.incoming .signal-call-card { padding: 20px; background: color-mix(in srgb, var(--surface-3), transparent 2%); }
+.signal-call-avatar { width: 64px; height: 64px; display: grid; place-items: center; overflow: hidden; border-radius: 50%; color: var(--bg); background: var(--accent); font-size: 26px; font-weight: 750; }
+.signal-call-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.signal-call-copy { min-width: 0; display: grid; gap: 3px; }
+.signal-call-copy strong { overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.signal-call-copy span { color: var(--muted); font-size: 14px; }
+.signal-call-copy small { color: var(--muted); overflow-wrap: anywhere; }
+.signal-call-copy small[role="alert"] { color: var(--danger); }
+.signal-call-actions { display: flex; gap: 10px; }
+.signal-call-actions button { min-width: 64px; min-height: 54px; display: grid; place-items: center; gap: 2px; padding: 8px 10px; border-radius: 18px; color: var(--text); background: var(--surface-1); font-size: 11px; font-weight: 650; }
+.signal-call-actions svg { width: 22px; height: 22px; }
+.signal-call-actions .call-accept { color: white; background: #198754; }
+.signal-call-actions .call-decline, .signal-call-actions .call-hangup { color: white; background: #d63a48; }
+.signal-call-actions .call-accept svg { transform: rotate(-18deg); }
+.signal-call-actions .call-decline svg, .signal-call-actions .call-hangup svg { transform: rotate(135deg); }
+.signal-call-actions .call-muted { color: var(--bg); background: var(--accent); }
+@media (max-width: 560px) {
+  .signal-call { inset: max(8px, env(safe-area-inset-top)) 8px auto; }
+  .signal-call-card { grid-template-columns: auto minmax(0, 1fr); border-radius: 20px; }
+  .signal-call-actions { grid-column: 1 / -1; width: 100%; }
+  .signal-call-actions button { flex: 1; }
+  .signal-call.active .signal-call-avatar { width: 48px; height: 48px; font-size: 20px; }
+}

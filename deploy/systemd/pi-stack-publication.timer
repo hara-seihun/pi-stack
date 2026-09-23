@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover missed Pi Stack publication wakeups
+
+[Timer]
+OnBootSec=5s
+OnUnitInactiveSec=10s
+AccuracySec=1s
+Unit=pi-stack-publication.service
+
+[Install]
+WantedBy=timers.target

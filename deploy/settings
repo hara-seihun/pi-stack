@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Reconcile one account's Pi settings: the ordered package list from
+# config/packages.json with the host's own packages folded in ahead of the
+# context observer and the custom model catalog. Reviewed npm packages resolve
+# to their exact pins in the shared runtime; onboarding needs no package install.
+#
+#   deploy/settings [USER]      defaults to the invoking account
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+export PI_STACK_ROOT_DIR=$root
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+user=${1:-$(id -un)}
+manifest="$root/config/packages.json"
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+# The invoking process may itself be a Pi session carrying PI_AGENT_DIR for
+# some other account; the settings being reconciled belong to this user's home.
+agent_dir=$(pi_stack_home "$user")/.pi/agent
+settings=$agent_dir/settings.json
+lockfile_module="$runtime/node_modules/@earendil-works/pi-coding-agent/node_modules/proper-lockfile/index.js"
+[[ -f $lockfile_module ]] || { echo "deploy Pi Runtime before settings" >&2; exit 66; }
+host_packages="[]"
+host_models='{"providers":{}}'
+if [[ -f $(pi_stack_host_file) ]]; then
+  host_packages=$(pi_stack_host_value '[.packages[]? // empty]' | jq -c .)
+  host_models_path=$(pi_stack_host_value '.models // empty')
+  if [[ -n $host_models_path ]]; then
+    [[ $host_models_path = /* ]] || { echo "host models must name an absolute path" >&2; exit 66; }
+    host_models=$(jq -ce 'if (.providers | type) == "object" then . else error("host models must contain providers") end' "$host_models_path")
+  fi
+fi
+
+# Send reviewed code and configuration over stdin. An ordinary account must
+# never need traversal permission on the administrator's source checkout.
+pi_stack_run_as "$user" env \
+  PI_STACK_MANIFEST_JSON="$(<"$manifest")" PI_STACK_HOST_PACKAGES="$host_packages" PI_STACK_HOST_MODELS="$host_models" \
+  PI_STACK_SETTINGS="$settings" PI_STACK_LOCKFILE_MODULE="$lockfile_module" \
+  PI_STACK_RUNTIME_DEST="$runtime" PI_STACK_ORCHESTRATOR_DEST="$orchestrator" \
+  PI_STACK_REMOTE_DEST="$remote" PI_STACK_COMMIT="$(pi_stack_commit)" \
+  bash -s -- "$user" "$agent_dir" <<'ACCOUNT'
+set -euo pipefail
+cd "$HOME"
+user=$1
+agent_dir=$2
+settings=$PI_STACK_SETTINGS
+runtime=$PI_STACK_RUNTIME_DEST
+orchestrator=$PI_STACK_ORCHESTRATOR_DEST
+install -d -m 700 "$agent_dir"
+if [[ ! -e $settings ]]; then
+  printf '{}\n' > "$settings"
+  chmod 600 "$settings"
+fi
+node --input-type=module <<'NODE'
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const manifest = JSON.parse(process.env.PI_STACK_MANIFEST_JSON);
+const roots = { "/srv/pi/runtime": process.env.PI_STACK_RUNTIME_DEST, "/srv/pi/pi-orchestrator": process.env.PI_STACK_ORCHESTRATOR_DEST, "/srv/pi/pi-remote": process.env.PI_STACK_REMOTE_DEST };
+const isExternalPackage = (source) => source.startsWith("npm:") || source.startsWith("git:") || source.includes("://");
+const deployedPath = (entry) => {
+  if (isExternalPackage(entry.source)) {
+    const pin = /^npm:((?:@[a-z0-9._-]+\/)?[a-z0-9._-]+)@([^/]+)$/.exec(entry.source);
+    if (!pin) throw new Error(`reviewed package must have an exact npm pin in the shared runtime: ${entry.source}`);
+    const path = join(process.env.PI_STACK_RUNTIME_DEST, "node_modules", pin[1]);
+    const installed = JSON.parse(readFileSync(join(path, "package.json"), "utf8"));
+    if (installed.name !== pin[1] || installed.version !== pin[2]) throw new Error(`shared runtime package does not match ${entry.source}`);
+    return path;
+  }
+  for (const [standard, actual] of Object.entries(roots)) {
+    if (entry.deployed === standard || entry.deployed.startsWith(`${standard}/`)) return actual + entry.deployed.slice(standard.length);
+  }
+  return entry.deployed;
+};
+const reviewed = manifest.packages.map((entry) => ({ id: entry.id, path: deployedPath(entry) }));
+const observer = reviewed.pop();
+if (observer.id !== manifest.contextObserver) throw new Error(`${manifest.contextObserver} must be the last reviewed package`);
+const hostPackages = JSON.parse(process.env.PI_STACK_HOST_PACKAGES);
+const packages = [...reviewed.map((entry) => entry.path), ...hostPackages, observer.path];
+for (const path of packages) {
+  if (!isExternalPackage(path) && !existsSync(path)) throw new Error(`package does not exist at ${path}`);
+}
+const { default: lockfile } = await import(process.env.PI_STACK_LOCKFILE_MODULE);
+const path = process.env.PI_STACK_SETTINGS;
+const release = await lockfile.lock(path, {
+  realpath: false,
+  retries: { retries: 50, factor: 1, minTimeout: 20, maxTimeout: 20 },
+});
+try {
+  const current = JSON.parse(readFileSync(path, "utf8"));
+  const next = {
+    ...current,
+    packages,
+    compaction: { ...(current.compaction ?? {}), enabled: true },
+    retry: { enabled: true, maxRetries: 6, baseDelayMs: 5000 },
+  };
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+} finally {
+  await release();
+}
+NODE
+
+models="$agent_dir/models.json"
+PI_STACK_MODELS="$models" PI_STACK_CUSTOM_MODELS="$orchestrator/dist/models.json" node --input-type=module <<'NODE'
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+
+const path=process.env.PI_STACK_MODELS;
+const catalogs=[JSON.parse(readFileSync(process.env.PI_STACK_CUSTOM_MODELS,"utf8")),JSON.parse(process.env.PI_STACK_HOST_MODELS)];
+const current=existsSync(path)?JSON.parse(readFileSync(path,"utf8")):{};
+const providers={...(current.providers??{})};
+for(const catalog of catalogs) for(const [providerId,addition] of Object.entries(catalog.providers)){
+  const provider=providers[providerId]??{};
+  const replacements=new Map((addition.models??[]).map((model)=>[model.id,model]));
+  providers[providerId]={...provider,...addition,models:[...(provider.models??[]).filter((model)=>!replacements.has(model.id)),...replacements.values()]};
+}
+const temporary=`${path}.${process.pid}.${randomUUID()}.tmp`;
+try{
+  writeFileSync(temporary,`${JSON.stringify({...current,providers},null,2)}\n`,{mode:0o600});
+  renameSync(temporary,path);
+}finally{rmSync(temporary,{force:true});}
+NODE
+
+expected=$(( $(jq '.packages | length' <<<"$PI_STACK_MANIFEST_JSON") + $(jq 'length' <<<"$PI_STACK_HOST_PACKAGES") ))
+jq -e --argjson expected "$expected" '.packages | length == $expected' "$settings" >/dev/null
+printf 'deployed Pi settings from %s for %s\n' "$PI_STACK_COMMIT" "$user"
+ACCOUNT

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Pi Remote command line. `person add` and `person remove` change machine state
+# under /var/lib/pi-remote and start or stop services, so they run as root.
+set -euo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+if [[ ${1:-} == person && ( ${2:-} == add || ${2:-} == remove ) && $EUID != 0 ]]; then
+  exec sudo -n --preserve-env=PI_REMOTE_PERSONS_DIR,PI_REMOTE_KEY_DIR "$0" "$@"
+fi
+exec bun "$here/person-cli.ts" "$@"

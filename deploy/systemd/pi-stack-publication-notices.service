@@ -1,0 +1,11 @@
+[Unit]
+Description=Deliver a pending Pi Stack publication or repair report
+
+[Service]
+Type=oneshot
+ExecStart=@PUBLICATION_COMMAND@ notices
+TimeoutStartSec=50s
+TimeoutStopSec=5s
+KillMode=control-group
+UMask=0077
+Environment=PATH=@PUBLICATION_PATH@

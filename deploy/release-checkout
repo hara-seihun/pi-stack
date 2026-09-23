@@ -1,0 +1,81 @@
+# shellcheck shell=bash
+
+pi_stack_acquire_host_lock() {
+  if [[ ${PI_STACK_HOST_LOCK_HELD:-0} == 1 ]]; then
+    return
+  fi
+  local lock=${PI_STACK_HOST_LOCK_PATH:-/srv/pi/.pi-stack-deploy.lock}
+  if [[ -n ${PI_STACK_HOST_LOCK_PATH:-} ]]; then
+    mkdir -p "$(dirname "$lock")" || return
+    touch "$lock" || return
+  elif [[ ! -e $lock ]]; then
+    local -a become=()
+    [[ $EUID == 0 ]] || become=(sudo -n)
+    "${become[@]}" mkdir -p /srv/pi || return
+    "${become[@]}" touch "$lock" || return
+    "${become[@]}" chmod 644 "$lock" || return
+  fi
+  exec {PI_STACK_HOST_LOCK_FD}<"$lock" || return
+  flock -w 40 "$PI_STACK_HOST_LOCK_FD" || {
+    echo "another Pi stack deployment owns $lock" >&2
+    return 75
+  }
+  export PI_STACK_HOST_LOCK_FD PI_STACK_HOST_LOCK_HELD=1
+}
+
+# Sourced by the host wrapper, which keeps these locks through activation and proof.
+pi_stack_select_release_checkout() {
+  local state=$1 repository=$2 requested=$3 live_marker=$4 allow_rollback=${5:-0}
+  local previous baseline origin lock
+  pi_stack_acquire_host_lock || return
+  mkdir -p "$state"
+  exec {PI_STACK_RELEASE_LOCK_FD}>"$state/release.lock"
+  flock "$PI_STACK_RELEASE_LOCK_FD"
+  export PI_STACK_RELEASE_LOCK_FD
+  stack="$state/repository"
+  if [[ ! -d "$stack/.git" ]]; then
+    git init --quiet "$stack"
+  fi
+  lock=$(git -C "$stack" rev-parse --path-format=absolute --git-path pi-stack-deploy.lock) || return
+  exec {PI_STACK_DEPLOY_LOCK_FD}>"$lock"
+  flock "$PI_STACK_DEPLOY_LOCK_FD"
+  export PI_STACK_DEPLOY_LOCK_FD PI_STACK_DEPLOY_LOCK_HELD=1
+  origin=$(git -C "$stack" config --get remote.origin.url) || origin=
+  if [[ -z $origin ]]; then
+    git -C "$stack" remote add origin "$repository" || return
+    origin=$repository
+  fi
+  [[ $origin == "$repository" ]] || {
+    echo "release checkout origin differs from $repository: $stack" >&2
+    return 65
+  }
+  [[ -z $(git -C "$stack" status --porcelain) ]] || {
+    echo "release-owned checkout has uncommitted changes: $stack; preserve and repair them before release" >&2
+    return 65
+  }
+  git -C "$stack" fetch --quiet origin || return
+  commit=$(git -C "$stack" rev-parse --verify "${requested}^{commit}") || return
+  previous=$(git -C "$stack" rev-parse --verify HEAD 2>/dev/null) || previous=
+  baseline=
+  if [[ -f "$live_marker" ]]; then
+    baseline=$(<"$live_marker")
+    [[ $baseline =~ ^[a-f0-9]{40}$ ]] || {
+      echo "invalid live release marker: $live_marker" >&2
+      return 65
+    }
+  fi
+  for baseline in "$previous" "$baseline"; do
+    [[ -n $baseline && $baseline != "$commit" ]] || continue
+    git -C "$stack" cat-file -e "${baseline}^{commit}" || return
+    if [[ $allow_rollback != 1 ]] && ! git -C "$stack" merge-base --is-ancestor "$baseline" "$commit"; then
+      echo "requested release $commit does not descend from $baseline" >&2
+      return 65
+    fi
+  done
+  git -C "$stack" checkout --quiet --detach "$commit" || return
+  [[ $(git -C "$stack" rev-parse HEAD) == "$commit" && -z $(git -C "$stack" status --porcelain) ]] || {
+    echo "release checkout changed during selection: $stack" >&2
+    return 65
+  }
+  source "$stack/deploy/lib"
+}

@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "tools": [
+    { "id": "agent-workspace", "commands": [{ "name": "agent-workspace", "entry": "main" }] },
+    { "id": "codex-reset", "commands": [{ "name": "codex-reset", "entry": "main" }] },
+    { "id": "fleet-errors", "commands": [{ "name": "fleet-errors", "entry": "main" }] },
+    { "id": "user-usage", "commands": [{ "name": "pi-user-usage", "entry": "main" }] },
+    { "id": "mcp", "commands": [{ "name": "mcp", "entry": "main" }] },
+    { "id": "mcp-script", "commands": [{ "name": "mcp-script", "entry": "main" }] },
+    {
+      "id": "read-condensed-session",
+      "commands": [
+        { "name": "read-condensed-session", "entry": "main" },
+        { "name": "read-thread", "entry": "read-thread" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+dest=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+commit=$(git -C "$root" rev-parse HEAD)
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-remote.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
+# Resolve the actual deployed import graph, outside the checkout's hoisted
+# development dependencies, without starting a supervisor or opening its data.
+check_imports() {
+  bun "$root/scripts/check-remote-imports.ts" "$1"
+}
+
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/server/pi-remote-launch ]]; then
+  check_imports "$dest"
+  printf 'Pi Remote from %s is already deployed\n' "$commit"
+  exit 0
+fi
+
+cd "$root"
+[[ -f $orchestrator/.pi-stack-commit && $(<"$orchestrator/.pi-stack-commit") == "$commit" ]] || {
+  echo "deploy Pi Orchestrator $commit before Pi Remote" >&2
+  exit 66
+}
+orchestrator_release=$(readlink -f "$orchestrator")
+[[ -f $orchestrator_release/src/api.ts && -f $orchestrator_release/src/boost.ts ]] || {
+  echo "Pi Orchestrator release is incomplete at $orchestrator_release" >&2
+  exit 66
+}
+
+node "$root/scripts/build-workspace.mjs" remote
+mkdir -p "$stage/release/node_modules" "$stage/release/web" "$stage/release/deploy"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX deploy/lib deploy/release-checkout deploy/smoke "$stage/release/deploy/"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server "$stage/release/"
+rsync -aL --chmod=D755,Fu=rwX,Fgo=rX apps/remote/skills "$stage/release/"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/web/dist "$stage/release/web/"
+for executable in pi-remote pi-remote-launch pi-remote-supervise; do
+  test -x "$stage/release/server/$executable" || {
+    printf 'staged Pi Remote executable is not executable: %s\n' "$executable" >&2
+    exit 1
+  }
+done
+ln -s "$orchestrator_release" "$stage/release/node_modules/pi-orchestrator"
+# The production workspace closure owns third-party dependencies. Keep the
+# Orchestrator pinned to this release while linking every declared dependency,
+# including workspace-local versions when npm could not hoist them.
+dependencies=$(readlink -f "$orchestrator_release/node_modules")
+[[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
+while IFS= read -r name; do
+  [[ $name == pi-orchestrator ]] && continue
+  source="$dependencies/../apps/remote/node_modules/$name"
+  [[ -d $source ]] || source="$dependencies/$name"
+  [[ -d $source ]] || { echo "Pi Remote production dependency is missing: $name" >&2; exit 66; }
+  mkdir -p "$(dirname "$stage/release/node_modules/$name")"
+  ln -s "$(readlink -f "$source")" "$stage/release/node_modules/$name"
+done < <(jq -r '((.dependencies // {}) + (.peerDependencies // {})) | keys[]' apps/remote/package.json)
+check_imports "$stage/release"
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage/release" "$dest" remote
+printf 'deployed Pi Remote from %s to %s\n' "$commit" "$dest"

@@ -1,0 +1,6 @@
+[
+  { "timestamp": 1, "type": "message_end", "message": { "role": "assistant", "timestamp": 1, "content": [{ "type": "thinking", "thinking": "" }] } },
+  { "timestamp": 2, "type": "tool_execution_start", "toolCallId": "pwd", "toolName": "bash", "args": { "command": "pwd", "timeout": 5 } },
+  { "timestamp": 3, "type": "tool_execution_update", "toolCallId": "pwd", "toolName": "bash", "partialResult": { "content": [{ "type": "text", "text": "/home" }] } },
+  { "timestamp": 4, "type": "tool_execution_end", "toolCallId": "pwd", "toolName": "bash", "result": { "content": [{ "type": "text", "text": "/home/kenan\n" }] }, "isError": false }
+]

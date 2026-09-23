@@ -1,0 +1,112 @@
+diff --git a/packages/coding-agent/src/core/extensions/loader.ts b/packages/coding-agent/src/core/extensions/loader.ts
+index 32ca6c952..a9c804dcf 100644
+--- a/packages/coding-agent/src/core/extensions/loader.ts
++++ b/packages/coding-agent/src/core/extensions/loader.ts
+@@ -568,9 +568,10 @@ async function loadExtension(
+ 	runtime: ExtensionRuntime,
+ 	cacheToken?: ExtensionCacheToken,
+ ): Promise<{ extension: Extension | null; error: string | null }> {
+-	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
+-
+ 	try {
++		// Native ESM caches symlink resolution. Import the selected physical release
++		// so reload cannot reuse a factory from a previously selected generation.
++		const resolvedPath = fs.realpathSync(resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true }));
+ 		const factory = await loadExtensionModule(resolvedPath, cacheToken);
+ 		time(`${extensionPath} module import`, "extensions");
+ 		if (!factory) {
+diff --git a/packages/coding-agent/src/core/resource-loader.ts b/packages/coding-agent/src/core/resource-loader.ts
+index 04102425b..55d6071f3 100644
+--- a/packages/coding-agent/src/core/resource-loader.ts
++++ b/packages/coding-agent/src/core/resource-loader.ts
+@@ -568,7 +568,7 @@ export class DefaultResourceLoader implements ResourceLoader {
+ 	}
+ 
+ 	private resolveExtensionLoadPath(path: string): string {
+-		return resolvePath(path, this.cwd, { normalizeUnicodeSpaces: true });
++		return canonicalizePath(resolvePath(path, this.cwd, { normalizeUnicodeSpaces: true }));
+ 	}
+ 
+ 	private async loadFinalExtensionSet(
+diff --git a/packages/coding-agent/test/extensions-release.test.ts b/packages/coding-agent/test/extensions-release.test.ts
+new file mode 100644
+index 000000000..ba433f001
+--- /dev/null
++++ b/packages/coding-agent/test/extensions-release.test.ts
+@@ -0,0 +1,76 @@
++import assert from "node:assert/strict";
++import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { it } from "vitest";
++import { clearExtensionCache, loadExtensionsCached } from "../src/core/extensions/loader.ts";
++import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
++import { SettingsManager } from "../src/core/settings-manager.ts";
++
++it.each([true, false])("retains symlinked extension handlers after project trust resolves to %s", async (trusted) => {
++	const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-extension-trust-")));
++	const release = join(root, "release");
++	const selected = join(root, "selected");
++	const entry = join(selected, "index.mjs");
++	try {
++		mkdirSync(release);
++		writeFileSync(join(release, "index.mjs"), 'export default pi => { pi.on("session_start", () => {}); };');
++		symlinkSync(release, selected, "junction");
++		const loader = new DefaultResourceLoader({
++			cwd: root,
++			agentDir: join(root, "agent"),
++			settingsManager: SettingsManager.inMemory({ extensions: [entry] }),
++		});
++		let preloaded: unknown;
++		await loader.reload({
++			resolveProjectTrust: async ({ extensionsResult }) => {
++				assert.equal(extensionsResult.extensions.length, 1);
++				preloaded = extensionsResult.extensions[0];
++				return trusted;
++			},
++		});
++		const result = loader.getExtensions();
++		assert.deepEqual(result.errors, []);
++		assert.equal(result.extensions.length, 1);
++		assert.equal(result.extensions[0], preloaded);
++		assert.equal(result.extensions[0]?.resolvedPath, join(release, "index.mjs"));
++		assert.equal(result.extensions[0]?.handlers.get("session_start")?.length, 1);
++	} finally {
++		clearExtensionCache();
++		rmSync(root, { recursive: true, force: true });
++	}
++});
++
++it("loads the physical ESM release after a symlink switch and rollback", async () => {
++	const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-extension-release-")));
++	const selected = join(root, "selected");
++	const entry = join(selected, "index.mjs");
++	try {
++		for (const version of ["first", "second"]) {
++			const release = join(root, version);
++			mkdirSync(release);
++			writeFileSync(join(release, "version.mjs"), `export default ${JSON.stringify(version)};`);
++			writeFileSync(
++				join(release, "index.mjs"),
++				'import version from "./version.mjs"; export default pi => pi.registerFlag("release", { type: "string", default: version });',
++			);
++		}
++		symlinkSync(join(root, "first"), selected, "junction");
++		const first = await loadExtensionsCached([entry], root);
++		assert.deepEqual(first.errors, []);
++		assert.equal(first.runtime.flagValues.get("release"), "first");
++		for (const version of ["second", "first"]) {
++			unlinkSync(selected);
++			symlinkSync(join(root, version), selected, "junction");
++			const result = await loadExtensionsCached([entry], root);
++			assert.deepEqual(result.errors, []);
++			assert.equal(result.runtime.flagValues.get("release"), version);
++			assert.equal(result.extensions[0]?.path, entry);
++			assert.equal(result.extensions[0]?.resolvedPath, join(root, version, "index.mjs"));
++			assert.equal(first.runtime.flagValues.get("release"), "first");
++		}
++	} finally {
++		clearExtensionCache();
++		rmSync(root, { recursive: true, force: true });
++	}
++});

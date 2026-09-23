@@ -1,0 +1,57 @@
+.inbox-header { position: relative; }
+.inbox-header:has(.chat-picker-popover) { z-index: 10; }
+.chat-picker { position: static; flex: 0 0 auto; }
+.chat-picker-popover { position: absolute; top: calc(100% + var(--space-1)); left: var(--space-3); right: var(--space-3); max-height: min(640px, calc(100dvh - 130px - env(safe-area-inset-bottom))); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-2); background: var(--bg); color: var(--text); box-shadow: 0 12px 36px rgb(0 0 0 / 35%); }
+.chat-picker-header { flex: 0 0 auto; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3); border-bottom: 1px solid var(--border); }
+.chat-picker-header h2 { flex: 1; min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: var(--text-md); }
+.chat-picker-actions { display: flex; gap: var(--space-1); }
+.chat-picker-actions button { min-height: var(--touch); padding: 0 var(--space-2); border-radius: var(--radius-2); color: var(--text); background: var(--surface-2); }
+.chat-picker-trigger { width: var(--touch); height: var(--touch); display: grid; place-items: center; padding: 0; border-radius: var(--radius-2); color: var(--bg); background: var(--accent); font-size: 26px; font-weight: 600; line-height: 1; }
+.chat-picker-panel { display: flex; flex-direction: column; gap: var(--space-3); overflow-y: auto; overscroll-behavior: contain; padding: var(--space-3); }
+.chat-picker-panel > * { flex-shrink: 0; min-width: 0; }
+.chat-picker-panel input { min-width: 0; width: 100%; padding: 10px; border: 0; border-radius: var(--radius-2); color: var(--text); background: var(--surface-2); }
+.chat-picker-panel button { min-height: 44px; padding: 8px 12px; border-radius: 6px; color: var(--text); background: var(--surface-2); }
+.chat-picker-panel button:hover:not(:disabled) { background: var(--border); }
+.chat-picker-list { display: flex; flex-direction: column; gap: 5px; }
+.chat-picker-model-group + .chat-picker-model-group { margin-top: var(--space-3); }
+.chat-picker-model-group h3 { display: flex; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-2); color: var(--muted); font-size: var(--text-xs); font-weight: 700; }
+.chat-picker-model-group h3 small { font-size: inherit; font-weight: 400; }
+.chat-picker-list button { display: flex; width: 100%; min-width: 0; gap: 10px; align-items: center; text-align: left; }
+.chat-picker-identities { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: var(--space-2); }
+.chat-picker-panel .chat-picker-identity { min-height: 64px; display: grid; place-items: center; padding: var(--space-3); }
+.chat-picker-identity .thread-provider, .chat-picker-identity .chat-picker-archive-icon { width: 30px; height: 30px; }
+.chat-picker-identity > span:not(.chat-picker-identity-label) { font-size: 25px; }
+.chat-picker-identity-label { overflow: hidden; font-size: var(--text-sm); font-weight: 700; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.chat-picker-list small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.chat-picker-list span { min-width: 0; overflow-wrap: anywhere; }
+.chat-picker-list button > span:nth-child(2) { flex: 1; }
+.chat-picker-panel .thread-provider, .chat-picker-archive-icon { width: 22px; height: 22px; flex-shrink: 0; }
+.chat-picker-archive-icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+.chat-picker-panel p { margin: 0; overflow-wrap: anywhere; }
+.chat-picker-count { color: var(--muted); font-size: 12px; }
+.chat-picker-count:empty, .chat-picker-list:empty, .chat-picker-identities:empty { display: none; }
+.chat-picker-address { min-width: 0; }
+.chat-picker-address summary { padding: 10px 0; cursor: pointer; color: var(--muted); }
+.chat-picker-address form { display: flex; flex-direction: column; gap: 8px; }
+.messaging-link { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.messaging-link form { display: flex; flex-direction: column; gap: 8px; }
+.messaging-link label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 12px; }
+.messaging-link label input { color: var(--text); font-size: 15px; }
+.messaging-link-start { font-weight: 600; color: var(--bg); background: var(--accent); }
+.chat-picker-panel .messaging-link-start:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+.messaging-link-steps { display: flex; flex-direction: column; gap: 4px; margin: 0; padding-left: 20px; color: var(--muted); }
+.messaging-link-qr { display: grid; place-items: center; padding: 12px; border-radius: var(--radius-2); background: #fff; }
+.messaging-link-qr svg { width: 100%; max-width: 260px; height: auto; }
+.messaging-link-uri { overflow-wrap: anywhere; }
+.messaging-link-actions { display: flex; gap: 8px; }
+.messaging-link-actions button { flex: 1; }
+.chat-picker-contexts { display: flex; flex-direction: column; gap: 4px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.chat-picker-contexts legend { display: flex; width: 100%; justify-content: space-between; gap: var(--space-2); padding: 0 0 6px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.chat-picker-contexts-total { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.chat-picker-context { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 12px; border-radius: 6px; background: var(--surface-2); cursor: pointer; }
+.chat-picker-context:hover { background: var(--border); }
+.chat-picker-contexts:disabled .chat-picker-context { cursor: default; opacity: 0.6; }
+.chat-picker-context input { width: 18px; height: 18px; margin: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); }
+.chat-picker-context-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.chat-picker-context-tokens { flex-shrink: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+@media (min-width: 900px) { .chat-picker-popover { max-height: min(720px, calc(100dvh - 90px)); } }

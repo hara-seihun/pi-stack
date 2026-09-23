@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""What the fleet's tool calls are failing at, ranked.
+
+Reads the orchestrator's shared per-run transcripts, classifies every failed
+tool call, and prints the taxonomy with rates. The point is to separate the
+errors that are the machine's fault from failures in the agent's own work,
+because only the first kind is fixable from here.
+"""
+
+from __future__ import annotations
+
+import argparse
+import calendar
+import collections
+import glob
+import json
+import os
+import re
+import sys
+import time
+
+RUNS = os.environ.get("PI_ORCHESTRATOR_RUNS", "/var/lib/pi-orchestrator/runs")
+
+# Ordered: the first pattern that matches wins, so put the specific causes
+# above the generic ones. A category is worth adding when you have looked at a
+# cluster and know what it means; anything left over lands in `agent's own
+# work`, which is the honest answer for a failed task.
+RULES: list[tuple[str, str, str]] = [
+    ("machine", "ledger unreachable (fetch failed / 5xx / refused)",
+     r"ConnectionRefused|fetch failed|HTTP 50\d|Bad gateway|socket hang up|Connection refused"),
+    ("machine", "ledger request timed out",
+     r"Request timed out|HTTP 524|Gateway time-?out"),
+    ("machine", "python module missing",
+     r"ModuleNotFoundError: No module named"),
+    ("machine", "command or shared file not found",
+     r"command not found|cannot open shared object|No such file or directory"),
+    ("machine", "permission denied",
+     r"EACCES|[Pp]ermission denied"),
+    ("machine", "out of memory",
+     r"MemoryError|std::bad_alloc|Cannot allocate memory|out of memory"),
+
+    ("interface", "asked for more than a cap allows",
+     r"Too big: expected number|exceeded the .* budget"),
+    ("interface", "wrong parameter name or type",
+     r"Invalid input: expected|Invalid option: expected|Validation failed for tool|Invalid arguments for tool"),
+    ("interface", "sql named a column or view that does not exist",
+     r"(column|relation) .{1,80} does not exist"),
+    ("interface", "ledger refused the write on a domain rule",
+     r'\{\\?"error\\?"'),
+    ("interface", "rate limit",
+     r"checks in an hour|rate limit|429"),
+    ("interface", "shell quoting broke the command",
+     r"unexpected EOF while looking|syntax error near unexpected token"),
+    ("interface", "bash call refused by the timeout guard",
+     r"bash was called with"),
+    ("interface", "edit: oldText did not match",
+     r"Could not find (the exact text|edits\[)"),
+    ("interface", "edit: oldText not unique",
+     r"Found \d+ occurrences"),
+    ("interface", "read past end of file",
+     r"Offset \d+ is beyond end of file"),
+
+    ("workload", "command hit its timeout",
+     r"Command timed out after|exited with code 124"),
+    ("workload", "command aborted",
+     r"^Command aborted"),
+]
+
+SCALE = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_since(value: str) -> float:
+    match = re.fullmatch(r"(\d+)\s*([mhdw])", value.strip().lower())
+    if not match:
+        sys.exit(f"--since wants an interval like 6h, 2d, 1w (got {value!r})")
+    return time.time() - int(match.group(1)) * SCALE[match.group(2)]
+
+
+def classify(text: str) -> tuple[str, str]:
+    for kind, name, pattern in RULES:
+        if re.search(pattern, text, re.M):
+            return kind, name
+    return "agent", "the agent's own work"
+
+
+def failures(since: float, tool: str | None):
+    for path in glob.glob(os.path.join(RUNS, "*", "events.jsonl")):
+        if os.path.getmtime(path) < since:
+            continue
+        run = os.path.basename(os.path.dirname(path))
+        try:
+            handle = open(path, errors="replace")
+        except OSError as e:
+            print(f"{path}: {e}", file=sys.stderr)
+            continue
+        with handle:
+            calls: dict[str, dict] = {}
+            for line in handle:
+                if '"tool_start"' not in line and '"tool_end"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                payload = event.get("payload") or {}
+                if event.get("type") == "tool_start":
+                    calls[payload.get("toolCallId")] = payload
+                    continue
+                name = payload.get("name")
+                if tool and name != tool:
+                    continue
+                when = event.get("time", "")
+                # Transcript times are UTC ISO; timegm reads them as UTC, where
+                # mktime would read them as local and be an hour out half the year.
+                stamp = calendar.timegm(time.strptime(when[:19], "%Y-%m-%dT%H:%M:%S")) if when else 0
+                if stamp and stamp < since:
+                    continue
+                yield {
+                    "run": run,
+                    "tool": name,
+                    "time": when,
+                    "failed": bool(payload.get("error")),
+                    "args": (calls.get(payload.get("toolCallId")) or {}).get("args"),
+                    "output": str(payload.get("output") or "")[:4000],
+                }
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--since", default="24h", help="window, e.g. 6h, 2d, 1w (default 24h; transcripts are pruned at 7d)")
+    ap.add_argument("--tool", help="only this tool (bash, mcp, mcpScript, edit, read, write)")
+    ap.add_argument("--show", metavar="SUBSTRING", help="print examples from the categories matching this")
+    ap.add_argument("--examples", type=int, default=5, help="how many examples --show prints (default 5)")
+    ap.add_argument("--json", action="store_true", help="every classified failure, one object per line")
+    args = ap.parse_args()
+
+    since = parse_since(args.since)
+    calls = 0
+    per_tool = collections.Counter()
+    per_tool_failed = collections.Counter()
+    counts: collections.Counter = collections.Counter()
+    samples: dict[tuple[str, str], list[dict]] = collections.defaultdict(list)
+
+    for call in failures(since, args.tool):
+        calls += 1
+        per_tool[call["tool"]] += 1
+        if not call["failed"]:
+            continue
+        per_tool_failed[call["tool"]] += 1
+        category = classify(call["output"])
+        counts[category] += 1
+        samples[category].append(call)
+        if args.json:
+            print(json.dumps({**call, "kind": category[0], "category": category[1]}))
+
+    if args.json:
+        return
+
+    failed = sum(counts.values())
+    if not calls:
+        print(f"no fleet tool calls in the last {args.since} under {RUNS}")
+        return
+
+    print(f"{failed} failed of {calls} tool calls in the last {args.since} ({100 * failed / calls:.1f}%)\n")
+    print(f"{'':2}{'failed':>7} {'calls':>7}  tool")
+    for tool, n in per_tool.most_common():
+        print(f"{'':2}{per_tool_failed[tool]:>7} {n:>7}  {tool}")
+
+    legend = {
+        "machine": "the machine is broken here; fix it",
+        "interface": "a tool refused a call it could have served, or taught nothing",
+        "workload": "the work did not fit the bounds it was given",
+        "agent": "the agent's own work; not a machine fault",
+    }
+    for kind in ("machine", "interface", "workload", "agent"):
+        rows = [(c, n) for c, n in counts.most_common() if c[0] == kind]
+        if not rows:
+            continue
+        print(f"\n{kind.upper()} — {legend[kind]}")
+        for (_, name), n in rows:
+            print(f"{n:6d} {100 * n / failed:5.1f}%  {name}")
+
+    if args.show:
+        wanted = [c for c in counts if args.show.lower() in c[1].lower()]
+        if not wanted:
+            print(f"\nnothing matching {args.show!r}; the category names above are what --show filters on")
+        for category in wanted:
+            print(f"\n=== {category[1]} ===")
+            for call in samples[category][: args.examples]:
+                print(f"--- {call['time']} {call['tool']} run {call['run']}")
+                if call["args"]:
+                    print("  call:  " + json.dumps(call["args"])[:400])
+                print("  error: " + call["output"][:400].replace("\n", "\n         "))
+
+
+if __name__ == "__main__":
+    # `fleet-errors --json | head` is the obvious way to sample the stream, and
+    # Python's default turns that into a traceback. Die the way every other
+    # command does when its reader goes away.
+    import signal
+
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    main()

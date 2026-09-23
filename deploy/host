@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Deploy the checked-out Pi stack commit to this machine.
+#
+#   deploy/host [HOST_FILE]     defaults to /etc/pi-stack/host.json
+#
+# The host file names the account that runs the fleet daemon and any packages
+# and skills this machine adds for every person. Persons come from Pi Remote's
+# registry under /var/lib/pi-remote/persons. Everything else is the same on
+# every host: one runtime under /srv/pi, one orchestrator, one Pi Remote, the
+# tools, the skills, and each account's Pi settings and command links.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+export PI_STACK_HOST_FILE=${1:-$(pi_stack_host_file)}
+[[ -f $PI_STACK_HOST_FILE ]] || { echo "usage: deploy/host [HOST_FILE]; $PI_STACK_HOST_FILE does not exist" >&2; exit 64; }
+jq -e '.version == 1' "$PI_STACK_HOST_FILE" >/dev/null || { echo "$PI_STACK_HOST_FILE must declare version 1" >&2; exit 64; }
+
+# Rehearsals never touch host services or require their credentials.
+services=1
+if [[ -n ${PI_STACK_REMOTE_DEST:-}${PI_STACK_ORCHESTRATOR_DEST:-}${PI_STACK_RUNTIME_DEST:-} && ${PI_STACK_SERVICES:-0} != 1 ]]; then
+  services=0
+fi
+if (( services )); then
+  pi_stack_check_person_configs
+  "$root/deploy/voice" --check
+fi
+
+fleet=$(pi_stack_fleet_user)
+mapfile -t users < <(pi_stack_users)
+(( ${#users[@]} > 0 )) || { echo "no Pi accounts: set fleetUser in $PI_STACK_HOST_FILE or add a person with pi-remote person add" >&2; exit 64; }
+if (( services )); then
+  daemon_units=$(pi_stack_daemon_units "${users[@]}") || { echo 'could not discover Orchestrator daemon units' >&2; exit 1; }
+  daemons=()
+  if [[ -n $daemon_units ]]; then mapfile -t daemons <<< "$daemon_units"; fi
+fi
+
+# Builds share checkout dependencies, not output directories. Prepare them
+# together while the independent production runtime and transcription install.
+pi_stack_prepare_builds "$root" &
+builds_pid=$!
+"$root/deploy/runtime" &
+runtime_pid=$!
+"$root/deploy/transcription" &
+transcription_pid=$!
+preparation_failed=0
+wait "$builds_pid" || preparation_failed=1
+wait "$runtime_pid" || preparation_failed=1
+wait "$transcription_pid" || preparation_failed=1
+(( preparation_failed == 0 )) || exit 1
+
+expected=$(git -C "$root" rev-parse HEAD)
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+skills=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
+tools=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
+previous_remote=""
+previous_remote_release=""
+if [[ -f $remote/.pi-stack-commit ]]; then
+  previous_remote=$(<"$remote/.pi-stack-commit")
+  previous_remote_release=$(readlink -f "$remote")
+fi
+"$root/deploy/orchestrator"
+# Once Orchestrator is selected, Remote, the tools and the accounts touch
+# disjoint state: separate release directories, ~/.local/bin, and ~/.pi/agent.
+# The shared skills release is published once, serially; each account's
+# settings and package install then proceed in parallel.
+"$root/deploy/remote" &
+remote_pid=$!
+"$root/deploy/tools" &
+tools_pid=$!
+(
+  set -euo pipefail
+  for user in "${users[@]}"; do
+    "$root/deploy/skills" "$user"
+  done
+  settings_pids=()
+  for user in "${users[@]}"; do
+    "$root/deploy/settings" "$user" &
+    settings_pids+=($!)
+  done
+  settings_failed=0
+  for pid in "${settings_pids[@]}"; do wait "$pid" || settings_failed=1; done
+  exit "$settings_failed"
+) &
+accounts_pid=$!
+publish_failed=0
+wait "$remote_pid" || publish_failed=1
+wait "$tools_pid" || publish_failed=1
+wait "$accounts_pid" || publish_failed=1
+(( publish_failed == 0 )) || exit 1
+
+for artifact in "$runtime" "$orchestrator" "$remote" "$skills" "$tools"; do
+  [[ -f $artifact/.pi-stack-commit && $(<"$artifact/.pi-stack-commit") == "$expected" ]] || {
+    echo "$artifact does not carry Pi stack $expected" >&2
+    exit 1
+  }
+done
+
+if (( ! services )); then
+  printf 'deployed Pi stack %s for %s into overridden destinations; services left alone\n' "$expected" "${users[*]}"
+  exit 0
+fi
+
+# The browser doctor opens a disposable session against the already selected
+# runtime and the account's just-reconciled settings; it touches no service, so
+# it runs alongside activation. A failure rolls the release back like a failed
+# smoke check.
+doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-browser-doctor.XXXXXXXX")
+pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs" >"$doctor_log" 2>&1 &
+doctor_pid=$!
+
+# Every enabled or running person's daemon restarts on release; live workers keep the
+# release they recorded. The front door restarts only when Pi Remote changed, and each
+# running supervisor is then handed the new release without ending active turns.
+router_base=http://127.0.0.1:${PI_REMOTE_ROUTER_PORT:-8788}
+# The front door starts every open person's supervisor before it listens, so
+# right after a restart the port is closed for as long as those starts take.
+# Nothing may judge the release through a closed port.
+wait_for_router() {
+  local deadline=$((SECONDS + 20))
+  while (( SECONDS < deadline )); do
+    curl -fsS --max-time 2 "$router_base/v1/router-health" >/dev/null 2>&1 && return 0
+    sleep 0.1
+  done
+  echo "pi-remote-router.service did not answer within 20 seconds" >&2
+  return 1
+}
+supervisor_commit() {
+  pi_stack_supervisor_health "$1" 2>/dev/null | jq -r '.releaseCommit // empty' 2>/dev/null
+}
+remote_matches_release() {
+  local target_commit=$1 user
+  local -a unlocked_users=()
+  wait_for_router || return 1
+  mapfile -t unlocked_users < <(curl -fsS --max-time 2 "$router_base/v1/router-health" 2>/dev/null | jq -r '.people[] | select(.unlocked) | .user' 2>/dev/null)
+  for user in "${unlocked_users[@]}"; do
+    [[ $(supervisor_commit "$user") == "$target_commit" ]] || return 1
+  done
+}
+activate_remote() {
+  local target_commit=$1 user response deadline
+  local -a unlocked_users=()
+  pi_stack_as_root systemctl restart pi-remote-router.service || return 1
+  wait_for_router || return 1
+  # A supervisor the front door has just started already runs the selected
+  # release; only one that reports another commit is asked to hand over.
+  mapfile -t unlocked_users < <(curl -fsS --max-time 2 "$router_base/v1/router-health" 2>/dev/null | jq -r '.people[] | select(.unlocked) | .user' 2>/dev/null)
+  for user in "${unlocked_users[@]}"; do
+    [[ $(supervisor_commit "$user") == "$target_commit" ]] && continue
+    PI_REMOTE_SERVICE="pi-remote@$user.service" "$root/apps/remote/activate"
+  done
+  for user in "${unlocked_users[@]}"; do
+    deadline=$((SECONDS + 20))
+    while (( SECONDS < deadline )); do
+      [[ $(supervisor_commit "$user") == "$target_commit" ]] && continue 2
+      sleep 0.1
+    done
+    echo "pi-remote@$user.service did not activate Pi Remote $target_commit" >&2
+    return 1
+  done
+}
+activation_failed=0
+if (( ${#daemons[@]} )); then
+  pi_stack_as_root systemctl restart "${daemons[@]}" || activation_failed=1
+fi
+broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || activation_failed=1
+mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
+if (( ${#brokers[@]} )); then
+  pi_stack_as_root systemctl restart "${brokers[@]}" || activation_failed=1
+fi
+if ! "$root/deploy/voice" --activate; then
+  activation_failed=1
+elif [[ $previous_remote != "$expected" ]]; then
+  activate_remote "$expected" || activation_failed=1
+elif ! remote_matches_release "$expected"; then
+  # Publication can finish before a deployment is interrupted. Reconcile a
+  # selected release whose supervisors never received the activation handoff.
+  activate_remote "$expected" || activation_failed=1
+fi
+
+# Then walk the front door the way the clients do. A release that locks a
+# person out of the app goes back to the previous Pi Remote release on the
+# spot, and the deployment fails loudly instead of quietly.
+smoke_failed=0
+if (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
+doctor_failed=0
+wait "$doctor_pid" || doctor_failed=1
+cat "$doctor_log"; rm -f "$doctor_log"
+(( doctor_failed == 0 )) || echo 'browser doctor failed' >&2
+if (( smoke_failed || doctor_failed )); then
+    if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
+      echo "activation, smoke or browser check failed; returning Pi Remote to $previous_remote" >&2
+      candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
+      pi_stack_as_root ln -s "$previous_remote_release" "$candidate"
+      pi_stack_as_root mv -Tf "$candidate" "$remote"
+      # A supervisor that crashed on the rejected release may have hit its
+      # start limit; the previous release cannot come back through a unit
+      # systemd refuses to start.
+      pi_stack_as_root systemctl reset-failed 'pi-remote@*.service' 2>/dev/null || true
+      if [[ -f $previous_remote_release/server/voice/service.ts ]]; then
+        "$root/deploy/voice" --activate || echo 'Voice rollback failed' >&2
+      else
+        pi_stack_as_root systemctl stop pi-stack-voice.service
+      fi
+      activate_remote "$previous_remote" || true
+      if [[ -x $previous_remote_release/deploy/smoke ]]; then
+        "$previous_remote_release/deploy/smoke" || echo 'The restored release failed its own smoke check' >&2
+      fi
+    fi
+    echo "Pi stack $expected is not accepted on this host" >&2
+    exit 1
+fi
+printf 'deployed Pi stack %s for %s\n' "$expected" "${users[*]}"

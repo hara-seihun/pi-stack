@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enforce_deploy_deadline "$0" "$@"
+pi_stack_acquire_deploy_lock "$root"
+if [[ -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted Pi stack" >&2
+  exit 65
+fi
+pi_stack_prepare_dependencies "$root"
+cd "$root/apps/kenan"
+
+trap 'adb kill-server >/dev/null 2>&1 || true' EXIT
+
+npm run android:test
+endpoint=$(./connect-adb)
+apk=android/app/build/outputs/apk/debug/app-debug.apk
+application_id=$(jq -r .appId capacitor.config.json)
+development_id="$application_id.dev"
+expected=$(jq -r .version package.json)
+expected_name=$(jq -r .appName capacitor.config.json)
+
+[[ $(apkanalyzer manifest application-id "$apk") == "$application_id" ]] || { echo "APK has the wrong package id" >&2; exit 1; }
+[[ $(apkanalyzer manifest version-name "$apk") == "$expected" ]] || { echo "APK has the wrong version" >&2; exit 1; }
+[[ $(apkanalyzer resources value --config default --type string --name app_name "$apk") == "$expected_name" ]] \
+  || { echo "APK has the wrong application name" >&2; exit 1; }
+
+adb -s "$endpoint" install -r "$apk"
+installed=$(adb -s "$endpoint" shell dumpsys package "$application_id" \
+  | awk -F= '/versionName=/ { gsub(/\r/, "", $2); print $2; exit }')
+[[ $installed == "$expected" ]] || { echo "installed Kenan version $installed; expected $expected" >&2; exit 1; }
+launch=$(adb -s "$endpoint" shell am start -W -n "$application_id/.MainActivity")
+[[ $launch == *"Status: ok"* ]] || { printf '%s\n' "$launch" >&2; exit 1; }
+
+if adb -s "$endpoint" shell pm path "$development_id" | grep -q '^package:'; then
+  adb -s "$endpoint" uninstall "$development_id"
+fi
+packages=$(adb -s "$endpoint" shell pm list packages | tr -d '\r' | grep '^package:works\.kenan\.piremote\.kenan' || true)
+[[ $packages == "package:$application_id" ]] || { printf 'unexpected Kenan packages:\n%s\n' "$packages" >&2; exit 1; }
+printf 'Kenan %s replaced the native client on %s\n' "$installed" "$endpoint"

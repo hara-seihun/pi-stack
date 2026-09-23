@@ -1,0 +1,11 @@
+{
+  "name": "@hara-seihun/anthropic-beta-guard",
+  "version": "1.0.0",
+  "description": "Send Anthropic's long-context beta only to models that have a long context",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0" },
+  "scripts": { "test": "node --test guard.test.mjs" }
+}

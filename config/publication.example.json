@@ -1,0 +1,43 @@
+{
+  "repositoryUrl": "https://github.com/example/pi-stack.git",
+  "mergeAuthor": {
+    "name": "Pi Stack publication owner",
+    "email": "publication@example.org"
+  },
+  "targets": [
+    {
+      "id": "primary",
+      "environmentId": "local",
+      "sshHost": null,
+      "releaseCommand": "/home/operator/machine/pi-stack-release",
+      "checkServicesCommand": "/home/operator/machine/pi-stack-check-services",
+      "releaseRepository": "/home/operator/.local/state/pi-stack-release/repository",
+      "androidTransferRoot": null,
+      "hostConfig": "/etc/pi-stack/host.json",
+      "requiredUnits": ["pi-remote-router.service", "pi-stack-voice.service"],
+      "voiceStatusUrl": "http://127.0.0.1:8796/status"
+    },
+    {
+      "id": "secondary",
+      "environmentId": "remote",
+      "sshHost": "remote-release-alias",
+      "releaseCommand": "/home/operator/machine/pi-stack-release",
+      "checkServicesCommand": "/home/operator/machine/pi-stack-check-services",
+      "releaseRepository": "/home/operator/.local/state/pi-stack-release/repository",
+      "androidTransferRoot": "/home/operator/.cache/pi-stack-app-updates",
+      "hostConfig": "/etc/pi-stack/host.json",
+      "requiredUnits": ["pi-remote-router.service", "pi-stack-voice.service"],
+      "voiceStatusUrl": "http://127.0.0.1:8796/status"
+    }
+  ],
+  "paths": {
+    "canonicalRepository": "/home/operator/projects/pi-stack",
+    "androidProperties": "/home/operator/projects/pi-stack/apps/kenan/android/local.properties",
+    "installedCommand": "/home/operator/machine/pi-stack-publication",
+    "stateRoot": "/home/operator/.local/state/pi-stack-publication",
+    "userUnitRoot": "/home/operator/.config/systemd/user",
+    "repairWorkspaceRoot": "/home/operator/work/clones",
+    "piCommand": "/home/operator/.local/bin/pi",
+    "alertInbox": "/var/lib/machine-alerts/inbox"
+  }
+}

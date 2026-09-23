@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Publish the reviewed skills under /srv/pi/skills, then link them, plus the
+# host's own skills, into one account's Pi skill directory.
+#
+#   deploy/skills [USER]      defaults to the invoking account
+#   deploy/skills --links-only USER
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+links_only=0
+if [[ ${1:-} == --links-only && $# == 2 ]]; then
+  links_only=1
+  shift
+elif (( $# > 1 )); then
+  echo 'usage: deploy/skills [USER] | --links-only USER' >&2; exit 64
+fi
+user=${1:-$(id -un)}
+dest=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
+manifest="$root/config/skills.json"
+home=$(pi_stack_home "$user")
+[[ -n $home && -d $home ]] || { echo "no home directory for $user" >&2; exit 64; }
+agent_dir=$home/.pi/agent
+cd "$root"
+commit=$(git rev-parse HEAD)
+if (( links_only )); then
+  pi_stack_require_release "$dest" "$commit"
+else
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-skills.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+mkdir -p "$stage/release"
+while IFS= read -r skill; do
+  rsync -a --chmod=D755,F644 "skills/$skill/" "$stage/release/$skill/"
+done < <(jq -r '.skills[]' "$manifest")
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage/release" "$dest" skills
+fi
+
+# The desired set: every reviewed skill from the release, and every host skill
+# directory named in the host file, each linked under its own directory name.
+declare -A wanted=()
+while IFS= read -r skill; do wanted["$skill"]="$dest/$skill"; done < <(jq -r '.skills[]' "$manifest")
+if [[ -f $(pi_stack_host_file) ]]; then
+  while IFS= read -r path; do
+    [[ -n $path ]] || continue
+    [[ -f $path/SKILL.md ]] || { echo "host skill has no SKILL.md: $path" >&2; exit 1; }
+    wanted["$(basename "$path")"]="$path"
+  done < <(pi_stack_host_value '.skills[]? // empty')
+fi
+
+owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
+pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.pi" "$agent_dir" "$agent_dir/skills"
+# Links we manage point into the release or into a host skill; anything else in
+# the directory belongs to the person and is left alone.
+while IFS= read -r -d '' target; do
+  link=$(pi_stack_as_root readlink "$target")
+  name=$(basename "$target")
+  managed=0
+  [[ $link == "$dest/"* ]] && managed=1
+  [[ -n ${wanted[$name]:-} ]] && managed=1
+  if (( managed )) && [[ ${wanted[$name]:-} != "$link" ]]; then
+    pi_stack_as_root rm -- "$target"
+  fi
+done < <(pi_stack_as_root find "$agent_dir/skills" -mindepth 1 -maxdepth 1 -type l -print0)
+for name in "${!wanted[@]}"; do
+  target="$agent_dir/skills/$name"
+  if ! pi_stack_as_root test -L "$target" || [[ $(pi_stack_as_root readlink "$target") != "${wanted[$name]}" ]]; then
+    pi_stack_as_root rm -rf -- "$target"
+    pi_stack_as_root ln -s "${wanted[$name]}" "$target"
+    pi_stack_as_root chown -h "$owner:$group" "$target"
+  fi
+done
+printf 'deployed Pi skills from %s for %s\n' "$commit" "$user"

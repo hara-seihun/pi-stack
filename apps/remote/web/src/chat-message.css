@@ -1,0 +1,11 @@
+.message-avatar { flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; object-fit: cover; align-self: center; }
+.message-time { flex: 0 1 auto; padding-top: 5px; color: var(--muted); font-size: 11px; text-align: right; }
+.message-text { white-space: pre-wrap; }
+p.message-text { margin: 0; }
+.message-segment + .message-segment { margin-top: var(--space-2); }
+.message-attachment { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.message-attachment a { color: var(--accent); }
+.message-metrics, .message-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.message-metrics { font-variant-numeric: tabular-nums; }
+.message-status.failed, .message-status.unknown { color: var(--danger); }
+.message-delivery-action { margin-top: 8px; }

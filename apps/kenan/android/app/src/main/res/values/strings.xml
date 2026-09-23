@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Kenan</string>
+    <string name="title_activity_main">Kenan</string>
+    <string name="package_name">works.kenan.piremote.kenan</string>
+    <string name="custom_url_scheme">works.kenan.piremote.kenan</string>
+</resources>

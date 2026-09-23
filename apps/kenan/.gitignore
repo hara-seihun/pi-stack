@@ -1,0 +1,6 @@
+dist/
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+android/local.properties

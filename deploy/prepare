@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Prepare everything deploy/host would otherwise build inside its 50-second
+# deadline: checkout dependencies, the Orchestrator and Remote builds, the
+# production runtime tree and the transcription runtime. Every step is
+# idempotent and receipt-cached, so deploy/host then reuses the results and
+# spends its whole budget on publishing, activation and smoke checks.
+#
+# Host release wrappers call this before deploy/host. Preparation touches no
+# running service, so it runs without the deployment deadline; the caller
+# (the publication step or an operator) bounds it.
+#
+#   deploy/prepare
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_acquire_deploy_lock "$root"
+export PI_STACK_DEPLOY_DEADLINE_ACTIVE=1
+if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to prepare an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+  exit 65
+fi
+
+started=$SECONDS
+pi_stack_prepare_builds "$root" &
+builds_pid=$!
+"$root/deploy/runtime" &
+runtime_pid=$!
+"$root/deploy/transcription" &
+transcription_pid=$!
+failed=0
+for job in "builds:$builds_pid" "runtime:$runtime_pid" "transcription:$transcription_pid"; do
+  if wait "${job#*:}"; then continue; else status=$?; fi
+  printf 'Pi stack preparation %s exited %s\n' "${job%%:*}" "$status" >&2
+  failed=1
+done
+(( failed == 0 )) || { echo "Pi stack preparation failed" >&2; exit 1; }
+printf 'prepared Pi stack %s in %ss\n' "$(git -C "$root" rev-parse --short HEAD)" "$((SECONDS - started))"

@@ -1,0 +1,15 @@
+[Unit]
+Description=Dedicated local Pi repair for publication %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=@PUBLICATION_COMMAND@ repair-run %i
+RuntimeMaxSec=22min
+TimeoutStopSec=10s
+KillMode=control-group
+Restart=no
+UMask=0077
+Environment=PATH=@PUBLICATION_PATH@
+Environment=PI_SKIP_VERSION_CHECK=1

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+(($# > 0)) || { echo "usage: pi-remote-supervise COMMAND [ARG ...]" >&2; exit 64; }
+child=""
+stopping=0
+
+handoff() {
+  [[ -n $child ]] && kill -USR2 "$child" 2>/dev/null || true
+}
+stop() {
+  stopping=1
+  [[ -n $child ]] && kill -TERM "$child" 2>/dev/null || true
+}
+trap handoff HUP
+trap stop TERM INT
+
+while true; do
+  "$@" &
+  child=$!
+  while true; do
+    set +e
+    wait "$child"
+    status=$?
+    set -e
+    kill -0 "$child" 2>/dev/null || break
+  done
+  child=""
+  ((stopping)) && exit 0
+  [[ $status -eq 75 ]] || exit "$status"
+done

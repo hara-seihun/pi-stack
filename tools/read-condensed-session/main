@@ -1,0 +1,144 @@
+#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { takeOption } from "../shared/arguments.mjs";
+import {
+  DEFAULT_THRESHOLD,
+  activePath,
+  buildEpisodes,
+  contextThrough,
+  episodeJobs,
+  flattenPath,
+  itemsSince,
+  lookupSummaries,
+  markVerbatim,
+  openSummaryDb,
+  parseSession,
+  pass1Jobs,
+  renderCondensed,
+  storeSummary,
+} from "./condense.mjs";
+import { promptForJob } from "./prompts.mjs";
+import { DEFAULT_MODEL, disposeModelRuntime, summarizeDirect } from "./runtime.mjs";
+
+const DEFAULT_CONCURRENCY = 16;
+
+const HELP = `usage: read-condensed-session [OPTIONS] SESSION.jsonl
+
+Render the active path of a Pi session as an episode-condensed transcript.
+
+options:
+  --threshold CHARS    pre-summarize blocks and condense episodes at this source size (default: 16000)
+  --since TIMESTAMP    include only activity at or after this ISO timestamp
+  --output FILE        write the transcript and print only statistics
+  --model MODEL        summarizer model id or provider/model (default: ${DEFAULT_MODEL})
+  --thinking LEVEL     summarizer reasoning level (default: low)
+  --concurrency N      parallel direct model requests (default: ${DEFAULT_CONCURRENCY})
+  --db FILE            summary cache (default: ~/.local/share/session-condenser/summaries.sqlite3)`;
+
+function positiveInteger(value, label, minimum = 1) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum) throw new Error(`${label} must be an integer at least ${minimum}`);
+  return parsed;
+}
+
+async function summarizeJobs({ jobs, summaries, db, options, wave }) {
+  for (const [hash, record] of lookupSummaries(db, jobs.map((job) => job.hash))) summaries.set(hash, record);
+  const missing = jobs.filter((job) => !summaries.has(job.hash));
+  const cached = jobs.length - missing.length;
+  if (missing.length === 0) return { cached, fresh: 0 };
+  process.stderr.write(`${wave}: ${cached}/${jobs.length} cached; summarizing ${missing.length}\n`);
+  let completed = 0;
+  let index = 0;
+  const worker = async () => {
+    for (;;) {
+      const job = missing[index++];
+      if (!job) return;
+      try {
+        const response = await summarizeDirect(promptForJob(job.kind, job.text), options);
+        const record = { summary: response.text, model: response.model };
+        summaries.set(job.hash, record);
+        storeSummary(db, { hash: job.hash, kind: job.kind, chars: job.chars, ...record });
+      } catch (error) {
+        summaries.set(job.hash, { error: error?.message ?? String(error) });
+      }
+      completed++;
+      process.stderr.write(`${wave}: ${completed}/${missing.length}\r`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(options.concurrency, missing.length) }, worker));
+  process.stderr.write(`${wave}: ${completed}/${missing.length}\n`);
+  return { cached, fresh: missing.length };
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(HELP);
+    return;
+  }
+  const threshold = positiveInteger(takeOption(args, "--threshold") ?? DEFAULT_THRESHOLD, "threshold", 500);
+  const sinceOption = takeOption(args, "--since");
+  const since = sinceOption === undefined ? undefined : Date.parse(sinceOption);
+  if (sinceOption !== undefined && !Number.isFinite(since)) {
+    throw new Error("--since must be an ISO timestamp");
+  }
+  const output = takeOption(args, "--output");
+  const model = takeOption(args, "--model") ?? process.env.SESSION_CONDENSER_MODEL ?? DEFAULT_MODEL;
+  const thinking = takeOption(args, "--thinking") ?? "low";
+  const concurrency = positiveInteger(
+    takeOption(args, "--concurrency") ?? process.env.SESSION_CONDENSER_CONCURRENCY ?? DEFAULT_CONCURRENCY,
+    "concurrency",
+  );
+  const dbFile = takeOption(args, "--db") ?? process.env.SESSION_CONDENSER_DB ?? join(homedir(), ".local", "share", "session-condenser", "summaries.sqlite3");
+  if (args.length !== 1) throw new Error("pass exactly one session .jsonl path");
+
+  const sessionPath = resolve(args[0]);
+  const raw = readFileSync(sessionPath, "utf8");
+  const entries = parseSession(raw);
+  const windowItems = itemsSince(flattenPath(activePath(entries)), since);
+  const through = contextThrough(windowItems, since);
+  const items = markVerbatim(windowItems);
+  const db = openSummaryDb(resolve(dbFile));
+  try {
+    const summaries = new Map();
+    const options = { model, thinking, concurrency };
+    const firstJobs = pass1Jobs(items, threshold);
+    const first = await summarizeJobs({ jobs: firstJobs, summaries, db, options, wave: "pass 1" });
+    const segments = buildEpisodes(items, threshold, summaries);
+    const secondJobs = episodeJobs(segments);
+    const second = await summarizeJobs({ jobs: secondJobs, summaries, db, options, wave: "pass 2" });
+    const condensed = renderCondensed(
+      segments,
+      threshold,
+      summaries,
+      sessionPath,
+      entries.find((entry) => entry.type === "session"),
+      { since, through },
+    );
+    const failed = [...summaries.values()].filter((record) => record.error).length;
+    const episodes = segments.filter((segment) => segment.type === "episode");
+    const cached = first.cached + second.cached;
+    const fresh = first.fresh + second.fresh;
+    const stats = `${raw.length.toLocaleString("en-US")} chars on disk → ${condensed.length.toLocaleString("en-US")} chars condensed · pass 1: ${firstJobs.length} large blocks · pass 2: ${episodes.length} episodes / ${secondJobs.length} chunks (${episodes.reduce((total, episode) => total + episode.blocks, 0)} blocks) · ${cached} cached, ${fresh} summarized now${failed ? `, ${failed} FAILED` : ""}`;
+    if (output) {
+      writeFileSync(resolve(output), condensed);
+      console.log(`${stats}\nwritten to ${resolve(output)}`);
+    } else {
+      console.log(`${stats}\n\n${condensed}`);
+    }
+    if (failed) process.exitCode = 2;
+  } finally {
+    db.close();
+  }
+}
+
+try {
+  await main();
+} catch (error) {
+  console.error(`read-condensed-session: ${error?.message ?? error}`);
+  process.exitCode = 1;
+} finally {
+  await disposeModelRuntime();
+}

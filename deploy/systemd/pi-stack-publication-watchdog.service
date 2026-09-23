@@ -1,0 +1,11 @@
+[Unit]
+Description=Supervise publication progress and dispatch dedicated local repairs
+
+[Service]
+Type=oneshot
+ExecStart=@PUBLICATION_COMMAND@ watchdog
+TimeoutStartSec=45s
+TimeoutStopSec=5s
+KillMode=control-group
+UMask=0077
+Environment=PATH=@PUBLICATION_PATH@

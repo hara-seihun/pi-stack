@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Mount this person's folder if she has an encrypted one, then become her
+# supervisor.
+#
+# The unit runs with PrivateMounts=yes, so this whole script is already inside a
+# mount namespace of its own with private propagation. The mount below is
+# therefore visible to this process and to everything it spawns, which is every
+# pi thread she runs, and to nothing else on the machine. There is no unmount
+# path and no lock timer: stopping the unit destroys the namespace, and the
+# plaintext view goes with it.
+set -euo pipefail
+
+: "${PI_REMOTE_CONFIG:?person file required}"
+
+# This is a system service with User=, so systemd's %U is the system manager's
+# UID (root), not this process's UID. Derive the user runtime directory here;
+# audio and Proton Pass both need the real session bus and must never inherit
+# /run/user/0.
+runtime_dir="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR="$runtime_dir"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+
+cipher_dir=$(jq -r '.unlock.cipherDir // empty' "$PI_REMOTE_CONFIG")
+mountpoint_dir=$(jq -r '.unlock.mountpoint // empty' "$PI_REMOTE_CONFIG")
+
+if [[ -n $cipher_dir ]]; then
+  key="${CREDENTIALS_DIRECTORY:?systemd credentials required}/key"
+  [[ -s $key ]] || { echo "no key credential for $cipher_dir" >&2; exit 78; }
+  mkdir -p -- "$mountpoint_dir"
+  if ! mountpoint -q -- "$mountpoint_dir"; then
+    # gocryptfs forks a daemon that stays in this namespace and this cgroup, so
+    # the unit owns it and KillMode=control-group takes it down with everything
+    # else. A wrong key fails here and the unit never starts, which is what
+    # tells the front door to report the key as wrong rather than serving an
+    # empty folder.
+    gocryptfs -q -passfile "$key" -- "$cipher_dir" "$mountpoint_dir"
+  fi
+fi
+
+exec "$(dirname "$0")/pi-remote-supervise" "$@"

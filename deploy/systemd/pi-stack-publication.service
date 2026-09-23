@@ -1,0 +1,15 @@
+[Unit]
+Description=Integrate and release durable Pi Stack publications
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=@PUBLICATION_COMMAND@ drain
+TimeoutStopSec=10s
+KillMode=control-group
+UMask=0077
+Environment=PATH=@PUBLICATION_PATH@
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
