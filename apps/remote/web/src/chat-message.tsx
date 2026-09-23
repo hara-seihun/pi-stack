@@ -78,7 +78,7 @@ export type ChatMessageProps = {
   onEditImage?(image: HTMLImageElement): void;
 } & ({ contentFormat: "literal"; renderMarkdown?: never } | { contentFormat: "markdown"; renderMarkdown(text: string): ReactNode });
 
-function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identity, onReply, children }: {
+function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identity, onReply, onReact, children }: {
   kind: string;
   label: string;
   avatar?: string;
@@ -87,6 +87,7 @@ function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identit
   menu?: MessageMenuItem[];
   identity?: MessageIdentity;
   onReply?(target: ReplyTarget): void;
+  onReact?(): void;
   children: ReactNode;
 }) {
   const time = timestamp === undefined ? undefined : new Date(timestamp);
@@ -95,9 +96,10 @@ function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identit
     { label: "Copy", onSelect: () => copyText(text) },
     ...(reader && text.trim() ? [{ label: "Speak", onSelect: () => speech.speak(text, speechTitle(text)) }] : []),
     ...(identity && onReply ? [{ label: "Reply", onSelect: () => onReply(replyTarget(identity, text)) }] : []),
+    ...(onReact ? [{ label: "React", onSelect: onReact }] : []),
     ...menu,
   ]);
-  return <article className={`message ${kind}`} data-message-id={identity?.id} tabIndex={identity ? -1 : undefined} {...handlers}>
+  return <article className={`message ${kind}`} data-message-id={identity?.id} tabIndex={identity ? 0 : undefined} {...handlers}>
     <header className="message-header">
       {avatar && <img className="message-avatar" src={avatar} alt="" loading="lazy" decoding="async" />}
       <span className="message-label">{label.toUpperCase()}</span>
@@ -132,15 +134,15 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
 
 export function ChatMessage(props: ChatMessageProps) {
   const { kind, label, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions, reply, onReply } = props;
-  return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply}>
+  const [reactionsOpen, setReactionsOpen] = useState(false);
+  return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
     <MessageBody attachments={attachments} delivery={delivery} checking={checking} onCheck={onCheck} onRetry={onRetry} onEditImage={onEditImage}>
       {reply && <ReplyQuote reply={reply} />}
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}
       {props.previewMessageId && <MessageLinkPreviews key={props.previewMessageId} messageId={props.previewMessageId} />}
       {responseMetrics && <footer className="message-metrics">{formatResponseMetrics(responseMetrics)}</footer>}
     </MessageBody>
-    {identity && onReply && <button type="button" className="message-reply-action" aria-label={`Reply to ${label}`} onClick={() => onReply(replyTarget(identity, text))}>Reply</button>}
-    {identity && <MessageReactions identity={identity} reactions={reactions} />}
+    {identity && <MessageReactions identity={identity} reactions={reactions} open={reactionsOpen} onOpenChange={setReactionsOpen} />}
   </MessageFrame>;
 }
 
@@ -180,11 +182,13 @@ function GroupSegment({ segment, label, time, delivery, checking, onEditImage }:
   onEditImage?(image: HTMLImageElement): void;
 }) {
   const { identity, onReply } = segment;
+  const [reactionsOpen, setReactionsOpen] = useState(false);
   const { menu, handlers } = useMessageMenu([
     { label: "Copy", onSelect: () => copyText(segment.text) },
     ...(identity && onReply ? [{ label: "Reply", onSelect: () => onReply(replyTarget(identity, segment.text)) }] : []),
+    ...(identity ? [{ label: "React", onSelect: () => setReactionsOpen(true) }] : []),
   ]);
-  return <div className="message-segment" data-message-id={identity?.id ?? segment.id} tabIndex={identity ? -1 : undefined} title={time?.toLocaleString()}
+  return <div className="message-segment" data-message-id={identity?.id ?? segment.id} tabIndex={identity ? 0 : undefined} title={time?.toLocaleString()}
     {...handlers} onContextMenu={event => { event.stopPropagation(); handlers.onContextMenu?.(event); }}
     onPointerDown={event => { event.stopPropagation(); handlers.onPointerDown?.(event); }}
     onPointerMove={event => { event.stopPropagation(); handlers.onPointerMove?.(event); }}
@@ -196,8 +200,7 @@ function GroupSegment({ segment, label, time, delivery, checking, onEditImage }:
       {segment.text && <p className="message-text">{segment.text}</p>}
       {segment.previewMessageId && <MessageLinkPreviews key={segment.previewMessageId} messageId={segment.previewMessageId} />}
     </MessageBody>
-    {identity && onReply && <button type="button" className="message-reply-action" aria-label={`Reply to ${label}`} onClick={() => onReply(replyTarget(identity, segment.text))}>Reply</button>}
-    {identity && <MessageReactions identity={identity} reactions={segment.reactions} />}
+    {identity && <MessageReactions identity={identity} reactions={segment.reactions} open={reactionsOpen} onOpenChange={setReactionsOpen} />}
   </div>;
 }
 
