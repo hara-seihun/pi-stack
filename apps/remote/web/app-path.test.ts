@@ -42,6 +42,13 @@ test("one built frontend serves root and prefix-stripped pages, assets, fonts an
       cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
     });
     expect({ code: build.exitCode, error: build.exitCode ? build.stderr.toString() : "" }).toEqual({ code: 0, error: "" });
+    const index = await webResponse(output, "/index.html", "GET")!.text();
+    const initialStyles = await Promise.all([...index.matchAll(/href="([^"]+\.css)"/g)].map(async match => {
+      const path = new URL(match[1]!, "https://router.test/").pathname;
+      return webResponse(output, path, "GET")!.text();
+    }));
+    expect(initialStyles.join("\n")).toContain(".chat-picker-trigger{");
+    expect(initialStyles.join("\n")).not.toContain(".chat-picker-popover{");
     for (const prefix of ["", "/pi-stack"]) {
       const checked = new Set<string>();
       const asset = async (value: string, parent: URL): Promise<void> => {
