@@ -7,6 +7,7 @@ import { isReactionEmoji, messageReference, parseMessageReference, type MessageR
 import { extractMessageLinks } from "./links";
 import { createLinkPreviewResolver, PreviewOverloaded } from "./link-previews";
 import { API_CORS_HEADERS } from "../cors";
+import { inlineSafe, servedFileResponse } from "../files";
 import { storeUpload, uploadName } from "../uploads";
 import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendReaction, BackendReply, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
 import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingCall, MessagingCallState, MessagingConversation, MessagingHistory, MessagingHistoryChanges, MessagingLink, MessagingMessage, MessagingResult, MessagingSend, MessagingSnapshot } from "./protocol";
@@ -1057,9 +1058,14 @@ export class MessagingService {
       if (attachment) {
         const file = this.attachmentRow(attachment.attachmentId);
         if (!existsSync(file.path)) throw new MessagingFailure("Attachment file is missing", 404);
-        const inline = /^image\/(png|jpeg|gif|webp|avif)$/.test(file.mime_type);
-        const disposition = inline && url.searchParams.get("download") !== "1" ? "inline" : "attachment";
-        return new Response(Bun.file(file.path), { headers: { ...API_CORS_HEADERS, "content-type": inline ? file.mime_type : "application/octet-stream", "content-disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(file.name)}`, "x-content-type-options": "nosniff", "cache-control": "private, no-store" } });
+        // Pictures, voice notes and videos play in place and can seek; other types download.
+        const inline = inlineSafe(file.mime_type);
+        return servedFileResponse(file.path, req.method, req, {
+          name: file.name,
+          contentType: inline ? file.mime_type : "application/octet-stream",
+          disposition: inline && url.searchParams.get("download") !== "1" ? "inline" : "attachment",
+          cacheControl: "private, no-store",
+        });
       }
       const avatar = API.messagingAvatar.match(req.method, url.pathname);
       if (avatar) {

@@ -33,7 +33,17 @@ export function CopyButton({ text, label = "Copy message", className = "message-
   return <button type="button" className={`${className}${status === "idle" ? "" : ` ${status}`}`} title={description} aria-label={description} onClick={copy}><ClipboardIcon /></button>;
 }
 
-export type ChatAttachment = { id: string; name: string; url: string; size: number; image: boolean };
+export type ChatAttachmentKind = "image" | "audio" | "video" | "file";
+export type ChatAttachment = { id: string; name: string; url: string; size: number; kind: ChatAttachmentKind };
+
+/** How a message attachment of this MIME type appears: in place when every client can play or draw it. */
+export function attachmentKind(mimeType: string): ChatAttachmentKind {
+  const type = mimeType.toLowerCase().split(";", 1)[0].trim();
+  if (/^image\/(png|jpeg|gif|webp|avif|bmp)$/.test(type)) return "image";
+  if (type.startsWith("audio/")) return "audio";
+  if (type.startsWith("video/")) return "video";
+  return "file";
+}
 export type ChatDelivery = { status: string; error?: string | null; canCheck: boolean; canRetry: boolean };
 
 /** One message's body: its text, files and delivery state. A block shows one or more of these under a single header. */
@@ -122,9 +132,13 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
   return <>
     {children}
     {attachments.map(attachment => <div className="message-attachment" key={attachment.id}>
-      {attachment.image
+      {attachment.kind === "image"
         ? <AttachmentImage src={attachment.url} alt={attachment.name} downloadQuery onEditImage={onEditImage} />
-        : <a href={attachment.url} download={attachment.name}>{attachment.name} · {Math.ceil(attachment.size / 1024)} KB</a>}
+        : <>
+          {attachment.kind === "audio" && <audio className="message-attachment-media" controls preload="metadata" src={attachment.url} aria-label={attachment.name} />}
+          {attachment.kind === "video" && <video className="message-attachment-media" controls preload="metadata" playsInline src={attachment.url} aria-label={attachment.name} />}
+          <a href={attachment.url} download={attachment.name}>{attachment.name} · {Math.ceil(attachment.size / 1024)} KB</a>
+        </>}
     </div>)}
     {delivery && <footer className={`message-status ${delivery.status}`}>{delivery.status}{delivery.error ? ` · ${delivery.error}` : ""}</footer>}
     {delivery?.canCheck && onCheck && <button type="button" className="message-delivery-action" disabled={checking} onClick={onCheck}>Check send status</button>}
@@ -228,7 +242,7 @@ export function messagingMessageProps(message: MessagingMessage, backendId = "")
       name: attachment.name,
       url: resourceUrl(API.messagingAttachment.path({ attachmentId: attachment.id })),
       size: attachment.size,
-      image: /^(image\/(png|jpeg|gif|webp|avif|bmp))$/i.test(attachment.mimeType),
+      kind: attachmentKind(attachment.mimeType),
     })),
     delivery: outgoing ? {
       status: message.status,

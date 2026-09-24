@@ -1,16 +1,24 @@
-# Inline images
+# Inline images and files
 
-Pi Remote tells agents how to deliver existing images and how to declare images for background generation. Browser and Android use the same renderer.
+Pi Remote tells agents how to deliver existing files, which appear inline when the client can present them, and how to declare images for background generation. Browser and Android use the same renderer.
 
 ## Existing files
 
-An assistant reply can show an existing image with:
+A message can show an existing file with:
 
 ```xml
 <pi-remote-file src="/absolute/path/picture.png" />
 ```
 
-PNG, JPEG, GIF, WebP, AVIF and SVG files appear inline, linked to their originals. Other files become download links. The file stays on the thread's host.
+The file's extension chooses the presentation, and every presentation keeps the file name as a download link beneath it:
+
+- PNG, JPEG, GIF, WebP, AVIF, SVG, BMP and ICO files appear as pictures linked to their originals. HEIC and TIFF, which most clients cannot draw, stay links.
+- M4A, MP3, AAC, WAV, Ogg, Opus, FLAC and WebA files get an audio player; MP4, M4V, MOV, WebM, Ogg video and MKV files get a video player. Both load only metadata until played and seek with range requests. A codec the browser lacks leaves the player inert, with the link still there.
+- PDFs are embedded where the browser has a PDF viewer (`navigator.pdfViewerEnabled`). Android WebView and mobile browsers have none, so they show the link.
+- Text, code, Markdown, JSON and CSV files show their first 64 KiB in a scrollable, expandable block. A complete JSON document is pretty-printed.
+- Anything else is a download link.
+
+The file stays on the thread's host. The session file endpoint serves it with range support; `inline=1` displays PDFs, audio, video and raster images in place, while scriptable types such as HTML and SVG are always sent as attachments. [`web/src/inline-files.ts`](../web/src/inline-files.ts) owns the presentation. Signal attachments follow the same rule: pictures inline, voice notes and videos as players.
 
 ## Background generation
 

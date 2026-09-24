@@ -1,11 +1,9 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { InlineImage } from "../../server/inline-image-contract";
 import { presentInlineImages, type ImagePresentation } from "./inline-images";
-import { resourceUrl } from "./resource-url";
 export { CopyButton } from "./chat-message";
 
 export const InlineImagesContext = createContext<ReadonlyMap<string, InlineImage> | null>(null);
-import { API } from "../../server/api";
 import { applyHtml } from "./markdown-dom";
 import { ensureMarkdown, markdownRenderer, normalizeLatex, onMarkdownReady, plainMarkdownHtml } from "./markdown-engine";
 import { onKatexReady } from "./math-engine";
@@ -29,25 +27,12 @@ const subscribeRender = (listener: () => void) => {
 };
 const renderSnapshot = () => renderGeneration;
 
-const INLINE_IMAGE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
-
-function presentationMarkdown(source: string, sessionId: string) {
-  return source.replace(/<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) => {
-    const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
-    const label = name.replaceAll("&", "&amp;").replaceAll("[", "&#91;").replaceAll("]", "&#93;").replace(/[\r\n]+/g, " ");
-    const link = API.sessionFiles.path({ sessionId }, { path });
-    const href = resourceUrl(link);
-    if (INLINE_IMAGE.test(name)) return `\n\n![${label}](${href})\n\n`;
-    return `\n\n[${label}](${href})\n\n`;
-  });
-}
-
 export function renderMarkdown(source: string, sessionId: string, streaming = false, presentation: ImagePresentation = {}) {
   const markdown = markdownRenderer();
   if (!markdown) return plainMarkdownHtml(source || "");
   const prepared = presentInlineImages(source || "", sessionId, { ...presentation, streaming });
-  const normalized = normalizeLatex(presentationMarkdown(prepared.source, sessionId));
-  return markdown.render(streaming ? streamingMarkdown(normalized) : normalized, { inlineImages: prepared.inlineImages });
+  const normalized = normalizeLatex(prepared.source);
+  return markdown.render(streaming ? streamingMarkdown(normalized) : normalized, { inlineImages: prepared.inlineImages, sessionId });
 }
 
 export const Markdown = memo(function Markdown({ source, sessionId, streaming = false, assistant = false, className = "markdown-body" }: { source: string; sessionId: string; streaming?: boolean; assistant?: boolean; className?: string }) {

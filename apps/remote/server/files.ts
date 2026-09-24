@@ -41,26 +41,66 @@ export function listDirectory(requested: string) {
   return { path, parent: path === "/" ? null : dirname(path), entries };
 }
 
-function downloadHeaders(path: string, size: number, contentType: string, etagValue = `${size}`): Headers {
-  const name = basename(path) || "download";
+// Bun names several media types by their old `x-` spellings; a media element
+// in Firefox or Safari may refuse those, so the standard names win.
+const MEDIA_TYPES: Record<string, string> = {
+  aac: "audio/aac", flac: "audio/flac", m4a: "audio/mp4", oga: "audio/ogg", opus: "audio/ogg", wav: "audio/wav", weba: "audio/webm",
+  m4v: "video/mp4", mkv: "video/x-matroska", ogv: "video/ogg",
+};
+
+export function fileContentType(path: string, detected = ""): string {
+  const extension = basename(path).toLowerCase().split(".").at(-1) ?? "";
+  return MEDIA_TYPES[extension] ?? (detected || "application/octet-stream");
+}
+
+/**
+ * Types a client may display in place rather than download. Scriptable
+ * documents (HTML, SVG, XML) are absent: served inline from this origin they
+ * would run with the reader's session.
+ */
+export function inlineSafe(contentType: string): boolean {
+  const type = contentType.toLowerCase().split(";", 1)[0].trim();
+  return type === "application/pdf" || type.startsWith("audio/") || type.startsWith("video/")
+    || /^image\/(png|jpeg|gif|webp|avif|bmp)$/.test(type);
+}
+
+export interface FileResponseOptions {
+  /** File name offered to the reader; defaults to the path's base name. */
+  name?: string;
+  contentType: string;
+  /** `inline` is honored only for `inlineSafe` types. */
+  disposition?: "inline" | "attachment";
+  cacheControl?: string;
+  etag?: string;
+}
+
+function fileHeaders(path: string, size: number, options: FileResponseOptions): Headers {
+  const name = options.name || basename(path) || "download";
   const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_") || "download";
   const encoded = encodeURIComponent(name).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-  return new Headers({
-    "content-type": contentType || "application/octet-stream",
+  const disposition = options.disposition === "inline" && inlineSafe(options.contentType) ? "inline" : "attachment";
+  const headers = new Headers({
+    "content-type": options.contentType || "application/octet-stream",
     "content-length": String(size),
-    "content-disposition": `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`,
-    "cache-control": "private, no-cache",
+    "content-disposition": `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`,
+    "cache-control": options.cacheControl ?? "private, no-cache",
     "accept-ranges": "bytes",
-    etag: `\"${sha256(`${path}:${etagValue}`)}\"`,
     "x-content-type-options": "nosniff",
     ...API_CORS_HEADERS,
   });
+  if (options.etag) headers.set("etag", options.etag);
+  return headers;
 }
 
 export function byteRange(value: string | null, size: number): { start: number; end: number } | null {
   if (!value) return null;
-  const match = value.match(/^bytes=(\d+)-(\d*)$/);
-  if (!match) return null;
+  const match = value.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match || (!match[1] && !match[2])) return null;
+  // `bytes=-N` asks for the last N bytes; Safari's media stack uses it.
+  if (!match[1]) {
+    const length = Math.min(size, Number(match[2]));
+    return Number.isSafeInteger(length) && length > 0 ? { start: size - length, end: size - 1 } : null;
+  }
   const start = Number(match[1]);
   const end = match[2] ? Math.min(size - 1, Number(match[2])) : size - 1;
   return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && start <= end && start < size
@@ -68,21 +108,33 @@ export function byteRange(value: string | null, size: number): { start: number; 
     : null;
 }
 
+/** A regular file with range support, so media can seek and stream. The caller has resolved and authorized `path`. */
+export function servedFileResponse(path: string, method: string, req: Request, options: FileResponseOptions): Response {
+  const size = statSync(path).size;
+  const file = Bun.file(path);
+  const headers = fileHeaders(path, size, options);
+  const range = method === "GET" ? byteRange(req.headers.get("range"), size) : null;
+  if (req.headers.has("range") && method === "GET" && !range)
+    return new Response(null, { status: 416, headers: { ...API_CORS_HEADERS, "content-range": `bytes */${size}` } });
+  if (!range) return new Response(method === "HEAD" ? null : file, { headers });
+  headers.set("content-range", `bytes ${range.start}-${range.end}/${size}`);
+  headers.set("content-length", String(range.end - range.start + 1));
+  return new Response(file.slice(range.start, range.end + 1), { status: 206, headers });
+}
+
+/** An absolute path on this host. `inline=1` in the request asks to display a safe type in place. */
 export function localFileResponse(requested: string, method: string, req: Request): Response {
   if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400, headers: API_CORS_HEADERS });
   try {
     const path = realpathSync(requested);
     const stat = statSync(path);
     if (!stat.isFile()) return new Response("File not found", { status: 404, headers: API_CORS_HEADERS });
-    const file = Bun.file(path);
-    const headers = downloadHeaders(path, stat.size, file.type, `${stat.size}:${stat.mtimeMs}`);
-    const range = method === "GET" ? byteRange(req.headers.get("range"), stat.size) : null;
-    if (req.headers.has("range") && method === "GET" && !range)
-      return new Response(null, { status: 416, headers: { ...API_CORS_HEADERS, "content-range": `bytes */${stat.size}` } });
-    if (!range) return new Response(method === "HEAD" ? null : file, { headers });
-    headers.set("content-range", `bytes ${range.start}-${range.end}/${stat.size}`);
-    headers.set("content-length", String(range.end - range.start + 1));
-    return new Response(file.slice(range.start, range.end + 1), { status: 206, headers });
+    const inline = new URL(req.url, "http://localhost").searchParams.get("inline") === "1";
+    return servedFileResponse(path, method, req, {
+      contentType: fileContentType(path, Bun.file(path).type),
+      disposition: inline ? "inline" : "attachment",
+      etag: `"${sha256(`${path}:${stat.size}:${stat.mtimeMs}`)}"`,
+    });
   } catch { return new Response("File not found", { status: 404, headers: API_CORS_HEADERS }); }
 }
 

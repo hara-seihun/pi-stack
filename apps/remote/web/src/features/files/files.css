@@ -58,6 +58,8 @@
 .file-preview-image.natural { display: block; place-items: unset; }
 .file-preview-image.natural img { max-width: none; max-height: none; cursor: zoom-out; }
 .file-preview-pdf { min-height: 0; width: 100%; flex: 1; border: 0; }
+.file-preview-audio { width: calc(100% - 2 * var(--space-4)); margin: var(--space-4); }
+.file-preview-video { min-height: 0; width: 100%; flex: 1; background: #000; }
 .file-preview-binary { margin: 0; padding: var(--space-4); color: var(--muted); }
 @keyframes files-spin { to { transform: rotate(360deg); } }
 .files-screen.stack.preview-open .files-tree-pane { display: none; }

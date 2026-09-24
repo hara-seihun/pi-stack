@@ -13,8 +13,8 @@ export interface FilePreviewProps {
   onAttach?(path: string): void;
 }
 
-function downloadPath(path: string) {
-  const link = API.fileDownload.path({}, { path });
+function downloadPath(path: string, inline = false) {
+  const link = API.fileDownload.path({}, inline ? { path, inline: 1 } : { path });
   return window.PiRemotePerson?.href(link) ?? link;
 }
 
@@ -102,7 +102,9 @@ export function FilePreview({ path, onAttach }: FilePreviewProps) {
     {kind === "markdown" && <><div className="file-preview-options"><button type="button" onClick={() => setSourceMode(value => !value)} aria-pressed={sourceMode}>{sourceMode ? "Show rendered" : "Show source"}</button></div>{sourceMode ? <TextView source={source} truncated={truncated} /> : <MarkdownView source={source} />}</>}
     {kind === "text" && <TextView source={source} truncated={truncated} />}
     {kind === "image" && <div className={`file-preview-image${naturalImage ? " natural" : ""}`}><img src={downloadPath(path)} alt={name} onClick={() => setNaturalImage(value => !value)} title="Tap for natural size" /></div>}
-    {kind === "pdf" && <iframe className="file-preview-pdf" title={name} src={downloadPath(path)} />}
+    {kind === "audio" && <audio className="file-preview-audio" controls preload="metadata" src={downloadPath(path)} aria-label={name} />}
+    {kind === "video" && <video className="file-preview-video" controls preload="metadata" playsInline src={downloadPath(path)} aria-label={name} />}
+    {kind === "pdf" && <iframe className="file-preview-pdf" title={name} src={downloadPath(path, true)} />}
     {kind === "binary" && <p className="file-preview-binary">No preview is available for this file type.</p>}
   </section>;
 }

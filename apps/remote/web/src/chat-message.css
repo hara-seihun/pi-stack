@@ -5,6 +5,8 @@ p.message-text { margin: 0; }
 .message-segment + .message-segment { margin-top: var(--space-2); }
 .message-attachment { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .message-attachment a { color: var(--accent); }
+.message-attachment-media { display: block; width: min(100%, 420px); max-height: 60vh; border-radius: 10px; }
+video.message-attachment-media { background: #000; }
 .message-metrics, .message-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
 .message-metrics { font-variant-numeric: tabular-nums; }
 .message-status.failed, .message-status.unknown { color: var(--danger); }
