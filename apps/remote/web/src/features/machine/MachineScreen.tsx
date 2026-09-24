@@ -130,6 +130,21 @@ function Plan({ plan, modelCounts }: { plan: PlanCard; modelCounts: Map<string, 
   </>;
 }
 
+/** The viewer's own weekly spending limit, enforced by her model broker over
+ * the trailing seven days. It sits right under the shared plans' bars. */
+export function Allowance({ allowance }: { allowance: { weeklyUsd: number; usedUsd: number } }) {
+  const usedPercent = allowance.weeklyUsd > 0 ? Math.min(100, allowance.usedUsd * 100 / allowance.weeklyUsd) : 100;
+  const left = Math.max(0, allowance.weeklyUsd - allowance.usedUsd);
+  const exhausted = allowance.usedUsd >= allowance.weeklyUsd;
+  return <Card title="Your weekly limit">
+    <div className="machine-plan-row">
+      <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{formatDollars(allowance.usedUsd)} of {formatDollars(allowance.weeklyUsd)}</strong><small>last 7 days</small></div><span>{exhausted ? "Used up" : `${formatDollars(left)} left`}</span></div>
+      <div className="machine-bar machine-person-bar" role="img" aria-label={`You used ${formatDollars(allowance.usedUsd)} of your ${formatDollars(allowance.weeklyUsd)} weekly limit`}><span data-risk={risk(100 - usedPercent)} style={{ width: `${Math.max(0.5, usedPercent)}%` }} /></div>
+      {exhausted && <p className="machine-secondary">Models are paused for you until use from seven days ago ages out.</p>}
+    </div>
+  </Card>;
+}
+
 const peoplePeriods: Array<{ id: PeopleUsagePeriod; label: string; description: string }> = [
   { id: "day", label: "Day", description: "last 24 hours" },
   { id: "week", label: "Week", description: "last 7 days" },
@@ -178,6 +193,7 @@ export function MachineScreen(props: MachineScreenProps) {
   return <main className="machine-screen">
     <div className="machine-grid">
       {dashboard?.plans.map((plan) => <Plan key={plan.id} plan={plan} modelCounts={props.modelCounts} />)}
+      {dashboard?.allowance && <Allowance allowance={dashboard.allowance} />}
       {dashboard?.people && <People usage={dashboard.people} />}
       {dashboard?.governors && <Card title="Background launch pace">
         {(["openai", "anthropic"] as const).map((provider) => {

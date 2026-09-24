@@ -361,6 +361,8 @@ const HOST_ADMINISTRATOR = isHostAdministrator();
 let peopleUsage: PeopleUsage | null = null;
 /** The viewer's own spending per plan; null when nothing attributes usage to her. */
 let ownUsage: PersonalUsage | null = null;
+/** The viewer's weekly spending limit, as her model broker enforces it. */
+let allowance: Dashboard["allowance"] = null;
 let planUsageRefresh: Promise<void> | null = null;
 let nextPlanUsageRefresh = 0;
 
@@ -381,6 +383,7 @@ function refreshPlanUsageIfDue() {
         const usage = await readBrokerUsage(broker);
         planUsage = usage.plans;
         ownUsage = usage.personal;
+        allowance = usage.allowance ?? null;
       } catch (cause) {
         console.error("Model broker usage refresh failed", cause);
         planUsage ??= orchestrator.plans();
@@ -455,6 +458,7 @@ async function buildDashboard(): Promise<Dashboard> {
     machine: readMachineUsage(),
     modelCounts: agents.models,
     people: peopleUsage,
+    allowance,
   };
 }
 // Refreshes are serialized so a toggle's refresh always observes the toggle,

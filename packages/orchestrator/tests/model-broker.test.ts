@@ -37,7 +37,7 @@ async function fixture(transport: BrokerTransport) {
   cleanup.push(() => broker.close());
   const [port] = await broker.listen();
   const url = `http://127.0.0.1:${port}`;
-  const regrant = (accounts: string[], models = ["openai-codex/gpt-6-luna"]) => broker.applyGrants([{ principal: "sybil", port: 0, accounts, models, maxInFlight: 2 }]);
+  const regrant = (accounts: string[], models = ["openai-codex/gpt-6-luna"], weeklyUsd?: number) => broker.applyGrants([{ principal: "sybil", port: 0, accounts, models, maxInFlight: 2, ...(weeklyUsd === undefined ? {} : { weeklyUsd }) }]);
   const post = (data: unknown, path = "/backend-api/codex/responses") => fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer attacker", "chatgpt-account-id": "owner-only", cookie: "owner-cookie", session_id: "kenan-session" }, body: JSON.stringify(data) });
   return { root, store, token, post, url, regrant };
 }
@@ -369,4 +369,26 @@ test("a principal reads her granted plans and only her own spending", async () =
   expect(day.tokens).toBe(1_000_000);
   // Two enabled OpenAI accounts at $200 a month; the week's cost per unit of value, times her quarter.
   expect(day.spend).toBeCloseTo(2 * 200 * 7 / 30 / 4, 6);
+});
+
+test("a principal over her weekly allowance is refused before any provider call and sees the allowance", async () => {
+  const transport = vi.fn(async () => sse({ id: "r", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+  const f = await fixture(transport);
+  const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  f.store.recordUsage({ accountId: "shared", hour, source: "interactive", runId: "broker:sybil:1", model: "gpt-6-luna", component: "output", tokens: 1_000_000 });
+  // She is the only user, so the week's whole prorated cost (2 accounts × $200 × 7/30) is hers.
+  f.regrant(["shared", "anthropic-shared"], ["openai-codex/gpt-6-luna"], 5);
+  const refused = await f.post(body());
+  expect(refused.status).toBe(403);
+  expect((await refused.json()).error.message).toContain("weekly model allowance of $5");
+  expect(transport).not.toHaveBeenCalled();
+  const usage = await (await fetch(`${f.url}/v1/usage`)).json();
+  expect(usage.allowance.weeklyUsd).toBe(5);
+  expect(usage.allowance.usedUsd).toBeCloseTo(2 * 200 * 7 / 30, 6);
+  f.regrant(["shared", "anthropic-shared"], ["openai-codex/gpt-6-luna"], 1000);
+  const admitted = await f.post(body());
+  expect(admitted.status).toBe(200);
+  await admitted.text();
+  f.regrant(["shared", "anthropic-shared"]);
+  expect((await (await fetch(`${f.url}/v1/usage`)).json()).allowance).toBeNull();
 });
