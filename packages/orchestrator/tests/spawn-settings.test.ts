@@ -102,14 +102,14 @@ describe("child spawn settings", () => {
 });
 
 describe("ThreadService child spawn policy", () => {
-  it("keeps explicit Anthropic on conversations and children, but not direct runs", async () => {
+  it("keeps explicit Anthropic on conversations, children and direct runs", async () => {
     const { root, service } = fixture();
     const conversation = value(await service.spawn({ requestId: "root", cwd: root, settings: { model: "opus" } }));
     const child = value(await service.spawn({ requestId: "child", cwd: root, parentId: conversation.id }));
     expect(child.settings.model).toBe("openai-codex/gpt-6-sol");
     expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "opus" } })).toMatchObject({ ok: true });
     expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "fable" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-    expect(await service.spawn({ requestId: "direct", cwd: root, settings: { model: "opus" }, metadata: { source: "direct" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(value(await service.spawn({ requestId: "direct", cwd: root, settings: { model: "opus" }, metadata: { source: "direct" } })).settings.model).toMatch(/^anthropic\//);
     expect(await service.control({ action: "settings", threadId: conversation.id, settings: { model: "fable" } })).toMatchObject({ ok: true });
   });
 

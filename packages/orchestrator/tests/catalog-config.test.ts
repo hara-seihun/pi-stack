@@ -79,12 +79,12 @@ describe("shared model selection", () => {
         expect(defaults[id]).toEqual([{ provider, model, thinking }]);
         expect(configured[id]).toEqual(defaults[id]);
       }
-      expect(configured.opus).toBeUndefined();
+      expect(configured.opus?.[0]?.provider).toBe("anthropic");
       writeFileSync(path, JSON.stringify({ profiles: { review: [
         { provider: "openai-codex", model: "gpt-5.6-sol" },
         { provider: "anthropic", model: "claude-opus-5" },
       ] } }));
-      expect(() => loadConfig(path)).toThrow("profile review must contain only OpenAI Codex models");
+      expect(loadConfig(path).profiles.review.map(candidate => candidate.provider)).toEqual(["openai-codex", "anthropic"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

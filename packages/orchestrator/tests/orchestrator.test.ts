@@ -51,7 +51,7 @@ describe("current orchestrator state",()=>{
 
   it("launches every Fable selection on Claude Fable 5.1",()=>{const anthropic=builtinProviders().find((provider)=>provider.id==="anthropic")!;const models=withCustomModels(anthropic).getModels();expect(models.some((model)=>model.id==="claude-fable-5")).toBe(true);expect(models.find((model)=>model.id==="claude-fable-5-1")?.cost.cacheRead).toBe(.25);expect(catalogModel("fable")?.model).toBe("claude-fable-5-1");});
 
-  it("uses only OpenAI models for built-in scheduling profiles",()=>{const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;expect(profiles.astra).toEqual([{provider:"openai-codex",model:"gpt-6-astra",thinking:"high"}]);expect(profiles.standard.map(candidate=>candidate.model)).toEqual(["gpt-6-astra","gpt-6-sol"]);expect(profiles.expert).toEqual(profiles.astra);expect(Object.values(profiles).flat().every(candidate=>candidate.provider==="openai-codex")).toBe(true);expect(profiles.opus).toBeUndefined();});
+  it("defaults built-in scheduling to OpenAI and offers Opus by name",()=>{const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;expect(profiles.astra).toEqual([{provider:"openai-codex",model:"gpt-6-astra",thinking:"high"}]);expect(profiles.standard.map(candidate=>candidate.model)).toEqual(["gpt-6-astra","gpt-6-sol"]);expect(profiles.expert).toEqual(profiles.astra);expect([...profiles.standard,...profiles.expert].every(candidate=>candidate.provider==="openai-codex")).toBe(true);expect(profiles.opus).toEqual([{provider:"anthropic",model:"claude-opus-5-5",thinking:"high"}]);});
 
   it("continues a provider-truncated turn even when rejected tool calls follow it",()=>{
     const prompt=outputLimitContinuation([

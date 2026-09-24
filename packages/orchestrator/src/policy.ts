@@ -71,14 +71,13 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   return{sessions:boosted,spent,meterAt,reason:multiplier===1?reason:`${sessions} base × ${multiplier} = ${boosted} sessions; ${reason}`};
 }
 
-export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"|"interactive"="user"):{assignment?:Assignment;refusals:Refusal[]}{
+export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user"):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   if(repair&&store.control("repair-owner")&&store.control("repair-owner")!==runId)return{refusals:[{accountId:"*",reason:"repair already owned"}]};
   if(store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
-  if(execution!=="interactive"&&candidates.some(candidate=>candidate.provider!=="openai-codex"))return{refusals:[{accountId:"*",reason:`profile ${profile} requests a provider outside OpenAI Codex scheduling`}]};
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
@@ -112,7 +111,6 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   const candidates=run?.provider&&run.model?[{provider:run.provider,model:run.model,thinking:run.thinking}]
     :cfg.profiles[profile]?.map(candidate=>({...candidate,thinking:completion?.input.thinkingLevel??admissionThinking(candidate)}));
   if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
-  if(candidates.some(candidate=>candidate.provider!=="openai-codex"))return{refusals:[{accountId:"*",reason:`completion ${runId} requests a provider outside OpenAI Codex scheduling`}]};
   const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){

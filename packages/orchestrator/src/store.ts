@@ -306,7 +306,7 @@ export class Store {
   assignRun(id:string,assignment:ModelCandidate & {accountId:string;unit:string;releasePath:string},at=Date.now()):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
-      if(!run || run.state!=="queued" || run.accountId || assignment.provider!=="openai-codex")return false;
+      if(!run || run.state!=="queued" || run.accountId)return false;
       const requestId=this.control(`completion-run:${id}`);
       const completion=requestId?JSON.parse(this.control(`completion:${requestId}`)!) as {input:CompletionInput}:undefined;
       const thinking=run.provider&&run.model?run.thinking:completion?.input.thinkingLevel??admissionThinking(assignment);

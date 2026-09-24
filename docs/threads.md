@@ -102,7 +102,7 @@ launched runners; new runners omit this flag from their process environment. The
 adapter resolves it from the individual open request. Missing required history remains
 an error; a fresh child creates its own file without inheriting the first thread's flag.
 
-New subagents default to Sol regardless of their parent's model. A child may explicitly choose Opus or another installed model outside the Astra and Fable families (Hara, September 24, 2026: "Just use opus agents"); the thread owner rejects Astra and Fable child requests before forwarding to another owner. Lanes, direct runs and completions remain OpenAI Codex only. Existing spawn receipts replay unchanged. Main conversations retain explicit Anthropic selection and existing threads keep their accepted settings.
+New subagents default to Sol regardless of their parent's model. A child may explicitly choose Opus or another installed model outside the Astra and Fable families; the thread owner rejects Astra and Fable child requests before forwarding to another owner. Existing spawn receipts replay unchanged. Main conversations retain explicit Anthropic selection and existing threads keep their accepted settings.
 
 Orchestrator resolves settings centrally. Standard provider speed is the default everywhere. Fable, Opus, Astra and Sol default to high thinking; Luna defaults to max. Explicit validated overrides are supported and do not accidentally inherit from a parent. Recovery preserves already accepted execution settings.
 

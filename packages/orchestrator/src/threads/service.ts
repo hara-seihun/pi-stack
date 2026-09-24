@@ -333,7 +333,6 @@ export class ThreadService implements ThreadApi {
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
       const settings = resolveSpawnSettings(input.settings, parent); if (!settings.ok) return settings;
-      if (["direct", "lane"].includes(String(input.metadata?.source)) && !settings.value.model.startsWith("openai-codex/")) return bad("invalid_request", "Orchestrator-scheduled work requires an OpenAI Codex model");
       // Check local receipts first so retries of previously accepted children retain their identity.
       const workerOwner = parent && this.workerOwner?.(parent, input);
       if (workerOwner) return workerOwner.spawn(input);
@@ -493,7 +492,6 @@ export class ThreadService implements ThreadApi {
     }
     if (input.action === "settings") {
       const current = this.get(input.threadId)!, settings = resolveThreadSettings(input.settings, current.settings); if (!settings.ok) return settings;
-      if (["direct", "lane"].includes(String(current.metadata?.source)) && !settings.value.model.startsWith("openai-codex/")) return bad("invalid_request", "Orchestrator-scheduled work requires an OpenAI Codex model");
       const childForbidden = current.parentId ? childModelError(settings.value.model) : undefined; if (childForbidden) return { ok: false, error: childForbidden };
       this.transaction(() => {
         this.sql("UPDATE thread SET settings=? WHERE id=?").run(JSON.stringify(settings.value), input.threadId);
