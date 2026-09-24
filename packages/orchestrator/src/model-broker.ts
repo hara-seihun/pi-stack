@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { BROKER_USAGE_PATH, brokerUsage } from "./broker-usage.js";
+import { allowanceRefusal, BROKER_USAGE_PATH, brokerUsage, WeeklyAllowances } from "./broker-usage.js";
 import { zstdDecompressSync } from "node:zlib";
 import { once } from "node:events";
 import { readFileSync, statSync, unwatchFile, watchFile } from "node:fs";
@@ -25,6 +25,8 @@ export interface BrokerListener {
   accounts: string[];
   models: string[];
   maxInFlight: number;
+  /** Most this principal may spend in any trailing seven days, in subscription dollars. */
+  weeklyUsd?: number;
 }
 export interface ModelBrokerConfig {
   ledgerPath: string;
@@ -42,7 +44,8 @@ export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig
       && Number.isInteger(listener.port) && listener.port > 1023 && listener.port <= 65535
       && strings(listener.accounts) && strings(listener.models)
       && listener.models.every(model => /^(openai-codex|anthropic)\/[^/]+$/.test(model))
-      && Number.isInteger(listener.maxInFlight) && listener.maxInFlight > 0)
+      && Number.isInteger(listener.maxInFlight) && listener.maxInFlight > 0
+      && (listener.weeklyUsd === undefined || (typeof listener.weeklyUsd === "number" && Number.isFinite(listener.weeklyUsd) && listener.weeklyUsd >= 0)))
     && new Set(config.listeners.map(listener => listener.port)).size === config.listeners.length
     && new Set(config.listeners.map(listener => listener.principal)).size === config.listeners.length;
 }
@@ -60,7 +63,14 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
   const store = Store.open(config.ledgerPath);
   // Grants are desired state the broker owns for every consumer of the ledger, including daemon
   // admission of completions this broker queued earlier. Reloading the grant file republishes them.
-  const grants = new Map(config.listeners.map(listener => [listener.principal, { accounts: listener.accounts, models: listener.models }]));
+  const grants = new Map(config.listeners.map(listener => [listener.principal, { accounts: listener.accounts, models: listener.models, weeklyUsd: listener.weeklyUsd }]));
+  const allowances = new WeeklyAllowances(store);
+  const overAllowance = (principal: string) => {
+    const weeklyUsd = grants.get(principal)!.weeklyUsd;
+    if (weeklyUsd === undefined) return null;
+    const used = allowances.spent(principal);
+    return used >= weeklyUsd ? allowanceRefusal(weeklyUsd) : null;
+  };
   const publish = () => store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })));
   const completions = new CompletionService(store, process.cwd());
   const providers = new Map(builtinProviders().filter(provider => provider.id in BROKER_ROUTES).map(provider => [provider.id, provider]));
@@ -86,7 +96,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
     }
     if (req.method === "GET" && req.url === BROKER_USAGE_PATH) {
       let body: string;
-      try { body = JSON.stringify(brokerUsage(store, listener.principal, grant.accounts)); }
+      try { body = JSON.stringify(brokerUsage(store, listener.principal, grant.accounts, Date.now(), grant.weeklyUsd === undefined ? null : { weeklyUsd: grant.weeklyUsd, usedUsd: allowances.spent(listener.principal, 0) })); }
       catch (error) { console.error(`Model broker usage failed for ${listener.principal}: ${error instanceof Error ? error.message : "unknown error"}`); json(res, 500, "Usage is unavailable"); return; }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(body);
@@ -114,6 +124,8 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       if (!isCompletionInput(input)) return error(400, "invalid-request", "Invalid completion input.");
       const model = catalogModel(input.model)!;
       if (!grant.models.includes(`${model.provider}/${model.model}`)) return error(403, "invalid-request", "This model is not shared with your Unix account.");
+      const refusal = completions.get(ownedId) ? null : overAllowance(listener.principal);
+      if (refusal) return error(403, "invalid-state", refusal);
       const outcome = store.transaction(() => {
         const outstanding = (store.db.prepare("SELECT c.value FROM control c JOIN run r ON c.key='completion:'||(SELECT value FROM control WHERE key='completion-run:'||r.id) WHERE r.state IN ('queued','starting','running')").all() as { value: string }[]).filter(row => JSON.parse(row.value).access?.principal === listener.principal).length;
         if (!completions.get(ownedId) && outstanding >= listener.maxInFlight) return { ok: false as const, error: { code: "invalid-state", message: "Your completion request limit is full." } };
@@ -155,6 +167,8 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       const invalid = validateBrokerBody(family, body);
       if (invalid) { json(res, 400, invalid); return; }
       if (!grant.models.includes(`${family}/${body.model}`)) { json(res, 403, "This model is not shared with your Unix account"); return; }
+      const refusal = overAllowance(listener.principal);
+      if (refusal) { json(res, 403, refusal); return; }
       const shared = auth.get(family)!;
       const exclude = new Set(store.accounts().filter(account => !grant.accounts.includes(account.id)
         || store.latestMeters(account.id).some(meter => modelDrainsMeter(family, body.model, meter.meter_id)
@@ -251,7 +265,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
     applyGrants(listeners: readonly BrokerListener[]): void {
       for (const listener of listeners) {
         if (!grants.has(listener.principal)) continue;
-        grants.set(listener.principal, { accounts: listener.accounts, models: listener.models });
+        grants.set(listener.principal, { accounts: listener.accounts, models: listener.models, weeklyUsd: listener.weeklyUsd });
       }
       publish();
     },

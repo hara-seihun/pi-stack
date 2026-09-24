@@ -272,6 +272,8 @@ export interface Dashboard {
   modelCounts: AgentModelCount[];
   /** Null for everyone except the host's administrator. */
   people: PeopleUsage | null;
+  /** The viewer's own weekly spending limit; null when she has none. */
+  allowance: { weeklyUsd: number; usedUsd: number } | null;
 }
 
 /** Every thread the inbox and worker tree list, as `GET /v1/sessions` returns
