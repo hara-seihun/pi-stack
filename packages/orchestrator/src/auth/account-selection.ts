@@ -32,8 +32,10 @@ export function coolingInteractiveAccounts(store: Store, auth: SharedOAuthAuth |
  * 2026-09-15, when four Codex accounts cooled within five minutes and every new
  * session was refused outright. The provider is the authority on whether a
  * request is allowed; guessing on its behalf is worth an ordering preference,
- * never a refusal. Selection after a real rate-limit failover leaves it off, so
- * a turn that just lost an account still rotates away from the cooling ones.
+ * never a refusal. A rate-limit failover excludes the account that just refused
+ * the turn and prefers a sibling that is not cooling, but still falls back to the
+ * sibling nearest expiry, so a throttled pool slows sessions down instead of
+ * failing them.
  */
 export function chooseInteractiveAccount(store: Store, auth: SharedOAuthAuth | undefined, family: string, exclude = new Set<string>(), { includeCooling = false, model }: { includeCooling?: boolean; model?: string } = {}) {
   const spent = (id: string) => Math.max(0, ...store.latestMeters(id)

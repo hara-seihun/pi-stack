@@ -260,7 +260,11 @@ export default function routing(pi:ExtensionAPI):void{
     }
     if(!isRateLimitError(failure))return;
     if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure));
-    const moved=await bind(ctx,new Set([failing]));
+    // Rotate away from the refusing account; when every sibling is cooling, take the
+    // one nearest expiry rather than ending the turn. A cooldown is this machine's
+    // guess and the provider decides, so a rate limit stays weather the session
+    // rides out instead of a thread failure.
+    const moved=await bind(ctx,new Set([failing]),undefined,true);
     if(moved&&!closed)unresolved={failure,account:moved,prompt:failoverPrompt};
   });
   pi.on("agent_before_settle",()=>{

@@ -161,3 +161,22 @@ it("records each native assistant usage receipt once against its admitted accoun
     if (admitted.ok) await admitted.value.release();
   } finally { store.close(); }
 });
+
+it("cools a thread's account for the limit class the provider named", async () => {
+  const store = Store.open(":memory:");
+  store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 3 });
+  const fleet = new Fleet(store, loadConfig("/missing"));
+  try {
+    const cooldown = async (errorMessage: string) => {
+      store.setCooldown("a", 0);
+      const admitted = await fleet.admit(thread, thread.settings, false, errorMessage);
+      if (!admitted.ok) throw new Error(admitted.error.message);
+      const before = Date.now();
+      fleet.event(thread.id, { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage } });
+      await admitted.value.release();
+      return store.account("a")!.cooldownUntil! - before;
+    };
+    expect(await cooldown("429 rate_limit_error: This request would exceed your account's monthly spend limit.")).toBeGreaterThan(23 * 3_600_000);
+    expect(await cooldown("429 Too Many Requests")).toBeLessThan(2 * 60_000);
+  } finally { store.close(); }
+});
