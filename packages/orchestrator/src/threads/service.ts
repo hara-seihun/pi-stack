@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { readThreadHistory, visibleThreadHistory } from "pi-orchestrator/history";
+import { contentText } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
@@ -26,7 +27,7 @@ export interface ThreadServiceOptions {
   onChange?: (thread: Thread) => void;
 }
 export type ThreadServiceEvent = { threadId: string; event: PiEvent } | { threadId: string; type: "changed" };
-export type PendingMessage = Omit<ThreadMessage, "state" | "insertedAt"> & { state: "queued" | "dispatched"; insertedAt: number | null };
+export type PendingMessage = Omit<ThreadMessage, "state" | "insertedAt" | "landedAt"> & { state: "queued" | "dispatched"; insertedAt: number | null; landedAt: number | null };
 export interface ImportThread {
   id: string; parentId?: string | null; title: string; cwd: string; sessionFile: string;
   settings: ThreadSettings; admission?: "force" | "background"; held?: boolean;
@@ -93,7 +94,7 @@ export class ThreadService implements ThreadApi {
         sender_id TEXT, text TEXT NOT NULL, images TEXT NOT NULL, delivery TEXT NOT NULL, source TEXT NOT NULL,
         reply_to TEXT, status TEXT NOT NULL DEFAULT 'queued', front INTEGER NOT NULL DEFAULT 0,
         settings TEXT NOT NULL, prepared TEXT, execution_id TEXT, created_at INTEGER NOT NULL, inserted_at INTEGER,
-        outcome TEXT, final_message TEXT, error TEXT);
+        landed_at INTEGER, outcome TEXT, final_message TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS thread_work_queue ON thread_work(thread_id,status,front DESC,ordinal);
       CREATE TABLE IF NOT EXISTS thread_execution (
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), work_id TEXT NOT NULL,
@@ -104,6 +105,7 @@ export class ThreadService implements ThreadApi {
       UPDATE thread_work SET status='dispatched' WHERE status IN ('dispatching','inserted');`);
     const executionColumns = this.sql("PRAGMA table_info(thread_execution)").all() as { name: string }[];
     if (executionColumns.some(column => column.name === "state")) this.db.exec("ALTER TABLE thread_execution DROP COLUMN state");
+    if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "landed_at")) this.db.exec("ALTER TABLE thread_work ADD COLUMN landed_at INTEGER; UPDATE thread_work SET landed_at=inserted_at WHERE status='dispatched' AND inserted_at IS NOT NULL");
     this.db.exec(`CREATE INDEX IF NOT EXISTS thread_execution_settlements ON thread_execution(thread_id,ended_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS thread_execution_await ON thread_execution(thread_id,settlement_seq);
       CREATE UNIQUE INDEX IF NOT EXISTS thread_execution_active ON thread_execution(thread_id) WHERE ended_at IS NULL;
@@ -204,9 +206,15 @@ export class ThreadService implements ThreadApi {
       return good({ thread, pending: this.pending(id), context, ...(projection ? { live: projection.live } : {}) });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
-  private message(row: Json): ThreadMessage { return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
+  private message(row: Json): ThreadMessage { return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
   pending(id: string): PendingMessage[] {
     return this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status!='done' ORDER BY front DESC,ordinal").all(id).map(row => this.message(row as Json) as PendingMessage);
+  }
+  /** Pi holds a steer or follow-up in its queue until a tool boundary, then starts it as a user message with the exact text it was sent. */
+  private land(id: string, text: string): void {
+    const works = this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status='dispatched' AND landed_at IS NULL AND prepared IS NOT NULL ORDER BY ordinal").all(id) as Json[];
+    const work = works.find(work => formatThreadMessage(this.message(work), JSON.parse(work.prepared).text) === text);
+    if (work && this.sql("UPDATE thread_work SET landed_at=? WHERE id=? AND landed_at IS NULL").run(Date.now(), work.id).changes) this.changed(id);
   }
   subscribe(listener: (event: ThreadServiceEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   setDirectory(directory: ThreadApi, workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined): void { this.directory = directory; this.workerOwner = workerOwner; }
@@ -703,6 +711,7 @@ export class ThreadService implements ThreadApi {
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
           await this.rpc(runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null });
+          this.sql("UPDATE thread_work SET landed_at=COALESCE(landed_at,?) WHERE id=?").run(Date.now(), work.id);
           runtime.busy = true;
         }
       }
@@ -745,6 +754,7 @@ export class ThreadService implements ThreadApi {
       projection.live.isThinking = !!live.isThinking;
       if (Array.isArray(live.tools)) projection.live.tools = live.tools;
     }
+    if (event.type === "message_start" && (event.message as Json)?.role === "user") this.land(id, contentText((event.message as Json).content, ""));
     if (event.type === "response") {
       const waiter = runtime.waiters.get(String(event.id));
       if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); event.success === false ? waiter.reject(new NativeRejection(String(event.error ?? "Pi command rejected"))) : waiter.resolve(event.data ?? {}); }
@@ -833,10 +843,11 @@ export class ThreadService implements ThreadApi {
     } else this.sql("UPDATE thread_work SET status='dispatched',execution_id=? WHERE id=?").run(execution.id, work.id);
     try {
       const prepared = JSON.parse(work.prepared);
-      await this.rpc(runtime!, { type: runtime!.busy ? "steer" : "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images ?? [] });
+      const prompt = !runtime!.busy;
+      await this.rpc(runtime!, { type: prompt ? "prompt" : "steer", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images ?? [] });
       const insertedAt = Date.now();
       if (this.suspended || this.row(id)?.held) return;
-      this.sql("UPDATE thread_work SET inserted_at=COALESCE(inserted_at,?) WHERE id=? AND status='dispatched'").run(insertedAt, work.id);
+      this.sql("UPDATE thread_work SET inserted_at=COALESCE(inserted_at,?),landed_at=CASE WHEN ? THEN COALESCE(landed_at,?) ELSE landed_at END WHERE id=? AND status='dispatched'").run(insertedAt, prompt ? 1 : 0, insertedAt, work.id);
       runtime!.busy = true; this.state(id, "running");
       for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_message_inserted", workId: work.id, executionId: runtime!.executionId, insertedAt, message: { ...this.message(work), insertedAt, state: "dispatched" } } });
       this.wake(id);

@@ -49,6 +49,7 @@ export interface ThreadMessage {
   replyTo?: string;
   state: "queued" | "dispatched" | "done";
   insertedAt?: number | null;
+  landedAt?: number | null;
 }
 export interface SpawnThread {
   requestId: string;

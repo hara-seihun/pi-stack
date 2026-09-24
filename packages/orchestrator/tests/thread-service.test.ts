@@ -81,6 +81,8 @@ class FakePiSession implements PiSession {
     this.output({ type: "agent_settled" });
   }
 
+  emit(event: PiEvent): void { this.output(event); }
+
   async close(): Promise<void> { this.closed = true; }
 }
 
@@ -945,6 +947,21 @@ describe("ThreadService", () => {
     for (const delivery of ["steer", "hardSteer"] as const) {
       expect(value(await service.send({ ...agent, requestId: delivery, delivery })).delivery).toBe(delivery);
     }
+  });
+
+  it("records a steer as landed only when Pi starts it as a user message", async () => {
+    const { directory, service, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "root", cwd: directory, message: "Coordinate" }));
+    await service.start();
+    await waitFor(() => sessions[0]?.commands.some(command => command.type === "prompt") ?? false);
+    expect(service.pending(thread.id)[0]?.landedAt).toEqual(expect.any(Number));
+    value(await service.send({ requestId: "steer", threadId: thread.id, text: "Result", delivery: "steer" }));
+    await waitFor(() => sessions[0]!.commands.some(command => command.type === "steer"));
+    const steer = service.pending(thread.id).find(message => message.id === "steer")!;
+    expect(steer).toMatchObject({ state: "dispatched", insertedAt: expect.any(Number), landedAt: null });
+    const message = String(sessions[0]!.commands.find(command => command.type === "steer")!.message);
+    sessions[0]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: message }] } });
+    expect(service.pending(thread.id).find(message => message.id === "steer")?.landedAt).toEqual(expect.any(Number));
   });
 
   it("deduplicates request receipts and rejects changed reuse", async () => {
