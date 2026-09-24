@@ -367,8 +367,8 @@ test("a principal reads her granted plans and only her own spending", async () =
   expect(openai.percentLeft).toBe(60);
   const day = usage.personal.periods.day.plans.openai;
   expect(day.tokens).toBe(1_000_000);
-  // Two enabled OpenAI accounts at $200 a month; the week's cost per unit of value, times her quarter.
-  expect(day.spend).toBeCloseTo(2 * 200 * 7 / 30 / 4, 6);
+  // 40 points of a $200 plan's week were used; she served a quarter of the value.
+  expect(day.spend).toBeCloseTo(40 * 200 * 7 / 30 / 100 / 4, 6);
 });
 
 test("a principal over her weekly allowance is refused before any provider call and sees the allowance", async () => {
@@ -376,15 +376,17 @@ test("a principal over her weekly allowance is refused before any provider call 
   const f = await fixture(transport);
   const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
   f.store.recordUsage({ accountId: "shared", hour, source: "interactive", runId: "broker:sybil:1", model: "gpt-6-luna", component: "output", tokens: 1_000_000 });
-  // She is the only user, so the week's whole prorated cost (2 accounts × $200 × 7/30) is hers.
+  // She is the only user of an account whose week is half used, so that half is hers.
+  f.store.recordMeter("shared", "codex-7d", 50, Date.now() + 86_400_000, Date.now());
   f.regrant(["shared", "anthropic-shared"], ["openai-codex/gpt-6-luna"], 5);
   const refused = await f.post(body());
   expect(refused.status).toBe(403);
-  expect((await refused.json()).error.message).toContain("weekly model allowance of $5");
+  expect((await refused.json()).error.message).toMatch(/weekly model allowance of \$5 is used up\. It resets Monday/);
   expect(transport).not.toHaveBeenCalled();
   const usage = await (await fetch(`${f.url}/v1/usage`)).json();
   expect(usage.allowance.weeklyUsd).toBe(5);
-  expect(usage.allowance.usedUsd).toBeCloseTo(2 * 200 * 7 / 30, 6);
+  expect(usage.allowance.usedUsd).toBeCloseTo(50 * 200 * 7 / 30 / 100, 6);
+  expect(new Date(usage.allowance.resetsAt).getDay()).toBe(1);
   f.regrant(["shared", "anthropic-shared"], ["openai-codex/gpt-6-luna"], 1000);
   const admitted = await f.post(body());
   expect(admitted.status).toBe(200);

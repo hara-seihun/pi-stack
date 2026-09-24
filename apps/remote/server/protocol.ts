@@ -120,8 +120,9 @@ export interface PlanCard {
   text: string;
   description: string;
   metrics: PlanMetricRow[];
-  /** What the viewer herself spent of this plan's subscriptions, in US dollars;
-   * null when her supervisor cannot attribute usage to her. */
+  /** What the viewer herself used of this plan's subscriptions today and this
+   * week (from Monday 00:00 host time), in US dollars; null when her supervisor
+   * cannot attribute usage to her. */
   spent: { day: number; week: number } | null;
 }
 
@@ -240,9 +241,10 @@ export interface SubscriptionUsage {
   label: string;
   accounts: number;
   monthlyUsd: number;
+  /** What the enabled accounts cost over the period. */
   spend: number;
-  /** Nobody used this provider in the period. */
-  idle: boolean;
+  /** Dollars of it actually used, from the accounts' weekly quota meters. */
+  used: number;
 }
 
 export interface PeopleUsagePeriodData {
@@ -250,7 +252,7 @@ export interface PeopleUsagePeriodData {
   until: string;
   /** Total subscription cost of the period across providers. */
   spend: number;
-  /** What people used of it at each provider's trailing-week rate; a busy day can exceed `spend`. */
+  /** Dollars of subscription people actually used, from consumed quota; a busy day can exceed `spend`. */
   used: number;
   subscriptions: SubscriptionUsage[];
   people: PersonUsage[];
@@ -273,7 +275,7 @@ export interface Dashboard {
   /** Null for everyone except the host's administrator. */
   people: PeopleUsage | null;
   /** The viewer's own weekly spending limit; null when she has none. */
-  allowance: { weeklyUsd: number; usedUsd: number } | null;
+  allowance: { weeklyUsd: number; usedUsd: number; resetsAt: string } | null;
 }
 
 /** Every thread the inbox and worker tree list, as `GET /v1/sessions` returns

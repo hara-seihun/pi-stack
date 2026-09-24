@@ -47,6 +47,8 @@ export interface PlanDefinition {
   readonly maxReadingAgeMs: number;
   /** What one account's subscription costs per month, in US dollars. */
   readonly monthlyUsd: number;
+  /** The provider-wide weekly meter whose consumed percentage measures how much of the subscription was used. */
+  readonly quotaMeter: string;
   readonly metrics: readonly PlanMetric[];
 }
 
@@ -85,11 +87,11 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   agentOrder: ["astra", "sol", "luna", "fable", "opus", "sonnet"],
   plans: [
     {
-      id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR, monthlyUsd: 200,
+      id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR, monthlyUsd: 200, quotaMeter: "codex-7d",
       metrics: [{ id: "remaining", model: "astra", meters: ["codex-5h", "codex-7d"] }],
     },
     {
-      id: "anthropic", label: "Anthropic", icon: "anthropic", provider: "anthropic", maxReadingAgeMs: 14 * DAY, monthlyUsd: 250,
+      id: "anthropic", label: "Anthropic", icon: "anthropic", provider: "anthropic", maxReadingAgeMs: 14 * DAY, monthlyUsd: 250, quotaMeter: "anthropic-7d",
       metrics: [
         { id: "fable", model: "fable", label: "F", name: "Fable weekly", meters: ["anthropic-7d", "anthropic-7d_oi"], requireAllMeters: true },
         { id: "weekly", model: "opus", label: "W", name: "Weekly, all models including Opus", meters: ["anthropic-7d"] },

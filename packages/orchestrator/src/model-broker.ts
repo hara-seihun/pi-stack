@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { allowanceRefusal, BROKER_USAGE_PATH, brokerUsage, WeeklyAllowances } from "./broker-usage.js";
+import { weekResetsAt } from "./person-usage.js";
 import { zstdDecompressSync } from "node:zlib";
 import { once } from "node:events";
 import { readFileSync, statSync, unwatchFile, watchFile } from "node:fs";
@@ -96,7 +97,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
     }
     if (req.method === "GET" && req.url === BROKER_USAGE_PATH) {
       let body: string;
-      try { body = JSON.stringify(brokerUsage(store, listener.principal, grant.accounts, Date.now(), grant.weeklyUsd === undefined ? null : { weeklyUsd: grant.weeklyUsd, usedUsd: allowances.spent(listener.principal, 0) })); }
+      try { body = JSON.stringify(brokerUsage(store, listener.principal, grant.accounts, Date.now(), grant.weeklyUsd === undefined ? null : { weeklyUsd: grant.weeklyUsd, usedUsd: allowances.spent(listener.principal, 0), resetsAt: new Date(weekResetsAt()).toISOString() })); }
       catch (error) { console.error(`Model broker usage failed for ${listener.principal}: ${error instanceof Error ? error.message : "unknown error"}`); json(res, 500, "Usage is unavailable"); return; }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(body);

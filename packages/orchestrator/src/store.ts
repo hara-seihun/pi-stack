@@ -141,6 +141,8 @@ export class Store {
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
     db.exec("DROP TABLE IF EXISTS live_state");
     adoptLaneColumns(db);
+    // Frozen subscription dollars per list-price dollar, one row per provider-hour. See person-usage.ts.
+    db.exec("CREATE TABLE IF NOT EXISTS usage_rate (provider TEXT NOT NULL, hour INTEGER NOT NULL, rate REAL NOT NULL, PRIMARY KEY(provider,hour)) STRICT");
     return new Store(db, path === ":memory:" ? path : resolve(path));
   }
 

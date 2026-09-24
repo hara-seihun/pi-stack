@@ -54,7 +54,7 @@ describe("plan cards", () => {
     const personal = { periods: {
       day: { since: "a", until: "b", plans: { openai: figures(1.5) } },
       week: { since: "a", until: "b", plans: { openai: figures(9), anthropic: figures(4) } },
-    } };
+    }, weekResetsAt: "c" };
     const cards = planCards(null, personal);
     expect(cards.find((card) => card.id === "openai")?.spent).toEqual({ day: 1.5, week: 9 });
     expect(cards.find((card) => card.id === "anthropic")?.spent).toEqual({ day: 0, week: 4 });
