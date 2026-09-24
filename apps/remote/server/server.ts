@@ -13,7 +13,6 @@ import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
 import { displayAssistantMessage, displayContextDocument, type ContextImage } from "./context-display";
-import { LandedWork } from "./queue-landing";
 import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
@@ -591,16 +590,6 @@ function clearStoredContext(sessionId: string) {
   signalSync();
 }
 
-// Work the runtime accepted whose text has since appeared in the agent's
-// context. Until then the queue keeps showing it as sent to the agent. A turn
-// grows the context in patches, so both the full capture and the patch mark it;
-// a patch is parsed only when a delivered message is still unaccounted for.
-const landedWork = new LandedWork();
-function markLandedWork(id: string, readContext: () => { messages?: unknown[] }) {
-  if (!threads.get(id)) return;
-  landedWork.mark(id, threads.pending(id).filter(message => message.insertedAt).map(message => ({ id: message.id, text: message.text })), readContext);
-}
-
 function storeContextCapture(id: string, body: any) {
   const capturedAt = Number(body.capturedAt);
   const context = body.context;
@@ -628,7 +617,6 @@ function storeContextCapture(id: string, body: any) {
   if (changed) {
     cacheStoredContext(id, { capturedAt: time, document, hash });
     if (compactionReplacement && runtime) runtime.compactionContextHash = hash;
-    markLandedWork(id, () => context);
     signalSync();
   }
   if (hash === sha256(document)) acknowledgeMessageContext(id, body.finalizesMessage);
@@ -1047,7 +1035,7 @@ function pendingMessages(id: string) {
   return threads.get(id) ? threads.pending(id) : peerInspections.get(id)?.pending ?? [];
 }
 function queuedMessagesFor(id: string): QueuedMessage[] {
-  return pendingMessages(id).filter(message => !message.insertedAt || (threads.get(id) && !landedWork.has(id, message.id))).map(message => {
+  return pendingMessages(id).filter(message => !message.landedAt).map(message => {
     // A message the runtime has taken cannot be edited, steered or removed;
     // one still waiting can be all three, whether or not the thread is held.
     const waiting = (message.state ?? "queued") === "queued";
@@ -1373,7 +1361,6 @@ function handlePiEvent(sessionId: string, event: any) {
     return;
   }
   if (event.type === "thread_settled") {
-    landedWork.forget(sessionId);
     responseTiming.forget(sessionId);
     settleLiveProjection(rt);
     void refreshThreadNotifications();
@@ -2227,7 +2214,6 @@ const server = Bun.serve<AudioSocketData>({
         })();
         if (!appended.ok) return error(appended.error, 409);
         cacheStoredContext(id, appended.value);
-        markLandedWork(id, () => JSON.parse(appended.value.document));
         acknowledgeMessageContext(id, body.finalizesMessage);
         signalSync();
         return json({ ok: true, capturedAt, hash: splice.targetHash });
