@@ -99,11 +99,10 @@ function signedFinalMessage() {
 }
 
 function expectReadableCompletion(text: string): void {
-  for (const readable of ["Readable child reasoning", "Readable child result", "Readable reasoning summary", "More readable reasoning", "application-signature", "application-value"]) {
-    expect(text).toContain(readable);
+  expect(text).toContain("Readable child result");
+  for (const excluded of ["Readable child reasoning", "Readable reasoning summary", "More readable reasoning", "application-signature", "application-value", "opaque-", "thinkingSignature", "textSignature", "thoughtSignature", "encryptedContent", "redacted_thinking", "stopReason", "usage", "\"provider\"", "\"model\""]) {
+    expect(text).not.toContain(excluded);
   }
-  expect(text).not.toContain("opaque-");
-  for (const field of ["thinkingSignature", "textSignature", "thoughtSignature", "encryptedContent", "redacted_thinking"]) expect(text).not.toContain(field);
 }
 
 function fixture(root?: string, workersOnly = false) {
@@ -600,8 +599,8 @@ describe("ThreadService", () => {
     expect(finalMessage).toEqual(nativeFinalMessage);
     const notification = first.service.pending(parent.id)[0]!;
     expectReadableCompletion(notification.text);
-    expect(JSON.parse(notification.text)).toMatchObject({
-      type: "thread_idle", threadId: child.id, workId: "child-work", executionId: settlement.executionId, outcome: "complete",
+    expect(JSON.parse(notification.text)).toEqual({
+      type: "thread_idle", title: child.title, outcome: "complete", finalText: "Readable child result",
     });
     const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
     try {
@@ -634,9 +633,7 @@ describe("ThreadService", () => {
     const command = second.sessions.flatMap(session => session.commands).find(command => command.workId === notification.id)!;
     const text = String(command.message);
     expectReadableCompletion(text);
-    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({
-      source: "notification", senderThreadId: child.id, recipientThreadId: parent.id, messageId: notification.id, replyTo: "child-work",
-    });
+    expect(JSON.parse(text.split("\n")[2]!)).toEqual({ senderThreadId: child.id });
     expect(text).toContain(notification.text);
   });
 
@@ -913,12 +910,9 @@ describe("ThreadService", () => {
     expectReadableCompletion(text);
     expect(text).toContain(meetingContext);
     expect(text.match(/<agent_message>/g)).toHaveLength(1);
-    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({
-      senderThreadId: "child", recipientThreadId: parent.id, source: "notification", messageId: "persisted-completion", replyTo: "child-work",
-    });
+    expect(JSON.parse(text.split("\n")[2]!)).toEqual({ senderThreadId: "child" });
     const body = JSON.parse(text.split("\n")[4]!);
-    expect(body).toMatchObject({ type: "thread_idle", threadId: "child", workId: "child-work", executionId: "child-execution", outcome: "failed", error });
-    expect(body.finalMessage.content.at(-1)).toEqual(finalMessage.content.at(-1));
+    expect(body).toEqual({ type: "thread_idle", outcome: "failed", finalText: "Readable child result", error });
     await settle(second.sessions[0]!, second.service, parent.id);
   });
 

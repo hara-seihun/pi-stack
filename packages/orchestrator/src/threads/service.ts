@@ -847,7 +847,7 @@ export class ThreadService implements ThreadApi {
       if (thread.parentId) {
         const receipt = `thread-result:${execution.id}`;
         if (!this.sql("SELECT 1 FROM thread_work WHERE id=?").get(receipt)) this.insertMessage(receipt, {
-          requestId: receipt, threadId: thread.parentId, senderId: id, text: serializeThreadNotification({ type: "thread_idle", threadId: id, workId: execution.work_id, executionId: execution.id, outcome, finalMessage, ...(error ? { error } : {}) }),
+          requestId: receipt, threadId: thread.parentId, senderId: id, text: serializeThreadNotification({ type: "thread_idle", title: thread.title, outcome, finalMessage, ...(error ? { error } : {}) }),
           delivery: "steer", source: "notification", replyTo: execution.work_id,
         }, this.get(thread.parentId)?.settings ?? thread.settings);
       }
