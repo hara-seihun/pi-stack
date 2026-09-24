@@ -27,7 +27,7 @@ async function request<T>(path: string, init: RequestInit, signal: AbortSignal):
 const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 export const messagingClient = {
   open: (backendId: string, target: string, signal: AbortSignal) => request<{ conversation: MessagingConversation }>(API.messagingOpen.path(), json({ backendId, target }), signal),
-  history: (conversationId: string, signal: AbortSignal, before?: number) => request<MessagingHistory>(API.messagingHistory.path({ conversationId }, { limit: 50, ...(before === undefined ? {} : { before }) }), {}, signal),
+  history: (conversationId: string, signal: AbortSignal, before?: number, since?: number) => request<MessagingHistory>(API.messagingHistory.path({ conversationId }, { limit: 50, before, since }), {}, signal),
   linkPreviews: async (messageId: string, signal: AbortSignal): Promise<MessagingResult<{ previews: MessagingLinkPreview[] }>> => {
     const release = await previewQueue.acquire(signal);
     if (!release) return { ok: false, error: { code: "aborted", message: "Preview request cancelled" } };
