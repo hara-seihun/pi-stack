@@ -75,7 +75,7 @@ function MessagingConversationController({ conversation, backend, active, histor
       setHistoryError(next.error);
       if (next.history && next.history !== held.history) {
         setLoaded(true);
-        setMessages(current => mergeHumanMessages(current, next.history!.messages));
+        setMessages(current => mergeHumanMessages(next.removed.size ? current.filter(message => !next.removed.has(message.id)) : current, next.history!.messages));
         if (!historyStarted.current) { setBefore(next.history.before); historyStarted.current = true; }
       }
       held = next;

@@ -1,5 +1,5 @@
 import { API } from "../../server/api";
-import type { MessagingAttachment, MessagingCall, MessagingConversation, MessagingHistory, MessagingLink, MessagingLinkPreview, MessagingMessage, MessagingResult, MessagingSend } from "../../server/messaging/protocol";
+import type { MessagingAttachment, MessagingCall, MessagingConversation, MessagingHistory, MessagingHistoryChanges, MessagingLink, MessagingLinkPreview, MessagingMessage, MessagingResult, MessagingSend } from "../../server/messaging/protocol";
 import { piFetch } from "./client";
 import { PreviewQueue } from "./preview-queue";
 
@@ -28,6 +28,7 @@ const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "cont
 export const messagingClient = {
   open: (backendId: string, target: string, signal: AbortSignal) => request<{ conversation: MessagingConversation }>(API.messagingOpen.path(), json({ backendId, target }), signal),
   history: (conversationId: string, signal: AbortSignal, before?: number, since?: number) => request<MessagingHistory>(API.messagingHistory.path({ conversationId }, { limit: 50, before, since }), {}, signal),
+  changes: (conversationId: string, signal: AbortSignal, after: number, from: number) => request<MessagingHistoryChanges>(API.messagingHistory.path({ conversationId }, { after, from }), {}, signal),
   linkPreviews: async (messageId: string, signal: AbortSignal): Promise<MessagingResult<{ previews: MessagingLinkPreview[] }>> => {
     const release = await previewQueue.acquire(signal);
     if (!release) return { ok: false, error: { code: "aborted", message: "Preview request cancelled" } };

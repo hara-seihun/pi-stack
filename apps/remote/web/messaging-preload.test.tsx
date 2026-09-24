@@ -6,14 +6,17 @@ import { MessagingHistoryCache } from "./src/messaging-history";
 
 test("first render of a never-visited Signal thread already contains its preloaded messages", async () => {
   const snapshot: MessagingSnapshot = { version: 1, backends: [], calls: [], conversations: [{
-    id: "chat", backendId: "signal", externalId: "contact", title: "Contact", kind: "direct", updatedAt: 1, unread: 1, current: true, avatar: null,
+    id: "chat", backendId: "signal", externalId: "contact", title: "Contact", kind: "direct", updatedAt: 1, unread: 1, current: true, avatar: null, revision: 1,
   }] };
   const message: MessagingMessage = {
     id: "message", requestId: null, conversationId: "chat", externalId: "external", direction: "incoming", sender: "Contact",
     text: "Already here before the tap", timestamp: 1, status: "received", error: null, attachments: [],
   };
   let requests = 0;
-  const history = new MessagingHistoryCache(async () => { requests++; return { ok: true, value: { messages: [message], before: 7 } }; });
+  const history = new MessagingHistoryCache({
+    window: async () => { requests++; return { ok: true, value: { messages: [message], before: 7, revision: 1 } }; },
+    changes: async () => { throw new Error("An unchanged conversation fetches no changes"); },
+  });
   history.reconcile(snapshot);
   await Promise.resolve();
   let reads = 0;

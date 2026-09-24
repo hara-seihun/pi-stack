@@ -82,6 +82,8 @@ export interface MessagingConversation {
   current: boolean;
   /** Version of the contact's or group's picture, for the avatar route; null when the backend has none. */
   avatar: number | null;
+  /** Rises whenever anything a client renders for one of this conversation's messages changes. */
+  revision: number;
 }
 
 export interface MessagingAttachment {
@@ -128,6 +130,14 @@ export interface MessagingSnapshot {
 export interface MessagingHistory {
   messages: MessagingMessage[];
   before: number | null;
+  /** The conversation revision this window reflects; pass it as `after` to fetch only later changes. */
+  revision: number;
+}
+/** Messages at or after the client's oldest held message that changed or disappeared after its revision. */
+export interface MessagingHistoryChanges {
+  messages: MessagingMessage[];
+  removed: string[];
+  revision: number;
 }
 export interface MessagingSend {
   requestId: string;

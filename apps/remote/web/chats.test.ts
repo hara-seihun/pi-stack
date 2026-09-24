@@ -22,9 +22,9 @@ const messaging: MessagingSnapshot = {
   version: 1,
   backends: [{ id: "signal-personal", plugin: "signal", label: "Signal", icon: "signal", status: "ready", detail: "", capabilities: { attachments: true, groups: true } }],
   conversations: [
-    { id: "same-id", backendId: "signal-personal", externalId: "+123", title: "A person", kind: "direct", updatedAt: 5, unread: 0, current: true, avatar: null },
+    { id: "same-id", backendId: "signal-personal", externalId: "+123", title: "A person", kind: "direct", updatedAt: 5, unread: 0, current: true, avatar: null, revision: 0 },
     { id: "unread", backendId: "signal-personal", externalId: "+789", title: "Waiting", kind: "direct", updatedAt: 2, unread: 3, current: true, avatar: 1700 },
-    { id: "directory-only", backendId: "signal-personal", externalId: "+456", title: "Not open", kind: "direct", updatedAt: 1, unread: 0, current: false, avatar: null },
+    { id: "directory-only", backendId: "signal-personal", externalId: "+456", title: "Not open", kind: "direct", updatedAt: 1, unread: 0, current: false, avatar: null, revision: 0 },
   ],
 };
 

@@ -53,7 +53,7 @@ describe("resource subscriptions", () => {
 
 describe("the messaging inbox", () => {
   const conversation = (id: string, extra: Partial<MessagingConversation>): MessagingConversation => ({
-    id, backendId: "signal", externalId: id, title: id, kind: "direct", updatedAt: 0, unread: 0, current: false, avatar: null, ...extra,
+    id, backendId: "signal", externalId: id, title: id, kind: "direct", updatedAt: 0, unread: 0, current: false, avatar: null, revision: 0, ...extra,
   });
   test("keeps open conversations that are recent or unread", () => {
     const now = Date.UTC(2026, 8, 18);

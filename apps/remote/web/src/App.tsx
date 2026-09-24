@@ -271,7 +271,10 @@ function RemoteApp() {
     })());
   }, [person]);
   useEffect(() => () => cache.dispose(), [cache]);
-  const messagingHistory = useMemo(() => new MessagingHistoryCache((id, signal, since) => messagingClient.history(id, signal, undefined, since)), [person]);
+  const messagingHistory = useMemo(() => new MessagingHistoryCache({
+    window: (id, signal, since) => messagingClient.history(id, signal, undefined, since),
+    changes: messagingClient.changes,
+  }), [person]);
   useEffect(() => {
     messagingHistory.start();
     const refresh = () => { if (document.visibilityState === "visible") messagingHistory.refresh(); };
