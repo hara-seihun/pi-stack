@@ -1,20 +1,21 @@
 import type { ThreadMessage } from "./contracts.js";
 
-const opaqueField = /^(?:thinkingSignature|textSignature|thoughtSignature|signature|encrypted_content|encryptedContent)$/i;
-
-function readableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(readableValue).filter(item => item !== undefined);
-  if (!value || typeof value !== "object") return value;
-  const record = value as Record<string, unknown>;
-  if (record.type === "redacted_thinking") return undefined;
-  return Object.fromEntries(Object.entries(record)
-    .filter(([key]) => !opaqueField.test(key))
-    .map(([key, item]) => [key, record.type === "toolCall" && key === "arguments" ? item : readableValue(item)])
-    .filter(([, item]) => item !== undefined));
+export function finalText(message: unknown): string | null {
+  if (typeof message === "string") return message || null;
+  if (!message || typeof message !== "object") return null;
+  const content = (message as Record<string, unknown>).content;
+  if (typeof content === "string") return content || null;
+  if (!Array.isArray(content)) return null;
+  const text = content.filter((block): block is { type: "text"; text: string } =>
+    !!block && typeof block === "object" && block.type === "text" && typeof block.text === "string")
+    .map(block => block.text).join("\n");
+  return text || null;
 }
 
 export function serializeThreadNotification(notification: Record<string, unknown>): string {
-  return JSON.stringify({ ...notification, finalMessage: readableValue(notification.finalMessage) });
+  return JSON.stringify({ type: "thread_idle", ...(typeof notification.title === "string" ? { title: notification.title } : {}),
+    outcome: notification.outcome, finalText: typeof notification.finalText === "string" ? notification.finalText : finalText(notification.finalMessage),
+    ...(notification.error ? { error: notification.error } : {}) });
 }
 
 export function readableNotificationText(message: Pick<ThreadMessage, "source" | "text">, text = message.text): string {
@@ -30,7 +31,7 @@ export function readableNotificationText(message: Pick<ThreadMessage, "source" |
 export function formatThreadMessage(message: ThreadMessage, text: string): string {
   if (!message.senderId && message.source !== "notification") return text;
   text = readableNotificationText(message, text);
-  const metadata = {
+  const metadata = message.source === "notification" ? { senderThreadId: message.senderId } : {
     senderThreadId: message.senderId,
     recipientThreadId: message.threadId,
     messageId: message.id,
