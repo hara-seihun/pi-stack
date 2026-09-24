@@ -4,6 +4,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
+import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
 import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
@@ -42,7 +43,7 @@ import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webResponse } from "./files";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
-import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { ResourceCache } from "../shared/resource-cache";
@@ -355,6 +356,9 @@ function liveFor(id: string): LiveProjection {
 
 const now = () => new Date().toISOString();
 let planUsage: PlanUsageSnapshot | null = null;
+/** Everyone's relative usage, computed only for the host's administrator. */
+const HOST_ADMINISTRATOR = isHostAdministrator();
+let peopleUsage: PeopleUsage | null = null;
 let planUsageRefresh: Promise<void> | null = null;
 let nextPlanUsageRefresh = 0;
 
@@ -368,6 +372,14 @@ function refreshPlanUsageIfDue() {
       console.error("Plan meter refresh failed", cause);
     }
     planUsage = orchestrator.plans();
+    if (HOST_ADMINISTRATOR) {
+      try {
+        const names = new Map(listPersons().map((person) => [person.user, person.displayName]));
+        peopleUsage = readPeopleUsage((windowMs) => orchestrator.personUsage(windowMs), userInfo().username, names);
+      } catch (cause) {
+        console.error("People usage refresh failed", cause);
+      }
+    }
   })().finally(() => { planUsageRefresh = null; });
 }
 
@@ -425,6 +437,7 @@ async function buildDashboard(): Promise<Dashboard> {
     actions,
     machine: readMachineUsage(),
     modelCounts: agents.models,
+    people: peopleUsage,
   };
 }
 // Refreshes are serialized so a toggle's refresh always observes the toggle,

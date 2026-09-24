@@ -1,6 +1,7 @@
 import { ORCHESTRATOR_CATALOG, catalogAgentType, catalogMeter, type PlanDefinition, type PlanMetric } from "./catalog.js";
 import { Store } from "./store.js";
 import { type Account, type UsageTotal } from "./domain.js";
+import { personUsage, type PersonUsageWindow } from "./person-usage.js";
 
 export const CACHE_WINDOW_MS=24*3_600_000;
 export interface PlanAccountUsage{
@@ -103,6 +104,8 @@ export class OrchestratorClient{
   boost(provider:string):number{return Number(this.store.control(`boost:${provider}`)??"1");}
   setBoost(provider:string,multiplier:number):void{this.store.setControl(`boost:${provider}`,String(multiplier));}
   plans(definitions:readonly PlanDefinition[]=ORCHESTRATOR_CATALOG.plans,now=Date.now()):PlanUsageSnapshot{const totals=this.store.usageSince(now-CACHE_WINDOW_MS);return{plans:Object.fromEntries(definitions.map((definition)=>[definition.id,plan(this.store,definition,totals,now)])),updatedAt:new Date(now).toISOString()};}
+  /** Each person's share of this ledger over the hour buckets of the last `windowMs`. */
+  personUsage(windowMs:number,now=Date.now()):PersonUsageWindow{return personUsage(this.store,now-windowMs,now);}
   async refreshPlanFacts(_agentDir:string):Promise<void>{}
   close():void{this.store.close();}
 }
