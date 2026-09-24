@@ -138,7 +138,6 @@ export function People({ usage }: { usage: PeopleUsage }) {
   const [period, setPeriod] = useState<PeopleUsagePeriod>("day");
   const current = usage.periods[period];
   const selected = peoplePeriods.find((item) => item.id === period)!;
-  const top = current.people[0]?.percent ?? 0;
   return <Card title="People">
     <div className="machine-people-header">
       <p className="machine-secondary">Share of model use, {selected.description}</p>
@@ -148,7 +147,7 @@ export function People({ usage }: { usage: PeopleUsage }) {
     </div>
     {current.people.length === 0 ? <p className="machine-secondary">Nobody used a model in this period.</p> : current.people.map((person) => <div className="machine-plan-row machine-person" key={person.user}>
       <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{person.name}</strong></div><span>{formatShare(person.percent)}</span></div>
-      <div className="machine-bar machine-person-bar" role="img" aria-label={`${person.name}: ${formatShare(person.percent)} of model use`}><span style={{ width: `${top > 0 ? Math.max(0.5, person.percent * 100 / top) : 0}%` }} /></div>
+      <div className="machine-bar machine-person-bar" role="img" aria-label={`${person.name}: ${formatShare(person.percent)} of model use`}><span style={{ width: `${Math.max(0.5, Math.min(100, person.percent))}%` }} /></div>
       <div className="machine-plan-meta"><span>{formatTokens(person.tokens)} tokens · {formatDollars(person.value)} at API prices</span>{person.workersPercent !== null && <span>{formatShare(person.workersPercent)} workers</span>}</div>
     </div>)}
   </Card>;
