@@ -12,6 +12,7 @@ Model descriptions help choose a worker after deciding to delegate; they are not
 
 ### Designing delegated subtasks
 - Subtasks must be concrete, well-defined, and self-contained.
+- Launch a bounded worker as ephemeral unless you plan to follow up with it after its response. Ephemeral describes the conversation's lifetime, not the importance of its work: it can edit files, run tools, and produce durable results. Its transcript and result remain readable after it archives. Choose a persistent worker when an ongoing exchange will help complete the task.
 - Delegated subtasks must materially advance the main task.
 - Do not duplicate work between the main agent and delegated subtasks.
 - Avoid issuing multiple delegate calls on the same unresolved thread unless the new delegated task is genuinely different and necessary.

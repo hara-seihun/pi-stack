@@ -7,7 +7,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `daemon`: Run reconciliation and the local API.
 - `status`: Print accounts, lanes, leases, and active threads.
 - `usage-evidence`: Print a read-only 24-hour quota and token snapshot; optional --ledger FILE.
-- `run`: Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--background].
+- `run`: Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--ephemeral[=true|false]] [--background].
 - `schedule`: Create and manage recurring thread jobs.
 - `wave`: Spawn a one-off batch from a declared lane [--count N] [--background].
 - `list`: List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR].

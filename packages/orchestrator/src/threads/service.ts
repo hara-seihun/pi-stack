@@ -317,6 +317,10 @@ export class ThreadService implements ThreadApi {
         if (accepted.value) return good(this.get(accepted.value)!);
       }
       if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
+      if (input.ephemeral !== undefined && typeof input.ephemeral !== "boolean") return bad("invalid_request", "ephemeral must be a boolean");
+      if (input.ephemeral && !parent) return bad("invalid_request", "Only subagents can be ephemeral");
+      if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
+      if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (parent && (parent.parentId || parent.role === "worker")) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
@@ -325,7 +329,7 @@ export class ThreadService implements ThreadApi {
       // Check local receipts first so retries of previously accepted children retain their identity.
       const workerOwner = parent && this.workerOwner?.(parent, input);
       if (workerOwner) return workerOwner.spawn(input);
-      const metadata = { ...Object.fromEntries(["profileId", "meetingId", "bashTimeoutSeconds", "context", "execution", "source", "raw"].filter(key => parent?.metadata?.[key] !== undefined).map(key => [key, parent!.metadata![key]])), ...input.metadata };
+      const metadata: Record<string, unknown> = { ...Object.fromEntries(["profileId", "meetingId", "bashTimeoutSeconds", "context", "execution", "source", "raw"].filter(key => parent?.metadata?.[key] !== undefined).map(key => [key, parent!.metadata![key]])), ...input.metadata, ...(input.ephemeral ? { ephemeral: true } : {}) };
       for (const key of ["context", "execution", "raw"] as const) if (parent && input.metadata && key in input.metadata && digest(input.metadata[key] ?? null) !== digest(parent.metadata?.[key] ?? null)) return bad("conflict", "A child must remain in its parent's execution boundary");
       if (metadata.context !== undefined && !isRunContext(metadata.context)) return bad("invalid_request", "Invalid isolated context contract");
       if (metadata.execution === "root-repair" && metadata.context) return bad("invalid_request", "Root repair requires full normal Pi context");
@@ -404,7 +408,7 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
     if (patch.title !== undefined && !patch.title.trim()) return bad("invalid_request", "Thread title cannot be empty");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["context", "execution", "nativeHistoryRequired", "runnerReference"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["context", "execution", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.archived && (this.execution(id) || this.runtimes.get(id)?.busy || thread.state === "running")) return bad("conflict", "Stop this thread before archiving it, or use control(update)");
     // Archiving an archived thread is a no-op rather than a fresh archivedAt: a
     // subtree cascade reaches the same thread from more than one owner.
@@ -870,6 +874,9 @@ export class ThreadService implements ThreadApi {
       this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, Date.now(), execution.id);
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
+      if (thread.metadata?.ephemeral && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
+        this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
+      }
       if (thread.parentId) {
         const receipt = `thread-result:${execution.id}`;
         if (!this.sql("SELECT 1 FROM thread_work WHERE id=?").get(receipt)) this.insertMessage(receipt, {

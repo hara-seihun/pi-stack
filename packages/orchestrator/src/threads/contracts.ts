@@ -57,6 +57,7 @@ export interface SpawnThread {
   title?: string;
   cwd: string;
   message?: string;
+  ephemeral?: boolean;
   images?: unknown[];
   settings?: SettingsOverrides;
   admission?: Admission;

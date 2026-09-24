@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { resolveDelivery, type Delivery, type SendThread, type ThreadApi } from "../src/threads/contracts.js";
+import { resolveDelivery, type Delivery, type SendThread, type SpawnThread, type ThreadApi } from "../src/threads/contracts.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 
 const modes: Delivery[] = ["queue", "steer", "hardSteer"];
@@ -8,6 +8,16 @@ afterEach(() => vi.restoreAllMocks());
 it.each([undefined, "sender"])("defaults API delivery for sender %s and preserves explicit choices", senderId => {
   expect(resolveDelivery({ senderId })).toBe(senderId ? "steer" : "queue");
   for (const delivery of modes) expect(resolveDelivery({ senderId, delivery })).toBe(delivery);
+});
+
+it("defaults bounded tool workers to ephemeral and accepts an explicit persistent choice", async () => {
+  const spawn = vi.fn(async (_input: SpawnThread) => ({ ok: true as const, value: {} }));
+  const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { spawn } as unknown as ThreadApi })
+    .find(tool => tool.name === "thread_spawn")!;
+  for (const [choice, expected] of [[undefined, true], [true, true], [false, false]] as const) {
+    await tool.execute("call", { message: "Build and deliver a real artifact", ephemeral: choice }, undefined, undefined, {} as never);
+    expect(spawn.mock.calls.at(-1)?.[0]).toMatchObject({ parentId: "parent", ephemeral: expected, message: "Build and deliver a real artifact" });
+  }
 });
 
 it.each(["in-process", "http"])("offers only steer and hard steer in the %s send tool", async transport => {
