@@ -81,10 +81,8 @@ describe("child spawn settings", () => {
 
   it.each([
     "opus", "sonnet", "anthropic/claude-opus-5-5", "anthropic/claude-opus-5", "anthropic-3/claude-opus-5",
-  ])("rejects Anthropic child model %s", model => {
-    expect(resolveSpawnSettings({ model }, parent("anthropic/claude-sonnet-4-5"))).toMatchObject({
-      ok: false, error: { code: "invalid_request", message: expect.stringContaining("OpenAI Codex") },
-    });
+  ])("accepts explicit Anthropic child model %s", model => {
+    expect(value(resolveSpawnSettings({ model }, parent("openai-codex/gpt-6-sol"))).model).toMatch(/^anthropic(-\d+)?\//);
   });
 
   it.each([
@@ -104,12 +102,13 @@ describe("child spawn settings", () => {
 });
 
 describe("ThreadService child spawn policy", () => {
-  it("keeps explicit Anthropic on conversations, but not on children or direct runs", async () => {
+  it("keeps explicit Anthropic on conversations and children, but not direct runs", async () => {
     const { root, service } = fixture();
     const conversation = value(await service.spawn({ requestId: "root", cwd: root, settings: { model: "opus" } }));
     const child = value(await service.spawn({ requestId: "child", cwd: root, parentId: conversation.id }));
     expect(child.settings.model).toBe("openai-codex/gpt-6-sol");
-    expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "opus" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "opus" } })).toMatchObject({ ok: true });
+    expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "fable" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(await service.spawn({ requestId: "direct", cwd: root, settings: { model: "opus" }, metadata: { source: "direct" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(await service.control({ action: "settings", threadId: conversation.id, settings: { model: "fable" } })).toMatchObject({ ok: true });
   });

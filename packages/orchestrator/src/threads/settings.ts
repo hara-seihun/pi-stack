@@ -6,10 +6,14 @@ export function resolveSpawnSettings(input: SettingsOverrides | undefined, paren
   if (!parent) return resolveThreadSettings(input);
   const resolved = resolveThreadSettings(input, { model: "sol", thinkingLevel: "high", speed: "standard" });
   if (!resolved.ok) return resolved;
-  const physical = resolved.value.model.split("/").at(-1)!;
-  if (/(^|[-_.])(astra|fable)([-_.]|$)/i.test(physical)) return { ok: false, error: { code: "invalid_request", message: "Subagents cannot use Astra or Fable. Choose Sol or Luna." } };
-  if (!resolved.value.model.startsWith("openai-codex/")) return { ok: false, error: { code: "invalid_request", message: "Subagents require an OpenAI Codex model. Choose Sol or Luna." } };
-  return resolved;
+  const forbidden = childModelError(resolved.value.model);
+  return forbidden ? { ok: false, error: forbidden } : resolved;
+}
+
+export function childModelError(model: string): { code: "invalid_request"; message: string } | undefined {
+  const physical = model.split("/").at(-1)!;
+  if (/(^|[-_.])(astra|fable)([-_.]|$)/i.test(physical)) return { code: "invalid_request", message: "Subagents cannot use Astra or Fable. Choose Sol, Opus or Luna." };
+  return undefined;
 }
 
 export function resolveThreadSettings(input: SettingsOverrides = {}, current?: ThreadSettings): Result<ThreadSettings> {

@@ -105,20 +105,22 @@ it("admits ordinary executions through a model broker without local accounts or 
   } finally { store.close(); }
 });
 
-it.each([false, true])("keeps Anthropic for interactive roots, not scheduled work (broker: %s)", async broker => {
+it.each([false, true])("keeps Anthropic for interactive roots and children, not lanes or direct runs (broker: %s)", async broker => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "anthropic-1", provider: "anthropic", concurrency: 3 });
   const fleet = new Fleet(store, { ...loadConfig("/missing"), ...(broker ? { modelBrokerUrl: "http://127.0.0.1:2461" } : {}) });
   const settings = { ...thread.settings, model: "anthropic/claude-opus-5" };
   try {
-    const scheduledThreads: Thread[] = [{ ...thread, parentId: "parent" }, { ...thread, metadata: { source: "lane" } }, { ...thread, metadata: { source: "direct" } }];
+    const scheduledThreads: Thread[] = [{ ...thread, metadata: { source: "lane" } }, { ...thread, metadata: { source: "direct" } }];
     for (const scheduled of scheduledThreads) {
       expect(await fleet.admit(scheduled, settings, false, scheduled.parentId ?? String(scheduled.metadata?.source ?? "work")))
         .toMatchObject({ ok: false, error: { code: "invalid_request", message: expect.stringContaining("OpenAI Codex") } });
     }
-    const interactive = await fleet.admit(thread, settings, false, "interactive");
-    expect(interactive.ok).toBe(true);
-    if (interactive.ok) await interactive.value.release();
+    for (const [admitted, id] of [[thread, "interactive"], [{ ...thread, parentId: "parent" }, "child"]] as const) {
+      const result = await fleet.admit(admitted, settings, false, id);
+      expect(result.ok).toBe(true);
+      if (result.ok) await result.value.release();
+    }
   } finally { store.close(); }
 });
 
