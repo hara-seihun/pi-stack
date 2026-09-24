@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { Dashboard, Governor, GovernorProvider, GovernorState, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
 import { Sheet } from "../../app/Sheet";
 import { iconUrl } from "../../chat-row";
-import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens } from "./format";
+import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens, formatWeekReset } from "./format";
 import "./machine.css";
 
 export type MachineScreenProps = {
@@ -122,25 +122,27 @@ function Plan({ plan, modelCounts }: { plan: PlanCard; modelCounts: Map<string, 
           <div className="machine-plan-meta"><span>{active} active</span>{metric.cacheText && <span>{metric.cacheText} cached · 24h</span>}</div>
         </div>;
       })}
-      {plan.spent && <div className="machine-plan-spent" aria-label={`You used ${formatDollars(plan.spent.day)} of ${plan.label} in the last 24 hours and ${formatDollars(plan.spent.week)} in the last 7 days`}>
-        <span>You used</span><strong>{formatDollars(plan.spent.day)}</strong><small>24h</small><strong>{formatDollars(plan.spent.week)}</strong><small>7 days</small>
+      {plan.spent && <div className="machine-plan-spent" aria-label={`You used ${formatDollars(plan.spent.day)} of ${plan.label} today and ${formatDollars(plan.spent.week)} this week`}>
+        <span>You used</span><strong>{formatDollars(plan.spent.day)}</strong><small>today</small><strong>{formatDollars(plan.spent.week)}</strong><small>this week</small>
       </div>}
     </Card>
     <PlanDetail plan={plan} metric={selected} now={now} onClose={() => setSelectedId(null)} />
   </>;
 }
 
-/** The viewer's own weekly spending limit, enforced by her model broker over
- * the trailing seven days. It sits right under the shared plans' bars. */
-export function Allowance({ allowance }: { allowance: { weeklyUsd: number; usedUsd: number } }) {
+/** The viewer's own weekly spending limit, enforced by her model broker for
+ * the week from Monday 00:00 host time. It sits right under the shared plans'
+ * bars and only grows until the week resets. */
+export function Allowance({ allowance }: { allowance: { weeklyUsd: number; usedUsd: number; resetsAt: string } }) {
+  const resets = formatWeekReset(allowance.resetsAt);
   const usedPercent = allowance.weeklyUsd > 0 ? Math.min(100, allowance.usedUsd * 100 / allowance.weeklyUsd) : 100;
   const left = Math.max(0, allowance.weeklyUsd - allowance.usedUsd);
   const exhausted = allowance.usedUsd >= allowance.weeklyUsd;
   return <Card title="Your weekly limit">
     <div className="machine-plan-row">
-      <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{formatDollars(allowance.usedUsd)} of {formatDollars(allowance.weeklyUsd)}</strong><small>last 7 days</small></div><span>{exhausted ? "Used up" : `${formatDollars(left)} left`}</span></div>
+      <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{formatDollars(allowance.usedUsd)} of {formatDollars(allowance.weeklyUsd)}</strong><small>this week{resets && ` · resets ${resets}`}</small></div><span>{exhausted ? "Used up" : `${formatDollars(left)} left`}</span></div>
       <div className="machine-bar machine-person-bar" role="img" aria-label={`You used ${formatDollars(allowance.usedUsd)} of your ${formatDollars(allowance.weeklyUsd)} weekly limit`}><span data-risk={risk(100 - usedPercent)} style={{ width: `${Math.max(0.5, usedPercent)}%` }} /></div>
-      {exhausted && <p className="machine-secondary">Models are paused for you until use from seven days ago ages out.</p>}
+      {exhausted && <p className="machine-secondary">Models are paused for you until the week resets{resets && ` ${resets}`}.</p>}
     </div>
   </Card>;
 }
@@ -165,7 +167,7 @@ export function People({ usage }: { usage: PeopleUsage }) {
         {peoplePeriods.map((item) => <button key={item.id} type="button" aria-pressed={period === item.id} onClick={() => setPeriod(item.id)}>{item.label}</button>)}
       </div>
     </div>
-    {current.subscriptions.length > 0 && <p className="machine-people-plans">{current.subscriptions.map((plan) => `${plan.label} ${plan.accounts} × $${plan.monthlyUsd}/mo = ${formatDollars(plan.spend)}${plan.idle ? " unused" : ""}`).join(" · ")}</p>}
+    {current.subscriptions.length > 0 && <p className="machine-people-plans">{current.subscriptions.map((plan) => `${plan.label} ${formatDollars(plan.used)} used of ${plan.accounts} × $${plan.monthlyUsd}/mo = ${formatDollars(plan.spend)}`).join(" · ")}</p>}
     {current.people.length === 0 ? <p className="machine-secondary">Nobody used a model in this period.</p> : current.people.map((person) => <div className="machine-plan-row machine-person" key={person.user}>
       <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{person.name}</strong></div><span>{formatDollars(person.spend)} · {formatShare(person.percent)}</span></div>
       <div className="machine-bar machine-person-bar" role="img" aria-label={`${person.name}: ${formatDollars(person.spend)}, ${formatShare(person.percent)} of subscription spending`}><span style={{ width: `${Math.max(0.5, Math.min(100, person.percent))}%` }} /></div>

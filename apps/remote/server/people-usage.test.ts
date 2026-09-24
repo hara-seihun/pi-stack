@@ -9,9 +9,9 @@ const sources = (fleet = figures()) => ({ interactive: figures(), fleet, complet
 const row = (principal: string | null, tokens: number, value: number, spend: number, fleet = figures()) =>
   ({ principal, tokens, value, spend, unpricedTokens: value > 0 ? 0 : tokens, sources: sources(fleet), providers: {} });
 const plans = [
-  { planId: "openai", label: "OpenAI", provider: "openai-codex", accounts: 5, monthlyUsd: 200, spend: 33.33, idle: 0, rate: 0.03, rateSince: "a" },
-  { planId: "anthropic", label: "Anthropic", provider: "anthropic", accounts: 3, monthlyUsd: 250, spend: 25, idle: 25, rate: null, rateSince: "a" },
-  { planId: "other", label: "Other", provider: "other", accounts: 0, monthlyUsd: 10, spend: 0, idle: 0, rate: null, rateSince: "a" },
+  { planId: "openai", label: "OpenAI", provider: "openai-codex", accounts: 5, monthlyUsd: 200, spend: 33.33, used: 30, rate: 0.03 },
+  { planId: "anthropic", label: "Anthropic", provider: "anthropic", accounts: 3, monthlyUsd: 250, spend: 25, used: 0, rate: null },
+  { planId: "other", label: "Other", provider: "other", accounts: 0, monthlyUsd: 10, spend: 0, used: 0, rate: null },
 ];
 
 describe("people usage", () => {
@@ -26,7 +26,7 @@ describe("people usage", () => {
     expect(period.people[1]!.workersPercent).toBeNull();
     expect(period.spend).toBeCloseTo(58.33, 2);
     expect(period.used).toBe(40);
-    expect(period.subscriptions.map((plan) => [plan.label, plan.idle])).toEqual([["OpenAI", false], ["Anthropic", true]]);
+    expect(period.subscriptions.map((plan) => [plan.label, plan.used])).toEqual([["OpenAI", 30], ["Anthropic", 0]]);
   });
 
   test("without subscriptions falls back to list-price value, then tokens", () => {

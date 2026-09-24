@@ -57,7 +57,7 @@ export function peopleUsagePeriod(window: PersonUsageWindow, owner: string, name
     used: rows.reduce((sum, row) => sum + row.spend, 0),
     subscriptions: window.subscriptions
       .filter((plan) => plan.accounts > 0)
-      .map((plan) => ({ label: plan.label, accounts: plan.accounts, monthlyUsd: plan.monthlyUsd, spend: plan.spend, idle: plan.idle > 0 })),
+      .map((plan) => ({ label: plan.label, accounts: plan.accounts, monthlyUsd: plan.monthlyUsd, spend: plan.spend, used: plan.used })),
     people,
   };
 }

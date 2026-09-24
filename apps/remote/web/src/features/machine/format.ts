@@ -62,3 +62,11 @@ export function formatShare(percent: number): string {
   if (percent < 0.1) return "<0.1%";
   return percent < 10 ? `${percent.toFixed(1).replace(/\.0$/, "")}%` : `${Math.round(percent)}%`;
 }
+
+/** "Mon 12:00 AM" for a reset within the coming week. */
+export function formatWeekReset(value: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(date);
+}
