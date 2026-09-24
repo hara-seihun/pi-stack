@@ -135,8 +135,8 @@ const peoplePeriods: Array<{ id: PeopleUsagePeriod; label: string; description: 
   { id: "week", label: "Week", description: "last 7 days" },
 ];
 
-/** Everyone's part of what the host's subscriptions cost. Each provider's
- * prorated plan cost is split by list-price value, so a Fable token and a Luna
+/** Everyone's part of what the host's subscriptions cost. Each provider has one
+ * trailing-week rate of subscription dollars per list-price dollar, so a Fable token and a Luna
  * token are not counted as the same thing, and one provider's prices never
  * move the other provider's bill. */
 export function People({ usage }: { usage: PeopleUsage }) {
@@ -145,7 +145,7 @@ export function People({ usage }: { usage: PeopleUsage }) {
   const selected = peoplePeriods.find((item) => item.id === period)!;
   return <Card title="People">
     <div className="machine-people-header">
-      <p className="machine-secondary">{formatDollars(current.spend)} of subscriptions, {selected.description}</p>
+      <p className="machine-secondary">{formatDollars(current.used)} used of {formatDollars(current.spend)} in subscriptions, {selected.description}</p>
       <div className="machine-people-periods" role="group" aria-label="Usage period">
         {peoplePeriods.map((item) => <button key={item.id} type="button" aria-pressed={period === item.id} onClick={() => setPeriod(item.id)}>{item.label}</button>)}
       </div>

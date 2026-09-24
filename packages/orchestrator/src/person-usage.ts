@@ -13,11 +13,17 @@ import type { Store } from "./store.js";
  * principal here because the ledger does not know its own Unix name.
  *
  * The money actually paid is the subscriptions: every enabled account costs
- * its plan's monthly price, prorated over the window. Within one provider,
- * that cost is divided in proportion to list-price value, which weighs a
- * cache read against fresh output the way the provider's quota roughly does.
- * Providers are allocated separately, so an expensive Anthropic token does
- * not take a share of the OpenAI bill.
+ * its plan's monthly price. Each provider gets one rate, dollars of
+ * subscription per dollar of list-price value, measured over a trailing rate
+ * window of at least a week: that window's prorated cost divided by all the
+ * value used in it. A person's spend is her value times that rate, so a
+ * shorter period is always a part of a longer one. Dividing each period's own
+ * cost among whoever happened to be active in it did not have that property:
+ * on a quiet day a light user absorbed most of the day's fixed cost and her
+ * day could exceed her week. List-price value weighs a cache read against
+ * fresh output the way the provider's quota roughly does. Providers are rated
+ * separately, so an expensive Anthropic token does not take a share of the
+ * OpenAI bill.
  */
 export interface PersonUsageRow {
   /** Broker principal (a Unix user name), or null for the ledger's owner. */
@@ -49,6 +55,9 @@ export interface SubscriptionSpend {
   readonly spend: number;
   /** The part of `spend` nobody used in the window. */
   readonly idle: number;
+  /** Subscription dollars per list-price dollar over the rate window; null when nothing was priced there. */
+  readonly rate: number | null;
+  readonly rateSince: string;
 }
 
 export interface PersonUsageWindow {
@@ -64,6 +73,8 @@ const COMPONENTS: readonly UsageComponent[] = ["input", "output", "cacheRead", "
 const POOLED_PROVIDERS = new Set(["openai-codex", "anthropic"]);
 /** Monthly plan prices are prorated over a 30-day month, as `pi-user-usage` does. */
 export const SUBSCRIPTION_MONTH_MS = 30 * 24 * 3_600_000;
+/** The shortest window a provider's rate is measured over. */
+export const SUBSCRIPTION_RATE_WINDOW_MS = 7 * 24 * 3_600_000;
 
 let prices: Map<string, Price> | undefined;
 
@@ -105,6 +116,13 @@ type Person = { principal: string | null; unpricedTokens: number; total: Mutable
 const figures = (): Mutable => ({ tokens: 0, value: 0, spend: 0 });
 const providerOf = (row: Row) => row.provider ?? (row.model.startsWith("claude-") ? "anthropic" : "openai-codex");
 
+function readCells(store: Store, since: number, until: number, priceOf: (model: string) => Price | undefined) {
+  return (store.db.prepare(PRINCIPAL_SQL).all(since, until) as Row[]).map(row => {
+    const price = priceOf(row.model);
+    return { row, provider: providerOf(row), priced: Boolean(price), value: price ? row.tokens * price[row.component] / 1_000_000 : 0 };
+  });
+}
+
 /** Token use, list-price value and each person's part of the subscription cost
  * for the hour buckets that start in [since, until). */
 export function personUsage(
@@ -113,45 +131,47 @@ export function personUsage(
   until = Date.now(),
   priceOf: (model: string) => Price | undefined = model => modelPrices().get(model),
   plans: readonly PlanDefinition[] = ORCHESTRATOR_CATALOG.plans,
+  rateWindowMs = SUBSCRIPTION_RATE_WINDOW_MS,
 ): PersonUsageWindow {
-  const rows = store.db.prepare(PRINCIPAL_SQL).all(since, until) as Row[];
-  const people = new Map<string | null, Person>();
-  // Per person, per provider, per source: the unit subscription cost is split over.
-  const cells: Array<{ person: Person; provider: string; source: UsageSource; tokens: number; value: number }> = [];
-  for (const row of rows) {
-    const principal = row.principal || null;
-    let person = people.get(principal);
-    if (!person) people.set(principal, person = { principal, unpricedTokens: 0, total: figures(), sources: { interactive: figures(), fleet: figures(), completion: figures() }, providers: {} });
-    const price = priceOf(row.model);
-    const value = price ? row.tokens * price[row.component] / 1_000_000 : 0;
-    const provider = providerOf(row);
-    const source: UsageSource = row.source in person.sources ? row.source as UsageSource : "interactive";
-    if (!price) person.unpricedTokens += row.tokens;
-    for (const target of [person.total, person.sources[source], person.providers[provider] ??= figures()]) {
-      target.tokens += row.tokens;
-      target.value += value;
-    }
-    cells.push({ person, provider, source, tokens: row.tokens, value });
-  }
-
+  const rateSince = Math.min(since, until - rateWindowMs);
+  const cells = readCells(store, since, until, priceOf);
+  const rateCells = rateSince === since ? cells : readCells(store, rateSince, until, priceOf);
   const enabled = new Map<string, number>();
   for (const account of store.accounts()) if (account.enabled) enabled.set(account.provider, (enabled.get(account.provider) ?? 0) + 1);
+
+  // Dollars of subscription per unit of weight, per provider. Value is the
+  // weight; a provider whose models are all unpriced falls back to tokens.
+  const rates = new Map<string, { byValue: boolean; rate: number }>();
   const subscriptions: SubscriptionSpend[] = [];
   for (const plan of plans) {
     const accounts = enabled.get(plan.provider) ?? 0;
-    const spend = accounts * plan.monthlyUsd * (until - since) / SUBSCRIPTION_MONTH_MS;
-    const mine = cells.filter(cell => cell.provider === plan.provider);
+    const monthly = accounts * plan.monthlyUsd;
+    const mine = rateCells.filter(cell => cell.provider === plan.provider);
     const value = mine.reduce((sum, cell) => sum + cell.value, 0);
-    const tokens = mine.reduce((sum, cell) => sum + cell.tokens, 0);
-    // Value decides the split; a provider whose models are all unpriced falls back to tokens.
-    const weight = (cell: { value: number; tokens: number }) => value > 0 ? cell.value / value : tokens > 0 ? cell.tokens / tokens : 0;
-    for (const cell of mine) {
-      const share = spend * weight(cell);
-      cell.person.total.spend += share;
-      cell.person.sources[cell.source].spend += share;
-      cell.person.providers[cell.provider]!.spend += share;
+    const tokens = mine.reduce((sum, cell) => sum + cell.row.tokens, 0);
+    const rateCost = monthly * (until - rateSince) / SUBSCRIPTION_MONTH_MS;
+    const byValue = value > 0;
+    const rate = byValue ? rateCost / value : tokens > 0 ? rateCost / tokens : 0;
+    rates.set(plan.provider, { byValue, rate });
+    const used = cells.some(cell => cell.provider === plan.provider && cell.row.tokens > 0);
+    const spend = monthly * (until - since) / SUBSCRIPTION_MONTH_MS;
+    subscriptions.push({ planId: plan.id, label: plan.label, provider: plan.provider, accounts, monthlyUsd: plan.monthlyUsd, spend, idle: used ? 0 : spend, rate: byValue ? rate : null, rateSince: new Date(rateSince).toISOString() });
+  }
+
+  const people = new Map<string | null, Person>();
+  for (const { row, provider, priced, value } of cells) {
+    const principal = row.principal || null;
+    let person = people.get(principal);
+    if (!person) people.set(principal, person = { principal, unpricedTokens: 0, total: figures(), sources: { interactive: figures(), fleet: figures(), completion: figures() }, providers: {} });
+    const source: UsageSource = row.source in person.sources ? row.source as UsageSource : "interactive";
+    const rate = rates.get(provider);
+    const spend = rate ? (rate.byValue ? value : row.tokens) * rate.rate : 0;
+    if (!priced) person.unpricedTokens += row.tokens;
+    for (const target of [person.total, person.sources[source], person.providers[provider] ??= figures()]) {
+      target.tokens += row.tokens;
+      target.value += value;
+      target.spend += spend;
     }
-    subscriptions.push({ planId: plan.id, label: plan.label, provider: plan.provider, accounts, monthlyUsd: plan.monthlyUsd, spend, idle: tokens > 0 ? 0 : spend });
   }
 
   return {
