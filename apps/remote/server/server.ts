@@ -35,6 +35,7 @@ import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles } from "./thread-context-files";
 import { API } from "./api";
+import { jsonHttp } from "./json-http";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
@@ -379,21 +380,6 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
     "cache-control": "no-store",
   },
 });
-
-function compressedJson(req: Request, data: unknown, status = 200): Response {
-  const encoded = JSON.stringify(data);
-  const headers: Record<string, string> = {
-    ...API_CORS_HEADERS,
-    "content-type": "application/json",
-    "cache-control": "no-store",
-    vary: "accept-encoding",
-  };
-  if (encoded.length >= 1_024 && /(?:^|,)\s*gzip(?:\s*;|\s*,|$)/i.test(req.headers.get("accept-encoding") ?? "")) {
-    headers["content-encoding"] = "gzip";
-    return new Response(Bun.gzipSync(Buffer.from(encoded)), { status, headers });
-  }
-  return new Response(encoded, { status, headers });
-}
 
 let imageProvider: SharedImageGenerationService | undefined;
 const inlineImages = new InlineImages(db, join(DATA, "inline-images"), async (input, signal) => {
@@ -1724,6 +1710,7 @@ const server = Bun.serve<AudioSocketData>({
   port: PORT,
   idleTimeout: 30,
   async fetch(req, httpServer) {
+    return jsonHttp(req, await (async () => {
     const url = new URL(req.url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
       return new Response(null, {
@@ -1830,14 +1817,14 @@ const server = Bun.serve<AudioSocketData>({
       const generation = url.searchParams.get("generation") ?? "";
       if (generation && generation !== update.current.generation) {
         // The client's window is gone; answer with the one that replaced it.
-        return compressedJson(req, { error: "The transcript generation has been replaced", sessionId: id,
+        return json({ error: "The transcript generation has been replaced", sessionId: id,
           generation: update.current.generation, total: items.length, items: transcriptWindow(items) }, 409);
       }
       const requestedBefore = Number(url.searchParams.get("before") ?? items.length);
       const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : items.length;
       const requestedLimit = Number(url.searchParams.get("limit") ?? 60);
       const limit = Math.min(200, Math.max(1, Number.isSafeInteger(requestedLimit) ? requestedLimit : 60));
-      return compressedJson(req, { sessionId: id, generation: update.current.generation, total: items.length,
+      return json({ sessionId: id, generation: update.current.generation, total: items.length,
         items: transcriptPage(items, before, limit) });
     }
     const itemRequest = API.sessionItem.match(req.method, url.pathname);
@@ -2212,7 +2199,7 @@ const server = Bun.serve<AudioSocketData>({
       const hash = stored?.hash ?? "empty";
       const etag = `\"${hash}\"`;
       if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { ...API_CORS_HEADERS, etag, "cache-control": "no-cache" } });
-      const response = compressedJson(req, {
+      const response = json({
         capturedAt: stored?.capturedAt ?? 0,
         context: stored ? JSON.parse(stored.document) : null,
         hash: stored?.hash ?? "",
@@ -2386,6 +2373,7 @@ const server = Bun.serve<AudioSocketData>({
     }
 
     return error("Not found", 404);
+    })());
   },
   websocket: {
     perMessageDeflate: false,

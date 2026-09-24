@@ -12,7 +12,7 @@ async function request<T>(path: string, init: RequestInit, signal: AbortSignal):
   else signal.addEventListener("abort", cancel, { once: true });
   const timer = setTimeout(() => controller.abort(new Error("Messaging request timed out")), 20_000);
   try {
-    const response = await piFetch(path, { ...init, signal: controller.signal, cache: "no-store" });
+    const response = await piFetch(path, { ...init, signal: controller.signal });
     const result = await response.json();
     if (!response.ok) return { ok: false, error: { code: String(response.status), message: typeof result.error === "string" ? result.error : result.error?.message || `HTTP ${response.status}` } };
     return { ok: true, value: result as T };

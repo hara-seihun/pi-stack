@@ -40,6 +40,7 @@ export const API = Object.freeze({
   messagingClose: route("DELETE", "/v1/messaging/conversations/:conversationId"),
   messagingHistory: route("GET", "/v1/messaging/conversations/:conversationId/messages"),
   messagingLinkPreviews: route("GET", "/v1/messaging/messages/:messageId/link-previews"),
+  messagingPreviewImage: route("GET", "/v1/messaging/preview-images/:hash"),
   messagingSend: route("POST", "/v1/messaging/conversations/:conversationId/messages"),
   messagingRead: route("POST", "/v1/messaging/conversations/:conversationId/read"),
   messagingUpload: route("POST", "/v1/messaging/conversations/:conversationId/attachments"),

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,6 +99,22 @@ describe("messaging custody", () => {
     expect(service.changes(conversation.id, held.revision)).toEqual({ messages: [], removed: [], revision: held.revision });
   });
 
+  test("content-addressed preview images remain accessible after restart and reject unknown hashes", async () => {
+    const root = directory();
+    const { service } = await setup(root);
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
+    const hash = createHash("sha256").update(image).digest("hex");
+    mkdirSync(join(root, "preview-images"));
+    writeFileSync(join(root, "preview-images", hash), image);
+    await service.close();
+    const restarted = await setup(root);
+    const response = await restarted.service.handle(new Request(`http://localhost/v1/messaging/preview-images/${hash}`));
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("content-type")).toBe("image/png");
+    expect(response?.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+    expect(Buffer.from(await response!.arrayBuffer())).toEqual(image);
+    expect((await restarted.service.handle(new Request("http://localhost/v1/messaging/preview-images/invalid")))?.status).toBe(404);
+  });
   test("reaction events precede messages, survive restart and replay, and use the same outbound state", async () => {
     const root = directory();
     let changes = 0;

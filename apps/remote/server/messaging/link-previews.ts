@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -119,7 +122,7 @@ function raster(body: Buffer, type: string): boolean {
   return false;
 }
 
-async function resolvePreview(url: string, addressForUrl = pinnedAddress): Promise<MessagingLinkPreview> {
+async function resolvePreview(url: string, imageRoot: string, addressForUrl = pinnedAddress): Promise<MessagingLinkPreview> {
   const fallback = simpleLinkPreview(url);
   const deadline = Date.now() + 7_000;
   try {
@@ -141,7 +144,13 @@ async function resolvePreview(url: string, addressForUrl = pinnedAddress): Promi
       try {
         const imageTarget = new URL(image, page.url).href;
         const response = await download(imageTarget, MAX_IMAGE, deadline, 0, addressForUrl);
-        if (raster(response.body, response.type)) imageUrl = `data:${response.type};base64,${response.body.toString("base64")}`;
+        if (raster(response.body, response.type)) {
+          const hash = createHash("sha256").update(response.body).digest("hex");
+          mkdirSync(imageRoot, { recursive: true, mode: 0o700 });
+          try { writeFileSync(join(imageRoot, hash), response.body, { flag: "wx", mode: 0o600 }); }
+          catch (cause) { if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause; }
+          imageUrl = `/v1/messaging/preview-images/${hash}`;
+        }
       } catch { /* Text metadata is still useful if an image cannot be fetched. */ }
     }
     return { url, title, description, imageUrl, siteName };
@@ -150,7 +159,7 @@ async function resolvePreview(url: string, addressForUrl = pinnedAddress): Promi
 
 export class PreviewOverloaded extends Error {}
 
-export function createLinkPreviewResolver(addressForUrl = pinnedAddress) {
+export function createLinkPreviewResolver(imageRoot: string, addressForUrl = pinnedAddress) {
   const cache = new Map<string, { expires: number; value: MessagingLinkPreview }>();
   const pending = new Map<string, Promise<MessagingLinkPreview>>();
   const waiting: Array<() => void> = [];
@@ -164,7 +173,7 @@ export function createLinkPreviewResolver(addressForUrl = pinnedAddress) {
     const task = new Promise<MessagingLinkPreview>((resolve, reject) => {
       const run = () => {
         active++;
-        void resolvePreview(url, addressForUrl).then(value => {
+        void resolvePreview(url, imageRoot, addressForUrl).then(value => {
           cache.delete(url);
           cache.set(url, { value, expires: Date.now() + (value.title === new URL(url).hostname ? 5 * 60_000 : 60 * 60_000) });
           if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
@@ -182,5 +191,3 @@ export function createLinkPreviewResolver(addressForUrl = pinnedAddress) {
     return task;
   };
 }
-
-export const linkPreview = createLinkPreviewResolver();

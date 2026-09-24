@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { API } from "../api";
 import { isReactionEmoji, messageReference, parseMessageReference, type MessageReaction, type MessageReply } from "../message-protocol";
 import { extractMessageLinks } from "./links";
-import { linkPreview, PreviewOverloaded } from "./link-previews";
+import { createLinkPreviewResolver, PreviewOverloaded } from "./link-previews";
 import { API_CORS_HEADERS } from "../cors";
 import { storeUpload, uploadName } from "../uploads";
 import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendReaction, BackendReply, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
@@ -163,6 +163,7 @@ async function loadPlugin(config: MessagingBackendConfig): Promise<MessagingPlug
 
 export class MessagingService {
   private readonly db: Database;
+  private readonly linkPreview: ReturnType<typeof createLinkPreviewResolver>;
   private readonly backends = new Map<string, Backend>();
   private readonly sends = new Map<string, Promise<MessagingMessage>>();
   private readonly receives = new Set<Promise<void>>();
@@ -177,6 +178,7 @@ export class MessagingService {
   private closeTask: Promise<void> | null = null;
   constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
+    this.linkPreview = createLinkPreviewResolver(join(root, "preview-images"));
     this.db = new Database(join(root, "messages.sqlite3"));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,backend_id TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,kind TEXT NOT NULL,updated_at INTEGER NOT NULL,unread INTEGER NOT NULL DEFAULT 0,UNIQUE(backend_id,external_id));
@@ -830,7 +832,7 @@ export class MessagingService {
   async linkPreviews(messageId: string) {
     const row = this.db.query("SELECT text FROM messages WHERE id=?").get(messageId) as { text: string } | null;
     if (!row) throw new MessagingFailure("Messaging message not found", 404);
-    return { previews: await Promise.all(extractMessageLinks(row.text).map(linkPreview)) };
+    return { previews: await Promise.all(extractMessageLinks(row.text).map(this.linkPreview)) };
   }
   markRead(id: string) {
     this.conversationRow(id);
@@ -1028,6 +1030,15 @@ export class MessagingService {
       }
       const previews = API.messagingLinkPreviews.match(req.method, url.pathname);
       if (previews) return json(await this.linkPreviews(previews.messageId));
+      const previewImage = API.messagingPreviewImage.match(req.method, url.pathname);
+      if (previewImage) {
+        if (!/^[a-f0-9]{64}$/.test(previewImage.hash)) throw new MessagingFailure("Invalid preview image", 404);
+        const path = join(this.root, "preview-images", previewImage.hash);
+        if (!existsSync(path)) throw new MessagingFailure("Preview image not found", 404);
+        const type = await imageType(path);
+        if (!type) throw new MessagingFailure("Preview image is not a recognised image", 404);
+        return new Response(Bun.file(path), { headers: { ...API_CORS_HEADERS, "content-type": type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable", etag: `"${previewImage.hash}"` } });
+      }
       const send = API.messagingSend.match(req.method, url.pathname);
       if (send) {
         // Answer with the durable receipt, not the backend's verdict: Signal's

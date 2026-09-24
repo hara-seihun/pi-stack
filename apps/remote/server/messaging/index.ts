@@ -31,7 +31,7 @@ export function messagingRoot(data: string, privateDir: string, encrypted: boole
   const root = join(dataPath, "messaging");
   if (existsSync(root) && !within(realpathSync(root))) throw new Error("Messaging profiles cannot point outside this account's encrypted folder");
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  for (const child of ["profiles.json", "messages.sqlite3", "messages.sqlite3-wal", "messages.sqlite3-shm", "backends", "attachments"]) {
+  for (const child of ["profiles.json", "messages.sqlite3", "messages.sqlite3-wal", "messages.sqlite3-shm", "backends", "attachments", "preview-images"]) {
     const path = join(root, child);
     if (existsSync(path) && !within(realpathSync(path))) throw new Error(`Messaging ${child} cannot point outside this account's encrypted folder`);
   }
