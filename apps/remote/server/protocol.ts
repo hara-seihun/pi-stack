@@ -216,24 +216,45 @@ export interface SpeechUtterance {
 
 export type PeopleUsagePeriod = "day" | "week";
 
-/** One person's share of the host's pooled model spending in a period. */
+/** One person's part of the host's subscription spending in a period. */
 export interface PersonUsage {
   /** Unix user name. */
   user: string;
   name: string;
-  /** Share of the period's list-price value, 0–100. */
+  /** Share of the period's subscription spending, 0–100. */
   percent: number;
+  /** Her part of what the subscriptions actually cost in the period, US dollars. */
+  spend: number;
   tokens: number;
-  /** API list-price value in US dollars; a weight for comparing people, not a bill. */
+  /** API list-price value in US dollars, which decides the split within a provider. */
   value: number;
-  /** Share of this person's own value spent by background workers, when she has any. */
+  /** Share of this person's own spend that background workers used, when she has any. */
   workersPercent: number | null;
+}
+
+/** One provider's subscriptions, prorated to the period. */
+export interface SubscriptionUsage {
+  label: string;
+  accounts: number;
+  monthlyUsd: number;
+  spend: number;
+  /** Nobody used this provider in the period. */
+  idle: boolean;
+}
+
+export interface PeopleUsagePeriodData {
+  since: string;
+  until: string;
+  /** Total subscription cost of the period across providers. */
+  spend: number;
+  subscriptions: SubscriptionUsage[];
+  people: PersonUsage[];
 }
 
 /** Relative usage of everyone on the host. Sent only to the host's administrator
  * (the `fleetUser`), whose ledger is the one every person's broker writes to. */
 export interface PeopleUsage {
-  periods: Record<PeopleUsagePeriod, { since: string; until: string; people: PersonUsage[] }>;
+  periods: Record<PeopleUsagePeriod, PeopleUsagePeriodData>;
 }
 
 /** The Machine screen. It changes on its own clock (meters, load, agent
