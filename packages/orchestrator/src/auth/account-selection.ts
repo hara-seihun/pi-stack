@@ -1,5 +1,6 @@
 import type { Store } from "../store.js";
 import { allowsAccountUse } from "../domain.js";
+import { modelDrainsMeter } from "../catalog.js";
 import type { SharedOAuthAuth } from "./shared-oauth.js";
 
 /** Every account this family could serve a session from: right provider, allowed
@@ -34,8 +35,10 @@ export function coolingInteractiveAccounts(store: Store, auth: SharedOAuthAuth |
  * never a refusal. Selection after a real rate-limit failover leaves it off, so
  * a turn that just lost an account still rotates away from the cooling ones.
  */
-export function chooseInteractiveAccount(store: Store, auth: SharedOAuthAuth | undefined, family: string, exclude = new Set<string>(), { includeCooling = false } = {}) {
-  const spent = (id: string) => Math.max(0, ...store.latestMeters(id).map(meter => Number(meter.used_percent)));
+export function chooseInteractiveAccount(store: Store, auth: SharedOAuthAuth | undefined, family: string, exclude = new Set<string>(), { includeCooling = false, model }: { includeCooling?: boolean; model?: string } = {}) {
+  const spent = (id: string) => Math.max(0, ...store.latestMeters(id)
+    .filter(meter => !model || modelDrainsMeter(family, model, meter.meter_id))
+    .map(meter => Number(meter.used_percent)));
   const eligible = eligibleInteractiveAccounts(store, auth, family, exclude)
     .sort((a, b) => spent(a.id) - spent(b.id)
       || store.activeLeases(a.id).length - store.activeLeases(b.id).length || a.id.localeCompare(b.id))[0];

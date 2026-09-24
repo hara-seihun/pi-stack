@@ -35,6 +35,8 @@ export interface PlanMetric {
   readonly name?: string;
   /** The most depleted fresh meter is the binding meter for this metric. */
   readonly meters: readonly string[];
+  /** All listed windows must be fresh before the metric reports available quota. */
+  readonly requireAllMeters?: boolean;
 }
 
 export interface PlanDefinition {
@@ -87,7 +89,7 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
     {
       id: "anthropic", label: "Anthropic", icon: "anthropic", provider: "anthropic", maxReadingAgeMs: 14 * DAY,
       metrics: [
-        { id: "fable", model: "fable", label: "F", name: "Fable weekly", meters: ["anthropic-7d_oi"] },
+        { id: "fable", model: "fable", label: "F", name: "Fable weekly", meters: ["anthropic-7d", "anthropic-7d_oi"], requireAllMeters: true },
         { id: "weekly", model: "opus", label: "W", name: "Weekly, all models including Opus", meters: ["anthropic-7d"] },
       ],
     },
@@ -105,6 +107,15 @@ export function admissionThinking(candidate: Pick<ModelCandidate, "provider" | "
 
 export function catalogMeter(id: string): CatalogMeter | undefined {
   return ORCHESTRATOR_CATALOG.meters.find((meter) => meter.id === id);
+}
+
+export function modelDrainsMeter(provider: string, model: string, meterId: string): boolean {
+  const meter = catalogMeter(meterId);
+  if (!meter || meter.provider !== provider) return true;
+  const candidate = ORCHESTRATOR_CATALOG.models.find(item => item.provider === provider && item.model === model);
+  if (!candidate) return true;
+  const meterClass = candidate.meterClass ?? "default";
+  return meter.drainedBy.some(key => key.startsWith(`${meterClass}:`) || key.startsWith("default:"));
 }
 
 export function catalogAgentType(raw: string): { key: string; label: string } {

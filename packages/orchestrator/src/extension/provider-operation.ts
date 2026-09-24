@@ -75,7 +75,7 @@ export async function runProviderOperation(
       if (lease) store.endLease(lease);
     }
     excluded.add(account);
-    const next = chooseInteractiveAccount(store, auth, family, excluded);
+    const next = chooseInteractiveAccount(store, auth, family, excluded, { model: request.model.id });
     if (!next) return last;
     account = next.id;
   }

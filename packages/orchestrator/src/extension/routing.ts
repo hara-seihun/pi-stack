@@ -47,7 +47,7 @@ export function resolveSessionModel(models:readonly Model<any>[],provider:string
     const available=new Set(candidates.map(model=>model.provider));
     const exclude=new Set(store.accounts().filter(account=>!available.has(account.id)).map(account=>account.id));
     const assigned=env.PI_ORCHESTRATOR_ASSIGNED==="1"&&env.PI_ORCHESTRATOR_RUN_ID?store.run(env.PI_ORCHESTRATOR_RUN_ID):undefined;
-    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude,{includeCooling:true});
+    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude,{includeCooling:true,model:modelId});
     if(account&&account.provider===provider&&available.has(account.id)&&shared.has(account.id)){
       const model=candidates.find(model=>model.provider===account.id)!;
       return {ok:true,model};
@@ -96,7 +96,7 @@ export default function routing(pi:ExtensionAPI):void{
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
-  const choose=(family:string,exclude=new Set<string>(),includeCooling=false)=>chooseInteractiveAccount(store,shared.get(family),family,exclude,{includeCooling});
+  const choose=(family:string,model:string,exclude=new Set<string>(),includeCooling=false)=>chooseInteractiveAccount(store,shared.get(family),family,exclude,{includeCooling,model});
   const select=async(ctx:ExtensionContext,model:Model<never>,thinking:ThinkingLevel):Promise<boolean>=>{
     if(closed)return false;
     await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false,signal:lifecycle.signal});
@@ -108,7 +108,7 @@ export default function routing(pi:ExtensionAPI):void{
   // because there the point is to leave the account that just refused the turn.
   const bind=async(ctx:ExtensionContext,exclude?:Set<string>,requested?:{family:string;modelId:string;thinking:ThinkingLevel},includeCooling=!exclude?.size):Promise<string|undefined>=>{
     const current=ctx.model,thinking=requested?.thinking??pi.getThinkingLevel();if(!current&&!requested)return;
-    const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=choose(family,exclude,includeCooling);
+    const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=choose(family,modelId,exclude,includeCooling);
     if(!choice)return;
     if(!requested&&choice.id===current?.provider&&modelId===current.id)return choice.id;
     const next=resolve(choice.id,family,modelId);if(!next)return;
@@ -127,7 +127,7 @@ export default function routing(pi:ExtensionAPI):void{
     if(matchesPin(ctx))return;
     if(!pinned){void ctx.abort();throw new Error(`Unknown subagent model pin ${requestedPin}`);}
     const current=store.account(ctx.model?.provider??"");
-    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")?current.id:choose(pinned.provider,undefined,true)?.id);
+    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")?current.id:choose(pinned.provider,pinned.model,undefined,true)?.id);
     const model=accountId?resolve(accountId,pinned.provider,pinned.model):undefined;
     if(!model||!await select(ctx,model,assigned?.thinking as ThinkingLevel??(pi.getThinkingLevel()==="off"?pinned.thinking as ThinkingLevel:pi.getThinkingLevel()))){
       void ctx.abort();throw new Error(`Pinned model ${pinned.provider}/${pinned.model} has no available account`);

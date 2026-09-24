@@ -88,6 +88,37 @@ describe("current orchestrator state",()=>{
     client.close();rmSync(root,{recursive:true});
   });
 
+  it("binds Fable weekly headroom per account to both shared and scoped meters",()=>{
+    const now=Date.UTC(2026,8,24,1),root=mkdtempSync(join(tmpdir(),"fable-plan-")),ledger=join(root,"ledger.sqlite3");
+    const store=Store.open(ledger);
+    for(const [id,all,scoped] of [["anthropic",100,73],["anthropic-2",96,63],["anthropic-3",100,83]] as const){
+      store.upsertAccount({id,provider:"anthropic"});
+      store.recordMeter(id,"anthropic-7d",all,now+3_600_000,now);
+      store.recordMeter(id,"anthropic-7d_oi",scoped,now+3_600_000,now);
+    }
+    store.close();
+    const client=new OrchestratorClient({ledgerPath:ledger});
+    try{
+      const plan=client.plans(undefined,now).plans.anthropic!;
+      expect(plan.metrics.fable?.percentLeft).toBe(1);
+      expect(plan.metrics.fable?.accounts.map(account=>[account.accountId,account.percentLeft,account.meterId])).toEqual([
+        ["anthropic",0,"anthropic-7d"],["anthropic-2",4,"anthropic-7d"],["anthropic-3",0,"anthropic-7d"],
+      ]);
+      expect(plan.metrics.weekly?.percentLeft).toBe(1);
+      const writer=Store.open(ledger);
+      writer.upsertAccount({id:"anthropic-4",provider:"anthropic"});
+      writer.recordMeter("anthropic-4","anthropic-7d_oi",10,now+3_600_000,now);
+      writer.upsertAccount({id:"anthropic-5",provider:"anthropic"});
+      writer.recordMeter("anthropic-5","anthropic-7d",10,now+3_600_000,now-15*24*3_600_000);
+      writer.recordMeter("anthropic-5","anthropic-7d_oi",20,now+3_600_000,now);
+      writer.close();
+      const incomplete=client.plans(undefined,now).plans.anthropic!;
+      expect(incomplete.metrics.fable?.accounts[3]).toMatchObject({accountId:"anthropic-4",state:"unavailable",percentLeft:null});
+      expect(incomplete.metrics.fable?.accounts[4]).toMatchObject({accountId:"anthropic-5",state:"stale"});
+      expect(incomplete).toMatchObject({state:"partial",checkedCount:3,planCount:5});
+    }finally{client.close();rmSync(root,{recursive:true,force:true});}
+  });
+
   it("reports the share of prompt tokens read from cache over the last 24 hours",()=>{
     const now=Date.now(),ledger=join(mkdtempSync(join(tmpdir(),"ledger-")),"ledger.sqlite3");
     const store=Store.open(ledger);

@@ -57,12 +57,16 @@ tests).
 - That response's `limits` array is the authority. The older top-level fields
   carry no scoped weekly bucket at all (`seven_day_opus` is null on these
   plans, and is *not* this bucket), so reading them reintroduces the hole.
-- The scoped weekly meter is **Fable's alone; Opus never touches it**.
-  Verified from production traffic: readings on `7d_oi` begin exactly when an
-  account starts running Fable and never appear for Opus-only accounts, and
-  the usage endpoint labels the same bucket `weekly_scoped` on model "Fable".
-  Opus drains the session and all-models weekly meters, which is why no card
-  or meter may be labelled "Opus".
+- The scoped weekly meter is Fable's alone; Opus never touches it. The usage
+  endpoint labels `weekly_scoped` with model `Fable`. Fable also drains
+  `weekly_all`, so its weekly headroom is the smaller of those two readings on
+  each account. Opus drains the session and all-models weekly meters. A scoped
+  exhaustion must not prevent Opus from using an account with all-models
+  headroom. On 2026-09-24 the three sampled accounts reported all-models
+  utilization of 100%, 96%, 100% and Fable-scoped utilization of 73%, 63%,
+  83%. Fable's usable weekly headroom was 0%, 4%, 0%, not 27%, 37%, 17%.
+  The Fable plan reading requires both weekly meters to be fresh. Raw meter
+  histories remain separate for spending calibration.
 - Poll due-ness must be judged on the **stalest** of an account's meters. A
   running session refreshes `5h` and `7d` from headers continuously; judging
   on the freshest reading would leave the very bucket the poll exists to

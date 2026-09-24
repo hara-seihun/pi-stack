@@ -131,11 +131,10 @@ export function parseAnthropicUsage(value: unknown): AnthropicUsageReading {
   const unmappedScopes: string[] = [];
   const scoped = limits.map(record).filter((limit): limit is Record<string, unknown> =>
     limit !== undefined && limit.kind === "weekly_scoped");
-  // One scoped bucket needs no name to be identified; several do, and a
-  // scope this deployment declares no meter for is reported rather than
-  // guessed at, because a mis-named meter would calibrate one model's drain
-  // against another's allowance.
-  const chosen = scoped.length === 1
+  // An unnamed single bucket follows the observed Fable-only topology.
+  // An explicit name must agree, even when it is the only scoped bucket;
+  // otherwise another model's usage could be attributed to Fable.
+  const chosen = scoped.length === 1 && !scopedModelName(scoped[0]!)
     ? scoped[0]
     : scoped.find((limit) => (scopedModelName(limit) ?? "").toLowerCase() === SCOPED_MODEL);
   for (const limit of limits) {
