@@ -61,6 +61,9 @@ describe("child spawn settings", () => {
 
   it.each([
     ["luna", "openai-codex/gpt-6-luna"],
+    ["Luna", "openai-codex/gpt-6-luna"],
+    ["SOL", "openai-codex/gpt-6-sol"],
+    ["Sol", "openai-codex/gpt-6-sol"],
     ["sol", "openai-codex/gpt-6-sol"],
   ])("preserves the explicit %s choice", (requested, model) => {
     expect(resolveSpawnSettings({ model: requested, thinkingLevel: "minimal", speed: "priority" }, parent("openai-codex/gpt-6-astra"))).toEqual({
@@ -70,8 +73,8 @@ describe("child spawn settings", () => {
   });
 
   it.each([
-    "astra", "gpt-6-astra", "openai-codex/gpt-6-astra", "openai-codex-8/gpt-6-astra", "alternate/gpt-6-astra",
-    "fable", "claude-fable-5-1", "anthropic/claude-fable-5-1", "anthropic-8/claude-fable-5-1", "alternate/claude-fable-5-1",
+    "astra", "Astra", "ASTRA", "gpt-6-astra", "openai-codex/gpt-6-astra", "openai-codex-8/gpt-6-astra", "alternate/gpt-6-astra",
+    "fable", "Fable", "FABLE", "claude-fable-5-1", "anthropic/claude-fable-5-1", "anthropic-8/claude-fable-5-1", "alternate/claude-fable-5-1",
   ])("rejects forbidden child identity %s", model => {
     expect(resolveSpawnSettings({ model }, parent("openai-codex/gpt-6-astra"))).toMatchObject({
       ok: false,
@@ -97,7 +100,9 @@ describe("child spawn settings", () => {
   it("leaves parentless defaults and model choices unchanged", () => {
     expect(value(resolveSpawnSettings(undefined, null)).model).toBe("openai-codex/gpt-6-astra");
     expect(value(resolveSpawnSettings({ model: "astra" }, null)).model).toBe("openai-codex/gpt-6-astra");
-    expect(value(resolveSpawnSettings({ model: "fable" }, null)).model).toBe("anthropic/claude-fable-5-1");
+    expect(value(resolveSpawnSettings({ model: "Fable" }, null)).model).toBe("anthropic/claude-fable-5-1");
+    expect(value(resolveSpawnSettings({ model: "Opus" }, null)).model).toBe("anthropic/claude-opus-5-5");
+    expect(value(resolveSpawnSettings({ model: "OpenAI-Codex/gpt-6-sol" }, null)).model).toBe("OpenAI-Codex/gpt-6-sol");
   });
 });
 
