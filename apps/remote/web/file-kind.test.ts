@@ -18,3 +18,12 @@ test("uses content type when a name gives no answer", () => {
   expect(fileKind("/work/blob", "application/pdf")).toBe("pdf");
   expect(fileKind("/work/blob", "application/octet-stream")).toBe("binary");
 });
+
+test("classifies audio and video by name or type", () => {
+  expect(fileKind("/work/memo.m4a")).toBe("audio");
+  expect(fileKind("/work/song.MP3")).toBe("audio");
+  expect(fileKind("/work/clip.mp4")).toBe("video");
+  expect(fileKind("/work/clip.mov")).toBe("video");
+  expect(fileKind("/work/blob", "audio/ogg")).toBe("audio");
+  expect(fileKind("/work/blob", "video/webm")).toBe("video");
+});

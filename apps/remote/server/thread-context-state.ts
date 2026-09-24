@@ -8,7 +8,7 @@ export function threadStateInstructions(options: {
   inlineImages?: boolean;
   activeTime?: number;
 }): string {
-  const file = `Pi Remote file delivery: To give the user a file, include <${options.fileTag} src="${options.home}/path/to/file" /> on its own line. Use an absolute path to an existing file. The client turns the tag into a download link, or shows the picture inline when the file is an image (png, jpg, gif, webp, avif, svg).`;
+  const file = `Pi Remote file delivery: To give the user a file, include <${options.fileTag} src="${options.home}/path/to/file" /> on its own line. Use an absolute path to an existing file. The client presents it inline with a download link: images (png, jpg, gif, webp, avif, svg) as pictures, audio (m4a, mp3, wav, ogg, opus, flac, aac) as a player, video (mp4, mov, webm, mkv) as a player, PDFs embedded where the browser can show them, and text, code, Markdown, JSON or CSV as a scrollable preview. Other files become download links.`;
   const continuation = INTERRUPTED_CONTINUATION.test(options.prompt)
     ? " This prompt resumes an interrupted operation in the same task. Continue from the recorded state without repeating setup or completed actions."
     : "";

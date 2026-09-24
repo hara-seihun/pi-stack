@@ -11,6 +11,7 @@
 // `ensureMarkdown()`.
 
 import { appPath } from "./app-path";
+import { installInlineFiles } from "./inline-files";
 import { installInlineImages } from "./inline-images";
 import { katexEngine } from "./math-engine";
 import { resourceUrl } from "./resource-url";
@@ -92,6 +93,7 @@ function build(): MarkdownRenderer {
     return defaultLinkOpen(tokens, index, options, env, renderer);
   };
   installInlineImages(markdown);
+  installInlineFiles(markdown);
   return markdown;
 }
 
