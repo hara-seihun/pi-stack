@@ -49,7 +49,7 @@ export {
 } from "./image-service.js";
 export { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, type GeneratedImage } from "./image-generation.js";
 export { readUsageEvidence, type UsageEvidence } from "./usage-evidence.js";
-export { personUsage, modelPrices, type PersonUsageRow, type PersonUsageWindow } from "./person-usage.js";
+export { personUsage, modelPrices, SUBSCRIPTION_MONTH_MS, type PersonUsageRow, type PersonUsageWindow, type SubscriptionSpend, type UsageFigures } from "./person-usage.js";
 export {
   CACHE_WINDOW_MS,
   OrchestratorClient,

@@ -151,6 +151,7 @@
   font-weight: 600;
 }
 .machine-people-periods button[aria-pressed="true"] { background: var(--surface-3); color: var(--text); }
+.machine-people-plans { margin: var(--space-2) 0 0; color: var(--muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .machine-person-bar { cursor: default; }
 .machine-person-bar::before { content: none; }
 

@@ -4,31 +4,40 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isHostAdministrator, peopleUsage, peopleUsagePeriod } from "./people-usage";
 
-const sources = (fleetTokens = 0, fleetValue = 0) => ({ interactive: { tokens: 0, value: 0 }, fleet: { tokens: fleetTokens, value: fleetValue }, completion: { tokens: 0, value: 0 } });
+const figures = (tokens = 0, value = 0, spend = 0) => ({ tokens, value, spend });
+const sources = (fleet = figures()) => ({ interactive: figures(), fleet, completion: figures() });
+const row = (principal: string | null, tokens: number, value: number, spend: number, fleet = figures()) =>
+  ({ principal, tokens, value, spend, unpricedTokens: value > 0 ? 0 : tokens, sources: sources(fleet), providers: {} });
+const plans = [
+  { planId: "openai", label: "OpenAI", provider: "openai-codex", accounts: 5, monthlyUsd: 200, spend: 33.33, idle: 0 },
+  { planId: "anthropic", label: "Anthropic", provider: "anthropic", accounts: 3, monthlyUsd: 250, spend: 25, idle: 25 },
+  { planId: "other", label: "Other", provider: "other", accounts: 0, monthlyUsd: 10, spend: 0, idle: 0 },
+];
 
 describe("people usage", () => {
-  test("names principals, gives the owner the ledger's own spending and shares by list-price value", () => {
-    const period = peopleUsagePeriod({ since: "a", until: "b", rows: [
-      { principal: null, tokens: 900, value: 30, unpricedTokens: 0, sources: sources(600, 20) },
-      { principal: "sybil", tokens: 100, value: 10, unpricedTokens: 0, sources: sources() },
-      { principal: "ghost", tokens: 0, value: 0, unpricedTokens: 0, sources: sources() },
+  test("names principals, gives the owner the ledger's own spending and shares by subscription spend", () => {
+    const period = peopleUsagePeriod({ since: "a", until: "b", subscriptions: plans, rows: [
+      row(null, 900, 300, 30, figures(600, 200, 20)),
+      row("sybil", 100, 10, 10),
+      row("ghost", 0, 0, 0),
     ] }, "kenan", new Map([["kenan", "Hara"], ["sybil", "Sybil"]]));
-    expect(period.people.map((person) => [person.user, person.name, person.percent])).toEqual([["kenan", "Hara", 75], ["sybil", "Sybil", 25]]);
+    expect(period.people.map((person) => [person.user, person.name, person.percent, person.spend])).toEqual([["kenan", "Hara", 75, 30], ["sybil", "Sybil", 25, 10]]);
     expect(period.people[0]!.workersPercent).toBeCloseTo(66.67, 1);
     expect(period.people[1]!.workersPercent).toBeNull();
+    expect(period.spend).toBeCloseTo(58.33, 2);
+    expect(period.subscriptions.map((plan) => [plan.label, plan.idle])).toEqual([["OpenAI", false], ["Anthropic", true]]);
   });
 
-  test("falls back to token shares when nothing in the period has a price", () => {
-    const period = peopleUsagePeriod({ since: "a", until: "b", rows: [
-      { principal: "jodie", tokens: 30, value: 0, unpricedTokens: 30, sources: sources() },
-      { principal: "martine", tokens: 10, value: 0, unpricedTokens: 10, sources: sources() },
-    ] }, "kenan", new Map());
-    expect(period.people.map((person) => [person.name, person.percent])).toEqual([["jodie", 75], ["martine", 25]]);
+  test("without subscriptions falls back to list-price value, then tokens", () => {
+    const byValue = peopleUsagePeriod({ since: "a", until: "b", subscriptions: [], rows: [row("jodie", 10, 3, 0), row("martine", 30, 1, 0)] }, "kenan", new Map());
+    expect(byValue.people.map((person) => [person.name, person.percent])).toEqual([["jodie", 75], ["martine", 25]]);
+    const byTokens = peopleUsagePeriod({ since: "a", until: "b", subscriptions: [], rows: [row("jodie", 30, 0, 0), row("martine", 10, 0, 0)] }, "kenan", new Map());
+    expect(byTokens.people.map((person) => [person.name, person.percent])).toEqual([["jodie", 75], ["martine", 25]]);
   });
 
   test("reads a day and a week", () => {
     const windows: number[] = [];
-    const usage = peopleUsage((windowMs) => { windows.push(windowMs); return { since: "a", until: "b", rows: [] }; }, "kenan", new Map());
+    const usage = peopleUsage((windowMs) => { windows.push(windowMs); return { since: "a", until: "b", subscriptions: [], rows: [] }; }, "kenan", new Map());
     expect(Object.keys(usage.periods)).toEqual(["day", "week"]);
     expect(windows).toEqual([86_400_000, 604_800_000]);
   });

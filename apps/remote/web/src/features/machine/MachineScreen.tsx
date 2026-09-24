@@ -132,22 +132,25 @@ const peoplePeriods: Array<{ id: PeopleUsagePeriod; label: string; description: 
   { id: "week", label: "Week", description: "last 7 days" },
 ];
 
-/** Everyone's share of the host's model spending, weighted by API list price so
- * a Fable token and a Luna token are not counted as the same thing. */
+/** Everyone's part of what the host's subscriptions cost. Each provider's
+ * prorated plan cost is split by list-price value, so a Fable token and a Luna
+ * token are not counted as the same thing, and one provider's prices never
+ * move the other provider's bill. */
 export function People({ usage }: { usage: PeopleUsage }) {
   const [period, setPeriod] = useState<PeopleUsagePeriod>("day");
   const current = usage.periods[period];
   const selected = peoplePeriods.find((item) => item.id === period)!;
   return <Card title="People">
     <div className="machine-people-header">
-      <p className="machine-secondary">Share of model use, {selected.description}</p>
+      <p className="machine-secondary">{formatDollars(current.spend)} of subscriptions, {selected.description}</p>
       <div className="machine-people-periods" role="group" aria-label="Usage period">
         {peoplePeriods.map((item) => <button key={item.id} type="button" aria-pressed={period === item.id} onClick={() => setPeriod(item.id)}>{item.label}</button>)}
       </div>
     </div>
+    {current.subscriptions.length > 0 && <p className="machine-people-plans">{current.subscriptions.map((plan) => `${plan.label} ${plan.accounts} × $${plan.monthlyUsd}/mo = ${formatDollars(plan.spend)}${plan.idle ? " unused" : ""}`).join(" · ")}</p>}
     {current.people.length === 0 ? <p className="machine-secondary">Nobody used a model in this period.</p> : current.people.map((person) => <div className="machine-plan-row machine-person" key={person.user}>
-      <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{person.name}</strong></div><span>{formatShare(person.percent)}</span></div>
-      <div className="machine-bar machine-person-bar" role="img" aria-label={`${person.name}: ${formatShare(person.percent)} of model use`}><span style={{ width: `${Math.max(0.5, Math.min(100, person.percent))}%` }} /></div>
+      <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{person.name}</strong></div><span>{formatDollars(person.spend)} · {formatShare(person.percent)}</span></div>
+      <div className="machine-bar machine-person-bar" role="img" aria-label={`${person.name}: ${formatDollars(person.spend)}, ${formatShare(person.percent)} of subscription spending`}><span style={{ width: `${Math.max(0.5, Math.min(100, person.percent))}%` }} /></div>
       <div className="machine-plan-meta"><span>{formatTokens(person.tokens)} tokens · {formatDollars(person.value)} at API prices</span>{person.workersPercent !== null && <span>{formatShare(person.workersPercent)} workers</span>}</div>
     </div>)}
   </Card>;
