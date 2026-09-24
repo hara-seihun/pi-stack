@@ -104,6 +104,30 @@ it("settles normal completion once, then admits the next turn", async () => {
   expect(f.events.filter(event => event.type === "agent_settled")).toHaveLength(2);
 }, 3000);
 
+it("puts every queued steer into one model turn after the current response", async () => {
+  const f = await fixture(), started = deferred();
+  const first = createAssistantMessageEventStream();
+  const requests: string[][] = [];
+  f.native.agent.streamFunction = (_model, context) => {
+    requests.push(context.messages.filter(message => message.role === "user").map(message =>
+      typeof message.content === "string" ? message.content : message.content.filter(part => part.type === "text").map(part => part.text).join("")));
+    if (requests.length === 1) { started.resolve(); return first; }
+    return f.reply(f.message([{ type: "text", text: "All results considered" }], "stop"));
+  };
+  expect(await f.command("prompt", { workId: "root", message: "Coordinate workers" })).toMatchObject({ success: true });
+  await started.promise;
+  for (let index = 0; index < 20; index++) {
+    expect(await f.command("steer", { workId: `worker-${index}`, message: `Result ${index}` })).toMatchObject({ success: true });
+  }
+  first.push({ type: "done", reason: "stop", message: f.message([{ type: "text", text: "Waiting for results" }], "stop") });
+  first.end();
+  const settlement = await f.waitFor(event => event.type === "agent_settled");
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toHaveLength(21);
+  for (let index = 0; index < 20; index++) expect(requests[1]![index + 1]).toContain(`Result ${index}`);
+  expect(settlement.workIds).toEqual(["root", ...Array.from({ length: 20 }, (_, index) => `worker-${index}`)]);
+}, 3000);
+
 it("lets halt own settlement when native completion arrives before the prompt returns", async () => {
   const f = await fixture(), nativeSettled = deferred();
   f.native.subscribe(event => { if (event.type === "agent_settled") nativeSettled.resolve(); });
