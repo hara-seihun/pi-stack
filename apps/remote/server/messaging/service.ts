@@ -5,11 +5,11 @@ import { pathToFileURL } from "node:url";
 import { API } from "../api";
 import { isReactionEmoji, messageReference, parseMessageReference, type MessageReaction, type MessageReply } from "../message-protocol";
 import { extractMessageLinks } from "./links";
-import { linkPreview, PreviewOverloaded } from "./link-previews";
+import { createLinkPreviewResolver, PreviewOverloaded } from "./link-previews";
 import { API_CORS_HEADERS } from "../cors";
 import { storeUpload, uploadName } from "../uploads";
 import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendReaction, BackendReply, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
-import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingCall, MessagingCallState, MessagingConversation, MessagingHistory, MessagingLink, MessagingMessage, MessagingResult, MessagingSend, MessagingSnapshot } from "./protocol";
+import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingCall, MessagingCallState, MessagingConversation, MessagingHistory, MessagingHistoryChanges, MessagingLink, MessagingMessage, MessagingResult, MessagingSend, MessagingSnapshot } from "./protocol";
 
 const DEVICE_NAME = /^[\p{L}\p{N} .,'()_-]{1,64}$/u;
 
@@ -37,7 +37,70 @@ async function imageType(path: string): Promise<string | null> {
 class MessagingFailure extends Error {
   constructor(message: string, readonly status = 400, readonly code?: string) { super(message); }
 }
-interface ConversationRow { id: string; backend_id: string; external_id: string; title: string; kind: "direct" | "group"; updated_at: number; unread: number; current: number }
+interface ConversationRow { id: string; backend_id: string; external_id: string; title: string; kind: "direct" | "group"; updated_at: number; unread: number; current: number; revision: number }
+
+/*
+ * Every change to what a client renders for a message gives that message a new
+ * revision from one counter, and raises its conversation's revision. Clients
+ * hold a conversation revision and fetch only messages revised after it.
+ * Triggers own this so no write path can forget: rendered messages join
+ * attachments, reactions, quotes, sender names, aliases, avatars and the account.
+ * `SET revision=revision` touches a row; message_touched turns that into a new revision.
+ */
+const touchIdentity = (backend: string, identity: string, extra = "") => {
+  const ids = `(SELECT ${identity} UNION SELECT alias FROM messaging_sender_aliases WHERE backend_id=${backend} AND sender_id=${identity})`;
+  return `UPDATE messages SET revision=revision WHERE conversation_id IN (SELECT id FROM conversations WHERE backend_id=${backend}) AND (
+    sender IN ${ids} OR quote_author IN ${ids}${extra}
+    OR timestamp IN (SELECT target_timestamp FROM messaging_reactions WHERE backend_id=${backend} AND (sender IN ${ids} OR account IN ${ids} OR target_author IN ${ids})));`;
+};
+const REVISION_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS message_removals(conversation_id TEXT NOT NULL,message_id TEXT NOT NULL,seq INTEGER NOT NULL,revision INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS message_removal_revision ON message_removals(conversation_id,revision);
+  CREATE INDEX IF NOT EXISTS message_revision ON messages(conversation_id,revision);
+  CREATE TRIGGER IF NOT EXISTS message_revised AFTER UPDATE OF revision ON messages BEGIN
+    UPDATE conversations SET revision=MAX(revision,NEW.revision) WHERE id=NEW.conversation_id;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_touched AFTER UPDATE ON messages WHEN NEW.revision IS OLD.revision BEGIN
+    UPDATE messaging_state SET revision=revision+1;
+    UPDATE messages SET revision=(SELECT revision FROM messaging_state) WHERE seq=NEW.seq;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_quotable_changed AFTER UPDATE OF timestamp,status ON messages BEGIN
+    UPDATE messages SET revision=revision WHERE conversation_id=NEW.conversation_id AND quote_timestamp IN (OLD.timestamp,NEW.timestamp) AND seq<>NEW.seq;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_added AFTER INSERT ON messages BEGIN
+    UPDATE messaging_state SET revision=revision+1;
+    UPDATE messages SET revision=(SELECT revision FROM messaging_state) WHERE seq=NEW.seq;
+    UPDATE messages SET revision=revision WHERE conversation_id=NEW.conversation_id AND quote_timestamp=NEW.timestamp AND seq<>NEW.seq;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_removed AFTER DELETE ON messages BEGIN
+    UPDATE messaging_state SET revision=revision+1;
+    INSERT INTO message_removals VALUES(OLD.conversation_id,OLD.id,OLD.seq,(SELECT revision FROM messaging_state));
+    UPDATE conversations SET revision=MAX(revision,(SELECT revision FROM messaging_state)) WHERE id=OLD.conversation_id;
+    UPDATE messages SET revision=revision WHERE conversation_id=OLD.conversation_id AND quote_timestamp=OLD.timestamp;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_attachment_added AFTER INSERT ON message_attachments BEGIN
+    UPDATE messages SET revision=revision WHERE id=NEW.message_id;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_attachment_removed AFTER DELETE ON message_attachments BEGIN
+    UPDATE messages SET revision=revision WHERE id=OLD.message_id;
+  END;
+  ${["INSERT", "UPDATE"].map(event => `CREATE TRIGGER IF NOT EXISTS message_reaction_${event.toLowerCase()} AFTER ${event} ON messaging_reactions BEGIN
+    UPDATE messages SET revision=revision WHERE timestamp=NEW.target_timestamp
+      AND conversation_id IN (SELECT id FROM conversations WHERE backend_id=NEW.backend_id AND external_id=NEW.conversation_external_id);
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_sender_${event.toLowerCase()} AFTER ${event} ON messaging_senders BEGIN
+    ${touchIdentity("NEW.backend_id", "NEW.id")}
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_alias_${event.toLowerCase()} AFTER ${event} ON messaging_sender_aliases BEGIN
+    ${touchIdentity("NEW.backend_id", "NEW.sender_id", " OR sender=NEW.alias OR quote_author=NEW.alias")}
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_account_${event.toLowerCase()} AFTER ${event} ON messaging_accounts BEGIN
+    ${touchIdentity("NEW.backend_id", "NEW.sender_id", " OR direction='outgoing'")}
+  END;`).join("\n")}
+  ${["INSERT", "UPDATE", "DELETE"].map(event => { const row = event === "DELETE" ? "OLD" : "NEW"; return `CREATE TRIGGER IF NOT EXISTS message_avatar_${event.toLowerCase()} AFTER ${event} ON messaging_avatars BEGIN
+    ${touchIdentity(`${row}.backend_id`, `${row}.id`)}
+  END;`; }).join("\n")}
+`;
 interface MessageRow { seq: number; id: string; conversation_id: string; external_id: string | null; direction: "incoming" | "outgoing"; sender: string; text: string; timestamp: number; status: MessagingMessage["status"]; error: string | null; request_body: string | null; quote_author: string | null; quote_timestamp: number | null; quote_text: string | null; quote_message_id: string | null }
 interface AttachmentRow { id: string; conversation_id: string; message_id: string | null; name: string; mime_type: string; size: number; path: string }
 interface Backend { config: MessagingBackendConfig; info: MessagingBackendInfo; plugin?: MessagingPlugin; attempts: number; retry?: ReturnType<typeof setTimeout> }
@@ -100,6 +163,7 @@ async function loadPlugin(config: MessagingBackendConfig): Promise<MessagingPlug
 
 export class MessagingService {
   private readonly db: Database;
+  private readonly linkPreview: ReturnType<typeof createLinkPreviewResolver>;
   private readonly backends = new Map<string, Backend>();
   private readonly sends = new Map<string, Promise<MessagingMessage>>();
   private readonly receives = new Set<Promise<void>>();
@@ -114,6 +178,7 @@ export class MessagingService {
   private closeTask: Promise<void> | null = null;
   constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
+    this.linkPreview = createLinkPreviewResolver(join(root, "preview-images"));
     this.db = new Database(join(root, "messages.sqlite3"));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,backend_id TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,kind TEXT NOT NULL,updated_at INTEGER NOT NULL,unread INTEGER NOT NULL DEFAULT 0,UNIQUE(backend_id,external_id));
@@ -130,7 +195,7 @@ export class MessagingService {
       CREATE INDEX IF NOT EXISTS messaging_reaction_target ON messaging_reactions(backend_id,conversation_external_id,target_timestamp);
       CREATE TABLE IF NOT EXISTS messaging_state(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS messaging_avatars(backend_id TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(backend_id,id));
-      INSERT OR IGNORE INTO messaging_state VALUES(1,1);`);
+      INSERT OR IGNORE INTO messaging_state(id,version) VALUES(1,1);`);
     this.db.transaction(() => {
       const columns = this.db.query("PRAGMA table_info(conversations)").all() as { name: string }[];
       if (!columns.some(column => column.name === "current")) {
@@ -145,6 +210,15 @@ export class MessagingService {
           ALTER TABLE messages ADD COLUMN quote_message_id TEXT;`);
       }
       this.db.exec("CREATE INDEX IF NOT EXISTS message_quote_target ON messages(conversation_id,timestamp)");
+      if (!messageColumns.some(column => column.name === "revision")) {
+        this.db.exec(`ALTER TABLE messages ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE conversations ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE messaging_state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+          UPDATE messages SET revision=seq;
+          UPDATE conversations SET revision=COALESCE((SELECT MAX(revision) FROM messages WHERE conversation_id=conversations.id),0);
+          UPDATE messaging_state SET revision=COALESCE((SELECT MAX(seq) FROM messages),0);`);
+      }
+      this.db.exec(REVISION_SCHEMA);
       this.db.exec(`UPDATE messages SET status='unknown',error='Supervisor stopped before the backend confirmed this send. Check the recipient before sending again.' WHERE status='sending';
         UPDATE conversations SET updated_at=COALESCE((SELECT MAX(timestamp) FROM messages WHERE conversation_id=conversations.id),0);
         UPDATE messaging_state SET version=version+1;`);
@@ -295,7 +369,7 @@ export class MessagingService {
     };
   }
   private conversation(row: ConversationRow): MessagingConversation {
-    return { id: row.id, backendId: row.backend_id, externalId: row.external_id, title: row.title, kind: row.kind, updatedAt: row.updated_at, unread: row.unread, current: Boolean(row.current), avatar: this.avatarVersion(row.backend_id, row.external_id) };
+    return { id: row.id, backendId: row.backend_id, externalId: row.external_id, title: row.title, kind: row.kind, updatedAt: row.updated_at, unread: row.unread, current: Boolean(row.current), avatar: this.avatarVersion(row.backend_id, row.external_id), revision: row.revision };
   }
   private avatarVersion(backendId: string, id: string): number | null {
     const row = this.db.query("SELECT updated_at FROM messaging_avatars WHERE backend_id=? AND id=?").get(backendId, id) as { updated_at: number } | null;
@@ -727,7 +801,17 @@ export class MessagingService {
     };
   }
   history(conversationId: string, before?: number, limit = 60, since?: number): MessagingHistory {
-    this.conversationRow(conversationId);
+    return { ...this.historyWindow(conversationId, before, limit, since), revision: this.conversationRow(conversationId).revision };
+  }
+  /** `from` is the sequence of the oldest message the client holds; older changes stay with pages it has not loaded. */
+  changes(conversationId: string, after: number, from = 0): MessagingHistoryChanges {
+    const { revision } = this.conversationRow(conversationId);
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(from) || from < 0) throw new MessagingFailure("Invalid message revision");
+    const rows = this.db.query("SELECT * FROM messages WHERE conversation_id=? AND revision>? AND seq>=? ORDER BY seq ASC").all(conversationId, after, from) as MessageRow[];
+    const removed = this.db.query("SELECT message_id FROM message_removals WHERE conversation_id=? AND revision>? AND seq>=?").all(conversationId, after, from) as { message_id: string }[];
+    return { messages: rows.map(row => this.message(row)), removed: removed.map(row => row.message_id), revision };
+  }
+  private historyWindow(conversationId: string, before?: number, limit = 60, since?: number): Omit<MessagingHistory, "revision"> {
     if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) throw new MessagingFailure("Invalid message cursor");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new MessagingFailure("Message limit must be between 1 and 100");
     if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) throw new MessagingFailure("Invalid message timestamp");
@@ -748,7 +832,7 @@ export class MessagingService {
   async linkPreviews(messageId: string) {
     const row = this.db.query("SELECT text FROM messages WHERE id=?").get(messageId) as { text: string } | null;
     if (!row) throw new MessagingFailure("Messaging message not found", 404);
-    return { previews: await Promise.all(extractMessageLinks(row.text).map(linkPreview)) };
+    return { previews: await Promise.all(extractMessageLinks(row.text).map(this.linkPreview)) };
   }
   markRead(id: string) {
     this.conversationRow(id);
@@ -936,10 +1020,25 @@ export class MessagingService {
       if (history) {
         const since = url.searchParams.get("since");
         if (since !== null && !/^(0|[1-9]\d*)$/.test(since)) throw new MessagingFailure("Invalid message timestamp");
+        const after = url.searchParams.get("after");
+        if (after !== null) {
+          const from = url.searchParams.get("from");
+          if (!/^(0|[1-9]\d*)$/.test(after) || (from !== null && !/^(0|[1-9]\d*)$/.test(from))) throw new MessagingFailure("Invalid message revision");
+          return json(this.changes(history.conversationId, Number(after), from === null ? 0 : Number(from)));
+        }
         return json(this.history(history.conversationId, url.searchParams.has("before") ? Number(url.searchParams.get("before")) : undefined, url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 60, since === null ? undefined : Number(since)));
       }
       const previews = API.messagingLinkPreviews.match(req.method, url.pathname);
       if (previews) return json(await this.linkPreviews(previews.messageId));
+      const previewImage = API.messagingPreviewImage.match(req.method, url.pathname);
+      if (previewImage) {
+        if (!/^[a-f0-9]{64}$/.test(previewImage.hash)) throw new MessagingFailure("Invalid preview image", 404);
+        const path = join(this.root, "preview-images", previewImage.hash);
+        if (!existsSync(path)) throw new MessagingFailure("Preview image not found", 404);
+        const type = await imageType(path);
+        if (!type) throw new MessagingFailure("Preview image is not a recognised image", 404);
+        return new Response(Bun.file(path), { headers: { ...API_CORS_HEADERS, "content-type": type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable", etag: `"${previewImage.hash}"` } });
+      }
       const send = API.messagingSend.match(req.method, url.pathname);
       if (send) {
         // Answer with the durable receipt, not the backend's verdict: Signal's

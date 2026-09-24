@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync, gunzipSync } from "node:zlib";
 
 const root = mkdtempSync(join(tmpdir(), "pi-remote-router-test-"));
 const persons = join(root, "persons");
@@ -25,6 +26,10 @@ function person(user: string, encrypted: boolean, remoteAccess: string[]) {
     if (!existsSync(join(units, `pi-remote@${user}.service`))) return new Response("Stopped", { status: 503 });
     const url = new URL(req.url);
     if (url.pathname === "/v1/health" && healthChecks.has(user)) return healthChecks.get(user)!();
+    if (url.pathname === "/v1/encoded-test") return new Response(gzipSync(JSON.stringify({ user, text: "message".repeat(500) })), { headers: { "content-type": "application/json", "content-encoding": "gzip", "cache-control": "private, no-cache" } });
+    if (url.pathname === "/v1/cache-test") return req.headers.get("if-none-match") === 'W/"cache"'
+      ? new Response(null, { status: 304, headers: { etag: 'W/"cache"', "cache-control": "private, no-cache" } })
+      : Response.json({ user }, { headers: { etag: 'W/"cache"', "cache-control": "private, no-cache" } });
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket" && url.pathname.startsWith("/v1/ws-test/")) {
       if (req.headers.get("x-pi-remote-user") !== user) return new Response("Wrong person", { status: 403 });
       return httpServer.upgrade(req, { data: { id: nextWebsocketId++, user, path: url.pathname } })
@@ -144,6 +149,23 @@ async function expectWebSocketRefused(path: string): Promise<void> {
     socket.addEventListener("close", refused, { once: true });
   });
 }
+
+test("router preserves upstream revalidation and partitions the browser cache by person and session", async () => {
+  const kenan = await token("kenan");
+  const first = await request("/v1/cache-test", kenan, "kenan");
+  expect(first.headers.get("cache-control")).toBe("private, no-cache");
+  expect(first.headers.get("vary")).toContain("X-Pi-Remote-User");
+  expect(first.headers.get("vary")).toContain("X-Pi-Remote-Session");
+  expect(first.headers.get("vary")).toContain("Cookie");
+  const revalidated = await fetch(`${base}/v1/cache-test`, { headers: { "x-pi-remote-user": "kenan", "x-pi-remote-session": kenan, "if-none-match": first.headers.get("etag")! } });
+  expect(revalidated.status).toBe(304);
+  expect(revalidated.headers.get("cache-control")).toBe("private, no-cache");
+  const encoded = await fetch(`${base}/v1/encoded-test`, { headers: { "x-pi-remote-user": "kenan", "x-pi-remote-session": kenan, "accept-encoding": "gzip" }, decompress: false } as RequestInit & { decompress: boolean });
+  expect(encoded.headers.get("content-encoding")).toBe("gzip");
+  expect(JSON.parse(gunzipSync(Buffer.from(await encoded.arrayBuffer())).toString()).user).toBe("kenan");
+  const sybil = await token("sybil");
+  expect((await (await request("/v1/cache-test", sybil, "sybil")).json()).user).toBe("sybil");
+});
 
 test("bootstrap exposes persons, not endpoint access; Android can preflight session headers", async () => {
   const environment = await (await request("/v1/environment")).json();

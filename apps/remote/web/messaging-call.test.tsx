@@ -12,7 +12,7 @@ const call = (extra: Partial<MessagingCall> = {}): MessagingCall => ({
 });
 const conversations = [{
   id: "conversation-1", backendId: "signal", externalId: "+12025550123", title: "Jo", kind: "direct" as const,
-  updatedAt: 1, unread: 0, current: true, avatar: null,
+  updatedAt: 1, unread: 0, current: true, avatar: null, revision: 0,
 }];
 const snapshot = (active: MessagingCall): MessagingSnapshot => ({
   version: 2,

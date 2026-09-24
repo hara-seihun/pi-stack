@@ -1,5 +1,5 @@
 import { API } from "../../server/api";
-import type { MessagingAttachment, MessagingCall, MessagingConversation, MessagingHistory, MessagingLink, MessagingLinkPreview, MessagingMessage, MessagingResult, MessagingSend } from "../../server/messaging/protocol";
+import type { MessagingAttachment, MessagingCall, MessagingConversation, MessagingHistory, MessagingHistoryChanges, MessagingLink, MessagingLinkPreview, MessagingMessage, MessagingResult, MessagingSend } from "../../server/messaging/protocol";
 import { piFetch } from "./client";
 import { PreviewQueue } from "./preview-queue";
 
@@ -12,7 +12,7 @@ async function request<T>(path: string, init: RequestInit, signal: AbortSignal):
   else signal.addEventListener("abort", cancel, { once: true });
   const timer = setTimeout(() => controller.abort(new Error("Messaging request timed out")), 20_000);
   try {
-    const response = await piFetch(path, { ...init, signal: controller.signal, cache: "no-store" });
+    const response = await piFetch(path, { ...init, signal: controller.signal });
     const result = await response.json();
     if (!response.ok) return { ok: false, error: { code: String(response.status), message: typeof result.error === "string" ? result.error : result.error?.message || `HTTP ${response.status}` } };
     return { ok: true, value: result as T };
@@ -28,6 +28,7 @@ const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "cont
 export const messagingClient = {
   open: (backendId: string, target: string, signal: AbortSignal) => request<{ conversation: MessagingConversation }>(API.messagingOpen.path(), json({ backendId, target }), signal),
   history: (conversationId: string, signal: AbortSignal, before?: number, since?: number) => request<MessagingHistory>(API.messagingHistory.path({ conversationId }, { limit: 50, before, since }), {}, signal),
+  changes: (conversationId: string, signal: AbortSignal, after: number, from: number) => request<MessagingHistoryChanges>(API.messagingHistory.path({ conversationId }, { after, from }), {}, signal),
   linkPreviews: async (messageId: string, signal: AbortSignal): Promise<MessagingResult<{ previews: MessagingLinkPreview[] }>> => {
     const release = await previewQueue.acquire(signal);
     if (!release) return { ok: false, error: { code: "aborted", message: "Preview request cancelled" } };

@@ -417,7 +417,8 @@ Bun.serve<ProxySocketData>({
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);
     const response = await route(req, url);
     if (!url.pathname.startsWith("/v1/")) return response;
-    response.headers.set("cache-control", "no-store");
+    if (!response.headers.has("cache-control")) response.headers.set("cache-control", "no-store");
+    response.headers.set("vary", [response.headers.get("vary"), "X-Pi-Remote-User", "X-Pi-Remote-Session", "Cookie"].filter(Boolean).join(", "));
     response.headers.set("referrer-policy", "no-referrer");
     return withCors(response);
   },

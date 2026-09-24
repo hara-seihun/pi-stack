@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +53,68 @@ async function setup(root = directory(), onChange?: () => void) {
 }
 
 describe("messaging custody", () => {
+  test("revision diffs reproduce the rendered window through every kind of change", async () => {
+    const { service, context, conversation, plugin } = await setup();
+    const chat = { id: conversation.externalId, title: conversation.title, kind: 'direct' as const };
+    context.self('self-number');
+    context.sender({ id: 'friend', aliases: ['friend-number'], name: 'Friend' });
+    await context.message({ id: 'first', conversation: chat, direction: 'incoming', sender: 'friend-number', text: 'one', timestamp: 100, attachments: [] });
+    const initial = service.history(conversation.id);
+    let held = { messages: initial.messages, revision: initial.revision };
+    const unchanged = service.changes(conversation.id, held.revision);
+    expect(unchanged).toEqual({ messages: [], removed: [], revision: held.revision });
+    const sync = () => {
+      const diff = service.changes(conversation.id, held.revision);
+      const byId = new Map(held.messages.map(message => [message.id, message]));
+      for (const id of diff.removed) byId.delete(id);
+      for (const message of diff.messages) byId.set(message.id, message);
+      held = { messages: [...byId.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)), revision: diff.revision };
+      const full = service.history(conversation.id);
+      expect(held.revision).toBe(full.revision);
+      expect(held.messages).toEqual([...full.messages].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)));
+      expect(service.snapshot().conversations.find(item => item.id === conversation.id)!.revision).toBe(full.revision);
+      return diff;
+    };
+    await context.message({ id: 'answer', conversation: chat, direction: 'incoming', sender: 'friend', text: 'quoting', timestamp: 300, attachments: [], reply: { author: 'friend', timestamp: 200, text: 'not yet here' } });
+    expect(sync().messages.map(message => message.text)).toEqual(['quoting']);
+    await context.message({ id: 'late-target', conversation: chat, direction: 'incoming', sender: 'friend', text: 'target', timestamp: 200, attachments: [] });
+    expect(sync().messages.map(message => message.text).sort()).toEqual(['quoting', 'target']);
+    await context.reaction({ conversation: chat, target: { author: 'friend-number', timestamp: 100 }, account: 'self-number', sender: 'self-number', emoji: '👍', remove: false, timestamp: 400 });
+    expect(sync().messages.map(message => message.text)).toEqual(['one']);
+    context.sender({ id: 'friend', aliases: ['friend-number'], name: 'Renamed' });
+    expect(sync().messages).toHaveLength(3);
+    let release!: () => void;
+    plugin.send = () => new Promise(resolve => { release = () => resolve({ ok: true, value: { externalId: 'synced', timestamp: 500 } }); });
+    const accepted = service.accept(conversation.id, { requestId: 'outgoing-send', text: 'mine', attachmentIds: [] });
+    sync();
+    await context.message({ id: 'synced', conversation: chat, direction: 'outgoing', sender: 'self-number', text: 'mine', timestamp: 500, attachments: [] });
+    expect(held.messages.filter(message => message.text === 'mine')).toHaveLength(1);
+    sync();
+    expect(held.messages.filter(message => message.text === 'mine')).toHaveLength(2);
+    release();
+    await accepted.settled;
+    const settled = sync();
+    expect(settled.removed).toHaveLength(1);
+    expect(held.messages.filter(message => message.text === 'mine')).toMatchObject([{ id: 'outgoing-send', status: 'sent' }]);
+    expect(service.changes(conversation.id, held.revision)).toEqual({ messages: [], removed: [], revision: held.revision });
+  });
+
+  test("content-addressed preview images remain accessible after restart and reject unknown hashes", async () => {
+    const root = directory();
+    const { service } = await setup(root);
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
+    const hash = createHash("sha256").update(image).digest("hex");
+    mkdirSync(join(root, "preview-images"));
+    writeFileSync(join(root, "preview-images", hash), image);
+    await service.close();
+    const restarted = await setup(root);
+    const response = await restarted.service.handle(new Request(`http://localhost/v1/messaging/preview-images/${hash}`));
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("content-type")).toBe("image/png");
+    expect(response?.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+    expect(Buffer.from(await response!.arrayBuffer())).toEqual(image);
+    expect((await restarted.service.handle(new Request("http://localhost/v1/messaging/preview-images/invalid")))?.status).toBe(404);
+  });
   test("reaction events precede messages, survive restart and replay, and use the same outbound state", async () => {
     const root = directory();
     let changes = 0;
@@ -188,20 +251,21 @@ describe("messaging custody", () => {
     service.closeConversation(conversation.id);
     const original = service.history(conversation.id).messages;
     const named = (name: string) => original.map(message => ({ ...message, senderName: name, identity: { ...message.identity!, sender: { id: message.sender, name } } }));
-    const state = service.snapshot().conversations;
+    const listed = () => service.snapshot().conversations.map(({ revision: _revision, ...row }) => row);
+    const state = listed();
     expect(original[0].senderName).toBeUndefined();
     const version = service.snapshot().version;
     context.sender({ id: sender, aliases: [number], name: 'Known Contact' });
     expect(service.snapshot().version).toBeGreaterThan(version);
     expect(service.history(conversation.id).messages).toEqual(named('Known Contact'));
-    expect(service.snapshot().conversations).toEqual(state);
+    expect(listed()).toEqual(state);
     const namedVersion = service.snapshot().version;
     context.sender({ id: sender, aliases: [number], name: 'Known Contact' });
     expect(service.snapshot().version).toBe(namedVersion);
     context.sender({ id: sender, aliases: [], name: 'New Name' });
     await context.message(incoming);
     expect(service.history(conversation.id).messages).toEqual(named('New Name'));
-    expect(service.snapshot().conversations).toEqual(state);
+    expect(listed()).toEqual(state);
     await service.close();
     const restarted = await setup(root);
     expect(restarted.service.history(conversation.id).messages).toEqual(named('New Name'));
@@ -483,7 +547,7 @@ describe("messaging custody", () => {
     }
     const response = (await fixture.service.handle(new Request(`http://local/v1/messaging/conversations/${id}/messages?since=0`)))!;
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ messages: [], before: null });
+    expect(await response.json()).toEqual({ messages: [], before: null, revision: 0 });
   });
   test("contact and group pictures reach the inbox, message headers and an image route that reads the type from the bytes", async () => {
     const root = directory();
