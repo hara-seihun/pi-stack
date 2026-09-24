@@ -7,7 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
 import { isRunContext } from "../isolated-context-contract.js";
 import { isModelConfigurationError } from "../provider-errors.js";
-import { resolveSpawnSettings, resolveThreadSettings } from "./settings.js";
+import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { RAW_ARGUMENT } from "./pi-raw.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
@@ -493,7 +493,8 @@ export class ThreadService implements ThreadApi {
     }
     if (input.action === "settings") {
       const current = this.get(input.threadId)!, settings = resolveThreadSettings(input.settings, current.settings); if (!settings.ok) return settings;
-      if ((current.parentId || ["direct", "lane"].includes(String(current.metadata?.source))) && !settings.value.model.startsWith("openai-codex/")) return bad("invalid_request", "Orchestrator-scheduled work requires an OpenAI Codex model");
+      if (["direct", "lane"].includes(String(current.metadata?.source)) && !settings.value.model.startsWith("openai-codex/")) return bad("invalid_request", "Orchestrator-scheduled work requires an OpenAI Codex model");
+      const childForbidden = current.parentId ? childModelError(settings.value.model) : undefined; if (childForbidden) return { ok: false, error: childForbidden };
       this.transaction(() => {
         this.sql("UPDATE thread SET settings=? WHERE id=?").run(JSON.stringify(settings.value), input.threadId);
         if (input.settings.model !== undefined) {
