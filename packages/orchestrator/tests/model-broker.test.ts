@@ -348,3 +348,25 @@ test("broker configuration and inline Anthropic tools reject ambiguous trust bou
   expect(validateBrokerBody("anthropic", { model: "claude", stream: true, messages: [{ type: "tool_use", input: { file_id: "local-file" } }], tools: [{ name: "read", input_schema: { type: "object", properties: { file_id: { type: "string" } } } }] })).toBeUndefined();
   expect(validateBrokerBody("anthropic", { model: "claude", stream: true, messages: [{ content: [{ type: "image", source: { type: "file", file_id: "owner-file" } }] }] })).toMatch(/resources/);
 });
+
+test("a principal reads her granted plans and only her own spending", async () => {
+  const f = await fixture(vi.fn(async () => new Response("ok")));
+  f.store.upsertAccount({ id: "shared", provider: "openai-codex", label: "private@example.com" });
+  f.store.recordMeter("shared", "codex-7d", 40, Date.now() + 86_400_000, Date.now());
+  const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  f.store.recordUsage({ accountId: "shared", hour, source: "interactive", runId: "broker:sybil:1", model: "gpt-6-luna", component: "output", tokens: 1_000_000 });
+  f.store.recordUsage({ accountId: "shared", hour, source: "interactive", runId: "owner-session", model: "gpt-6-luna", component: "output", tokens: 3_000_000 });
+  const response = await fetch(`${f.url}/v1/usage`);
+  expect(response.status).toBe(200);
+  const usage = await response.json();
+  const text = JSON.stringify(usage);
+  expect(text).not.toContain("private@example.com");
+  expect(text).not.toContain("owner-only");
+  const openai = usage.plans.plans.openai.metrics.remaining;
+  expect(openai.accounts.map((account: any) => [account.accountId, account.accountLabel])).toEqual([["shared", "shared"]]);
+  expect(openai.percentLeft).toBe(60);
+  const day = usage.personal.periods.day.plans.openai;
+  expect(day.tokens).toBe(1_000_000);
+  // Two enabled OpenAI accounts at $200 a month, one day of it, a quarter of the value.
+  expect(day.spend).toBeCloseTo(2 * 200 / 30 / 4, 6);
+});

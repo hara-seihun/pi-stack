@@ -2,6 +2,7 @@ import {
   ORCHESTRATOR_CATALOG,
   catalogMeter,
   catalogModel,
+  type PersonalUsage,
   type PlanUsageSnapshot,
 } from "pi-orchestrator/api";
 
@@ -43,7 +44,7 @@ function quotaDescription(name: string | undefined, modelLabel: string, meterIds
 
 /** Pi Remote owns prose and card layout; model and meter semantics come from
  * the orchestrator catalog and read model. */
-export function planCards(snapshot: PlanUsageSnapshot | null): PlanCard[] {
+export function planCards(snapshot: PlanUsageSnapshot | null, personal: PersonalUsage | null = null): PlanCard[] {
   return ORCHESTRATOR_CATALOG.plans.map((plan) => {
     const usage = snapshot?.plans[plan.id];
     const state = String(usage?.state ?? "loading");
@@ -80,6 +81,7 @@ export function planCards(snapshot: PlanUsageSnapshot | null): PlanCard[] {
       text: rendered.map((metric) => metric.text).join(" · "),
       description,
       metrics: rendered,
+      spent: personal ? { day: personal.periods.day.plans[plan.id]?.spend ?? 0, week: personal.periods.week.plans[plan.id]?.spend ?? 0 } : null,
     };
   });
 }

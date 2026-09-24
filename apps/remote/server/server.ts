@@ -7,7 +7,7 @@ import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -359,6 +359,8 @@ let planUsage: PlanUsageSnapshot | null = null;
 /** Everyone's relative usage, computed only for the host's administrator. */
 const HOST_ADMINISTRATOR = isHostAdministrator();
 let peopleUsage: PeopleUsage | null = null;
+/** The viewer's own spending per plan; null when nothing attributes usage to her. */
+let ownUsage: PersonalUsage | null = null;
 let planUsageRefresh: Promise<void> | null = null;
 let nextPlanUsageRefresh = 0;
 
@@ -371,7 +373,22 @@ function refreshPlanUsageIfDue() {
     } catch (cause) {
       console.error("Plan meter refresh failed", cause);
     }
-    planUsage = orchestrator.plans();
+    // The administrator's own ledger holds the pool and her spending. Everyone
+    // else's ledger is empty; her broker knows the pool and what she spent.
+    const broker = HOST_ADMINISTRATOR ? undefined : modelBrokerUrl();
+    if (broker) {
+      try {
+        const usage = await readBrokerUsage(broker);
+        planUsage = usage.plans;
+        ownUsage = usage.personal;
+      } catch (cause) {
+        console.error("Model broker usage refresh failed", cause);
+        planUsage ??= orchestrator.plans();
+      }
+    } else {
+      planUsage = orchestrator.plans();
+      if (HOST_ADMINISTRATOR) ownUsage = orchestrator.ownUsage();
+    }
     if (HOST_ADMINISTRATOR) {
       try {
         const names = new Map(listPersons().map((person) => [person.user, person.displayName]));
@@ -432,7 +449,7 @@ async function buildDashboard(): Promise<Dashboard> {
   await refreshPeers();
   const [agents, actions] = await Promise.all([activeAgents(), machineActions.refresh()]);
   return {
-    plans: planCards(planUsage),
+    plans: planCards(planUsage, ownUsage),
     governors: governorControls(orchestrator),
     actions,
     machine: readMachineUsage(),

@@ -163,3 +163,30 @@ export function personUsage(
       .sort((a, b) => b.spend - a.spend || b.value - a.value || b.tokens - a.tokens),
   };
 }
+
+export type PersonalUsagePeriod = "day" | "week";
+export const PERSONAL_USAGE_PERIODS: Readonly<Record<PersonalUsagePeriod, number>> = { day: 24 * 3_600_000, week: 7 * 24 * 3_600_000 };
+
+/** One person's part of each plan's subscription cost over the last day and week. */
+export interface PersonalUsage {
+  readonly periods: Readonly<Record<PersonalUsagePeriod, {
+    readonly since: string;
+    readonly until: string;
+    /** Keyed by catalog plan id. */
+    readonly plans: Readonly<Record<string, UsageFigures>>;
+  }>>;
+}
+
+/** `principal` is a broker principal, or null for the ledger's own owner. */
+export function personalUsage(store: Store, principal: string | null, now = Date.now(), plans: readonly PlanDefinition[] = ORCHESTRATOR_CATALOG.plans): PersonalUsage {
+  const periods = Object.fromEntries(Object.entries(PERSONAL_USAGE_PERIODS).map(([period, windowMs]) => {
+    const window = personUsage(store, now - windowMs, now, undefined, plans);
+    const row = window.rows.find(candidate => candidate.principal === principal);
+    return [period, {
+      since: window.since,
+      until: window.until,
+      plans: Object.fromEntries(plans.map(plan => [plan.id, row?.providers[plan.provider] ?? { tokens: 0, value: 0, spend: 0 }])),
+    }];
+  }));
+  return { periods: periods as PersonalUsage["periods"] };
+}

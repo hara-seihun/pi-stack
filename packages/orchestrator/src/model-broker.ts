@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { BROKER_USAGE_PATH, brokerUsage } from "./broker-usage.js";
 import { zstdDecompressSync } from "node:zlib";
 import { once } from "node:events";
 import { readFileSync, statSync, unwatchFile, watchFile } from "node:fs";
@@ -81,6 +82,14 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       } finally {
         inflight.set(listener.principal, (inflight.get(listener.principal) ?? 1) - 1);
       }
+      return;
+    }
+    if (req.method === "GET" && req.url === BROKER_USAGE_PATH) {
+      let body: string;
+      try { body = JSON.stringify(brokerUsage(store, listener.principal, grant.accounts)); }
+      catch (error) { console.error(`Model broker usage failed for ${listener.principal}: ${error instanceof Error ? error.message : "unknown error"}`); json(res, 500, "Usage is unavailable"); return; }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(body);
       return;
     }
     const completionRoute = /^\/v1\/completions\/([^/?]+)$/.exec(req.url ?? "");

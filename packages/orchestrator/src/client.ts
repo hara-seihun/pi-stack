@@ -1,7 +1,7 @@
 import { ORCHESTRATOR_CATALOG, catalogAgentType, catalogMeter, type PlanDefinition, type PlanMetric } from "./catalog.js";
 import { Store } from "./store.js";
 import { type Account, type UsageTotal } from "./domain.js";
-import { personUsage, type PersonUsageWindow } from "./person-usage.js";
+import { personalUsage, personUsage, type PersonalUsage, type PersonUsageWindow } from "./person-usage.js";
 
 export const CACHE_WINDOW_MS=24*3_600_000;
 export interface PlanAccountUsage{
@@ -84,8 +84,8 @@ function accountReading(store:Store,account:Account,metric:PlanMetric,maxReading
   return{left:0,expected:null,usage:{accountId:account.id,accountLabel:account.label?.trim()||account.id,state:"unavailable",percentLeft:null,usedPercent:null,meterId:null,windowHours:null,readingAt:null,resetAt:null,...banked}};
 }
 
-function plan(store:Store,definition:PlanDefinition,totals:readonly UsageTotal[],now:number):PlanUsage{
-  const accounts=store.accounts().filter((account)=>account.provider===definition.provider&&account.enabled),coverage:number[]=[];
+function plan(store:Store,definition:PlanDefinition,totals:readonly UsageTotal[],now:number,visible:(account:Account)=>boolean=()=>true):PlanUsage{
+  const accounts=store.accounts().filter((account)=>account.provider===definition.provider&&account.enabled&&visible(account)),coverage:number[]=[];
   const accountIds=new Set(accounts.map((account)=>account.id));
   const metrics=Object.fromEntries(definition.metrics.map((metric)=>{
     const accountReadings=accounts.map((account)=>accountReading(store,account,metric,definition.maxReadingAgeMs,now));
@@ -97,13 +97,21 @@ function plan(store:Store,definition:PlanDefinition,totals:readonly UsageTotal[]
   const checked=coverage.length?Math.min(...coverage):0;return{state:accounts.length>0&&checked===accounts.length?"ready":checked>0?"partial":"unavailable",metrics,planCount:accounts.length,checkedCount:checked};
 }
 
+/** Plan meters for the enabled accounts `visible` admits. */
+export function planUsage(store:Store,definitions:readonly PlanDefinition[]=ORCHESTRATOR_CATALOG.plans,now=Date.now(),visible?:(account:Account)=>boolean):PlanUsageSnapshot{
+  const totals=store.usageSince(now-CACHE_WINDOW_MS);
+  return{plans:Object.fromEntries(definitions.map((definition)=>[definition.id,plan(store,definition,totals,now,visible)])),updatedAt:new Date(now).toISOString()};
+}
+
 export class OrchestratorClient{
   private readonly store:Store;
   constructor(options:OrchestratorClientOptions){this.store=Store.open(options.ledgerPath);}
   accounts(provider?:string){return this.store.accounts().filter((account)=>!provider||account.provider===provider);}
   boost(provider:string):number{return Number(this.store.control(`boost:${provider}`)??"1");}
   setBoost(provider:string,multiplier:number):void{this.store.setControl(`boost:${provider}`,String(multiplier));}
-  plans(definitions:readonly PlanDefinition[]=ORCHESTRATOR_CATALOG.plans,now=Date.now()):PlanUsageSnapshot{const totals=this.store.usageSince(now-CACHE_WINDOW_MS);return{plans:Object.fromEntries(definitions.map((definition)=>[definition.id,plan(this.store,definition,totals,now)])),updatedAt:new Date(now).toISOString()};}
+  plans(definitions:readonly PlanDefinition[]=ORCHESTRATOR_CATALOG.plans,now=Date.now()):PlanUsageSnapshot{return planUsage(this.store,definitions,now);}
+  /** What the ledger's own owner spent of each plan's subscriptions in the last day and week. */
+  ownUsage(now=Date.now()):PersonalUsage{return personalUsage(this.store,null,now);}
   /** Each person's share of this ledger over the hour buckets of the last `windowMs`. */
   personUsage(windowMs:number,now=Date.now()):PersonUsageWindow{return personUsage(this.store,now-windowMs,now);}
   async refreshPlanFacts(_agentDir:string):Promise<void>{}
