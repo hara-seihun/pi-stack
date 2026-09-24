@@ -74,6 +74,26 @@ it("bounds status lookup when an owner cannot answer after await times out", asy
   }
 });
 
+it("returns compact settlements with cursors across successive bounded calls", async () => {
+  const wait = vi.fn<ThreadApi["await"]>().mockImplementationOnce(async input => response(input, settlement("child")))
+    .mockImplementationOnce(async input => response(input, settlement("other", 9)));
+  const list = vi.fn<ThreadApi["list"]>();
+  const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait, list } as unknown as ThreadApi })
+    .find(tool => tool.name === "thread_await")!;
+  const controller = new AbortController();
+  const first = await tool.execute("first", { threadIds: ["child", "other"], after: { prior: 3 } }, controller.signal, undefined, {} as never);
+  const after = { prior: 3, child: 7, other: 0 };
+  expect(first.details).toEqual({ ok: true, value: { settlement: { threadId: "child", outcome: "complete", finalText: "Done" },
+    remainingThreadIds: ["other"], after } });
+  expect(wait).toHaveBeenCalledOnce();
+  const second = await tool.execute("second", { threadIds: ["child", "other"], after }, controller.signal, undefined, {} as never);
+  expect(wait).toHaveBeenCalledTimes(2);
+  expect(wait.mock.calls[1]).toEqual([{ threadIds: ["child", "other"], parentId: "parent", after, timeoutMs: 25_000 }, controller.signal]);
+  expect(second.details).toEqual({ ok: true, value: { settlement: { threadId: "other", outcome: "complete", finalText: "Done" },
+    remainingThreadIds: ["child"], after: { prior: 3, child: 7, other: 9 } } });
+  expect(list).not.toHaveBeenCalled();
+});
+
 it("preserves final text while omitting opaque content without changing the native result", async () => {
   const text = "Full final message. ".repeat(3000);
   const native = { ...settlement("child"), finalMessage: { role: "assistant", content: [
@@ -86,7 +106,8 @@ it("preserves final text while omitting opaque content without changing the nati
   const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait } as unknown as ThreadApi })
     .find(tool => tool.name === "thread_await")!;
   const result = await tool.execute("call", { threadIds: ["child"] }, undefined, undefined, {} as never);
-  expect(result.details).toMatchObject({ ok: true, value: { settlement: { finalMessage: { content: [{ type: "text", text }, null, { type: "image", mimeType: "image/png", image: "[image bytes omitted]" }, null] } } } });
+  expect(result.details).toEqual({ ok: true, value: { settlement: { threadId: "child", outcome: "complete", finalText: text },
+    remainingThreadIds: [], after: { child: 7 } } });
   expect(JSON.stringify(result)).not.toContain("OPAQUE");
   expect(native.finalMessage.content[0]).toHaveProperty("textSignature", "OPAQUE_SIGNATURE");
 });
