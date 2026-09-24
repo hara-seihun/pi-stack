@@ -214,6 +214,28 @@ export interface SpeechUtterance {
   error: string | null;
 }
 
+export type PeopleUsagePeriod = "day" | "week";
+
+/** One person's share of the host's pooled model spending in a period. */
+export interface PersonUsage {
+  /** Unix user name. */
+  user: string;
+  name: string;
+  /** Share of the period's list-price value, 0–100. */
+  percent: number;
+  tokens: number;
+  /** API list-price value in US dollars; a weight for comparing people, not a bill. */
+  value: number;
+  /** Share of this person's own value spent by background workers, when she has any. */
+  workersPercent: number | null;
+}
+
+/** Relative usage of everyone on the host. Sent only to the host's administrator
+ * (the `fleetUser`), whose ledger is the one every person's broker writes to. */
+export interface PeopleUsage {
+  periods: Record<PeopleUsagePeriod, { since: string; until: string; people: PersonUsage[] }>;
+}
+
 /** The Machine screen. It changes on its own clock (meters, load, agent
  * lifecycles) and travels only to streams that subscribed to it. */
 export interface Dashboard {
@@ -222,6 +244,8 @@ export interface Dashboard {
   actions: MachineActionState[];
   machine: MachineUsage | null;
   modelCounts: AgentModelCount[];
+  /** Null for everyone except the host's administrator. */
+  people: PeopleUsage | null;
 }
 
 /** Every thread the inbox and worker tree list, as `GET /v1/sessions` returns

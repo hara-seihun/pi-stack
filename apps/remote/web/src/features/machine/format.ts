@@ -39,3 +39,26 @@ export function formatLocalDateTime(value: string | null): string | null {
   if (!Number.isFinite(date.getTime())) return null;
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
+
+/** Token counts at a glance: 950, 12k, 3.4M, 21B. */
+export function formatTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens < 0) return "—";
+  const scaled = (value: number, suffix: string) => `${value >= 10 ? Math.round(value) : Math.round(value * 10) / 10}${suffix}`;
+  if (tokens >= 1e9) return scaled(tokens / 1e9, "B");
+  if (tokens >= 1e6) return scaled(tokens / 1e6, "M");
+  if (tokens >= 1e3) return scaled(tokens / 1e3, "k");
+  return String(Math.round(tokens));
+}
+
+/** Whole dollars, with cents only below ten. */
+export function formatDollars(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "—";
+  return value < 10 ? `$${value.toFixed(2)}` : `$${Math.round(value).toLocaleString("en-US")}`;
+}
+
+/** A share of a whole: one decimal below ten percent, "<0.1%" for trace use. */
+export function formatShare(percent: number): string {
+  if (!Number.isFinite(percent) || percent <= 0) return "0%";
+  if (percent < 0.1) return "<0.1%";
+  return percent < 10 ? `${percent.toFixed(1).replace(/\.0$/, "")}%` : `${Math.round(percent)}%`;
+}

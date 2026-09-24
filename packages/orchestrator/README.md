@@ -186,6 +186,8 @@ Codex sampling also reads available banked rate-limit resets on every pass. The 
 
 ## Usage evidence
 
+`personUsage(store, since, until)` and `OrchestratorClient.personUsage(windowMs)` attribute a ledger's hourly usage to people. Broker leases are named `broker:<principal>:<id>`, and a broker completion's principal is in its `completion:<request>` access record; every other row is the ledger owner's own interactive, fleet or completion spending and has a null principal. Each person gets tokens, list-price value from the pooled providers' model catalog (including retired models) and a per-source split. Pi Remote's administrator People card consumes it.
+
 `pi-orchestrator usage-evidence [--ledger FILE]` prints a transaction-consistent, read-only JSON snapshot of the last 24 hours of quota meters and hourly token totals. It includes account aliases, providers, voice reservations, and the catalog's weekly meter scopes. It excludes credentials, account labels, run ids, and transcript paths. It does not contact providers, initialize missing databases, or require the daemon to be running.
 
 The same function is exported as `readUsageEvidence` from `pi-orchestrator/api`. [`pi-user-usage`](../../tools/user-usage/README.md) consumes the command to estimate a person's subscription-equivalent dollars from her recorded conversation usage. Token totals measure spending, not capacity; the paired provider meter readings supply the capacity estimate.

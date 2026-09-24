@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { Dashboard, Governor, GovernorProvider, GovernorState, MachineUsage, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
+import type { Dashboard, Governor, GovernorProvider, GovernorState, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
 import { Sheet } from "../../app/Sheet";
 import { iconUrl } from "../../chat-row";
-import { formatBytes, formatLocalDateTime, formatResetDistance } from "./format";
+import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens } from "./format";
 import "./machine.css";
 
 export type MachineScreenProps = {
@@ -127,6 +127,33 @@ function Plan({ plan, modelCounts }: { plan: PlanCard; modelCounts: Map<string, 
   </>;
 }
 
+const peoplePeriods: Array<{ id: PeopleUsagePeriod; label: string; description: string }> = [
+  { id: "day", label: "Day", description: "last 24 hours" },
+  { id: "week", label: "Week", description: "last 7 days" },
+];
+
+/** Everyone's share of the host's model spending, weighted by API list price so
+ * a Fable token and a Luna token are not counted as the same thing. */
+export function People({ usage }: { usage: PeopleUsage }) {
+  const [period, setPeriod] = useState<PeopleUsagePeriod>("day");
+  const current = usage.periods[period];
+  const selected = peoplePeriods.find((item) => item.id === period)!;
+  const top = current.people[0]?.percent ?? 0;
+  return <Card title="People">
+    <div className="machine-people-header">
+      <p className="machine-secondary">Share of model use, {selected.description}</p>
+      <div className="machine-people-periods" role="group" aria-label="Usage period">
+        {peoplePeriods.map((item) => <button key={item.id} type="button" aria-pressed={period === item.id} onClick={() => setPeriod(item.id)}>{item.label}</button>)}
+      </div>
+    </div>
+    {current.people.length === 0 ? <p className="machine-secondary">Nobody used a model in this period.</p> : current.people.map((person) => <div className="machine-plan-row machine-person" key={person.user}>
+      <div className="machine-plan-heading"><div className="machine-plan-name"><strong>{person.name}</strong></div><span>{formatShare(person.percent)}</span></div>
+      <div className="machine-bar machine-person-bar" role="img" aria-label={`${person.name}: ${formatShare(person.percent)} of model use`}><span style={{ width: `${top > 0 ? Math.max(0.5, person.percent * 100 / top) : 0}%` }} /></div>
+      <div className="machine-plan-meta"><span>{formatTokens(person.tokens)} tokens · {formatDollars(person.value)} at API prices</span>{person.workersPercent !== null && <span>{formatShare(person.workersPercent)} workers</span>}</div>
+    </div>)}
+  </Card>;
+}
+
 function Host({ machine }: { machine: MachineUsage | null }) {
   if (!machine) return <Card title="Host"><p className="machine-secondary">Not measured</p></Card>;
   return <Card title="Host"><div className="machine-usage-grid">
@@ -146,6 +173,7 @@ export function MachineScreen(props: MachineScreenProps) {
   return <main className="machine-screen">
     <div className="machine-grid">
       {dashboard?.plans.map((plan) => <Plan key={plan.id} plan={plan} modelCounts={props.modelCounts} />)}
+      {dashboard?.people && <People usage={dashboard.people} />}
       {dashboard?.governors && <Card title="Background launch pace">
         {(["openai", "anthropic"] as const).map((provider) => {
           const governor = dashboard.governors![provider];
