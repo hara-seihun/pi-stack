@@ -487,7 +487,7 @@ describe("leaf Orchestrator workers", () => {
     person.service.setDirectory(directory, () => fleet.service);
     fleet.service.setDirectory(directory);
     const root = value(await directory.spawn({ requestId: "parent", cwd: person.directory, message: "Coordinate" }));
-    const child = value(await directory.spawn({ requestId: "child", parentId: root.id, cwd: person.directory, message: "Work" }));
+    const child = value(await directory.spawn({ requestId: "child", parentId: root.id, cwd: person.directory, message: "Work", ephemeral: true }));
     value(await person.service.start()); value(await fleet.service.start());
     await waitFor(() => person.sessions[0]?.isStreaming === true && fleet.sessions[0]?.isStreaming === true);
     expect(person.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("1");
@@ -514,7 +514,10 @@ describe("leaf Orchestrator workers", () => {
     expect(JSON.parse(progress.split("\n")[2]!)).toMatchObject({ recipientThreadId: root.id, source: "explicit", messageId: "progress" });
     expect(JSON.parse(completion.split("\n")[2]!)).toEqual({ senderThreadId: child.id });
     expect(JSON.parse(completion.split("\n")[4]!)).toEqual({ type: "thread_idle", title: child.title, outcome: "complete", finalText: "Worker result" });
-    expect(fleet.service.get(child.id)?.state).toBe("idle");
+    expect(fleet.service.get(child.id)).toMatchObject({ state: "idle", held: true, metadata: { ephemeral: true, archived: true, archivedAt: expect.any(String) } });
+    expect(fleet.service.latestSettlement(child.id)?.finalMessage).toMatchObject({ content: [{ text: "Worker result" }] });
+    expect(value(await directory.read({ threadId: child.id })).entries.length).toBeGreaterThanOrEqual(0);
+    expect(await directory.send({ requestId: "late", threadId: child.id, senderId: root.id, text: "Follow up" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
   });
 });
 
@@ -524,6 +527,31 @@ async function settle(session: FakePiSession, service: ThreadService, threadId: 
 }
 
 describe("ThreadService", () => {
+  it("archives an ephemeral worker only after its final queued assignment, retaining its result", async () => {
+    const { service, directory, sessions } = fixture();
+    const root = value(await service.spawn({ requestId: "root", cwd: directory }));
+    expect(await service.spawn({ requestId: "invalid-root", cwd: directory, ephemeral: true })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(await service.spawn({ requestId: "invalid-metadata", cwd: directory, parentId: root.id, metadata: { ephemeral: true } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    const child = value(await service.spawn({ requestId: "ephemeral", cwd: directory, parentId: root.id, message: "Write the result", ephemeral: true }));
+    expect(child.metadata).toMatchObject({ ephemeral: true });
+    expect(await service.update(child.id, { metadata: { ephemeral: false } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    value(await service.control({ threadId: root.id, action: "stop", descendants: false }));
+    await service.start();
+    await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.isStreaming));
+    value(await service.send({ requestId: "follow-up", threadId: child.id, text: "Include the references", delivery: "queue" }));
+    sessions.find(session => session.options.threadId === child.id)!.settle("First draft");
+    await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.commands.some(command => command.workId === "follow-up")));
+    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    [...sessions].reverse().find(session => session.options.threadId === child.id)!.settle("Finished artifact");
+    await waitFor(() => service.get(child.id)?.metadata?.archived === true);
+    expect(service.get(child.id)).toMatchObject({ held: true, metadata: { ephemeral: true, archivedAt: expect.any(String) } });
+    expect(service.latestSettlement(child.id)?.finalMessage).toMatchObject({ content: [{ text: "Finished artifact" }] });
+    const archivedAt = service.get(child.id)?.metadata?.archivedAt;
+    service.reconcile();
+    expect(service.get(child.id)?.metadata?.archivedAt).toBe(archivedAt);
+    expect(await service.send({ requestId: "after", threadId: child.id, senderId: root.id, text: "More" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  });
+
   it("applies import provenance without treating retained archive metadata as a new archive request", async () => {
     const { service, directory } = fixture();
     const thread = value(await service.spawn({ requestId: "provenance", cwd: directory, metadata: { importedFrom: { nativeStateDirectory: directory } } }));

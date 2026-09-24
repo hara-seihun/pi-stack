@@ -29,12 +29,12 @@ export function threadTools(options: PiSessionOptions) {
   return [
     defineTool({
       name: "thread_spawn", label: "Start a thread",
-      description: `${DELEGATION_POLICY}\n\nStart a fresh Orchestrator worker with its own context. Workers cannot spawn subagents; coordinate all delegation from this conversation. It returns immediately; completion arrives as a normal message. To continue an existing conversation use thread_send instead. Defaults: Sol for OpenAI parents, Opus for Anthropic parents, standard speed, high thinking; Luna defaults to max. Explicit settings override these defaults, but Astra and Fable cannot be spawned. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
-      parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), settings: Type.Optional(Type.Object({
+      description: `${DELEGATION_POLICY}\n\nStart a fresh Orchestrator worker with its own context. Workers cannot spawn subagents; coordinate all delegation from this conversation. It returns immediately; completion arrives as a normal message. An ephemeral worker archives after its final assignment settles, but its work and filesystem effects persist. Set ephemeral:false if you expect to continue the conversation after its response. To continue an existing conversation use thread_send instead. Defaults: Sol for OpenAI parents, Opus for Anthropic parents, standard speed, high thinking; Luna defaults to max. Explicit settings override these defaults, but Astra and Fable cannot be spawned. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
+      parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), ephemeral: Type.Optional(Type.Boolean({ default: true, description: "Archive after its last assignment settles. Set false when you plan to send follow-up work." })), settings: Type.Optional(Type.Object({
         ...settings.properties,
         model: Type.Optional(Type.String({ description: "Defaults to Sol, or Opus for Anthropic parents. Astra and Fable are not allowed, including provider-qualified names." })),
       })) }),
-      execute: async (id, input, signal) => result(await api(signal).spawn({ ...input, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
+      execute: async (id, input, signal) => result(await api(signal).spawn({ ...input, ephemeral: input.ephemeral ?? true, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
         cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] })),
     }),
     defineTool({

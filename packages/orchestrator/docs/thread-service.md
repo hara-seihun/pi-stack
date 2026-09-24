@@ -4,6 +4,8 @@ The [accepted thread design](../../../docs/threads.md) defines behavior. [`Threa
 
 `send()` accepts an optional `delivery`. The shared `resolveDelivery()` defaults messages with `senderId` to `steer` and senderless human messages to `queue`. Agents may send only `steer` or `hardSteer`; the service rejects `senderId` with `delivery: "queue"`. Humans may use all three modes. HTTP and directory routing preserve the sender and selected mode; the destination service resolves omitted delivery before persistence.
 
+`spawn()` accepts `ephemeral: true` for a child thread, stored as immutable thread metadata. When its last accepted assignment settles, the owner archives it in the same transaction as the execution result and the parent's notification. Pending messages keep it active until they settle; restoring an archived worker remains possible. Model-tool spawns default to ephemeral and can select `false` for planned follow-ups. Ordinary API callers retain a persistent default.
+
 ## HTTP acceptance across activation
 
 `createThreadClient()` retains one serialized request and its identity while reconnecting. Sends and spawns require their existing stable `requestId` before transport replay is allowed. Read-only operations can reconnect too. Connection loss, HTTP 502/503/504 and an explicitly retryable suspended-controller response use delays of 100, 200, 400, 800 and then 1,000 milliseconds, within one 60-second deadline. Ordinary owner decisions, including archived recipients and identity conflicts, are terminal. Commands and controls are never automatically replayed.

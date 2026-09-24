@@ -20,7 +20,7 @@ Shared-process execution remains essential. Hundreds of threads must not create 
 
 Humans and agents use the same thread API, with one delivery restriction:
 
-- Spawn always creates a fresh thread with a fresh context and initial assignment. Continuing an existing thread means sending it a message.
+- Spawn always creates a fresh thread with a fresh context and initial assignment. Continuing an existing thread means sending it a message. A subagent may be ephemeral: it archives as soon as its last accepted assignment settles, after the parent notification and result are saved. Its transcript, files and other effects persist. Model-tool spawns default to ephemeral; set `ephemeral: false` when follow-up work is planned. Other API callers select it explicitly.
 - Agent-to-agent messages always use steer or hard steer. They default to steer. A request with `senderId` and `delivery: "queue"` is invalid.
 - Human messages default to queue and may explicitly use queue, steer or hard steer.
 - Queue waits for the recipient's current execution to finish.
@@ -72,7 +72,7 @@ active or recent nonarchived descendants protect their parents. The owning servi
 `archiveInactive` control rechecks eligibility synchronously without stopping execution;
 older owners reject this action rather than interpreting it as an unconditional archive.
 
-A worker's lifetime is its conversation's. Archiving a thread, by the sweep or by hand,
+A persistent worker's lifetime is its conversation's. An ephemeral worker archives after its final assignment settles; it never waits in the active worker list for the inactivity sweep. Archiving a thread, by the sweep or by hand,
 archives every descendant with it, across owners: `archiveInactive` marks the whole
 subtree once it has verified the subtree is idle, and the directory's `update
 archived` walks children in other owners after the root. A worker's unread marker

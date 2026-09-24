@@ -18,7 +18,7 @@ export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
   ["status","Print accounts, lanes, leases, and active threads"],
   ["usage-evidence","Print a read-only 24-hour quota and token snapshot; optional --ledger FILE"],
-  ["run","Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--background]"],
+  ["run","Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--ephemeral[=true|false]] [--background]"],
   ["schedule","Create and manage recurring thread jobs"],
   ["wave","Spawn a one-off batch from a declared lane [--count N] [--background]"],
   ["list","List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR]"],
@@ -167,7 +167,7 @@ export async function dispatch(argv:string[]):Promise<void>{
   }
   if(command==="run"||command==="wave"){
     const {named,positional}=flags(rest),count=positiveInteger(named.get("count")??"1","--count");
-    const allowed=new Set(["count","force","background","model","thinking","speed",...(command==="run"?["prompt","cwd","title","parent"]:["lane"])]);
+    const allowed=new Set(["count","force","background","model","thinking","speed",...(command==="run"?["prompt","cwd","title","parent","ephemeral"]:["lane"])]);
     for(const key of named.keys())if(!allowed.has(key))throw new Error(`Unknown ${command} option --${key}`);
     const force=switchEnabled(named,"force"),background=switchEnabled(named,"background");
     if(force&&background)throw new Error("Choose --force or --background");
@@ -175,7 +175,7 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(command==="run"){
       const message=named.get("prompt")??positional.join(" ");
       if(!message.trim())throw new Error("run requires --prompt");
-      await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission},count);
+      await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission,ephemeral:named.has("ephemeral")?switchEnabled(named,"ephemeral"):!!process.env.PI_THREAD_ID},count);
     }else{
       if(process.env.PI_THREAD_ID||process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("Agents cannot launch unparented waves; use thread_spawn from the parent conversation");
       const id=named.get("lane")??positional[0];if(!id)throw new Error("wave requires a lane");
