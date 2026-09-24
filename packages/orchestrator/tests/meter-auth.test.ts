@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SharedOAuthAuth } from "../src/auth/shared-oauth.js";
-import { AnthropicMeterSampler } from "../src/meters-anthropic.js";
+import { AnthropicMeterSampler, parseAnthropicUsage } from "../src/meters-anthropic.js";
 import { CodexMeterSampler } from "../src/meters-codex.js";
 import { Store } from "../src/store.js";
 import { Daemon } from "../src/daemon.js";
@@ -13,6 +13,12 @@ import { loadConfig } from "../src/config.js";
 const isCredits = (url: unknown) => String(url).includes("rate-limit-reset-credits");
 const creditsResponse = () => Response.json({ credits: [{ id: "credit-1", status: "available", expires_at: "2026-12-01T00:00:00.000Z" }], available_count: 1 });
 const creditsReport = (accountId: string) => ({ accountId, outcome: "recorded", bankedResets: 1 });
+
+it("does not attribute an explicitly named non-Fable scoped bucket to Fable", () => {
+  const scoped = (display_name: string) => ({ limits: [{ kind: "weekly_scoped", scope: { model: { display_name } }, percent: 73 }] });
+  expect(parseAnthropicUsage(scoped("Opus"))).toMatchObject({ buckets: [], unmappedScopes: ["Opus"] });
+  expect(parseAnthropicUsage(scoped("Fable"))).toMatchObject({ buckets: [{ meterId: "anthropic-7d_oi", usedPercent: 73 }], unmappedScopes: [] });
+});
 
 it.each(["anthropic", "openai-codex"] as const)("refreshes idle %s credentials once under the session lock before sampling", async provider => {
   const root = mkdtempSync(join(tmpdir(), "meter-auth-")), path = join(root, "auth.json"), now = Date.now();

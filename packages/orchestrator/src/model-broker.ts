@@ -8,7 +8,7 @@ import { createParser } from "eventsource-parser";
 import { Store } from "./store.js";
 import { CompletionService } from "./completion.js";
 import { isCompletionInput, isCompletionRequestId } from "./completion-contract.js";
-import { catalogModel } from "./catalog.js";
+import { catalogModel, modelDrainsMeter } from "./catalog.js";
 import type { UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
@@ -148,11 +148,12 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       if (!grant.models.includes(`${family}/${body.model}`)) { json(res, 403, "This model is not shared with your Unix account"); return; }
       const shared = auth.get(family)!;
       const exclude = new Set(store.accounts().filter(account => !grant.accounts.includes(account.id)
-        || store.latestMeters(account.id).some(meter => Number(meter.used_percent) >= 100 && (!meter.reset_at || Number(meter.reset_at) > Date.now()))).map(account => account.id));
+        || store.latestMeters(account.id).some(meter => modelDrainsMeter(family, body.model, meter.meter_id)
+          && Number(meter.used_percent) >= 100 && (!meter.reset_at || Number(meter.reset_at) > Date.now()))).map(account => account.id));
       const affinity = scoped(listener.principal, body.prompt_cache_key ?? req.headers["session-id"] ?? req.headers["session_id"] ?? req.headers["x-claude-code-session-id"]);
       const retained = sticky.get(affinity);
       const account = eligibleInteractiveAccounts(store, shared, family, exclude).find(account => account.id === retained)
-        ?? chooseInteractiveAccount(store, shared, family, exclude, { includeCooling: true });
+        ?? chooseInteractiveAccount(store, shared, family, exclude, { includeCooling: true, model: body.model });
       if (!account) { json(res, 503, "No eligible shared model account. The granted pool is unavailable or out of quota."); return; }
       if (sticky.size >= 4096) sticky.delete(sticky.keys().next().value!);
       sticky.set(affinity, account.id);

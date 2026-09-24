@@ -75,6 +75,25 @@ test("model-only routes inject granted credentials, namespace affinity and retai
   expect(f.store.usageSince(0).reduce((sum, row) => sum + row.tokens, 0)).toBe(17);
 });
 
+test("Fable scoped exhaustion blocks Fable but leaves Opus on shared weekly quota", async () => {
+  const transport = vi.fn(async () => new Response("ok"));
+  const f = await fixture(transport);
+  f.regrant(["anthropic-shared"], ["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1"]);
+  const now = Date.now();
+  f.store.recordMeter("anthropic-shared", "anthropic-7d", 90, now + 3600000, now);
+  f.store.recordMeter("anthropic-shared", "anthropic-7d_oi", 100, now + 3600000, now);
+  const post = (model: string) => fetch(`${f.url}/v1/messages`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model, stream: true, messages: [] }),
+  });
+  expect((await post("claude-fable-5-1")).status).toBe(503);
+  expect((await post("claude-opus-5-5")).status).toBe(200);
+  expect(transport).toHaveBeenCalledOnce();
+  f.store.recordMeter("anthropic-shared", "anthropic-7d", 100, now + 3600000, now + 1);
+  expect((await post("claude-opus-5-5")).status).toBe(503);
+  expect(transport).toHaveBeenCalledOnce();
+});
+
 test.each(["repaired", "still-rejected", "usage-healthy", "usage-failed"])("broker bounds corroborated Codex 404 repair and preserves the response: %s", async kind => {
   const probe = vi.spyOn(codexUsage, "fetchCodexUsage").mockImplementation(async () => {
     if (kind === "usage-healthy") return [];
