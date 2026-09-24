@@ -110,6 +110,8 @@ Subagents always use forced quota admission. Lanes use forced admission by defau
 
 A thread that cannot be admitted says so. When every eligible account refuses, `metadata.admissionWait` carries the refusal code, the joined per-account reasons, the instant the current reason first appeared and its latest observation. The work stays queued and reconciliation retries it, so the same unchanged reason does not bump the thread revision; the entry disappears as soon as an account is assigned or the thread is halted. A refusal that retrying cannot fix, such as an invalid request, settles the thread as failed with that message instead of waiting. Before this, an unadmitted thread sat in `running` with queued input and no recorded cause, which is how the September 18 Codex exhaustion produced subagents that never opened a session.
 
+A running thread treats a provider rate limit as weather. The refusing account is cooled for the limit class the provider named (a monthly spend ceiling for a day, a burst throttle for a minute), and the turn continues on a sibling, preferring one that is not cooling and otherwise taking the one nearest expiry. On September 24 a flat thirty-minute cooldown benched the only healthy Anthropic account after one throttle while workers kept landing on an account at its monthly limit, and three Opus workers failed outright.
+
 ## Cutover and acceptance
 
 Preserve existing thread identities, native conversations, parent links and pending input/result receipts. Never replay completed work. Existing imported history retains its provenance. Remove superseded owners after transferring useful state; no permanent alternate lifecycle path.

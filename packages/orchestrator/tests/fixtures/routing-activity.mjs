@@ -142,10 +142,13 @@ try {
     usageRequest.mock.restore();
     syncBuiltinESMExports();
   }
-  const exhausted = child.session.prompt('no remaining account'), exhaustedRequest = await child.request();
+  const exhausted = child.session.prompt('every sibling cooling'), exhaustedRequest = await child.request();
   exhaustedRequest.finish('error', '429 rate limit');
+  const coolingRequest = await child.request();
+  assert.equal(coolingRequest.model.provider, 'openai-codex-2', 'a pool of cooling siblings slows the turn down instead of failing it');
+  coolingRequest.finish();
   await exhausted;
-  assert.equal(leases().length, 2, 'failed failover leaves no idle reservation');
+  assert.equal(leases().length, 2, 'the continuation on a cooling sibling releases on settlement');
 
   for (const terminal of ['session_compact', 'session_compact_failed']) {
     await emit(child.session, 'session_before_compact');
