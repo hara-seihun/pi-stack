@@ -120,6 +120,9 @@ export interface PlanCard {
   text: string;
   description: string;
   metrics: PlanMetricRow[];
+  /** What the viewer herself spent of this plan's subscriptions, in US dollars;
+   * null when her supervisor cannot attribute usage to her. */
+  spent: { day: number; week: number } | null;
 }
 
 export type GovernorProvider = "openai" | "anthropic";

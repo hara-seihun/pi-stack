@@ -48,4 +48,16 @@ describe("plan cards", () => {
     const [card] = planCards(null);
     expect(card.metrics.every((metric) => metric.cacheText === "")).toBe(true);
   });
+
+  test("carries the viewer's own spending per plan, or nothing when she has none attributed", () => {
+    const figures = (spend: number) => ({ tokens: 1, value: 1, spend });
+    const personal = { periods: {
+      day: { since: "a", until: "b", plans: { openai: figures(1.5) } },
+      week: { since: "a", until: "b", plans: { openai: figures(9), anthropic: figures(4) } },
+    } };
+    const cards = planCards(null, personal);
+    expect(cards.find((card) => card.id === "openai")?.spent).toEqual({ day: 1.5, week: 9 });
+    expect(cards.find((card) => card.id === "anthropic")?.spent).toEqual({ day: 0, week: 4 });
+    expect(planCards(null).every((card) => card.spent === null)).toBe(true);
+  });
 });

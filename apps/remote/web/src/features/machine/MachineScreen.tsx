@@ -122,6 +122,9 @@ function Plan({ plan, modelCounts }: { plan: PlanCard; modelCounts: Map<string, 
           <div className="machine-plan-meta"><span>{active} active</span>{metric.cacheText && <span>{metric.cacheText} cached · 24h</span>}</div>
         </div>;
       })}
+      {plan.spent && <div className="machine-plan-spent" aria-label={`You used ${formatDollars(plan.spent.day)} of ${plan.label} in the last 24 hours and ${formatDollars(plan.spent.week)} in the last 7 days`}>
+        <span>You used</span><strong>{formatDollars(plan.spent.day)}</strong><small>24h</small><strong>{formatDollars(plan.spent.week)}</strong><small>7 days</small>
+      </div>}
     </Card>
     <PlanDetail plan={plan} metric={selected} now={now} onClose={() => setSelectedId(null)} />
   </>;

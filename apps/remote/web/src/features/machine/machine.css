@@ -85,6 +85,19 @@
   font-size: var(--text-xs);
   white-space: nowrap;
 }
+.machine-plan-spent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-3) 0 0;
+  border-top: 1px solid var(--surface-3);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.machine-plan-spent > span { margin-right: auto; color: var(--muted); }
+.machine-plan-spent small { margin-right: var(--space-2); color: var(--muted); font-size: var(--text-xs); }
+.machine-plan-spent small:last-child { margin-right: 0; }
 .machine-plan-details-button {
   min-height: var(--touch);
   margin: var(--space-1) 0;
