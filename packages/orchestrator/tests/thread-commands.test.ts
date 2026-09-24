@@ -20,7 +20,7 @@ it("preserves an agent caller as parent and uses its authorized directory",async
   vi.stubEnv("PI_THREAD_API_URL","http://127.0.0.1:18790/v1/threads");
   const calls=transport();
   await dispatch(["run","--prompt","bounded work"]);
-  expect(calls[0]!.body.parentId).toBe("caller");
+  expect(calls[0]!.body).toMatchObject({parentId:"caller",ephemeral:true});
   expect(vi.mocked(fetch).mock.calls[0]![0]).toBe("http://127.0.0.1:18790/v1/threads/spawn");
   await expect(dispatch(["run","--prompt","work","--parent","another"])).rejects.toThrow("own thread");
   await expect(dispatch(["wave","review"])).rejects.toThrow("unparented waves");
@@ -60,8 +60,20 @@ it("spawns fresh forced threads without resolving server settings",async()=>{
   const calls=transport();
   await dispatch(["run","--prompt","do work","--cwd","/work","--count","2"]);
   expect(calls).toHaveLength(2);
-  for(const call of calls)expect(call).toEqual({path:"/v1/threads/spawn",method:"POST",body:{requestId:expect.any(String),message:"do work",cwd:"/work",admission:"force"}});
+  for(const call of calls)expect(call).toEqual({path:"/v1/threads/spawn",method:"POST",body:{requestId:expect.any(String),message:"do work",cwd:"/work",admission:"force",ephemeral:false}});
   expect(calls[0]!.body.requestId).not.toBe(calls[1]!.body.requestId);
+});
+
+it.each([
+  {caller:undefined,args:["--parent","parent","--ephemeral"],ephemeral:true},
+  {caller:"parent",args:["--ephemeral=true"],ephemeral:true},
+  {caller:"parent",args:["--ephemeral=false"],ephemeral:false},
+])("sends explicit ephemeral=$ephemeral with caller $caller",async({caller,args,ephemeral})=>{
+  vi.stubEnv("PI_THREAD_ID",caller);
+  const calls=transport();
+  await dispatch(["run","--prompt","work",...args]);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.body).toMatchObject({parentId:"parent",ephemeral});
 });
 
 it("sends explicit model, thinking, speed and admission overrides",async()=>{
@@ -130,6 +142,7 @@ it.each([
   ["run","--prompt","work","--count","1.5"],
   ["run","--prompt","work","--profile","standard"],
   ["run","--prompt","work","--thinking","invalid"],
+  ["run","--prompt","work","--ephemeral=invalid"],
   ["send","thread","--prompt","work","--delivery","cancel"],
   ["worker","run"],["recover","run"],["abort","run"],["kill","run"],
 ])("rejects unsupported input %j before contacting the daemon",async(...argv)=>{
