@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 
 const root = resolve(import.meta.dirname, "..");
@@ -10,6 +10,7 @@ const releaseResources = [
   "deploy/lib", "deploy/release-checkout", "deploy/smoke", "skills/livedev/SKILL.md", "server/voice/delegation-policy.md",
   "server/meet/asr/worker.py", "server/meet/asr/model.json", "server/meet/asr/requirements.lock",
   "web/dist/index.html", "web/dist/meet.html", "web/dist/meet-adapter.js", "web/dist/voice.html", "web/dist/kenan.png",
+  "shared/state.ts", "shared/value.ts",
 ];
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "pi-remote-deploy-test-"));
@@ -29,7 +30,9 @@ function fixture() {
     put(join(repo, "apps/remote", resource), "fixture\n");
   }
   cpSync(join(repo, "apps/remote/web/dist"), join(dir, "build-assets"), { recursive: true });
-  put(join(repo, "apps/remote/server/main.ts"), 'import { chromium } from "playwright-core"; import { ok } from "pi-orchestrator/api"; console.log(chromium, ok);');
+  put(join(repo, "apps/remote/shared/state.ts"), 'export { value } from "./value.js";');
+  put(join(repo, "apps/remote/shared/value.ts"), 'export const value = true;');
+  put(join(repo, "apps/remote/server/main.ts"), 'import { chromium } from "playwright-core"; import { ok } from "pi-orchestrator/api"; import { value } from "../shared/state.js"; console.log(chromium, ok, value);');
   for (const entry of ["router.ts", "person-cli.ts", "voice/service.ts"]) put(join(repo, "apps/remote/server", entry), "export {};");
   for (const entry of ["pi-remote", "pi-remote-launch", "pi-remote-supervise"]) put(join(repo, "apps/remote/server", entry), "#!/bin/sh\nexit 0\n", 0o755);
   put(join(orchestrator, "package.json"), JSON.stringify({name: "pi-orchestrator", exports: {"./api": "./src/api.ts"}}));
@@ -80,7 +83,8 @@ test("Remote rejects an incomplete release even on unchanged redeploy", () => {
       rmSync(path);
       const result = f.run();
       assert.notEqual(result.status, 0, resource);
-      assert.ok(result.stderr.includes(resource), result.stderr);
+      const missing = resource.startsWith("shared/") ? `${basename(resource, ".ts")}.js` : resource;
+      assert.ok(result.stderr.includes(missing), result.stderr);
       cpSync(saved, path);
     }
   } finally { rmSync(f.dir, {recursive: true, force: true}); }

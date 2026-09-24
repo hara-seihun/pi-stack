@@ -1,8 +1,10 @@
 import type { MessagingAttachment, MessagingMessage, MessagingSend } from "../../server/messaging/protocol";
+import type { ReplyTarget } from "./message-reply";
 
 export interface HumanDraft {
   text: string;
   attachments: MessagingAttachment[];
+  reply?: ReplyTarget;
 }
 export const emptyHumanDraft = (): HumanDraft => ({ text: "", attachments: [] });
 
@@ -12,13 +14,14 @@ export function beginHumanSend(draft: HumanDraft, conversationId: string, reques
       id: requestId, requestId, conversationId, externalId: null,
       direction: "outgoing", sender: "You", text: draft.text,
       attachments: draft.attachments, timestamp, status: "sending", error: null,
+      reply: draft.reply ? { messageId: draft.reply.identity.id, sender: draft.reply.identity.sender, text: draft.reply.text, timestamp: draft.reply.identity.timestamp } : undefined,
     },
-    request: { requestId, text: draft.text, attachmentIds: draft.attachments.map(attachment => attachment.id) },
+    request: { requestId, text: draft.text, attachmentIds: draft.attachments.map(attachment => attachment.id), ...(draft.reply ? { replyTo: draft.reply.identity.id } : {}) },
   };
 }
 
 export function requestFromHumanMessage(message: MessagingMessage): MessagingSend | null {
-  return message.requestId ? { requestId: message.requestId, text: message.text, attachmentIds: message.attachments.map(attachment => attachment.id) } : null;
+  return message.requestId ? { requestId: message.requestId, text: message.text, attachmentIds: message.attachments.map(attachment => attachment.id), ...(message.reply?.messageId ? { replyTo: message.reply.messageId } : {}) } : null;
 }
 
 export function unconfirmedHumanSend(messages: MessagingMessage[], attempted: MessagingMessage, error: string): MessagingMessage[] {
@@ -59,5 +62,6 @@ export function draftFromHumanMessage(message: MessagingMessage): HumanDraft {
   return {
     text: message.text,
     attachments: message.attachments,
+    ...(message.reply?.messageId ? { reply: { identity: { id: message.reply.messageId, sender: message.reply.sender, timestamp: message.reply.timestamp ?? message.timestamp }, text: message.reply.text } } : {}),
   };
 }

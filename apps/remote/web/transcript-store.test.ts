@@ -1,108 +1,45 @@
 import { expect, test } from "bun:test";
 import type { TranscriptItemHead } from "../server/protocol";
-import { applyTranscriptEvent, hasEarlier, loadEarlier, mergeHeads, transcriptCursor } from "./src/features/conversation/transcript-store";
+import { ReconcilePublisher, ReconcileReplica } from "../shared/reconcile";
+import { applyTranscriptEvent, hasEarlier, loadEarlier, type TranscriptEvent } from "./src/features/conversation/transcript-store";
 import { entriesFromHeads, entryFromHead } from "./src/features/conversation/transcript-entries";
 
-const user = (seq: number, text = `message ${seq}`): TranscriptItemHead => ({ seq, id: `u${seq}`, kind: "user", size: text.length, timestamp: 1_000 + seq, text });
-const call = (seq: number, patch: Partial<Extract<TranscriptItemHead, { kind: "toolCall" }>> = {}): TranscriptItemHead => ({
-  seq, id: `t${seq}`, kind: "toolCall", size: 2_000, timestamp: 2_000 + seq,
-  callId: `call-${seq}`, name: "bash", arguments: { command: "pwd" }, argumentsTruncated: false, ...patch,
+const item = (seq: number, text = String(seq)): TranscriptItemHead => ({ seq, id: text, kind: "user", size: text.length, text });
+
+test("recent snapshots replace corrections while preserving explicitly loaded older heads", () => {
+  const held = { generation: "g", total: 100, items: Array.from({ length: 100 }, (_, seq) => item(seq)) };
+  const recent = applyTranscriptEvent(held, { generation: "g", total: 101, items: Array.from({ length: 60 }, (_, n) => item(n + 41, n === 0 ? "corrected" : String(n + 41))) });
+  expect(recent.items).toHaveLength(101);
+  expect(recent.items[40]).toEqual(item(40));
+  expect(recent.items[41]).toEqual(item(41, "corrected"));
+  expect(hasEarlier(recent)).toBe(false);
+  expect(applyTranscriptEvent(recent, { generation: "next", total: 0, items: [] }).items).toEqual([]);
+  expect(applyTranscriptEvent(recent, { generation: "g", total: 0, items: [] }).items).toEqual([]);
 });
 
-test("a transcript event upserts by seq and keeps the window ordered", () => {
-  const first = applyTranscriptEvent(null, { generation: "g1", total: 2, reset: true, items: [user(0), call(1)] });
-  expect(first.items.map(item => item.seq)).toEqual([0, 1]);
-
-  const landed = applyTranscriptEvent(first, {
-    generation: "g1", total: 3, reset: false,
-    items: [call(1, { result: { isError: false, size: 40, preview: "/home/kenan", imageCount: 0, timestamp: 2_500 } }), user(2)],
-  });
-  expect(landed.items.map(item => item.seq)).toEqual([0, 1, 2]);
-  expect(landed.total).toBe(3);
-  expect((landed.items[1] as any).result.preview).toBe("/home/kenan");
-  expect(transcriptCursor(landed)).toEqual({ generation: "g1", after: 2 });
-});
-
-test("a reset, or a new generation, replaces the window instead of merging into it", () => {
-  const held = applyTranscriptEvent(null, { generation: "g1", total: 3, reset: true, items: [user(0), user(1), user(2)] });
-  const compacted = applyTranscriptEvent(held, { generation: "g2", total: 1, reset: false, items: [user(0, "after compaction")] });
-  expect(compacted.generation).toBe("g2");
-  expect(compacted.items).toHaveLength(1);
-  expect((compacted.items[0] as any).text).toBe("after compaction");
-
-  const replaced = applyTranscriptEvent(compacted, { generation: "g2", total: 1, reset: true, items: [user(0, "replaced")] });
-  expect((replaced.items[0] as any).text).toBe("replaced");
-});
-
-test("earlier items exist only while the window starts above the first item", () => {
-  expect(hasEarlier(null)).toBe(false);
-  expect(hasEarlier({ generation: "g", total: 2, items: [user(0), user(1)] })).toBe(false);
-  expect(hasEarlier({ generation: "g", total: 9, items: [user(7), user(8)] })).toBe(true);
-  expect(transcriptCursor({ generation: "", total: 0, items: [] })).toBeNull();
-  expect(mergeHeads([user(3)], [])).toEqual([user(3)]);
-});
-
-test("Show earlier pages older heads into the window", async () => {
-  const window = { generation: "g1", total: 40, items: [user(38), user(39)] };
-  const paths: string[] = [];
-  const result = await loadEarlier("thread", window, {
-    limit: 2,
-    fetcher: async (path) => {
-      paths.push(path);
-      return new Response(JSON.stringify({ sessionId: "thread", generation: "g1", total: 40, items: [user(36), user(37)] }), { status: 200 });
-    },
-  });
-  expect(paths[0]).toContain("before=38");
-  expect(paths[0]).toContain("generation=g1");
-  expect(result.reset).toBe(false);
-  expect(result.window.items.map(item => item.seq)).toEqual([36, 37, 38, 39]);
-});
-
-test("a 409 that carries the newest window uses it without asking again", async () => {
-  const window = { generation: "stale", total: 40, items: [user(38), user(39)] };
-  let requests = 0;
-  const result = await loadEarlier("thread", window, {
-    limit: 2,
-    fetcher: async () => {
-      requests += 1;
-      return new Response(JSON.stringify({
-        error: "The transcript generation has been replaced", sessionId: "thread",
-        generation: "g2", total: 2, items: [user(0), user(1)],
-      }), { status: 409 });
-    },
-  });
-  expect(requests).toBe(1);
-  expect(result.reset).toBe(true);
-  expect(result.window).toEqual({ generation: "g2", total: 2, items: [user(0), user(1)] });
-});
-
-test("a 409 without a window takes the generation from the answer and reloads", async () => {
-  const window = { generation: "stale", total: 40, items: [user(38), user(39)] };
-  const requests: string[] = [];
-  const result = await loadEarlier("thread", window, {
-    limit: 2,
-    fetcher: async (path) => {
-      requests.push(path);
-      if (requests.length === 1) return new Response(JSON.stringify({ error: "generation moved", generation: "g2" }), { status: 409 });
-      return new Response(JSON.stringify({ sessionId: "thread", generation: "g2", total: 2, items: [user(0), user(1)] }), { status: 200 });
-    },
-  });
-  expect(requests[1]).toContain("generation=g2");
-  expect(requests[1]).not.toContain("before=");
-  expect(result.reset).toBe(true);
-  expect(result.window).toEqual({ generation: "g2", total: 2, items: [user(0), user(1)] });
+test("paging loads older heads and a generation change replaces them", async () => {
+  const window = { generation: "g", total: 100, items: [item(60), item(61)] };
+  const result = await loadEarlier("thread", window, { fetcher: async () => new Response(JSON.stringify({ sessionId: "thread", generation: "g", total: 100, items: [item(59)] })) });
+  expect(result.window.items.map(head => head.seq)).toEqual([59, 60, 61]);
+  const compacted = await loadEarlier("thread", window, { fetcher: async () => new Response(JSON.stringify({ sessionId: "thread", generation: "next", total: 1, items: [item(0)] }), { status: 409 }) });
+  expect(compacted).toMatchObject({ reset: true, window: { generation: "next", total: 1, items: [item(0)] } });
 });
 
 test("heads become the entries the transcript renders", () => {
+  const user: TranscriptItemHead = { ...item(0, "do the thing"), timestamp: 1_000 };
+  const call: Extract<TranscriptItemHead, { kind: "toolCall" }> = {
+    seq: 3, id: "t3", kind: "toolCall", size: 2_000, timestamp: 2_003,
+    callId: "call-3", name: "bash", arguments: { command: "pwd" }, argumentsTruncated: false, partialOutput: "running…",
+  };
   const entries = entriesFromHeads([
-    user(0, "do the thing"),
+    user,
     { seq: 1, id: "s1", kind: "system", size: 40_000, preview: "You are Pi" },
     { seq: 2, id: "h2", kind: "thinking", size: 900, label: "Thinking", preview: "Consider the file" },
-    call(3, { partialOutput: "running…" }),
+    call,
     { seq: 4, id: "sc4", kind: "tool", size: 1_200, label: "bash", preview: "Run a command" },
   ]);
-
-  expect(entries[0]).toMatchObject({ key: "user:0", signature: "u0", kind: "user", text: "do the thing", messageTimestamp: 1_000, itemId: "u0", bodyLoaded: false });
+  expect(entries[0]).toMatchObject({ key: "user:0", kind: "user", text: "do the thing", messageTimestamp: 1_000, itemId: user.id, bodyLoaded: false });
+  expect(entries[0].signature).toBe(entryFromHead(user).signature);
   expect(entries[1]).toMatchObject({ key: "system:1", kind: "system", preview: "You are Pi", size: 40_000 });
   expect(entries[1].text).toBeUndefined();
   expect(entries[2]).toMatchObject({ kind: "thinking", label: "Thinking", preview: "Consider the file" });
@@ -112,8 +49,58 @@ test("heads become the entries the transcript renders", () => {
   });
   expect(entries[3].toolResult).toBeUndefined();
   expect(entries[4]).toMatchObject({ kind: "tool", label: "bash" });
-
-  const landed = entryFromHead(call(3, { result: { isError: true, size: 90, preview: "boom", imageCount: 1, timestamp: 2_900 } }), true);
+  const landed = entryFromHead({ ...call, result: { isError: true, size: 90, preview: "boom", imageCount: 1, timestamp: 2_900 } }, true);
   expect(landed.signature).toBe("t3:body");
   expect(landed.toolResult).toMatchObject({ isError: true, preview: "boom", imageCount: 1 });
+});
+
+test.each(["user", "assistant"] as const)("%s identity and reaction changes invalidate rendering without changing the body ID", kind => {
+  const head: TranscriptItemHead = { seq: 0, id: "body-hash", kind, size: 5, timestamp: 1_000, text: "Hello" };
+  const initial = entryFromHead(head);
+  const identity = { id: "pi/thread/native-entry", timestamp: 1_000, sender: { id: kind } };
+  const addressed = entryFromHead({ ...head, identity });
+  expect(addressed.identity).toEqual(identity);
+  expect(addressed.signature).not.toBe(initial.signature);
+
+  const reactions = [{ emoji: "❤️", sender: { id: "reader", name: "Reader" }, timestamp: 2_000, own: true }];
+  const reacted = entryFromHead({ ...head, identity, reactions });
+  expect(reacted.reactions).toEqual(reactions);
+  expect(reacted.signature).not.toBe(addressed.signature);
+  expect(entryFromHead({ ...head, identity, reactions: structuredClone(reactions) }).signature).toBe(reacted.signature);
+  expect(entryFromHead({ ...head, identity, reactions: [] }).signature).toBe(addressed.signature);
+
+  for (const entry of [addressed, reacted]) {
+    expect(entry).toMatchObject({ key: initial.key, itemId: initial.itemId, text: initial.text, messageTimestamp: initial.messageTimestamp });
+  }
+});
+
+test.each(["user", "assistant"] as const)("%s reactions reconcile through the held transcript without replacing its body", kind => {
+  const publisher = new ReconcilePublisher();
+  const replica = new ReconcileReplica();
+  const head: TranscriptItemHead = {
+    seq: 1, id: "body-hash", kind, size: 2_000, text: "x".repeat(2_000), timestamp: 1_000,
+    identity: { id: "pi/thread/native-entry", timestamp: 1_000, sender: { id: kind } },
+  };
+  const recent = { generation: "g", total: 2, items: [head] };
+  const resource = "transcript:thread";
+  publisher.publish(resource, recent);
+  expect(replica.apply(publisher.reconcile(resource, null)!).ok).toBe(true);
+  let window = applyTranscriptEvent({ generation: "g", total: 2, items: [item(0)] }, recent);
+  const initial = entryFromHead(window.items[1]);
+  const reactions = [{ emoji: "❤️", sender: { id: "reader" }, timestamp: 2_000, own: true }];
+  for (const nextReactions of [reactions, []]) {
+    const next = { ...recent, items: [{ ...head, reactions: nextReactions }] };
+    publisher.publish(resource, next);
+    const frame = publisher.reconcile(resource, replica.have()[resource])!;
+    expect(frame.kind).toBe("patch");
+    const applied = replica.apply(frame);
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) throw new Error(applied.reason);
+    window = applyTranscriptEvent(window, applied.value as unknown as TranscriptEvent);
+    expect(window.items).toEqual([item(0), ...next.items]);
+    const rendered = entryFromHead(window.items[1]);
+    expect(rendered).toMatchObject({ itemId: initial.itemId, text: initial.text, identity: head.identity, reactions: nextReactions });
+    if (nextReactions.length) expect(rendered.signature).not.toBe(initial.signature);
+    else expect(rendered.signature).toBe(initial.signature);
+  }
 });

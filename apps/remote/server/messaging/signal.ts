@@ -3,7 +3,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, MessagingCallSupport, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
+import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendReply, MessagingCallSupport, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
 import type { MessagingBackendConfig, MessagingCallState, MessagingCapabilities, MessagingLink, MessagingResult } from "./protocol";
 import { qrSvg } from "./qr";
 import { openSignalCallAudio } from "./signal-call-audio";
@@ -354,6 +354,13 @@ class SignalPlugin implements MessagingPlugin {
       context.status("unconfigured", numbers.length > 1 ? "Set options.account to choose a linked Signal account" : "Signal is not linked yet. Link this profile to your phone to start using it.");
       return success(undefined);
     }
+    context.self(this.account);
+    const ownAccount = list(accounts.value).map(object).find(value => value.number === this.account);
+    const ownUuid = text(ownAccount?.uuid);
+    if (ownUuid) {
+      this.context.sender({ id: this.account, aliases: [this.account, ownUuid], name: null });
+      this.aliases.set(ownUuid, this.account);
+    }
     const directories = await this.refreshDirectories();
     if (!directories.ok) return this.startFailure(directories);
     if (this.closing) return failure("closed", "Signal profile closed during startup");
@@ -627,7 +634,7 @@ class SignalPlugin implements MessagingPlugin {
     return success(managed);
   }
 
-  async send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[] }): Promise<MessagingResult<{ externalId: string; timestamp: number }>> {
+  async send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[]; reply?: BackendReply }): Promise<MessagingResult<{ externalId: string; timestamp: number }>> {
     const rpc = this.rpc;
     if (!this.ready || !rpc) return failure("unconfigured", "Signal is not connected to a linked account");
     const attachments: string[] = [];
@@ -643,6 +650,7 @@ class SignalPlugin implements MessagingPlugin {
       ...(conversation.kind === "group" ? { groupId: conversation.id.replace(/^group:/, "") } : { recipient: [conversation.id] }),
       message: message.text,
       attachments,
+      ...(message.reply ? { quoteTimestamp: message.reply.timestamp, quoteAuthor: message.reply.author === "You" ? this.account : message.reply.author, quoteMessage: message.reply.text } : {}),
     });
     if (!result.ok) return result;
     const value = object(result.value);
@@ -655,6 +663,24 @@ class SignalPlugin implements MessagingPlugin {
       return failure("delivery", `Signal rejected delivery: ${summary}`);
     }
     return success({ externalId: this.sentId(timestamp), timestamp });
+  }
+
+  async react(conversation: BackendConversation, target: { author: string; timestamp: number }, emoji: string, remove: boolean): Promise<MessagingResult<{ timestamp: number; sender: string }>> {
+    if (!this.ready || !this.rpc) return failure("unconfigured", "Signal is not connected to a linked account");
+    if (this.closing) return failure("closed", "Signal profile closed before reacting");
+    const result = await this.rpc.call("sendReaction", {
+      account: this.account,
+      ...(conversation.kind === "group" ? { groupId: conversation.id.replace(/^group:/, "") } : { recipient: [conversation.id] }),
+      emoji, targetAuthor: target.author === "You" ? this.account : target.author,
+      targetTimestamp: target.timestamp, remove,
+    });
+    if (!result.ok) return result;
+    const value = object(result.value);
+    if (typeof value.timestamp !== "number" || !Number.isSafeInteger(value.timestamp))
+      return failure("unknown", "Signal reaction returned no valid timestamp; outcome unknown");
+    const results = list(value.results).map(object);
+    if (results.some(item => item.type !== "SUCCESS")) return failure("unknown", `Signal reported incomplete reaction delivery (${deliverySummary(results)}); outcome unknown`);
+    return success({ timestamp: value.timestamp, sender: this.account });
   }
 
   private sentId(timestamp: number): string { return `${this.account}:sent:${timestamp}`; }
@@ -678,6 +704,11 @@ class SignalPlugin implements MessagingPlugin {
       this.context!.sender({ id: this.aliases.get(sender) ?? sender, aliases, name: senderName, avatar: this.personAvatar([text(envelope.sourceUuid), text(envelope.sourceNumber)]) });
     }
     const sync = object(envelope.syncMessage);
+    if (sync.sentMessage && text(envelope.sourceUuid)) {
+      const ownUuid = text(envelope.sourceUuid);
+      this.aliases.set(ownUuid, this.account);
+      this.context!.sender({ id: this.account, aliases: [this.account, ownUuid], name: null });
+    }
     if (sync.contacts || sync.groups) {
       const result = await this.refreshDirectories();
       if (!result.ok) { this.context?.status("error", result.error.message); return; }
@@ -691,6 +722,30 @@ class SignalPlugin implements MessagingPlugin {
     }
     const body = text(data.message);
     const attached = list(data.attachments);
+    const quote = object(data.quote);
+    const reply = Object.keys(quote).length && typeof quote.id === "number" && Number.isSafeInteger(quote.id) && quote.id > 0 && text(quote.author)
+      ? { author: text(quote.author), timestamp: quote.id, text: text(quote.text) } : undefined;
+    if (Object.keys(quote).length && !reply) this.context?.status("error", "Signal quote has an invalid author or timestamp");
+    const reaction = object(data.reaction);
+    if (Object.keys(reaction).length) {
+      const targetAuthor = text(reaction.targetAuthor);
+      const targetTimestamp = reaction.targetSentTimestamp;
+      const reactionTimestamp = data.timestamp ?? envelope.timestamp;
+      if (!targetAuthor || typeof targetTimestamp !== "number" || !Number.isSafeInteger(targetTimestamp)
+        || typeof reactionTimestamp !== "number" || !Number.isSafeInteger(reactionTimestamp)
+        || !text(reaction.emoji) || typeof reaction.isRemove !== "boolean") {
+        this.context?.status("error", "Signal reaction has an invalid target, timestamp or emoji");
+        return;
+      }
+      const group = object(data.groupInfo);
+      const groupId = text(group.groupId);
+      const destination = outgoing ? text(data.destinationUuid) || text(data.destinationNumber) || text(data.destination) : sender;
+      const id = groupId ? `group:${groupId}` : this.aliases.get(destination) ?? destination;
+      if (!id) { this.context?.status("error", "Signal reaction has no conversation address"); return; }
+      const conversation = this.conversations.get(id) ?? this.remember({ id, title: text(group.name) || (!outgoing ? text(envelope.sourceName) : "") || destination || id, kind: groupId ? "group" : "direct" });
+      await this.context!.reaction({ conversation, target: { author: targetAuthor, timestamp: targetTimestamp }, account: this.account,
+        sender: outgoing ? this.account : sender, emoji: text(reaction.emoji), remove: reaction.isRemove, timestamp: reactionTimestamp });
+    }
     if (!body && !attached.length) return;
     const timestamp = data.timestamp ?? envelope.timestamp;
     if (typeof timestamp !== "number" || !Number.isSafeInteger(timestamp)) { this.context?.status("error", "Signal message has no valid timestamp"); return; }
@@ -718,7 +773,7 @@ class SignalPlugin implements MessagingPlugin {
       await this.context!.message({
         id: outgoing ? this.sentId(timestamp) : `${this.account}:${sender}:${timestamp}`,
         conversation, direction: outgoing ? "outgoing" : "incoming", sender: outgoing ? this.account : sender,
-        text: body, timestamp, attachments,
+        text: body, timestamp, attachments, ...(reply ? { reply } : {}),
       });
     } finally {
       if (stage) await rm(stage, { recursive: true, force: true });

@@ -24,6 +24,11 @@ export interface BackendAttachment {
   mimeType: string;
   size: number;
 }
+export interface BackendReply {
+  author: string;
+  timestamp: number;
+  text: string;
+}
 export interface BackendMessage {
   id: string;
   conversation: BackendConversation;
@@ -32,6 +37,17 @@ export interface BackendMessage {
   text: string;
   timestamp: number;
   attachments: BackendAttachment[];
+  reply?: BackendReply;
+}
+export interface BackendReaction {
+  conversation: BackendConversation;
+  target: { author: string; timestamp: number };
+  /** The linked account's address, for distinguishing its outgoing messages. */
+  account: string;
+  sender: string;
+  emoji: string;
+  remove: boolean;
+  timestamp: number;
 }
 export interface BackendCall {
   /** Backend call id. Signal call ids are unsigned 64-bit decimal strings. */
@@ -59,7 +75,10 @@ export interface MessagingPluginContext {
   dataDir: string;
   conversation(value: BackendConversation): void;
   sender(value: BackendSender): void;
+  /** The linked account's stable address, used for local sends before their sync arrives. */
+  self(id: string): void;
   message(value: BackendMessage): Promise<void>;
+  reaction(value: BackendReaction): Promise<void>;
   /** Report unsolicited call state, including incoming calls and remote hangups. */
   call(value: BackendCall): void;
   status(status: "ready" | "unconfigured" | "connecting" | "error", detail: string): void;
@@ -80,7 +99,8 @@ export interface MessagingPlugin {
   cancelLink?(): Promise<MessagingLink>;
   start(context: MessagingPluginContext): Promise<MessagingResult<void>>;
   openConversation(target: string): Promise<MessagingResult<BackendConversation>>;
-  send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[] }): Promise<MessagingResult<{ externalId: string; timestamp: number }>>;
+  send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[]; reply?: BackendReply }): Promise<MessagingResult<{ externalId: string; timestamp: number }>>;
+  react?(conversation: BackendConversation, target: { author: string; timestamp: number }, emoji: string, remove: boolean): Promise<MessagingResult<{ timestamp: number; sender: string }>>;
   close(): Promise<void>;
 }
 export type MessagingPluginFactory = (config: MessagingBackendConfig) => MessagingPlugin;

@@ -26,17 +26,72 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-it("keeps one tool call open across bounded waits, injecting its parent and forwarding cursors", async () => {
-  const wait = vi.fn<ThreadApi["await"]>().mockImplementationOnce(async input => response(input))
-    .mockImplementationOnce(async input => response(input, settlement("child")));
-  const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait } as unknown as ThreadApi })
+it("returns on the first owner timeout with cursors and actionable child statuses", async () => {
+  const wait = vi.fn<ThreadApi["await"]>().mockImplementation(async input => response({ ...input, after: { ...input.after, child: 8, other: 4 } }));
+  const list = vi.fn<ThreadApi["list"]>().mockImplementation(async input => ({ ok: true, value: { threads: [{
+    id: input!.id!, parentId: "parent", state: "running", held: false, pendingMessages: 1,
+    metadata: input!.id === "child" ? { admissionWait: { code: "quota_exhausted", reason: "No account available" } } : { executionError: "Cancellation unconfirmed" },
+  } as unknown as Thread] } }));
+  const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait, list } as unknown as ThreadApi })
     .find(tool => tool.name === "thread_await")!;
   const controller = new AbortController();
-  const result = await tool.execute("call", { threadIds: ["child", "other"], after: { prior: 3 } }, controller.signal, undefined, {} as never);
+  const outcome = await tool.execute("call", { threadIds: ["child", "other"], after: { prior: 3 } }, controller.signal, undefined, {} as never);
+  expect(wait).toHaveBeenCalledOnce();
+  expect(wait).toHaveBeenCalledWith({ threadIds: ["child", "other"], parentId: "parent", after: { prior: 3 }, timeoutMs: 25_000 }, controller.signal);
+  expect(outcome.details).toEqual({ ok: true, value: { settlement: null, timedOut: true, remainingThreadIds: ["child", "other"], after: { prior: 3, child: 8, other: 4 }, statuses: [
+    { threadId: "child", state: "running", held: false, pendingMessages: 1, admissionWait: { code: "quota_exhausted", reason: "No account available" } },
+    { threadId: "other", state: "running", held: false, pendingMessages: 1, executionError: "Cancellation unconfirmed" },
+  ] } });
+  expect(list).toHaveBeenCalledTimes(2);
+});
+
+it("returns a useful timeout even when a child status lookup fails", async () => {
+  const wait = vi.fn<ThreadApi["await"]>().mockImplementation(async input => response(input));
+  const list = vi.fn<ThreadApi["list"]>().mockResolvedValue({ ok: false, error: { code: "unavailable", message: "Owner offline" } });
+  const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait, list } as unknown as ThreadApi })
+    .find(tool => tool.name === "thread_await")!;
+  const outcome = await tool.execute("call", { threadIds: ["child"] }, undefined, undefined, {} as never);
+  expect(outcome.details).toEqual({ ok: true, value: { settlement: null, timedOut: true, remainingThreadIds: ["child"], after: { child: 0 }, statuses: [
+    { threadId: "child", error: { code: "unavailable", message: "Owner offline" } },
+  ] } });
+  expect(wait).toHaveBeenCalledOnce();
+});
+
+it("bounds status lookup when an owner cannot answer after await times out", async () => {
+  vi.useFakeTimers();
+  try {
+    const wait = vi.fn<ThreadApi["await"]>().mockImplementation(async input => response(input));
+    const list = vi.fn<ThreadApi["list"]>().mockImplementation(() => new Promise(() => {}));
+    const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait, list } as unknown as ThreadApi })
+      .find(tool => tool.name === "thread_await")!;
+    const waiting = tool.execute("call", { threadIds: ["child"] }, undefined, undefined, {} as never);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await waiting).details).toMatchObject({ ok: true, value: { settlement: null, timedOut: true, after: { child: 0 },
+      statuses: [{ threadId: "child", error: { code: "unavailable" } }] } });
+    expect(wait).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("returns compact settlements with cursors across successive bounded calls", async () => {
+  const wait = vi.fn<ThreadApi["await"]>().mockImplementationOnce(async input => response(input, settlement("child")))
+    .mockImplementationOnce(async input => response(input, settlement("other", 9)));
+  const list = vi.fn<ThreadApi["list"]>();
+  const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait, list } as unknown as ThreadApi })
+    .find(tool => tool.name === "thread_await")!;
+  const controller = new AbortController();
+  const first = await tool.execute("first", { threadIds: ["child", "other"], after: { prior: 3 } }, controller.signal, undefined, {} as never);
+  const after = { prior: 3, child: 7, other: 0 };
+  expect(first.details).toEqual({ ok: true, value: { settlement: { threadId: "child", outcome: "complete", finalText: "Done" },
+    remainingThreadIds: ["other"], after } });
+  expect(wait).toHaveBeenCalledOnce();
+  const second = await tool.execute("second", { threadIds: ["child", "other"], after }, controller.signal, undefined, {} as never);
   expect(wait).toHaveBeenCalledTimes(2);
-  expect(wait.mock.calls[1]).toEqual([{ threadIds: ["child", "other"], parentId: "parent", after: { prior: 3, child: 0, other: 0 }, timeoutMs: 25_000 }, controller.signal]);
-  expect(result.details).toEqual({ ok: true, value: { settlement: { threadId: "child", outcome: "complete", finalText: "Done" },
-    remainingThreadIds: ["other"], after: { prior: 3, child: 7, other: 0 } } });
+  expect(wait.mock.calls[1]).toEqual([{ threadIds: ["child", "other"], parentId: "parent", after, timeoutMs: 25_000 }, controller.signal]);
+  expect(second.details).toEqual({ ok: true, value: { settlement: { threadId: "other", outcome: "complete", finalText: "Done" },
+    remainingThreadIds: ["child"], after: { prior: 3, child: 7, other: 9 } } });
+  expect(list).not.toHaveBeenCalled();
 });
 
 it("preserves final text while omitting opaque content without changing the native result", async () => {
@@ -51,7 +106,8 @@ it("preserves final text while omitting opaque content without changing the nati
   const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait } as unknown as ThreadApi })
     .find(tool => tool.name === "thread_await")!;
   const result = await tool.execute("call", { threadIds: ["child"] }, undefined, undefined, {} as never);
-  expect(result.details).toMatchObject({ ok: true, value: { settlement: { threadId: "child", outcome: "complete", finalText: text } } });
+  expect(result.details).toEqual({ ok: true, value: { settlement: { threadId: "child", outcome: "complete", finalText: text },
+    remainingThreadIds: [], after: { child: 7 } } });
   expect(JSON.stringify(result)).not.toContain("OPAQUE");
   expect(native.finalMessage.content[0]).toHaveProperty("textSignature", "OPAQUE_SIGNATURE");
 });

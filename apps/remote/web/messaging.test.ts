@@ -56,6 +56,16 @@ test("lost acknowledgements stay on the message, and a check uses the exact orig
   expect(requestFromHumanMessage(message("received", { requestId: null }))).toBeNull();
 });
 
+test("reply references survive unknown send checks and failed draft recovery", () => {
+  const target = { identity: { id: "messaging/original", sender: { id: "sam", name: "Sam" }, timestamp: 4 }, text: "Earlier" };
+  const first = beginHumanSend({ ...draft, reply: target }, "conversation-a", "request-a", 5);
+  expect(first.request.replyTo).toBe(target.identity.id);
+  expect(first.message.reply).toEqual({ messageId: target.identity.id, sender: target.identity.sender, text: "Earlier", timestamp: 4 });
+  expect(requestFromHumanMessage(unconfirmedHumanSend([first.message], first.message, "Connection lost")[0])).toEqual(first.request);
+  const restored = draftFromHumanMessage({ ...first.message, status: "failed" });
+  expect(beginHumanSend(restored, "conversation-a", "request-b").request.replyTo).toBe(target.identity.id);
+});
+
 test("a transport failure cannot overwrite a receipt already received from history", () => {
   const first = beginHumanSend(draft, "conversation-a", "request-a", 1);
   for (const status of ["sending", "sent", "failed", "unknown"] as const) {

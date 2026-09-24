@@ -577,14 +577,30 @@ function deriveIssues() {
   const requests = allRequests();
   const byId = new Map(requests.map(request => [request.requestId, request]));
   const repairs = new Map(requests.map(request => [request.requestId, readRepair(request.requestId)]));
-  const published = requests.filter(request => request.status === "published" && request.integrationSha)
-    .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0];
-  const deployedSources = new Set(published ? checked("git", ["-C", checkout, "rev-list", published.integrationSha], { timeoutSeconds: 5 }).split("\n") : []);
+  const publications = requests.filter(request => request.status === "published" && request.integrationSha)
+    .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+  const deployedSources = new Map();
+  for (const publication of publications) {
+    if (!deployedSources.has(publication.integrationSha)) deployedSources.set(publication.integrationSha, publication);
+  }
+  if (publications.length) {
+    const ancestry = checked("git", ["--no-replace-objects", "-C", checkout, "rev-list", "--topo-order", "--parents",
+      ...deployedSources.keys()], { timeoutSeconds: 5 });
+    for (const line of ancestry.split("\n")) {
+      const [sha, ...parents] = line.split(" ");
+      const publication = deployedSources.get(sha);
+      for (const parent of parents) {
+        const existing = deployedSources.get(parent);
+        if (!existing || existing.publishedAt < publication.publishedAt) deployedSources.set(parent, publication);
+      }
+    }
+  }
   function resolution(request, seen = new Set()) {
     if (!request || seen.has(request.requestId)) return null;
     seen.add(request.requestId);
     if (request.status === "published") return { requestId: request.requestId, integrationSha: request.integrationSha, proof: request.finalProof?.path };
-    if (deployedSources.has(request.sourceSha)) return { requestId: published.requestId, integrationSha: published.integrationSha, proof: published.finalProof?.path };
+    const published = deployedSources.get(request.sourceSha);
+    if (published) return { requestId: published.requestId, integrationSha: published.integrationSha, proof: published.finalProof?.path };
     return resolution(byId.get(repairs.get(request.requestId)?.successor?.requestId), seen);
   }
   const resolved = [], issues = [];
@@ -1932,9 +1948,8 @@ function main() {
   if (operation === "_fail-stalled" && args.length === 2) return failStalled(...args);
   if (operation === "acknowledge-issues" && args.length === 0) return locked("worker", "acknowledge-issues");
   if (operation === "_acknowledge-issues" && args.length === 0) return acknowledgeIssues();
-  if (operation === "issues" && args.length === 0) return locked("worker", "issues");
-  if (operation === "_issues" && args.length === 0) {
-    const { visible, ...index } = reconcileIssueAlert();
+  if (operation === "issues" && args.length === 0) {
+    const { visible, ...index } = deriveIssues();
     process.stdout.write(`${JSON.stringify(index, null, 2)}\n`);
     return;
   }

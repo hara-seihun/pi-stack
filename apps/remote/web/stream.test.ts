@@ -1,138 +1,111 @@
 import { expect, test } from "bun:test";
+import { ReconcilePublisher, revisionOf } from "../shared/reconcile";
 import { createStreamClient, EventStreamParser, streamEventFromFrame } from "./src/stream";
 import type { StreamEvent } from "../server/protocol";
 
-const frames = (parser: EventStreamParser, chunk: string) => parser.push(chunk);
-
-test("the event-stream parser joins split chunks, drops keep-alive comments and keeps multi-line data", () => {
-  const parser = new EventStreamParser();
-  expect(frames(parser, ": keep-alive\n\n")).toEqual([]);
-  expect(frames(parser, "event: hello\ndata: {\"strea")).toEqual([]);
-  expect(frames(parser, "mId\":\"s1\"}\n\n")).toEqual([{ event: "hello", data: "{\"streamId\":\"s1\"}" }]);
-  expect(frames(parser, "event: live\r\ndata: one\r\ndata: two\r\n\r\n")).toEqual([{ event: "live", data: "one\ntwo" }]);
-  expect(frames(parser, "data: {}\n\n")).toEqual([{ event: "message", data: "{}" }]);
-});
-
-test("a frame becomes a typed event, naming the variant from the event line when the payload omits it", () => {
-  expect(streamEventFromFrame({ event: "dashboard", data: "{\"dashboard\":null}" })).toMatchObject({ type: "dashboard" });
-  expect(streamEventFromFrame({ event: "state", data: "{\"type\":\"state\",\"version\":3}" })).toMatchObject({ type: "state", version: 3 });
-  expect(streamEventFromFrame({ event: "state", data: "not json" })).toBeNull();
-  expect(streamEventFromFrame({ event: "state", data: "" })).toBeNull();
-});
-
-function textStream(chunks: string[]) {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
-    },
-  });
-}
-
-function sse(chunks: string[]) {
-  return new Response(textStream(chunks), { status: 200, headers: { "content-type": "text/event-stream" } });
-}
-
+const hello = 'event: hello\ndata: {"epoch":"e","streamId":"s","bootstrap":{"home":"/","threadStarts":[],"environmentId":"local"}}\n\n';
+const sse = (frames: string[]) => new Response(new ReadableStream<Uint8Array>({ start(controller) { for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame)); } }), { status: 200 });
+const frame = (value: unknown) => `event: reconcile\ndata: ${JSON.stringify({ type: "reconcile", ...value })}\n\n`;
 const settle = () => new Promise(resolve => setTimeout(resolve, 5));
 
-test("the client subscribes, hands over typed events and ignores frames for another thread", async () => {
-  const sent: Array<{ path: string; body: any }> = [];
+test("the event-stream parser handles split chunks and comments", () => {
+  const parser = new EventStreamParser();
+  expect(parser.push(": ping\n\nevent: hello\ndata: {\"strea")).toEqual([]);
+  expect(parser.push('mId":"s"}\n\n')).toEqual([{ event: "hello", data: '{"streamId":"s"}' }]);
+  expect(streamEventFromFrame({ event: "reconcile", data: "{}" })).toEqual({ type: "reconcile" });
+});
+
+test("the replica applies generic frames, filters another session, and resumes from resident revisions", async () => {
+  const publisher = new ReconcilePublisher();
+  const first = publisher.publish("transcript:mine", { type: "transcript", sessionId: "mine", generation: "g", total: 0, items: [] });
+  publisher.publish("transcript:other", { type: "transcript", sessionId: "other", generation: "g", total: 0, items: [] });
+  const calls: Array<{ path: string; body: any }> = [];
   const received: StreamEvent[] = [];
   const client = createStreamClient({
-    subscription: { session: "mine", viewing: true },
-    listen: false,
-    onEvent: event => received.push(event),
-    onStatus: () => {},
-    fetch: async (path, init) => {
-      sent.push({ path, body: JSON.parse(String(init.body)) });
-      return sse([
-        "event: hello\ndata: {\"epoch\":\"e\",\"streamId\":\"s1\",\"bootstrap\":{\"home\":\"/home/kenan\",\"threadStarts\":[],\"environmentId\":\"local\"}}\n\n",
-        "event: transcript\ndata: {\"sessionId\":\"other\",\"generation\":\"g\",\"total\":1,\"reset\":true,\"items\":[]}\n\n",
-        "event: transcript\ndata: {\"sessionId\":\"mine\",\"generation\":\"g\",\"total\":1,\"reset\":true,\"items\":[]}\n\n",
-      ]);
-    },
-  });
-  client.start();
-  await settle();
-  client.stop();
-
-  expect(sent[0].path).toBe("/v1/stream");
-  expect(sent[0].body).toEqual({ session: "mine", viewing: true });
-  expect(received.map(event => event.type)).toEqual(["hello", "transcript"]);
-  expect(received[1]).toMatchObject({ sessionId: "mine" });
-});
-
-test("a subscription change posts to the stream, and a restarted server (404) brings the whole subscription back", async () => {
-  const calls: Array<{ path: string; body: any }> = [];
-  let streams = 0;
-  const client = createStreamClient({
-    subscription: { session: "a" },
-    listen: false,
-    onEvent: () => {},
-    onStatus: () => {},
+    subscription: { session: "mine", viewing: true }, listen: false,
+    onEvent: event => received.push(event), onStatus: () => {},
     fetch: async (path, init) => {
       calls.push({ path, body: JSON.parse(String(init.body)) });
-      if (path === "/v1/stream") {
-        streams += 1;
-        return sse([`event: hello\ndata: {"epoch":"e","streamId":"s${streams}","bootstrap":{"home":"/","threadStarts":[],"environmentId":"local"}}\n\n`]);
-      }
-      return new Response("{}", { status: streams === 1 ? 404 : 204 });
+      if (path !== "/v1/stream") return new Response(null, { status: 204 });
+      return sse([hello, frame(publisher.reconcile("transcript:other", null)), frame(publisher.reconcile("transcript:mine", calls.length === 1 ? null : first))]);
     },
   });
-  client.start();
-  await settle();
-  client.update({ session: "b", viewing: true });
-  await settle();
-  await settle();
-  client.stop();
-
-  expect(calls.map(call => call.path)).toEqual(["/v1/stream", "/v1/stream/s1", "/v1/stream"]);
-  expect(calls[1].body).toEqual({ session: "b", viewing: true });
-  expect(calls[2].body).toEqual({ session: "b", viewing: true });
-  expect(client.subscription()).toMatchObject({ session: "b", viewing: true });
+  client.start(); await settle();
+  expect(received.map(event => event.type)).toEqual(["hello", "transcript"]);
+  expect(calls[0].body).toMatchObject({ have: {}, want: ["bootstrap", "state", "messaging", "live:mine", "transcript:mine", "images:mine"] });
+  client.reconnect(); await settle(); client.stop();
+  expect(calls.at(-1)?.body.have["transcript:mine"]).toBe(first);
 });
 
-test("a failed connection reports offline and retries", async () => {
+test("restored transcript heads declare only their actual local revision", async () => {
+  const cached = { type: "transcript" as const, sessionId: "mine", generation: "g", total: 1, items: [] };
+  const calls: any[] = [];
+  const client = createStreamClient({ subscription: { session: "mine", viewing: true }, listen: false, onEvent: () => {}, onStatus: () => {}, fetch: async (path, init) => {
+    calls.push({ path, body: JSON.parse(String(init.body)) });
+    return sse([hello]);
+  } });
+  client.restore(cached);
+  client.start(); await settle(); client.stop();
+  expect(calls[0].body.have).toEqual({ "transcript:mine": revisionOf(cached) });
+  expect(calls[0].body.want).toContain("transcript:mine");
+});
+
+test("a missing patch base requests a full resource without retaining its revision", async () => {
+  const calls: any[] = [];
+  const client = createStreamClient({ subscription: { session: "mine", viewing: true }, listen: false, onEvent: () => {}, onStatus: () => {}, fetch: async (path, init) => {
+    calls.push({ path, body: JSON.parse(String(init.body)) });
+    return path === "/v1/stream"
+      ? sse([hello, frame({ resource: "live:mine", revision: "new", base: "missing", kind: "patch", patch: { op: "replace", value: { type: "live", sessionId: "mine", text: "hi" } } })])
+      : new Response(null, { status: 204 });
+  } });
+  client.start(); await settle(); client.stop();
+  expect(calls.map(call => call.path)).toEqual(["/v1/stream", "/v1/stream/s"]);
+  expect(calls[1].body.have).toEqual({});
+});
+
+test("reconnect aborts pending subscription posts and never lets an old post block or alter the new connection", async () => {
+  const posts: Array<{ body: any; signal: AbortSignal }> = [];
   const statuses: string[] = [];
-  let attempts = 0;
-  const client = createStreamClient({
-    subscription: {},
-    listen: false,
-    onEvent: () => {},
-    onStatus: status => statuses.push(status.state),
-    fetch: async () => {
-      attempts += 1;
-      if (attempts === 1) return new Response("no", { status: 500 });
-      return sse(["event: hello\ndata: {\"epoch\":\"e\",\"streamId\":\"s\",\"bootstrap\":{\"home\":\"/\",\"threadStarts\":[],\"environmentId\":\"local\"}}\n\n"]);
+  let connects = 0;
+  const client = createStreamClient({ subscription: { session: "a", viewing: true }, listen: false,
+    onEvent: () => {}, onStatus: status => statuses.push(status.state),
+    fetch: async (path, init) => {
+      if (path === "/v1/stream") {
+        connects++;
+        return sse([hello]);
+      }
+      const signal = init.signal as AbortSignal;
+      posts.push({ body: JSON.parse(String(init.body)), signal });
+      if (connects > 1) return new Response(null, { status: 204 });
+      return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
     },
   });
-  client.start();
-  await settle();
-  expect(statuses).toEqual(["connecting", "offline"]);
-  client.reconnect();
-  await settle();
+  client.start(); await settle();
+  client.update({ session: "b" }); await settle();
+  expect(posts[0].body.session).toBe("b");
+  expect(posts[0].signal.aborted).toBe(false);
+  client.update({ session: "c" });
+  client.reconnect(); await settle();
+  expect(posts[0].signal.aborted).toBe(true);
+  client.update({ session: "d" }); await settle();
+  expect(posts).toHaveLength(2);
+  expect(posts[1].body.session).toBe("d");
+  expect(posts[1].signal.aborted).toBe(false);
+  expect(statuses).not.toContain("offline");
   client.stop();
-  expect(attempts).toBe(2);
-  expect(client.state()).toBe("open");
+  expect(posts[1].signal.aborted).toBe(true);
 });
 
-test("remembering a cursor changes the next connection without a request", async () => {
-  const bodies: any[] = [];
-  const client = createStreamClient({
-    subscription: { session: "a" },
-    listen: false,
-    onEvent: () => {},
-    onStatus: () => {},
-    fetch: async (path, init) => {
-      if (path === "/v1/stream") bodies.push(JSON.parse(String(init.body)));
-      return sse(["event: hello\ndata: {\"epoch\":\"e\",\"streamId\":\"s\",\"bootstrap\":{\"home\":\"/\",\"threadStarts\":[],\"environmentId\":\"local\"}}\n\n"]);
-    },
-  });
-  client.start();
-  await settle();
-  client.remember({ transcript: { generation: "g1", after: 42 } });
-  expect(bodies).toHaveLength(1);
-  client.reconnect();
-  await settle();
-  client.stop();
-  expect(bodies[1]).toEqual({ session: "a", transcript: { generation: "g1", after: 42 } });
+test("selection changed before hello posts the latest subscription rather than reconnecting", async () => {
+  const calls: Array<{ path: string; body: any }> = [];
+  let resolve!: (value: Response) => void;
+  const pending = new Promise<Response>(done => { resolve = done; });
+  const client = createStreamClient({ subscription: { session: "a", viewing: true }, listen: false, onEvent: () => {}, onStatus: () => {}, fetch: async (path, init) => {
+    calls.push({ path, body: JSON.parse(String(init.body)) });
+    return path === "/v1/stream" ? pending : new Response(null, { status: 204 });
+  } });
+  client.start(); await settle(); client.update({ session: "b" });
+  resolve(sse([hello])); await settle(); client.stop();
+  expect(calls.map(call => call.path)).toEqual(["/v1/stream", "/v1/stream/s"]);
+  expect(calls[1].body.want).toContain("transcript:b");
 });

@@ -3,7 +3,8 @@ import { isAbsolute, join, relative } from "node:path";
 import { API } from "../api";
 import { API_CORS_HEADERS } from "../cors";
 import { MessagingService, messagingConfig, type CallAudioSocket } from "./service";
-import type { MessagingSnapshot } from "./protocol";
+import type { MessagingResult, MessagingSnapshot } from "./protocol";
+import type { MessageReaction } from "../message-protocol";
 import { SIGNAL_ICON } from "./signal";
 
 export type { CallAudioSocket } from "./service";
@@ -17,6 +18,7 @@ export function openCallAudio(callId: string): CallAudioSocket | null {
 export interface MessagingEndpoint {
   snapshot(): MessagingSnapshot;
   handle(req: Request): Promise<Response | null>;
+  react(messageId: string, emoji: string, remove: boolean): Promise<MessagingResult<MessageReaction[]>>;
   close(): Promise<void>;
 }
 
@@ -49,6 +51,7 @@ export function createMessagingService(data: string, privateDir: string, encrypt
     return {
       snapshot: () => service.snapshot(),
       handle: req => service.handle(req),
+      react: (messageId, emoji, remove) => service.react(messageId, emoji, remove),
       close: async () => {
         if (activeService === service) activeService = null;
         await service.close();
@@ -68,6 +71,7 @@ export function createMessagingService(data: string, privateDir: string, encrypt
           ? this.snapshot()
           : { error: detail }, { status: API.messaging.match(req.method, path) ? 200 : 503, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
       },
+      async react() { return { ok: false, error: { code: "messaging_unavailable", message: detail } }; },
       async close() {},
     };
   }

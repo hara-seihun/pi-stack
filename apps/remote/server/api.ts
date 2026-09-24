@@ -33,10 +33,13 @@ function route(method: string, template: string): Route {
 export const API = Object.freeze({
   unlock: route("POST", "/v1/unlock"), health: route("GET", "/v1/health"), environment: route("GET", "/v1/environment"), environments: route("GET", "/v1/environments"),
   notifications: route("GET", "/v1/notifications"),
+  messageReaction: route("POST", "/v1/messages/reactions"),
+  sessionReaction: route("POST", "/v1/sessions/:sessionId/reactions"),
   messaging: route("GET", "/v1/messaging"),
   messagingOpen: route("POST", "/v1/messaging/conversations"),
   messagingClose: route("DELETE", "/v1/messaging/conversations/:conversationId"),
   messagingHistory: route("GET", "/v1/messaging/conversations/:conversationId/messages"),
+  messagingLinkPreviews: route("GET", "/v1/messaging/messages/:messageId/link-previews"),
   messagingSend: route("POST", "/v1/messaging/conversations/:conversationId/messages"),
   messagingRead: route("POST", "/v1/messaging/conversations/:conversationId/read"),
   messagingUpload: route("POST", "/v1/messaging/conversations/:conversationId/attachments"),
@@ -61,6 +64,8 @@ export const API = Object.freeze({
   dismissError: route("POST", "/v1/errors/:errorId/dismiss"),
   /** Sample the supervisor's main thread for `seconds` (default 10, at most 60) and report the hottest functions; `format=text` for a readable report. */
   profile: route("POST", "/v1/diagnostics/profile"),
+  requestTimings: route("POST", "/v1/diagnostics/requests"),
+  requestTimingsRead: route("GET", "/v1/diagnostics/requests"),
   /** Measure timer lateness for `seconds`: how long requests wait behind synchronous work. */
   loopLag: route("GET", "/v1/diagnostics/loop-lag"),
   workspaces: route("GET", "/v1/workspaces"), stream: route("POST", "/v1/stream"), streamUpdate: route("POST", "/v1/stream/:streamId"), sessions: route("GET", "/v1/sessions"), createSession: route("POST", "/v1/sessions"), archivedSessions: route("GET", "/v1/sessions/archived"),

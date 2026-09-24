@@ -42,6 +42,7 @@ createInterface({input:process.stdin}).on('line', line => {
   const statuses: Array<{ status: string; detail: string }> = [];
   const logs: string[] = [];
   const messages: BackendMessage[] = [];
+  const reactions: import("./plugin").BackendReaction[] = [];
   const senders: BackendSender[] = [];
   const conversations: BackendConversation[] = [];
   const links: MessagingLink[] = [];
@@ -55,13 +56,15 @@ createInterface({input:process.stdin}).on('line', line => {
     dataDir: join(root, "profile"),
     conversation(value) { conversations.push(value); },
     sender(value) { senders.push(value); },
+    self() {},
     async message(message) { messages.push(message); arrived.resolve(message); },
+    async reaction(value) { reactions.push(value); },
     call(value) { calls.push(value); },
     status(status, detail) { statuses.push({ status, detail }); },
     log(message) { logs.push(message); },
     link(value) { links.push(value); if (value.status !== "waiting") settled.resolve(value); },
   };
-  return { root, binary, plugin, context, statuses, logs, messages, senders, conversations, arrived, links, settled, calls };
+  return { root, binary, plugin, context, statuses, logs, messages, reactions, senders, conversations, arrived, links, settled, calls };
 }
 
 async function start(plugin: MessagingPlugin, context: MessagingPluginContext) {
@@ -178,6 +181,56 @@ test("discovers contacts and groups, sends named attachments, and uses matching 
   const sync = await f.arrived.promise;
   expect(sent).toEqual({ ok: true, value: { externalId: sync.id, timestamp: 202 } });
   expect(sync.direction).toBe("outgoing");
+});
+
+test("Signal receives native quotes and sends a reply with Signal quote fields", async () => {
+  const f = await fixture(`
+    if(request.method==='subscribeReceive') {
+      reply(request,0);
+      incoming('reply',201,{quote:{id:101,author:'+12025550101',text:'quoted on the phone'}});
+      receive({sourceNumber:account,syncMessage:{sentMessage:{destinationUuid:friend,timestamp:202,message:'linked reply',quote:{id:101,author:friend,text:'quoted on desktop'}}}});
+      return;
+    }
+    if(request.method==='send') {
+      if(request.params.quoteTimestamp!==101 || request.params.quoteAuthor!==friend || request.params.quoteMessage!=='stored message' || request.params.message!=='response') process.exit(2);
+      return reply(request,{timestamp:203,results:[{type:'SUCCESS'}]});
+    }
+  `);
+  await start(f.plugin, f.context);
+  const conversation = await f.plugin.openConversation(friend);
+  expect(conversation.ok).toBe(true);
+  if (!conversation.ok) return;
+  const sent = await f.plugin.send(conversation.value, { requestId: 'reply', text: 'response', attachments: [], reply: { author: friend, timestamp: 101, text: 'stored message' } });
+  expect(sent).toMatchObject({ ok: true, value: { timestamp: 203 } });
+  await f.plugin.close();
+  expect(f.messages.map(item => item.reply)).toEqual([
+    { author: '+12025550101', timestamp: 101, text: 'quoted on the phone' },
+    { author: friend, timestamp: 101, text: 'quoted on desktop' },
+  ]);
+});
+
+test("Signal reaction-only events use target author and timestamp, preserve group routing, and never become blank messages", async () => {
+  const f = await fixture(`
+    if(request.method==='subscribeReceive') {
+      reply(request,0);
+      receive({sourceUuid:friend,dataMessage:{timestamp:310,groupInfo:{groupId:'YWJjZA=='},reaction:{emoji:'👍',targetAuthor:account,targetSentTimestamp:202,isRemove:false}}});
+      receive({sourceNumber:account,syncMessage:{sentMessage:{destinationUuid:friend,timestamp:311,reaction:{emoji:'👍',targetAuthor:friend,targetSentTimestamp:101,isRemove:true}}}});
+      return;
+    }
+    if(request.method==='sendReaction') {
+      if(request.params.targetAuthor!==account || request.params.targetTimestamp!==202 || !request.params.remove || request.params.groupId!=='YWJjZA==' || request.params.emoji!=='👍') process.exit(2);
+      return reply(request,{timestamp:312,results:[{type:'SUCCESS'}]});
+    }
+  `);
+  await start(f.plugin, f.context);
+  expect(await f.plugin.react!({ id: 'group:YWJjZA==', title: 'Friends', kind: 'group' }, { author: 'You', timestamp: 202 }, '👍', true))
+    .toEqual({ ok: true, value: { timestamp: 312, sender: account } });
+  await f.plugin.close();
+  expect(f.reactions).toEqual([
+    expect.objectContaining({ target: { author: account, timestamp: 202 }, sender: friend, account, emoji: '👍', remove: false, conversation: expect.objectContaining({ id: 'group:YWJjZA==' }) }),
+    expect.objectContaining({ target: { author: friend, timestamp: 101 }, sender: account, account, emoji: '👍', remove: true, conversation: expect.objectContaining({ id: friend }) }),
+  ]);
+  expect(f.messages).toHaveLength(0);
 });
 
 test("sender directory uses Signal nickname, contact and profile names, including hidden group members", async () => {

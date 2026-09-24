@@ -84,6 +84,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
         tools: isolated?.tools ?? (raw ? [] : undefined), customTools: raw ? [] : [bash, ...threadTools({ ...options, cwd, env })] });
       execution.bind(created.session);
+      created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });
       return { ...created, services, diagnostics: services.diagnostics };
     };

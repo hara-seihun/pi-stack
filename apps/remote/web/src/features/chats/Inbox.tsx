@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ThreadColor } from "../../../../server/protocol";
-import { ThreadColorButton, threadColorStyle } from "./ThreadColorButton";
+import { useThreadColor, threadColorStyle } from "./use-thread-color";
 import { useVisibleSelection } from "../../app/use-visible-selection";
 import { ChatAvatar } from "../../chat-row";
 import { INBOX_SECTIONS, type Chat, type ChatId, type InboxRow } from "../../chats";
@@ -28,14 +28,15 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
   const conversation = chat.kind === "human" ? chat.conversation : null;
   const [color, setColor] = useState<ThreadColor | null>(session?.color ?? null);
   useEffect(() => setColor(session?.color ?? null), [session?.color]);
+  const colour = useThreadColor({ id: session?.id, name: chat.title, color: session?.color, onPreview: setColor });
   const titleOnly = selected && compactSelected;
   const showStatusLine = !titleOnly && Boolean(session || conversation?.unread || status);
   const closeTitle = chat.kind === "ai" ? `Close ${chat.title}: stops it and its workers, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
-  return <div className={`inbox-row${selected ? " selected" : ""}${titleOnly ? " title-only" : ""}${session ? " has-color-control" : ""}${color ? " has-thread-color" : ""}`} data-section={row.section} style={threadColorStyle(color)}>
+  return <div className={`inbox-row${selected ? " selected" : ""}${titleOnly ? " title-only" : ""}`} data-section={row.section} style={threadColorStyle(color)}>
     {/* The press starts before the tap lands: that is when this thread's
         newest window is worth asking for. */}
-    <button type="button" className="inbox-open" onClick={() => onOpen(chat)} onPointerDown={() => onPrefetch?.(chat)} aria-current={selected || undefined}>
-      <span className="inbox-glyph"><ChatAvatar avatar={chat.kind === "human" ? chat.avatar : undefined} icon={chat.icon} /></span>
+    <button ref={colour.button} type="button" className="inbox-open" {...colour.handlers} onClick={event => { colour.handlers.onClick(event); if (!event.defaultPrevented) onOpen(chat); }} onPointerDown={event => { colour.handlers.onPointerDown(event); onPrefetch?.(chat); }} aria-current={selected || undefined} aria-expanded={colour.expanded} aria-controls={colour.controls} aria-description={session ? "Long press, right click or press Shift+F10 to change thread colour" : undefined} title={session ? "Long press to change thread colour" : undefined}>
+      <span className="inbox-glyph"><ChatAvatar avatar={chat.kind === "human" ? chat.avatar : undefined} icon={chat.icon} color={color ? "var(--thread-color)" : undefined} /></span>
       <span className="inbox-main">
         <span className="inbox-title-line"><span className="inbox-title">{chat.title}</span>{session?.idleUnread && <span className="inbox-unread-dot" aria-label="Unread" title="Unread" />}{!titleOnly && <time className="inbox-time">{relativeTime(row.updatedAt)}</time>}</span>
         {showStatusLine && <span className="inbox-status-line">
@@ -48,7 +49,7 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
         </span>}
       </span>
     </button>
-    {session && <ThreadColorButton id={session.id} name={chat.title} color={session.color} onPreview={setColor} />}
+    {colour.menu}
     <button type="button" className="inbox-close" aria-label={closeTitle} title={closeTitle} onClick={() => onClose(chat)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button>
   </div>;
 });

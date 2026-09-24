@@ -2,11 +2,10 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { runningChildParents, threadActivity } from "../server/live-projection";
-import { sessionDelta } from "../server/stream";
 import { InboxRowView } from "./src/features/chats/Inbox";
 import type { Session } from "../server/protocol";
 import type { MessagingSnapshot } from "../server/messaging/protocol";
-import { applySessionDelta, currentChats, inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync } from "./src/chats";
+import { currentChats, inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync } from "./src/chats";
 import { threadStatus } from "./src/features/status/thread-status";
 
 // Artwork paths derive from the page address; there is no page here.
@@ -63,7 +62,7 @@ test("a Signal chat with a picture shows it in the inbox; one without keeps the 
   } finally { globalThis.window = previous; }
 });
 
-test("the last worker settling clears waiting status through projection, stream and inbox", () => {
+test("the last worker settling clears waiting status in the inbox", () => {
   const parent = session("parent", { hasChildren: true });
   const local = session("local", { parentId: parent.id });
   const fleet = session("fleet", { parentId: parent.id, state: "running" });
@@ -73,8 +72,7 @@ test("the last worker settling clears waiting status through projection, stream 
 
   fleet.state = "idle";
   const settled = project();
-  const delta = sessionDelta(new Map([[parent.id, JSON.stringify(waiting)]]), [{ session: settled, encoded: JSON.stringify(settled) }]);
-  const [received] = applySessionDelta([waiting], { reset: false, ...delta });
+  const received = settled;
   expect(received.revision).toBe(waiting.revision);
   expect(threadStatus(received)).toMatchObject({ key: "idle", busy: false });
   const row = inboxRows([received], [], { ...messaging, conversations: [] })[0];
@@ -129,47 +127,10 @@ test("the inbox keeps idle unread as Idle with a dot and gives multi-tool names 
   expect(workingMarkup).toMatch(/<span class="inbox-status-line"><span class="status-pill/);
 });
 
-test("session deltas upsert by id, remove by id and reset the whole list", () => {
-  const held = [session("a"), session("b"), session("c")];
-  const changed = applySessionDelta(held, { reset: false, sessions: [session("b", { state: "running" }), session("d")], removed: ["a"] });
-  expect(changed.map(item => item.id)).toEqual(["b", "c", "d"]);
-  expect(changed[0].state).toBe("running");
-  expect(changed[1]).toBe(held[2]);
-
-  expect(applySessionDelta(changed, { reset: true, sessions: [session("only")], removed: [] }).map(item => item.id)).toEqual(["only"]);
-  expect(applySessionDelta(held, { reset: false, sessions: [], removed: [] })).toEqual(held);
-  // A row that arrives and is removed in the same delta does not come back.
-  expect(applySessionDelta(held, { reset: false, sessions: [session("e")], removed: ["e"] }).map(item => item.id)).toEqual(["a", "b", "c"]);
-});
-
-test("an authoritative reset discards directly discovered rows that disappeared while disconnected", () => {
-  const discovered = [session("running-worker", { parentId: "root", state: "running" })];
-  expect(reconcileDiscoveredSessions(discovered, [session("root")], { reset: true, removed: [] })).toEqual([]);
-
-  expect(reconcileDiscoveredSessions(discovered, [], { reset: false, removed: [] })).toEqual(discovered);
-  expect(reconcileDiscoveredSessions(discovered, [session("running-worker", { state: "idle" })], { reset: false, removed: [] })).toEqual([]);
-  expect(reconcileDiscoveredSessions(discovered, [], { reset: false, removed: ["running-worker"] })).toEqual([]);
-});
-
-test("patches change named fields of held rows and retain untouched values", () => {
-  const held = [session("a", { held: true }), session("b")];
-  const patched = applySessionDelta(held, {
-    reset: false, sessions: [],
-    patches: [{ id: "a", activity: "waiting_on_tool", activeTools: ["bash"], state: "running", held: false, revision: 2 }],
-    removed: [],
-  });
-  expect(patched[0]).toMatchObject({ id: "a", state: "running", held: false, activity: "waiting_on_tool", activeTools: ["bash"], revision: 2 });
-  // Untouched fields keep their held values, and other rows are untouched.
-  expect(patched[0].name).toBe("a");
-  expect(patched[0].model).toBe("model");
-  expect(patched[1]).toBe(held[1]);
-
-  // A patch for a row this client does not hold is not half a row.
-  expect(applySessionDelta(held, { reset: false, sessions: [], patches: [{ id: "unknown", state: "running" }], removed: [] }).map(item => item.id)).toEqual(["a", "b"]);
-  // A removal wins over a patch in the same delta.
-  expect(applySessionDelta(held, { reset: false, sessions: [], patches: [{ id: "a", state: "running" }], removed: ["a"] }).map(item => item.id)).toEqual(["b"]);
-  // A full row for a held id still replaces it wholesale.
-  expect(applySessionDelta(held, { reset: false, sessions: [session("a", { name: "renamed" })], patches: [{ id: "a", name: "patched" }], removed: [] })[0].name).toBe("renamed");
+test("directly discovered rows yield to the authoritative directory", () => {
+  const discovered = [session("worker")];
+  expect(reconcileDiscoveredSessions(discovered, [])).toEqual(discovered);
+  expect(reconcileDiscoveredSessions(discovered, [session("worker", { state: "idle" })])).toEqual([]);
 });
 
 test("sync clears chats closed on another device but incoming reopen never takes focus", () => {

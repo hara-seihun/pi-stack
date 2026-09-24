@@ -11,6 +11,7 @@
 // Item order and pairing follow what the client used to compute in the browser
 // from the whole document, so a rendered transcript keeps its shape.
 
+import { ResourceCache } from "../shared/resource-cache";
 import { AGENT_NAME } from "./agent-identity";
 import { sha256 } from "./sync";
 import { isResponseMetrics } from "./response-metrics";
@@ -28,10 +29,11 @@ export const ARGUMENT_ARRAY_LIMIT = 5;
 export const PARTIAL_OUTPUT_LIMIT = 4_000;
 /** The newest window carries the body of its last item inline when it is at most this large. */
 export const INLINE_BODY_LIMIT = 8_000;
-/** How many trailing items the newest window carries. */
-export const WINDOW_ITEMS = 120;
-/** Derived lists kept in memory, newest use last. */
-const CACHED_SESSIONS = 4;
+/** How many trailing items the newest window carries. Older items remain page-able. */
+export const WINDOW_ITEMS = 60;
+/** Derived lists kept in memory, newest use last. The byte budget counts bodies and heads. */
+export const CACHED_SESSIONS = 32;
+export const CACHED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 
 export interface DerivedItem {
   /** Identity of the slice, independent of its content. Generations compare these. */
@@ -164,6 +166,19 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
     if (items.length > from && isResponseMetrics(metrics)) items.at(-1)!.head.responseMetrics = metrics;
   };
 
+  const attachIdentity = (message: any, from: number) => {
+    if (!message.identity?.id) return;
+    for (let i = items.length - 1; i >= from; i--) {
+      const head = items[i]!.head;
+      if (head.kind !== "user" && head.kind !== "assistant") continue;
+      head.identity = message.identity;
+      head.reactions = message.reactions ?? [];
+      if (message.reply) head.reply = message.reply;
+      head.label = message.identity.sender.name || message.identity.sender.id;
+      break;
+    }
+  };
+
   if (!context) return items;
   lazy("system", "system", "System", String(context.systemPrompt || ""));
   for (const tool of (context.tools || []) as any[]) {
@@ -216,6 +231,7 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
         inline("notice", `notice:assistant:${identity}`, `${AGENT_NAME} error`, String(message.errorMessage), stamp);
       }
       attachResponseMetrics(message, itemsBefore);
+      attachIdentity(message, itemsBefore);
       continue;
     }
     if (role === "toolResult" && paired.has(message)) continue;
@@ -231,6 +247,7 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
       if (message?.isError) inline("notice", `notice:${key}`, label, text, stamp);
       else lazy("tool", key, label, text, stamp);
     } else lazy("tool", `message:${role}:${identity}`, role, text, stamp);
+    attachIdentity(message, itemsBefore);
   }
   return items;
 }
@@ -242,13 +259,10 @@ export function withInlineBody(item: DerivedItem): TranscriptItemHead {
   return { ...item.head, body: JSON.parse(item.body) } as TranscriptItemHead;
 }
 
-/** The newest window: the leading system and tool schemas, then the last items. */
+/** The newest window is a contiguous tail. Earlier system and tool items are page-able. */
 export function transcriptWindow(items: DerivedItem[], limit = WINDOW_ITEMS): TranscriptItemHead[] {
-  let prefix = 0;
-  while (prefix < items.length && (items[prefix].head.kind === "system" || items[prefix].head.kind === "tool")) prefix++;
-  const start = Math.max(prefix, items.length - limit);
-  const heads = [...items.slice(0, prefix), ...items.slice(start)].map((item) => item.head);
-  if (items.length > prefix) heads[heads.length - 1] = withInlineBody(items[items.length - 1]);
+  const heads = items.slice(-Math.max(1, limit)).map((item) => item.head);
+  if (heads.length) heads[heads.length - 1] = withInlineBody(items[items.length - 1]);
   return heads;
 }
 
@@ -268,49 +282,54 @@ export interface TranscriptGeneration {
 
 export interface TranscriptUpdate {
   current: TranscriptGeneration;
-  /** The previous list's identities did not survive: clients reload their window. */
-  reset: boolean;
-  /** Items that are new or whose content changed inside the same generation. */
-  changed: TranscriptItemHead[];
 }
 
 /**
- * Derived lists per session, with the generation identity that tells a client
- * whether it can keep what it already holds. A capture that keeps every earlier
- * item's identity extends the generation; compaction, a fork or tree navigation
- * replaces it.
+ * Keep up to 32 sessions and 64 MiB of derived bodies and heads, least recently
+ * used first. A larger context is derived on demand; a small identity fingerprint
+ * preserves its generation across captures without retaining its bodies.
  */
 export class TranscriptItems {
-  private readonly cache = new Map<string, TranscriptGeneration>();
+  private readonly cache: ResourceCache<TranscriptGeneration>;
+  private readonly oversized: ResourceCache<{ count: number; identityHash: string; generation: string }>;
 
-  constructor(private readonly limit = CACHED_SESSIONS, private readonly mintGeneration: () => string = () => crypto.randomUUID()) {}
+  constructor(
+    maxEntries = CACHED_SESSIONS,
+    private readonly maxBytes = CACHED_TRANSCRIPT_BYTES,
+    private readonly mintGeneration: () => string = () => crypto.randomUUID(),
+  ) {
+    this.cache = new ResourceCache({ entries: maxEntries, bytes: maxBytes });
+    this.oversized = new ResourceCache({ entries: maxEntries, bytes: maxEntries * 512 });
+  }
 
   derive(sessionId: string, sourceHash: string, load: () => unknown): TranscriptUpdate {
     const previous = this.cache.get(sessionId);
-    if (previous?.sourceHash === sourceHash) {
-      this.touch(sessionId, previous);
-      return { current: previous, reset: false, changed: [] };
-    }
+    if (previous?.sourceHash === sourceHash) return { current: previous };
+    const previousLarge = this.oversized.get(sessionId);
     const items = deriveTranscriptItems(load());
-    const extended = Boolean(previous) && previous!.items.length <= items.length
-      && previous!.items.every((item, index) => item.key === items[index].key);
+    const extended = previous
+      ? previous.items.length <= items.length && previous.items.every((item, index) => item.key === items[index].key)
+      : Boolean(previousLarge && previousLarge.count <= items.length
+        && previousLarge.identityHash === this.identityHash(items, previousLarge.count));
+    const bytes = Buffer.byteLength(sessionId) + Buffer.byteLength(sourceHash)
+      + items.reduce((total, item) => total + Buffer.byteLength(item.key) + 64
+        + item.head.size + Buffer.byteLength(JSON.stringify(item.head)), 0);
+    const generation = extended ? (previous?.generation ?? previousLarge!.generation) : this.mintGeneration();
     const current: TranscriptGeneration = {
       sessionId,
       sourceHash,
-      generation: extended ? previous!.generation : this.mintGeneration(),
+      generation,
       items,
       bodies: new Map(items.map((item) => [item.head.id, item.body])),
     };
-    this.touch(sessionId, current);
-    // The newest item is the step a client opens first; a small body rides along.
-    // Heads are compared whole: a running tool's partial output and a response's
-    // speed change the head while its body hash stays the same.
-    const changed = extended
-      ? items.filter((item, index) => index >= previous!.items.length
-        || JSON.stringify(item.head) !== JSON.stringify(previous!.items[index].head))
-        .map((item) => item === items.at(-1) ? withInlineBody(item) : item.head)
-      : [];
-    return { current, reset: !extended, changed };
+    this.forget(sessionId);
+    if (bytes <= this.maxBytes) this.cache.set(sessionId, current, bytes);
+    else {
+      const identityHash = this.identityHash(items, items.length);
+      this.oversized.set(sessionId, { count: items.length, identityHash, generation },
+        Buffer.byteLength(sessionId) + identityHash.length + generation.length + 16);
+    }
+    return { current };
   }
 
   get(sessionId: string): TranscriptGeneration | null {
@@ -319,11 +338,10 @@ export class TranscriptItems {
 
   forget(sessionId: string) {
     this.cache.delete(sessionId);
+    this.oversized.delete(sessionId);
   }
 
-  private touch(sessionId: string, entry: TranscriptGeneration) {
-    this.cache.delete(sessionId);
-    this.cache.set(sessionId, entry);
-    while (this.cache.size > this.limit) this.cache.delete(this.cache.keys().next().value!);
+  private identityHash(items: DerivedItem[], count: number): string {
+    return sha256(JSON.stringify(items.slice(0, count).map((item) => item.key)));
   }
 }

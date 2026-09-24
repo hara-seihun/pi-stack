@@ -18,8 +18,17 @@ export function useMessageMenu(items: MessageMenuItem[] | undefined) {
   const start = useRef<Anchor | null>(null);
   const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } start.current = null; };
   useEffect(() => cancel, []);
-  if (!items?.length) return { menu: null, handlers: {} };
+  if (!items?.length) return { menu: null, handlers: {
+    onContextMenu: undefined, onKeyDown: undefined, onPointerDown: undefined, onPointerMove: undefined, onPointerUp: undefined, onPointerCancel: undefined,
+  } };
   const handlers = {
+    onKeyDown(event: React.KeyboardEvent) {
+      if (event.target !== event.currentTarget || !(event.key === "ContextMenu" || event.key === "F10" && event.shiftKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const box = event.currentTarget.getBoundingClientRect();
+      setAnchor({ x: box.left, y: box.top });
+    },
     onContextMenu(event: React.MouseEvent) {
       if (window.getSelection()?.toString()) return;
       event.preventDefault();

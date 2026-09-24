@@ -71,10 +71,15 @@ function accountReading(store:Store,account:Account,metric:PlanMetric,maxReading
       ...banked,
     }}];
   });
-  const fresh=readings.filter((reading)=>reading.at<=now+60_000&&now-reading.at<=maxReadingAgeMs).sort((a,b)=>a.left-b.left)[0];
-  if(fresh)return fresh;
-  const stale=readings.filter((reading)=>reading.at<=now+60_000).sort((a,b)=>a.left-b.left)[0];
-  if(stale)return{...stale,expected:null,usage:{...stale.usage,state:"stale"}};
+  const eligible=readings.filter((reading)=>reading.at<=now+60_000);
+  const fresh=eligible.filter((reading)=>now-reading.at<=maxReadingAgeMs);
+  if((!metric.requireAllMeters||fresh.length===metric.meters.length)&&fresh.length){
+    return fresh.sort((a,b)=>a.left-b.left)[0]!;
+  }
+  if((!metric.requireAllMeters||eligible.length===metric.meters.length)&&eligible.length){
+    const stale=eligible.sort((a,b)=>a.left-b.left)[0]!;
+    return{...stale,expected:null,usage:{...stale.usage,state:"stale"}};
+  }
   return{left:0,expected:null,usage:{accountId:account.id,accountLabel:account.label?.trim()||account.id,state:"unavailable",percentLeft:null,usedPercent:null,meterId:null,windowHours:null,readingAt:null,resetAt:null,...banked}};
 }
 

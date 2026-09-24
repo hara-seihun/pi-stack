@@ -52,6 +52,131 @@ async function setup(root = directory(), onChange?: () => void) {
 }
 
 describe("messaging custody", () => {
+  test("reaction events precede messages, survive restart and replay, and use the same outbound state", async () => {
+    const root = directory();
+    let changes = 0;
+    const { service, context, conversation, plugin } = await setup(root, () => changes++);
+    context.sender({ id: 'friend', aliases: ['friend-number'], name: 'Friend' });
+    const target = { author: 'friend-number', timestamp: 123 };
+    const event = { conversation: { id: conversation.externalId, title: conversation.title, kind: 'direct' as const }, target, account: 'self', sender: 'self', emoji: '👍', remove: false, timestamp: 130 };
+    await context.reaction(event);
+    expect(service.history(conversation.id).messages).toHaveLength(0);
+    const original = { id: 'incoming', conversation: event.conversation, direction: 'incoming' as const, sender: 'friend', text: 'hello', timestamp: 123, attachments: [] };
+    await context.message(original);
+    const id = service.history(conversation.id).messages[0].id;
+    expect(service.history(conversation.id).messages[0]).toMatchObject({ identity: { id: `messaging/${id}`, timestamp: 123, sender: { id: 'friend', name: 'Friend' } }, reactions: [{ emoji: '👍', sender: { id: 'self' }, timestamp: 130, own: true }] });
+    const count = changes;
+    await context.reaction(event);
+    expect(changes).toBe(count);
+    await context.reaction({ ...event, remove: true, timestamp: 140 });
+    await context.reaction(event);
+    expect(service.history(conversation.id).messages[0].reactions).toEqual([]);
+    plugin.react = async (_conversation, target, emoji, remove) => {
+      expect(target).toEqual({ author: 'friend', timestamp: 123 });
+      expect(remove).toBe(false);
+      expect(emoji).toBe('❤️');
+      return { ok: true, value: { timestamp: 150, sender: 'self' } };
+    };
+    expect(await service.react('unknown', '❤️', false)).toMatchObject({ ok: false, error: { code: 'message_not_found' } });
+    expect(await service.react(id, '❤️', false)).toMatchObject({ ok: true, value: [{ emoji: '❤️', own: true }] });
+    await service.close();
+    const restarted = await setup(root);
+    expect(restarted.service.history(conversation.id).messages[0].reactions).toMatchObject([{ emoji: '❤️', own: true }]);
+  });
+  test("Signal quotes resolve late originals by author and timestamp, including own sends, across restart", async () => {
+    const root = directory();
+    const { service, context, conversation } = await setup(root);
+    context.self('self-number');
+    context.sender({ id: 'friend-uuid', aliases: ['friend-number'], name: 'Friend' });
+    const chat = { id: conversation.externalId, title: conversation.title, kind: 'direct' as const };
+    await context.message({ id: 'quote-first', conversation: chat, direction: 'incoming', sender: 'friend-uuid', text: 'answer', timestamp: 200, attachments: [], reply: { author: 'self-number', timestamp: 100, text: 'original' } });
+    const first = service.history(conversation.id).messages[0];
+    expect(first.reply).toMatchObject({ messageId: null, text: 'original', sender: { id: 'self-number' }, timestamp: 100 });
+    await context.message({ id: 'other', conversation: chat, direction: 'incoming', sender: 'friend-uuid', text: 'wrong', timestamp: 100, attachments: [] });
+    expect(service.history(conversation.id).messages[0].reply?.messageId).toBeNull();
+    await context.message({ id: 'mine', conversation: chat, direction: 'outgoing', sender: 'self-number', text: 'original', timestamp: 100, attachments: [] });
+    const resolved = service.history(conversation.id).messages;
+    expect(resolved[0].reply?.messageId).toBe(`messaging/${resolved[2].id}`);
+    const count = resolved.length;
+    await context.message({ id: 'quote-first', conversation: chat, direction: 'incoming', sender: 'friend-uuid', text: 'answer', timestamp: 200, attachments: [], reply: { author: 'self-number', timestamp: 100, text: 'original' } });
+    expect(service.history(conversation.id).messages).toHaveLength(count);
+    await service.close();
+    const restarted = await setup(root);
+    expect(restarted.service.history(conversation.id).messages[0].reply).toEqual(resolved[0].reply);
+  });
+  test("send replies quote confirmed stored targets and preserve their intent on uncertain receipts", async () => {
+    const { service, context, conversation, plugin, sends } = await setup();
+    context.sender({ id: 'friend-uuid', aliases: ['friend-number'], name: 'Friend' });
+    const chat = { id: conversation.externalId, title: conversation.title, kind: 'direct' as const };
+    await context.message({ id: 'original', conversation: chat, direction: 'incoming', sender: 'friend-number', text: 'exact quote', timestamp: 123, attachments: [] });
+    const target = service.history(conversation.id).messages[0];
+    const input = { requestId: 'reply-send', text: 'response', attachmentIds: [], replyTo: target.identity!.id };
+    let sentReply: unknown;
+    plugin.send = async (_conversation, value) => { sentReply = value.reply; return { ok: false, error: { code: 'unknown', message: 'uncertain' } }; };
+    const accepted = service.accept(conversation.id, input);
+    expect(accepted.message.reply).toMatchObject({ messageId: target.identity!.id, text: 'exact quote', sender: { id: 'friend-uuid', name: 'Friend' } });
+    expect(sentReply).toEqual({ author: 'friend-uuid', timestamp: 123, text: 'exact quote' });
+    expect((await accepted.settled).status).toBe('unknown');
+    expect(await service.send(conversation.id, input)).toMatchObject({ status: 'unknown', reply: { messageId: target.identity!.id } });
+    expect(() => service.send(conversation.id, { ...input, replyTo: 'messaging/other' })).toThrow('different message');
+    expect(() => service.send(conversation.id, { ...input, replyTo: undefined })).toThrow('different message');
+    expect(() => service.send(conversation.id, { ...input, requestId: 'missing', replyTo: 'messaging/missing' })).toThrow('confirmed message');
+    expect(() => service.send(conversation.id, { ...input, requestId: 'wrong-transport', replyTo: 'pi/session/id' })).toThrow('messaging message');
+    const other = await service.open('personal', 'another-contact');
+    expect(() => service.send(other.id, { ...input, requestId: 'other-conversation' })).toThrow('confirmed message');
+    expect(sends()).toBe(0);
+  });
+  test("shutdown rejects new reactions and drains an admitted reaction before closing storage", async () => {
+    const { service, context, conversation, plugin } = await setup();
+    await context.message({ id: 'react-target', conversation: { id: conversation.externalId, title: conversation.title, kind: 'direct' }, direction: 'incoming', sender: 'friend', text: 'hello', timestamp: 123, attachments: [] });
+    const id = service.history(conversation.id).messages[0].id;
+    let release!: () => void;
+    const backendDone = new Promise<void>(resolve => { release = resolve; });
+    plugin.react = async () => {
+      await backendDone;
+      return { ok: true, value: { timestamp: 130, sender: 'self' } };
+    };
+    const pending = service.react(id, '❤️', false);
+    const closing = service.close();
+    expect(await service.react(id, '❤️', false)).toMatchObject({ ok: false, error: { code: 'closed' } });
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    release();
+    expect(await pending).toMatchObject({ ok: true, value: [{ emoji: '❤️' }] });
+    await closing;
+    expect(closed).toBe(true);
+    expect(await service.react(id, '❤️', false)).toMatchObject({ ok: false, error: { code: 'closed' } });
+  });
+  test("local outgoing identity resolves to the linked account before its Signal sync", async () => {
+    const { service, context, conversation } = await setup();
+    context.self('+12025550100');
+    const sent = service.accept(conversation.id, { requestId: 'own-send', text: 'hello', attachmentIds: [] });
+    expect(sent.message.identity).toBeUndefined();
+    expect((await sent.settled).identity).toMatchObject({ id: 'messaging/own-send', sender: { id: '+12025550100' } });
+  });
+  test("group reactions match target author as well as timestamp and keep peer ownership", async () => {
+    const { service, context } = await setup();
+    const group = { id: 'group:abc', title: 'Group', kind: 'group' as const };
+    await context.reaction({ conversation: group, target: { author: 'other', timestamp: 777 }, account: 'self', sender: 'friend', emoji: '🔥', remove: false, timestamp: 781 });
+    await context.message({ id: 'mine', conversation: group, direction: 'outgoing', sender: 'self', text: 'mine', timestamp: 777, attachments: [] });
+    await context.message({ id: 'theirs', conversation: group, direction: 'incoming', sender: 'other', text: 'theirs', timestamp: 777, attachments: [] });
+    const id = service.snapshot().conversations.find(item => item.externalId === group.id)!.id;
+    const messages = service.history(id).messages;
+    expect(messages[0].reactions).toEqual([]);
+    expect(messages[1].reactions).toMatchObject([{ emoji: '🔥', sender: { id: 'friend' }, own: false }]);
+  });
+  test("historical message previews are scoped to stored text and refuse loopback targets", async () => {
+    const { service, context, conversation } = await setup();
+    await context.message({ id: "preview", conversation: { id: conversation.externalId, title: conversation.title, kind: "direct" }, direction: "incoming", sender: "Friend", text: "Look at http://127.0.0.1:8899/secret. Again http://127.0.0.1:8899/secret", timestamp: 123, attachments: [] });
+    const id = service.history(conversation.id).messages[0].id;
+    const response = await service.handle(new Request(`http://local/v1/messaging/messages/${id}/link-previews`));
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({ previews: [{ url: "http://127.0.0.1:8899/secret", title: "127.0.0.1", description: null, imageUrl: null, siteName: null }] });
+    const missing = await service.handle(new Request("http://local/v1/messaging/messages/not-stored/link-previews"));
+    expect(missing?.status).toBe(404);
+  });
   test("stored sender identities resolve on discovery, survive restart, and rename without touching history", async () => {
     const root = directory();
     const { service, context, conversation } = await setup(root);
@@ -62,23 +187,24 @@ describe("messaging custody", () => {
     await context.message({ ...incoming, id: 'by-number', sender: number });
     service.closeConversation(conversation.id);
     const original = service.history(conversation.id).messages;
+    const named = (name: string) => original.map(message => ({ ...message, senderName: name, identity: { ...message.identity!, sender: { id: message.sender, name } } }));
     const state = service.snapshot().conversations;
     expect(original[0].senderName).toBeUndefined();
     const version = service.snapshot().version;
     context.sender({ id: sender, aliases: [number], name: 'Known Contact' });
     expect(service.snapshot().version).toBeGreaterThan(version);
-    expect(service.history(conversation.id).messages).toEqual(original.map(message => ({ ...message, senderName: 'Known Contact' })));
+    expect(service.history(conversation.id).messages).toEqual(named('Known Contact'));
     expect(service.snapshot().conversations).toEqual(state);
     const namedVersion = service.snapshot().version;
     context.sender({ id: sender, aliases: [number], name: 'Known Contact' });
     expect(service.snapshot().version).toBe(namedVersion);
     context.sender({ id: sender, aliases: [], name: 'New Name' });
     await context.message(incoming);
-    expect(service.history(conversation.id).messages).toEqual(original.map(message => ({ ...message, senderName: 'New Name' })));
+    expect(service.history(conversation.id).messages).toEqual(named('New Name'));
     expect(service.snapshot().conversations).toEqual(state);
     await service.close();
     const restarted = await setup(root);
-    expect(restarted.service.history(conversation.id).messages).toEqual(original.map(message => ({ ...message, senderName: 'New Name' })));
+    expect(restarted.service.history(conversation.id).messages).toEqual(named('New Name'));
     restarted.context.sender({ id: sender, aliases: [], name: null });
     expect(restarted.service.history(conversation.id).messages).toEqual(original);
     expect(restarted.sends()).toBe(0);
@@ -325,6 +451,39 @@ describe("messaging custody", () => {
     fixture.service.markRead(fixture.conversation.id);
     expect(fixture.service.snapshot().conversations[0].unread).toBe(0);
     expect(fixture.sends()).toBe(0);
+  });
+  test("since history includes every recent message in seq order and keeps older cursor paging gapless", async () => {
+    const fixture = await setup();
+    const conversation = { id: fixture.conversation.externalId, title: "Friend", kind: "direct" as const };
+    const receive = (index: number, timestamp: number) => fixture.context.message({ id: String(index), conversation, direction: "incoming" as const, sender: "Friend", text: String(index), timestamp, attachments: [] });
+    for (let index = 0; index < 6; index++) await receive(index, 999);
+    for (let index = 6; index < 132; index++) await receive(index, index === 112 ? 998 : 1000 + index);
+
+    const page = fixture.service.history(fixture.conversation.id, undefined, 50, 1006);
+    expect(page.messages.map(message => Number(message.text))).toEqual(Array.from({ length: 126 }, (_, index) => index + 6));
+    expect(page.before).toBe(7);
+    expect(fixture.service.snapshot().conversations[0].unread).toBe(132);
+    const older = fixture.service.history(fixture.conversation.id, page.before!, 50);
+    expect(older.messages.map(message => Number(message.text))).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(older.before).toBeNull();
+    expect(fixture.service.history(fixture.conversation.id, undefined, 2).messages.map(message => message.text)).toEqual(["130", "131"]);
+    expect(fixture.service.history(fixture.conversation.id, undefined, 3, 999999).messages.map(message => message.text)).toEqual(["129", "130", "131"]);
+    expect(fixture.service.history(fixture.conversation.id, undefined, 3, 0).messages).toHaveLength(132);
+  });
+  test("history rejects invalid since values and conflicting cursors through both service and HTTP", async () => {
+    const fixture = await setup();
+    const id = fixture.conversation.id;
+    for (const since of [NaN, Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => fixture.service.history(id, undefined, 60, since)).toThrow("Invalid message timestamp");
+    }
+    expect(() => fixture.service.history(id, 2, 60, 0)).toThrow("before and since cannot be combined");
+    for (const query of ["since=", "since=bad", "since=-1", "since=%20", "since=1e3", "before=2&since=0"]) {
+      const response = (await fixture.service.handle(new Request(`http://local/v1/messaging/conversations/${id}/messages?${query}`)))!;
+      expect(response.status).toBe(400);
+    }
+    const response = (await fixture.service.handle(new Request(`http://local/v1/messaging/conversations/${id}/messages?since=0`)))!;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ messages: [], before: null });
   });
   test("contact and group pictures reach the inbox, message headers and an image route that reads the type from the bytes", async () => {
     const root = directory();

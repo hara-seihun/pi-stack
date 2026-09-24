@@ -156,9 +156,13 @@ it("repairs only invalid undispatched model snapshots and retains their provenan
   } finally { db.close(); }
 });
 
-it.each([false, true])("settles a missing runtime model once, holds remaining work, and informs the parent across restart, recovering=%s", async recovering => {
-  const directory = mkdtempSync(join(tmpdir(), "thread-model-failure-")); roots.push(directory);
-  const error = "Error: Model not found: private/removed-model";
+it.each([
+  [false, "Error: Model not found: private/removed-model"],
+  [true, "Error: Model not found: private/removed-model"],
+  [false, "Error: Pi cwd admission rejected thread.cwd: cwd_unavailable: Session cwd cannot be opened"],
+  [true, "Error: Pi cwd admission rejected thread.cwd: cwd_unavailable: Session cwd cannot be opened"],
+])("settles permanent startup failure once and informs parent across restart, recovering=%s error=%s", async (recovering, error) => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-startup-failure-")); roots.push(directory);
   const openSession = vi.fn<OpenPiSession>(async (_options, output) => {
     output({ type: "runner_attached", control: "control.sock", socketPath: "session.sock" });
     throw new Error(error);
@@ -182,7 +186,8 @@ it.each([false, true])("settles a missing runtime model once, holds remaining wo
   expect(value(await service.await({ parentId: parent.id, threadIds: ["child"], timeoutMs: 0 })).settlement)
     .toEqual(service.latestSettlement("child"));
   const notification = service.pending(parent.id)[0];
-  expect(JSON.parse(notification.text)).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null, error });
+  expect(JSON.parse(notification.text)).toEqual({ type: "thread_idle", title: "Child", outcome: "failed", finalText: null, error });
+  expect(notification).toMatchObject({ senderId: "child", threadId: parent.id, replyTo: "assignment" });
   service.reconcile(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   await service.close();
@@ -191,6 +196,67 @@ it.each([false, true])("settles a missing runtime model once, holds remaining wo
   expect(openSession).toHaveBeenCalledTimes(1);
   expect(restored.get("child")).toMatchObject({ state: "idle", held: true, metadata: { executionError: error } });
   expect(restored.pending(parent.id)).toEqual([notification]);
+});
+
+it("does not invent a failed settlement when retained runner absence is uncertain", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-startup-uncertain-")); roots.push(directory);
+  const openSession: OpenPiSession = async () => { throw new Error("Pi cwd admission rejected thread.cwd: cwd_unavailable"); };
+  const attachSession = vi.fn(async () => { throw new Error("runner status timed out"); });
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(service);
+  value(service.importThread({ id: "child", title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" }, metadata: { runnerReference: { control: "control.sock", socketPath: "session.sock" } } }));
+  value(service.importMessage({ id: "assignment", threadId: "child", text: "work", state: "dispatched", executionId: "retained" }));
+  await service.start();
+  await waitFor(() => service.get("child")?.metadata?.executionError === "runner status timed out");
+  expect(service.get("child")).toMatchObject({ held: true, state: "running" });
+  expect(service.latestSettlement("child")).toBeNull();
+  expect(service.pending("child")).toMatchObject([{ id: "assignment", state: "dispatched" }]);
+});
+
+it("persists a bounded startup retry budget across owner restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-startup-retry-")); roots.push(directory);
+  const openSession = vi.fn<OpenPiSession>(async () => { throw new Error("temporary runner failure"); });
+  const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
+  const first = new ThreadService(options); services.push(first);
+  const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
+  await first.start();
+  await waitFor(() => (first.get(thread.id)?.metadata?.startupFailure as { attempts: number })?.attempts === 1);
+  first.reconcile(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  await first.close();
+  const second = new ThreadService(options); services.push(second);
+  await second.start(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  const db = new DatabaseSync(options.databasePath);
+  try {
+    for (const attempts of [2, 3]) {
+      db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure.retryAt',0) WHERE id=?").run(thread.id);
+      second.reconcile();
+      await waitFor(() => (second.get(thread.id)?.metadata?.startupFailure as { attempts: number })?.attempts === attempts);
+      await turn();
+    }
+    await waitFor(() => second.get(thread.id)?.held === true);
+    expect(openSession).toHaveBeenCalledTimes(3);
+    expect(second.latestSettlement(thread.id)).toMatchObject({ outcome: "failed", workId: "assignment" });
+    second.reconcile(); await turn();
+    expect(openSession).toHaveBeenCalledTimes(3);
+  } finally { db.close(); }
+});
+
+it("stops even when the in-flight opening rejects", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-stop-opening-")); roots.push(directory);
+  let rejectOpen!: (error: Error) => void;
+  const openSession = vi.fn<OpenPiSession>(() => new Promise((_resolve, reject) => { rejectOpen = reject; }));
+  const attachSession = vi.fn(async () => null);
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(service);
+  const thread = value(await service.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
+  await service.start(); await waitFor(() => !!rejectOpen);
+  const stopped = service.control({ threadId: thread.id, action: "stop", descendants: false });
+  await turn();
+  rejectOpen(new Error("Pi cwd admission rejected thread.cwd: cwd_unavailable"));
+  expect(value(await stopped)).toMatchObject({ held: true, state: "idle" });
+  expect(attachSession).toHaveBeenCalledTimes(1);
+  expect(service.pending(thread.id)).toMatchObject([{ id: "assignment", state: "queued" }]);
+  expect(service.latestSettlement(thread.id)).toBeNull();
 });
 
 it("records why a capacity refusal is waiting, keeps the work queued, and clears the reason once admitted", async () => {
@@ -442,10 +508,12 @@ describe("leaf Orchestrator workers", () => {
     const completion = String(person.sessions[0]!.commands.find(command => command.type === "steer" && String(command.message).includes("Worker result"))?.message);
     for (const text of [progress, completion]) {
       expect(text.split("\n").slice(0, 2)).toEqual(assignment.split("\n").slice(0, 2));
-      expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({ senderThreadId: child.id, recipientThreadId: root.id });
+      expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({ senderThreadId: child.id });
       expect(text).toMatch(/<\/agent_message>$/);
     }
-    expect(JSON.parse(completion.split("\n")[2]!)).toMatchObject({ source: "notification", replyTo: "child" });
+    expect(JSON.parse(progress.split("\n")[2]!)).toMatchObject({ recipientThreadId: root.id, source: "explicit", messageId: "progress" });
+    expect(JSON.parse(completion.split("\n")[2]!)).toEqual({ senderThreadId: child.id });
+    expect(JSON.parse(completion.split("\n")[4]!)).toEqual({ type: "thread_idle", title: child.title, outcome: "complete", finalText: "Worker result" });
     expect(fleet.service.get(child.id)?.state).toBe("idle");
   });
 });

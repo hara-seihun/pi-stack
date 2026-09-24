@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MessagingBackendInfo, MessagingConversation, MessagingMessage, MessagingSnapshot } from "../../server/messaging/protocol";
 import { Composer } from "./Composer";
+import { ReplyComposer } from "./message-reply";
 import { useChatDrawing } from "./chat-drawing";
 import { ConversationView } from "./ConversationView";
 import { ChatMessageGroup, messagingMessageProps, messagingMessageSegment } from "./chat-message";
@@ -8,39 +9,43 @@ import { PasteTextDialog } from "./PasteTextDialog";
 import { DismissibleError } from "./dismissible-error";
 import { listenForFileDrops } from "./file-drop";
 import { messagingClient } from "./messaging-client";
+import type { MessagingHistoryCache } from "./messaging-history";
 import { beginHumanSend, draftFromHumanMessage, emptyHumanDraft, groupHumanMessages, mergeHumanMessages, requestFromHumanMessage, unconfirmedHumanSend, type HumanDraft } from "./messaging-state";
 import "./messages.css";
 
-export function MessagingConversations({ selected, snapshot, onRead }: {
+export function MessagingConversations({ selected, snapshot, history, onRead }: {
   selected: MessagingConversation | null;
   snapshot: MessagingSnapshot;
+  history: MessagingHistoryCache;
   onRead(): void;
 }) {
   const [visited, setVisited] = useState<MessagingConversation[]>([]);
   useEffect(() => {
     if (selected) setVisited(current => current.some(item => item.id === selected.id) ? current : [...current, selected]);
   }, [selected]);
-  return <>{visited.map(previous => {
+  const rendered = selected && !visited.some(item => item.id === selected.id) ? [...visited, selected] : visited;
+  return <>{rendered.map(previous => {
     const conversation = snapshot.conversations.find(item => item.id === previous.id) ?? previous;
-    return <MessagingConversationController key={conversation.id} conversation={conversation} backend={snapshot.backends.find(item => item.id === conversation.backendId)} active={conversation.id === selected?.id} version={snapshot.version} onRead={onRead} />;
+    return <MessagingConversationController key={conversation.id} conversation={conversation} backend={snapshot.backends.find(item => item.id === conversation.backendId)} active={conversation.id === selected?.id} history={history} onRead={onRead} />;
   })}</>;
 }
 
-function MessagingConversationController({ conversation, backend, active, version, onRead }: {
+function MessagingConversationController({ conversation, backend, active, history, onRead }: {
   conversation: MessagingConversation;
   backend?: MessagingBackendInfo;
   active: boolean;
-  version: number;
+  history: MessagingHistoryCache;
   onRead(): void;
 }) {
   const [draft, setDraft] = useState(emptyHumanDraft);
   const currentDraft = useRef(draft);
   const [error, setError] = useState("");
-  const [messages, setMessages] = useState<MessagingMessage[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [before, setBefore] = useState<number | null>(null);
-  const historyStarted = useRef(false);
-  const [revision, setRevision] = useState(0);
+  const cached = history.get(conversation.id);
+  const [messages, setMessages] = useState<MessagingMessage[]>(() => cached.history?.messages ?? []);
+  const [loaded, setLoaded] = useState(!!cached.history);
+  const [historyError, setHistoryError] = useState(cached.error);
+  const [before, setBefore] = useState<number | null>(() => cached.history?.before ?? null);
+  const historyStarted = useRef(!!cached.history);
   const checking = useRef(new Set<string>());
   const [pendingChecks, setPendingChecks] = useState<string[]>([]);
   const [uploading, setUploading] = useState<Array<{ id: string; name: string }>>([]);
@@ -63,35 +68,38 @@ function MessagingConversationController({ conversation, backend, active, versio
   const applyMessage = useCallback((message: MessagingMessage) => {
     setMessages(current => mergeHumanMessages(current, [message]));
   }, []);
-  const refresh = useCallback(async (signal: AbortSignal) => {
-    const result = await messagingClient.history(conversation.id, signal);
-    if (signal.aborted) return;
-    if (!result.ok) { setError(result.error.message); return; }
-    setError(""); setLoaded(true);
-    setMessages(current => mergeHumanMessages(current, result.value.messages));
-    if (!historyStarted.current) { setBefore(result.value.before); historyStarted.current = true; }
-    const newest = result.value.messages.at(-1)?.id ?? "empty";
-    if (conversation.unread > 0 && lastRead.current !== newest && document.visibilityState === "visible") {
-      const read = await messagingClient.read(conversation.id, signal);
-      if (signal.aborted) return;
+  useEffect(() => {
+    let held = cached;
+    const apply = () => {
+      const next = history.get(conversation.id);
+      setHistoryError(next.error);
+      if (next.history && next.history !== held.history) {
+        setLoaded(true);
+        setMessages(current => mergeHumanMessages(current, next.history!.messages));
+        if (!historyStarted.current) { setBefore(next.history.before); historyStarted.current = true; }
+      }
+      held = next;
+    };
+    const unsubscribe = history.subscribe(apply);
+    apply();
+    history.ensure(conversation.id);
+    return unsubscribe;
+  }, [conversation.id, history]);
+  const newest = messages.at(-1)?.id ?? "empty";
+  useEffect(() => {
+    if (!active || !loaded || conversation.unread === 0) return;
+    const controller = new AbortController();
+    const markRead = async () => {
+      if (document.visibilityState !== "visible" || lastRead.current === newest) return;
+      const read = await messagingClient.read(conversation.id, controller.signal);
+      if (controller.signal.aborted) return;
       if (read.ok) { lastRead.current = newest; onRead(); }
       else setError(`Could not mark messages read: ${read.error.message}`);
-    }
-  }, [conversation.id, conversation.unread, revision, version, applyMessage, onRead]);
-  useEffect(() => {
-    if (!active) return;
-    let controller: AbortController | null = null;
-    const load = () => {
-      controller?.abort();
-      if (document.visibilityState === "hidden") return;
-      controller = new AbortController();
-      void refresh(controller.signal);
     };
-    load();
-    document.addEventListener("visibilitychange", load);
-    window.addEventListener("online", load);
-    return () => { controller?.abort(); document.removeEventListener("visibilitychange", load); window.removeEventListener("online", load); };
-  }, [active, refresh]);
+    void markRead();
+    document.addEventListener("visibilitychange", markRead);
+    return () => { controller.abort(); document.removeEventListener("visibilitychange", markRead); };
+  }, [active, loaded, conversation.id, conversation.unread, newest, onRead]);
   const older = async () => {
     if (before === null || olderLoading) return;
     setOlderLoading(true);
@@ -144,13 +152,18 @@ function MessagingConversationController({ conversation, backend, active, versio
   };
   const send = async () => {
     if (uploads.current || (!currentDraft.current.text.trim() && !currentDraft.current.attachments.length)) return;
-    const { message, request } = beginHumanSend(currentDraft.current, conversation.id, crypto.randomUUID());
+    const sentDraft = currentDraft.current;
+    const { message, request } = beginHumanSend(sentDraft, conversation.id, crypto.randomUUID());
     setMessages(current => mergeHumanMessages(current, [message]));
-    save(emptyHumanDraft());
+    save({ ...emptyHumanDraft(), reply: sentDraft.reply });
     setError("");
     const result = await messagingClient.send(conversation.id, request, lifetime.current.signal);
     if (lifetime.current.signal.aborted) return;
-    if (result.ok) { applyMessage(result.value.message); setRevision(current => current + 1); }
+    if (result.ok) {
+      applyMessage(result.value.message);
+      if (currentDraft.current.reply === sentDraft.reply) save({ ...currentDraft.current, reply: undefined });
+      history.refresh(conversation.id);
+    }
     else setMessages(current => unconfirmedHumanSend(current, message, result.error.message));
   };
   const checkRequest = async (message: MessagingMessage) => {
@@ -168,11 +181,12 @@ function MessagingConversationController({ conversation, backend, active, versio
   const ready = backend?.status === "ready";
   return <ConversationView active={active} label={`Messages with ${conversation.title}`} drawing={drawing} editImages={!!backend?.capabilities.attachments} transcript={<div className="transcript">
         {before !== null && <button type="button" disabled={olderLoading} onClick={() => void older()}>{olderLoading ? "Loading…" : "Older messages"}</button>}
-        {!loaded && !messages.length && !error && <p className="muted">Loading conversation…</p>}
+        {!loaded && !messages.length && !error && !historyError && <p className="muted">Loading conversation…</p>}
         {loaded && !messages.length && <p className="muted">No messages yet</p>}
         {groupHumanMessages(messages).map(group => {
           const { kind, label, avatar } = messagingMessageProps(group[0], conversation.backendId);
           return <ChatMessageGroup key={group[0].id} kind={kind} label={label} avatar={avatar} checking={group.some(message => pendingChecks.includes(message.id))} segments={group.map(message => messagingMessageSegment(message, {
+            onReply: target => save({ ...currentDraft.current, reply: target }),
             onCheck: () => void checkRequest(message),
             onRetry: () => {
               if (currentDraft.current.text || currentDraft.current.attachments.length) { setError("Keep or send your current draft before restoring the failed message."); return; }
@@ -183,9 +197,10 @@ function MessagingConversationController({ conversation, backend, active, versio
       </div>}>
     {fileDrag && <div className="file-drop-overlay" role="status">Drop files to attach to {conversation.title}</div>}
     {!ready && <p className="messaging-notice" role="status">{backend?.detail || "This messaging service is unavailable. Open the chat picker to check its configuration."}</p>}
-    <DismissibleError message={error} />
-    {error && <button type="button" onClick={() => setRevision(current => current + 1)}>Refresh conversation</button>}
+    <DismissibleError message={error || historyError} />
+    {(error || historyError) && <button type="button" onClick={() => { setError(""); history.refresh(conversation.id); }}>Refresh conversation</button>}
     <Composer value={draft.text} onChange={text => save({ ...currentDraft.current, text })} placeholder={`Message ${conversation.title}`} layoutKey={`${active}:${drawing.isOpen}`} disabled={!ready || !!uploading.length || (!draft.text.trim() && !draft.attachments.length)} attachmentDisabled={!backend?.capabilities.attachments}
+      before={draft.reply && <ReplyComposer target={draft.reply} onCancel={() => save({ ...currentDraft.current, reply: undefined })} />}
       attachments={[...draft.attachments, ...uploading.map(item => ({ ...item, uploading: true }))]} onRemove={id => void remove(id)} onUpload={files => void uploadFiles(files)} onPaste={() => setPaste(true)} onDraw={() => drawing.open()} onSend={() => void send()} />
     {active && paste && <PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={uploadFile} onClose={() => setPaste(false)} />}
   </ConversationView>;

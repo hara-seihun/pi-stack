@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { projectThreadNotifications } from "./thread-notifications";
@@ -14,6 +14,7 @@ import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
 import { displayAssistantMessage, displayContextDocument, type ContextImage } from "./context-display";
 import { LandedWork } from "./queue-landing";
+import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
@@ -42,10 +43,17 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
-import { applySessionDelta, ClientStream, inboxMessaging, liveTextChange, mergeSubscription, PING_INTERVAL_MS, readSubscription, sessionDelta } from "./stream";
+import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
+import { ReconcilePublisher } from "../shared/reconcile";
+import { ResourceCache } from "../shared/resource-cache";
 import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-items";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
+import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
+import { parseMessageReference } from "./message-protocol";
+import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
+import { SlackReactions } from "./slack-reactions";
+import { AGENT_NAME } from "./agent-identity";
 import { createSpeechService } from "./speech/service";
 import { closeAiChat } from "./chat-lifecycle";
 import { archivedSessions } from "./archived-sessions";
@@ -76,6 +84,7 @@ const ENVIRONMENT_REQUIRES_UNLOCK = process.env.PI_REMOTE_REQUIRES_UNLOCK === "t
 if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_ENVIRONMENT_ID must be a stable lowercase identifier");
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
+const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
@@ -215,6 +224,8 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
+const piReactions = new PiReactions(db, MESSAGE_OWNER);
+const slackReactions = new SlackReactions(process.env.PI_REMOTE_SLACK_REACTIONS);
 const orchestrator = new OrchestratorClient({
   ledgerPath: ORCHESTRATOR_DB_PATH,
 });
@@ -305,16 +316,23 @@ async function refreshPeers() {
   }).finally(() => { peerRefresh = null; });
   return peerRefresh;
 }
+const inspectingThreads = new Map<string, Promise<void>>();
 async function refreshThreadInspection(id: string) {
   const local = threads.get(id);
   if (local && !peerInspections.has(id) && storedContext(id)) return;
+  const known = peerInspections.get(id);
+  const listed = peerThreads.get(id);
+  if (!local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
+  const pending = inspectingThreads.get(id);
+  if (pending) return pending;
+  const operation = inspectThread(id, Boolean(local)).finally(() => inspectingThreads.delete(id));
+  inspectingThreads.set(id, operation);
+  return operation;
+}
+async function inspectThread(id: string, local: boolean) {
   const result = await directory.inspect(id);
   if (!result.ok) throw new Error(result.error.message);
   const inspection = result.value;
-  if (!local) {
-    const children = unwrap(await directory.list({ parentId: id, limit: 1 }));
-    peerChildren.set(id, children.threads.length > 0);
-  }
   const changed = !local && (peerThreads.get(id)?.revision !== inspection.thread.revision
     || JSON.stringify(peerInspections.get(id)?.pending) !== JSON.stringify(inspection.pending));
   if (!local) peerThreads.set(id, inspection.thread);
@@ -389,6 +407,7 @@ const inlineImages = new InlineImages(db, join(DATA, "inline-images"), async (in
 
 /** Live event streams by id, the only thing a client keeps open. */
 const streams = new Map<string, ClientStream>();
+const reconciledState = new ReconcilePublisher({ maxHistoryPerResource: 32 });
 
 // Anything that can change the inbox projection, the messaging snapshot or a
 // client's images calls this. The projection is rebuilt once per burst, and a
@@ -436,7 +455,7 @@ function refreshDashboard(): Promise<void> {
       dashboardSnapshot = next;
       dashboardEncoded = encoded;
       dashboardVersion++;
-      for (const stream of streams.values()) if (stream.subscription.dashboard) stream.send({ type: "dashboard", dashboard: next });
+      for (const stream of streams.values()) if (stream.subscription.dashboard) stream.publish({ type: "dashboard", dashboard: next });
     } catch (cause) {
       console.error("Dashboard refresh failed", cause);
     } finally {
@@ -474,8 +493,11 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-const storedContextCache = new Map<string, { capturedAt: number; document: string; hash: string } | null>();
-const displayContexts = new Map<string, { sourceHash: string; document: string; hash: string; images: Map<string, ContextImage> }>();
+type StoredContext = { capturedAt: number; document: string; hash: string };
+const contextCacheLimits = { entries: 32, bytes: 64 * 1024 * 1024 };
+const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheLimits);
+const displayContexts = new ResourceCache<{ sourceHash: string; document: string; hash: string; images: Map<string, ContextImage> }>(contextCacheLimits);
+const inspectedContexts = new WeakMap<ThreadInspection, StoredContext | null>();
 
 /** The newest user and assistant messages of this thread, from the context the
  * agent actually holds. Naming and Voice both want to read the conversation,
@@ -520,11 +542,7 @@ function streamedThinkingByMessage(sessionId: string): Map<string, string> {
 
 function displayContext(sessionId: string, sourceHash: string, sourceDocument: string) {
   const cached = displayContexts.get(sessionId);
-  if (cached?.sourceHash === sourceHash) {
-    displayContexts.delete(sessionId);
-    displayContexts.set(sessionId, cached);
-    return cached;
-  }
+  if (cached?.sourceHash === sourceHash) return cached;
   const progress = liveProjections.get(sessionId)?.toolProgress;
   if (progress?.size) {
     for (const message of JSON.parse(sourceDocument).messages ?? []) {
@@ -532,15 +550,13 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     }
   }
   const images = new Map<string, ContextImage>();
-  const document = displayContextDocument(sourceDocument, streamedThinkingByMessage(sessionId), (image) => {
+  const document = displayContextDocument(piReactions.project(sessionId, sourceDocument), streamedThinkingByMessage(sessionId), (image) => {
     const hash = sha256(`${image.mimeType}\0${image.data}`);
     images.set(hash, image);
     return API.sessionImage.path({ sessionId, hash });
   }, liveProjections.get(sessionId)?.toolProgress.values(), responseMetricsByMessage(sessionId));
   const projected = { sourceHash, document, hash: sha256(document), images };
-  displayContexts.delete(sessionId);
-  displayContexts.set(sessionId, projected);
-  while (displayContexts.size > 4) displayContexts.delete(displayContexts.keys().next().value!);
+  displayContexts.set(sessionId, projected, document.length * 2 + [...images.values()].reduce((bytes, image) => bytes + image.data.length * 2, 0));
   return projected;
 }
 
@@ -553,9 +569,7 @@ function cacheStoredContext(sessionId: string, stored: { capturedAt: number; doc
       if (message?.role === "toolResult") progress.delete(message.toolCallId);
     }
   }
-  storedContextCache.delete(sessionId);
-  storedContextCache.set(sessionId, stored);
-  while (storedContextCache.size > 4) storedContextCache.delete(storedContextCache.keys().next().value!);
+  storedContextCache.set(sessionId, stored, stored ? stored.document.length * 2 : 4);
   if (known?.hash !== stored?.hash) signalTranscript(sessionId);
 }
 
@@ -568,15 +582,14 @@ function invalidateDisplayContext(sessionId: string) {
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
   const peer = peerInspections.get(sessionId);
   if (peer) {
-    if (!peer.context) return null;
-    const document = JSON.stringify(peer.context);
-    return { capturedAt: peer.thread.updatedAt, document, hash: sha256(document) };
-  }
-  if (storedContextCache.has(sessionId)) {
-    const stored = storedContextCache.get(sessionId) ?? null;
-    cacheStoredContext(sessionId, stored);
+    if (inspectedContexts.has(peer)) return inspectedContexts.get(peer)!;
+    const document = peer.context ? JSON.stringify(peer.context) : null;
+    const stored = document === null ? null : { capturedAt: peer.thread.updatedAt, document, hash: sha256(document) };
+    inspectedContexts.set(peer, stored);
     return stored;
   }
+  const cached = storedContextCache.get(sessionId);
+  if (cached !== undefined) return cached;
   const stored = readContext(db, sessionId);
   cacheStoredContext(sessionId, stored);
   return stored;
@@ -697,6 +710,8 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
     audience === "thread" ? chosenContextFiles(sessionId) : "",
     meetingInstructions(sessionId, audience),
     registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
+    piReactions.session(sessionId).size ? `Message reactions, keyed by stable message ID: ${JSON.stringify(Object.fromEntries(piReactions.session(sessionId)))}` : "",
+    slackReactions.instructions(),
   ].filter(Boolean).join("\n\n");
 }
 
@@ -1051,7 +1066,7 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
     // one still waiting can be all three, whether or not the thread is held.
     const waiting = (message.state ?? "queued") === "queued";
     return {
-      id: message.id, text: message.text, delivery: message.delivery,
+      id: message.id, text: decodeMessageReply(message.text).text, delivery: message.delivery,
       state: waiting ? "queued" as const : "dispatched" as const,
       canSteer: waiting && message.delivery === "queue",
       canHardSteer: waiting,
@@ -1095,10 +1110,8 @@ function bootstrap(): Bootstrap {
   return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null };
 }
 
-let stateVersion = 1;
 let stateEncoded = "";
 let stateSnapshot: SupervisorState = { sessions: [], archivedTotal: 0, ownerErrors: [] };
-let stateRows: Array<{ session: Session; encoded: string }> = [];
 
 function currentState(): SupervisorState {
   if (!stateEncoded) projectState();
@@ -1112,8 +1125,6 @@ function projectState(): void {
   if (encoded === stateEncoded) return;
   stateEncoded = encoded;
   stateSnapshot = state;
-  stateRows = state.sessions.map(session => ({ session, encoded: JSON.stringify(session) }));
-  stateVersion++;
 }
 
 function refreshState(): void {
@@ -1121,7 +1132,7 @@ function refreshState(): void {
     if (stream.subscription.viewing && stream.subscription.session) markSessionViewed(stream.subscription.session);
   }
   projectState();
-  for (const stream of streams.values()) sendState(stream, false);
+  for (const stream of streams.values()) sendState(stream);
   pushMessaging();
   pushBootstrap();
   for (const stream of streams.values()) sendImages(stream);
@@ -1135,49 +1146,29 @@ function pushBootstrap(): void {
   if (encoded === bootstrapEncoded) return;
   const known = Boolean(bootstrapEncoded);
   bootstrapEncoded = encoded;
-  if (known) for (const stream of streams.values()) stream.send({ type: "bootstrap", bootstrap: current });
+  if (known) for (const stream of streams.values()) stream.publish({ type: "bootstrap", bootstrap: current });
 }
 
-function streamRows(stream: ClientStream): Array<{ session: Session; encoded: string }> {
+function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
-  if (!selected) return stateRows;
-  return stateRows.map(row => {
-    if (row.session.id !== selected) return row;
-    const session = { ...row.session, queuedMessages: queuedMessagesFor(selected) };
-    return { session, encoded: JSON.stringify(session) };
-  });
-}
-
-function sendState(stream: ClientStream, reset: boolean): void {
-  const rows = streamRows(stream);
-  const summary = JSON.stringify({ archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
-  if (reset) stream.sentSessions.clear();
-  const delta = reset
-    ? { sessions: rows.map(row => row.session), patches: [], removed: [] as string[] }
-    : sessionDelta(stream.sentSessions, rows);
-  if (!reset && !delta.sessions.length && !delta.patches.length && !delta.removed.length && summary === stream.sentSummary) return;
-  applySessionDelta(stream.sentSessions, rows, delta.removed);
-  stream.sentSummary = summary;
-  stream.send({ type: "state", version: stateVersion, reset, sessions: delta.sessions, patches: delta.patches, removed: delta.removed,
-    archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
+  const sessions = selected ? stateSnapshot.sessions.map(session => session.id === selected
+    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session) : stateSnapshot.sessions;
+  stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
 }
 
 let messagingVersion = -1;
 function pushMessaging(target?: ClientStream): void {
   const snapshot = inboxMessaging(messaging.snapshot());
-  if (target) { target.send({ type: "messaging", snapshot }); return; }
+  if (target) { target.publish({ type: "messaging", snapshot }); return; }
   if (snapshot.version === messagingVersion) return;
   messagingVersion = snapshot.version;
-  for (const stream of streams.values()) stream.send({ type: "messaging", snapshot });
+  for (const stream of streams.values()) stream.publish({ type: "messaging", snapshot });
 }
 
 function sendImages(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
-  const version = inlineImages.version(sessionId);
-  if (version === stream.sentImagesVersion) return;
-  stream.sentImagesVersion = version;
-  stream.send({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
+  stream.publish({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
 }
 
 function sendEvents(stream: ClientStream): void {
@@ -1201,24 +1192,17 @@ function pushNotifications(target?: ClientStream): void {
   }
 }
 
-function sendLive(stream: ClientStream, reset: boolean): void {
+function sendLive(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
   const runtime = liveProjections.get(sessionId);
-  const text = runtime?.liveText ?? "";
-  const thinking = runtime?.liveThinking ?? "";
-  const textChange = reset ? { reset: text } : liveTextChange(stream.sentText, text);
-  const wantsThinking = stream.subscription.thinking === true;
-  const thinkingChange = !wantsThinking ? null : reset ? { reset: thinking } : liveTextChange(stream.sentThinking, thinking);
-  if (!textChange && !thinkingChange) return;
-  if (textChange) stream.sentText = text;
-  if (thinkingChange) stream.sentThinking = thinking;
-  stream.send({ type: "live", sessionId, ...(textChange ? { text: textChange } : {}), ...(thinkingChange ? { thinking: thinkingChange } : {}) });
+  stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "",
+    ...(stream.subscription.thinking ? { thinking: runtime?.liveThinking ?? "" } : {}) });
 }
 
 function pushLive(): void {
   for (const stream of streams.values()) {
-    sendLive(stream, false);
+    sendLive(stream);
     sendEvents(stream);
   }
 }
@@ -1231,12 +1215,7 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
   return [...streams.values()].filter(stream => stream.subscription.session === sessionId);
 }
 
-/**
- * Derive this session's items from the display projection and give every
- * client looking at it what that client is missing. A derivation reports what
- * changed since the previous one exactly once, so the fan-out happens here
- * rather than at each caller.
- */
+/** Project a captured context once; the reconciler owns each client's differences. */
 function refreshTranscript(sessionId: string) {
   const stored = storedContext(sessionId);
   const display = stored ? displayContext(sessionId, stored.hash, stored.document) : null;
@@ -1256,50 +1235,47 @@ function signalTranscript(sessionId: string): void {
 function sendTranscript(stream: ClientStream, update: ReturnType<typeof refreshTranscript>): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
-  if (!update) {
-    // No captured context, or a cleared one after a failed compaction: the
-    // client drops what it holds and waits for the next capture.
-    if (!stream.transcript) return;
-    stream.transcript = null;
-    stream.send({ type: "transcript", sessionId, generation: "", total: 0, reset: true, items: [] });
-    return;
-  }
-  const { current, changed } = update;
-  if (stream.transcript?.sessionId === sessionId && stream.transcript.generation === current.generation) {
-    if (!changed.length) return;
-    stream.send({ type: "transcript", sessionId, generation: current.generation, total: current.items.length, reset: false, items: changed });
-    return;
-  }
-  stream.transcript = { sessionId, generation: current.generation };
-  stream.send({ type: "transcript", sessionId, generation: current.generation, total: current.items.length,
-    reset: true, items: transcriptWindow(current.items) });
+  const current = update?.current;
+  const from = stream.subscription.transcriptFrom;
+  const limit = from == null ? 60 : Math.max(60, (current?.items.length ?? 0) - from);
+  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.items.length ?? 0,
+    items: current ? transcriptWindow(current.items, limit) : [] });
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
 async function applySubscription(stream: ClientStream, patch: Partial<StreamSubscription>): Promise<void> {
   const before = stream.subscription;
-  stream.subscription = mergeSubscription(before, patch);
+  stream.declare(patch);
+  const revision = stream.revision;
   const sessionId = stream.subscription.session ?? null;
   const changedSession = (before.session ?? null) !== sessionId;
-  if (changedSession) stream.resetSession();
   if (sessionId && stream.subscription.viewing) markSessionViewed(sessionId);
-  if (patch.dashboard) {
-    if (!dashboardSnapshot) await refreshDashboard();
-    if (dashboardSnapshot) stream.send({ type: "dashboard", dashboard: dashboardSnapshot });
-  }
-  if (patch.notificationsAfter !== undefined) pushNotifications(stream);
   if (sessionId) {
-    if (changedSession && sessionRow.get(sessionId)) {
-      try { await refreshThreadInspection(sessionId); }
-      catch (cause) { console.error("Thread inspection failed", cause); }
-    }
-    if (stream.closed) return;
-    refreshTranscript(sessionId);
-    sendLive(stream, changedSession || (patch.thinking === true && before.thinking !== true));
+    const captured = storedContext(sessionId);
+    if (captured) refreshTranscript(sessionId);
+    sendLive(stream);
     sendImages(stream);
     sendEvents(stream);
+    if (sessionRow.get(sessionId) && (changedSession || !captured)) {
+      void refreshThreadInspection(sessionId).then(() => {
+        if (stream.closed || stream.revision !== revision) return;
+        refreshTranscript(sessionId);
+        sendLive(stream);
+      }, cause => {
+        if (stream.closed || stream.revision !== revision) return;
+        stream.send({ type: "error", message: `Could not refresh thread: ${cause instanceof Error ? cause.message : String(cause)}` });
+      });
+    } else if (!captured) refreshTranscript(sessionId);
   }
-  if (changedSession) { projectState(); sendState(stream, false); }
+  projectState();
+  sendState(stream);
+  pushMessaging(stream);
+  stream.publish({ type: "bootstrap", bootstrap: bootstrap() });
+  if (patch.notificationsAfter !== undefined) pushNotifications(stream);
+  if (stream.subscription.dashboard) {
+    if (!dashboardSnapshot) await refreshDashboard();
+    if (!stream.closed && stream.revision === revision && dashboardSnapshot) stream.publish({ type: "dashboard", dashboard: dashboardSnapshot });
+  }
 }
 
 function closeStream(stream: ClientStream): void {
@@ -1565,6 +1541,7 @@ function threadEnvironment(thread: Thread) {
   return { ...process.env, HOME,
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
+    PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
@@ -1741,6 +1718,7 @@ const meet = new MeetServer((id) => {
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { callId: string; audio?: ReturnType<typeof openCallAudio> };
+const requestTimings = new RequestTimings();
 const server = Bun.serve<AudioSocketData>({
   hostname: HOST,
   port: PORT,
@@ -1765,6 +1743,29 @@ const server = Bun.serve<AudioSocketData>({
       return httpServer.upgrade(req, { data: { callId } })
         ? undefined
         : error("WebSocket upgrade failed", 400);
+    }
+    const agentReaction = API.sessionReaction.match(req.method, url.pathname);
+    if (agentReaction || API.messageReaction.match(req.method, url.pathname)) {
+      httpServer.timeout(req, 60);
+      if (agentReaction && !threads.get(agentReaction.sessionId)) return json({ ok: false, error: { code: "not_found", message: "Agent thread not found" } }, 404);
+      let input: unknown;
+      try { input = await req.json(); } catch { return json({ ok: false, error: { code: "invalid_request", message: "Expected a JSON reaction request" } }, 400); }
+      const sender = agentReaction ? { id: "assistant", name: AGENT_NAME } : MESSAGE_OWNER;
+      const result = await reactToMessage(input, sender, {
+        pi: async (target, emoji, remove, actor) => {
+          const thread = threads.get(target.sessionId);
+          if (!thread || !await nativeMessageExists(thread.sessionFile, target.messageId)) {
+            return { ok: false, error: { code: "not_found", message: "Message not found in this account's thread" } };
+          }
+          const reactions = piReactions.set(target, emoji, actor, remove);
+          displayContexts.delete(target.sessionId);
+          signalTranscript(target.sessionId);
+          return { ok: true, value: reactions };
+        },
+        messaging: (id, emoji, remove) => messaging.react(id, emoji, remove),
+        slack: (target, emoji, remove) => slackReactions.react(target, emoji, remove),
+      });
+      return result.ok ? json({ ok: true, reactions: result.value }) : json(result, ["not_found", "message_not_found"].includes(result.error.code) ? 404 : 400);
     }
     const messagingResponse = await messaging.handle(req);
     if (messagingResponse) return messagingResponse;
@@ -1822,7 +1823,7 @@ const server = Bun.serve<AudioSocketData>({
     if (transcriptRequest) {
       const id = transcriptRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      try { await refreshThreadInspection(id); } catch (cause) { console.error("Thread inspection failed", cause); }
+      if (!storedContext(id)) await refreshThreadInspection(id);
       const update = refreshTranscript(id);
       if (!update) return json({ sessionId: id, generation: "", total: 0, items: [] });
       const items = update.current.items;
@@ -1843,8 +1844,11 @@ const server = Bun.serve<AudioSocketData>({
     if (itemRequest) {
       const id = itemRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      try { await refreshThreadInspection(id); } catch (cause) { console.error("Thread inspection failed", cause); }
-      const body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
+      let body = transcripts.get(id)?.bodies.get(itemRequest.itemId);
+      if (!body) {
+        if (!storedContext(id)) await refreshThreadInspection(id);
+        body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
+      }
       if (!body) return error("Transcript item not found", 404);
       const headers: Record<string, string> = {
         ...API_CORS_HEADERS,
@@ -1869,6 +1873,11 @@ const server = Bun.serve<AudioSocketData>({
     const web = webResponse(WEB_DIR, url.pathname, req.method, req);
     if (web) return web;
     if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
+    if (API.requestTimingsRead.match(req.method, url.pathname)) return json({ requests: requestTimings.list() });
+    if (API.requestTimings.match(req.method, url.pathname)) {
+      const result = requestTimings.receive(await readBody(req));
+      return json(result, result.ok ? 200 : 400);
+    }
     if (API.profile.match(req.method, url.pathname)) {
       const seconds = Math.min(60, Math.max(1, Number(url.searchParams.get("seconds")) || 10));
       const report = await profileMainThread(seconds * 1000);
@@ -2069,7 +2078,7 @@ const server = Bun.serve<AudioSocketData>({
           stream = new ClientStream({
             write: (chunk) => controller.enqueue(encoder.encode(chunk)),
             close: () => { try { controller.close(); } catch {} },
-          });
+          }, reconciledState);
         },
         cancel: () => { closeStream(stream); },
       });
@@ -2085,9 +2094,6 @@ const server = Bun.serve<AudioSocketData>({
       const facts = bootstrap();
       bootstrapEncoded = JSON.stringify(facts);
       stream.send({ type: "hello", epoch: SUPERVISOR_EPOCH, streamId: stream.id, bootstrap: facts });
-      projectState();
-      sendState(stream, true);
-      pushMessaging(stream);
       void applySubscription(stream, patch).catch((cause) => {
         stream.send({ type: "error", message: cause instanceof Error ? cause.message : String(cause) });
       });
@@ -2355,7 +2361,16 @@ const server = Bun.serve<AudioSocketData>({
         const roomImages = body.includeMeetingImages === true && row.meeting_id
           ? meet.captureDelegation(row.meeting_id)
           : { images: [], note: "" };
-        const message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
+        let message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
+        if (body.replyTo !== undefined) {
+          const target = typeof body.replyTo === "string" ? parseMessageReference(body.replyTo) : null;
+          if (target?.transport !== "pi" || target.sessionId !== id) return error("Reply must reference a message in this conversation");
+          const history = await directory.read({ threadId: id, entryId: target.messageId });
+          if (!history.ok) return threadError(history.error);
+          const reply = replyFromNativeEntry(body.replyTo, history.value.entries[0], MESSAGE_OWNER, AGENT_NAME);
+          if (!reply) return error("Reply target is not a user or assistant message");
+          message = encodeMessageReply(message, reply);
+        }
         return json(await enqueuePrompt(id, requestId, message, delivery, roomImages.images), 202);
       } catch (e: any) { return error(e.message ?? "Prompt failed", 400); }
     }

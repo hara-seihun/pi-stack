@@ -29,12 +29,15 @@
     "@headless-tree/core": "^1.7.0",
     "@headless-tree/react": "^1.7.0",
     "@tanstack/react-virtual": "^3.14.10",
+    "emojibase-data": "^17.0.0",
+    "fast-sha256": "^1.3.0",
     "gpt-tokenizer": "4.0.0",
     "openid-client": "^6.8.8",
     "pi-orchestrator": "0.2.1",
     "playwright-core": "^1.58.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "sonner": "^2.0.8",
     "typebox": "^1.3.16"
   },
   "peerDependencies": {

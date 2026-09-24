@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 export interface PiRemoteConfig {
   version: 1;
+  user?: string;
+  displayName?: string;
   environment?: Record<string, string | number | boolean | object>;
 }
 
@@ -27,6 +29,10 @@ export function applyLocalConfig(path = configPath()): string {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Invalid environment key in ${path}: ${name}`);
     if (process.env[name] !== undefined) continue;
     process.env[name] = typeof value === "object" ? JSON.stringify(value) : String(value);
+  }
+  if (config.user) {
+    process.env.PI_REMOTE_SENDER_ID = config.user;
+    process.env.PI_REMOTE_SENDER_NAME = config.displayName || config.user;
   }
   return path;
 }

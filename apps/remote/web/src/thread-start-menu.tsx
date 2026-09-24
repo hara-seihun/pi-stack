@@ -11,6 +11,7 @@ import { linkStage, MessagingLinkController } from "./messaging-link";
 import { formatTokens, pickerOptions, recentRecipients, PICKER_RESULT_LIMIT } from "./chat-picker-options";
 import { threadStartReducer, threadStartSelection, threadStartStage, type ThreadStartEvent, type ThreadStartState } from "./thread-start-state";
 import type { Session, ThreadStart } from "./types";
+import "./chat-picker-trigger.css";
 import "./chat-picker.css";
 
 type Category = { kind: "root" } | { kind: "models" } | { kind: "archived" } | { kind: "backend"; id: string };

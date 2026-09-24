@@ -155,6 +155,48 @@ describe("context mirror", () => {
     expect(captures.at(-1)?.finalizesMessage).toBe(messageFinalizationKey(assistant("Finished", "stop")));
   });
 
+  test("mirrors canonical identity while only the model sees the address label", async () => {
+    captures.length = 0;
+    document = "";
+    const handlers = new Map<string, Handler>();
+    contextMirror({
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { return []; },
+      getAllTools() { return []; },
+    } as unknown as ExtensionAPI);
+    const message = { role: "user", content: [{ type: "text", text: "Hello" }], timestamp: Date.parse("2026-09-23T11:59:59.000Z") };
+    const branch = [{ type: "message", id: "native-user", parentId: null, timestamp: "2026-09-23T12:00:00.000Z", message }];
+    const ctx = { mode: "rpc", getSystemPrompt: () => "System", sessionManager: { getBranch: () => branch } };
+    const result = await handlers.get("context")?.({ messages: [message] }, ctx) as { messages: any[] };
+    expect(result.messages[0].content[0].text).toContain('Message ID: "pi/00000000-0000-0000-0000-000000000001/native-user"');
+    expect(result.messages[0].content[0].text).toContain("system time: 2026-09-23T11:59:59.000Z");
+    const mirrored = (captures.at(-1)?.context.messages as any[])[0];
+    expect(mirrored.content[0].text).toBe("Hello");
+    expect(mirrored.identity.id).toBe("pi/00000000-0000-0000-0000-000000000001/native-user");
+    expect(message.content[0].text).toBe("Hello");
+  });
+
+  test("assigns the assistant native entry ID after Pi persists the finalized response", async () => {
+    captures.length = 0;
+    document = "";
+    const handlers = new Map<string, Handler>();
+    contextMirror({
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { return []; },
+      getAllTools() { return []; },
+    } as unknown as ExtensionAPI);
+    const branch: any[] = [{ type: "message", id: "user-entry", parentId: null, timestamp: "2026-09-23T12:00:00.000Z", message: { role: "user", content: "Hello", timestamp: 111 } }];
+    const ctx = { mode: "rpc", getSystemPrompt: () => "System", sessionManager: { getBranch: () => branch } };
+    await handlers.get("context")?.({ messages: [branch[0].message] }, ctx);
+    const answer = assistant("Done", "stop");
+    await handlers.get("message_end")?.({ message: answer }, ctx);
+    expect((captures.at(-1)?.context.messages as any[]).at(-1).identity).toBeUndefined();
+    branch.push({ type: "message", id: "assistant-entry", parentId: "user-entry", timestamp: "2026-09-23T12:00:01.000Z", message: answer });
+    await handlers.get("turn_end")?.({}, ctx);
+    expect((captures.at(-1)?.context.messages as any[]).at(-1).identity.id).toBe("pi/00000000-0000-0000-0000-000000000001/assistant-entry");
+    expect((captures.at(-1)?.context.messages as any[]).at(-1).content[0].text).toBe("Done");
+  });
+
   test("sends small boundary patches, skips unchanged captures, and replaces a lost base", async () => {
     captures.length = 0;
     requests.length = 0;

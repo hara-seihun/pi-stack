@@ -284,6 +284,46 @@ test("bounded reconciliation preserves caches across a runtime-referenced group"
   } finally { f.close(); }
 });
 
+test("a queued thread on one group member keeps both workspaces and their caches", () => {
+  const f = fixture();
+  try {
+    const records = ["one", "two"].map((name) => JSON.parse(run([
+      "create", "--root", f.workspaces, "--repo", f.remote, "--name", name, "--group", "paired",
+      "--lease-seconds", "0", "--min-free-gib", "0", "--json",
+    ], f.env)));
+    const application = path.join(f.root, "applications", "sample");
+    mkdirSync(application, { recursive: true });
+    const databasePath = path.join(application, "threads.sqlite3");
+    const db = new DatabaseSync(databasePath);
+    db.exec(`CREATE TABLE thread(id TEXT, cwd TEXT, state TEXT);
+      CREATE TABLE thread_work(thread_id TEXT, status TEXT);
+      CREATE TABLE thread_execution(thread_id TEXT, ended_at INTEGER);`);
+    db.prepare("INSERT INTO thread VALUES(?,?,?)").run("worker", records[0].path, "idle");
+    db.prepare("INSERT INTO thread_work VALUES(?,?)").run("worker", "queued");
+    const previousLedger = process.env.PI_ORCHESTRATOR_LEDGER;
+    process.env.PI_ORCHESTRATOR_LEDGER = path.join(f.root, "ledger.sqlite3");
+    try {
+      assert.ok(workspaceTesting.ownerThreadDatabases().includes(databasePath));
+      assert.deepEqual(workspaceTesting.threadSnapshot(workspaceTesting.ownerThreadDatabases())
+        .filter((thread) => thread.cwd === records[0].path).map((thread) => thread.id), ["worker"]);
+    } finally {
+      if (previousLedger === undefined) delete process.env.PI_ORCHESTRATOR_LEDGER;
+      else process.env.PI_ORCHESTRATOR_LEDGER = previousLedger;
+    }
+    for (const record of records) {
+      mkdirSync(path.join(record.path, "node_modules"));
+      writeFileSync(path.join(record.path, "node_modules", "needed"), "in use");
+    }
+    const result = JSON.parse(run(["release", "--path", records[1].path, "--json"], {
+      ...f.env, PI_ORCHESTRATOR_LEDGER: path.join(f.root, "ledger.sqlite3"),
+      PI_THREAD_DATABASE: databasePath,
+    }));
+    assert.equal(result.find(({ record }) => record.id === records[0].id).inspection.classification, "referenced");
+    assert.ok(records.every((record) => existsSync(path.join(record.path, "node_modules", "needed"))));
+    db.close();
+  } finally { f.close(); }
+});
+
 test("bounded reconciliation stops a stalled read without declaring unchecked paths clean", () => {
   const f = fixture();
   try {
@@ -585,6 +625,47 @@ test("classifies active systemd workspace references", () => {
   assert.deepEqual(unavailable, { units: [], available: false });
 });
 
+test("a released checkout stays until its owner's pending or running thread settles", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "resubmitted",
+      "--repo", f.remote, "--min-free-gib", "0", "--json"], f.env));
+    const threadDatabase = path.join(f.root, "threads.sqlite3");
+    const db = new DatabaseSync(threadDatabase);
+    db.exec(`CREATE TABLE thread(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, state TEXT NOT NULL);
+      CREATE TABLE thread_work(thread_id TEXT NOT NULL, status TEXT NOT NULL);
+      CREATE TABLE thread_execution(thread_id TEXT NOT NULL, ended_at INTEGER);`);
+    const insert = db.prepare("INSERT INTO thread(id,cwd,state) VALUES(?,?,?)");
+    insert.run("historical", created.path, "idle");
+    insert.run("other-path", `${created.path}-sibling`, "running");
+    assert.deepEqual(workspaceTesting.threadSnapshot([threadDatabase]).map((row) => row.id), ["other-path"]);
+    const env = { ...f.env, PI_ORCHESTRATOR_LEDGER: path.join(f.root, "ledger.sqlite3"),
+      PI_THREAD_DATABASE: threadDatabase };
+    insert.run("resubmitted-worker", created.path, "idle");
+    db.prepare("INSERT INTO thread_work(thread_id,status) VALUES(?,?)").run("resubmitted-worker", "queued");
+    const held = JSON.parse(run(["release", "--id", created.id, "--json"], env));
+    assert.equal(held.inspection.classification, "referenced");
+    assert.match(held.inspection.reason, /resubmitted-worker/);
+    assert.equal(existsSync(created.path), true);
+    db.prepare("UPDATE thread_work SET status='done'").run();
+    db.prepare("UPDATE thread SET state='running' WHERE id='resubmitted-worker'").run();
+    const executing = JSON.parse(run(["reconcile", "--path", created.path, "--execute", "--json"], env))[0];
+    assert.equal(executing.inspection.classification, "referenced");
+    db.prepare("UPDATE thread SET state='idle' WHERE id='resubmitted-worker'").run();
+    db.prepare("INSERT INTO thread_execution(thread_id,ended_at) VALUES(?,NULL)").run("resubmitted-worker");
+    assert.equal(JSON.parse(run(["release", "--id", created.id, "--json"], env)).inspection.classification, "referenced");
+    db.prepare("UPDATE thread_execution SET ended_at=1").run();
+    writeFileSync(path.join(f.root, "invalid-threads.sqlite3"), "not sqlite");
+    assert.throws(() => run(["release", "--id", created.id, "--json"], {
+      ...env, PI_THREAD_DATABASE: path.join(f.root, "invalid-threads.sqlite3"),
+    }), /file is not a database/);
+    assert.equal(existsSync(created.path), true);
+    assert.equal(JSON.parse(run(["release", "--id", created.id, "--json"], env)).action, "released");
+    assert.equal(existsSync(created.path), false);
+    db.close();
+  } finally { f.close(); }
+});
+
 test("creates and releases a clean review checkout", () => {
   const f = fixture();
   try {
@@ -715,6 +796,44 @@ test("releases and can recreate a linked worktree name", () => {
   } finally {
     f.close();
   }
+});
+
+test("a registered linked worktree prevents release of its parent clone", () => {
+  const f = fixture();
+  try {
+    const parent = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "parent", "--repo", f.remote,
+      "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    const childPath = path.join(f.workspaces, "child");
+    git(parent.path, "worktree", "add", "-b", "child", childPath, "HEAD");
+    const child = JSON.parse(run(["register", "--path", childPath, "--json"], f.env));
+    writeFileSync(path.join(childPath, "unique.txt"), "unfinished child work\n");
+
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    database.prepare("UPDATE workspace SET lease_expires_at=0 WHERE id=?").run(parent.id);
+    database.close();
+    const planned = JSON.parse(run(["reconcile", "--root", f.workspaces, "--json"], f.env));
+    const parentPlan = planned.find(({ record }) => record.id === parent.id);
+    assert.equal(parentPlan.inspection.classification, "referenced");
+    assert.equal(parentPlan.inspection.gitDependents[0].recordId, child.id);
+    const executed = JSON.parse(run(["reconcile", "--root", f.workspaces, "--execute", "--reap-expired", "--json"], f.env));
+    assert.equal(executed.find(({ record }) => record.id === parent.id).action, "none");
+    assert.equal(existsSync(parent.path), true);
+    const held = JSON.parse(run(["release", "--id", parent.id, "--json"], f.env));
+    assert.equal(held.inspection.classification, "referenced");
+    assert.equal(held.action, "none");
+    assert.equal(held.inspection.gitDependents[0].recordId, child.id);
+    assert.equal(git(childPath, "rev-parse", "HEAD"), parent.sourceCommit);
+    assert.equal(readFileSync(path.join(childPath, "unique.txt"), "utf8"), "unfinished child work\n");
+    assert.equal(existsSync(parent.path), true);
+
+    const childRelease = JSON.parse(run(["release", "--id", child.id, "--json"], f.env));
+    assert.equal(childRelease.inspection.classification, "repair-required");
+    rmSync(path.join(childPath, "unique.txt"));
+    assert.equal(JSON.parse(run(["release", "--id", child.id, "--json"], f.env)).action, "released");
+    assert.equal(JSON.parse(run(["release", "--id", parent.id, "--json"], f.env)).action, "released");
+  } finally { f.close(); }
 });
 
 test("a linked worktree ignores branches owned by its peers", () => {
