@@ -39,13 +39,8 @@ export function loadConfig(
       standard: [standard, sol],
       expert: [standard],
     }),
-    ...Object.fromEntries(["astra", "sol", "luna"].map(id => [id, [catalogModel(id)!]])),
+    ...Object.fromEntries(["astra", "sol", "luna", "opus"].map(id => [id, [catalogModel(id)!]])),
   };
-  for (const [profile, candidates] of Object.entries(profiles)) {
-    if (!Array.isArray(candidates) || candidates.some(candidate => candidate?.provider !== "openai-codex")) {
-      throw new Error(`Orchestrator scheduling profile ${profile} must contain only OpenAI Codex models`);
-    }
-  }
   const modelBrokerUrl = env.PI_MODEL_BROKER_URL ?? local.modelBrokerUrl;
   if (modelBrokerUrl !== undefined && typeof modelBrokerUrl !== "string") throw new Error("modelBrokerUrl must be a string");
   return {

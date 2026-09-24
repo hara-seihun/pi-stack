@@ -15,9 +15,6 @@ export class Fleet {
 
   async admit(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string): Promise<Result<ThreadAdmission>> {
     const rootRepair = thread.metadata?.execution === "root-repair";
-    const automated = thread.metadata?.source === "lane" || thread.metadata?.source === "direct";
-    const openai = settings.model.startsWith("openai-codex/");
-    if (automated && !openai) return { ok: false, error: { code: "invalid_request", message: "Orchestrator-scheduled work requires an OpenAI Codex model" } };
     if (this.config.modelBrokerUrl) return this.admitBroker(thread, settings, recovering, executionId);
     if (rootRepair && thread.metadata?.context) return { ok: false, error: { code: "invalid_request", message: "Root repair cannot use an isolated application context" } };
     const slash = settings.model.indexOf("/");
@@ -28,7 +25,7 @@ export class Fleet {
       if (recovering && !held) return { ok: false, error: { code: "unavailable", message: `Execution ${executionId} has no recorded account lease` } };
       const selected = held ? { assignment: { ...candidate, accountId: held.account_id }, refusals: [] }
         : assign(this.store, "thread", thread.parentId ? "force" : thread.admission,
-          { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : openai && (automated || !!thread.parentId) ? "user" : "interactive");
+          { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user");
       if (!selected.assignment) return { ok: false, error: { code: "unavailable", message: selected.refusals.map(item => `${item.accountId}: ${item.reason}`).join("; ") } };
       const assignment = selected.assignment;
       this.store.createLease(leaseId, assignment.accountId, "fleet", thread.id);

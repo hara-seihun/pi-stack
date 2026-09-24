@@ -33,25 +33,12 @@ it("normalizes every new direct and lane admission, including private profiles a
   }
 });
 
-it("normalizes OpenAI profiles and refuses Anthropic scheduling even with raw config or persisted runs", () => {
+it("schedules explicitly chosen Anthropic candidates for direct runs, lanes and completions", () => {
   const { path, store, create } = fixture();
-  writeFileSync(path, JSON.stringify({ profiles: { custom: [
-    { provider: "openai-codex", model: "gpt-6-luna", thinking: "low" },
-  ] } }));
+  writeFileSync(path, JSON.stringify({ profiles: { custom: [{ provider: "anthropic", model: "claude-opus-5-5" }] } }));
   const config = loadConfig(path);
-  expect(config.profiles.custom).toEqual([{ provider: "openai-codex", model: "gpt-6-luna", thinking: "max" }]);
-  const raw = { ...config, profiles: { custom: [
-    { provider: "openai-codex", model: "gpt-6-luna" },
-    { provider: "anthropic", model: "claude-opus-5" },
-  ] } };
-  expect(assign(store, "custom", "force", raw)).toMatchObject({ refusals: [{ accountId: "*", reason: expect.stringContaining("outside OpenAI") }] });
+  expect(assign(store, "custom", "force", config).assignment).toMatchObject({ provider: "anthropic", accountId: "anthropic" });
   const id = create("custom");
-  expect(assignCompletion(store, id, "custom", raw)).toMatchObject({ refusals: [{ accountId: "*", reason: expect.stringContaining("outside OpenAI") }] });
-  expect(store.assignRun(id, { provider: "anthropic", model: "claude-opus-5", accountId: "anthropic", unit: id, releasePath: "/release" })).toBe(false);
-  const choice = assign(store, "custom", "force", config).assignment!;
-  expect(store.assignRun(id, { ...choice, unit: id, releasePath: "/release" })).toBe(true);
-  expect(store.run(id)?.thinking).toBe("max");
-  const pinned = create("custom");
-  store.db.prepare("UPDATE run SET provider='anthropic', model='claude-opus-5' WHERE id=?").run(pinned);
-  expect(assignCompletion(store, pinned, "custom", config)).toMatchObject({ refusals: [{ accountId: "*", reason: expect.stringContaining("outside OpenAI") }] });
+  expect(assignCompletion(store, id, "custom", config).refusals.map(refusal => refusal.reason).join()).not.toContain("OpenAI");
+  expect(store.assignRun(id, { provider: "anthropic", model: "claude-opus-5-5", accountId: "anthropic", unit: id, releasePath: "/release" })).toBe(true);
 });
