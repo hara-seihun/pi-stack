@@ -250,6 +250,8 @@ export interface PeopleUsagePeriodData {
   until: string;
   /** Total subscription cost of the period across providers. */
   spend: number;
+  /** What people used of it at each provider's trailing-week rate; a busy day can exceed `spend`. */
+  used: number;
   subscriptions: SubscriptionUsage[];
   people: PersonUsage[];
 }

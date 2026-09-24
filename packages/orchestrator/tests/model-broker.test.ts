@@ -367,6 +367,6 @@ test("a principal reads her granted plans and only her own spending", async () =
   expect(openai.percentLeft).toBe(60);
   const day = usage.personal.periods.day.plans.openai;
   expect(day.tokens).toBe(1_000_000);
-  // Two enabled OpenAI accounts at $200 a month, one day of it, a quarter of the value.
-  expect(day.spend).toBeCloseTo(2 * 200 / 30 / 4, 6);
+  // Two enabled OpenAI accounts at $200 a month; the week's cost per unit of value, times her quarter.
+  expect(day.spend).toBeCloseTo(2 * 200 * 7 / 30 / 4, 6);
 });

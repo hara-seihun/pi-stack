@@ -48,6 +48,25 @@ test("usage is attributed to broker principals, their completions and otherwise 
   }
 });
 
+test("a light user's quiet day is part of her week, not a share of the day's whole cost", () => {
+  const root = mkdtempSync(join(tmpdir(), "person-usage-"));
+  const store = Store.open(join(root, "ledger.sqlite3"));
+  try {
+    store.upsertAccount({ id: "claude", provider: "anthropic" });
+    const day = 24 * 3_600_000, until = 10 * day;
+    const record = (runId: string, tokens: number, at: number) => store.recordUsage({ accountId: "claude", hour: at, source: "interactive", runId, model: "priced", component: "output", tokens });
+    record("owner-session", 1_000_000_000, until - 5 * day);
+    record("broker:martine:1", 1_000_000, until - 3_600_000);
+    const priceOf = () => ({ input: 1, output: 1, cacheRead: 1, cacheWrite: 1 });
+    const spend = (windowMs: number) => personUsage(store, until - windowMs, until, priceOf, plans).rows.find(row => row.principal === "martine")!.spend;
+    expect(spend(day)).toBeCloseTo(spend(7 * day), 9);
+    expect(spend(day)).toBeCloseTo(250 * 7 / 30 / 1001, 9);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a provider nobody used is reported idle", () => {
   const root = mkdtempSync(join(tmpdir(), "person-usage-"));
   const store = Store.open(join(root, "ledger.sqlite3"));
