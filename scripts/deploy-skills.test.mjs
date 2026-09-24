@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -7,14 +7,16 @@ import assert from "node:assert/strict";
 
 const root = resolve(import.meta.dirname, "..");
 
-test("skill deployment replaces a stale managed directory with the reviewed release", () => {
+test("skill deployment replaces stale managed entries and removes unlisted skills", () => {
   const workspace = mkdtempSync(join(tmpdir(), "pi-stack-skills-"));
   const home = join(workspace, "home");
   const agentDir = join(home, ".pi", "agent");
   const stale = join(agentDir, "skills", "software-engineering");
+  const removed = join(agentDir, "skills", "unslop");
   const destination = join(workspace, "release");
   const hostSkill = join(workspace, "host-skills", "math-research");
   mkdirSync(stale, { recursive: true });
+  symlinkSync(join(destination, "unslop"), removed);
   mkdirSync(hostSkill, { recursive: true });
   writeFileSync(join(stale, "stale.txt"), "not the reviewed skill\n");
   writeFileSync(join(hostSkill, "SKILL.md"), "# host skill\n");
@@ -39,7 +41,7 @@ test("skill deployment replaces a stale managed directory with the reviewed rele
 
     assert.equal(lstatSync(stale).isSymbolicLink(), true);
     assert.equal(readlinkSync(stale), join(destination, "software-engineering"));
-    assert.equal(readlinkSync(join(agentDir, "skills", "unslop")), join(destination, "unslop"));
+    assert.throws(() => lstatSync(removed), { code: "ENOENT" });
     assert.equal(readlinkSync(join(agentDir, "skills", "charisma")), join(destination, "charisma"));
     assert.equal(readlinkSync(join(agentDir, "skills", "math-research")), hostSkill);
   } finally {
