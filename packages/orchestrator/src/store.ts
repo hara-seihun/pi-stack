@@ -143,6 +143,18 @@ export class Store {
     adoptLaneColumns(db);
     // Frozen subscription dollars per list-price dollar, one row per provider-hour. See person-usage.ts.
     db.exec("CREATE TABLE IF NOT EXISTS usage_rate (provider TEXT NOT NULL, hour INTEGER NOT NULL, rate REAL NOT NULL, PRIMARY KEY(provider,hour)) STRICT");
+    // A reset weekly meter rounded to 0% used to freeze a zero rate despite
+    // recorded usage. Restore those hours from the last valid provider rate;
+    // with no earlier calibration, leave the hour unpriced until one exists.
+    db.exec(`UPDATE usage_rate AS current SET rate = (
+      SELECT previous.rate FROM usage_rate AS previous
+      WHERE previous.provider = current.provider AND previous.hour < current.hour AND previous.rate > 0
+      ORDER BY previous.hour DESC LIMIT 1
+    ) WHERE current.rate = 0 AND EXISTS (
+      SELECT 1 FROM usage_rate AS previous
+      WHERE previous.provider = current.provider AND previous.hour < current.hour AND previous.rate > 0
+    );
+    DELETE FROM usage_rate WHERE rate = 0;`);
     return new Store(db, path === ":memory:" ? path : resolve(path));
   }
 

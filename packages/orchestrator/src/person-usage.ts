@@ -130,13 +130,16 @@ export function calibrateRate(store: Store, plan: PlanDefinition, priceOf: Price
     .all(earliest, now, ...windows.map(window => window.id)) as Array<{ account_id: string; hour: number; model: string; component: UsageComponent; tokens: number }>;
   let cost = 0, value = 0;
   for (const window of windows) {
+    // Weekly meters round small consumption to zero after a reset. A zero
+    // reading cannot calibrate the tokens already served in that window.
+    if (window.usedPercent <= 0) continue;
     const served = rows.filter(row => row.account_id === window.id && row.hour >= window.since)
       .reduce((sum, row) => sum + valueOf(priceOf, row.model, row.component, row.tokens), 0);
     if (served <= 0) continue;
     cost += window.usedPercent * pointUsd;
     value += served;
   }
-  return value > 0 ? cost / value : null;
+  return value > 0 && cost > 0 ? cost / value : null;
 }
 
 /** Frozen hourly rates for [since, until), freezing each hour up to `now` that has none yet. */
