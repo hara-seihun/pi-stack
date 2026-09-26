@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { MessagingHistory, MessagingHistoryChanges, MessagingMessage, MessagingResult, MessagingSnapshot } from "../server/messaging/protocol";
-import { MessagingHistoryCache, MESSAGING_PRELOAD_WINDOW_MS } from "./src/messaging-history";
+import { MessagingHistoryCache } from "./src/messaging-history";
 
 const snapshot = (revision: number, ids = ["a", "b"]): MessagingSnapshot => ({
   version: revision, backends: [], calls: [], conversations: ids.map(id => ({
@@ -14,26 +14,25 @@ const history: MessagingHistory = { messages: [message("m1"), message("m2", "m2"
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 
 type Call =
-  | { kind: "window"; id: string; since: number; signal: AbortSignal; resolve: (result: MessagingResult<MessagingHistory>) => void }
+  | { kind: "window"; id: string; priority: "high" | "low"; signal: AbortSignal; resolve: (result: MessagingResult<MessagingHistory>) => void }
   | { kind: "changes"; id: string; after: number; from: number; signal: AbortSignal; resolve: (result: MessagingResult<MessagingHistoryChanges>) => void };
 
 function fixture() {
   const calls: Call[] = [];
   const cache = new MessagingHistoryCache({
-    window: (id, signal, since) => new Promise(resolve => calls.push({ kind: "window", id, signal, since, resolve })),
+    window: (id, signal, priority) => new Promise(resolve => calls.push({ kind: "window", id, signal, priority, resolve })),
     changes: (id, signal, after, from) => new Promise(resolve => calls.push({ kind: "changes", id, signal, after, from, resolve })),
-  }, () => 2 * MESSAGING_PRELOAD_WINDOW_MS);
+  });
   const window = (index: number, value: MessagingHistory = history) => (calls[index] as Extract<Call, { kind: "window" }>).resolve({ ok: true, value });
   const changes = (index: number, value: MessagingHistoryChanges) => (calls[index] as Extract<Call, { kind: "changes" }>).resolve({ ok: true, value });
   return { cache, calls, window, changes };
 }
 
 describe("messaging history", () => {
-  test("preloads seven days once; unchanged revisions and taps fetch nothing more", async () => {
+  test("preloads the newest page once; unchanged revisions and taps fetch nothing more", async () => {
     const { cache, calls, window } = fixture();
     cache.reconcile(snapshot(1));
     expect(calls.map(call => [call.kind, call.id])).toEqual([["window", "a"], ["window", "b"]]);
-    expect(calls.every(call => call.kind === "window" && call.since === MESSAGING_PRELOAD_WINDOW_MS)).toBe(true);
     window(0);
     window(1);
     await flush();
@@ -61,15 +60,33 @@ describe("messaging history", () => {
     cache.dispose();
   });
 
-  test("bounds concurrent requests, prioritizes a tap, and shares in-flight loads", async () => {
+  test("a tap starts immediately even when background requests are stalled, without duplicate loads", async () => {
     const { cache, calls, window } = fixture();
     cache.reconcile(snapshot(1, ["a", "b", "c", "d", "e", "f"]));
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(3);
     cache.ensure("a");
+    expect(calls).toHaveLength(3);
     cache.ensure("f");
+    expect(calls.map(call => call.id)).toEqual(["a", "b", "c", "f"]);
+    expect(calls.filter(call => call.kind === "window").map(call => call.priority)).toEqual(["low", "low", "low", "high"]);
+    cache.ensure("f");
+    expect(calls).toHaveLength(4);
     window(0);
     await flush();
-    expect(calls.map(call => call.id)).toEqual(["a", "b", "c", "d", "f"]);
+    expect(calls).toHaveLength(4);
+    window(1);
+    await flush();
+    expect(calls.map(call => call.id)).toEqual(["a", "b", "c", "f", "d"]);
+    cache.dispose();
+  });
+
+  test("background pages start in most-recent conversation order", () => {
+    const { cache, calls } = fixture();
+    const value = snapshot(1, ["oldest", "middle", "newest", "recent"]);
+    value.conversations.forEach((conversation, index) => { conversation.updatedAt = [1, 2, 4, 3][index]; });
+    cache.reconcile(value);
+    expect(calls.map(call => call.id)).toEqual(["newest", "recent", "middle"]);
+    expect(value.conversations[0].id).toBe("oldest");
     cache.dispose();
   });
 

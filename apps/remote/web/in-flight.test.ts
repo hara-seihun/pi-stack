@@ -116,6 +116,19 @@ test("requests retain attribution without changing the pressed control", () => {
   noteActivation("not an element" as unknown as EventTarget);
 });
 
+test("slow nested requests retain latency diagnostics without owning global progress", () => {
+  const reported: RequestTiming[] = [];
+  setRequestTimingReporter(timing => reported.push(timing));
+  try {
+    const settle = beginRequest("GET", "/v1/messaging/conversations/chat/messages?private=value", performance.now() - SLOW_REQUEST_MS - 1);
+    expect(inFlight.count()).toBe(0);
+    settle();
+    expect(reported.map(timing => timing.state)).toEqual(["pending", "settled"]);
+    expect(reported.every(timing => timing.path === "/v1/messaging/conversations/chat/messages")).toBe(true);
+    expect(inFlight.count()).toBe(0);
+  } finally { setRequestTimingReporter(null); }
+});
+
 test("slow foreground requests report pending and settled without leaking query values", async () => {
   const reported: RequestTiming[] = [];
   setRequestTimingReporter(timing => reported.push(timing));

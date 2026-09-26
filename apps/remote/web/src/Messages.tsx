@@ -82,9 +82,11 @@ function MessagingConversationController({ conversation, backend, active, histor
     };
     const unsubscribe = history.subscribe(apply);
     apply();
-    history.ensure(conversation.id);
     return unsubscribe;
   }, [conversation.id, history]);
+  useEffect(() => {
+    if (active) history.ensure(conversation.id);
+  }, [active, conversation.id, history]);
   const newest = messages.at(-1)?.id ?? "empty";
   useEffect(() => {
     if (!active || !loaded || conversation.unread === 0) return;
@@ -179,13 +181,12 @@ function MessagingConversationController({ conversation, backend, active, histor
     else setMessages(current => unconfirmedHumanSend(current, message, result.error.message));
   };
   const ready = backend?.status === "ready";
-  return <ConversationView active={active} label={`Messages with ${conversation.title}`} drawing={drawing} editImages={!!backend?.capabilities.attachments} transcript={<div className="transcript">
-        {before !== null && <button type="button" disabled={olderLoading} onClick={() => void older()}>{olderLoading ? "Loading…" : "Older messages"}</button>}
-        {!loaded && !messages.length && !error && !historyError && <p className="muted">Loading conversation…</p>}
+  return <ConversationView active={active} label={`Messages with ${conversation.title}`} drawing={drawing} editImages={!!backend?.capabilities.attachments} transcript={<div className="transcript messaging-transcript">
+        {!loaded && !messages.length && !error && !historyError && <div className="conversation-skeleton" role="status" aria-label="Loading conversation"><span /><span /><span /></div>}
         {loaded && !messages.length && <p className="muted">No messages yet</p>}
-        {groupHumanMessages(messages).map(group => {
+        {groupHumanMessages(messages).reverse().map(group => {
           const { kind, label, avatar } = messagingMessageProps(group[0], conversation.backendId);
-          return <ChatMessageGroup key={group[0].id} kind={kind} label={label} avatar={avatar} checking={group.some(message => pendingChecks.includes(message.id))} segments={group.map(message => messagingMessageSegment(message, {
+          return <ChatMessageGroup key={group[0].id} newestFirstDom kind={kind} label={label} avatar={avatar} checking={group.some(message => pendingChecks.includes(message.id))} segments={group.map(message => messagingMessageSegment(message, {
             onReply: target => save({ ...currentDraft.current, reply: target }),
             onCheck: () => void checkRequest(message),
             onRetry: () => {
@@ -194,6 +195,7 @@ function MessagingConversationController({ conversation, backend, active, histor
             },
           }))} />;
         })}
+        {before !== null && <button type="button" disabled={olderLoading} onClick={() => void older()}>{olderLoading ? "Loading…" : "Older messages"}</button>}
       </div>}>
     {fileDrag && <div className="file-drop-overlay" role="status">Drop files to attach to {conversation.title}</div>}
     {!ready && <p className="messaging-notice" role="status">{backend?.detail || "This messaging service is unavailable. Open the chat picker to check its configuration."}</p>}

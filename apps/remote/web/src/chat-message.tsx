@@ -259,14 +259,15 @@ export function messagingMessageProps(message: MessagingMessage, backendId = "")
 function AttachmentPlayback({ attachment }: { attachment: ChatAttachment }) {
   const { ref, near } = useNearViewport<HTMLDivElement>();
   const [error, setError] = useState(false);
+  const [ready, setReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const src = attempt ? `${attachment.url}${attachment.url.includes("?") ? "&" : "?"}retry=${attempt}` : attachment.url;
   return <div className={`attachment-playback ${attachment.kind}`} ref={ref}>
-    {!near && <div className="attachment-placeholder" aria-hidden="true" />}
+    {(!near || attachment.kind === "video" && !ready && !error) && <div className="attachment-placeholder" aria-hidden="true" />}
     {near && !error && (attachment.kind === "audio"
       ? <audio className="message-attachment-media" controls preload="none" src={src} aria-label={attachment.name} onError={() => setError(true)} />
-      : <video className="message-attachment-media" controls preload="metadata" playsInline src={src} aria-label={attachment.name} onError={() => setError(true)} />)}
-    {error && <div className="attachment-error" role="alert">Could not load {attachment.kind}. <button type="button" onClick={() => { setError(false); setAttempt(value => value + 1); }}>Retry</button></div>}
+      : <video className="message-attachment-media" controls preload="metadata" playsInline src={src} aria-label={attachment.name} onLoadedMetadata={() => setReady(true)} onError={() => setError(true)} />)}
+    {error && <div className="attachment-error" role="alert">Could not load {attachment.kind}. <button type="button" onClick={() => { setError(false); setReady(false); setAttempt(value => value + 1); }}>Retry</button></div>}
   </div>;
 }
 

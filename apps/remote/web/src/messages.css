@@ -1,3 +1,7 @@
+.messaging-transcript { display: flex; flex-direction: column-reverse; }
+.conversation-skeleton { display: grid; gap: var(--space-4); padding-block: var(--space-4); }
+.conversation-skeleton span { display: block; width: 75%; height: 64px; border-radius: var(--radius-2); background: var(--surface-2); }
+.conversation-skeleton span:nth-child(2) { width: 55%; }
 .messaging-backend { color: var(--muted); }
 .messaging-backend.error, .messaging-backend.unconfigured { color: var(--danger); }
 .messaging-notice { flex: 0 0 auto; margin: 0; padding: 10px; font-size: 13px; border-radius: var(--radius-2); background: var(--surface-2); overflow-wrap: anywhere; }

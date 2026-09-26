@@ -420,7 +420,7 @@ Bun.serve<ProxySocketData>({
     // A fresh cached private response must carry the authenticated session in
     // its URL. Header/cookie-only URLs can revalidate but cannot cross a later
     // account switch through a cache entry keyed only by attachment id.
-    const immutable = req.method === "GET" && [200, 206].includes(response.status)
+    const immutable = req.method === "GET" && [200, 206, 304].includes(response.status)
       && response.headers.get("cache-control")?.includes("immutable");
     const scopedSession = url.searchParams.get("session");
     const cache = response.headers.get("cache-control");

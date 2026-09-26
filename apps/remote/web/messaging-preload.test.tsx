@@ -12,9 +12,10 @@ test("first render of a never-visited Signal thread already contains its preload
     id: "message", requestId: null, conversationId: "chat", externalId: "external", direction: "incoming", sender: "Contact",
     text: "Already here before the tap", timestamp: 1, status: "received", error: null, attachments: [],
   };
+  const latest = { ...message, id: "latest", sender: "Someone else", text: "Newest is first in the DOM", timestamp: 2 };
   let requests = 0;
   const history = new MessagingHistoryCache({
-    window: async () => { requests++; return { ok: true, value: { messages: [message], before: 7, revision: 1 } }; },
+    window: async () => { requests++; return { ok: true, value: { messages: [message, latest], before: 7, revision: 1 } }; },
     changes: async () => { throw new Error("An unchanged conversation fetches no changes"); },
   });
   history.reconcile(snapshot);
@@ -23,6 +24,9 @@ test("first render of a never-visited Signal thread already contains its preload
   const html = renderToStaticMarkup(<MessagingConversations selected={snapshot.conversations[0]} snapshot={snapshot} history={history} onRead={() => { reads++; }} />);
   expect(html).toContain(message.text);
   expect(html).toContain("Older messages");
+  expect(html).toContain("messaging-transcript");
+  expect(html.indexOf(latest.text)).toBeLessThan(html.indexOf(message.text));
+  expect(html.indexOf("Older messages")).toBeGreaterThan(html.indexOf(message.text));
   expect(html).not.toContain("Loading conversation");
   expect(requests).toBe(1);
   expect(reads).toBe(0);

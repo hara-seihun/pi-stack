@@ -281,7 +281,7 @@ function RemoteApp() {
   }, [person]);
   useEffect(() => () => cache.dispose(), [cache]);
   const messagingHistory = useMemo(() => new MessagingHistoryCache({
-    window: (id, signal) => messagingClient.history(id, signal),
+    window: (id, signal, priority) => messagingClient.history(id, signal, undefined, priority),
     changes: messagingClient.changes,
   }), [person]);
   useEffect(() => {

@@ -82,17 +82,17 @@ function emitTiming(request: InFlightRequest, startedAt: number, state: RequestT
   try { timingReporter?.(timing); } catch { /* Diagnostics must not change the request result. */ }
 }
 
-/** Track a visible request until it settles, whether it succeeds or fails. */
+/** Keep latency diagnostics independent of whether a request owns global progress. */
 export function beginRequest(method: string, pathname: string, now = performance.now()): () => void {
   const path = pathname.split(/[?#]/, 1)[0]!;
   const normalizedMethod = method.toUpperCase();
   const age = activation ? now - activation.at : null;
-  if (requestVisibility(normalizedMethod, path, age) === "background") return () => {};
+  const shown = requestVisibility(normalizedMethod, path, age) === "shown";
+  if (/\/v1\/(?:stream(?:\/|$)|diagnostics\/requests$)/.test(path) || normalizedMethod === NATIVE_METHOD && !shown) return () => {};
   const origin = attributedOrigin(activation, now);
   const request: InFlightRequest = { id: nextId++, method: normalizedMethod, path, origin, startedAt: now };
   const startedAt = Date.now();
-  requests.set(request.id, request);
-  notify();
+  if (shown) { requests.set(request.id, request); notify(); }
   let settled = false;
   let slow = false;
   const pending = () => {
@@ -110,8 +110,7 @@ export function beginRequest(method: string, pathname: string, now = performance
       emitTiming(request, startedAt, "pending");
     }
     if (slow) emitTiming(request, startedAt, "settled");
-    requests.delete(request.id);
-    notify();
+    if (shown) { requests.delete(request.id); notify(); }
   };
 }
 

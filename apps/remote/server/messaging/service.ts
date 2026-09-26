@@ -805,6 +805,11 @@ export class MessagingService {
   }
   private messages(rows: MessageRow[], conversationId: string): MessagingMessage[] {
     if (!rows.length) return [];
+    if (rows.length > 100) {
+      const messages: MessagingMessage[] = [];
+      for (let start = 0; start < rows.length; start += 100) messages.push(...this.messages(rows.slice(start, start + 100), conversationId));
+      return messages;
+    }
     const conversation = this.conversationRow(conversationId);
     const placeholders = (count: number) => Array(count).fill("?").join(",");
     const ids = rows.map(row => row.id);
