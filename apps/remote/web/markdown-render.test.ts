@@ -51,6 +51,9 @@ describe("the lazy Markdown engine", () => {
       const markdown = markdownRenderer();
       expect(markdown).not.toBeNull();
       expect(markdown!.render("**bold**")).toContain("<strong>bold</strong>");
+      const table = markdown!.render("| Budget | Berkeley | San Francisco |\n| --- | --- | --- |\n| $1,750–2,400 | Studio | Studio |");
+      expect(table).toContain('<div class="table-scroll"><table>');
+      expect(table).toContain("</table>\n</div>");
     } finally { globalThis.window = previous; }
   });
 });
