@@ -113,8 +113,11 @@ export function servedFileResponse(path: string, method: string, req: Request, o
   const size = statSync(path).size;
   const file = Bun.file(path);
   const headers = fileHeaders(path, size, options);
-  const range = method === "GET" ? byteRange(req.headers.get("range"), size) : null;
-  if (req.headers.has("range") && method === "GET" && !range)
+  if (method === "GET" && !req.headers.has("range") && options.etag && req.headers.get("if-none-match") === options.etag)
+    return new Response(null, { status: 304, headers });
+  const ranged = method === "GET" && req.headers.has("range") && (!req.headers.has("if-range") || !options.etag || req.headers.get("if-range") === options.etag);
+  const range = ranged ? byteRange(req.headers.get("range"), size) : null;
+  if (ranged && !range)
     return new Response(null, { status: 416, headers: { ...API_CORS_HEADERS, "content-range": `bytes */${size}` } });
   if (!range) return new Response(method === "HEAD" ? null : file, { headers });
   headers.set("content-range", `bytes ${range.start}-${range.end}/${size}`);

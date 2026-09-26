@@ -417,7 +417,17 @@ Bun.serve<ProxySocketData>({
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);
     const response = await route(req, url);
     if (!url.pathname.startsWith("/v1/")) return response;
-    if (!response.headers.has("cache-control")) response.headers.set("cache-control", "no-store");
+    // A fresh cached private response must carry the authenticated session in
+    // its URL. Header/cookie-only URLs can revalidate but cannot cross a later
+    // account switch through a cache entry keyed only by attachment id.
+    const immutable = req.method === "GET" && [200, 206].includes(response.status)
+      && response.headers.get("cache-control")?.includes("immutable");
+    const scopedSession = url.searchParams.get("session");
+    const cache = response.headers.get("cache-control");
+    const authorizedResponse = [200, 206, 304].includes(response.status);
+    response.headers.set("cache-control", immutable
+      ? scopedSession ? "private, max-age=31536000, immutable" : "private, no-cache"
+      : authorizedResponse && !cache?.includes("no-store") ? "private, no-cache" : "no-store");
     response.headers.set("vary", [response.headers.get("vary"), "X-Pi-Remote-User", "X-Pi-Remote-Session", "Cookie"].filter(Boolean).join(", "));
     response.headers.set("referrer-policy", "no-referrer");
     return withCors(response);

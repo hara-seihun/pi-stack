@@ -102,6 +102,7 @@ const REVISION_SCHEMA = `
     ${touchIdentity(`${row}.backend_id`, `${row}.id`)}
   END;`; }).join("\n")}
 `;
+interface ReactionRow { target_timestamp: number; target_author: string; sender: string; account: string; emoji: string; removed: number; event_timestamp: number }
 interface MessageRow { seq: number; id: string; conversation_id: string; external_id: string | null; direction: "incoming" | "outgoing"; sender: string; text: string; timestamp: number; status: MessagingMessage["status"]; error: string | null; request_body: string | null; quote_author: string | null; quote_timestamp: number | null; quote_text: string | null; quote_message_id: string | null }
 interface AttachmentRow { id: string; conversation_id: string; message_id: string | null; name: string; mime_type: string; size: number; path: string }
 interface Backend { config: MessagingBackendConfig; info: MessagingBackendInfo; plugin?: MessagingPlugin; attempts: number; retry?: ReturnType<typeof setTimeout> }
@@ -711,22 +712,23 @@ export class MessagingService {
     const alias = this.db.query("SELECT sender_id FROM messaging_sender_aliases WHERE backend_id=? AND alias=?").get(backendId, id) as { sender_id: string } | null;
     return alias?.sender_id ?? id;
   }
-  private reactions(row: MessageRow): MessageReaction[] {
-    const conversation = this.conversationRow(row.conversation_id);
-    const events = this.db.query(`SELECT * FROM messaging_reactions WHERE backend_id=? AND conversation_external_id=? AND target_timestamp=? ORDER BY event_timestamp DESC,rowid DESC`)
-      .all(conversation.backend_id, conversation.external_id, row.timestamp) as Array<{ target_author: string; sender: string; account: string; emoji: string; removed: number; event_timestamp: number }>;
+  private reactions(row: MessageRow, loaded?: { conversation: ConversationRow; events: ReactionRow[]; canonical: (id: string) => string; names: Map<string, string | null> }): MessageReaction[] {
+    const conversation = loaded?.conversation ?? this.conversationRow(row.conversation_id);
+    const events = loaded?.events ?? this.db.query(`SELECT * FROM messaging_reactions WHERE backend_id=? AND conversation_external_id=? AND target_timestamp=? ORDER BY event_timestamp DESC,rowid DESC`)
+      .all(conversation.backend_id, conversation.external_id, row.timestamp) as ReactionRow[];
+    const canonical = loaded?.canonical ?? ((id: string) => this.canonical(conversation.backend_id, id));
     const reactions = new Map<string, MessageReaction>();
     const seen = new Set<string>();
     for (const event of events) {
-      const account = this.canonical(conversation.backend_id, event.account);
-      const target = this.canonical(conversation.backend_id, event.target_author);
-      if (row.direction === "outgoing" ? target !== account : target !== this.canonical(conversation.backend_id, row.sender)) continue;
-      const sender = this.canonical(conversation.backend_id, event.sender);
+      const account = canonical(event.account);
+      const target = canonical(event.target_author);
+      if (row.direction === "outgoing" ? target !== account : target !== canonical(row.sender)) continue;
+      const sender = canonical(event.sender);
       if (seen.has(sender)) continue;
       seen.add(sender);
       if (event.removed) continue;
-      const name = this.db.query("SELECT name FROM messaging_senders WHERE backend_id=? AND id=?").get(conversation.backend_id, sender) as { name: string | null } | null;
-      reactions.set(sender, { emoji: event.emoji, sender: { id: sender, ...(name?.name ? { name: name.name } : {}) }, timestamp: event.event_timestamp, own: sender === account });
+      const name = loaded ? loaded.names.get(sender) : (this.db.query("SELECT name FROM messaging_senders WHERE backend_id=? AND id=?").get(conversation.backend_id, sender) as { name: string | null } | null)?.name;
+      reactions.set(sender, { emoji: event.emoji, sender: { id: sender, ...(name ? { name } : {}) }, timestamp: event.event_timestamp, own: sender === account });
     }
     return [...reactions.values()].sort((a, b) => a.timestamp - b.timestamp || a.sender.id.localeCompare(b.sender.id));
   }
@@ -780,26 +782,66 @@ export class MessagingService {
     return { messageId: target ? messageReference({ transport: "messaging", messageId: target.id }) : null,
       sender: { id: author, ...(sender?.name ? { name: sender.name } : {}) }, text: row.quote_text, timestamp: row.quote_timestamp };
   }
-  private message(row: MessageRow): MessagingMessage {
-    const attachments = (this.db.query("SELECT a.* FROM attachments a JOIN message_attachments ma ON ma.attachment_id=a.id WHERE ma.message_id=? ORDER BY a.rowid").all(row.id) as AttachmentRow[]).map(item => this.attachment(item));
+  private message(row: MessageRow, prepared?: { attachments: MessagingAttachment[]; sender: { name: string | null; avatar: number | null } | null; account: string | null; reactions: MessageReaction[] }): MessagingMessage {
+    const attachments = prepared?.attachments ?? (this.db.query("SELECT a.* FROM attachments a JOIN message_attachments ma ON ma.attachment_id=a.id WHERE ma.message_id=? ORDER BY a.rowid").all(row.id) as AttachmentRow[]).map(item => this.attachment(item));
     if (row.request_body) {
       const order = (JSON.parse(row.request_body) as MessagingSend).attachmentIds;
       attachments.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
     }
-    const sender = this.db.query(`SELECT s.name, v.updated_at AS avatar FROM conversations c
+    const sender = prepared ? prepared.sender : this.db.query(`SELECT s.name, v.updated_at AS avatar FROM conversations c
       JOIN messaging_sender_aliases a ON a.backend_id=c.backend_id AND a.alias=?
       JOIN messaging_senders s ON s.backend_id=a.backend_id AND s.id=a.sender_id
       LEFT JOIN messaging_avatars v ON v.backend_id=s.backend_id AND v.id=s.id WHERE c.id=?`).get(row.sender, row.conversation_id) as { name: string | null; avatar: number | null } | null;
-    const account = row.direction === "outgoing" && row.sender === "You"
-      ? this.db.query(`SELECT sender_id FROM messaging_accounts WHERE backend_id=(SELECT backend_id FROM conversations WHERE id=?)`).get(row.conversation_id) as { sender_id: string } | null : null;
+    const account = prepared ? prepared.account : row.direction === "outgoing" && row.sender === "You"
+      ? (this.db.query(`SELECT sender_id FROM messaging_accounts WHERE backend_id=(SELECT backend_id FROM conversations WHERE id=?)`).get(row.conversation_id) as { sender_id: string } | null)?.sender_id ?? null : null;
     const reply = this.reply(row);
     return { id: row.id, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), ...(sender?.avatar ? { senderAvatar: sender.avatar } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
       ...((row.status === "received" || row.status === "sent") && row.external_id ? {
-        identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account?.sender_id ?? row.sender, ...(sender?.name ? { name: sender.name } : {}) } },
+        identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account ?? row.sender, ...(sender?.name ? { name: sender.name } : {}) } },
       } : {}),
-      reactions: this.reactions(row),
+      reactions: prepared?.reactions ?? this.reactions(row),
       ...(reply ? { reply } : {}),
     };
+  }
+  private messages(rows: MessageRow[], conversationId: string): MessagingMessage[] {
+    if (!rows.length) return [];
+    const conversation = this.conversationRow(conversationId);
+    const placeholders = (count: number) => Array(count).fill("?").join(",");
+    const ids = rows.map(row => row.id);
+    const attached = this.db.query(`SELECT ma.message_id AS owner_id, a.* FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id IN (${placeholders(ids.length)}) ORDER BY a.rowid`).all(...ids) as (AttachmentRow & { owner_id: string })[];
+    const attachments = new Map<string, MessagingAttachment[]>();
+    for (const item of attached) {
+      const list = attachments.get(item.owner_id) ?? [];
+      list.push(this.attachment(item));
+      attachments.set(item.owner_id, list);
+    }
+    const timestamps = [...new Set(rows.map(row => row.timestamp))];
+    const events = this.db.query(`SELECT * FROM messaging_reactions WHERE backend_id=? AND conversation_external_id=? AND target_timestamp IN (${placeholders(timestamps.length)}) ORDER BY event_timestamp DESC,rowid DESC`)
+      .all(conversation.backend_id, conversation.external_id, ...timestamps) as ReactionRow[];
+    const byTimestamp = new Map<number, ReactionRow[]>();
+    for (const event of events) {
+      const list = byTimestamp.get(event.target_timestamp) ?? [];
+      list.push(event);
+      byTimestamp.set(event.target_timestamp, list);
+    }
+    const aliases = [...new Set([...rows.map(row => row.sender), ...events.flatMap(event => [event.account, event.sender, event.target_author])])];
+    const contacts = this.db.query(`SELECT a.alias, a.sender_id, s.name, v.updated_at AS avatar FROM messaging_sender_aliases a
+      JOIN messaging_senders s ON s.backend_id=a.backend_id AND s.id=a.sender_id
+      LEFT JOIN messaging_avatars v ON v.backend_id=s.backend_id AND v.id=s.id
+      WHERE a.backend_id=? AND a.alias IN (${placeholders(aliases.length)})`).all(conversation.backend_id, ...aliases) as { alias: string; sender_id: string; name: string | null; avatar: number | null }[];
+    const byAlias = new Map(contacts.map(contact => [contact.alias, contact]));
+    const canonical = (id: string) => byAlias.get(id)?.sender_id ?? id;
+    const names = new Map(contacts.map(contact => [contact.sender_id, contact.name]));
+    const account = this.db.query("SELECT sender_id FROM messaging_accounts WHERE backend_id=?").get(conversation.backend_id) as { sender_id: string } | null;
+    return rows.map(row => {
+      const sender = byAlias.get(row.sender);
+      return this.message(row, {
+        attachments: attachments.get(row.id) ?? [],
+        sender: sender ? { name: sender.name, avatar: sender.avatar } : null,
+        account: row.direction === "outgoing" && row.sender === "You" ? account?.sender_id ?? null : null,
+        reactions: this.reactions(row, { conversation, events: byTimestamp.get(row.timestamp) ?? [], canonical, names }),
+      });
+    });
   }
   history(conversationId: string, before?: number, limit = 60, since?: number): MessagingHistory {
     return { ...this.historyWindow(conversationId, before, limit, since), revision: this.conversationRow(conversationId).revision };
@@ -810,7 +852,7 @@ export class MessagingService {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(from) || from < 0) throw new MessagingFailure("Invalid message revision");
     const rows = this.db.query("SELECT * FROM messages WHERE conversation_id=? AND revision>? AND seq>=? ORDER BY seq ASC").all(conversationId, after, from) as MessageRow[];
     const removed = this.db.query("SELECT message_id FROM message_removals WHERE conversation_id=? AND revision>? AND seq>=?").all(conversationId, after, from) as { message_id: string }[];
-    return { messages: rows.map(row => this.message(row)), removed: removed.map(row => row.message_id), revision };
+    return { messages: this.messages(rows, conversationId), removed: removed.map(row => row.message_id), revision };
   }
   private historyWindow(conversationId: string, before?: number, limit = 60, since?: number): Omit<MessagingHistory, "revision"> {
     if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) throw new MessagingFailure("Invalid message cursor");
@@ -823,12 +865,12 @@ export class MessagingService {
       const start = Math.min(recent?.seq ?? 0, dated.seq ?? Number.MAX_SAFE_INTEGER);
       const rows = this.db.query("SELECT * FROM messages WHERE conversation_id=? AND seq>=? ORDER BY seq ASC").all(conversationId, start) as MessageRow[];
       const more = rows.length > 0 && !!this.db.query("SELECT 1 FROM messages WHERE conversation_id=? AND seq<? LIMIT 1").get(conversationId, rows[0].seq);
-      return { messages: rows.map(row => this.message(row)), before: more ? rows[0].seq : null };
+      return { messages: this.messages(rows, conversationId), before: more ? rows[0].seq : null };
     }
     const rows = this.db.query("SELECT * FROM messages WHERE conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?").all(conversationId, before ?? Number.MAX_SAFE_INTEGER, limit + 1) as MessageRow[];
     const more = rows.length > limit;
     if (more) rows.pop();
-    return { messages: rows.reverse().map(row => this.message(row)), before: more ? rows[0].seq : null };
+    return { messages: this.messages(rows.reverse(), conversationId), before: more ? rows[0].seq : null };
   }
   async linkPreviews(messageId: string) {
     const row = this.db.query("SELECT text FROM messages WHERE id=?").get(messageId) as { text: string } | null;
@@ -1064,7 +1106,9 @@ export class MessagingService {
           name: file.name,
           contentType: inline ? file.mime_type : "application/octet-stream",
           disposition: inline && url.searchParams.get("download") !== "1" ? "inline" : "attachment",
-          cacheControl: "private, no-store",
+          cacheControl: file.message_id && this.db.query("SELECT status FROM messages WHERE id=? AND status IN ('sent','received')").get(file.message_id)
+            ? "private, max-age=31536000, immutable" : "private, no-store",
+          etag: `"${file.id}"`,
         });
       }
       const avatar = API.messagingAvatar.match(req.method, url.pathname);

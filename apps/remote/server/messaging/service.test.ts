@@ -489,6 +489,29 @@ describe("messaging custody", () => {
     expect(download.headers.get("content-disposition")).toStartWith("attachment;");
     expect(download.headers.get("content-disposition")).toContain("photo.png");
   });
+  test("only confirmed attachment bytes are immutable; drafts remain removable and media ranges revalidate", async () => {
+    const fixture = await setup();
+    const draft = await fixture.service.upload(new Request("http://local/upload", { method: "POST", body: "hello world", headers: { "content-type": "audio/ogg" } }), fixture.conversation.id, "voice.ogg");
+    const url = `http://local/v1/messaging/attachments/${draft.id}`;
+    const fetchFile = (headers?: HeadersInit) => fixture.service.handle(new Request(url, { headers }));
+    expect((await fetchFile())!.headers.get("cache-control")).toBe("private, no-store");
+    fixture.setMode("failed");
+    await fixture.service.send(fixture.conversation.id, { requestId: "failed-voice", text: "", attachmentIds: [draft.id] });
+    expect((await fetchFile())!.headers.get("cache-control")).toBe("private, no-store");
+    fixture.setMode("ok");
+    await fixture.service.send(fixture.conversation.id, { requestId: "sent-voice", text: "", attachmentIds: [draft.id] });
+    const confirmed = (await fetchFile())!;
+    expect(confirmed.headers.get("cache-control")).toContain("immutable");
+    expect(confirmed.headers.get("etag")).toBe(`"${draft.id}"`);
+    expect((await fetchFile({ "if-none-match": `"${draft.id}"` }))!.status).toBe(304);
+    const range = (await fetchFile({ range: "bytes=6-10" }))!;
+    expect(range.status).toBe(206);
+    expect(range.headers.get("content-range")).toBe("bytes 6-10/11");
+    expect(await range.text()).toBe("world");
+    const removable = await fixture.service.upload(new Request("http://local/upload", { method: "POST", body: "discard" }), fixture.conversation.id, "draft.txt");
+    fixture.service.removeAttachment(removable.id);
+    expect((await fixture.service.handle(new Request(`http://local/v1/messaging/attachments/${removable.id}`)))!.status).toBe(404);
+  });
   test("a sent-sync event arriving before send confirmation merges into its durable request", async () => {
     const fixture = await setup();
     fixture.plugin.send = async (conversation, message) => {
@@ -548,6 +571,19 @@ describe("messaging custody", () => {
     const response = (await fixture.service.handle(new Request(`http://local/v1/messaging/conversations/${id}/messages?since=0`)))!;
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ messages: [], before: null, revision: 0 });
+  });
+  test("large history pages hydrate in a bounded number of database lookups", async () => {
+    const fixture = await setup();
+    const conversation = { id: fixture.conversation.externalId, title: fixture.conversation.title, kind: "direct" as const };
+    for (let i = 0; i < 55; i++) await fixture.context.message({ id: `row-${i}`, conversation, direction: "incoming", sender: "Friend", text: "hello", timestamp: 1_000 + i, attachments: [] });
+    const db = (fixture.service as any).db as Database;
+    const query = db.query.bind(db);
+    let count = 0;
+    db.query = ((...args: Parameters<Database["query"]>) => { count++; return query(...args); }) as Database["query"];
+    try {
+      expect(fixture.service.history(fixture.conversation.id, undefined, 50).messages).toHaveLength(50);
+      expect(count).toBeLessThan(15);
+    } finally { db.query = query; }
   });
   test("contact and group pictures reach the inbox, message headers and an image route that reads the type from the bytes", async () => {
     const root = directory();
