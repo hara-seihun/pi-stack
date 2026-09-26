@@ -103,10 +103,12 @@ test("human text stays literal and uploaded SVG/HTML are downloads, not active c
     expect(html).toContain("**not markdown**");
     expect(html).not.toContain("<script>");
     expect(html).not.toContain("<image ");
-    expect(html.match(/<img /g)).toHaveLength(1);
+    expect(html).not.toContain('<img ');
+    expect(html).toContain('class="attachment-image-frame"');
+    expect(html).toContain('class="attachment-placeholder"');
     expect(html).toContain('download="drawing.svg"');
     expect(html).toContain('download="page.html"');
-    expect(html).toContain('/v1/messaging/attachments/png');
+    expect(html).not.toContain('/v1/messaging/attachments/png');
     expect(html).not.toContain("/uploads");
   } finally { globalThis.window = previous; }
 });

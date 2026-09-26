@@ -258,8 +258,8 @@ window.fetch = async (input, init) => {
     if (url.searchParams.getAll("user").some(user => user !== auth.user)) throw new Error("Request person does not match the authenticated person");
     url.searchParams.delete("user");
     url.searchParams.delete("session");
-    // Reported here, at the one door every API request goes through, so the
-    // page's busy state cannot depend on a caller remembering to show it.
+    // Classify at the shared transport: user actions are visible, while
+    // nested item/media requests and stream maintenance remain background.
     const settle = beginRequest(init?.method ?? request?.method ?? "GET", pathname);
     try {
       const response = await browserFetch(request ? new Request(url, request) : url, { ...init, headers, signal: combined, redirect: "error" });

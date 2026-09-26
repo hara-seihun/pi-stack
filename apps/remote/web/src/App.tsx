@@ -30,6 +30,7 @@ import { MessagingHistoryCache } from "./messaging-history";
 import { MessagingConversations } from "./Messages";
 import { MessagingCallProvider, SignalCallButton } from "./messaging-call";
 import { RequestIndicator } from "./RequestIndicator";
+import { beginSectionLoad } from "./in-flight";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
 import { shouldUndoClose, UndoCloses } from "./undo-closes";
 import { toast, ToastViewport } from "./toasts";
@@ -58,6 +59,7 @@ const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(modul
 const MachineTab = lazy(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
 
 function Loading({ label }: { label: string }) {
+  useEffect(() => beginSectionLoad(`screen:${label}`), [label]);
   return <section className="empty-state" aria-busy="true"><strong>{label}</strong></section>;
 }
 
@@ -217,6 +219,13 @@ function RemoteApp() {
   const [voiceDetail, setVoiceDetail] = useState("");
   const voice = useRef<VoiceSession | null>(null);
   const stream = useRef<StreamClient | null>(null);
+  const initialLoad = useRef<(() => void) | null>(null);
+  const sectionLoad = useRef<{ name: string; finish: () => void } | null>(null);
+  const finishSection = (name: string) => {
+    if (sectionLoad.current?.name !== name) return;
+    sectionLoad.current.finish();
+    sectionLoad.current = null;
+  };
   // Live answer and thinking text, thirty frames a second, kept out of the
   // app's state so only the open conversation re-renders for them.
   const live = useRef<LiveTextStore | null>(null);
@@ -272,7 +281,7 @@ function RemoteApp() {
   }, [person]);
   useEffect(() => () => cache.dispose(), [cache]);
   const messagingHistory = useMemo(() => new MessagingHistoryCache({
-    window: (id, signal, since) => messagingClient.history(id, signal, undefined, since),
+    window: (id, signal, priority) => messagingClient.history(id, signal, undefined, priority),
     changes: messagingClient.changes,
   }), [person]);
   useEffect(() => {
@@ -359,6 +368,7 @@ function RemoteApp() {
         cache.rememberThread(id, { transcript: window });
         stream.current?.restore({ type: "transcript", sessionId: id, ...window });
         patch({ transcript: window });
+        finishSection(`thread:${id}`);
         stream.current?.update({ transcriptFrom: window.items[0]?.seq ?? null });
       }
     });
@@ -366,7 +376,7 @@ function RemoteApp() {
   useLayoutEffect(() => {
     if (routeChat === stateRef.current.selectedChatId) return;
     if (!routeChat) { liveText.reset(); patch({ selectedChatId: null, transcript: null, images: null }); return; }
-    if (routeChat.startsWith("ai:")) void selectThread(routeChat.slice(3)).catch(cause => setChatError(String(cause)));
+    if (routeChat.startsWith("ai:")) void selectThread(routeChat.slice(3)).catch(cause => { finishSection(`thread:${routeChat.slice(3)}`); setChatError(String(cause)); });
     else { setStopTarget(null); setPasteSessionId(null); liveText.reset(); patch({ selectedChatId: routeChat, transcript: null, images: null, slashCommands: [] }); kick(); }
   }, [routeChat, selectThread, patch, kick, liveText, stateRef]);
 
@@ -394,6 +404,28 @@ function RemoteApp() {
     return () => window.removeEventListener("pi-notification", openNotification);
   }, [openThreadId, patch]);
 
+  useEffect(() => {
+    initialLoad.current = beginSectionLoad("app");
+    return () => { initialLoad.current?.(); initialLoad.current = null; };
+  }, []);
+  useEffect(() => {
+    sectionLoad.current?.finish();
+    sectionLoad.current = null;
+    const name = aiId ? `thread:${aiId}` : routeChat?.startsWith("human:") ? `message:${routeChat.slice(6)}` : route.tab === "machine" ? "machine" : null;
+    if (!name || aiId && cache.thread(aiId)?.transcript || name === "machine" && stateRef.current.dashboard) return;
+    const finish = beginSectionLoad(name);
+    sectionLoad.current = { name, finish };
+    if (name.startsWith("message:")) {
+      const id = name.slice(8);
+      const ready = () => { const value = messagingHistory.get(id); if (value.history || value.error) finishSection(name); };
+      const unsubscribe = messagingHistory.subscribe(ready);
+      messagingHistory.ensure(id);
+      ready();
+      return () => { unsubscribe(); finishSection(name); };
+    }
+    return () => finishSection(name);
+  }, [aiId, routeChat, route.tab, cache, messagingHistory]);
+
   // One stream carries every section. Session-scoped frames for a thread the
   // person left are dropped by the client before they reach this handler.
   const notificationsSubscribed = useRef(false);
@@ -406,6 +438,8 @@ function RemoteApp() {
         case "bootstrap": {
           undoCloses.setScope(`${person}:${event.bootstrap.environmentId}`);
           patch({ bootstrap: event.bootstrap, syncing: false });
+          initialLoad.current?.();
+          initialLoad.current = null;
           speech.configure(event.bootstrap.speech);
           if (event.type === "hello" && !notificationsSubscribed.current && event.bootstrap.environmentId) {
             notificationsSubscribed.current = true;
@@ -442,11 +476,12 @@ function RemoteApp() {
           if (closed) navigate(routeHome(currentRoute()), { replace: true });
           break;
         }
-        case "dashboard": patch({ dashboard: event.dashboard }); break;
+        case "dashboard": patch({ dashboard: event.dashboard }); finishSection("machine"); break;
         case "transcript": {
           const previous = stateRef.current.transcript;
           const transcript = applyTranscriptEvent(previous, event);
           patch({ transcript, syncing: false, earlierError: "" });
+          finishSection(`thread:${event.sessionId}`);
           if (previous && previous.generation !== transcript.generation) stream.current?.update({ transcriptFrom: null });
           cache.rememberThread(event.sessionId, { transcript });
           break;
@@ -479,6 +514,12 @@ function RemoteApp() {
       onEvent: handle,
       onStatus: (status) => {
         if (status.state !== "open") carrying.current = false;
+        if (status.state === "offline") {
+          initialLoad.current?.();
+          initialLoad.current = null;
+          sectionLoad.current?.finish();
+          sectionLoad.current = null;
+        }
         patch({
           offline: status.state === "offline" ? status.error || "Offline" : "",
           syncing: status.state !== "open" || !carrying.current,

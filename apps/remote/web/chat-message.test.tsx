@@ -105,7 +105,8 @@ test("unconfirmed receipts retain checking and failed receipts retain explicit d
 
 test("inline image attachments do not repeat their download link", () => {
   const image = renderMessage({ attachments: [{ id: "image", name: "photo.png", mimeType: "image/png", size: 2048 }] });
-  expect(image).toContain('alt="photo.png"');
+  expect(image).toContain('class="attachment-image-frame"');
+  expect(image).not.toContain('<img');
   expect(image).not.toContain("photo.png · 2 KB");
   expect(image).not.toContain("download=");
 
@@ -124,22 +125,23 @@ test("the image editor owns the image download action", () => {
   expect(paper).not.toContain(">Download</a>");
 });
 
-test("attachment images open drawing on click, Enter, and Space, preserving the actual image", () => {
-  let opened = 0;
-  let prevented = 0;
-  let stopped = 0;
-  let focused = 0;
-  const image = { src: "/image", focus: () => { focused++; } } as unknown as HTMLImageElement;
-  const component = AttachmentImage({ src: image.src, alt: "A photo", downloadQuery: true, onEditImage: selected => { expect(selected).toBe(image); opened++; } });
-  const event = { currentTarget: image, preventDefault: () => { prevented++; }, stopPropagation: () => { stopped++; } };
-  expect(component.props.role).toBe("button");
-  expect(component.props.tabIndex).toBe(0);
-  expect(component.props["data-download-query"]).toBe(true);
-  component.props.onClick(event);
-  component.props.onKeyDown({ ...event, key: "Enter" });
-  component.props.onKeyDown({ ...event, key: " " });
-  component.props.onKeyDown({ ...event, key: "Escape" });
-  expect([opened, prevented, stopped, focused]).toEqual([3, 3, 3, 3]);
-  AttachmentImage({ src: image.src, alt: "Delegated image" }).props.onClick(event);
-  expect([prevented, stopped]).toEqual([3, 3]);
+test("attachment media reserves geometry without starting offscreen downloads", () => {
+  const image = renderToStaticMarkup(<AttachmentImage src="/image" alt="A photo" downloadQuery onEditImage={() => {}} />);
+  expect(image).toContain('class="attachment-image-frame"');
+  expect(image).toContain('class="attachment-placeholder"');
+  expect(image).not.toContain('src="/image"');
+  const audio = renderMessage({ attachments: [{ id: "audio", name: "voice.mp3", mimeType: "audio/mpeg", size: 1000 }] });
+  const video = renderMessage({ attachments: [{ id: "video", name: "clip.mp4", mimeType: "video/mp4", size: 1000 }] });
+  expect(audio).toContain('class="attachment-playback audio"');
+  expect(video).toContain('class="attachment-playback video"');
+  expect(audio).not.toContain('<audio');
+  expect(video).not.toContain('<video');
+});
+
+test("group segments can prioritize newest messages in DOM without changing their visual order", () => {
+  const html = renderToStaticMarkup(<ChatMessageGroup kind="assistant" label="Sam" newestFirstDom segments={[
+    { id: "first", text: "first" }, { id: "last", text: "last" },
+  ]} />);
+  expect(html).toContain('class="message-segments newest-first-dom"');
+  expect(html.indexOf('data-message-id="last"')).toBeLessThan(html.indexOf('data-message-id="first"'));
 });

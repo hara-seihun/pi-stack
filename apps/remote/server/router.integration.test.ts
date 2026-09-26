@@ -26,6 +26,7 @@ function person(user: string, encrypted: boolean, remoteAccess: string[]) {
     if (!existsSync(join(units, `pi-remote@${user}.service`))) return new Response("Stopped", { status: 503 });
     const url = new URL(req.url);
     if (url.pathname === "/v1/health" && healthChecks.has(user)) return healthChecks.get(user)!();
+    if (url.pathname === "/v1/immutable-test") return new Response(req.headers.has("if-none-match") ? null : user, { status: req.headers.has("if-none-match") ? 304 : 200, headers: { "cache-control": "private, max-age=31536000, immutable", etag: '"file"' } });
     if (url.pathname === "/v1/encoded-test") return new Response(gzipSync(JSON.stringify({ user, text: "message".repeat(500) })), { headers: { "content-type": "application/json", "content-encoding": "gzip", "cache-control": "private, no-cache" } });
     if (url.pathname === "/v1/cache-test") return req.headers.get("if-none-match") === 'W/"cache"'
       ? new Response(null, { status: 304, headers: { etag: 'W/"cache"', "cache-control": "private, no-cache" } })
@@ -251,6 +252,22 @@ test("each person's discovery is policy controlled; open guests receive no remot
     expect(JSON.stringify(body)).not.toContain("upstreams");
     expect(JSON.stringify(body)).not.toContain("127.0.0.1");
   }
+});
+
+test("immutable bytes cache only under an authenticated session-scoped resource URL", async () => {
+  const kenan = await token("kenan");
+  const sybil = await token("sybil");
+  const path = "/v1/immutable-test";
+  expect((await request(path, kenan)).headers.get("cache-control")).toBe("private, no-cache");
+  const owned = await request(`${path}?session=${kenan}`);
+  expect(await owned.text()).toBe("kenan");
+  expect(owned.headers.get("cache-control")).toContain("immutable");
+  const unchanged = await fetch(`${base}${path}?session=${kenan}`, { headers: { "if-none-match": '"file"' } });
+  expect(unchanged.status).toBe(304);
+  expect(unchanged.headers.get("cache-control")).toContain("immutable");
+  expect((await request(`${path}?session=${sybil}&user=kenan`)).status).toBe(403);
+  expect((await request(`${path}?session=${kenan}&user=sybil`)).status).toBe(403);
+  expect((await request(path)).headers.get("cache-control")).toBe("no-store");
 });
 
 test("remote requests, notifications and downloads share authorization without forwarding credentials", async () => {

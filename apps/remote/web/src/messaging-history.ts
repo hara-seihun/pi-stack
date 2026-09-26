@@ -1,10 +1,9 @@
 import type { MessagingHistory, MessagingHistoryChanges, MessagingResult, MessagingSnapshot } from "../../server/messaging/protocol";
 import { mergeHumanMessages } from "./messaging-state";
 
-export const MESSAGING_PRELOAD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export interface MessagingHistorySource {
-  window(id: string, signal: AbortSignal, since: number): Promise<MessagingResult<MessagingHistory>>;
-  changes(id: string, signal: AbortSignal, after: number, from: number): Promise<MessagingResult<MessagingHistoryChanges>>;
+  window(id: string, signal: AbortSignal, priority: "high" | "low"): Promise<MessagingResult<MessagingHistory>>;
+  changes(id: string, signal: AbortSignal, after: number, from: number, priority: "high" | "low"): Promise<MessagingResult<MessagingHistoryChanges>>;
 }
 export interface CachedMessagingHistory {
   history?: MessagingHistory;
@@ -25,7 +24,7 @@ const empty: CachedMessagingHistory = { removed: new Set(), error: "" };
 
 /**
  * Owned by the unlocked app, never persisted to device storage. Each
- * conversation loads its recent window once; afterwards only messages revised
+ * conversation loads its newest page once; afterwards only messages revised
  * after the held revision travel, and only when the inbox announces a newer one.
  */
 export class MessagingHistoryCache {
@@ -34,8 +33,9 @@ export class MessagingHistoryCache {
   private lifetime = new AbortController();
   private readonly queue = new Set<string>();
   private running = 0;
+  private selected: string | null = null;
 
-  constructor(private readonly source: MessagingHistorySource, private readonly now = Date.now) {}
+  constructor(private readonly source: MessagingHistorySource) {}
 
   get = (id: string): CachedMessagingHistory => this.entries.get(id)?.value ?? empty;
   subscribe = (listener: () => void): (() => void) => {
@@ -44,7 +44,7 @@ export class MessagingHistoryCache {
   };
 
   reconcile(snapshot: MessagingSnapshot): void {
-    for (const conversation of snapshot.conversations) {
+    for (const conversation of [...snapshot.conversations].sort((a, b) => b.updatedAt - a.updatedAt)) {
       const entry = this.entry(conversation.id);
       if (entry) entry.wanted = Math.max(entry.wanted, conversation.revision);
       this.enqueue(conversation.id, false);
@@ -53,6 +53,7 @@ export class MessagingHistoryCache {
   }
 
   ensure(id: string): void {
+    this.selected = id;
     this.entry(id);
     this.enqueue(id, true);
     this.drain();
@@ -75,6 +76,7 @@ export class MessagingHistoryCache {
   dispose(): void {
     this.lifetime.abort();
     this.running = 0;
+    this.selected = null;
     this.queue.clear();
     this.entries.clear();
     this.listeners.clear();
@@ -106,8 +108,11 @@ export class MessagingHistoryCache {
   }
 
   private drain(): void {
-    while (!this.lifetime.signal.aborted && this.running < 4 && this.queue.size) {
-      const id = this.queue.values().next().value!;
+    while (!this.lifetime.signal.aborted && this.queue.size) {
+      const selected = this.selected && this.queue.has(this.selected) ? this.selected : null;
+      // Keep one connection available for a tap even while other chats preload.
+      if (this.running >= (selected ? 4 : 3)) return;
+      const id = selected ?? this.queue.values().next().value!;
       this.queue.delete(id);
       const entry = this.entries.get(id)!;
       if (entry.loading || !this.stale(entry)) continue;
@@ -122,9 +127,10 @@ export class MessagingHistoryCache {
   private async load(id: string, entry: Entry): Promise<void> {
     const signal = this.lifetime.signal;
     const held = entry.value.history;
+    const priority = id === this.selected ? "high" : "low";
     const result = held
-      ? await this.source.changes(id, signal, held.revision, held.before ?? 0)
-      : await this.source.window(id, signal, Math.max(0, this.now() - MESSAGING_PRELOAD_WINDOW_MS));
+      ? await this.source.changes(id, signal, held.revision, held.before ?? 0, priority)
+      : await this.source.window(id, signal, priority);
     if (signal.aborted) return;
     entry.loading = false;
     this.running--;
