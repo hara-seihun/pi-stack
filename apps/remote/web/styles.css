@@ -109,8 +109,10 @@ button:disabled { cursor: default; opacity: .45; }
 .markdown-body pre code { padding: 0; background: transparent; font-size: 13px; white-space: pre; overflow-wrap: normal; }
 .markdown-body a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .markdown-body hr { margin: 1em 0; border: 0; border-top: 1px solid var(--border); }
-.markdown-body table { display: block; max-width: 100%; margin: .75em 0; overflow-x: auto; border-collapse: collapse; }
-.markdown-body th, .markdown-body td { padding: 6px 9px; border: 1px solid var(--border); text-align: left; }
+.markdown-body .table-scroll { max-width: 100%; margin: .75em 0; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.markdown-body .table-scroll::-webkit-scrollbar { display: none; }
+.markdown-body table { width: max-content; min-width: 100%; border-collapse: collapse; }
+.markdown-body th, .markdown-body td { min-width: 9rem; max-width: 24rem; padding: 6px 9px; border: 1px solid var(--border); text-align: left; overflow-wrap: normal; }
 /* Transcript and attachment images are bounded in both directions: a tall
    screenshot from a tool result must not push the conversation down a page,
    and the browser can lay the message out before the bytes arrive. */

@@ -91,6 +91,10 @@ function build(): MarkdownRenderer {
     tokens[index].attrSet("rel", "noopener noreferrer");
     return defaultLinkOpen(tokens, index, options, env, renderer);
   };
+  markdown.renderer.rules.table_open = (tokens, index, options, _env, renderer) =>
+    `<div class="table-scroll">${renderer.renderToken(tokens, index, options)}`;
+  markdown.renderer.rules.table_close = (tokens, index, options, _env, renderer) =>
+    `${renderer.renderToken(tokens, index, options)}</div>`;
   installInlineImages(markdown);
   return markdown;
 }
