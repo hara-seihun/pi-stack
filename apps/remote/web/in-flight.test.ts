@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ACTIVATION_WINDOW_MS, NATIVE_METHOD, SLOW_REQUEST_MS, TIMING_HISTORY_LIMIT, attributedOrigin, beginRequest, inFlight, noteActivation, reportingBridge, requestVisibility, setRequestTimingReporter, type RequestTiming } from "./src/in-flight";
+import { ACTIVATION_WINDOW_MS, NATIVE_METHOD, SLOW_REQUEST_MS, TIMING_HISTORY_LIMIT, attributedOrigin, beginRequest, beginSectionLoad, inFlight, noteActivation, reportingBridge, requestVisibility, setRequestTimingReporter, type RequestTiming } from "./src/in-flight";
 
 class FakeControl {
   attributes = new Map<string, string>();
@@ -16,18 +16,36 @@ class FakeControl {
   }
 }
 
-test("writes always show; reads show only within the press window; the stream never shows", () => {
+test("top-level requests and actions show; descendant media, read receipts and stream maintenance do not", () => {
   expect(requestVisibility("POST", "/v1/sessions", null)).toBe("shown");
   expect(requestVisibility("DELETE", "/pi-stack/v1/sessions/x", 10_000)).toBe("shown");
   expect(requestVisibility("GET", "/v1/sessions", null)).toBe("background");
-  expect(requestVisibility("GET", "/v1/sessions", ACTIVATION_WINDOW_MS)).toBe("shown");
+  expect(requestVisibility("GET", "/v1/remotes/other/v1/sessions", ACTIVATION_WINDOW_MS)).toBe("shown");
   expect(requestVisibility("GET", "/v1/sessions", ACTIVATION_WINDOW_MS + 1)).toBe("background");
+  for (const path of ["/v1/sessions/x/items/a", "/v1/sessions/x/images/hash", "/v1/sessions/x/transcript", "/v1/messaging/attachments/file", "/v1/messaging/backends/signal/avatars/person", "/v1/speech/utterances/id/audio", "/v1/files/download"]) {
+    expect(requestVisibility("GET", path, 5)).toBe("background");
+  }
   expect(requestVisibility("POST", "/v1/stream", 5)).toBe("background");
-  expect(requestVisibility("POST", "/v1/stream/abc", 5)).toBe("shown");
+  expect(requestVisibility("POST", "/v1/stream/abc", 5)).toBe("background");
+  expect(requestVisibility("POST", "/v1/remotes/other/v1/messaging/conversations/id/read", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/diagnostics/requests", 5)).toBe("background");
-  expect(requestVisibility(NATIVE_METHOD, "native:getState", null)).toBe("background");
+  expect(requestVisibility(NATIVE_METHOD, "native:getState", 5)).toBe("background");
   expect(requestVisibility(NATIVE_METHOD, "native:installAppUpdate", 50)).toBe("shown");
   expect(requestVisibility(NATIVE_METHOD, "native:haptic", 50)).toBe("background");
+});
+
+test("a section settles on its own readiness, independently of descendant fetches", () => {
+  const events: number[] = [];
+  const unsubscribe = inFlight.subscribe(() => events.push(inFlight.count()));
+  const ready = beginSectionLoad("thread:one");
+  const child = beginRequest("GET", "/v1/sessions/one/items/a");
+  expect(inFlight.sections()).toEqual(["thread:one"]);
+  expect(inFlight.count()).toBe(1);
+  ready(); ready();
+  expect(inFlight.count()).toBe(0);
+  child();
+  expect(events).toEqual([1, 0]);
+  unsubscribe();
 });
 
 test("a native bridge call after a press shows like a request and settles with its promise", async () => {
@@ -50,7 +68,7 @@ test("a delayed tactile confirmation does not prolong the server progress bar", 
   let resolve!: () => void;
   const bridge = reportingBridge({ haptic: () => new Promise<void>(done => { resolve = done; }) });
   noteActivation(button as unknown as EventTarget);
-  const server = beginRequest("GET", "/v1/sessions/thread/item", performance.now());
+  const server = beginRequest("POST", "/v1/sessions/thread/prompt", performance.now());
   const haptic = bridge.haptic();
   expect(inFlight.count()).toBe(1);
   server();

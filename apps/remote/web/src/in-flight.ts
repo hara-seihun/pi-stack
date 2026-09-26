@@ -15,20 +15,40 @@ export interface InFlightRequest { id: number; method: string; path: string; ori
 
 const listeners = new Set<() => void>();
 const requests = new Map<number, InFlightRequest>();
+const sections = new Map<number, string>();
 const timings: RequestTiming[] = [];
 let timingReporter: ((timing: RequestTiming) => void) | null = null;
 let nextId = 1;
 let activation: Activation | null = null;
 
 const WRITES = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const TOP_LEVEL_READ = /^\/v1\/(?:sessions(?:\/archived)?|workspaces|messaging|files|environments|actions)$/;
+const BACKGROUND_WRITE = /^\/v1\/(?:stream(?:\/[^/]+)?|messaging\/conversations\/[^/]+\/read|speech\/utterances)$/;
+const NATIVE_ACTION = /^native:(?:installAppUpdate|checkAppUpdate|notifications)$/;
 
-/** Native bridge calls report with this method; they show like reads, when a press is behind them. */
+/** Native bridge calls are not API reads; only explicit native actions can show progress. */
 export const NATIVE_METHOD = "NATIVE";
 
 export function requestVisibility(method: string, pathname: string, activationAgeMs: number | null): "shown" | "background" {
-  if (/\/v1\/(?:stream|diagnostics\/requests)$/.test(pathname) || pathname === "native:haptic") return "background";
-  if (WRITES.has(method)) return "shown";
-  return activationAgeMs !== null && activationAgeMs >= 0 && activationAgeMs <= ACTIVATION_WINDOW_MS ? "shown" : "background";
+  const route = pathname.replace(/^.*(?=\/v1\/)/, "");
+  if (/^\/v1\/(?:stream(?:\/|$)|diagnostics\/requests$)/.test(route)) return "background";
+  if (method === NATIVE_METHOD) return NATIVE_ACTION.test(pathname) && activationAgeMs !== null && activationAgeMs >= 0 && activationAgeMs <= ACTIVATION_WINDOW_MS ? "shown" : "background";
+  if (WRITES.has(method)) return BACKGROUND_WRITE.test(route) ? "background" : "shown";
+  return method === "GET" && TOP_LEVEL_READ.test(route) && activationAgeMs !== null && activationAgeMs >= 0 && activationAgeMs <= ACTIVATION_WINDOW_MS ? "shown" : "background";
+}
+
+/** A screen owns readiness; descendant fetches never extend its lifetime. */
+export function beginSectionLoad(name: string): () => void {
+  const id = nextId++;
+  sections.set(id, name);
+  notify();
+  let settled = false;
+  return () => {
+    if (settled) return;
+    settled = true;
+    sections.delete(id);
+    notify();
+  };
 }
 
 /** The control a request should be attributed to, given the last press. */
@@ -99,8 +119,9 @@ function notify(): void { for (const listener of listeners) listener(); }
 
 export const inFlight = {
   subscribe(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  count(): number { return requests.size; },
+  count(): number { return requests.size + sections.size; },
   list(): InFlightRequest[] { return [...requests.values()]; },
+  sections(): string[] { return [...sections.values()]; },
   timings(): RequestTiming[] { return [...timings]; },
   /** The control currently attributed to new requests; for tests and diagnostics. */
   activation(): Activation | null { return activation; },
