@@ -26,10 +26,12 @@ function deferred() {
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
-async function fixture(prepare?: (session: AgentSession) => void, extension?: string, env: NodeJS.ProcessEnv = {}) {
+async function fixture(prepare?: (session: AgentSession) => void, extension?: string, env: NodeJS.ProcessEnv = {}, raw = false) {
   captured.prepare = prepare;
   const cwd = mkdtempSync(join(tmpdir(), "pi-halt-")), events: PiEvent[] = [];
-  const args: string[] = [];
+  const args: string[] = raw ? ["--raw"] : [];
+  if (raw) env = { PI_ORCHESTRATOR_CONFIG: join(cwd, "config.json"), PI_ORCHESTRATOR_LEDGER: join(cwd, "ledger.sqlite3"),
+    PI_ORCHESTRATOR_AUTH: join(cwd, "auth.json"), PI_MODEL_BROKER_URL: undefined, PI_ORCHESTRATOR_ASSIGNED: "0", PI_SUBAGENT_MODEL: undefined, ...env };
   if (extension) {
     const path = join(cwd, "fixture.mjs");
     writeFileSync(path, extension);
@@ -68,14 +70,51 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
   return { session, native, events, command, waitFor, reply, message };
 }
 
-it.each([false, true])("identifies capture ownership without losing runner observation: Remote=%s", async remote => {
+it.each([
+  { remote: false, raw: false },
+  { remote: true, raw: false },
+  { remote: true, raw: true },
+])("captures the request and finished reply with correct ownership: $remote / raw=$raw", async ({ remote, raw }) => {
   const f = await fixture(undefined, undefined, remote
     ? { PI_REMOTE_SESSION_ID: "mirror-owner", PI_REMOTE_SERVER_URL: "http://127.0.0.1:1" }
-    : { PI_REMOTE_SESSION_ID: "", PI_REMOTE_SERVER_URL: "" });
+    : { PI_REMOTE_SESSION_ID: "", PI_REMOTE_SERVER_URL: "" }, raw);
+  const answer = f.message([{ type: "text", text: "done" }], "stop");
+  f.native.agent.streamFunction = () => f.reply(answer);
   expect(await f.command("prompt", { workId: "capture", message: "capture" })).toMatchObject({ success: true });
   await f.waitFor(event => event.type === "agent_settled");
+  const contextOwner = remote && !raw ? "remote-mirror" : "runner";
+  const request = { role: "user", content: [{ type: "text", text: "capture" }] };
+  const updates = f.events.filter(event => event.type === "context_update");
+  expect(updates).toMatchObject([
+    { contextOwner, context: { tools: expect.any(Array), messages: [request] } },
+    { contextOwner, context: { tools: expect.any(Array), messages: [request, answer] } },
+  ]);
+  if (raw) for (const update of updates) expect(update.context).toMatchObject({ systemPrompt: "", tools: [] });
+  expect(f.events.indexOf(updates[1]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
+}, 3000);
+
+it("captures tool results before the next request without duplicating completed messages", async () => {
+  const f = await fixture(undefined, `export default pi => {
+    pi.registerTool({ name: "fixture_result", label: "Fixture", description: "Fixture result",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({ content: [{ type: "text", text: "tool output" }], details: {} }) });
+  }`);
+  const call = f.message([{ type: "toolCall", id: "result", name: "fixture_result", arguments: {} }], "toolUse");
+  const answer = f.message([{ type: "text", text: "done" }], "stop");
+  let requests = 0;
+  f.native.agent.streamFunction = () => f.reply(requests++ === 0 ? call : answer);
+  expect(await f.command("prompt", { workId: "tool", message: "use tool" })).toMatchObject({ success: true });
+  await f.waitFor(event => event.type === "agent_settled");
+  const user = { role: "user", content: [{ type: "text", text: "use tool" }] };
+  const result = { role: "toolResult", toolCallId: "result", toolName: "fixture_result", isError: false,
+    content: [{ type: "text", text: "tool output" }] };
+  expect(requests).toBe(2);
   expect(f.events.filter(event => event.type === "context_update")).toMatchObject([
-    { contextOwner: remote ? "remote-mirror" : "runner", context: { tools: expect.any(Array), messages: expect.any(Array) } },
+    { context: { messages: [user] } },
+    { context: { messages: [user, call] } },
+    { context: { messages: [user, call, result] } },
+    { context: { messages: [user, call, result] } },
+    { context: { messages: [user, call, result, answer] } },
   ]);
 }, 3000);
 

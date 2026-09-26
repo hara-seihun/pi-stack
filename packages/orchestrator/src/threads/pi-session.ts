@@ -50,12 +50,22 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const isolated = await isolatedPiContext({ ...options, cwd, sessionFile: sessionManager.getSessionFile()! }, env);
       // Pi Remote's context-mirror extension owns context capture when it is loaded; a raw session loads no packages, so the runner reports.
       const contextOwner = !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
+      // Like the mirror, the runner also reports each finished reply. The `context` event fires only before a
+      // model call, so without this a raw thread's context never held its final answer: the transcript kept it
+      // as live text and the supervisor's response metrics, keyed to that message, had nothing to attach to.
       const threadContext = { name: "thread-context", factory: (pi: Parameters<typeof threadSpeed>[0]) => {
+        let reported: { systemPrompt: string; tools: unknown[]; messages: ReturnType<typeof convertToLlm> } | null = null;
         pi.on("context", (event, ctx) => {
           const active = new Set(pi.getActiveTools());
-          output({ type: "context_update", contextOwner, context: { systemPrompt: ctx.getSystemPrompt(),
+          reported = { systemPrompt: ctx.getSystemPrompt(),
             tools: pi.getAllTools().filter(tool => active.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters })),
-            messages: convertToLlm(event.messages) } });
+            messages: convertToLlm(event.messages) };
+          output({ type: "context_update", contextOwner, context: reported });
+        });
+        pi.on("message_end", event => {
+          if (!reported || (event.message.role !== "assistant" && event.message.role !== "toolResult")) return;
+          reported = { ...reported, messages: [...reported.messages, ...convertToLlm([event.message])] };
+          output({ type: "context_update", contextOwner, context: reported });
         });
       } };
       const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
