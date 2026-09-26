@@ -66,6 +66,36 @@ test("a priced hour keeps its rate, so spend since a fixed moment only grows", (
   expect(spent(start + 3 * HOUR)).toBeGreaterThan(first);
 }));
 
+test("a reset meter rounded to zero retains the last positive rate rather than freezing zero-dollar hours", () => ledger(store => {
+  const start = 20 * DAY;
+  store.upsertAccount({ id: "codex-1", provider: "openai-codex" });
+  record(store, "codex-1", "interactive", "broker:sybil:1", "output", 1_000_000, start);
+  store.recordMeter("codex-1", "codex-7d", 10, start + 5 * DAY, start + HOUR / 2);
+  const prior = personUsage(store, start, start + HOUR, priceOf, plans).subscriptions[0]!.rate!;
+  record(store, "codex-1", "interactive", "broker:sybil:2", "output", 1_000_000, start + HOUR);
+  store.recordMeter("codex-1", "codex-7d", 0, start + 8 * DAY, start + HOUR + 1);
+  expect(calibrateRate(store, plans[0]!, priceOf, start + 2 * HOUR)).toBeNull();
+  const next = personUsage(store, start + HOUR, start + 2 * HOUR, priceOf, plans);
+  expect(next.rows[0]!.spend).toBeCloseTo(10 * prior);
+  expect(next.subscriptions[0]!.rate).toBe(prior);
+}));
+
+test("opening a ledger repairs frozen zero rates from a rounded reset", () => {
+  const root = mkdtempSync(join(tmpdir(), "person-usage-"));
+  const path = join(root, "ledger.sqlite3");
+  try {
+    const store = Store.open(path);
+    store.db.exec(`INSERT INTO usage_rate(provider,hour,rate) VALUES ('openai-codex',0,0.025),('openai-codex',3600000,0),('openai-codex',7200000,0),('anthropic',0,0)`);
+    store.close();
+    const reopened = Store.open(path);
+    expect(reopened.db.prepare("SELECT hour,rate FROM usage_rate WHERE provider='openai-codex' ORDER BY hour").all()).toEqual([
+      { hour: 0, rate: 0.025 }, { hour: HOUR, rate: 0.025 }, { hour: 2 * HOUR, rate: 0.025 },
+    ]);
+    expect(reopened.db.prepare("SELECT count(*) count FROM usage_rate WHERE provider='anthropic'").get()).toEqual({ count: 0 });
+    reopened.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("without any meter reading nothing is priced", () => ledger(store => {
   store.upsertAccount({ id: "claude", provider: "anthropic" });
   record(store, "claude", "interactive", "broker:sybil:1", "output", 1000, 0);

@@ -192,8 +192,17 @@ function UsageTile({ label, percent, detail }: { label: string; percent: number 
 
 export function MachineScreen(props: MachineScreenProps) {
   const { dashboard } = props;
+  const spendingPlans = dashboard?.plans.filter((plan) => plan.spent) ?? [];
+  const totalDay = spendingPlans.reduce((total, plan) => total + plan.spent!.day, 0);
+  const totalWeek = spendingPlans.reduce((total, plan) => total + plan.spent!.week, 0);
   return <main className="machine-screen">
     <div className="machine-grid">
+      {spendingPlans.length > 0 && <Card title="Your model usage · all plans">
+        <div className="machine-plan-spent" aria-label={`Across all plans you used ${formatDollars(totalDay)} today and ${formatDollars(totalWeek)} this week`}>
+          <span>Total</span><strong>{formatDollars(totalDay)}</strong><small>today</small><strong>{formatDollars(totalWeek)}</strong><small>this week</small>
+        </div>
+        <p className="machine-secondary">Subscription quota used, valued in dollars. Plan cards below show each provider separately.</p>
+      </Card>}
       {dashboard?.plans.map((plan) => <Plan key={plan.id} plan={plan} modelCounts={props.modelCounts} />)}
       {dashboard?.allowance && <Allowance allowance={dashboard.allowance} />}
       {dashboard?.people && <People usage={dashboard.people} />}
