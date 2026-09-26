@@ -11,6 +11,7 @@ import { appPath } from "./app-path";
 import { messagingAvatarUrl } from "./messaging-avatar";
 import { resourceUrl } from "./resource-url";
 import { MessageLinkPreviews } from "./link-previews";
+import { useNearViewport } from "./near-viewport";
 import { formatResponseMetrics } from "./response-metrics";
 import { copyText, useMessageMenu, type MessageMenuItem } from "./message-menu";
 import { speech, speechTitle, useSpeech } from "./speech";
@@ -132,11 +133,9 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
   return <>
     {children}
     {attachments.map(attachment => <div className="message-attachment" key={attachment.id}>
-      {attachment.kind === "image"
-        ? <AttachmentImage src={attachment.url} alt={attachment.name} downloadQuery onEditImage={onEditImage} />
+      {attachment.kind === "image" ? <AttachmentImage src={attachment.url} alt={attachment.name} downloadQuery onEditImage={onEditImage} />
         : <>
-          {attachment.kind === "audio" && <audio className="message-attachment-media" controls preload="metadata" src={attachment.url} aria-label={attachment.name} />}
-          {attachment.kind === "video" && <video className="message-attachment-media" controls preload="metadata" playsInline src={attachment.url} aria-label={attachment.name} />}
+          {(attachment.kind === "audio" || attachment.kind === "video") && <AttachmentPlayback attachment={attachment} />}
           <a href={attachment.url} download={attachment.name}>{attachment.name} · {Math.ceil(attachment.size / 1024)} KB</a>
         </>}
     </div>)}
@@ -167,7 +166,7 @@ export function ChatMessage(props: ChatMessageProps) {
  * run of delivered messages does not repeat itself; anything unresolved or
  * failed stays visible on the segment it belongs to.
  */
-export function ChatMessageGroup({ kind, label, avatar, segments, checking = false, menu, onEditImage }: {
+export function ChatMessageGroup({ kind, label, avatar, segments, checking = false, menu, onEditImage, newestFirstDom = false }: {
   kind: string;
   label: string;
   avatar?: string;
@@ -175,15 +174,18 @@ export function ChatMessageGroup({ kind, label, avatar, segments, checking = fal
   checking?: boolean;
   menu?: MessageMenuItem[];
   onEditImage?(image: HTMLImageElement): void;
+  newestFirstDom?: boolean;
 }) {
   const text = segments.map(segment => segment.text).filter(Boolean).join("\n\n");
   return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={segments[0]?.timestamp} menu={menu}>
-    {segments.map((segment, index) => {
+    <div className={newestFirstDom ? "message-segments newest-first-dom" : "message-segments"}>
+    {(newestFirstDom ? segments.map((segment, index) => ({ segment, index })).reverse() : segments.map((segment, index) => ({ segment, index }))).map(({ segment, index }) => {
       const last = index === segments.length - 1;
       const delivery = segment.delivery && (last || segment.delivery.status !== "sent") ? segment.delivery : undefined;
       const time = segment.timestamp === undefined ? undefined : new Date(segment.timestamp);
       return <GroupSegment key={segment.id} segment={segment} label={label} time={time} delivery={delivery} checking={checking} onEditImage={onEditImage} />;
     })}
+    </div>
   </MessageFrame>;
 }
 
@@ -254,6 +256,20 @@ export function messagingMessageProps(message: MessagingMessage, backendId = "")
   };
 }
 
+function AttachmentPlayback({ attachment }: { attachment: ChatAttachment }) {
+  const { ref, near } = useNearViewport<HTMLDivElement>();
+  const [error, setError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const src = attempt ? `${attachment.url}${attachment.url.includes("?") ? "&" : "?"}retry=${attempt}` : attachment.url;
+  return <div className={`attachment-playback ${attachment.kind}`} ref={ref}>
+    {!near && <div className="attachment-placeholder" aria-hidden="true" />}
+    {near && !error && (attachment.kind === "audio"
+      ? <audio className="message-attachment-media" controls preload="none" src={src} aria-label={attachment.name} onError={() => setError(true)} />
+      : <video className="message-attachment-media" controls preload="metadata" playsInline src={src} aria-label={attachment.name} onError={() => setError(true)} />)}
+    {error && <div className="attachment-error" role="alert">Could not load {attachment.kind}. <button type="button" onClick={() => { setError(false); setAttempt(value => value + 1); }}>Retry</button></div>}
+  </div>;
+}
+
 export function AttachmentImage({ src, alt, className = "context-image", downloadQuery = false, onEditImage }: {
   src: string;
   alt: string;
@@ -261,14 +277,23 @@ export function AttachmentImage({ src, alt, className = "context-image", downloa
   downloadQuery?: boolean;
   onEditImage?(image: HTMLImageElement): void;
 }) {
+  const { ref, near } = useNearViewport<HTMLDivElement>();
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => { setState("loading"); setAttempt(0); }, [src]);
+  const imageSrc = near ? (attempt ? `${src}${src.includes("?") ? "&" : "?"}retry=${attempt}` : src) : undefined;
   const edit = (event: SyntheticEvent<HTMLImageElement>) => {
-    if (!onEditImage) return;
+    if (!onEditImage || state !== "ready") return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.focus({ preventScroll: true });
     onEditImage(event.currentTarget);
   };
-  return <img className={className} src={src} alt={alt} crossOrigin="anonymous" data-download-query={downloadQuery || undefined} loading="lazy" decoding="async" role="button" tabIndex={0} aria-label={`Draw on ${alt || "image"}`} onClick={edit} onKeyDown={event => {
-    if (event.key === "Enter" || event.key === " ") edit(event);
-  }} />;
+  return <div className="attachment-image-frame" ref={ref}>
+    {state === "loading" && <div className="attachment-placeholder" aria-hidden="true" />}
+    {state === "error" && <div className="attachment-error" role="alert">Could not load image. <button type="button" onClick={() => { setState("loading"); setAttempt(value => value + 1); }}>Retry</button></div>}
+    {imageSrc && state !== "error" && <img className={className} src={imageSrc} alt={alt} crossOrigin="anonymous" data-download-query={downloadQuery || undefined} loading="lazy" decoding="async" role="button" tabIndex={0} aria-label={`Draw on ${alt || "image"}`} onLoad={() => setState("ready")} onError={() => setState("error")} onClick={edit} onKeyDown={event => {
+      if (event.key === "Enter" || event.key === " ") edit(event);
+    }} />}
+  </div>;
 }

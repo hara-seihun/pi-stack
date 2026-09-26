@@ -1,12 +1,20 @@
 .message-link-previews { min-height: 1px; }
+.link-preview-skeleton { display: flex; flex-direction: column; justify-content: center; gap: 10px; width: min(440px, 100%); height: 80px; box-sizing: border-box; margin-top: 10px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-2); background: var(--surface-2); }
+.link-preview-skeleton span { display: block; height: 9px; width: 65%; border-radius: 5px; background: var(--surface-3); }
+.link-preview-skeleton span:first-child { width: 30%; }
+.link-preview-skeleton span:last-child { width: 48%; }
 .link-preview { display: flex; width: min(440px, 100%); box-sizing: border-box; overflow: hidden; margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius-2); background: var(--surface-2); color: var(--text); text-decoration: none; }
 .link-preview:hover { border-color: var(--accent); }
 .link-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.link-preview-image { flex: 0 0 104px; width: 104px; min-height: 104px; max-height: 156px; object-fit: cover; align-self: stretch; }
+.link-preview-artwork { position: relative; flex: 0 0 104px; width: 104px; min-height: 104px; max-height: 156px; background: var(--surface-3); }
+.link-preview-image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.link-preview-artwork:has(.link-preview-image-placeholder) .link-preview-image { opacity: 0; }
+.link-preview-image-placeholder { position: absolute; inset: 0; background: var(--surface-3); }
+.link-preview-image-error { display: grid; place-items: center; height: 100%; padding: 6px; box-sizing: border-box; text-align: center; color: var(--muted); font-size: 11px; }
 .link-preview-copy { display: flex; flex: 1; flex-direction: column; gap: 5px; min-width: 0; padding: 12px; overflow-wrap: anywhere; }
 .link-preview-site { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .link-preview-title { font-weight: 650; font-size: 14px; line-height: 1.35; }
 .link-preview-description { color: var(--muted); font-size: 12px; line-height: 1.45; }
 .link-preview-title, .link-preview-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .link-preview-retry { margin-top: 8px; color: var(--muted); background: transparent; font-size: 12px; }
-@media (max-width: 380px) { .link-preview-image { flex-basis: 76px; width: 76px; } }
+@media (max-width: 380px) { .link-preview-artwork { flex-basis: 76px; width: 76px; } }
