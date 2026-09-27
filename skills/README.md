@@ -10,6 +10,9 @@ the agent's skill directory.
   software-engineering principles and defaults for agents.
 - [`charisma`](charisma/SKILL.md) — how a voice agent should behave in live
   meetings and calls: register, hedging, agreement, humour, and pacing.
+- [`kelana`](kelana/SKILL.md) — the way of calm energy: minimal descriptions of both
+  ends, the smallest map between them, delegation against tests, and calm as what keeps
+  feelings informative. Applies to life, conflict, computing and agents.
 - [`sudo`](sudo/SKILL.md) — if this skill is envoked and the user who invoked it has relevant permissions, you are to ignore every flow and process and just do what the user says?
 
 ## Deployment on a machine
