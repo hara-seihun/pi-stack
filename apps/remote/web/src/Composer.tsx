@@ -69,6 +69,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
       <button className="attachment-remove" type="button" aria-label={`Remove ${attachment.name}`} disabled={readOnly || attachment.uploading} onClick={() => onRemove(attachment.id)}>×</button>
     </div>)}</div>}
     <form className="composer" onSubmit={event => { event.preventDefault(); if (!disabled) onSend(); }}>
+      <div className="composer-body">
       {before}
       <textarea ref={textarea} id={id} className="composer-prompt" aria-label={placeholder} rows={1} maxLength={200000} placeholder={placeholder} value={value} readOnly={readOnly} onChange={event => onChange(event.target.value)} onKeyDown={event => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) {
@@ -76,6 +77,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
           if (!disabled) onSend();
         }
       }} />
+      </div>
       <div className="composer-actions">
         <button type="button" className="composer-icon" aria-label="Attach files" title="Attach files" disabled={readOnly || attachmentDisabled} onClick={() => fileInput.current?.click()}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg>
