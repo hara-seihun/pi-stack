@@ -37,13 +37,15 @@ export function coolingInteractiveAccounts(store: Store, auth: SharedOAuthAuth |
  * sibling nearest expiry, so a throttled pool slows sessions down instead of
  * failing them.
  */
-export function chooseInteractiveAccount(store: Store, auth: SharedOAuthAuth | undefined, family: string, exclude = new Set<string>(), { includeCooling = false, model }: { includeCooling?: boolean; model?: string } = {}) {
+/** `live` sessions (thread mode live: people waiting on the answer) go to the least loaded account instead of the least spent. */
+export function chooseInteractiveAccount(store: Store, auth: SharedOAuthAuth | undefined, family: string, exclude = new Set<string>(), { includeCooling = false, model, live = false }: { includeCooling?: boolean; model?: string; live?: boolean } = {}) {
   const spent = (id: string) => Math.max(0, ...store.latestMeters(id)
     .filter(meter => !model || modelDrainsMeter(family, model, meter.meter_id))
     .map(meter => Number(meter.used_percent)));
+  const load = (id: string) => store.activeLeases(id).length;
   const eligible = eligibleInteractiveAccounts(store, auth, family, exclude)
-    .sort((a, b) => spent(a.id) - spent(b.id)
-      || store.activeLeases(a.id).length - store.activeLeases(b.id).length || a.id.localeCompare(b.id))[0];
+    .sort((a, b) => (live ? load(a.id) - load(b.id) || spent(a.id) - spent(b.id) : spent(a.id) - spent(b.id) || load(a.id) - load(b.id))
+      || a.id.localeCompare(b.id))[0];
   if (eligible || !includeCooling) return eligible;
   return coolingInteractiveAccounts(store, auth, family, exclude)[0];
 }
