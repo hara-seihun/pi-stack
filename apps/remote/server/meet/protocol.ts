@@ -28,9 +28,12 @@ export function meetVoiceControl(value: unknown): MeetVoiceControl | null {
   const state = value as MeetVoiceControl;
   return typeof state.muted === "boolean" && Number.isSafeInteger(state.revision) && state.revision >= 0 ? state : null;
 }
+/** The latest platform transcript line that said Kenan's name. The host opens Voice for it and, if Voice was not listening, hands the line to Pi. */
+export interface MeetVoiceWake { revision: number; turnId: string; speaker: string; text: string; at: number }
 export interface MeetSnapshot {
   voiceMuted: boolean;
   voiceRevision: number;
+  voiceWake: MeetVoiceWake | null;
   transcriptFlushRevision: number;
   /** Speaker-labelled turns arrive from the meeting platform; the host does not upload mixed audio for recognition. */
   platformTranscript: boolean;

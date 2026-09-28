@@ -187,3 +187,32 @@ test("Voice stop silences local capture and playback before remote settlement", 
   finish();
   await stopped;
 });
+
+test("a muted platform room starts without Voice and a mention opens it and reaches Pi", async () => {
+  provide("navigator", { mediaDevices: { getUserMedia: async () => new Stream([new Track()]) } });
+  const participant = { id: "external-host", host: true, name: "Mixed meeting audio" };
+  const room = { id: "room", sessionId: "thread", apiUrl: "", iceServers: [], participants: [participant],
+    browser: null, threads: [], voiceMuted: true, voiceRevision: 0, voiceWake: null as any, transcriptFlushRevision: 0, platformTranscript: true };
+  const calls: string[] = [];
+  const prompts: Array<{ text: string; delivery: string }> = [];
+  const request = async (path: string, init: RequestInit) => {
+    calls.push(path);
+    if (path === "/v1/meet/external") return Response.json({ room, participant });
+    if (path.includes("/poll")) return Response.json({ ...room, messages: [] });
+    if (path === "/v1/voice") return Response.json({ enabled: false, error: "Voice disabled in this test" });
+    if (path === "/v1/sessions/thread/prompt") { prompts.push(JSON.parse(String(init.body))); return Response.json({ accepted: true }); }
+    return Response.json({ ok: true });
+  };
+  const adapter = await startMeetAdapter({ request, namespace: "recall", eventKey: "mention", container: element() as any });
+  expect(adapter.state.status).toBe("live");
+  expect(calls).not.toContain("/v1/voice");
+  room.voiceWake = { revision: 1, turnId: "t1", speaker: "Sara", text: "hey kanon can you unmute yourself", at: Date.now() };
+  for (let waited = 0; !prompts.length && waited < 3_000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0]!.delivery).toBe("steer");
+  expect(prompts[0]!.text).toContain("Meeting mention");
+  expect(prompts[0]!.text).toContain("Sara said your name while your voice connection was closed");
+  expect(prompts[0]!.text).toContain("hey kanon can you unmute yourself");
+  expect(calls).toContain("/v1/voice");
+  await adapter.close();
+});

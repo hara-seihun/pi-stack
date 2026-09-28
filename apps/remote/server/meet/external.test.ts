@@ -109,3 +109,26 @@ test("a platform-transcribed external room stores speaker-labelled turns from it
     expect((await externalMeetingRequest(request("/external", { ...body, transcript: "whisper" }), server, () => {}))!.status).toBe(400);
   } finally { await server.close(); }
 });
+
+test("a platform turn naming Kenan wakes Voice once per utterance and is visible to the host's poll", async () => {
+  const server = new MeetServer(() => true);
+  const body = { namespace: "converge", eventKey: "voice-wake", transcript: "platform" };
+  try {
+    const host = await (await externalMeetingRequest(request("/external", body), server, () => {}))!.json();
+    expect(host.room.voiceWake).toBeNull();
+    const root = `/${host.room.id}`;
+    const say = async (id: string, text: string, speaker = "Sara") => (await server.handle(request(`${root}/transcript/turn?participant=${host.participant.id}`,
+      { id, speakerId: "recall:100", speaker, text, startedAt: 1_000 })))!.status;
+    const poll = async () => (await (await server.handle(request(`${root}/poll?participant=${host.participant.id}`)))!.json()).voiceWake;
+    expect(await say("a", "Let's review the roadmap.")).toBe(200);
+    expect(await poll()).toBeNull();
+    expect(await say("b", "hey kanon can you unmute yourself")).toBe(200);
+    expect(await poll()).toMatchObject({ revision: 1, turnId: "b", speaker: "Sara", text: "hey kanon can you unmute yourself" });
+    expect(await say("b", "hey kanon can you unmute yourself please")).toBe(200);
+    expect((await poll()).revision).toBe(1);
+    expect(await say("c", "Kenan, share the dashboard.", "Darin")).toBe(200);
+    expect(await poll()).toMatchObject({ revision: 2, turnId: "c", speaker: "Darin" });
+    const reopened = await (await externalMeetingRequest(request("/external", body), server, () => {}))!.json();
+    expect(reopened.room.voiceWake.revision).toBe(2);
+  } finally { await server.close(); }
+});

@@ -5,7 +5,8 @@ import { MeetTranscriber } from "./transcriber";
 import { API_CORS_HEADERS } from "../cors";
 import { MeetBrowser } from "./browser";
 import { meetIceServers } from "./config";
-import type { MeetEnvelope, MeetParticipant, MeetSignal, MeetSnapshot, MeetThreadState, MeetJoined } from "./protocol";
+import { addressesAgent } from "./mention";
+import type { MeetEnvelope, MeetParticipant, MeetSignal, MeetSnapshot, MeetThreadState, MeetJoined, MeetVoiceWake } from "./protocol";
 
 type Member = { participant: MeetParticipant; seen: number; messages: MeetEnvelope[]; frame: Buffer | null; frameAt: number };
 type PendingFlush = { resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
@@ -14,6 +15,8 @@ type Room = {
   kind: "peer-to-peer" | "external";
   browser: MeetBrowser | null; opening: Promise<void> | null; closed: boolean;
   voiceMuted: boolean; voiceRevision: number; threads(): MeetThreadState[];
+  /** Latest transcript line naming Kenan, and the platform turns that already produced one, so partial updates wake Voice once. */
+  voiceWake: MeetVoiceWake | null; wokenTurns: Set<string>;
   transcriptFlushRevision: number; flushes: Map<number, PendingFlush>;
   /** The meeting platform supplies speaker-labelled turns, so the host's mixed audio is not recognized locally. */
   platformTranscript: boolean;
@@ -25,7 +28,7 @@ const image = (bytes: Buffer | null) => bytes
   : fail("No video frame is available", 404);
 const iceServers = meetIceServers();
 const snapshot = (room: Room): MeetSnapshot => ({
-  voiceMuted: room.voiceMuted, voiceRevision: room.voiceRevision, threads: room.threads(), transcriptFlushRevision: room.transcriptFlushRevision,
+  voiceMuted: room.voiceMuted, voiceRevision: room.voiceRevision, voiceWake: room.voiceWake, threads: room.threads(), transcriptFlushRevision: room.transcriptFlushRevision,
   platformTranscript: room.platformTranscript,
   id: room.id, sessionId: room.sessionId, apiUrl: room.apiUrl, iceServers, participants: [...room.members.values()].map((member) => member.participant),
   browser: room.browser ? { endpoint: room.browser.endpoint, url: room.browser.page.url(), error: room.browser.error, watchPath: room.browser.watchPath, watchError: room.browser.watchError } : null,
@@ -60,7 +63,7 @@ export class MeetServer {
   private createRoom(id: string, sessionId: string, apiUrl: string, name: string, kind: Room["kind"] = "peer-to-peer", platformTranscript = false): MeetJoined {
     const participantId = kind === "external" ? "external-host" : crypto.randomUUID();
     const room: Room = { id, sessionId, apiUrl, kind, members: new Map(), speakers: new Map(), seq: 0,
-      browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0,
+      browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0, voiceWake: null, wokenTurns: new Set(),
       transcriptFlushRevision: 0, flushes: new Map(), platformTranscript, threads: () => this.threadActivity(id, sessionId) };
     const participant: MeetParticipant = { id: participantId, name: name.slice(0, 80), host: true };
     room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0 });
@@ -292,6 +295,12 @@ export class MeetServer {
         || !Number.isFinite(body.startedAt) || body.startedAt < 0 || (body.final !== undefined && typeof body.final !== "boolean")) return fail("Invalid platform transcript turn");
       if (!this.transcripts.platform(`${room.id}:platform:${body.id}`, room.id, body.speakerId, body.speaker.trim().slice(0, 120), body.startedAt, body.text, body.final ?? true)) {
         return fail("Platform transcript turn identity conflict", 409);
+      }
+      if (!room.wokenTurns.has(body.id) && addressesAgent(body.text)) {
+        if (room.wokenTurns.size >= 1_000) room.wokenTurns.clear();
+        room.wokenTurns.add(body.id);
+        room.voiceWake = { revision: (room.voiceWake?.revision ?? 0) + 1, turnId: body.id, speaker: body.speaker.trim().slice(0, 120),
+          text: body.text.slice(0, 2_000), at: Date.now() };
       }
       return json({ ok: true });
     }

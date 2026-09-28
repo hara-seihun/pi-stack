@@ -29,6 +29,7 @@ import { MeetServer } from "./meet/server";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
 import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "./meet/handoff";
+import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
@@ -736,12 +737,16 @@ function voiceInstructions(row: any): string {
     .map((message) => `${message.role === "user" ? "User" : "Agent"}: ${message.text.slice(0, 1_500)}`)
     .join("\n");
   const policy = readFileSync(new URL("./voice/delegation-policy.md", import.meta.url), "utf8").trim();
-  return [
+  const instructions = [
     policy,
     `Connected Pi thread: ${JSON.stringify({ id: row.id, name: row.name, meeting: Boolean(row.meeting_id) })}`,
     threadInstructions(row.id, "voice"),
     history ? `Recent thread transcript:\n${history}` : "",
   ].filter(Boolean).join("\n\n");
+  // Meeting Voice opens on demand, so it starts without having heard the room; the recent transcript fills that in when it fits the Voice service's 32 kB bound.
+  const meeting = row.meeting_id && meet.transcripts.has(row.meeting_id) ? voiceMeetingContext(meet.transcripts.read(row.meeting_id), Date.now()) : "";
+  const withMeeting = meeting ? `${instructions}\n\n${meeting}` : instructions;
+  return Buffer.byteLength(withMeeting, "utf8") <= 30_000 ? withMeeting : instructions;
 }
 
 type ThreadLookup = (id: string) => Thread | null;
