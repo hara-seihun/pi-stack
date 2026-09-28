@@ -64,8 +64,10 @@ function emailFrom(value) {
 function organizationId(value) {
   const organizations = Array.isArray(value) ? value : value?.organizations;
   if (!Array.isArray(organizations)) throw new Error("organizations response did not contain a list");
-  const ids = organizations.map((org) => org?.uuid ?? org?.id ?? org?.organization?.uuid).filter((id) => typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id));
-  if (ids.length !== 1) throw new Error(`expected one Claude organization; found ${ids.length}`);
+  const subscription = organizations.filter((org) => org?.billing_type === "stripe_subscription");
+  const candidates = subscription.length ? subscription : organizations;
+  const ids = candidates.map((org) => org?.uuid ?? org?.id ?? org?.organization?.uuid).filter((id) => typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id));
+  if (ids.length !== 1) throw new Error(`expected one Claude subscription organization; found ${ids.length}`);
   return ids[0];
 }
 
