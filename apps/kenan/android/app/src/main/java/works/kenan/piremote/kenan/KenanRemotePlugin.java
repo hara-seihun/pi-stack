@@ -186,6 +186,8 @@ public final class KenanRemotePlugin extends Plugin {
     @PluginMethod
     public void notifications(PluginCall call) {
         if (Build.VERSION.SDK_INT >= 33 && getPermissionState("notifications") != PermissionState.GRANTED) {
+            getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", false).apply();
+            getContext().stopService(new Intent(getContext(), IdleNotificationService.class));
             if (Boolean.TRUE.equals(call.getBoolean("request", false))) {
                 requestPermissionForAlias("notifications", call, "notificationPermission");
             } else call.resolve(new JSObject().put("enabled", false));
@@ -198,15 +200,36 @@ public final class KenanRemotePlugin extends Plugin {
     private void notificationPermission(PluginCall call) {
         boolean granted = Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED;
         boolean enabled = granted && NotificationIdentity.get(getContext()).current() != null;
-        if (enabled) {
-            getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", true).apply();
-            startNotifications();
-        }
+        getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", enabled).apply();
+        if (enabled) startNotifications();
+        else getContext().stopService(new Intent(getContext(), IdleNotificationService.class));
         call.resolve(new JSObject().put("enabled", enabled));
     }
 
     private void startNotifications() {
         androidx.core.content.ContextCompat.startForegroundService(getContext(), new Intent(getContext(), IdleNotificationService.class));
+    }
+
+    @PluginMethod
+    public void notificationFeed(PluginCall call) {
+        RemoteSession state = NotificationIdentity.get(getContext());
+        synchronized (state) {
+            RemoteSession.Identity identity = state.current();
+            if (identity == null || !identity.user.equals(call.getString("user", ""))
+                || !getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
+                || !androidx.core.app.NotificationManagerCompat.from(getContext()).areNotificationsEnabled()) {
+                call.resolve();
+                return;
+            }
+            try {
+                String environment = call.getString("environment", "");
+                String name = call.getString("name", "");
+                org.json.JSONObject feed = call.getObject("feed");
+                if (environment.isBlank() || name.isBlank() || feed == null) throw new IllegalArgumentException("Invalid notification feed");
+                NotificationDelivery.receive(getContext(), identity, environment, name, feed, true);
+                call.resolve();
+            } catch (Exception failure) { call.reject("Could not deliver notification feed: " + failure.getMessage(), failure); }
+        }
     }
 
     @PluginMethod

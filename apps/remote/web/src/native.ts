@@ -1,4 +1,5 @@
 import { API } from "../../server/api";
+import type { IdleNotificationFeed } from "../../server/protocol";
 import { appBase, appStorageKey } from "./app-path";
 import { abortable, deadline } from "./abortable";
 import { ensureUnlocked, registerAuthenticationBootstrap } from "./client";
@@ -21,6 +22,7 @@ interface RemoteBridge {
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
   notificationTarget?(): Promise<{ environment?: string; sessionId?: string; user?: string }>;
   notificationThread?(options: { user: string; environment: string; sessionId: string }): Promise<void>;
+  notificationFeed?(options: { user: string; environment: string; name: string; feed: IdleNotificationFeed }): Promise<void>;
   checkAppUpdate?(): Promise<AppUpdateCheck>;
   installAppUpdate?(): Promise<AppUpdateInstall>;
   webReady?(): Promise<void>;
@@ -57,6 +59,7 @@ export const remote: RemoteBridge = !nativePlatform
         notifications: (options) => capacitor.nativePromise("KenanRemote", "notifications", options),
         notificationTarget: () => capacitor.nativePromise("KenanRemote", "notificationTarget", {}),
         notificationThread: (options) => capacitor.nativePromise("KenanRemote", "notificationThread", options),
+        notificationFeed: (options) => capacitor.nativePromise("KenanRemote", "notificationFeed", options),
         checkAppUpdate: () => capacitor.nativePromise("KenanRemote", "checkAppUpdate", {}),
         installAppUpdate: () => capacitor.nativePromise("KenanRemote", "installAppUpdate", {}),
         webReady: () => capacitor.nativePromise("KenanRemote", "webReady", {}),
