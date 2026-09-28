@@ -102,7 +102,7 @@ Parentage is durable thread metadata used for discovery and completion notificat
 
 ## Asynchronous questions
 
-Agents can call `request_user_input_async` to store a question and continue immediately. **Questions to answer**, beside Send below the composer, opens pending questions with any number of suggestions, an optional labelled recommendation, multi-selection and an always-available text field. Only an answer with neither selections nor non-whitespace text is invalid. Questions survive turn completion and restarts; accepted answers become correlated human messages without cancelling the agent's work. [Asynchronous questions](docs/questions.md) owns the tool, UI and transport contract.
+Agents can call `request_user_input_async` with a nonempty `questions` array to store independently answerable questions atomically and continue immediately. Each item has its own prompt, suggestions and optional recommendation; a single question uses a one-item array. **Questions to answer**, beside Send below the composer, opens pending questions with any number of suggestions, an optional labelled recommendation, multi-selection and an always-available text field. Only an answer with neither selections nor non-whitespace text is invalid. Questions survive turn completion and restarts; accepted answers become correlated human messages without cancelling the agent's work. [Asynchronous questions](docs/questions.md) owns the tool, UI and transport contract.
 
 ## Message identity, reactions and replies
 
