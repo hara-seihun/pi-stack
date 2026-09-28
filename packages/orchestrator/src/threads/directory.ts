@@ -1,5 +1,5 @@
 import { validateThreadAwait } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestion, QuestionReceipt, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
@@ -24,7 +24,7 @@ export class ThreadDirectory implements ThreadApi {
     const owner = await this.owner(input.parentId);
     return owner.ok ? owner.value.api.spawn(input) : owner;
   }
-  async ask(input: AskThreadQuestion): Promise<Result<QuestionReceipt>> {
+  async ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>> {
     const owner = await this.owner(input.threadId);
     return owner.ok ? owner.value.api.ask(input) : owner;
   }

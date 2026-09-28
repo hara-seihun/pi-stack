@@ -6,6 +6,21 @@ export interface ComposerAttachment {
   uploading?: boolean;
 }
 
+export function resizeComposerPrompt(element: HTMLTextAreaElement, viewportHeight: number) {
+  // A grid item's auto height can be stretched by its track in WebView.
+  // Measure from a definite zero height so the track cannot feed its prior
+  // height back into scrollHeight on every resize.
+  element.style.height = "0px";
+  const style = getComputedStyle(element);
+  const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.4;
+  const chrome = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom)
+    + Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth);
+  const maximum = Math.min(lineHeight * 6 + chrome, viewportHeight * 0.3);
+  const contentHeight = element.scrollHeight;
+  element.style.height = `${Math.max(44, Math.min(contentHeight, maximum))}px`;
+  element.style.overflowY = contentHeight > element.clientHeight ? "auto" : "hidden";
+}
+
 export function Composer({ value, onChange, onSend, placeholder, disabled, readOnly = false, attachmentDisabled = false, attachments, onRemove, onUpload, onPaste, onDraw, action = "send", before, actions, id, layoutKey }: {
   value: string;
   onChange(value: string): void;
@@ -34,14 +49,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
   const resize = useCallback(() => {
     const element = textarea.current;
     if (!element || !element.getClientRects().length) return;
-    element.style.height = "auto";
-    const style = getComputedStyle(element);
-    const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.4;
-    const chrome = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom)
-      + Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth);
-    const maximum = lineHeight * 6 + chrome;
-    element.style.height = `${Math.min(element.scrollHeight, maximum)}px`;
-    element.style.overflowY = element.scrollHeight > maximum ? "auto" : "hidden";
+    resizeComposerPrompt(element, window.innerHeight);
   }, []);
   useLayoutEffect(resize, [value, resize, layoutKey]);
   useEffect(() => {
@@ -61,6 +69,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
       <button className="attachment-remove" type="button" aria-label={`Remove ${attachment.name}`} disabled={readOnly || attachment.uploading} onClick={() => onRemove(attachment.id)}>×</button>
     </div>)}</div>}
     <form className="composer" onSubmit={event => { event.preventDefault(); if (!disabled) onSend(); }}>
+      <div className="composer-body">
       {before}
       <textarea ref={textarea} id={id} className="composer-prompt" aria-label={placeholder} rows={1} maxLength={200000} placeholder={placeholder} value={value} readOnly={readOnly} onChange={event => onChange(event.target.value)} onKeyDown={event => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) {
@@ -68,6 +77,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
           if (!disabled) onSend();
         }
       }} />
+      </div>
       <div className="composer-actions">
         <button type="button" className="composer-icon" aria-label="Attach files" title="Attach files" disabled={readOnly || attachmentDisabled} onClick={() => fileInput.current?.click()}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg>

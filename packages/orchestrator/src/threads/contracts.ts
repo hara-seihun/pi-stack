@@ -46,13 +46,17 @@ export interface ThreadQuestion {
   recommendedSuggestionId?: string;
   createdAt: number;
 }
-export interface AskThreadQuestion {
-  requestId: string;
-  threadId: string;
+export interface QuestionInput {
   question: string;
   suggestions?: string[];
   recommendedSuggestionIndex?: number;
 }
+export interface AskThreadQuestions {
+  requestId: string;
+  threadId: string;
+  questions: QuestionInput[];
+}
+export interface QuestionsReceipt { accepted: true; questionIds: string[] }
 export interface AnswerThreadQuestion {
   threadId: string;
   questionId: string;
@@ -170,7 +174,7 @@ export type ThreadControl =
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
   | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };
 export interface ThreadApi {
-  ask(input: AskThreadQuestion): Promise<Result<QuestionReceipt>>;
+  ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;
   questions(threadId: string): Promise<Result<ThreadQuestion[]>>;
   answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>>;
   spawn(input: SpawnThread): Promise<Result<Thread>>;

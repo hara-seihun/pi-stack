@@ -13,7 +13,7 @@ import { RAW_ARGUMENT } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestion, QuestionReceipt, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
 export interface ThreadAdmission { env?: Record<string, string | undefined>; settings?: ThreadSettings; release(): void | Promise<void> }
@@ -377,34 +377,39 @@ export class ThreadService implements ThreadApi {
     return { id: row.id, threadId: row.thread_id, question: row.question,
       suggestions: JSON.parse(row.suggestions), ...(row.recommended_id ? { recommendedSuggestionId: row.recommended_id } : {}), createdAt: row.created_at };
   }
-  async ask(input: AskThreadQuestion): Promise<Result<QuestionReceipt>> {
+  async ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
-    if (typeof input.requestId !== "string" || !input.requestId.trim() || typeof input.threadId !== "string" || !input.threadId.trim()
-      || typeof input.question !== "string" || !input.question.trim()
-      || input.suggestions !== undefined && (!Array.isArray(input.suggestions) || input.suggestions.some(text => typeof text !== "string" || !text.trim()))
-      || input.recommendedSuggestionIndex !== undefined && (!Number.isSafeInteger(input.recommendedSuggestionIndex)
-        || input.recommendedSuggestionIndex < 0 || input.recommendedSuggestionIndex >= (input.suggestions?.length ?? 0))) {
-      return bad("invalid_request", "Provide a question and stable requestId; optional suggestions must contain nonblank text and any recommended index must identify one");
+    if (!input || typeof input.requestId !== "string" || !input.requestId.trim() || typeof input.threadId !== "string" || !input.threadId.trim()
+      || !Array.isArray(input.questions) || input.questions.length === 0
+      || input.questions.some(question => !question || typeof question.question !== "string" || !question.question.trim()
+        || question.suggestions !== undefined && (!Array.isArray(question.suggestions) || question.suggestions.some(text => typeof text !== "string" || !text.trim()))
+        || question.recommendedSuggestionIndex !== undefined && (!Number.isSafeInteger(question.recommendedSuggestionIndex)
+          || question.recommendedSuggestionIndex < 0 || question.recommendedSuggestionIndex >= (question.suggestions?.length ?? 0)))) {
+      return bad("invalid_request", "Provide a nonempty questions array and stable requestId. Each item needs one question; optional suggestions must contain nonblank text and any recommended index must identify one");
     }
     try {
       const prior = this.request(input.requestId, input, "ask"); if (!prior.ok) return prior;
-      if (prior.value) return good({ accepted: true, questionId: prior.value });
+      if (prior.value) return good({ accepted: true, questionIds: JSON.parse(prior.value) });
       const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found");
-      if (thread.metadata?.archived) return bad("unavailable", "Restore this archived thread before asking a question");
-      const id = randomUUID();
+      if (thread.metadata?.archived) return bad("unavailable", "Restore this archived thread before asking questions");
+      const questionIds = input.questions.map(() => randomUUID());
       this.transaction(() => {
-        const suggestions = (input.suggestions ?? []).map((text, index) => ({ id: `${id}:${index}`, text }));
-        this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)")
-          .run(id, input.threadId, input.question, JSON.stringify(suggestions), input.recommendedSuggestionIndex === undefined ? null : suggestions[input.recommendedSuggestionIndex]!.id, Date.now());
-        this.recordRequest(input.requestId, input, "ask", id);
+        const now = Date.now();
+        input.questions.forEach((question, index) => {
+          const id = questionIds[index]!;
+          const suggestions = (question.suggestions ?? []).map((text, index) => ({ id: `${id}:${index}`, text }));
+          this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)")
+            .run(id, input.threadId, question.question, JSON.stringify(suggestions), question.recommendedSuggestionIndex === undefined ? null : suggestions[question.recommendedSuggestionIndex]!.id, now);
+        });
+        this.recordRequest(input.requestId, input, "ask", JSON.stringify(questionIds));
       });
       this.changed(input.threadId);
-      return good({ accepted: true, questionId: id });
+      return good({ accepted: true, questionIds });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     if (!this.get(threadId)) return bad("not_found", "Thread not found");
-    return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL ORDER BY created_at,id").all(threadId) as Json[]).map(row => this.question(row)));
+    return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL ORDER BY created_at,rowid").all(threadId) as Json[]).map(row => this.question(row)));
   }
   async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");

@@ -149,15 +149,16 @@ div.math-pending { display: block; padding: .2em 0; }
 .attachment-chip.uploading { color: var(--muted); }
 .attachment-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .attachment-remove { flex: 0 0 30px; height: 30px; padding: 0; background: transparent; color: var(--danger); font-size: 18px; }
-.composer { flex: 0 0 auto; display: grid; gap: 2px; margin: 0 var(--space-3) max(var(--space-3), env(safe-area-inset-bottom)); padding: var(--space-1) var(--space-1) var(--space-1) var(--space-2); border-radius: var(--radius-3); background: var(--surface); }
+.composer { flex: 0 0 auto; display: grid; grid-auto-rows: min-content; gap: 2px; max-height: min(420px, 60dvh); margin: 0 var(--space-3) max(var(--space-3), env(safe-area-inset-bottom)); padding: var(--space-1) var(--space-1) var(--space-1) var(--space-2); border-radius: var(--radius-3); background: var(--surface); }
 .slash-commands { max-height: 190px; overflow-y: auto; border-radius: var(--radius-2); background: var(--surface-2); }
 .slash-command { width: 100%; min-height: 42px; display: flex; align-items: baseline; gap: 10px; padding: 8px 11px; border-bottom: 1px solid var(--border); color: var(--text); background: transparent; text-align: left; }
 .slash-command:last-child { border-bottom: 0; }
 .slash-command:hover, .slash-command:focus-visible { background: var(--surface); }
 .slash-command-name { flex: 0 0 auto; color: var(--accent); font: 700 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .slash-command-description { min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.composer-prompt { width: 100%; min-height: 44px; max-height: 180px; resize: none; border: 0; border-radius: 0; padding: 10px 11px; color: var(--text); background: transparent; line-height: 1.4; }
-.composer-actions { display: flex; align-items: center; min-width: 0; }
+.composer-body { display: grid; grid-auto-rows: min-content; min-width: 0; min-height: 0; max-height: calc(min(420px, 60dvh) - 56px); overflow-y: auto; }
+.composer-prompt { width: 100%; height: 44px; min-height: 44px; max-height: min(180px, 30dvh); align-self: start; resize: none; border: 0; border-radius: 0; padding: 10px 11px; color: var(--text); background: transparent; line-height: 1.4; }
+.composer-actions { display: flex; align-items: center; min-width: 0; background: var(--surface); }
 .composer-spacer { flex: 1; }
 .composer-icon { width: 40px; height: 40px; display: grid; place-items: center; padding: 0; color: var(--text); background: transparent; }
 .composer-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }

@@ -36,22 +36,36 @@ it("acknowledges immediately, persists across owner restart, and atomically queu
   const api = new ThreadDirectory({ id: "local", api: service });
   const tool = threadTools({ threadId: "thread", cwd: root, sessionFile: join(root, "sessions/thread.jsonl"), args: [], env: {}, threads: api })
     .find(tool => tool.name === "request_user_input_async")!;
-  const input = { question: "Which direction?", suggestions: ["North", "South", "East"], recommendedSuggestionIndex: 1 };
+  const input = { questions: [
+    { question: "Which direction?", suggestions: ["North", "South", "East"], recommendedSuggestionIndex: 1 },
+    { question: "When?", suggestions: ["Morning", "Evening"], recommendedSuggestionIndex: 0 },
+    { question: "Who is coming?" }, { question: "How will you travel?" },
+    { question: "What is the budget?" }, { question: "Where will you stay?" },
+  ] };
   const receipt = await tool.execute("call-1", input, new AbortController().signal, () => {}, {} as never);
   const result = JSON.parse((receipt.content[0] as { text: string }).text);
-  expect(result).toMatchObject({ accepted: true, questionId: expect.any(String) });
-  const id = result.questionId as string;
+  expect(result).toMatchObject({ accepted: true, questionIds: input.questions.map(() => expect.any(String)) });
+  const [id, secondId] = result.questionIds as string[];
   expect(await api.ask({ ...input, threadId: "thread", requestId: "thread:call-1" })).toEqual({ ok: true, value: result });
-  expect((await api.questions("thread"))).toMatchObject({ ok: true, value: [{ id, recommendedSuggestionId: `${id}:1` }] });
+  const pending = await api.questions("thread");
+  if (!pending.ok) throw Error(pending.error.message);
+  expect(pending.value.map(question => question.question)).toEqual(input.questions.map(question => question.question));
+  expect(pending.value[0]).toMatchObject({ id, recommendedSuggestionId: `${id}:1` });
+  expect(pending.value[1]).toMatchObject({ id: secondId, recommendedSuggestionId: `${secondId}:0` });
   await service.close();
   const restored = owner(root);
   const questions = await restored.questions("thread");
   if (!questions.ok) throw Error(questions.error.message);
-  expect(questions.value).toHaveLength(1);
-  const answer = { threadId: "thread", questionId: id, selectedSuggestionIds: [`${id}:2`, `${id}:0`], text: "For the morning" };
+  expect(questions.value.map(question => question.id)).toEqual(result.questionIds);
+  expect(await restored.ask({ ...input, threadId: "thread", requestId: "thread:call-1" })).toEqual({ ok: true, value: result });
+  const answer = { threadId: "thread", questionId: id!, selectedSuggestionIds: [`${id}:2`, `${id}:0`], text: "For the morning" };
   expect(await restored.answer(answer)).toEqual({ ok: true, value: { accepted: true, questionId: id } });
   expect(await restored.answer(answer)).toEqual({ ok: true, value: { accepted: true, questionId: id } });
-  expect((await restored.questions("thread"))).toEqual({ ok: true, value: [] });
+  const remaining = await restored.questions("thread");
+  if (!remaining.ok) throw Error(remaining.error.message);
+  expect(remaining.value.map(question => question.id)).toEqual(result.questionIds.slice(1));
+  expect(await restored.ask({ ...input, threadId: "thread", requestId: "thread:call-1" })).toEqual({ ok: true, value: result });
+  expect(await restored.ask({ ...input, questions: [{ question: "Different?" }], threadId: "thread", requestId: "thread:call-1" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(restored.pending("thread")).toMatchObject([{ id: `question-answer:${id}`, delivery: "steer", senderId: null, replyTo: id }]);
   expect(restored.pending("thread")[0]?.text).toContain("East\n- North\nFor the morning");
   expect(await restored.answer({ ...answer, text: "changed" })).toMatchObject({ ok: false, error: { code: "conflict" } });
@@ -60,11 +74,15 @@ it("acknowledges immediately, persists across owner restart, and atomically queu
 
 it("rejects invalid recommendations and answers without consuming the question", async () => {
   const { service } = await setup();
-  const ask = { requestId: "ask", threadId: "thread", question: "Proceed?", suggestions: ["Yes", "No"] };
-  expect(await service.ask({ ...ask, recommendedSuggestionIndex: 2 })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  const question = { question: "Proceed?", suggestions: ["Yes", "No"] };
+  const ask = { requestId: "ask", threadId: "thread", questions: [question] };
+  for (const questions of [[], [question, { ...question, recommendedSuggestionIndex: 2 }], [question, { question: " " }], [question, { question: "Next?", suggestions: [""] }], [null]]) {
+    expect(await service.ask({ ...ask, questions } as never)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(await service.questions("thread")).toEqual({ ok: true, value: [] });
+  }
   const created = await service.ask(ask);
   if (!created.ok) throw Error(created.error.message);
-  const questionId = created.value.questionId;
+  const questionId = created.value.questionIds[0]!;
   for (const answer of [
     { selectedSuggestionIds: [], text: "  " },
     { selectedSuggestionIds: ["unknown"], text: "okay" },
@@ -75,9 +93,9 @@ it("rejects invalid recommendations and answers without consuming the question",
 
 it("prevents inactivity archiving and reopens an explicitly archived thread on answer", async () => {
   const { service } = await setup();
-  const asked = await service.ask({ requestId: "plain", threadId: "thread", question: "Details?" });
+  const asked = await service.ask({ requestId: "plain", threadId: "thread", questions: [{ question: "Details?" }] });
   if (!asked.ok) throw Error(asked.error.message);
-  const questionId = asked.value.questionId;
+  const questionId = asked.value.questionIds[0]!;
   vi.useFakeTimers();
   try {
     vi.setSystemTime(Date.now() + 60_000);
@@ -93,13 +111,13 @@ it("prevents inactivity archiving and reopens an explicitly archived thread on a
 
 it("places an explicit answer before previously held messages", async () => {
   const { service } = await setup();
-  const asked = await service.ask({ requestId: "held-question", threadId: "thread", question: "What next?" });
+  const asked = await service.ask({ requestId: "held-question", threadId: "thread", questions: [{ question: "What next?" }] });
   if (!asked.ok) throw Error(asked.error.message);
   await service.send({ requestId: "earlier", threadId: "thread", text: "Earlier queued work" });
   await service.control({ threadId: "thread", action: "stop", descendants: false });
   expect(service.get("thread")?.held).toBe(true);
-  expect(await service.answer({ threadId: "thread", questionId: asked.value.questionId, selectedSuggestionIds: [], text: "This decision first" })).toMatchObject({ ok: true });
-  expect(service.pending("thread").map(message => message.id)).toEqual([`question-answer:${asked.value.questionId}`, "earlier"]);
+  expect(await service.answer({ threadId: "thread", questionId: asked.value.questionIds[0]!, selectedSuggestionIds: [], text: "This decision first" })).toMatchObject({ ok: true });
+  expect(service.pending("thread").map(message => message.id)).toEqual([`question-answer:${asked.value.questionIds[0]}`, "earlier"]);
   expect(service.get("thread")?.held).toBe(false);
 });
 
@@ -113,9 +131,9 @@ it("routes owner HTTP requests and deduplicates a lost ask acknowledgement", asy
     return response;
   });
   const client = createThreadClient("http://localhost/v1/threads", fetcher);
-  const created = await client.ask({ requestId: "retry", threadId: "thread", question: "Why?" });
+  const created = await client.ask({ requestId: "retry", threadId: "thread", questions: [{ question: "Why?" }, { question: "When?" }] });
   expect(created.ok).toBe(true);
-  expect((await client.questions("thread"))).toMatchObject({ ok: true, value: [{ suggestions: [] }] });
-  expect((await service.questions("thread"))).toMatchObject({ ok: true, value: [expect.any(Object)] });
+  expect((await client.questions("thread"))).toMatchObject({ ok: true, value: [{ question: "Why?", suggestions: [] }, { question: "When?", suggestions: [] }] });
+  expect((await service.questions("thread"))).toMatchObject({ ok: true, value: [expect.any(Object), expect.any(Object)] });
   expect(fetcher).toHaveBeenCalledTimes(3);
 });
