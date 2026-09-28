@@ -3,6 +3,7 @@ import { useNearViewport } from "./near-viewport";
 import type { MessagingLinkPreview } from "../../server/messaging/protocol";
 import { messagingClient } from "./messaging-client";
 import { resourceUrl } from "./resource-url";
+import { useCachedMedia } from "./cached-media";
 import "./link-previews.css";
 
 export function LinkPreviewCard({ preview }: { preview: MessagingLinkPreview }) {
@@ -10,12 +11,14 @@ export function LinkPreviewCard({ preview }: { preview: MessagingLinkPreview }) 
   const [imageState, setImageState] = useState<"loading" | "ready" | "error">("loading");
   const image = preview.imageUrl;
   useEffect(() => setImageState("loading"), [image]);
-  const imageSrc = image && (image.startsWith("/") ? resourceUrl(image) : image);
+  const imageUrl = image && (image.startsWith("/") ? resourceUrl(image) : image);
+  const media = useCachedMedia(imageUrl || undefined, near);
+  const failed = imageState === "error" || !!media.error;
   return <a className="link-preview" href={preview.url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" ref={ref}>
     {image && <span className="link-preview-artwork">
-      {imageState === "loading" && <span className="link-preview-image-placeholder" aria-hidden="true" />}
-      {near && imageState !== "error" && <img className="link-preview-image" src={imageSrc || undefined} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onLoad={() => setImageState("ready")} onError={() => setImageState("error")} />}
-      {imageState === "error" && <span className="link-preview-image-error">Image unavailable</span>}
+      {!failed && imageState === "loading" && !media.ready && <span className="link-preview-image-placeholder" aria-hidden="true" />}
+      {media.src && !failed && <img className="link-preview-image" src={media.src} data-source-url={imageUrl || undefined} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onLoad={() => setImageState("ready")} onError={() => setImageState("error")} />}
+      {failed && <span className="link-preview-image-error">Image unavailable</span>}
     </span>}
     <span className="link-preview-copy">
       <span className="link-preview-site">{preview.siteName || new URL(preview.url).hostname}</span>
