@@ -6,6 +6,21 @@ export interface ComposerAttachment {
   uploading?: boolean;
 }
 
+export function resizeComposerPrompt(element: HTMLTextAreaElement, viewportHeight: number) {
+  // A grid item's auto height can be stretched by its track in WebView.
+  // Measure from a definite zero height so the track cannot feed its prior
+  // height back into scrollHeight on every resize.
+  element.style.height = "0px";
+  const style = getComputedStyle(element);
+  const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.4;
+  const chrome = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom)
+    + Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth);
+  const maximum = Math.min(lineHeight * 6 + chrome, viewportHeight * 0.3);
+  const contentHeight = element.scrollHeight;
+  element.style.height = `${Math.max(44, Math.min(contentHeight, maximum))}px`;
+  element.style.overflowY = contentHeight > element.clientHeight ? "auto" : "hidden";
+}
+
 export function Composer({ value, onChange, onSend, placeholder, disabled, readOnly = false, attachmentDisabled = false, attachments, onRemove, onUpload, onPaste, onDraw, action = "send", before, actions, id, layoutKey }: {
   value: string;
   onChange(value: string): void;
@@ -34,14 +49,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
   const resize = useCallback(() => {
     const element = textarea.current;
     if (!element || !element.getClientRects().length) return;
-    element.style.height = "auto";
-    const style = getComputedStyle(element);
-    const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.4;
-    const chrome = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom)
-      + Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth);
-    const maximum = lineHeight * 6 + chrome;
-    element.style.height = `${Math.min(element.scrollHeight, maximum)}px`;
-    element.style.overflowY = element.scrollHeight > maximum ? "auto" : "hidden";
+    resizeComposerPrompt(element, window.innerHeight);
   }, []);
   useLayoutEffect(resize, [value, resize, layoutKey]);
   useEffect(() => {
