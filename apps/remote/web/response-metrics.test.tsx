@@ -46,7 +46,9 @@ test("the agent's messages are Kenan's, with the head artwork, whatever label an
   expect(entryFromHead({ ...assistantHead(), label: "Assistant" }).label).toBe("Kenan");
   const html = renderAssistant();
   expect(html).toContain('class="message-label">KENAN</span>');
-  expect(html).toContain('class="message-avatar" src="/kenan.png"');
+  const avatar = html.match(/<img\b[^>]*>/)?.[0];
+  expect(avatar).toContain('class="message-avatar"');
+  expect(avatar).toContain(' src="/kenan.png"');
 });
 
 for (const kind of ["toolCall", "thinking"] as const) {
