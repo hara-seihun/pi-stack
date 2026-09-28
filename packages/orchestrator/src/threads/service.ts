@@ -10,6 +10,7 @@ import { isModelConfigurationError } from "../provider-errors.js";
 import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { RAW_ARGUMENT } from "./pi-raw.js";
+import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
 import type { AnswerThreadQuestion, AskThreadQuestion, QuestionReceipt, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
@@ -25,6 +26,8 @@ export interface ThreadServiceOptions {
   admit?: (thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string) => Promise<Result<ThreadAdmission>>;
   prepareMessage?: (thread: Thread, message: ThreadMessage) => Promise<Result<{ text: string; images?: unknown[] }>>;
   onChange?: (thread: Thread) => void;
+  /** Issues each session's PI_THREAD_TOKEN, which its tools present to thread owners. */
+  capability?: ThreadCapability;
 }
 export type ThreadServiceEvent = { threadId: string; event: PiEvent } | { threadId: string; type: "changed" };
 export type PendingMessage = Omit<ThreadMessage, "state" | "insertedAt" | "landedAt"> & { state: "queued" | "dispatched"; insertedAt: number | null; landedAt: number | null };
@@ -319,7 +322,9 @@ export class ThreadService implements ThreadApi {
   }
   async spawn(input: SpawnThread): Promise<Result<Thread>> {
     try {
-      const prior = this.request(input.requestId, input, "spawn"); if (!prior.ok) return prior;
+      // The creator is the owner's verification of this caller, not part of the request's identity.
+      const { createdBy, ...receipt } = input;
+      const prior = this.request(input.requestId, receipt, "spawn"); if (!prior.ok) return prior;
       if (prior.value) return good(this.get(prior.value)!);
       if (!input.cwd || typeof input.cwd !== "string" || input.message !== undefined && (typeof input.message !== "string" || !input.message.trim())) return bad("invalid_request", "cwd and a nonempty assignment when supplied are required");
       let parent = input.parentId ? this.get(input.parentId) : null;
@@ -327,7 +332,7 @@ export class ThreadService implements ThreadApi {
         const found = await this.directory.list({ id: input.parentId, limit: 1 });
         if (!found.ok) return found;
         parent = found.value.threads[0] ?? null;
-        const accepted = this.request(input.requestId, input, "spawn"); if (!accepted.ok) return accepted;
+        const accepted = this.request(input.requestId, receipt, "spawn"); if (!accepted.ok) return accepted;
         if (accepted.value) return good(this.get(accepted.value)!);
       }
       if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
@@ -343,6 +348,8 @@ export class ThreadService implements ThreadApi {
       const workerOwner = parent && this.workerOwner?.(parent, input);
       if (workerOwner) return workerOwner.spawn(input);
       const metadata: Record<string, unknown> = { ...Object.fromEntries(["profileId", "meetingId", "bashTimeoutSeconds", "context", "execution", "source", "raw"].filter(key => parent?.metadata?.[key] !== undefined).map(key => [key, parent!.metadata![key]])), ...input.metadata, ...(input.ephemeral ? { ephemeral: true } : {}) };
+      delete metadata.createdBy;
+      if (createdBy) metadata.createdBy = createdBy;
       for (const key of ["context", "execution", "raw"] as const) if (parent && input.metadata && key in input.metadata && digest(input.metadata[key] ?? null) !== digest(parent.metadata?.[key] ?? null)) return bad("conflict", "A child must remain in its parent's execution boundary");
       if (metadata.context !== undefined && !isRunContext(metadata.context)) return bad("invalid_request", "Invalid isolated context contract");
       if (metadata.execution === "root-repair" && metadata.context) return bad("invalid_request", "Root repair requires full normal Pi context");
@@ -358,7 +365,7 @@ export class ThreadService implements ThreadApi {
         this.sql("INSERT INTO thread(id,parent_id,title,cwd,session_file,settings,admission,state,created_at,updated_at,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
           .run(id, input.parentId ?? null, input.title ?? `Thread ${id.slice(0, 8)}`, input.cwd, join(this.options.sessionsDir, `${id}.jsonl`), JSON.stringify(settings.value), input.parentId ? "force" : input.admission ?? "force", input.message ? "running" : "idle", now, now, JSON.stringify(metadata));
         if (input.message) this.insertMessage(input.requestId, { requestId: input.requestId, threadId: id, senderId: input.parentId, text: input.message, images: input.images, delivery: resolveDelivery({ senderId: input.parentId }) }, settings.value);
-        this.recordRequest(input.requestId, input, "spawn", id);
+        this.recordRequest(input.requestId, receipt, "spawn", id);
       });
       this.changed(id); this.wake(id); return good(this.get(id)!);
     } catch (error) { return bad("unavailable", errorText(error)); }
@@ -804,7 +811,7 @@ export class ThreadService implements ThreadApi {
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
     const raw = thread.metadata?.raw === true;
     if (raw && (context !== undefined || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded raw execution boundary");
-    const env = { ...this.options.environment?.(thread), ...extraEnv, ...(context ? { HOME: join(thread.cwd, ".home") } : {}), PI_THREAD_ID: id, PI_THREAD_SPEED: settings.speed,
+    const env = { ...this.options.environment?.(thread), ...extraEnv, ...(context ? { HOME: join(thread.cwd, ".home") } : {}), PI_THREAD_ID: id, PI_THREAD_SPEED: settings.speed, PI_THREAD_TOKEN: this.options.capability?.issue(id),
       PI_THREAD_DATABASE: this.options.databasePath,
       // Explicit false survives JSON transport and overrides older runners' launch environment.
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",

@@ -1,7 +1,8 @@
 import { webResponse } from "./files";
 import { appUpdateResponse } from "./app-update";
 import { unlink, writeFile, readFile, mkdir, chmod } from "node:fs/promises";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { listPersons, publicPerson, type Person } from "./persons";
 import { configuredEnvironments, personEnvironments, publicEnvironments } from "./environments";
@@ -14,6 +15,9 @@ import type { HostAuthentication } from "./protocol";
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
 const KEY_DIR = process.env.PI_REMOTE_KEY_DIR ?? "/run/pi-remote-keys";
+const UPSTREAM_CREDENTIAL_DIR = process.env.PI_REMOTE_UPSTREAM_CREDENTIAL_DIR ?? "/var/lib/pi-remote/upstream-credentials";
+/** pi-orchestrator's UPSTREAM_CREDENTIAL_HEADER; inbound copies are stripped with every other x-pi-remote- header. */
+const UPSTREAM_CREDENTIAL_HEADER = "x-pi-remote-upstream";
 const WEB_DIR = join(import.meta.dir, "../web/dist");
 const UNLOCK_TIMEOUT_MS = Number(process.env.PI_REMOTE_UNLOCK_TIMEOUT_MS ?? "20000");
 const VERSION = "2.0.0";
@@ -139,7 +143,29 @@ type RequestIdentity = {
   error?: Response;
 };
 
-type ProxyDestination = { origin: string; target: URL } | { error: Response };
+type ProxyDestination = { origin: string; target: URL; upstream?: string } | { error: Response };
+
+/**
+ * The credential this router presents to an upstream environment's supervisor.
+ * A supervisor treats loopback callers as local processes unless a front door
+ * vouches for the person: its own router by running as root, an upstream
+ * router by this secret, whose SHA-256 the upstream host lists in
+ * host.json `upstreamCredentials`. Only root can read it here.
+ */
+const upstreamCredentials = new Map<string, string>();
+function upstreamCredential(environment: string): string {
+  const cached = upstreamCredentials.get(environment);
+  if (cached) return cached;
+  const path = join(UPSTREAM_CREDENTIAL_DIR, environment);
+  mkdirSync(UPSTREAM_CREDENTIAL_DIR, { recursive: true, mode: 0o700 });
+  try {
+    const fd = openSync(path, "wx", 0o600);
+    try { writeSync(fd, randomBytes(32).toString("hex")); } finally { closeSync(fd); }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const credential = readFileSync(path, "utf8").trim();
+  upstreamCredentials.set(environment, credential);
+  return credential;
+}
 
 type ProxySocketData = {
   signal: AbortSignal;
@@ -174,7 +200,7 @@ function proxyDestination(person: Person, url: URL): ProxyDestination {
     }
     const target = new URL(url);
     target.pathname = match[2]!;
-    return { origin: endpoint.upstreams[person.user]!, target };
+    return { origin: endpoint.upstreams[person.user]!, target, upstream: match[1]! };
   }
   if (!url.pathname.startsWith("/v1/")) return { error: new Response("Not found", { status: 404 }) };
   return { origin: `http://127.0.0.1:${person.port}`, target: url };
@@ -263,13 +289,14 @@ async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySo
   return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
 }
 
-async function proxy(person: Person, origin: string, req: Request, url: URL, signal: AbortSignal): Promise<Response> {
+async function proxy(person: Person, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {
     if (HOP_BY_HOP.has(name) || ["host", "cookie", "authorization", "forwarded", "referer"].includes(name) || name.startsWith("x-forwarded-") || name.startsWith("x-pi-remote-")) headers.delete(name);
   }
   headers.set("x-pi-remote-user", person.user);
+  if (upstream) headers.set(UPSTREAM_CREDENTIAL_HEADER, upstreamCredential(upstream));
   const query = new URLSearchParams(url.search);
   query.delete("user");
   query.delete("session");
@@ -405,7 +432,7 @@ async function route(req: Request, url: URL): Promise<Response> {
   if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments: publicEnvironments(grants.get(person.user)!) });
   const destination = proxyDestination(person, url);
   if ("error" in destination) return destination.error;
-  return proxy(person, destination.origin, req, destination.target, authenticated.signal);
+  return proxy(person, destination.origin, req, destination.target, authenticated.signal, destination.upstream);
 }
 
 Bun.serve<ProxySocketData>({

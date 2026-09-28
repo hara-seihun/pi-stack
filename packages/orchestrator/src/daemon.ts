@@ -28,6 +28,7 @@ import { createThreadClient, threadHttp } from "./threads/http.js";
 import { importFleetThreads } from "./threads/import.js";
 import type { SettingsOverrides, Thread } from "./threads/contracts.js";
 import { ThreadDirectory } from "./threads/directory.js";
+import { admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerResolver, type CallerSource } from "./threads/caller.js";
 import { resolveThreadSettings } from "./threads/settings.js";
 import type { RunContext } from "./domain.js";
 import { ScheduleService, scheduleHttp } from "./schedule.js";
@@ -59,6 +60,8 @@ export class Daemon {
   readonly threads:ThreadService;
   private readonly isolated=new Map<string,ThreadService>();
   private readonly opener:ReturnType<typeof createSharedPiSessionOpener>;
+  private readonly capability=threadCapability();
+  private readonly callers:CallerResolver;
 
   constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string){
     this.fleet=new Fleet(store,config);
@@ -70,7 +73,8 @@ export class Daemon {
     const dataDir=this.ledgerPath===":memory:"?tmpdir():dirname(this.ledgerPath);
     const threadDatabasePath=this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3");
     this.opener=createSharedPiSessionOpener({dataDir,durable:true});
-    this.threads=new ThreadService({workersOnly:true,databasePath:threadDatabasePath,sessionsDir:join(dataDir,"threads"),
+    this.callers=callerResolver({capability:this.capability,host:hostIdentityConfig()});
+    this.threads=new ThreadService({workersOnly:true,databasePath:threadDatabasePath,sessionsDir:join(dataDir,"threads"),capability:this.capability,
       attachSession:this.opener.attachSession,
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
@@ -274,7 +278,7 @@ export class Daemon {
     let service=this.isolated.get(id);
     if(!service){
       const dataDir=join(dirname(this.ledgerPath),"applications",id);
-      service=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
+      service=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),capability:this.capability,
         attachSession:this.opener.attachSession,
         openSession:(options,output,exit)=>this.opener.openSession({...options,args:[...options.args,"--orchestrator-context",JSON.stringify(context)]},output,exit),
         environment:thread=>({...this.threadEnvironment(thread),PI_THREAD_API_URL:`http://127.0.0.1:${this.port}/v1/applications/${id}/threads`}),
@@ -327,6 +331,8 @@ export class Daemon {
       const url=new URL(req.url??"/",`http://${HOST}:${this.port}`),method=req.method??"GET";
       const application=/^\/v1\/applications\/([a-f0-9]+)\/threads\//.exec(url.pathname);
       const localOwner=url.pathname.startsWith("/v1/thread-owner/");
+      const caller:CallerSource={headers:new Headers(Object.entries(req.headers).flatMap(([key,value])=>value===undefined?[]:[[key,Array.isArray(value)?value.join(","):value] as [string,string]])),
+        socket:req.socket.remoteAddress&&req.socket.localAddress?{address:req.socket.remoteAddress,port:req.socket.remotePort!,localAddress:req.socket.localAddress,localPort:req.socket.localPort!}:undefined};
       if(url.pathname.startsWith("/v1/threads/")||localOwner||application){
         const input=method==="POST"?await body(req):undefined;
         if(this.config.modelBrokerUrl&&input?.metadata?.execution==="root-repair")return json(res,403,{error:"Root repair is unavailable when this daemon uses a model broker"});
@@ -344,7 +350,7 @@ export class Daemon {
         if(res.destroyed)cancel();
         try{
           const headers=new Headers(Object.entries(req.headers).flatMap(([key,value])=>value===undefined?[]:[[key,Array.isArray(value)?value.join(","):value] as [string,string]]));
-          const response=await threadHttp(api,new Request(url,{method,headers,signal:cancellation.signal,...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads");
+          const response=await threadHttp(api,new Request(url,{method,headers,signal:cancellation.signal,...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads",admissionFor(this.callers,caller));
           if(res.destroyed)return;
           if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
         }finally{res.off("close",cancel);}
@@ -364,10 +370,12 @@ export class Daemon {
         const started=await owner.start();if(!started.ok)return json(res,503,started);
         const settings=resolveThreadSettings({model:input.model??this.profileModel(input.profile??"standard"),thinkingLevel:input.thinkingLevel,speed:input.speed});
         if(!settings.ok)return json(res,400,settings);
-        const runIds:string[]=[];
+        const runIds:string[]=[],admit=admissionFor(this.callers,caller);
         for(let index=0;index<count;index++){
-          const result=await owner.spawn({requestId:input.requestId?`${input.requestId}:${index}`:randomUUID(),cwd:input.cwd,title:input.profile??"Assignment",message:input.prompt,
+          const admitted=await admit("spawn",{requestId:input.requestId?`${input.requestId}:${index}`:randomUUID(),cwd:input.cwd,title:input.profile??"Assignment",message:input.prompt,
             settings:settings.value,admission:input.force===false?"background":"force",metadata:{source:"direct",profile:input.profile,context:isolated?input.context:undefined}});
+          if(!admitted.ok)return json(res,admitted.status,{error:admitted.message});
+          const result=await owner.spawn(admitted.input as Parameters<typeof owner.spawn>[0]);
           if(!result.ok)return json(res,409,result);runIds.push(result.value.id);
         }
         return json(res,202,{runIds});

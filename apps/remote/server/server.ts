@@ -7,7 +7,7 @@ import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
+import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -243,7 +243,11 @@ const contextFinalizedMessages = new Map<string, string>();
 const forkingSessions = new Set<string>();
 let shuttingDown = false;
 const runner = createSharedPiSessionOpener({ dataDir: DATA });
+// Thread capabilities and caller checks: a thread's parent and creator are verified, never taken from the request.
+const capability = threadCapability();
+const callers = callerResolver({ capability, host: hostIdentityConfig() });
 const threads = new ThreadService({
+  capability,
   attachSession: runner.attachSession,
   databasePath: join(DATA, "threads.sqlite3"),
   sessionsDir: join(DATA, "threads"),
@@ -1710,10 +1714,10 @@ function meetingDestination() {
     ?? [...THREAD_DESTINATIONS.values()][0];
 }
 async function insertThread(id: string, name: string, destination: ThreadDestination, model: string,
-  meetingId: string | null, message?: string, parentId?: string, settings?: Parameters<typeof directory.spawn>[0]["settings"], contextFiles: string[] = []) {
+  meetingId: string | null, message?: string, parentId?: string, settings?: Parameters<typeof directory.spawn>[0]["settings"], contextFiles: string[] = [], createdBy?: ThreadCreator) {
   const admitted = workspaceAdmission.resolve(destination.workspaceId);
   if (!admitted.ok) throw new Error(admitted.error.message);
-  const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId,
+  const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId, createdBy,
     cwd: admitted.value.cwd, message, settings: { model, ...settings },
     metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(destination.raw ? { raw: true } : {}),
       ...(contextFiles.length ? { contextFiles } : {}) },
@@ -1753,6 +1757,8 @@ const server = Bun.serve<AudioSocketData>({
   async fetch(req, httpServer) {
     return jsonHttp(req, await (async () => {
     const url = new URL(req.url);
+    const peer = httpServer.requestIP(req);
+    const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
       return new Response(null, {
         status: 204,
@@ -1799,9 +1805,9 @@ const server = Bun.serve<AudioSocketData>({
     if (messagingResponse) return messagingResponse;
     const speechResponse = speech ? await speech.handle(req) : null;
     if (speechResponse) return speechResponse;
-    const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner");
+    const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner", admissionFor(callers, caller));
     if (ownedThreadResponse) return ownedThreadResponse;
-    const threadResponse = await threadHttp(directory, req);
+    const threadResponse = await threadHttp(directory, req, "/v1/threads", admissionFor(callers, caller));
     if (threadResponse) return threadResponse;
     const externalResponse = await externalMeetingRequest(req, meet, async (sessionId, meetingId, name) => {
       const existing = sessionRow.get(sessionId) as any;
@@ -2178,8 +2184,10 @@ const server = Bun.serve<AudioSocketData>({
         const id = String(body.sessionId ?? requestId);
         const contextFiles = selectContextFiles(destinationContextDir(destination), body.contextFiles);
         if (!contextFiles.ok) return error(contextFiles.error);
+        const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
+        if (!creator.ok) return error(creator.message, creator.status);
         const thread = await insertThread(id, creationName(requestId), destination, model, body.meetingId ?? null, body.message, body.parentId,
-          { thinkingLevel: body.thinkingLevel, speed: body.speedMode }, contextFiles.value);
+          { thinkingLevel: body.thinkingLevel, speed: body.speedMode }, contextFiles.value, creator.input.createdBy);
         const response = { session: publicSession(threadRow(thread)) };
         saveRequest(requestId, id, "create", 201, response);
         return json(response, 201);

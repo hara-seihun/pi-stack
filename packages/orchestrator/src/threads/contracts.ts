@@ -1,4 +1,5 @@
 export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
+import type { ThreadCreator } from "./caller.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
 export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; requestId?: string };
@@ -85,6 +86,8 @@ export interface SpawnThread {
   settings?: SettingsOverrides;
   admission?: Admission;
   metadata?: Record<string, unknown>;
+  /** Set by the owner from the verified caller and stored as metadata.createdBy; clients cannot supply it. */
+  createdBy?: ThreadCreator;
 }
 export interface SendThread {
   requestId: string;
