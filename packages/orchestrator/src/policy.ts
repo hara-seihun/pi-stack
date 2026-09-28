@@ -23,6 +23,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   if(account.reservation&&!reservationMatchesRun(store,account.reservation,runId))return stop(`reserved capacity: ${account.reservation.reason}`);
   if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
   if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
+  if(budget==="live")return{sessions:Number.POSITIVE_INFINITY,spent,meterAt,reason:"live consulting"};
   if(budget==="force")return{sessions:account.concurrency,spent,meterAt,reason:"urgent spend"};
   if(!Number.isFinite(multiplier)||multiplier<=0)return stop("background launches halted");
   if(!meters.length){
@@ -76,7 +77,8 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   if(repair&&store.control("repair-owner")&&store.control("repair-owner")!==runId)return{refusals:[{accountId:"*",reason:"repair already owned"}]};
-  if(store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
+  // Live consulting has people waiting on the answer, so it is admitted past the session ceilings the fleet queues behind.
+  if(budget!=="live"&&store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
@@ -85,7 +87,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
       const active=store.activeSessionLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
       const admitted=(store.db.prepare("SELECT last_admitted_meter_at FROM account WHERE id=?").get(account.id) as any)?.last_admitted_meter_at;
-      if(budget!=="force"&&Number(store.control(`boost:${account.provider}`)??"1")<=1&&admitted!=null&&capacity.meterAt!==undefined&&Number(admitted)>=capacity.meterAt){refusals.push({accountId:account.id,reason:"already admitted from this meter observation"});continue;}
+      if(budget==="background"&&Number(store.control(`boost:${account.provider}`)??"1")<=1&&admitted!=null&&capacity.meterAt!==undefined&&Number(admitted)>=capacity.meterAt){refusals.push({accountId:account.id,reason:"already admitted from this meter observation"});continue;}
       choices.push({accountId:account.id,...candidate,meterAt:capacity.meterAt,spent:capacity.spent});
     }
     if(choices.length)break;

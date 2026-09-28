@@ -9,6 +9,7 @@ import { threadTools } from "./pi-tools.js";
 import { argument, assertPiSessionFile, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
+import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
 import { isRawSession, rawModelContext } from "./pi-raw.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, resolveSessionModel } from "../extension/routing.js";
@@ -30,6 +31,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
     PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1" };
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_") || key === EXPLICIT_THREAD_MODEL_ENV) delete env[key];
+  modeEnvironment(env);
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
   return piEnvironmentScope.run(env, async () => {
     const execution = new PiExecution(() => settle());
@@ -79,7 +81,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
           extensionFactories: [routing, usageLogger, threadSpeed, rawModelContext, threadContext],
-        } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, threadContext] } });
+        } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, threadContext, modeTools(env)] } });
       if (isolated) { services.resourceLoader = isolated.resourceLoader; acceptedContext = JSON.parse(argument(options.args, "--orchestrator-context")!); }
       const errors = services.resourceLoader.getExtensions().errors;
       if (errors.length) throw new Error(`Session extensions failed: ${JSON.stringify(errors)}`);

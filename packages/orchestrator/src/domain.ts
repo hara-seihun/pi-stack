@@ -2,7 +2,7 @@ import type { ModelCandidate } from "./catalog.js";
 import type { AccountReservation } from "./admission-reservation.js";
 import type { ThinkingLevel } from "./threads/contracts.js";
 
-export type BudgetClass = "background" | "force";
+export type BudgetClass = "background" | "force" | "live";
 export type RunSource = "direct" | "lane";
 export type RunExecution = "user" | "root-repair";
 export const ISOLATED_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;

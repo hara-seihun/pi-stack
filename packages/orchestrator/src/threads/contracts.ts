@@ -8,7 +8,8 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 export const isThinkingLevel = (value: unknown): value is ThinkingLevel => THINKING_LEVELS.some(level => level === value);
 export type Speed = "standard" | "priority";
-export type Admission = "force" | "background";
+/** `live` is never requested directly; it comes from a thread mode (see modes.ts). */
+export type Admission = "force" | "background" | "live";
 export const THREAD_STATES = ["idle", "running"] as const;
 export type ThreadState = typeof THREAD_STATES[number];
 export const isThreadState = (state: unknown): state is ThreadState => THREAD_STATES.some(value => value === state);

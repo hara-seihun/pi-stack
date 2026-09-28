@@ -52,6 +52,7 @@ export class VoiceDemand {
   private failedAt = Number.NEGATIVE_INFINITY;
   private transition: Promise<void> | null = null;
   private stopped = false;
+  private workersRunning = false;
 
   constructor(private readonly voice: DemandVoice, private readonly clock: () => number = Date.now) {}
 
@@ -59,7 +60,9 @@ export class VoiceDemand {
   activity() { this.lastActivityAt = this.clock(); }
 
   get wanted(): boolean {
-    return voiceWanted({ muted: this.muted, platformTranscript: this.platformTranscript, working: this.voice.working,
+    // Workers report back through the meeting thread, which Voice speaks; keep listening for them, within the same bound as a delegation.
+    const workers = this.workersRunning && this.clock() - this.lastActivityAt < VOICE_WORK_HOLD_MS;
+    return voiceWanted({ muted: this.muted, platformTranscript: this.platformTranscript, working: this.voice.working || workers,
       now: this.clock(), lastActivityAt: this.lastActivityAt });
   }
 
@@ -68,8 +71,9 @@ export class VoiceDemand {
    * the caller hands to Pi; the first snapshot only sets the baseline so a
    * reconnecting host does not replay an old mention.
    */
-  observe(snapshot: Pick<MeetSnapshot, "voiceMuted" | "platformTranscript" | "voiceWake">): MeetVoiceWake | null {
+  observe(snapshot: Pick<MeetSnapshot, "voiceMuted" | "platformTranscript" | "voiceWake"> & Partial<Pick<MeetSnapshot, "threads" | "sessionId">>): MeetVoiceWake | null {
     this.platformTranscript = snapshot.platformTranscript;
+    this.workersRunning = (snapshot.threads ?? []).some((thread) => thread.id !== snapshot.sessionId && thread.state === "running" && !thread.held);
     if (snapshot.voiceMuted !== this.muted) { this.muted = snapshot.voiceMuted; this.activity(); }
     const wake = snapshot.voiceWake;
     const first = this.wakeRevision === null;

@@ -7,6 +7,11 @@ import type { PiEvent, Result, Thread, ThreadSettings } from "./threads/contract
 import type { ThreadAdmission } from "./threads/service.js";
 import { BROKER_ROUTES } from "./model-broker-contract.js";
 
+/** Children are forced; live consulting keeps its own class so it passes the ceilings force still respects. */
+function admissionClass(thread: Thread): Thread["admission"] {
+  return thread.admission === "live" ? "live" : thread.parentId ? "force" : thread.admission;
+}
+
 /** Account policy for thread execution. ThreadService owns work and settlement. */
 export class Fleet {
   private readonly leases = new Map<string, { leaseId: string; accountId: string; timer: ReturnType<typeof setInterval> }>();
@@ -24,7 +29,7 @@ export class Fleet {
       const held = recovering ? this.store.db.prepare("SELECT account_id FROM lease WHERE id=? AND run_id=?").get(leaseId, thread.id) as { account_id: string } | undefined : undefined;
       if (recovering && !held) return { ok: false, error: { code: "unavailable", message: `Execution ${executionId} has no recorded account lease` } };
       const selected = held ? { assignment: { ...candidate, accountId: held.account_id }, refusals: [] }
-        : assign(this.store, "thread", thread.parentId ? "force" : thread.admission,
+        : assign(this.store, "thread", admissionClass(thread),
           { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user");
       if (!selected.assignment) return { ok: false, error: { code: "unavailable", message: selected.refusals.map(item => `${item.accountId}: ${item.reason}`).join("; ") } };
       const assignment = selected.assignment;
@@ -35,7 +40,7 @@ export class Fleet {
       this.leases.set(thread.id, { leaseId, accountId: assignment.accountId, timer });
       return { ok: true, value: {
         env: { PI_ORCHESTRATOR_ASSIGNED: "1", PI_THREAD_USAGE: "service", PI_ORCHESTRATOR_ACCOUNT_ID: assignment.accountId,
-          PI_ORCHESTRATOR_PROVIDER: assignment.provider, PI_THREAD_ADMISSION: thread.parentId ? "force" : thread.admission },
+          PI_ORCHESTRATOR_PROVIDER: assignment.provider, PI_THREAD_ADMISSION: admissionClass(thread) },
         release: () => this.release(thread.id, executionId),
       } };
     });
@@ -53,12 +58,12 @@ export class Fleet {
       if (!recovering) {
         if (this.store.control("launches") === "paused") return { ok: false, error: { code: "unavailable", message: "emergency halt" } };
         if (this.store.control("ordinary-launches") === "paused") return { ok: false, error: { code: "unavailable", message: "ordinary work paused" } };
-        if (this.brokerExecutions.size >= this.config.maxConcurrentSessions) return { ok: false, error: { code: "unavailable", message: "machine session ceiling" } };
+        if (thread.admission !== "live" && this.brokerExecutions.size >= this.config.maxConcurrentSessions) return { ok: false, error: { code: "unavailable", message: "machine session ceiling" } };
         this.store.setControl(key, thread.id);
       }
       this.brokerExecutions.set(thread.id, executionId);
       return { ok: true, value: {
-        env: { PI_MODEL_BROKER_URL: this.config.modelBrokerUrl, PI_THREAD_USAGE: "service", PI_THREAD_ADMISSION: thread.parentId ? "force" : thread.admission },
+        env: { PI_MODEL_BROKER_URL: this.config.modelBrokerUrl, PI_THREAD_USAGE: "service", PI_THREAD_ADMISSION: admissionClass(thread) },
         release: () => this.releaseBroker(thread.id, executionId),
       } };
     });

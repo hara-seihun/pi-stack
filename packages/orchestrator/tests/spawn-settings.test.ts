@@ -148,3 +148,19 @@ describe("ThreadService child spawn policy", () => {
     expect(await service.spawn(input)).toEqual({ ok: true, value: child });
   });
 });
+
+describe("live mode", () => {
+  it("declares the conversation, gives workers the cheap priority profile and live admission, and keeps the mode", async () => {
+    const { root, service } = fixture();
+    const conversation = value(await service.spawn({ requestId: "meeting", cwd: root, metadata: { mode: "live" } }));
+    expect(conversation).toMatchObject({ admission: "live", settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "low", speed: "priority" } });
+    const worker = value(await service.spawn({ requestId: "worker", cwd: root, parentId: conversation.id }));
+    expect(worker).toMatchObject({ admission: "live", metadata: { mode: "live" }, settings: { model: "openai-codex/gpt-6-luna", thinkingLevel: "medium", speed: "priority" } });
+    const sol = value(await service.spawn({ requestId: "synthesis", cwd: root, parentId: conversation.id, settings: { model: "sol" } }));
+    expect(sol.settings).toEqual({ model: "openai-codex/gpt-6-sol", thinkingLevel: "medium", speed: "priority" });
+    expect(await service.spawn({ requestId: "escape", cwd: root, parentId: conversation.id, metadata: { mode: "other" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    const ordinary = value(await service.spawn({ requestId: "ordinary", cwd: root }));
+    expect(ordinary).toMatchObject({ admission: "force", settings: { speed: "standard" } });
+    expect(value(await service.spawn({ requestId: "ordinary-child", cwd: root, parentId: ordinary.id })).settings.speed).toBe("standard");
+  });
+});
