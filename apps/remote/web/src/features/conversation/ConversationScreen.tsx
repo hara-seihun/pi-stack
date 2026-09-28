@@ -90,6 +90,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const action = composerAction(session, prompt);
   const [delivery, setDelivery] = useState<Delivery>("queue");
   const [questionsOpenFor, setQuestionsOpenFor] = useState<string | null>(null);
+  useEffect(() => { if (questions.length === 0) setQuestionsOpenFor(null); }, [questions.length]);
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
   const modeToggleRef = useRef<HTMLButtonElement>(null);
@@ -119,7 +120,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
       <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}
         before={<>{reply && <ReplyComposer target={reply} onCancel={onCancelReply} />}{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}</>}
-        actions={<><button type="button" className="questions-trigger" aria-haspopup="dialog" aria-label={`Questions to answer, ${questions.length} pending`} onClick={() => setQuestionsOpenFor(session.id)}>Questions to answer ({questions.length})</button>{running && hasText && <div className="delivery-mode" ref={modeRef}>
+        actions={<>{questions.length > 0 && <button type="button" className="questions-trigger" aria-haspopup="dialog" aria-label={`Questions to answer, ${questions.length} pending`} title="Questions to answer" onClick={() => setQuestionsOpenFor(session.id)}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 3.5M12 16h.01" /></svg><span aria-hidden="true">{questions.length}</span></button>}{running && hasText && <div className="delivery-mode" ref={modeRef}>
           <button ref={modeToggleRef} type="button" className="delivery-toggle" aria-haspopup="menu" aria-expanded={modeOpen} aria-label={`Change delivery. Current: ${DELIVERY_LABELS[delivery].label}`} onClick={() => setModeOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setModeOpen(true); } }}><span>{DELIVERY_LABELS[delivery].label}</span><ChevronIcon /></button>
           {modeOpen && <div ref={modeMenuRef} className="delivery-menu" role="menu" aria-label="Change delivery" onKeyDown={event => {
             if (event.key === "Escape") { setModeOpen(false); modeToggleRef.current?.focus(); return; }
