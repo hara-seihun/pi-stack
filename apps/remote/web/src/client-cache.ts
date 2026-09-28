@@ -1,6 +1,6 @@
 import type { InlineImageSnapshot, TranscriptItemBody } from "../../server/protocol";
 import { ResourceCache } from "../../shared/resource-cache";
-import { CACHED_HEADS, deleteCachedWindow, readCachedBody, readCachedWindow, writeCachedBody, writeCachedWindow, type CachedWindow } from "./transcript-cache";
+import { CACHED_HEADS, deleteCachedWindow, readCachedBody, readCachedWindow, readCachedMedia, writeCachedMedia, writeCachedBody, writeCachedWindow, type CachedWindow } from "./transcript-cache";
 
 export interface CachedThread { transcript: CachedWindow | null; images: InlineImageSnapshot | null }
 export interface BodyCache {
@@ -8,6 +8,9 @@ export interface BodyCache {
   acceptBody(id: string, body: TranscriptItemBody, size: number): void;
   loadBody(id: string, size: number, fetcher: () => Promise<TranscriptItemBody>): Promise<TranscriptItemBody>;
 }
+
+export interface MediaLease { url: string; release(): void }
+interface MediaValue { blob: Blob; url: string; retained: boolean; users: number }
 
 const MiB = 1024 * 1024;
 
@@ -18,6 +21,13 @@ export class ClientCache implements BodyCache {
   private pendingBodies = new Map<string, Promise<TranscriptItemBody>>();
   private writes = new Map<string, { window: CachedWindow; timer: ReturnType<typeof setTimeout> }>();
   private diskAvailable = true;
+  private mediaValues = new Set<MediaValue>();
+  private media = new ResourceCache<MediaValue>({ entries: 512, bytes: 32 * MiB }, Date.now, value => {
+    value.retained = false;
+    this.releaseMedia(value);
+  });
+  private pendingMedia = new Map<string, Promise<MediaValue>>();
+  private mediaController = new AbortController();
 
   constructor(private readonly scope: () => Promise<string>) {}
 
@@ -25,7 +35,7 @@ export class ClientCache implements BodyCache {
     if (!this.diskAvailable) return missing;
     try { return await operation(); }
     catch (error) {
-      if (this.diskAvailable) console.warn("Transcript disk cache unavailable; retaining the bounded memory cache", error);
+      if (this.diskAvailable) console.warn("Client disk cache unavailable; retaining the bounded memory cache", error);
       this.diskAvailable = false;
       return missing;
     }
@@ -89,6 +99,53 @@ export class ClientCache implements BodyCache {
     return pending;
   }
 
+  getMedia(id: string): string | undefined { return this.media.get(id)?.url; }
+
+  private releaseMedia(value: MediaValue) {
+    if (value.retained || value.users) return;
+    if (value.url) URL.revokeObjectURL(value.url);
+    value.url = "";
+    this.mediaValues.delete(value);
+  }
+
+  async acquireMedia(id: string, fetcher: (signal: AbortSignal) => Promise<Blob>): Promise<MediaLease> {
+    const signal = this.mediaController.signal;
+    let value = this.media.get(id);
+    if (!value) {
+      let pending = this.pendingMedia.get(id);
+      if (!pending) {
+        pending = (async () => {
+          const key = `${await this.scope()}:media:${id}`;
+          signal.throwIfAborted();
+          const cached = await this.disk(() => readCachedMedia(key), null);
+          signal.throwIfAborted();
+          const blob = cached ?? await fetcher(signal);
+          signal.throwIfAborted();
+          const entry: MediaValue = { blob, url: URL.createObjectURL(blob), retained: false, users: 0 };
+          this.mediaValues.add(entry);
+          entry.retained = this.media.set(id, entry, blob.size);
+          if (!cached) void this.disk(() => writeCachedMedia(key, blob), undefined);
+          return entry;
+        })();
+        this.pendingMedia.set(id, pending);
+        const settled = () => { if (this.pendingMedia.get(id) === pending) this.pendingMedia.delete(id); };
+        void pending.then(settled, settled);
+      }
+      value = await pending;
+    }
+    signal.throwIfAborted();
+    // An entry can be evicted between its shared load and a consumer taking a lease.
+    if (!value.url) { value.url = URL.createObjectURL(value.blob); this.mediaValues.add(value); }
+    value.users++;
+    let released = false;
+    return { url: value.url, release: () => {
+      if (released) return;
+      released = true;
+      value.users--;
+      this.releaseMedia(value);
+    } };
+  }
+
   dispose() {
     for (const [id, write] of this.writes) {
       clearTimeout(write.timer);
@@ -97,5 +154,14 @@ export class ClientCache implements BodyCache {
     this.writes.clear();
     this.threads.clear();
     this.bodies.clear();
+    this.mediaController.abort();
+    this.mediaController = new AbortController();
+    this.pendingMedia.clear();
+    this.media.clear();
+    for (const value of this.mediaValues) {
+      if (value.url) URL.revokeObjectURL(value.url);
+      value.url = "";
+    }
+    this.mediaValues.clear();
   }
 }

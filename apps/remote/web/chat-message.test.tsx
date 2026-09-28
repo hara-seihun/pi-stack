@@ -24,7 +24,10 @@ test("human and agent messages use the same header and direction styling, with a
     expect(html).not.toContain('class="message-actions"');
     expect(html).not.toContain('aria-label="Copy message"');
   }
-  expect(agent).toContain('<img class="message-avatar" src="/kenan.png" alt=""');
+  const avatar = agent.match(/<img\b[^>]*>/)?.[0];
+  expect(avatar).toContain('class="message-avatar"');
+  expect(avatar).toContain('src="/kenan.png"');
+  expect(avatar).toContain('alt=""');
   expect(agent).toContain('class="message-label">KENAN</span>');
   expect(human).not.toContain("message-avatar");
   expect(human).toContain('class="message-label">SAM</span>');
