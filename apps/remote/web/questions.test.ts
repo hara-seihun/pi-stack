@@ -1,7 +1,15 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { answerIsValid, emptyQuestionDraft, QuestionDrafts, toggleSuggestion } from "./src/features/conversation/question-drafts";
 
-Object.assign(globalThis, { location: { href: "http://localhost/remote/" } });
+let previousLocation: PropertyDescriptor | undefined;
+beforeEach(() => {
+  previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: new URL("http://localhost/remote/") });
+});
+afterEach(() => {
+  if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+  else Reflect.deleteProperty(globalThis, "location");
+});
 
 function storage() {
   const values = new Map<string, string>();
