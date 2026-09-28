@@ -47,6 +47,7 @@ interface Runtime {
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
 const bad = <T = never>(code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed", message: string): Result<T> => ({ ok: false, error: { code, message } });
+const ARCHIVE_RESUME_TEXT = "This thread was archived while it was working, which cancelled its turn. It has been restored. Continue the interrupted work from where it stopped; tools that were cut off may need to be rerun.";
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const canonical = (value: any): any => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, canonical(value[key])])) : value;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
@@ -375,7 +376,7 @@ export class ThreadService implements ThreadApi {
       const message = this.transaction(() => {
         const held = !!this.row(thread.id)?.held, explicit = input.source !== "notification";
         const result = this.insertMessage(input.requestId, input, thread.settings, explicit && held || input.delivery === "hardSteer");
-        if (explicit && held) this.sql("UPDATE thread SET held=0,state='running' WHERE id=?").run(thread.id);
+        if (explicit && held) this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(thread.id);
         else if (!held && thread.state === "idle") this.sql("UPDATE thread SET state='running' WHERE id=?").run(thread.id);
         this.recordRequest(input.requestId, input, "send", result.id); return result;
       });
@@ -455,7 +456,7 @@ export class ThreadService implements ThreadApi {
     }
     this.sql("UPDATE thread_work SET delivery=?,front=? WHERE id=?").run(delivery, delivery === "hardSteer" ? Date.now() : 0, messageId);
     if (delivery === "hardSteer") {
-      this.sql("UPDATE thread SET held=0,state='running' WHERE id=?").run(threadId);
+      this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(threadId);
       if (this.runtimes.get(threadId)?.commandRunning) void this.halt(threadId).then(() => this.wake(threadId));
     }
     this.changed(threadId); this.wake(threadId); return good({ ...this.message(work), delivery });
@@ -481,10 +482,19 @@ export class ThreadService implements ThreadApi {
       return archived;
     }
     if (input.action === "update") {
-      if (input.archived) { const stopped = await this.control({ threadId: input.threadId, action: "stop", descendants: true }); if (!stopped.ok) return stopped; }
+      if (input.archived) { const stopped = await this.control({ threadId: input.threadId, action: "stop", descendants: true, reason: "archive" }); if (!stopped.ok) return stopped; }
       const updated = this.update(input.threadId, input);
       if (updated.ok && input.archived) for (const id of this.descendantIds(input.threadId)) this.update(id, { archived: true });
       return updated;
+    }
+    if (input.action === "restore") {
+      if (typeof input.descendants !== "boolean" || input.resume !== undefined && typeof input.resume !== "boolean") return bad("invalid_request", "Restore must explicitly select whether descendants are restored too");
+      // Deepest first: a resumed worker's result must find its conversation
+      // still archived-and-held rather than race a half-restored subtree.
+      for (const id of [...(input.descendants ? this.descendantIds(input.threadId).reverse() : []), input.threadId]) {
+        const restored = await this.restoreOne(id, input.resume === true); if (!restored.ok) return restored;
+      }
+      return good(this.get(input.threadId)!);
     }
     if (input.action === "cancelMessage" || input.action === "promoteMessage") {
       const result = input.action === "cancelMessage" ? await this.cancelMessage(input.threadId, input.messageId) : await this.promoteMessage(input.threadId, input.messageId, input.delivery);
@@ -535,15 +545,51 @@ export class ThreadService implements ThreadApi {
       if (this.row(input.threadId)?.held && (this.execution(input.threadId) || this.runtimes.has(input.threadId) || this.halts.has(input.threadId))) {
         const halted = await this.halt(input.threadId); if (!halted.ok) return halted;
       }
-      this.sql("UPDATE thread SET held=0,state='running' WHERE id=?").run(input.threadId);
+      this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(input.threadId);
       this.changed(input.threadId); this.wake(input.threadId); return good(this.get(input.threadId)!);
     }
     if (input.action !== "stop" || typeof input.descendants !== "boolean") return bad("invalid_request", "Stop must explicitly select whether descendants stop too");
+    if (input.reason !== undefined && input.reason !== "archive") return bad("invalid_request", "Invalid stop reason");
     const ids = new Set([input.threadId, ...(input.descendants ? this.descendantIds(input.threadId) : [])]);
-    for (const id of ids) { this.sql("UPDATE thread SET held=1 WHERE id=?").run(id); this.changed(id); }
+    const at = new Date().toISOString();
+    for (const id of ids) {
+      // An archive remembers every thread it takes out of play and the turn it
+      // cancels; a thread already held keeps whatever an earlier archive stop
+      // recorded. A deliberate stop is final, so it forgets any record.
+      const row = this.row(id), execution = this.execution(id);
+      if (input.reason === "archive" && row && !row.held) this.sql("UPDATE thread SET metadata=json_set(metadata,'$.archiveInterruption',json(?)) WHERE id=?").run(JSON.stringify({ at, ...(execution ? { executionId: execution.id } : {}) }), id);
+      else if (input.reason !== "archive") this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(id);
+      this.sql("UPDATE thread SET held=1 WHERE id=?").run(id); this.changed(id);
+    }
     const results = await Promise.all([...ids].map(id => this.halt(id)));
     const failure = results.find(result => !result.ok); if (failure && !failure.ok) return failure;
     return good(this.get(input.threadId)!);
+  }
+  /**
+   * Unarchive one thread. With `resume`, a thread the archive took out of play
+   * (and that nobody has restarted or deliberately stopped since) returns to
+   * it: an interrupted turn gets a continuation message, held queued work is
+   * released, an idle thread is unheld so results wake it again, and the
+   * "cancelled" result the archive produced for its parent is withdrawn when it
+   * has not been delivered yet, since the work is continuing.
+   */
+  private async restoreOne(id: string, resume: boolean): Promise<Result<Thread>> {
+    const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
+    const interruption = thread.metadata?.archiveInterruption as { at?: string; executionId?: string } | undefined;
+    if (thread.metadata?.archived) { const restored = this.update(id, { archived: false }); if (!restored.ok) return restored; }
+    if (!resume || !interruption || !this.row(id)?.held) return good(this.get(id)!);
+    if (interruption.executionId) {
+      this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE id=? AND source='notification' AND status='queued'").run(`thread-result:${interruption.executionId}`);
+      if (thread.parentId && this.row(thread.parentId)) this.changed(thread.parentId);
+      const sent = await this.send({ requestId: `archive-resume:${id}:${interruption.executionId}`, threadId: id, text: ARCHIVE_RESUME_TEXT, delivery: "steer", source: "explicit" });
+      return sent.ok ? good(this.get(id)!) : sent;
+    }
+    if (!this.pending(id).some(work => work.state === "queued")) {
+      // It was waiting for results rather than working; let them wake it again.
+      this.sql("UPDATE thread SET held=0,metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(id); this.changed(id);
+      return good(this.get(id)!);
+    }
+    return this.control({ threadId: id, action: "resume" });
   }
   /** Every thread below `id` in this owner, nearest first; children owned elsewhere are the directory's to find. */
   private descendantIds(id: string): string[] {

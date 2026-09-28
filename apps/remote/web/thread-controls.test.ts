@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { isValidElement, type ReactElement, type ReactNode } from "react";
-import { requestStop, StopChoices, submitThreadControl } from "./src/thread-controls";
+import { requestStop, runningDescendants, StopChoices, submitThreadControl } from "./src/thread-controls";
 import { composerAction, conversationThreads, working } from "./src/thread-state";
 import { buildWorkerTree, isActiveWorker } from "./src/features/workers/tree-model";
 import { threadStatus } from "./src/features/status/thread-status";
@@ -37,6 +37,15 @@ async function withThreadClient(fetcher: typeof fetch, run: () => Promise<void>)
 }
 
 describe("thread controls", () => {
+  test("closing asks first only for running, unheld workers anywhere below the chat", () => {
+    const sessions = [
+      session("root"), session("idle", { parentId: "root" }), session("running", { parentId: "root", state: "running" }),
+      session("held", { parentId: "root", state: "running", held: true }), session("deep", { parentId: "idle", state: "running" }),
+      session("archived", { parentId: "root", state: "running", archivedAt: "2026-09-28T19:04:00Z" }), session("elsewhere", { state: "running" }),
+    ];
+    expect(runningDescendants("root", sessions).map(item => item.id).sort()).toEqual(["deep", "running"]);
+    expect(runningDescendants("elsewhere", sessions)).toEqual([]);
+  });
   test("conversation roots exclude workers; the worker tree hangs children under their parent", () => {
     const rows = [session("root"), session("existing-worker", { parentId: "root" }), session("fleet-worker", { parentId: "root", origin: "fleet" }), session("lane", { origin: "fleet" })];
     expect(conversationThreads(rows).map(row => row.id)).toEqual(["root"]);

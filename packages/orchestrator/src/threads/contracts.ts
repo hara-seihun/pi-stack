@@ -133,8 +133,11 @@ export interface ThreadInspection {
   live?: Record<string, unknown>;
 }
 export type ThreadControl =
-  | { threadId: string; action: "stop"; descendants: boolean }
+  /** `reason: "archive"` records the work this stop interrupts so a restore can resume it. */
+  | { threadId: string; action: "stop"; descendants: boolean; reason?: "archive" }
   | { threadId: string; action: "resume" }
+  /** Unarchive a thread, or its whole subtree; `resume` continues the turns and held work its archive interrupted. */
+  | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   | { threadId: string; action: "cancelMessage"; messageId: string }

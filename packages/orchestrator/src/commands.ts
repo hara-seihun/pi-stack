@@ -27,6 +27,7 @@ export const COMMANDS=[
   ["stop","Stop THREAD_ID; --descendants also stops its descendants"],
   ["pause / resume","Set or clear the global launch halt; --ordinary controls only ordinary work"],
   ["resume THREAD_ID","Release a held thread's pending messages"],
+  ["restore","Unarchive THREAD_ID; --descendants also restores every thread below it; --resume continues the work its archive interrupted"],
   ["boost","Set a provider pacing multiplier or halt"],
   ["account","Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts"],
   ["peer","List configured account-transfer peers"],
@@ -37,7 +38,7 @@ export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --pr
 const base=()=>orchestratorUrl();
 const threadBase=()=>process.env.PI_THREAD_API_URL??`${base()}/v1/threads`;
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
-function flags(args:string[]):{named:Map<string,string>;positional:string[]}{const named=new Map<string,string>(),positional:string[]=[];for(let i=0;i<args.length;i++){const value=args[i]!;if(!value.startsWith("--")){positional.push(value);continue;}const [name,inline]=value.slice(2).split("=",2);if(inline!==undefined)named.set(name!,inline);else if(["force","background","descendants"].includes(name!))named.set(name!,"true");else if(args[i+1]&&!args[i+1]!.startsWith("--"))named.set(name!,args[++i]!);else named.set(name!,"true");}return{named,positional};}
+function flags(args:string[]):{named:Map<string,string>;positional:string[]}{const named=new Map<string,string>(),positional:string[]=[];for(let i=0;i<args.length;i++){const value=args[i]!;if(!value.startsWith("--")){positional.push(value);continue;}const [name,inline]=value.slice(2).split("=",2);if(inline!==undefined)named.set(name!,inline);else if(["force","background","descendants","resume"].includes(name!))named.set(name!,"true");else if(args[i+1]&&!args[i+1]!.startsWith("--"))named.set(name!,args[++i]!);else named.set(name!,"true");}return{named,positional};}
 function required(named:Map<string,string>,key:string):string{const value=named.get(key);if(!value)throw new Error(`--${key} is required`);return value;}
 async function request(path:string,method="GET",value?:unknown):Promise<any>{const response=await fetch(`${base()}${path}`,{method,headers:{"content-type":"application/json"},body:value===undefined?undefined:JSON.stringify(value)});const body=await response.json();if(!response.ok)throw new Error(typeof body.error==="string"?body.error:body.error?.message??`orchestrator returned ${response.status}`);return body;}
 function output(value:unknown):void{console.log(JSON.stringify(value,null,2));}
@@ -117,6 +118,11 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="pause"||(command==="resume"&&(rest.length===0||rest[0]==="--ordinary"))){
     if(rest.length>1||(rest.length===1&&rest[0]!=="--ordinary"))throw new Error(`${command} accepts only --ordinary`);
     output(await request("/v1/control","POST",{key:rest[0]==="--ordinary"?"ordinary-launches":"launches",value:command==="pause"?"paused":"enabled"}));return;
+  }
+  if(command==="restore"){
+    const {named,positional}=flags(rest),threadId=positional[0];
+    if(!threadId||positional.length!==1||[...named.keys()].some(key=>key!=="descendants"&&key!=="resume"))throw new Error("restore accepts one thread id, --descendants and --resume");
+    threadOutput(await createThreadClient(threadBase()).control({threadId,action:"restore",descendants:switchEnabled(named,"descendants"),resume:switchEnabled(named,"resume")}));return;
   }
   if(command==="stop"||command==="resume"){
     const {named,positional}=flags(rest),threadId=positional[0];

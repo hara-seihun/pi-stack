@@ -26,6 +26,23 @@ export function threadTools(options: PiSessionOptions) {
     if (!url) throw new Error("Thread owner is unavailable: PI_THREAD_API_URL is not configured");
     return createThreadClient(url, fetch, { signal });
   }
+  /** Whether an unavailable recipient is archived, and if so whether it sits below this unarchived thread. */
+  async function archivedDescendant(threadId: string, signal?: AbortSignal): Promise<"descendant" | "other" | null> {
+    const find = async (id: string) => {
+      const page = await api(signal).list({ id, limit: 1 });
+      return page.ok ? page.value.threads.find(thread => thread.id === id) : undefined;
+    };
+    const recipient = await find(threadId);
+    if (!recipient?.metadata?.archived) return null;
+    const caller = await find(options.threadId);
+    if (!caller || caller.metadata?.archived) return "other";
+    const seen = new Set([threadId]);
+    for (let parentId: string | null | undefined = recipient.parentId; parentId && !seen.has(parentId); parentId = (await find(parentId))?.parentId) {
+      if (parentId === options.threadId) return "descendant";
+      seen.add(parentId);
+    }
+    return "other";
+  }
   return [
     defineTool({
       name: "thread_spawn", label: "Start a thread",
@@ -39,11 +56,20 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_send", label: "Send to a thread",
-      description: "Send to an existing accessible thread. Agents steer by default and may hard steer to cancel and confirm current local work before running the message. Sending explicitly resumes a held recipient. It does not stop descendants.",
+      description: "Send to an existing accessible thread. Agents steer by default and may hard steer to cancel and confirm current local work before running the message. Sending explicitly resumes a held recipient. An archived descendant of this thread is restored first; any other archived recipient needs thread_control restore. It does not stop descendants.",
       parameters: Type.Object({ threadId: Type.String(), text: Type.String(), delivery: Type.Optional(Type.Union(agentDelivery.anyOf, { default: "steer", description: "Agents may steer or hard steer." })), replyTo: Type.Optional(Type.String()) }),
       execute: async (id, input, signal) => {
         if (input.threadId === options.threadId && input.delivery === "hardSteer") return result({ ok: false, error: { code: "invalid_request", message: "Hard steer cannot wait for the tool that requested it. Return and continue in this thread instead." } });
-        return result(await api(signal).send({ ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" }));
+        const request = { ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" as const };
+        const sent = await api(signal).send(request);
+        // The owner words this refusal "Restore this archived thread …"; only then is the recipient worth inspecting.
+        if (sent.ok || sent.error.code !== "unavailable" || !/archived/i.test(sent.error.message) || signal?.aborted) return result(sent);
+        const archived = await archivedDescendant(input.threadId, signal).catch(() => null);
+        if (archived === "other") return result({ ok: false, error: { ...sent.error, message: `${sent.error.message}. Use thread_control with action "restore" (descendants:true for its workers too, resume:true to continue work the archive interrupted), then send again.` } });
+        if (archived !== "descendant") return result(sent);
+        const restored = await api(signal).control({ threadId: input.threadId, action: "restore", descendants: false });
+        if (!restored.ok) return result(restored);
+        return result(await api(signal).send(request));
       },
     }),
     defineTool({
@@ -114,10 +140,11 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_control", label: "Control a thread",
-      description: "Stop local execution and hold pending messages, resume held messages, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Omit threadId for this thread. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
+      description: "Stop local execution and hold pending messages, resume held messages, restore archived threads, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Restore unarchives the thread, and with descendants:true every thread below it; resume:true also puts back what the archive took out of play, continuing cancelled turns and releasing held messages, while leaving threads that were already stopped stopped. Omit threadId for this thread. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
       parameters: Type.Union([
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("stop"), descendants: Type.Boolean() }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("resume") }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("restore"), descendants: Type.Boolean({ description: "Also restore every thread below it, such as workers archived with their conversation." }), resume: Type.Optional(Type.Boolean({ default: false, description: "Continue the work the archive interrupted." })) }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("settings"), settings }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("cancelMessage"), messageId: Type.String() }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("promoteMessage"), messageId: Type.String(), delivery }),

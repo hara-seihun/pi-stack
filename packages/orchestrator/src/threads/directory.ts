@@ -35,6 +35,7 @@ export class ThreadDirectory implements ThreadApi {
   async control(input: ThreadControl): Promise<Result<Thread>> {
     const owner = await this.owner(input.threadId);
     if (!owner.ok) return owner;
+    if (input.action === "restore" && input.descendants) return this.restoreTree(input.threadId, owner.value, input.resume === true);
     const cascade = input.action === "stop" && input.descendants ? { ...input, descendants: false } as const
       : input.action === "update" && input.archived ? { threadId: input.threadId, action: "update", archived: true } as const
       : null;
@@ -59,6 +60,32 @@ export class ThreadDirectory implements ThreadApi {
       } while (cursor);
     }
     return failure ?? root;
+  }
+  /**
+   * Restore a subtree that may span owners, deepest first so a resumed worker
+   * never reports to a conversation that is still archived. Each thread is
+   * restored by its own owner; the root's result is returned.
+   */
+  private async restoreTree(threadId: string, root: ThreadOwner, resume: boolean): Promise<Result<Thread>> {
+    const levels: string[][] = [[threadId]], seen = new Set([threadId]);
+    for (let level = levels[0]!; level.length; level = levels.at(-1)!) {
+      const next: string[] = [];
+      for (const parentId of level) {
+        let cursor: string | undefined;
+        do {
+          const page = await this.list({ parentId, cursor, limit: 100 });
+          if (!page.ok) return page;
+          for (const child of page.value.threads) if (!seen.has(child.id)) { seen.add(child.id); next.push(child.id); }
+          cursor = page.value.nextCursor;
+        } while (cursor);
+      }
+      levels.push(next);
+    }
+    for (const id of levels.slice(1).reverse().flat()) {
+      const owner = await this.owner(id); if (!owner.ok) return owner;
+      const restored = await owner.value.api.control({ threadId: id, action: "restore", descendants: false, resume }); if (!restored.ok) return restored;
+    }
+    return root.api.control({ threadId, action: "restore", descendants: false, resume });
   }
   async inspect(threadId: string): Promise<Result<ThreadInspection>> {
     const owner = await this.owner(threadId);

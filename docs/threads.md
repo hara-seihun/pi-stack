@@ -87,6 +87,22 @@ Closing hides a thread without deleting history. The UI's X first stops that AI 
 its descendants, then marks the root archived. A failed descendant stop keeps the chat
 visible. There is no separate archive tab; the New/Open Chat picker restores previous
 conversations. Restoring resets the inactivity clock but does not resume held work.
+
+A stop with `reason: "archive"` (the X, and the stop inside `update archived`) records
+`metadata.archiveInterruption` on every thread it takes out of play that was not
+already held, with the execution it cancels. The `restore` control
+(`{ action: "restore", descendants, resume? }`) unarchives a thread or, with
+`descendants: true`, its whole subtree across owners, deepest first. With
+`resume: true` each recorded thread returns to play: an interrupted turn gets one
+continuation message (request `archive-resume:THREAD:EXECUTION`), held queued work is
+released, an idle thread is unheld so worker results wake it, and the archive's
+still-undelivered "cancelled" result for the parent is withdrawn. Threads that were
+already stopped stay stopped, and a later send, resume or deliberate stop discards the
+record. Remote's Undo after X restores the subtree with `resume: true`; X asks for
+confirmation first when workers below the chat are running. Agents restore with
+`thread_control` `restore`, and `thread_send` restores an archived descendant of the
+calling thread before delivering. On September 28, 2026 an accidental archive of a
+coordinator cancelled 19 running workers and only raw HTTP could restore them.
 Merely viewing a thread does not reset its clock. AI completion never reopens a closed
 chat; human messaging backends reopen on a fresh incoming message. Current-chat membership
 and order are shared across the person's devices, while selection remains local.
