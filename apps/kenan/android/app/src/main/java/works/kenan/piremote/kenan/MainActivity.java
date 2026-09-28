@@ -14,10 +14,12 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.ServerPath;
+import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        ThreadNotifications.notReady();
         registerPlugin(KenanRemotePlugin.class);
         // A downloaded web client for this shell replaces the APK's built-in copy.
         WebBundles.Installed bundle = new WebBundles(this).activate();
@@ -48,6 +50,7 @@ public class MainActivity extends BridgeActivity {
     /** Switches the running WebView to a bundle (or back to the built-in client) and reloads it. */
     void serveWebBundle(WebBundles.Installed bundle) {
         if (bridge == null) return;
+        ThreadNotifications.notReady();
         if (bundle != null) bridge.setServerBasePath(bundle.directory.getPath());
         else bridge.setServerAssetPath("public");
     }
@@ -55,14 +58,18 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
-        ThreadNotifications.resume(this, true);
+        ThreadNotifications.resume(this, this);
         if (bridge != null) bridge.triggerWindowJSEvent("pi-app-foreground");
     }
 
     @Override
     public void onPause() {
-        ThreadNotifications.resume(this, false);
+        ThreadNotifications.pause(this);
         super.onPause();
+    }
+
+    void notificationToast(JSONObject detail) {
+        if (bridge != null) bridge.eval("window.dispatchEvent(new CustomEvent('pi-notification-toast', {detail:" + detail + "}))", null);
     }
 
     @Override
