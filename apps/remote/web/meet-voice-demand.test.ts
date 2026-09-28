@@ -90,3 +90,14 @@ test("rooms without a platform transcript keep Voice open, and old unsettled del
   expect(pendingWork([{ createdAt: 0 }], 10 * 60_000)).toBe(false);
   expect(pendingWork([], 0)).toBe(false);
 });
+
+test("unmuted Voice stays open while the meeting's workers run so their results are spoken, within the work bound", async () => {
+  const { voice, step } = harness();
+  const running = [{ id: "root", state: "idle", held: false }, { id: "worker", state: "running", held: false }];
+  await step({ voiceMuted: false, sessionId: "root", threads: running } as any);
+  expect(voice.state).toBe("live");
+  await step({}, VOICE_UNMUTED_IDLE_MS + 1);
+  expect(voice.state).toBe("live");
+  await step({ threads: [{ id: "root", state: "idle", held: false }, { id: "worker", state: "idle", held: false }] } as any);
+  expect(voice.state).toBe("idle");
+});

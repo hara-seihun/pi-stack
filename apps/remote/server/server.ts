@@ -7,7 +7,7 @@ import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
+import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -146,7 +146,8 @@ const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
 // Live meeting threads answer in the room, so their first call must be quick. On September 28, 2026,
 // astra at low thinking placed live-research placeholders 5.8 s after a request, against 11.1 s at
 // the destination's high default; Sara chose it over sol at medium.
-const MEETING_THREAD = { model: "astra", thinkingLevel: "low" } as const;
+/** Meetings are live consulting: the thread mode declares the dispatcher's settings, tools, admission and its workers. */
+const MEETING_MODE = "live" satisfies ThreadModeName;
 const OFFERED_DESTINATIONS = (process.env.PI_REMOTE_DESTINATIONS ?? "home").split(",").map((id) => id.trim()).filter(Boolean);
 const destinationDefinitions: ThreadDestination[] = process.env.PI_REMOTE_THREAD_DESTINATIONS === undefined
   ? defaultThreadDestinations()
@@ -1719,12 +1720,12 @@ function meetingDestination() {
     ?? [...THREAD_DESTINATIONS.values()][0];
 }
 async function insertThread(id: string, name: string, destination: ThreadDestination, model: string,
-  meetingId: string | null, message?: string, parentId?: string, settings?: Parameters<typeof directory.spawn>[0]["settings"], contextFiles: string[] = [], createdBy?: ThreadCreator) {
+  meetingId: string | null, message?: string, parentId?: string, settings?: Parameters<typeof directory.spawn>[0]["settings"], contextFiles: string[] = [], createdBy?: ThreadCreator, mode?: ThreadModeName) {
   const admitted = workspaceAdmission.resolve(destination.workspaceId);
   if (!admitted.ok) throw new Error(admitted.error.message);
   const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId, createdBy,
     cwd: admitted.value.cwd, message, settings: { model, ...settings },
-    metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(destination.raw ? { raw: true } : {}),
+    metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode } : {}), ...(destination.raw ? { raw: true } : {}),
       ...(contextFiles.length ? { contextFiles } : {}) },
   }));
   ensureThreadView(db, thread.id);
@@ -1824,12 +1825,20 @@ const server = Bun.serve<AudioSocketData>({
           const reopened = await directory.control({ threadId: sessionId, action: "update", archived: false });
           if (!reopened.ok) throw new Error(`The external meeting's thread could not be reopened: ${reopened.error.message}`);
         }
+        // A recurring meeting reuses its thread; one created before meetings became live consulting joins the mode here.
+        const thread = threads.get(sessionId);
+        if (thread && thread.metadata?.mode !== MEETING_MODE) {
+          const moded = await directory.control({ threadId: sessionId, action: "update", metadata: { mode: MEETING_MODE } });
+          if (!moded.ok) throw new Error(`The external meeting's thread could not become live: ${moded.error.message}`);
+          const fast = await directory.control({ threadId: sessionId, action: "settings", settings: { speed: THREAD_MODES[MEETING_MODE].conversation.settings.speed } });
+          if (!fast.ok) throw new Error(`The external meeting's thread could not take priority speed: ${fast.error.message}`);
+        }
         return;
       }
       const destination = meetingDestination();
-      const model = THREAD_MODELS.get(MEETING_THREAD.model)!;
+      const { model, thinkingLevel, speed } = THREAD_MODES[MEETING_MODE].conversation.settings;
       if (!destination) throw new Error("This host needs a configured Astra destination for meetings");
-      await insertThread(sessionId, name, destination, model.id, meetingId, undefined, undefined, { thinkingLevel: MEETING_THREAD.thinkingLevel });
+      await insertThread(sessionId, name, destination, THREAD_MODELS.get(model)!.id, meetingId, undefined, undefined, { thinkingLevel, speed }, [], undefined, MEETING_MODE);
     });
     if (externalResponse) return externalResponse;
     const meetingResponse = await meet.handle(req);

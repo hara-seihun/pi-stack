@@ -6,6 +6,7 @@ import { historyPreview } from "./pi-history-preview.js";
 import { finalText, readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
+import { threadMode } from "./modes.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
@@ -16,6 +17,13 @@ const settings = Type.Object({
 });
 function result(value: Result<unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value, isError: !value.ok };
+}
+
+function spawnDefaults(mode: string | undefined): string {
+  const declared = threadMode(mode);
+  if (!declared) return "Defaults: Sol, standard speed, high thinking; Luna defaults to max.";
+  const { model, thinkingLevel, speed } = declared.worker.settings;
+  return `This is a ${mode} conversation, so workers default to ${model} at ${thinkingLevel} thinking and ${speed} speed and are admitted immediately; choose Sol only when a worker must synthesize or judge rather than gather.`;
 }
 
 export function threadTools(options: PiSessionOptions) {
@@ -55,7 +63,7 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_spawn", label: "Start a thread",
-      description: `${DELEGATION_POLICY}\n\nStart a fresh Orchestrator worker with its own context. Workers cannot spawn subagents; coordinate all delegation from this conversation. It returns immediately; completion arrives as a normal message. An ephemeral worker archives after its final assignment settles, but its work and filesystem effects persist. Set ephemeral:false if you expect to continue the conversation after its response. To continue an existing conversation use thread_send instead. Defaults: Sol, standard speed, high thinking; Luna defaults to max. Explicit settings override these defaults: Opus may be chosen explicitly, but Astra and Fable cannot be spawned. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
+      description: `${DELEGATION_POLICY}\n\nStart a fresh Orchestrator worker with its own context. Workers cannot spawn subagents; coordinate all delegation from this conversation. It returns immediately; completion arrives as a normal message. An ephemeral worker archives after its final assignment settles, but its work and filesystem effects persist. Set ephemeral:false if you expect to continue the conversation after its response. To continue an existing conversation use thread_send instead. ${spawnDefaults(options.env.PI_THREAD_MODE)} Explicit settings override these defaults: Opus may be chosen explicitly, but Astra and Fable cannot be spawned. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
       parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), ephemeral: Type.Optional(Type.Boolean({ default: true, description: "Archive after its last assignment settles. Set false when you plan to send follow-up work." })), settings: Type.Optional(Type.Object({
         ...settings.properties,
         model: Type.Optional(Type.String({ description: "Defaults to Sol. Opus may be chosen explicitly. Astra and Fable are not allowed, including provider-qualified names." })),

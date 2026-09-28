@@ -180,3 +180,20 @@ it("cools a thread's account for the limit class the provider named", async () =
     expect(await cooldown("429 Too Many Requests")).toBeLessThan(2 * 60_000);
   } finally { store.close(); }
 });
+
+it("admits live consulting past the account and machine ceilings the fleet waits behind, but not past exhausted quota", async () => {
+  const store = Store.open(":memory:");
+  store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
+  const fleet = new Fleet(store, { ...loadConfig("/missing"), maxConcurrentSessions: 1 });
+  try {
+    const busy = await fleet.admit(thread, thread.settings, false, "fleet-work");
+    expect(busy.ok).toBe(true);
+    expect((await fleet.admit({ ...thread, id: "queued", parentId: "parent" }, thread.settings, false, "queued-work")).ok).toBe(false);
+    const live = await fleet.admit({ ...thread, id: "live", parentId: "meeting", admission: "live" }, thread.settings, false, "live-work");
+    expect(live).toMatchObject({ ok: true, value: { env: { PI_THREAD_ADMISSION: "live" } } });
+    if (live.ok) await live.value.release();
+    store.recordMeter("a", "weekly", 100, Date.now() + 1000);
+    expect((await fleet.admit({ ...thread, id: "live-2", admission: "live" }, thread.settings, false, "live-exhausted")).ok).toBe(false);
+    if (busy.ok) await busy.value.release();
+  } finally { store.close(); }
+});
