@@ -1,10 +1,6 @@
-.questions-trigger { align-self: center; flex: 0 0 auto; padding: 8px 10px; border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: var(--text-xs); font-weight: 650; white-space: nowrap; }
+.questions-trigger { align-self: center; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; min-height: 44px; padding: 8px 10px; border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: var(--text-xs); font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.questions-trigger svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .questions-trigger:hover, .question-submit:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
-@media (max-width: 560px) {
-  .conversation-screen .composer-actions:has(.questions-trigger) { flex-wrap: wrap; }
-  .conversation-screen .composer-actions:has(.questions-trigger) .composer-spacer { flex-basis: 100%; }
-  .conversation-screen .questions-trigger { margin-left: auto; }
-}
 .question-form { padding: var(--space-4) 0; border-bottom: 1px solid var(--border); display: grid; gap: var(--space-3); }
 .question-form:first-child { padding-top: 0; }
 .question-form h3 { margin: 0; font-size: var(--text-md); line-height: 1.5; overflow-wrap: anywhere; }
