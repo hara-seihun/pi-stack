@@ -50,7 +50,7 @@ function MediaTile({ source, muted, showIdentity }: { source: MeetMediaSource; m
 
 function MeetPage() {
   const meetingStart = useRef<MeetingStart | null>(null);
-  const [name, setName] = useState(localStorage.getItem(appStorageKey("pi-meet-name")) || "Hara");
+  const [name, setName] = useState(localStorage.getItem(appStorageKey("pi-meet-name")) ?? "");
   const [camera, setCamera] = useState(true);
   const [microphone, setMicrophone] = useState(true);
   const [busy, setBusy] = useState(false);
