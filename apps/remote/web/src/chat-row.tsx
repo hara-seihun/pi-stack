@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { appPath } from "./app-path";
+import { CachedImage } from "./cached-media";
 
 export function iconUrl(icon: string) {
   return /^(data:|https?:|\/\/)/.test(icon) ? icon : appPath(icon.startsWith("/") ? icon : `${encodeURIComponent(icon)}.svg`);
@@ -18,6 +19,6 @@ export function ChatIcon({ icon, color }: { icon: string; color?: string }) {
 /** A contact's photo in place of a service glyph; falls back to the glyph when the picture cannot load. */
 export function ChatAvatar({ avatar, icon, color }: { avatar?: string; icon: string; color?: string }) {
   return avatar
-    ? <img className="chat-avatar" src={avatar} alt="" loading="lazy" decoding="async" onError={event => { event.currentTarget.replaceWith(Object.assign(document.createElement("img"), { className: "thread-provider", src: iconUrl(icon), alt: "" })); }} />
+    ? <CachedImage className="chat-avatar" src={avatar} alt="" loading="lazy" decoding="async" fallback={<ChatIcon icon={icon} color={color} />} />
     : <ChatIcon icon={icon} color={color} />;
 }

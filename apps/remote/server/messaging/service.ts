@@ -1122,7 +1122,16 @@ export class MessagingService {
         if (!file || !existsSync(file.path)) throw new MessagingFailure("No picture for this contact", 404);
         const type = await imageType(file.path);
         if (!type) throw new MessagingFailure("Picture is not a recognised image", 404);
-        return new Response(Bun.file(file.path), { headers: { ...API_CORS_HEADERS, "content-type": type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=86400" } });
+        const requestedVersion = url.searchParams.get("v");
+        if (requestedVersion !== null && requestedVersion !== String(file.updatedAt))
+          throw new MessagingFailure("Picture version is no longer available", 404);
+        const stat = statSync(file.path);
+        return servedFileResponse(file.path, req.method, req, {
+          contentType: type,
+          disposition: "inline",
+          cacheControl: requestedVersion === null ? "private, no-cache" : "private, max-age=31536000, immutable",
+          etag: `"${file.updatedAt}-${stat.size}-${stat.mtimeMs}"`,
+        });
       }
       const remove = API.messagingRemoveAttachment.match(req.method, url.pathname);
       if (remove) { this.removeAttachment(remove.attachmentId); return json({ ok: true }); }

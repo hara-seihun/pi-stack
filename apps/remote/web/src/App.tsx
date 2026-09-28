@@ -3,6 +3,7 @@ import { API } from "../../server/api";
 import { appPath, appStorageKey } from "./app-path";
 import type { GovernorProvider, InlineImageSnapshot, StreamEvent, ThreadQuestion } from "../../server/protocol";
 import { ClientCache } from "./client-cache";
+import { ClientCacheContext } from "./cached-media";
 import { api, piFetch, registerUnlockHandler } from "./client";
 import { fetchPersonChooser, reportWebReady } from "./native";
 import { useChatDrawing } from "./chat-drawing";
@@ -900,7 +901,7 @@ function RemoteApp() {
     : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
 
   const showTabs = route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
-  return <NotificationProvider sessionId={routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
+  return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
         <SpeechBar />
@@ -914,7 +915,7 @@ function RemoteApp() {
         {selected && !messagingActive && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
         {!messagingActive && pasteSessionId && <Suspense fallback={null}><PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} /></Suspense>}
       </>} />
-  </MessagingCallProvider></NotificationProvider>;
+  </MessagingCallProvider></NotificationProvider></ClientCacheContext.Provider>;
 }
 
 

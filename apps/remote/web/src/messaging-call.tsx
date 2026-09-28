@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { MessagingCall, MessagingConversation, MessagingSnapshot } from "../../server/messaging/protocol";
 import { messagingAvatarUrl } from "./messaging-avatar";
+import { CachedImage } from "./cached-media";
 import { MessagingCallAudio } from "./messaging-call-audio";
 import { messagingClient } from "./messaging-client";
 import "./messaging-call.css";
@@ -116,7 +117,7 @@ export function MessagingCallSurface({ call, conversations, busy, error, audioSt
   const detail = call.error || error || (call.state === "ended" ? call.reason : null) || audioStatus;
   return <section className={`signal-call ${incoming ? "incoming" : "active"}`} role="dialog" aria-modal="false" aria-label={`${labels[call.state]} from ${title}`}>
     <div className="signal-call-card">
-      <div className="signal-call-avatar">{avatar ? <img src={avatar} alt="" /> : <span aria-hidden="true">{title.trim().charAt(0).toUpperCase() || "?"}</span>}</div>
+      <div className="signal-call-avatar">{avatar ? <CachedImage src={avatar} alt="" fallback={<span aria-hidden="true">{title.trim().charAt(0).toUpperCase() || "?"}</span>} /> : <span aria-hidden="true">{title.trim().charAt(0).toUpperCase() || "?"}</span>}</div>
       <div className="signal-call-copy">
         <strong>{title}</strong>
         <span role="status">{labels[call.state]}{duration ? ` · ${duration}` : ""}</span>

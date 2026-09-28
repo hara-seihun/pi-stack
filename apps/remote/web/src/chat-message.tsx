@@ -9,6 +9,7 @@ import { MessageReactions } from "./message-reactions";
 import { AGENT_AVATAR } from "../../server/agent-identity";
 import { appPath } from "./app-path";
 import { messagingAvatarUrl } from "./messaging-avatar";
+import { CachedImage, useCachedMedia } from "./cached-media";
 import { resourceUrl } from "./resource-url";
 import { MessageLinkPreviews } from "./link-previews";
 import { useNearViewport } from "./near-viewport";
@@ -112,7 +113,7 @@ function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identit
   ]);
   return <article className={`message ${kind}`} data-message-id={identity?.id} tabIndex={identity ? 0 : undefined} {...handlers}>
     <header className="message-header">
-      {avatar && <img className="message-avatar" src={avatar} alt="" loading="lazy" decoding="async" />}
+      {avatar && <CachedImage className="message-avatar" src={avatar} alt="" loading="lazy" decoding="async" />}
       <span className="message-label">{label.toUpperCase()}</span>
       {time && <time className="message-time" dateTime={time.toISOString()}>{time.toLocaleString()}</time>}
     </header>
@@ -282,7 +283,9 @@ export function AttachmentImage({ src, alt, className = "context-image", downloa
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => { setState("loading"); setAttempt(0); }, [src]);
-  const imageSrc = near ? (attempt ? `${src}${src.includes("?") ? "&" : "?"}retry=${attempt}` : src) : undefined;
+  const media = useCachedMedia(src, near, attempt);
+  const imageSrc = media.src && (attempt && !media.ready ? `${media.src}${media.src.includes("?") ? "&" : "?"}retry=${attempt}` : media.src);
+  const failed = state === "error" || !!media.error;
   const edit = (event: SyntheticEvent<HTMLImageElement>) => {
     if (!onEditImage || state !== "ready") return;
     event.preventDefault();
@@ -291,9 +294,9 @@ export function AttachmentImage({ src, alt, className = "context-image", downloa
     onEditImage(event.currentTarget);
   };
   return <div className="attachment-image-frame" ref={ref}>
-    {state === "loading" && <div className="attachment-placeholder" aria-hidden="true" />}
-    {state === "error" && <div className="attachment-error" role="alert">Could not load image. <button type="button" onClick={() => { setState("loading"); setAttempt(value => value + 1); }}>Retry</button></div>}
-    {imageSrc && state !== "error" && <img className={className} src={imageSrc} alt={alt} crossOrigin="anonymous" data-download-query={downloadQuery || undefined} loading="lazy" decoding="async" role="button" tabIndex={0} aria-label={`Draw on ${alt || "image"}`} onLoad={() => setState("ready")} onError={() => setState("error")} onClick={edit} onKeyDown={event => {
+    {!failed && state === "loading" && !media.ready && <div className="attachment-placeholder" aria-hidden="true" />}
+    {failed && <div className="attachment-error" role="alert">Could not load image. <button type="button" onClick={() => { setState("loading"); setAttempt(value => value + 1); }}>Retry</button></div>}
+    {imageSrc && !failed && <img className={className} src={imageSrc} data-source-url={src} alt={alt} crossOrigin="anonymous" data-download-query={downloadQuery || undefined} loading="lazy" decoding="async" role="button" tabIndex={0} aria-label={`Draw on ${alt || "image"}`} onLoad={() => setState("ready")} onError={() => setState("error")} onClick={edit} onKeyDown={event => {
       if (event.key === "Enter" || event.key === " ") edit(event);
     }} />}
   </div>;

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { agentAvatar, ChatMessage } from "../../chat-message";
+import { CachedImage } from "../../cached-media";
 import { ReplyComposer, type ReplyTarget } from "../../message-reply";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { Composer, type ComposerAttachment } from "../../Composer";
@@ -27,7 +28,7 @@ function ChevronIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><pat
 export function ConversationHeader({ title, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true }: { title: string; status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
   return <header className="conversation-header">
     {onBack && <button type="button" className="header-icon" aria-label="Back" onClick={onBack}><BackIcon /></button>}
-    {avatar && showIdentity && <img className="conversation-avatar" src={avatar} alt="" decoding="async" />}
+    {avatar && showIdentity && <CachedImage className="conversation-avatar" src={avatar} alt="" decoding="async" />}
     <div className="conversation-title">
       {showIdentity && <span className="conversation-title-text">{title}</span>}
       {(status || meta) && <span className="conversation-subtitle">{status}{meta}</span>}

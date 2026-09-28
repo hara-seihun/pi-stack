@@ -3,7 +3,11 @@ export class ResourceCache<T> {
   private bytes = 0;
   private count = 0;
 
-  constructor(private readonly limits: { entries: number; bytes: number; idleMs?: number }, private readonly now = Date.now) {}
+  constructor(
+    private readonly limits: { entries: number; bytes: number; idleMs?: number },
+    private readonly now = Date.now,
+    private readonly evict?: (value: T) => void,
+  ) {}
 
   get size() { return this.entries.size; }
   get byteSize() { return this.bytes; }
@@ -47,13 +51,12 @@ export class ResourceCache<T> {
     if (entry) {
       this.bytes -= entry.bytes;
       this.count -= entry.count;
+      this.entries.delete(key);
+      this.evict?.(entry.value);
     }
-    this.entries.delete(key);
   }
 
   clear() {
-    this.entries.clear();
-    this.bytes = 0;
-    this.count = 0;
+    for (const key of this.entries.keys()) this.delete(key);
   }
 }

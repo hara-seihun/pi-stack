@@ -56,7 +56,9 @@ test("a Signal chat with a picture shows it in the inbox; one without keeps the 
     expect(withPicture.chat).toMatchObject({ kind: "human", avatar: "/v1/messaging/backends/signal-personal/avatars/%2B789?v=1700&session=s" });
     expect(without.chat).not.toHaveProperty("avatar");
     const render = (row: typeof withPicture) => renderToStaticMarkup(createElement(InboxRowView, { row, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
-    expect(render(withPicture)).toContain('class="chat-avatar" src="/v1/messaging/backends/signal-personal/avatars/%2B789?v=1700&amp;session=s"');
+    const avatar = render(withPicture).match(/<img\b[^>]*>/)?.[0];
+    expect(avatar).toContain('class="chat-avatar"');
+    expect(avatar).toContain(' src="/v1/messaging/backends/signal-personal/avatars/%2B789?v=1700&amp;session=s"');
     expect(render(without)).toContain('class="thread-provider"');
     expect(render(without)).not.toContain("chat-avatar");
   } finally { globalThis.window = previous; }

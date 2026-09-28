@@ -20,7 +20,7 @@ function decodedPreview(image: HTMLImageElement) {
 }
 
 function imageName(image: HTMLImageElement) {
-  const src = image.currentSrc || image.src;
+  const src = image.dataset.sourceUrl || image.currentSrc || image.src;
   const dataType = /^data:image\/([^;,]+)/i.exec(src)?.[1].toLowerCase();
   if (dataType) return `image.${dataType === "jpeg" ? "jpg" : dataType === "svg+xml" ? "svg" : dataType}`;
   try {
@@ -80,7 +80,7 @@ export function useChatDrawing(chatId: string | null, attach: (file: File, chatI
   };
   const editImage = (image: HTMLImageElement) => {
     image.focus({ preventScroll: true });
-    const src = image.currentSrc || image.src;
+    const src = image.dataset.sourceUrl || image.currentSrc || image.src;
     const existing = chatId ? findDrawingDraft(drafts, chatId, { src, alt: image.alt }) : undefined;
     if (existing) {
       open(existing.background);
