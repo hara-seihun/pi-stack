@@ -13,7 +13,7 @@ import { inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSyn
 import { SignInDialog } from "./SignInDialog";
 import { DismissibleError } from "./dismissible-error";
 import { dismissServerError } from "./error-feedback";
-import { deliverIdleNotifications, readIdleCursor, saveIdleCursor, takeNotificationTarget, retainNotificationTarget } from "./notifications";
+import { deliverIdleNotifications, readIdleCursor, takeNotificationTarget, retainNotificationTarget } from "./notifications";
 import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
@@ -34,6 +34,7 @@ import { beginSectionLoad } from "./in-flight";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
 import { shouldUndoClose, UndoCloses } from "./undo-closes";
 import { toast, ToastViewport } from "./toasts";
+import { NotificationProvider } from "./notification-control";
 import { useSystemBack } from "./app/system-back";
 import { back, currentRoute, navigate, routeChatId, routeHome, routeThreadId, useRoute, withoutPanel, type Panel, type Route, type Tab } from "./app/routes";
 import { Inbox } from "./features/chats/Inbox";
@@ -496,8 +497,6 @@ function RemoteApp() {
           break;
         case "notifications": {
           deliverIdleNotifications(event.feed);
-          const environment = stateRef.current.bootstrap?.environmentId;
-          if (environment) saveIdleCursor(person, environment, event.feed.cursor);
           stream.current?.remember({ notificationsAfter: event.feed.cursor });
           break;
         }
@@ -892,12 +891,12 @@ function RemoteApp() {
   }
 
   const detail = route.tab === "machine"
-    ? <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} sessionId={messagingActive ? null : aiId} /></Suspense>
+    ? <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>
     : route.tab === "files" ? filesScreen(layout === "phone" ? "stack" : "split")
     : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
 
   const showTabs = route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
-  return <MessagingCallProvider snapshot={state.messaging}>
+  return <NotificationProvider sessionId={routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
         <SpeechBar />
@@ -911,7 +910,7 @@ function RemoteApp() {
         {selected && !messagingActive && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
         {!messagingActive && pasteSessionId && <Suspense fallback={null}><PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} /></Suspense>}
       </>} />
-  </MessagingCallProvider>;
+  </MessagingCallProvider></NotificationProvider>;
 }
 
 

@@ -68,6 +68,42 @@ test("opening a thread dismisses across tabs and suppresses only that person and
   first.dispose(); second.dispose();
 });
 
+test("foreground completions are clickable toasts, viewing clears them, and background delivery stays native", async () => {
+  setup();
+  let foreground = true;
+  let opened = 0;
+  const toasts = new Map<string, () => void>();
+  const notifications = new ThreadNotifications({
+    visible: () => foreground,
+    show: (key, _title, open) => { toasts.set(key, open); },
+    clear: key => { toasts.delete(key); },
+  });
+  const key = threadNotificationKey("kenan", "local", "123");
+  await notifications.show(key, "Ready", () => { opened++; });
+  expect(shown).toHaveLength(0);
+  toasts.get(key)!();
+  expect(opened).toBe(1);
+  expect(toasts.size).toBe(0);
+  await notifications.show(key, "Another completion", () => {});
+  const visible = new AbortController();
+  const viewing = notifications.view(key, visible.signal);
+  expect(toasts.size).toBe(0);
+  await notifications.show(key, "Already viewing", () => {});
+  expect(toasts.size).toBe(0);
+  visible.abort();
+  await viewing;
+  foreground = false;
+  await notifications.show(key, "Away", () => {});
+  expect(shown).toHaveLength(1);
+  foreground = true;
+  const returned = new AbortController();
+  const returning = notifications.view(key, returned.signal);
+  expect(shown[0].closed).toBe(true);
+  returned.abort();
+  await returning;
+  notifications.dispose();
+});
+
 test("repeated completions replace one thread notification and disposed owners cannot post", async () => {
   setup();
   const notifications = new ThreadNotifications();

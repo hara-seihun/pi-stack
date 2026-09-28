@@ -7,15 +7,12 @@ import { EnvironmentControl } from "../../EnvironmentControl";
 import { NotificationControl } from "../../notification-control";
 import { MachineScreen, type MachineScreenProps } from "./MachineScreen";
 
-export type MachineTabProps = Omit<MachineScreenProps, "environment" | "notifications" | "appUpdate" | "clientRevision"> & {
-  /** The open thread, whose notifications count as seen while it is on screen. */
-  sessionId: string | null;
-};
+export type MachineTabProps = Omit<MachineScreenProps, "environment" | "notifications" | "appUpdate" | "clientRevision">;
 
-export function MachineTab({ sessionId, ...screen }: MachineTabProps) {
+export function MachineTab(screen: MachineTabProps) {
   return <MachineScreen {...screen}
     environment={<EnvironmentControl />}
-    notifications={<NotificationControl sessionId={sessionId} />}
+    notifications={<NotificationControl />}
     appUpdate={<AppUpdateControl />}
     clientRevision={__PI_REMOTE_REVISION__} />;
 }

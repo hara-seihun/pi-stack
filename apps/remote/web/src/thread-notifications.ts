@@ -9,7 +9,7 @@ export class ThreadNotifications {
   private disposed = false;
   private channel = new BroadcastChannel(appStorageKey("pi-thread-notifications"));
 
-  constructor() {
+  constructor(private foreground?: { visible(): boolean; show(key: string, title: string, open: () => void): void; clear(key: string): void }) {
     this.channel.onmessage = (event) => {
       if (typeof event.data === "string") this.clear(event.data);
     };
@@ -18,6 +18,7 @@ export class ThreadNotifications {
   private clear(key: string) {
     this.notifications.get(key)?.close();
     this.notifications.delete(key);
+    this.foreground?.clear(key);
   }
 
   async view(key: string, signal: AbortSignal) {
@@ -35,6 +36,10 @@ export class ThreadNotifications {
     await navigator.locks.request(key, { ifAvailable: true }, (lock) => {
       if (!lock || this.disposed) return;
       this.clear(key);
+      if (this.foreground?.visible()) {
+        this.foreground.show(key, title, () => { onClick(); this.clear(key); });
+        return;
+      }
       const notification = new Notification(title, { body: "Session is idle", tag: key, icon: appPath("kenan.png") });
       this.notifications.set(key, notification);
       notification.onclick = () => { onClick(); this.clear(key); };

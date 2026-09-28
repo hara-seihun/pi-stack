@@ -5,10 +5,7 @@ import { nativePlatform, remote } from "./native";
 export interface NotificationTarget { environment?: string; sessionId?: string; user?: string }
 const targetKey = () => appStorageKey("pi-notification-target");
 
-// Idle-notification cursors and the target a notification opened. The
-// permission surface and the poll of other environments live with the Machine
-// screen in `notification-control.tsx`; this module is what the app itself
-// needs, so it stays in the first paint.
+// The app-wide notification owner consumes stream feeds and opens their targets.
 export const cursorKey = (user: string, environment: string) => appStorageKey(`pi-idle-cursor:${user}:${environment}`);
 
 export function readIdleCursor(user: string, environment: string): number {
@@ -21,15 +18,24 @@ export function saveIdleCursor(user: string, environment: string, cursor: number
 
 type IdleSink = (feed: IdleNotificationFeed) => void;
 let idleSink: IdleSink | null = null;
+let pending: { user: string; session: string; feed: IdleNotificationFeed } | null = null;
 
-/** The stream hands the current environment's feed to whoever can show it. */
 export function deliverIdleNotifications(feed: IdleNotificationFeed) {
-  idleSink?.(feed);
+  if (idleSink) { idleSink(feed); return; }
+  const user = window.PiRemotePerson.get();
+  const session = window.PiRemotePerson.session();
+  const previous = pending?.user === user && pending.session === session ? pending.feed : null;
+  pending = { user, session, feed: {
+    cursor: Math.max(previous?.cursor ?? 0, feed.cursor),
+    notifications: [...new Map([...(previous?.notifications ?? []), ...feed.notifications].map(item => [item.seq, item])).values()],
+  } };
 }
 
-/** The Machine screen's notification control claims the feed while it is mounted. */
-export function setIdleSink(sink: IdleSink | null) {
+export function setIdleSink(sink: IdleSink) {
   idleSink = sink;
+  const buffered = pending;
+  pending = null;
+  if (buffered?.user === window.PiRemotePerson.get() && buffered.session === window.PiRemotePerson.session()) sink(buffered.feed);
   return () => { if (idleSink === sink) idleSink = null; };
 }
 
