@@ -93,7 +93,9 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   };
   const accept = (source: MeetMediaSource) => {
     if (suspended) return;
-    media?.attach(source); transcription?.attach(source);
+    media?.attach(source);
+    // A platform that labels speakers supplies the transcript; recognizing its mixed feed again would only add unattributed duplicates.
+    if (!room?.snapshot.platformTranscript) transcription?.attach(source);
   };
   const releaseMedia = async () => {
     browser?.close();
@@ -187,7 +189,9 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
       input: media.voiceInput.stream,
       outputMuted: joined.room.voiceMuted,
       meetingContext: () => [
-        "External meeting audio source: Mixed meeting audio. This is one mixed feed, not identified individual speakers.",
+        current.snapshot.platformTranscript
+          ? "External meeting audio source: Mixed meeting audio. The meeting platform supplies the speaker-labelled transcript."
+          : "External meeting audio source: Mixed meeting audio. This is one mixed feed, not identified individual speakers.",
         `Kenan's outgoing voice is ${current.snapshot.voiceMuted ? "muted" : "unmuted"}.`,
         current.snapshot.browser ? `Shared browser: ${current.snapshot.browser.url}` : "No browser is being shared.",
       ].join("\n"),

@@ -25,6 +25,7 @@ export async function externalMeetingRequest(req: Request, meet: MeetServer,
     const body = start ? await req.json() : Object.fromEntries(url.searchParams);
     if (typeof body.namespace !== "string" || !/^[a-z][a-z0-9._-]{0,79}$/.test(body.namespace)
       || typeof body.eventKey !== "string" || !body.eventKey.trim() || body.eventKey.length > 2000) return json({ error: "namespace and eventKey are required" }, 400);
+    if (start && body.transcript !== undefined && body.transcript !== "local" && body.transcript !== "platform") return json({ error: "transcript must be local or platform" }, 400);
     const meetingId = identity(body.namespace, body.eventKey, "room");
     const sessionId = identity(body.namespace, body.eventKey, "thread");
     if (transcript) {
@@ -36,7 +37,7 @@ export async function externalMeetingRequest(req: Request, meet: MeetServer,
       return response;
     }
     await ensureThread(sessionId, meetingId, typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 120) : `${body.namespace} meeting`);
-    return json(meet.openExternal(meetingId, sessionId, `${url.origin}/v1/meet/${meetingId}`));
+    return json(meet.openExternal(meetingId, sessionId, `${url.origin}/v1/meet/${meetingId}`, body.transcript === "platform"));
   } catch (cause) {
     return json({ error: cause instanceof Error ? cause.message : String(cause) }, 400);
   }

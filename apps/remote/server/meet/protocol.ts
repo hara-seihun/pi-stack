@@ -32,6 +32,8 @@ export interface MeetSnapshot {
   voiceMuted: boolean;
   voiceRevision: number;
   transcriptFlushRevision: number;
+  /** Speaker-labelled turns arrive from the meeting platform; the host does not upload mixed audio for recognition. */
+  platformTranscript: boolean;
   threads: MeetThreadState[];
   id: string;
   sessionId: string;

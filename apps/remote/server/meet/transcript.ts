@@ -66,6 +66,16 @@ export class MeetTranscriptStore {
       .run(id, meeting, startedAt, text, final ? 1 : 0, final ? "done" : "partial", Date.now(),
         fragment?.voiceSessionId ?? null, fragment?.startMs ?? null, fragment?.endMs ?? null);
   }
+  /** Save a speaker-labelled turn recognized by the meeting platform. Returns false when the id belongs to another meeting or speaker. */
+  platform(id: string, meeting: string, speakerId: string, speaker: string, startedAt: number, text: string, final: boolean) {
+    const existing = this.db.query("SELECT meeting_id,speaker_id FROM meet_transcript WHERE id=?").get(id) as any;
+    if (existing && (existing.meeting_id !== meeting || existing.speaker_id !== speakerId)) return false;
+    this.db.query(`INSERT INTO meet_transcript(id,meeting_id,speaker_id,speaker,started_at,text,final,status,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+      speaker=excluded.speaker,text=excluded.text,final=excluded.final,status=excluded.status,updated_at=excluded.updated_at`)
+      .run(id, meeting, speakerId, speaker, startedAt, text, final ? 1 : 0, final ? "done" : "partial", Date.now());
+    return true;
+  }
   recover() { this.db.query("UPDATE meet_transcript SET status='queued' WHERE status='processing'").run(); }
   pending() { return this.db.query("SELECT id,audio FROM meet_transcript WHERE status='queued' ORDER BY seq LIMIT 1").get() as { id: string; audio: Uint8Array } | null; }
   countPending() { return (this.db.query("SELECT count(*) AS n FROM meet_transcript WHERE status IN ('queued','processing')").get() as {n: number}).n; }
