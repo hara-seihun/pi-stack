@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+// Collects Claude's banked reset balance through an existing authenticated Kernel profile.
+// Every HTTP request in this tool is GET; it never redeems a grant.
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+
+const API = "https://claude.ai/api";
+const LEDGER = process.env.PI_ORCHESTRATOR_LEDGER ?? "/var/lib/pi-orchestrator/ledger.sqlite3";
+const STORE = process.env.PI_ORCHESTRATOR_STORE ?? "/srv/pi/pi-orchestrator/dist/store.js";
+const HELP = `Usage: claude-reset [collect|status] [--config FILE] [--account ID] [--dry-run] [--json]
+
+collect (default) reads Claude's banked resets and records successful readings.
+status shows last-known ledger readings without opening a browser.
+--dry-run reads Claude but does not change the ledger.
+Configuration is a JSON object mapping orchestrator account IDs to existing Kernel profile names.
+Set CLAUDE_RESET_CONFIG instead of --config if desired.`;
+
+function parseArgs(args) {
+  const options = { command: "collect", config: process.env.CLAUDE_RESET_CONFIG, accounts: [], dryRun: false, json: false };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--help" || arg === "-h") return { help: true };
+    if (arg === "collect" || arg === "status") options.command = arg;
+    else if (arg === "--config" || arg === "--account") {
+      const value = args[++i];
+      if (!value) throw new Error(`${arg} requires a value`);
+      if (arg === "--config") options.config = value;
+      else options.accounts.push(value);
+    } else if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--json") options.json = true;
+    else throw new Error(`unknown argument: ${arg}`);
+  }
+  if (!options.config) throw new Error("provide --config FILE or CLAUDE_RESET_CONFIG");
+  if (options.command === "status" && options.dryRun) throw new Error("--dry-run only applies to collect");
+  return options;
+}
+
+function configured(path, accounts) {
+  const map = JSON.parse(readFileSync(path, "utf8"));
+  if (!map || Array.isArray(map) || typeof map !== "object") throw new Error("config must map account IDs to Kernel profile names");
+  const rows = Object.entries(map);
+  if (rows.some(([id, profile]) => !id || typeof profile !== "string" || !profile.trim())) throw new Error("config has an invalid account ID or profile name");
+  for (const id of accounts) if (!(id in map)) throw new Error(`account ${id} is not configured`);
+  return rows.filter(([id]) => !accounts.length || accounts.includes(id));
+}
+
+function command(program, args) {
+  return execFileSync(program, args, { encoding: "utf8", timeout: 50_000, maxBuffer: 2 * 1024 * 1024 });
+}
+
+function get(session, path) {
+  const body = command("kernel", ["browsers", "curl", session, `${API}${path}`, "--request", "GET", "--fail", "--silent", "--max-time", "30"]);
+  return JSON.parse(body);
+}
+
+function emailFrom(value) {
+  // Only identity-bearing fields, not arbitrary email strings in unrelated organization data.
+  for (const candidate of [value?.email_address, value?.email, value?.account?.email_address, value?.account?.email, value?.user?.email]) {
+    if (typeof candidate === "string" && candidate.includes("@")) return candidate.trim().toLowerCase();
+  }
+  return undefined;
+}
+
+function organizationId(value) {
+  const organizations = Array.isArray(value) ? value : value?.organizations;
+  if (!Array.isArray(organizations)) throw new Error("organizations response did not contain a list");
+  const subscription = organizations.filter((org) => org?.billing_type === "stripe_subscription");
+  const candidates = subscription.length ? subscription : organizations;
+  const ids = candidates.map((org) => org?.uuid ?? org?.id ?? org?.organization?.uuid).filter((id) => typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id));
+  if (ids.length !== 1) throw new Error(`expected one Claude subscription organization; found ${ids.length}`);
+  return ids[0];
+}
+
+function credits(value) {
+  const grants = value?.cedar_ember?.grants;
+  if (!Array.isArray(grants)) throw new Error("usage response lacks cedar_ember.grants");
+  let available = 0;
+  let nextExpiresAt;
+  for (const grant of grants) {
+    if (!Number.isSafeInteger(grant?.resets_left) || grant.resets_left < 0) throw new Error("grant has invalid resets_left");
+    if (grant.resets_left === 0) continue;
+    if (grant.paused === true) continue;
+    const expires = Date.parse(grant.ends_at);
+    if (!Number.isFinite(expires)) throw new Error("grant has invalid ends_at");
+    if (expires <= Date.now()) continue;
+    available += grant.resets_left;
+    nextExpiresAt = Math.min(nextExpiresAt ?? expires, expires);
+  }
+  return { available, ...(nextExpiresAt === undefined ? {} : { nextExpiresAt }) };
+}
+
+function observe(profile, expectedEmail) {
+  const started = JSON.parse(command("kernel-browser", ["start", profile]));
+  const session = started.session_id;
+  if (typeof session !== "string" || !/^[a-zA-Z0-9]+$/.test(session)) throw new Error("Kernel start returned no valid session ID");
+  let result;
+  let failure;
+  try {
+    const orgs = get(session, "/organizations");
+    const orgId = organizationId(orgs);
+    const identity = emailFrom(get(session, "/account"));
+    if (!identity) throw new Error("Claude web identity has no email");
+    if (identity !== expectedEmail.trim().toLowerCase()) throw new Error(`Claude web identity ${identity} does not match ledger label ${expectedEmail}`);
+    result = credits(get(session, `/organizations/${orgId}/usage?cedar_ember=1&skip_spend=1`));
+  } catch (error) {
+    failure = error;
+  } finally {
+    try { command("kernel-browser", ["stop", session]); }
+    catch (error) { failure = new Error(`could not stop Kernel session ${session}: ${error.message}`, { cause: failure }); }
+  }
+  if (failure) throw failure;
+  return result;
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.help) { console.log(HELP); return; }
+  const { Store } = await import(STORE);
+  const ledger = Store.open(LEDGER);
+  const results = [];
+  try {
+    for (const [accountId, profile] of configured(options.config, options.accounts)) {
+      const account = ledger.account(accountId);
+      if (options.command === "status") {
+        results.push({ accountId, outcome: "last-known", reading: ledger.resetCredits(accountId) ?? null });
+        continue;
+      }
+      if (!account || account.provider !== "anthropic" || !account.label?.includes("@")) {
+        results.push({ accountId, outcome: "error", reason: "ledger has no Anthropic account with an email label" });
+        continue;
+      }
+      try {
+        const reading = { at: Date.now(), ...observe(profile, account.label) };
+        if (!options.dryRun) ledger.recordResetCredits(accountId, reading);
+        results.push({ accountId, outcome: options.dryRun ? "would-record" : "recorded", reading });
+      } catch (error) {
+        results.push({ accountId, outcome: "error", reason: error.message, lastKnown: ledger.resetCredits(accountId) ?? null });
+      }
+    }
+  } finally { ledger.close(); }
+  if (options.json) console.log(JSON.stringify(results, null, 2));
+  else for (const row of results) console.log(`${row.accountId}\t${row.outcome}\t${row.reading?.available ?? row.lastKnown?.available ?? "-"}${row.reason ? `\t${row.reason}` : ""}`);
+  if (results.some((row) => row.outcome === "error")) process.exitCode = 1;
+}
+
+main().catch((error) => { console.error(`claude-reset: ${error.message}`); process.exitCode = 1; });
