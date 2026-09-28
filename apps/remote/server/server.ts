@@ -2502,13 +2502,6 @@ process.on("uncaughtException", (cause) => {
 refreshPlanUsageIfDue();
 void refreshPeers();
 
-// Fleet owns its questions on another process: sample only while that thread is selected.
-// Local questions arrive through the thread owner's change subscription instead.
-const peerQuestionTicker = setInterval(() => {
-  for (const stream of streams.values()) if (stream.subscription.viewing && stream.subscription.session && !threads.get(stream.subscription.session)) void sendQuestions(stream);
-}, 2_000);
-peerQuestionTicker.unref?.();
-
 unwrap(await threads.start());
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
 const stopAutoArchive = startAutoArchive(directory, AUTO_ARCHIVE_AFTER_MS, error => console.error("[supervisor] auto-archive failed", error), thread => Boolean((unreadThread.get(thread.id) as { idle_unread: number } | null)?.idle_unread),

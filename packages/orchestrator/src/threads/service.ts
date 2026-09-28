@@ -374,7 +374,7 @@ export class ThreadService implements ThreadApi {
       || input.suggestions !== undefined && (!Array.isArray(input.suggestions) || input.suggestions.some(text => typeof text !== "string" || !text.trim()))
       || input.recommendedSuggestionIndex !== undefined && (!Number.isSafeInteger(input.recommendedSuggestionIndex)
         || input.recommendedSuggestionIndex < 0 || input.recommendedSuggestionIndex >= (input.suggestions?.length ?? 0))) {
-      return bad("invalid_request", "A question, stable requestId, nonempty suggestions and a valid recommended suggestion index are required");
+      return bad("invalid_request", "Provide a question and stable requestId; optional suggestions must contain nonblank text and any recommended index must identify one");
     }
     try {
       const prior = this.request(input.requestId, input, "ask"); if (!prior.ok) return prior;
@@ -424,7 +424,7 @@ export class ThreadService implements ThreadApi {
         const accepted = this.sql("UPDATE thread_question SET answer=?,accepted_at=? WHERE id=? AND accepted_at IS NULL").run(answer, Date.now(), row.id);
         if (!accepted.changes) throw new Error("Question acceptance raced another answer");
         this.insertMessage(`question-answer:${row.id}`, { requestId: `question-answer:${row.id}`, threadId: input.threadId,
-          text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings);
+          text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings, thread.held);
         this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(input.threadId);
       });
       this.changed(input.threadId); this.wake(input.threadId);

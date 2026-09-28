@@ -73,7 +73,7 @@ it("rejects invalid recommendations and answers without consuming the question",
   expect((await service.questions("thread"))).toMatchObject({ ok: true, value: [{ id: questionId }] });
 });
 
-it("keeps unanswered questions through turn completion and inactivity archiving, then reopens an explicitly archived thread on answer", async () => {
+it("prevents inactivity archiving and reopens an explicitly archived thread on answer", async () => {
   const { service } = await setup();
   const asked = await service.ask({ requestId: "plain", threadId: "thread", question: "Details?" });
   if (!asked.ok) throw Error(asked.error.message);
@@ -89,6 +89,18 @@ it("keeps unanswered questions through turn completion and inactivity archiving,
   expect(await service.answer({ threadId: "thread", questionId, selectedSuggestionIds: [], text: "Here are the details" })).toMatchObject({ ok: true });
   expect(service.get("thread")?.metadata?.archived).toBeUndefined();
   expect(service.pending("thread")[0]).toMatchObject({ delivery: "steer", text: expect.stringContaining("Here are the details") });
+});
+
+it("places an explicit answer before previously held messages", async () => {
+  const { service } = await setup();
+  const asked = await service.ask({ requestId: "held-question", threadId: "thread", question: "What next?" });
+  if (!asked.ok) throw Error(asked.error.message);
+  await service.send({ requestId: "earlier", threadId: "thread", text: "Earlier queued work" });
+  await service.control({ threadId: "thread", action: "stop", descendants: false });
+  expect(service.get("thread")?.held).toBe(true);
+  expect(await service.answer({ threadId: "thread", questionId: asked.value.questionId, selectedSuggestionIds: [], text: "This decision first" })).toMatchObject({ ok: true });
+  expect(service.pending("thread").map(message => message.id)).toEqual([`question-answer:${asked.value.questionId}`, "earlier"]);
+  expect(service.get("thread")?.held).toBe(false);
 });
 
 it("routes owner HTTP requests and deduplicates a lost ask acknowledgement", async () => {

@@ -19,6 +19,8 @@ test("the replica applies generic frames, filters another session, and resumes f
   const publisher = new ReconcilePublisher();
   const first = publisher.publish("transcript:mine", { type: "transcript", sessionId: "mine", generation: "g", total: 0, items: [] });
   publisher.publish("transcript:other", { type: "transcript", sessionId: "other", generation: "g", total: 0, items: [] });
+  const questions = publisher.publish("questions:mine", { type: "questions", sessionId: "mine", questions: [] });
+  publisher.publish("questions:other", { type: "questions", sessionId: "other", questions: [] });
   const calls: Array<{ path: string; body: any }> = [];
   const received: StreamEvent[] = [];
   const client = createStreamClient({
@@ -27,14 +29,16 @@ test("the replica applies generic frames, filters another session, and resumes f
     fetch: async (path, init) => {
       calls.push({ path, body: JSON.parse(String(init.body)) });
       if (path !== "/v1/stream") return new Response(null, { status: 204 });
-      return sse([hello, frame(publisher.reconcile("transcript:other", null)), frame(publisher.reconcile("transcript:mine", calls.length === 1 ? null : first))]);
+      return sse([hello, frame(publisher.reconcile("transcript:other", null)), frame(publisher.reconcile("transcript:mine", calls.length === 1 ? null : first)),
+        frame(publisher.reconcile("questions:other", null)), frame(publisher.reconcile("questions:mine", calls.length === 1 ? null : questions))]);
     },
   });
   client.start(); await settle();
-  expect(received.map(event => event.type)).toEqual(["hello", "transcript"]);
-  expect(calls[0].body).toMatchObject({ have: {}, want: ["bootstrap", "state", "messaging", "live:mine", "transcript:mine", "images:mine"] });
+  expect(received.map(event => event.type)).toEqual(["hello", "transcript", "questions"]);
+  expect(calls[0].body).toMatchObject({ have: {}, want: ["bootstrap", "state", "messaging", "live:mine", "transcript:mine", "images:mine", "questions:mine"] });
   client.reconnect(); await settle(); client.stop();
   expect(calls.at(-1)?.body.have["transcript:mine"]).toBe(first);
+  expect(calls.at(-1)?.body.have["questions:mine"]).toBe(questions);
 });
 
 test("restored transcript heads declare only their actual local revision", async () => {
