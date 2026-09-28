@@ -83,6 +83,9 @@ test("a host flush acknowledgement settles all covered delegation requests", asy
     const failed = server.flushTranscript(host.room.id).then(() => null, (error: Error) => error);
     await server.handle(request(`/${host.room.id}/transcript/flushed?participant=${host.participant.id}`, { revision: 3, error: "capture failed" }));
     expect((await failed)?.message).toContain("capture failed");
+    const platform = server.openExternal(crypto.randomUUID(), "platform-thread", "http://localhost/v1/meet", true);
+    await server.flushTranscript(platform.room.id);
+    expect(platform.room.transcriptFlushRevision).toBe(0);
   } finally { await server.close(); }
 });
 

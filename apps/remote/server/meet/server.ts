@@ -101,7 +101,8 @@ export class MeetServer {
 
   flushTranscript(id: string): Promise<void> {
     const room = this.rooms.get(id);
-    if (!room || room.closed) return Promise.resolve();
+    // A platform room's host uploads no audio, so there is nothing to flush; waiting on its next poll only delayed every handoff.
+    if (!room || room.closed || room.platformTranscript) return Promise.resolve();
     const revision = ++room.transcriptFlushRevision;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
