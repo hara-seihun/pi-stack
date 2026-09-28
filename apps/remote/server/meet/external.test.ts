@@ -85,3 +85,27 @@ test("a host flush acknowledgement settles all covered delegation requests", asy
     expect((await failed)?.message).toContain("capture failed");
   } finally { await server.close(); }
 });
+
+test("a platform-transcribed external room stores speaker-labelled turns from its host only", async () => {
+  const server = new MeetServer(() => true);
+  const body = { namespace: "converge", eventKey: "platform-transcript", transcript: "platform" };
+  try {
+    const host = await (await externalMeetingRequest(request("/external", body), server, () => {}))!.json();
+    expect(host.room.platformTranscript).toBe(true);
+    const root = `/${host.room.id}`;
+    const turn = { id: "recall-1", speakerId: "recall:100", speaker: "Sara", text: "Can you unmute yourself?", startedAt: 1_000 };
+    expect((await server.handle(request(`${root}/transcript/turn?participant=${host.participant.id}`, turn)))!.status).toBe(200);
+    expect((await server.handle(request(`${root}/transcript/turn?participant=${host.participant.id}`, { ...turn, text: "Kenan, can you unmute yourself?" })))!.status).toBe(200);
+    expect((await server.handle(request(`${root}/transcript/turn?participant=${host.participant.id}`, { ...turn, speakerId: "recall:200" })))!.status).toBe(409);
+    expect((await server.handle(request(`${root}/transcript/turn?participant=${host.participant.id}`, { ...turn, id: "x", speakerId: "pi" })))!.status).toBe(400);
+    const camera = await (await server.handle(request(`${root}/join`, { name: "Recall camera: Sara" })))!.json();
+    expect((await server.handle(request(`${root}/transcript/turn?participant=${camera.participant.id}`, { ...turn, id: "y" })))!.status).toBe(403);
+    server.transcripts.assistant("spoken", host.room.id, "I'm unmuted now.", true, 2_000);
+    const text = await (await server.handle(request(`${root}/transcript?format=text`)))!.text();
+    expect(text).toContain("Sara [recall:100]: Kenan, can you unmute yourself?");
+    expect(text).toContain("Kenan [pi]: I'm unmuted now.");
+    const local = await (await externalMeetingRequest(request("/external", { ...body, transcript: "local" }), server, () => {}))!.json();
+    expect(local.room.platformTranscript).toBe(false);
+    expect((await externalMeetingRequest(request("/external", { ...body, transcript: "whisper" }), server, () => {}))!.status).toBe(400);
+  } finally { await server.close(); }
+});

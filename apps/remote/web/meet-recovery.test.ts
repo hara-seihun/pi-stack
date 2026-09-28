@@ -98,7 +98,7 @@ test("failed startup stops capture and retains its unfinished PCM until recovery
   provide("navigator", { mediaDevices: { getUserMedia: async () => { captures++; return input; } } });
   const participant = { id: "external-host", host: true, name: "Mixed meeting audio" };
   const room = { id: "room", sessionId: "thread", apiUrl: "", iceServers: [], participants: [participant],
-    browser: null, threads: [], voiceMuted: true, voiceRevision: 0, transcriptFlushRevision: 0 };
+    browser: null, threads: [], voiceMuted: true, voiceRevision: 0, transcriptFlushRevision: 0, platformTranscript: false };
   let connected = true;
   const uploads: Array<{ path: string; body: unknown; connected: boolean }> = [];
   let stops = 0;

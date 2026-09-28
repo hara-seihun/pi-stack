@@ -15,6 +15,8 @@ type Room = {
   browser: MeetBrowser | null; opening: Promise<void> | null; closed: boolean;
   voiceMuted: boolean; voiceRevision: number; threads(): MeetThreadState[];
   transcriptFlushRevision: number; flushes: Map<number, PendingFlush>;
+  /** The meeting platform supplies speaker-labelled turns, so the host's mixed audio is not recognized locally. */
+  platformTranscript: boolean;
 };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
 const fail = (error: string, status = 400) => json({ error }, status);
@@ -24,6 +26,7 @@ const image = (bytes: Buffer | null) => bytes
 const iceServers = meetIceServers();
 const snapshot = (room: Room): MeetSnapshot => ({
   voiceMuted: room.voiceMuted, voiceRevision: room.voiceRevision, threads: room.threads(), transcriptFlushRevision: room.transcriptFlushRevision,
+  platformTranscript: room.platformTranscript,
   id: room.id, sessionId: room.sessionId, apiUrl: room.apiUrl, iceServers, participants: [...room.members.values()].map((member) => member.participant),
   browser: room.browser ? { endpoint: room.browser.endpoint, url: room.browser.page.url(), error: room.browser.error, watchPath: room.browser.watchPath, watchError: room.browser.watchError } : null,
 });
@@ -54,11 +57,11 @@ export class MeetServer {
     this.timer.unref();
   }
 
-  private createRoom(id: string, sessionId: string, apiUrl: string, name: string, kind: Room["kind"] = "peer-to-peer"): MeetJoined {
+  private createRoom(id: string, sessionId: string, apiUrl: string, name: string, kind: Room["kind"] = "peer-to-peer", platformTranscript = false): MeetJoined {
     const participantId = kind === "external" ? "external-host" : crypto.randomUUID();
     const room: Room = { id, sessionId, apiUrl, kind, members: new Map(), speakers: new Map(), seq: 0,
       browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0,
-      transcriptFlushRevision: 0, flushes: new Map(), threads: () => this.threadActivity(id, sessionId) };
+      transcriptFlushRevision: 0, flushes: new Map(), platformTranscript, threads: () => this.threadActivity(id, sessionId) };
     const participant: MeetParticipant = { id: participantId, name: name.slice(0, 80), host: true };
     room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0 });
     room.speakers.set(participant.id, participant);
@@ -68,15 +71,16 @@ export class MeetServer {
     return { room: snapshot(room), participant };
   }
 
-  openExternal(id: string, sessionId: string, apiUrl: string): MeetJoined {
+  openExternal(id: string, sessionId: string, apiUrl: string, platformTranscript = false): MeetJoined {
     const room = this.rooms.get(id);
     if (room) {
       const host = [...room.members.values()].find((member) => member.participant.host)!;
       host.seen = Date.now();
+      room.platformTranscript = platformTranscript;
       return { room: snapshot(room), participant: host.participant };
     }
     if (this.rooms.size >= 16) throw new Error("This supervisor already has 16 meetings");
-    return this.createRoom(id, sessionId, apiUrl, "Mixed meeting audio", "external");
+    return this.createRoom(id, sessionId, apiUrl, "Mixed meeting audio", "external", platformTranscript);
   }
 
   /** Whether this meeting has an open room, so its threads must stay reachable. */
@@ -277,6 +281,18 @@ export class MeetServer {
         fragment = { voiceSessionId: body.voiceSessionId, startMs: body.startMs, endMs: body.endMs };
       }
       this.transcripts.assistant(`${room.id}:pi:${body.id}`, room.id, body.text, body.final, body.startedAt, fragment);
+      return json({ ok: true });
+    }
+    if (parts[3] === "transcript" && parts[4] === "turn" && req.method === "POST") {
+      if (!member.participant.host) return fail("Only the host records platform transcript turns", 403);
+      const body = await this.body(req);
+      if (!body || typeof body.id !== "string" || !body.id || body.id.length > 200
+        || typeof body.speakerId !== "string" || !body.speakerId || body.speakerId.length > 200 || body.speakerId === "pi" || room.members.has(body.speakerId)
+        || typeof body.speaker !== "string" || !body.speaker.trim() || typeof body.text !== "string" || body.text.length > 20_000
+        || !Number.isFinite(body.startedAt) || body.startedAt < 0 || (body.final !== undefined && typeof body.final !== "boolean")) return fail("Invalid platform transcript turn");
+      if (!this.transcripts.platform(`${room.id}:platform:${body.id}`, room.id, body.speakerId, body.speaker.trim().slice(0, 120), body.startedAt, body.text, body.final ?? true)) {
+        return fail("Platform transcript turn identity conflict", 409);
+      }
       return json({ ok: true });
     }
     if (parts[3] === "transcript" && parts[4] === "retry" && req.method === "POST") {
