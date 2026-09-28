@@ -71,7 +71,7 @@ export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null
   return ["hello", "reconcile", "notifications", "events", "error"].includes(value.type) ? value as StreamWireEvent : null;
 }
 
-const SESSION_SCOPED = new Set(["transcript", "live", "images", "events"]);
+const SESSION_SCOPED = new Set(["transcript", "live", "images", "questions", "events"]);
 
 export interface StreamClient {
   start(): void;
@@ -140,7 +140,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     }
     if (event.type === "reconcile") {
       if (!streamWants(subscription).includes(event.resource)) return;
-      if (/^(transcript|live|images):/.test(event.resource) && event.resource.slice(event.resource.indexOf(":") + 1) !== subscription.session) return;
+      if (/^(transcript|live|images|questions):/.test(event.resource) && event.resource.slice(event.resource.indexOf(":") + 1) !== subscription.session) return;
       const result = replica.apply(event);
       if (!result.ok || !isStreamSnapshot(event.resource, result.value)) {
         replica.forget(event.resource);
