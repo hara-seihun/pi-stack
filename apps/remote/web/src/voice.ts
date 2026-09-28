@@ -359,7 +359,7 @@ import { createStreamClient } from "./stream";
       } else if (event.type === "session.delegation.created" && !this.closing) {
         const item = asRecord(event.delegation);
         if (!item?.id || item.target !== "client") return;
-        const delegation = { id: item.id, requestId: crypto.randomUUID(), offsetMs: event.offset_ms, text: "", workId: null, started: false, submitted: false };
+        const delegation = { id: item.id, requestId: crypto.randomUUID(), offsetMs: event.offset_ms, text: "", workId: null, started: false, submitted: false, createdAt: Date.now() };
         this.delegations.push(delegation);
         this.setState("live", "Agent queued…");
         if (this.transcript.some((part) => part.role === "user")) void this.submitDelegation(delegation);

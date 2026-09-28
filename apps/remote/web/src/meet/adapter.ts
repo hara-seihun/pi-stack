@@ -1,5 +1,7 @@
 import { VoiceSession } from "../voice";
-import { meetPath, type MeetJoined, type MeetSnapshot, type MeetVoiceControl } from "../../../server/meet/protocol";
+import { API } from "../../../server/api";
+import { meetPath, type MeetJoined, type MeetSnapshot, type MeetVoiceControl, type MeetVoiceWake } from "../../../server/meet/protocol";
+import { pendingWork, VoiceDemand } from "./voice-demand";
 import { avatarStream, MeetMedia, type MeetMediaSource } from "./media";
 import { MeetBrowser } from "./browser";
 import { MeetRoom, post } from "./room";
@@ -62,6 +64,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   let transcription: MeetTranscription | null = null;
   let browser: MeetBrowser | null = null;
   let voice: VoiceSession | null = null;
+  let demand: VoiceDemand | null = null;
   let avatar: Awaited<ReturnType<typeof avatarStream>> | null = null;
   let closing: Promise<void> | null = null;
   let suspending: Promise<void> | null = null;
@@ -83,12 +86,36 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
     options.onState?.(state);
   };
   const notice = (message: string) => update({ notice: message });
+  const meetingContext = () => {
+    const current = room!.snapshot;
+    return [
+      current.platformTranscript
+        ? "External meeting audio source: Mixed meeting audio. The meeting platform supplies the speaker-labelled transcript."
+        : "External meeting audio source: Mixed meeting audio. This is one mixed feed, not identified individual speakers.",
+      `Kenan's outgoing voice is ${current.voiceMuted ? "muted" : "unmuted"}.`,
+      current.browser ? `Shared browser: ${current.browser.url}` : "No browser is being shared.",
+    ].join("\n");
+  };
+  // Voice was closed when this line was said, so nobody heard it but the transcript. Pi decides whether it asks anything of Kenan.
+  const handMention = async (wake: MeetVoiceWake) => {
+    try {
+      await meetJson(options.request, API.sessionPrompt.path({ sessionId: room!.snapshot.sessionId }), post({
+        requestId: crypto.randomUUID(), delivery: "steer", includeMeetingImages: true,
+        text: ["Meeting mention", meetingContext(),
+          `${wake.speaker} said your name while your voice connection was closed, so no one has answered yet: "${wake.text}"`,
+          "If it asks something of you, such as unmuting or doing some work, handle it as you would a Voice handoff. If it only mentions you in passing, end your turn without acting."].join("\n\n"),
+      }));
+    } catch (cause) { notice(`Mention handoff failed: ${String(cause instanceof Error ? cause.message : cause)}`); }
+  };
   const reconcile = (snapshot: MeetSnapshot) => {
     if (suspended) return;
     voice?.setOutputMuted(snapshot.voiceMuted);
     for (const track of avatar?.stream.getAudioTracks() || []) track.enabled = !snapshot.voiceMuted;
     browser?.reconcile(snapshot);
     transcription?.reconcileFlush(snapshot.transcriptFlushRevision);
+    const mention = demand?.observe(snapshot);
+    if (mention) void handMention(mention);
+    void demand?.reconcile()?.catch(notice);
     update();
   };
   const accept = (source: MeetMediaSource) => {
@@ -107,6 +134,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   };
   const suspend = (): Promise<void> => {
     suspended = true;
+    demand?.stop();
     voice?.suspend();
     input.getTracks().forEach((track) => track.stop());
     for (const track of avatar?.stream.getAudioTracks() || []) { track.enabled = false; track.stop(); }
@@ -164,7 +192,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
       void suspend().catch(notice);
       if (running) void close().catch(notice);
     }, options.request);
-    state = { status: "connecting", voice: "Connecting…", playback: "stopped", notice: "", inputSource: "mixed", room: joined.room };
+    state = { status: "connecting", voice: "Voice off", playback: "stopped", notice: "", inputSource: "mixed", room: joined.room };
     if (!joined.participant.host || joined.participant.name !== "Mixed meeting audio") {
       throw new Error("The external host must identify its audio source as Mixed meeting audio");
     }
@@ -188,17 +216,13 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
       sessionId: joined.room.sessionId,
       input: media.voiceInput.stream,
       outputMuted: joined.room.voiceMuted,
-      meetingContext: () => [
-        current.snapshot.platformTranscript
-          ? "External meeting audio source: Mixed meeting audio. The meeting platform supplies the speaker-labelled transcript."
-          : "External meeting audio source: Mixed meeting audio. This is one mixed feed, not identified individual speakers.",
-        `Kenan's outgoing voice is ${current.snapshot.voiceMuted ? "muted" : "unmuted"}.`,
-        current.snapshot.browser ? `Shared browser: ${current.snapshot.browser.url}` : "No browser is being shared.",
-      ].join("\n"),
+      meetingContext,
       handoffContext: () => transcription!.handoff(),
       onVoiceControl: (control) => current.applyVoiceControl(control),
       onFragment: (fragment) => {
-        if (fragment.role === "assistant" && !current.snapshot.voiceMuted) transcription!.saveVoice(fragment);
+        if (fragment.role !== "assistant") return;
+        demand?.activity();
+        if (!current.snapshot.voiceMuted) transcription!.saveVoice(fragment);
       },
       onOutput: (stream) => {
         for (const track of avatar!.stream.getAudioTracks()) { avatar!.stream.removeTrack(track); track.stop(); }
@@ -209,14 +233,24 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
         current.publish("pi-camera", avatar!.stream);
       },
       onPlayback: (playback) => update({ playback }),
-      onState: (status, detail) => update({ voice: detail || status, ...(status === "error" ? { status: "error" as const } : {}) }),
+      // A Voice failure is shown on the dashboard and retried while Voice is wanted; it no longer ends the meeting's transcript and canvas.
+      onState: (status, detail) => {
+        if (detail === "Agent queued…") demand?.activity();
+        update({ voice: detail || status });
+      },
       onNotice: notice,
+    });
+    const session = voice;
+    demand = new VoiceDemand({
+      get state() { return session.state; },
+      get working() { return pendingWork(session.delegations, Date.now()); },
+      start: () => session.start(),
+      stop: () => session.stop(),
     });
     reconcile(joined.room);
     void room.poll();
-    await voice.start();
+    await demand.reconcile();
     if (roomFailure) throw new Error(roomFailure);
-    if (voice.state !== "live") throw new Error(state.notice || state.voice || "Voice failed to start");
     running = true;
     update({ status: "live" });
     return {
