@@ -22,6 +22,9 @@ if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain)
 fi
 
 started=$SECONDS
+# Bound the release store before this release adds to it. Retention is not
+# part of this release's correctness, so its failure is loud but not fatal.
+"$root/deploy/retain" || echo 'Pi stack release retention failed; the release store was left as it was' >&2
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
 "$root/deploy/runtime" &
