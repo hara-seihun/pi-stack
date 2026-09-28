@@ -197,3 +197,18 @@ it("admits live consulting past the account and machine ceilings the fleet waits
     if (busy.ok) await busy.value.release();
   } finally { store.close(); }
 });
+
+it("sends live consulting to the least loaded account rather than the least spent one", async () => {
+  const store = Store.open(":memory:");
+  store.upsertAccount({ id: "busy", provider: "openai-codex", concurrency: 4 });
+  store.upsertAccount({ id: "quiet", provider: "openai-codex", concurrency: 4 });
+  store.recordMeter("busy", "weekly", 10, Date.now() + 3_600_000);
+  store.recordMeter("quiet", "weekly", 40, Date.now() + 3_600_000);
+  const fleet = new Fleet(store, loadConfig("/missing"));
+  try {
+    const fleetWork = await fleet.admit(thread, thread.settings, false, "fleet-work");
+    expect(fleetWork).toMatchObject({ ok: true, value: { env: { PI_ORCHESTRATOR_ACCOUNT_ID: "busy" } } });
+    const live = await fleet.admit({ ...thread, id: "live", admission: "live" }, thread.settings, false, "live-work");
+    expect(live).toMatchObject({ ok: true, value: { env: { PI_ORCHESTRATOR_ACCOUNT_ID: "quiet" } } });
+  } finally { store.close(); }
+});

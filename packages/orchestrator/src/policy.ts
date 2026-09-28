@@ -92,7 +92,11 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
     }
     if(choices.length)break;
   }
-  choices.sort((a,b)=>a.spent-b.spent||store.activeSessionLeases(a.accountId,120_000,now).length-store.activeSessionLeases(b.accountId,120_000,now).length||a.accountId.localeCompare(b.accountId));
+  const load=(accountId:string)=>store.activeSessionLeases(accountId,120_000,now).length;
+  // Live consulting passes the concurrency ceiling, so it goes where the fewest sessions already run: in the
+  // fvz meeting every thread shared one account the fleet had filled and hit provider faults.
+  choices.sort((a,b)=>budget==="live"?load(a.accountId)-load(b.accountId)||a.spent-b.spent||a.accountId.localeCompare(b.accountId)
+    :a.spent-b.spent||load(a.accountId)-load(b.accountId)||a.accountId.localeCompare(b.accountId));
   return{assignment:choices[0],refusals};
 }
 
