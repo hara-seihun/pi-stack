@@ -2200,7 +2200,13 @@ const server = Bun.serve<AudioSocketData>({
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
     if (action === "unarchive" && req.method === "POST") {
-      const result = await directory.control({ threadId: id, action: "update", archived: false });
+      // Opening an archived chat restores just that chat. Undo after closing
+      // one asks for the whole subtree and the work its close interrupted.
+      let body: any;
+      try { body = (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json") ? await readBody(req) : {}; }
+      catch (cause: any) { return error(cause?.message ?? "Invalid restore request", 400); }
+      if (body?.descendants !== undefined && typeof body.descendants !== "boolean" || body?.resume !== undefined && typeof body.resume !== "boolean") return error("descendants and resume must be booleans", 400);
+      const result = await directory.control({ threadId: id, action: "restore", descendants: body?.descendants === true, resume: body?.resume === true });
       return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
     }
     if (action === "color" && req.method === "PUT") {

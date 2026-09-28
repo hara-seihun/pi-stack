@@ -623,6 +623,71 @@ describe("ThreadService", () => {
     expect(person.service.get(worker.id)?.metadata?.archived).toBe(true);
   });
 
+  it("restores an accidentally archived conversation and its running workers across owners and continues their turns", async () => {
+    const person = fixture(), fleet = fixture(undefined, true);
+    const directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
+    person.service.setDirectory(directory, (_parent, input) => input.requestId === "remote" ? fleet.service : undefined);
+    fleet.service.setDirectory(directory);
+    const root = value(await person.service.spawn({ requestId: "root", cwd: person.directory, message: "Coordinate" }));
+    const local = value(await person.service.spawn({ requestId: "local", parentId: root.id, cwd: person.directory, message: "Local work" }));
+    const remote = value(await directory.spawn({ requestId: "remote", parentId: root.id, cwd: person.directory, message: "Remote work" }));
+    const stopped = value(await person.service.spawn({ requestId: "stopped", parentId: root.id, cwd: person.directory, message: "Deliberately stopped" }));
+    value(await person.service.control({ threadId: stopped.id, action: "stop", descendants: false }));
+    value(await person.service.start()); value(await fleet.service.start());
+    const streaming = (sessions: FakePiSession[], id: string) => sessions.some(session => session.options.threadId === id && session.isStreaming);
+    await waitFor(() => streaming(person.sessions, root.id) && streaming(person.sessions, local.id) && streaming(fleet.sessions, remote.id));
+
+    value(await directory.control({ threadId: root.id, action: "update", archived: true }));
+    const owners = [[person.service, root.id], [person.service, local.id], [fleet.service, remote.id]] as const;
+    for (const [service, id] of owners) {
+      expect(service.get(id)).toMatchObject({ held: true, metadata: { archived: true, archiveInterruption: { executionId: expect.any(String) } } });
+    }
+    expect(person.service.get(stopped.id)?.metadata?.archiveInterruption).toBeUndefined();
+    expect(await directory.send({ requestId: "blocked", threadId: local.id, senderId: root.id, text: "More" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+
+    value(await directory.control({ threadId: root.id, action: "restore", descendants: true, resume: true }));
+    const continued = (sessions: FakePiSession[], id: string) => sessions.some(session => session.options.threadId === id
+      && session.commands.some(command => String(command.message ?? "").includes("archived while it was working")));
+    await waitFor(() => owners.every(([service, id]) => continued(service === fleet.service ? fleet.sessions : person.sessions, id)));
+    for (const [service, id] of owners) {
+      expect(service.get(id)).toMatchObject({ held: false, state: "running" });
+      expect(service.get(id)?.metadata).toMatchObject({ archived: false });
+      expect(service.get(id)?.metadata?.archiveInterruption).toBeUndefined();
+    }
+    // The workers continue, so the conversation never hears they were cancelled.
+    expect(person.service.pending(root.id).filter(message => message.id.startsWith("thread-result:"))).toEqual([]);
+    expect(person.service.get(stopped.id)).toMatchObject({ held: true, metadata: { archived: false } });
+    expect(person.service.pending(stopped.id)).toHaveLength(1);
+  });
+
+  it("restores only on request, leaves deliberately stopped work alone, and lets thread_send restore a caller's own worker", async () => {
+    const { service, directory } = fixture();
+    const root = value(await service.spawn({ requestId: "root", cwd: directory }));
+    const other = value(await service.spawn({ requestId: "other", cwd: directory }));
+    const child = value(await service.spawn({ requestId: "child", parentId: root.id, cwd: directory, message: "queued work" }));
+    value(await service.control({ threadId: root.id, action: "update", archived: true }));
+    expect(service.get(child.id)?.metadata).toMatchObject({ archived: true, archiveInterruption: { at: expect.any(String) } });
+    expect(await service.control({ threadId: root.id, action: "restore" } as never)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    value(await service.control({ threadId: root.id, action: "restore", descendants: false }));
+    expect(service.get(root.id)?.metadata?.archived).toBe(false);
+    expect(service.get(child.id)).toMatchObject({ held: true, metadata: { archived: true } });
+
+    const tool = (threadId: string) => threadTools({ threadId, cwd: directory, sessionFile: join(directory, `${threadId}.jsonl`), args: [], env: {}, threads: service }).find(item => item.name === "thread_send")!;
+    const refused = await tool(other.id).execute("call-other", { threadId: child.id, text: "Not yours" }, undefined, undefined, undefined as never);
+    expect(refused.details).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("action \"restore\"") } });
+    expect(service.get(child.id)?.metadata?.archived).toBe(true);
+    const sent = await tool(root.id).execute("call-root", { threadId: child.id, text: "Carry on" }, undefined, undefined, undefined as never);
+    expect(sent.details).toMatchObject({ ok: true, value: { threadId: child.id, senderId: root.id } });
+    expect(service.get(child.id)).toMatchObject({ held: false, state: "running", metadata: { archived: false } });
+    expect(service.get(child.id)?.metadata?.archiveInterruption).toBeUndefined();
+
+    // A deliberate stop after an archive is final: resume must not undo it.
+    value(await service.control({ threadId: root.id, action: "update", archived: true }));
+    value(await service.control({ threadId: child.id, action: "stop", descendants: false }));
+    value(await service.control({ threadId: root.id, action: "restore", descendants: true, resume: true }));
+    expect(service.get(child.id)).toMatchObject({ held: true, metadata: { archived: false } });
+  });
+
   it("rechecks activity after a stale sweep snapshot and never stops a running model", async () => {
     const { service, directory, sessions } = fixture();
     await service.start();

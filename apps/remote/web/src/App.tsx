@@ -18,7 +18,7 @@ import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
 import { working } from "./thread-state";
-import { requestStop, submitThreadControl, ThreadStopDialog } from "./thread-controls";
+import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
 import type { ChatPickerHandle } from "./thread-start-menu";
 import type { Attachment, Bootstrap, ContextEntry, Dashboard, QueuedMessage, Session, SlashCommand } from "./types";
@@ -208,6 +208,7 @@ function RemoteApp() {
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [stopTarget, setStopTarget] = useState<Session | null>(null);
+  const [closeConfirm, setCloseConfirm] = useState<{ chat: Chat; running: number } | null>(null);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
   const [pasteSessionId, setPasteSessionId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<{ sessionId: string; message: string } | null>(null);
@@ -622,7 +623,7 @@ function RemoteApp() {
   const undoClose = useCallback(async () => {
     const chat = undoCloses.snapshot().entries.at(-1)?.chat;
     const result = await undoCloses.undo(item => item.kind === "ai"
-      ? api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: item.session.id }), {})
+      ? api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: item.session.id }), { descendants: true, resume: true })
       : api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: item.conversation.backendId, target: item.conversation.externalId }));
     if (result?.ok && chat) setClosing(current => withoutClose(current, chat.id));
     if (result) kick();
@@ -639,7 +640,7 @@ function RemoteApp() {
   useEffect(() => {
     const entry = undoState.entries.at(-1);
     if (!entry || undoState.restoring) return;
-    const description = entry.chat.kind === "ai" ? "Undo restores the chat, not stopped work." : "Restore this chat to your inbox.";
+    const description = entry.chat.kind === "ai" ? "Undo restores the chat and its workers and continues their work." : "Restore this chat to your inbox.";
     const show = undoState.error ? toast.error : toast;
     const id = show(undoState.error ? `Could not restore ${entry.chat.title}` : `Closed ${entry.chat.title}`, {
       description: undoState.error || description,
@@ -648,7 +649,13 @@ function RemoteApp() {
     return () => { toast.dismiss(id); };
   }, [undoState, undoClose]);
   const openInboxChat = useCallback((chat: Chat) => { void selectChat(chat).catch(cause => setChatError(String(cause))); }, [selectChat]);
-  const closeInboxChat = useCallback((chat: Chat) => { void closeChat(chat); }, [closeChat]);
+  // Closing cancels every running worker below the chat; ask first when there are any.
+  const requestCloseChat = useCallback((chat: Chat) => {
+    const running = chat.kind === "ai" ? runningDescendants(chat.session.id, [...stateRef.current.sessions, ...stateRef.current.discovered]).length : 0;
+    if (running) setCloseConfirm({ chat, running });
+    else void closeChat(chat);
+  }, [closeChat, stateRef]);
+  const closeInboxChat = requestCloseChat;
   const chatPicker = useRef<ChatPickerHandle>(null);
   const searchArchived = useCallback((query: string) => { chatPicker.current?.open({ kind: "archived", query }); }, []);
   const openWorker = useCallback((session: Session) => openThreadId(session.id, "workers"), [openThreadId]);
@@ -896,10 +903,11 @@ function RemoteApp() {
         <SpeechBar />
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && !messagingActive && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
+        {closeConfirm && <CloseRunningChatDialog title={closeConfirm.chat.title} running={closeConfirm.running} onConfirm={() => { const { chat } = closeConfirm; setCloseConfirm(null); void closeChat(chat); }} onClose={() => setCloseConfirm(null)} />}
         {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onArchive={() => { closePanel(); void closeChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} debug={debugTools} /></Suspense>}
+        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} debug={debugTools} /></Suspense>}
         {selected && !messagingActive && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
         {!messagingActive && pasteSessionId && <Suspense fallback={null}><PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} /></Suspense>}
       </>} />
