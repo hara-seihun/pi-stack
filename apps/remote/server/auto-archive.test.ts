@@ -60,3 +60,18 @@ test("a worker whose conversation is archived or gone is archived once it stops 
   expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000, () => false, () => true)).toBe(2);
   expect(calls).toEqual([["orphan", { action: "update", archived: true }], ["parentless", { action: "update", archived: true }]]);
 });
+
+test("a quiet thread in a live meeting stays open with its ancestors", async () => {
+  const rows = [
+    { id: "meeting", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "room" } },
+    { id: "worker", parentId: "meeting", state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "room" } },
+    { id: "ended", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "gone" } },
+  ] as unknown as Thread[];
+  const calls: string[] = [];
+  const api = {
+    async list() { return { ok: true, value: { threads: rows } }; },
+    async control({ threadId }: any) { calls.push(threadId); return { ok: true, value: { ...rows.find(row => row.id === threadId), metadata: { archived: true } } }; },
+  } as unknown as ThreadApi;
+  expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000, () => false, () => false, thread => thread.metadata?.meetingId === "room")).toBe(1);
+  expect(calls).toEqual(["ended"]);
+});

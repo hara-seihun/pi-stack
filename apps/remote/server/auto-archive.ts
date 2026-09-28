@@ -12,9 +12,12 @@ export function autoArchiveDelay(value: string | undefined): number {
  * unread conversation stays, and keeps its ancestors; an unread worker does
  * not, because its reader is the agent above it, which has already finished.
  * A worker whose conversation is archived or gone is archived outright once it
- * stops running, queued messages and all.
+ * stops running, queued messages and all. A thread attached to a live meeting
+ * room stays with its ancestors however long the room has been quiet: the
+ * meeting can hand it work at any moment and must find it open.
  */
-export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, now = Date.now(), stopped = () => false, isUnread: (thread: Thread) => boolean = () => false): Promise<number> {
+export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, now = Date.now(), stopped = () => false,
+  isUnread: (thread: Thread) => boolean = () => false, isLive: (thread: Thread) => boolean = () => false): Promise<number> {
   if (afterMs <= 0) return 0;
   const cutoff = now - afterMs;
   const threads = new Map<string, Thread>();
@@ -31,7 +34,7 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
   const blocked = new Set<string>();
   for (const thread of threads.values()) {
     if (thread.metadata?.archived) continue;
-    if (thread.updatedAt < cutoff && thread.state !== "running" && thread.pendingMessages === 0 && !unread(thread)) continue;
+    if (thread.updatedAt < cutoff && thread.state !== "running" && thread.pendingMessages === 0 && !unread(thread) && !isLive(thread)) continue;
     let id: string | null = thread.id;
     const visited = new Set<string>();
     while (id && !visited.has(id)) {
@@ -41,7 +44,7 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
   let archived = 0;
   for (const thread of threads.values()) {
     if (stopped()) break;
-    if (thread.metadata?.archived || unread(thread)) continue;
+    if (thread.metadata?.archived || unread(thread) || isLive(thread)) continue;
     const orphan = orphaned(thread);
     if (blocked.has(thread.id) && !orphan) continue;
     // An orphan only has to stop running. Its queued messages came from the
@@ -55,13 +58,14 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
   return archived;
 }
 
-export function startAutoArchive(api: ThreadApi, afterMs: number, report: (error: unknown) => void, isUnread: (thread: Thread) => boolean = () => false): () => void {
+export function startAutoArchive(api: ThreadApi, afterMs: number, report: (error: unknown) => void,
+  isUnread: (thread: Thread) => boolean = () => false, isLive: (thread: Thread) => boolean = () => false): () => void {
   if (!afterMs) return () => {};
   let stopped = false, running = false;
   const timer = setInterval(async () => {
     if (running || stopped) return;
     running = true;
-    try { await archiveInactiveThreads(api, afterMs, Date.now(), () => stopped, isUnread); }
+    try { await archiveInactiveThreads(api, afterMs, Date.now(), () => stopped, isUnread, isLive); }
     catch (error) { report(error); }
     finally { running = false; }
   }, 60_000);

@@ -1786,7 +1786,13 @@ const server = Bun.serve<AudioSocketData>({
     const externalResponse = await externalMeetingRequest(req, meet, async (sessionId, meetingId, name) => {
       const existing = sessionRow.get(sessionId) as any;
       if (existing) {
-        if (existing.archived_at || existing.meeting_id !== meetingId) throw new Error("The external meeting's thread is unavailable");
+        if (existing.meeting_id !== meetingId) throw new Error("The external meeting's thread is unavailable");
+        // The stable event key reopens its own thread. Auto-archive may have
+        // closed it between attempts, and a calendar retry must not fail on that.
+        if (existing.archived_at) {
+          const reopened = await directory.control({ threadId: sessionId, action: "update", archived: false });
+          if (!reopened.ok) throw new Error(`The external meeting's thread could not be reopened: ${reopened.error.message}`);
+        }
         return;
       }
       const destination = meetingDestination();
@@ -2456,7 +2462,8 @@ void refreshPeers();
 
 unwrap(await threads.start());
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
-const stopAutoArchive = startAutoArchive(directory, AUTO_ARCHIVE_AFTER_MS, error => console.error("[supervisor] auto-archive failed", error), thread => Boolean((unreadThread.get(thread.id) as { idle_unread: number } | null)?.idle_unread));
+const stopAutoArchive = startAutoArchive(directory, AUTO_ARCHIVE_AFTER_MS, error => console.error("[supervisor] auto-archive failed", error), thread => Boolean((unreadThread.get(thread.id) as { idle_unread: number } | null)?.idle_unread),
+  thread => typeof thread.metadata?.meetingId === "string" && meet.isLive(thread.metadata.meetingId));
 void refreshThreadNotifications();
 
 const stopLedgerSnapshots = startLedgerSnapshots(

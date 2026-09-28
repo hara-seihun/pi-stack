@@ -79,6 +79,12 @@ export class MeetServer {
     return this.createRoom(id, sessionId, apiUrl, "Mixed meeting audio", "external");
   }
 
+  /** Whether this meeting has an open room, so its threads must stay reachable. */
+  isLive(id: string): boolean {
+    const room = this.rooms.get(id);
+    return Boolean(room && !room.closed);
+  }
+
   stopExternal(id: string) {
     const room = this.rooms.get(id);
     const host = room && [...room.members.values()].find((member) => member.participant.host);
