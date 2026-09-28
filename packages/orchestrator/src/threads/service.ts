@@ -11,7 +11,7 @@ import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { RAW_ARGUMENT } from "./pi-raw.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
-import type { AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestion, QuestionReceipt, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
 export interface ThreadAdmission { env?: Record<string, string | undefined>; settings?: ThreadSettings; release(): void | Promise<void> }
@@ -101,6 +101,11 @@ export class ThreadService implements ThreadApi {
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), work_id TEXT NOT NULL,
         settings TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER, settlement_seq INTEGER UNIQUE, outcome TEXT, final_message TEXT, error TEXT);
       CREATE TABLE IF NOT EXISTS thread_request (id TEXT PRIMARY KEY, hash TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, response TEXT);
+      CREATE TABLE IF NOT EXISTS thread_question (
+        id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), question TEXT NOT NULL,
+        suggestions TEXT NOT NULL, recommended_id TEXT, created_at INTEGER NOT NULL,
+        answer TEXT, accepted_at INTEGER);
+      CREATE INDEX IF NOT EXISTS thread_question_pending ON thread_question(thread_id,created_at) WHERE accepted_at IS NULL;
       DROP INDEX IF EXISTS thread_execution_active;
       UPDATE thread SET state='idle',held=1 WHERE state='stopped';
       UPDATE thread_work SET status='dispatched' WHERE status IN ('dispatching','inserted');`);
@@ -358,6 +363,74 @@ export class ThreadService implements ThreadApi {
       this.changed(id); this.wake(id); return good(this.get(id)!);
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
+  private question(row: Json): ThreadQuestion {
+    return { id: row.id, threadId: row.thread_id, question: row.question,
+      suggestions: JSON.parse(row.suggestions), ...(row.recommended_id ? { recommendedSuggestionId: row.recommended_id } : {}), createdAt: row.created_at };
+  }
+  async ask(input: AskThreadQuestion): Promise<Result<QuestionReceipt>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    if (typeof input.requestId !== "string" || !input.requestId.trim() || typeof input.threadId !== "string" || !input.threadId.trim()
+      || typeof input.question !== "string" || !input.question.trim()
+      || input.suggestions !== undefined && (!Array.isArray(input.suggestions) || input.suggestions.some(text => typeof text !== "string" || !text.trim()))
+      || input.recommendedSuggestionIndex !== undefined && (!Number.isSafeInteger(input.recommendedSuggestionIndex)
+        || input.recommendedSuggestionIndex < 0 || input.recommendedSuggestionIndex >= (input.suggestions?.length ?? 0))) {
+      return bad("invalid_request", "A question, stable requestId, nonempty suggestions and a valid recommended suggestion index are required");
+    }
+    try {
+      const prior = this.request(input.requestId, input, "ask"); if (!prior.ok) return prior;
+      if (prior.value) return good({ accepted: true, questionId: prior.value });
+      const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found");
+      if (thread.metadata?.archived) return bad("unavailable", "Restore this archived thread before asking a question");
+      const id = randomUUID();
+      this.transaction(() => {
+        const suggestions = (input.suggestions ?? []).map((text, index) => ({ id: `${id}:${index}`, text }));
+        this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)")
+          .run(id, input.threadId, input.question, JSON.stringify(suggestions), input.recommendedSuggestionIndex === undefined ? null : suggestions[input.recommendedSuggestionIndex]!.id, Date.now());
+        this.recordRequest(input.requestId, input, "ask", id);
+      });
+      this.changed(input.threadId);
+      return good({ accepted: true, questionId: id });
+    } catch (error) { return bad("unavailable", errorText(error)); }
+  }
+  async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
+    if (!this.get(threadId)) return bad("not_found", "Thread not found");
+    return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL ORDER BY created_at,id").all(threadId) as Json[]).map(row => this.question(row)));
+  }
+  async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    if (typeof input.threadId !== "string" || typeof input.questionId !== "string"
+      || !Array.isArray(input.selectedSuggestionIds) || input.selectedSuggestionIds.some(id => typeof id !== "string")
+      || new Set(input.selectedSuggestionIds).size !== input.selectedSuggestionIds.length || typeof input.text !== "string") {
+      return bad("invalid_request", "Answer requires unique selectedSuggestionIds and text");
+    }
+    try {
+      const row = this.sql("SELECT * FROM thread_question WHERE id=? AND thread_id=?").get(input.questionId, input.threadId) as Json | undefined;
+      if (!row) return bad("not_found", "Question not found in this thread");
+      const choices = this.question(row).suggestions;
+      if (input.selectedSuggestionIds.some(id => !choices.some(choice => choice.id === id)) || !input.selectedSuggestionIds.length && !input.text.trim())
+        return bad("invalid_request", "Select at least one known suggestion or provide nonblank text");
+      const answer = JSON.stringify({ selectedSuggestionIds: input.selectedSuggestionIds, text: input.text });
+      if (row.accepted_at !== null) return row.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
+      if (this.halts.has(input.threadId)) return bad("conflict", "Wait for cancellation confirmation before answering");
+      const thread = this.get(input.threadId)!;
+      if (thread.held && thread.state === "running") {
+        const halted = await this.halt(thread.id); if (!halted.ok) return halted;
+        const accepted = this.sql("SELECT answer,accepted_at FROM thread_question WHERE id=?").get(row.id) as Json;
+        if (accepted.accepted_at !== null) return accepted.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
+      }
+      const selected = input.selectedSuggestionIds.map(id => choices.find(choice => choice.id === id)!.text);
+      const body = [`Answer to question ${row.id}: ${row.question}`, ...selected.map(text => `- ${text}`), ...(input.text.trim() ? [input.text] : [])].join("\n");
+      this.transaction(() => {
+        const accepted = this.sql("UPDATE thread_question SET answer=?,accepted_at=? WHERE id=? AND accepted_at IS NULL").run(answer, Date.now(), row.id);
+        if (!accepted.changes) throw new Error("Question acceptance raced another answer");
+        this.insertMessage(`question-answer:${row.id}`, { requestId: `question-answer:${row.id}`, threadId: input.threadId,
+          text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings);
+        this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(input.threadId);
+      });
+      this.changed(input.threadId); this.wake(input.threadId);
+      return good({ accepted: true, questionId: row.id });
+    } catch (error) { return bad("unavailable", errorText(error)); }
+  }
   async send(request: SendThread): Promise<Result<ThreadMessage>> {
     if (request.senderId && request.delivery === "queue") return bad("invalid_request", "Agents must use steer or hard steer; they cannot queue messages");
     const input = { ...request, delivery: resolveDelivery(request) };
@@ -473,7 +546,7 @@ export class ThreadService implements ThreadApi {
         const thread = this.project(row);
         if (thread.metadata?.archived) continue;
         const runtime = this.runtimes.get(thread.id);
-        if (thread.updatedAt >= input.inactiveBefore || thread.state !== "idle" || thread.pendingMessages > 0 || this.execution(thread.id) || runtime?.busy || runtime?.commandRunning || this.operations.has(thread.id) || this.halts.has(thread.id)) return good(current);
+        if (thread.updatedAt >= input.inactiveBefore || thread.state !== "idle" || thread.pendingMessages > 0 || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id) || this.execution(thread.id) || runtime?.busy || runtime?.commandRunning || this.operations.has(thread.id) || this.halts.has(thread.id)) return good(current);
       }
       // No await/stop between the authoritative check and mutation: new work cannot race it.
       // The whole subtree goes together; a finished worker without its conversation is noise in every list.

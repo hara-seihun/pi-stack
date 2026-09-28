@@ -445,6 +445,9 @@ export interface StreamSubscription {
   eventsAfter?: number | null;
 }
 
+export type { ThreadQuestion } from "pi-orchestrator/api";
+import type { ThreadQuestion } from "pi-orchestrator/api";
+
 export type StreamSnapshot =
   | { type: "bootstrap"; bootstrap: Bootstrap }
   | ({ type: "state" } & SupervisorState)
@@ -452,7 +455,8 @@ export type StreamSnapshot =
   | { type: "dashboard"; dashboard: Dashboard }
   | ({ type: "transcript" } & TranscriptPage)
   | { type: "live"; sessionId: string; text: string; thinking?: string }
-  | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot };
+  | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot }
+  | { type: "questions"; sessionId: string; questions: ThreadQuestion[] };
 
 export type StreamEvent =
   | { type: "hello"; epoch: string; streamId: string; bootstrap: Bootstrap }

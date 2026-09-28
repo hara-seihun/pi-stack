@@ -1143,7 +1143,7 @@ function refreshState(): void {
   for (const stream of streams.values()) sendState(stream);
   pushMessaging();
   pushBootstrap();
-  for (const stream of streams.values()) sendImages(stream);
+  for (const stream of streams.values()) { sendImages(stream); void sendQuestions(stream); }
 }
 
 let bootstrapEncoded = "";
@@ -1177,6 +1177,21 @@ function sendImages(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
   stream.publish({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
+}
+
+const questionReads = new Map<string, ReturnType<typeof directory.questions>>();
+async function sendQuestions(stream: ClientStream): Promise<void> {
+  const sessionId = stream.subscription.session;
+  if (!sessionId || !sessionRow.get(sessionId)) return;
+  let read = questionReads.get(sessionId);
+  if (!read) {
+    read = directory.questions(sessionId).finally(() => questionReads.delete(sessionId));
+    questionReads.set(sessionId, read);
+  }
+  const result = await read;
+  if (stream.closed || stream.subscription.session !== sessionId) return;
+  if (result.ok) stream.publish({ type: "questions", sessionId, questions: result.value });
+  else stream.send({ type: "error", message: `Could not load questions: ${result.error.message}` });
 }
 
 function sendEvents(stream: ClientStream): void {
@@ -1263,6 +1278,7 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     if (captured) refreshTranscript(sessionId);
     sendLive(stream);
     sendImages(stream);
+    void sendQuestions(stream);
     sendEvents(stream);
     if (sessionRow.get(sessionId) && (changedSession || !captured)) {
       void refreshThreadInspection(sessionId).then(() => {
@@ -2165,6 +2181,26 @@ const server = Bun.serve<AudioSocketData>({
         return json(response, 201);
       } catch (cause: any) { return error(cause.message); }
     }
+    const questionsRequest = API.sessionQuestions.match(req.method, url.pathname);
+    if (questionsRequest) {
+      if (!sessionRow.get(questionsRequest.sessionId)) return error("Session not found", 404);
+      const result = await directory.questions(questionsRequest.sessionId);
+      return result.ok ? json({ questions: result.value }) : threadError(result.error);
+    }
+    const answerRequest = API.sessionQuestionAnswer.match(req.method, url.pathname);
+    if (answerRequest) {
+      if (!sessionRow.get(answerRequest.sessionId)) return error("Session not found", 404);
+      try {
+        const body = await readBody(req);
+        const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
+          selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text });
+        if (!result.ok) return threadError(result.error);
+        if (questionReads.has(answerRequest.sessionId)) await questionReads.get(answerRequest.sessionId);
+        for (const stream of sessionSubscribers(answerRequest.sessionId)) void sendQuestions(stream);
+        signalSync();
+        return json(result.value);
+      } catch (cause: any) { return error(cause?.message ?? "Could not answer question", 400); }
+    }
     const childrenRequest = API.sessionChildren.match(req.method, url.pathname);
     if (childrenRequest) {
       const result = await directChildren(childrenRequest.sessionId);
@@ -2465,6 +2501,13 @@ process.on("uncaughtException", (cause) => {
 
 refreshPlanUsageIfDue();
 void refreshPeers();
+
+// Fleet owns its questions on another process: sample only while that thread is selected.
+// Local questions arrive through the thread owner's change subscription instead.
+const peerQuestionTicker = setInterval(() => {
+  for (const stream of streams.values()) if (stream.subscription.viewing && stream.subscription.session && !threads.get(stream.subscription.session)) void sendQuestions(stream);
+}, 2_000);
+peerQuestionTicker.unref?.();
 
 unwrap(await threads.start());
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
