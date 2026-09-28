@@ -3,22 +3,26 @@ import { appStorageKey } from "./app-path";
 import type { TranscriptItemBody, TranscriptItemHead } from "../../server/protocol";
 
 const DATABASE = "pi-remote-transcript";
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const BODIES = "bodies";
 const WINDOWS = "windows";
+const MEDIA = "media";
 const METADATA = "metadata";
 const USED_AT = "bucketUsedAt";
 const MAX_BODIES = 2_000;
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
 const MAX_WINDOWS = 32;
 const MAX_WINDOW_BYTES = 8 * 1024 * 1024;
+const MAX_MEDIA = 512;
+const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 export const CACHED_HEADS = 200;
 
 export interface CachedWindow { generation: string; total: number; items: TranscriptItemHead[] }
 
 interface StoredBody { id: string; body: TranscriptItemBody; size?: unknown; usedAt?: unknown }
 interface StoredWindow extends CachedWindow { key: string; updatedAt?: unknown }
-type Bucket = typeof BODIES | typeof WINDOWS;
+interface StoredMedia { key: string; blob: Blob }
+type Bucket = typeof BODIES | typeof WINDOWS | typeof MEDIA;
 
 interface CacheEntry {
   key: [Bucket, string];
@@ -103,10 +107,13 @@ function database() {
         const transaction = request.transaction!;
         if (!db.objectStoreNames.contains(BODIES)) db.createObjectStore(BODIES, { keyPath: "id" });
         if (!db.objectStoreNames.contains(WINDOWS)) db.createObjectStore(WINDOWS, { keyPath: "key" });
-        if ((event as IDBVersionChangeEvent).oldVersion >= DATABASE_VERSION) return;
+        if (!db.objectStoreNames.contains(MEDIA)) db.createObjectStore(MEDIA, { keyPath: "key" });
+        if ((event as IDBVersionChangeEvent).oldVersion >= 2) return;
 
-        const metadata = db.createObjectStore(METADATA, { keyPath: "key" });
-        metadata.createIndex(USED_AT, ["bucket", "usedAt"]);
+        const metadata = db.objectStoreNames.contains(METADATA)
+          ? transaction.objectStore(METADATA)
+          : db.createObjectStore(METADATA, { keyPath: "key" });
+        if (!metadata.indexNames.contains(USED_AT)) metadata.createIndex(USED_AT, ["bucket", "usedAt"]);
         migrateStore(transaction, metadata, BODIES, MAX_BODIES, MAX_BODY_BYTES, (raw) => {
           const value = raw as StoredBody;
           if (typeof value?.id !== "string" || !value.body) return null;
@@ -331,6 +338,72 @@ export async function writeCachedWindow(key: string, window: CachedWindow) {
     stats.bytes += size;
   }
   await trim(transaction, stats, MAX_WINDOWS, MAX_WINDOW_BYTES);
+  metadata.put(stats);
+  await done;
+}
+
+export async function readCachedMedia(key: string): Promise<Blob | null> {
+  const db = await database();
+  const transaction = db.transaction([MEDIA, METADATA], "readwrite");
+  const done = completion(transaction);
+  const metadata = transaction.objectStore(METADATA);
+  const [stored, entry, stats] = await Promise.all([
+    result<StoredMedia | undefined>(transaction.objectStore(MEDIA).get(key)),
+    result<CacheEntry | undefined>(metadata.get([MEDIA, key])),
+    loadStats(metadata, MEDIA),
+  ]);
+  if (!(stored?.blob instanceof Blob)) {
+    if (entry) {
+      transaction.objectStore(MEDIA).delete(key);
+      metadata.delete(entry.key);
+      removeEntry(stats, entry);
+      metadata.put(stats);
+    }
+    await done;
+    return null;
+  }
+  if (entry) {
+    entry.usedAt = usageTime(stats);
+    metadata.put(entry);
+    metadata.put(stats);
+  }
+  await done;
+  return stored.blob;
+}
+
+export async function writeCachedMedia(key: string, blob: Blob): Promise<void> {
+  const size = storedSize(blob.size, MAX_MEDIA_BYTES);
+  const db = await database();
+  const transaction = db.transaction([MEDIA, METADATA], "readwrite");
+  const done = completion(transaction);
+  const payloads = transaction.objectStore(MEDIA);
+  const metadata = transaction.objectStore(METADATA);
+  const [previous, stats] = await Promise.all([
+    result<CacheEntry | undefined>(metadata.get([MEDIA, key])),
+    loadStats(metadata, MEDIA),
+  ]);
+  if (size === null) {
+    payloads.delete(key);
+    if (previous) {
+      metadata.delete(previous.key);
+      removeEntry(stats, previous);
+      metadata.put(stats);
+    }
+    await done;
+    return;
+  }
+
+  const entry: CacheEntry = {
+    key: [MEDIA, key], bucket: MEDIA, entryKey: key, size, usedAt: usageTime(stats),
+  };
+  payloads.put({ key, blob } satisfies StoredMedia);
+  metadata.put(entry);
+  if (previous) stats.bytes += size - previous.size;
+  else {
+    stats.count += 1;
+    stats.bytes += size;
+  }
+  await trim(transaction, stats, MAX_MEDIA, MAX_MEDIA_BYTES);
   metadata.put(stats);
   await done;
 }
