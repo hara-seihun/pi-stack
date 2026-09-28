@@ -41,6 +41,10 @@ The UI stops a thread directly when there are no subthreads. Otherwise it asks "
 
 An execution has exclusive ownership of its thread. Cancellation fences late callbacks but must also stop local effects. Failure to confirm cancellation is a visible failure, not permission to start overlapping execution. Tools receive cancellation signals. CPU-blocking work belongs outside the shared event loop, without a separate Node process per agent.
 
+## Asynchronous user questions
+
+`request_user_input_async` stores a pending question with its thread owner and returns immediately. Suggestions have no fixed count; one may be explicitly recommended. Human answers combine zero or more selections with free text, with only an entirely empty answer rejected. Durable question identity correlates the answer to its question, and ordinary human steer delivery supplies it at a safe boundary without cancelling work. Questions remain pending beyond the current turn and across restarts. The [Remote question contract](../apps/remote/docs/questions.md) describes the shared client and API.
+
 ## Relationships and notifications
 
 Threads can list all accessible threads in their current environment or their direct children, read persisted history without starting a recipient, and steer or hard steer other accessible threads. Humans may also queue messages. Workers retain these collaboration tools but cannot spawn. Parentage determines discovery and automatic notifications, not aggregate execution state.
