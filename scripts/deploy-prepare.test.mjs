@@ -14,8 +14,8 @@ function fixture() {
   const repo = join(directory, "repo"), bin = join(directory, "bin");
   mkdirSync(join(repo, "deploy"), { recursive: true });
   mkdirSync(bin);
-  for (const name of ["lib", "release-checkout", "prepare", "runtime"]) copyFileSync(join(root, "deploy", name), join(repo, "deploy", name));
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp") };
+  for (const name of ["lib", "release-checkout", "prepare", "runtime", "retain"]) copyFileSync(join(root, "deploy", name), join(repo, "deploy", name));
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp"), PI_STACK_RUNTIME_DEST: join(directory, "srv/runtime"), PI_STACK_DEPENDENCIES_ROOT: join(directory, "srv/dependencies") };
   mkdirSync(env.TMPDIR);
   function executable(path, source) { writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${source}\n`, { mode: 0o755 }); }
   function commit() {
