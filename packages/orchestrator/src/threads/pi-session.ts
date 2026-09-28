@@ -103,7 +103,15 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     const commands = new PiCommandReceipts();
     const activeWork = new Set<string>();
     let executionStart: string | null | undefined;
-    const pendingInputs = new Map<string, PiCommand>();
+    // Accepted inputs awaiting Pi's acknowledgement. Each is dispatched only after the previous one is acknowledged,
+    // so two inputs to an idle session cannot both pass Pi's streaming check and start overlapping runs.
+    const pendingInputs = new Map<string, { command: PiCommand; acknowledge(): void }>();
+    let inputTail = Promise.resolve();
+    function acknowledge(id: string) {
+      const input = pendingInputs.get(id);
+      if (input) { pendingInputs.delete(id); input.acknowledge(); }
+      return input?.command;
+    }
     const internalResponses = new Map<string, PiEvent | undefined>();
     const dialogs = new Set<string>();
     const backgroundCommands = new Set<string>();
@@ -132,7 +140,8 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     function settle(cancelled = false): void {
       if (closed || replacing && !cancelled || executionStart === undefined && !activeWork.size) return;
       if (execution.active || !runtime.session.isIdle || runtime.session.isBashRunning) return;
-      if (!cancelled && (execution.blocked || runtime.session.getSteeringMessages().length || runtime.session.getFollowUpMessages().length)) return;
+      // An unacknowledged input may still start a run (Pi defers prompts made while it emits agent_settled); its response re-checks.
+      if (!cancelled && (pendingInputs.size || execution.blocked || runtime.session.getSteeringMessages().length || runtime.session.getFollowUpMessages().length)) return;
       const entries = branch();
       const firstInput = entries.findIndex(entry => entry.id === executionStart);
       const final = entries.slice(firstInput < 0 ? entries.length : firstInput + 1).reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
@@ -143,6 +152,8 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       checkpointPiSession(runtime.session.sessionManager);
       activeWork.clear();
       executionStart = undefined;
+      // Cancellation discards Pi's deferred inputs without a response; release their dispatch order with the receipt.
+      for (const id of [...pendingInputs.keys()]) acknowledge(id);
       output({ type: "agent_settled", workIds, outcome, lastAssistantMessage: message });
     }
     async function halt(): Promise<void> {
@@ -190,9 +201,9 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             output({ type: "command_settled", commandId: event.id, response: event });
             return;
           }
-          const input = pendingInputs.get(String(event.id));
+          const input = acknowledge(String(event.id));
           if (input) {
-            pendingInputs.delete(String(event.id));
+            queueMicrotask(() => settle());
             if (event.success === false) {
               const workId = String(input.workId);
               runtime.session.sessionManager.appendCustomEntry("thread_rejected", { workId, error: event.error });
@@ -203,7 +214,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           }
           if (event.command === "get_state" && event.success) event = { ...event, data: { ...event.data as object, ...receipts(),
             lastAssistantMessage: lastAssistant(), context: acceptedContext, localTools: execution.activeTools, pendingCommandCount: backgroundCommands.size,
-            isStreaming: !runtime.session.isIdle || execution.active || executionStart !== undefined,
+            isStreaming: !runtime.session.isIdle || execution.active || executionStart !== undefined || pendingInputs.size > 0,
             cancellationFailed: execution.blocked } };
         }
         if (event.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(event.method))) dialogs.add(String(event.id));
@@ -262,11 +273,19 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             if (command.workId) {
               const workId = String(command.workId);
               runtime.session.sessionManager.appendCustomEntry("thread_input", { workId, message: command.message, images: command.images, delivery: command.type });
-              if (command.type === "prompt" && executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
+              if (executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
               activeWork.add(workId);
               checkpointPiSession(runtime.session.sessionManager);
-              pendingInputs.set(String(command.id), command);
+              const prior = inputTail;
+              inputTail = new Promise(resolve => pendingInputs.set(String(command.id), { command, acknowledge: resolve }));
+              await prior;
+              // A cancelled settlement already recorded this input; it must not start a run after admission reopens.
+              if (!pendingInputs.has(String(command.id))) { response(false, "Pi execution has been cancelled"); return; }
             }
+            // Pi's steer/follow_up only enqueue: after the run has settled nothing consumes them, and the message is
+            // stranded while the queue reports busy forever. The controller cannot see settlement atomically with its
+            // dispatch, so Pi decides after input handling: queue into a live run, otherwise start a turn with it.
+            if (command.type !== "prompt") command = { ...command, type: "prompt", streamingBehavior: command.type === "steer" ? "steer" : "followUp" };
           }
           if (["abort", "abort_bash", "abort_retry"].includes(command.type)) {
             try { await halt(); response(true); }
