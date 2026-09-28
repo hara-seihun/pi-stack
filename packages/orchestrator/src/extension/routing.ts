@@ -47,7 +47,7 @@ export function resolveSessionModel(models:readonly Model<any>[],provider:string
     const available=new Set(candidates.map(model=>model.provider));
     const exclude=new Set(store.accounts().filter(account=>!available.has(account.id)).map(account=>account.id));
     const assigned=env.PI_ORCHESTRATOR_ASSIGNED==="1"&&env.PI_ORCHESTRATOR_RUN_ID?store.run(env.PI_ORCHESTRATOR_RUN_ID):undefined;
-    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude,{includeCooling:true,model:modelId});
+    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude,{includeCooling:true,model:modelId,live:env.PI_THREAD_MODE==="live"});
     if(account&&account.provider===provider&&available.has(account.id)&&shared.has(account.id)){
       const model=candidates.find(model=>model.provider===account.id)!;
       return {ok:true,model};
@@ -96,7 +96,7 @@ export default function routing(pi:ExtensionAPI):void{
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
-  const choose=(family:string,model:string,exclude=new Set<string>(),includeCooling=false)=>chooseInteractiveAccount(store,shared.get(family),family,exclude,{includeCooling,model});
+  const choose=(family:string,model:string,exclude=new Set<string>(),includeCooling=false)=>chooseInteractiveAccount(store,shared.get(family),family,exclude,{includeCooling,model,live:environment.PI_THREAD_MODE==="live"});
   const select=async(ctx:ExtensionContext,model:Model<never>,thinking:ThinkingLevel):Promise<boolean>=>{
     if(closed)return false;
     await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false,signal:lifecycle.signal});
