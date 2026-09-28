@@ -1,8 +1,8 @@
 .questions-trigger { align-self: center; flex: 0 0 auto; padding: 8px 10px; border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: var(--text-xs); font-weight: 650; white-space: nowrap; }
 .questions-trigger:hover, .question-submit:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
 @media (max-width: 560px) {
-  .conversation-screen .composer-actions { flex-wrap: wrap; }
-  .conversation-screen .composer-spacer { flex-basis: 100%; }
+  .conversation-screen .composer-actions:has(.questions-trigger) { flex-wrap: wrap; }
+  .conversation-screen .composer-actions:has(.questions-trigger) .composer-spacer { flex-basis: 100%; }
   .conversation-screen .questions-trigger { margin-left: auto; }
 }
 .question-form { padding: var(--space-4) 0; border-bottom: 1px solid var(--border); display: grid; gap: var(--space-3); }

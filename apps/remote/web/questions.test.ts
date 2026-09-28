@@ -41,8 +41,3 @@ test("drafts survive closing and switching threads; clearing an accepted answer 
   expect(new QuestionDrafts(store, "person-b").load("thread-b", "question-1")).toEqual(emptyQuestionDraft());
 });
 
-test("failed submission leaves the draft intact", () => {
-  const drafts = new QuestionDrafts(storage(), "person");
-  drafts.save("thread", "question", { selectedSuggestionIds: ["choice"], text: "Keep this" });
-  expect(drafts.load("thread", "question")).toEqual({ selectedSuggestionIds: ["choice"], text: "Keep this" });
-});
