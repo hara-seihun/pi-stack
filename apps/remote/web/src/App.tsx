@@ -1,7 +1,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { API } from "../../server/api";
 import { appPath, appStorageKey } from "./app-path";
-import type { GovernorProvider, InlineImageSnapshot, StreamEvent } from "../../server/protocol";
+import type { GovernorProvider, InlineImageSnapshot, StreamEvent, ThreadQuestion } from "../../server/protocol";
 import { ClientCache } from "./client-cache";
 import { api, piFetch, registerUnlockHandler } from "./client";
 import { fetchPersonChooser, reportWebReady } from "./native";
@@ -211,6 +211,7 @@ function RemoteApp() {
   const [stopTarget, setStopTarget] = useState<Session | null>(null);
   const [closeConfirm, setCloseConfirm] = useState<{ chat: Chat; running: number } | null>(null);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
+  const [pendingQuestions, setPendingQuestions] = useState<{ sessionId: string; questions: ThreadQuestion[] } | null>(null);
   const [pasteSessionId, setPasteSessionId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<{ sessionId: string; message: string } | null>(null);
   const [fileDrag, setFileDrag] = useState(false);
@@ -494,6 +495,9 @@ function RemoteApp() {
         case "images":
           cache.rememberThread(event.sessionId, { images: event.snapshot });
           patch({ images: event.snapshot });
+          break;
+        case "questions":
+          setPendingQuestions({ sessionId: event.sessionId, questions: event.questions });
           break;
         case "notifications": {
           deliverIdleNotifications(event.feed);
@@ -867,7 +871,7 @@ function RemoteApp() {
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
-        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
+        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? pendingQuestions.questions : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : messagingActive && humanConversation
       ? <div className="conversation-screen"><ConversationHeader title={humanConversation.title} avatar={messagingAvatarUrl(humanConversation.backendId, humanConversation.externalId, humanConversation.avatar)} showIdentity={showConversationIdentity} meta={<span className="conversation-meta">{humanBackend?.label || "Messaging"}{humanBackend && humanBackend.status !== "ready" ? ` · ${humanBackend.status}` : ""}</span>} trailing={<SignalCallButton conversation={humanConversation} available={humanBackend?.plugin === "signal"} enabled={humanBackend?.status === "ready" && humanBackend.capabilities.calls === true} />} onBack={layout === "phone" ? closeDetail : null} onOpenInspector={null} />

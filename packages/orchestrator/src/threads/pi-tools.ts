@@ -45,6 +45,15 @@ export function threadTools(options: PiSessionOptions) {
   }
   return [
     defineTool({
+      name: "request_user_input_async", label: "Ask the user asynchronously",
+      description: "Post a question for the human and continue working immediately. It stays pending after this turn ends and across restarts. Suggestions are optional and may be any number; optionally recommend one by its zero-based index. The human can choose any number of suggestions and add free text. Their answer arrives as a correlated ordinary user message at a safe turn boundary, without cancelling current work.",
+      parameters: Type.Object({ question: Type.String({ minLength: 1 }), suggestions: Type.Optional(Type.Array(Type.String({ minLength: 1 }))), recommendedSuggestionIndex: Type.Optional(Type.Integer({ minimum: 0 })) }),
+      execute: async (id, input, signal) => {
+        const asked = await api(signal).ask({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
+        return asked.ok ? { content: [{ type: "text" as const, text: JSON.stringify(asked.value) }], details: asked } : result(asked);
+      },
+    }),
+    defineTool({
       name: "thread_spawn", label: "Start a thread",
       description: `${DELEGATION_POLICY}\n\nStart a fresh Orchestrator worker with its own context. Workers cannot spawn subagents; coordinate all delegation from this conversation. It returns immediately; completion arrives as a normal message. An ephemeral worker archives after its final assignment settles, but its work and filesystem effects persist. Set ephemeral:false if you expect to continue the conversation after its response. To continue an existing conversation use thread_send instead. Defaults: Sol, standard speed, high thinking; Luna defaults to max. Explicit settings override these defaults: Opus may be chosen explicitly, but Astra and Fable cannot be spawned. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
       parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), ephemeral: Type.Optional(Type.Boolean({ default: true, description: "Archive after its last assignment settles. Set false when you plan to send follow-up work." })), settings: Type.Optional(Type.Object({

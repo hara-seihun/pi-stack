@@ -14,6 +14,8 @@ import { OFFLINE_STATUS, threadStatus } from "../status/thread-status";
 import { composerAction } from "../../thread-state";
 import { DELIVERY_LABELS } from "../queue/delivery";
 import { Transcript } from "./Transcript";
+import { QuestionsSheet } from "./questions";
+import type { ThreadQuestion } from "../../../../server/protocol";
 import "./conversation.css";
 
 export type Delivery = "queue" | "steer" | "hardSteer";
@@ -35,7 +37,7 @@ export function ConversationHeader({ title, status, onBack, onOpenInspector, tra
   </header>;
 }
 
-export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, images, offline, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
+export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, images, offline, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
   session: Session;
   ancestors: Session[];
   entries: ContextEntry[];
@@ -63,6 +65,8 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onOpenInspector(): void;
   onOpenAncestor(session: Session): void;
   onOpenQueue(): void;
+  questions: ThreadQuestion[];
+  onQuestionAccepted(id: string): void;
   onEdit(entry: ContextEntry): void;
   reply: ReplyTarget | null;
   onReply(target: ReplyTarget): void;
@@ -84,6 +88,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const queued = session.queuedMessages.length;
   const action = composerAction(session, prompt);
   const [delivery, setDelivery] = useState<Delivery>("queue");
+  const [questionsOpenFor, setQuestionsOpenFor] = useState<string | null>(null);
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
   const modeToggleRef = useRef<HTMLButtonElement>(null);
@@ -113,7 +118,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
       <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}
         before={<>{reply && <ReplyComposer target={reply} onCancel={onCancelReply} />}{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}</>}
-        actions={running && hasText && <div className="delivery-mode" ref={modeRef}>
+        actions={<><button type="button" className="questions-trigger" aria-haspopup="dialog" aria-label={`Questions to answer, ${questions.length} pending`} onClick={() => setQuestionsOpenFor(session.id)}>Questions to answer ({questions.length})</button>{running && hasText && <div className="delivery-mode" ref={modeRef}>
           <button ref={modeToggleRef} type="button" className="delivery-toggle" aria-haspopup="menu" aria-expanded={modeOpen} aria-label={`Change delivery. Current: ${DELIVERY_LABELS[delivery].label}`} onClick={() => setModeOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setModeOpen(true); } }}><span>{DELIVERY_LABELS[delivery].label}</span><ChevronIcon /></button>
           {modeOpen && <div ref={modeMenuRef} className="delivery-menu" role="menu" aria-label="Change delivery" onKeyDown={event => {
             if (event.key === "Escape") { setModeOpen(false); modeToggleRef.current?.focus(); return; }
@@ -124,7 +129,8 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
             const next = event.key === "Home" ? 0 : event.key === "End" ? choices.length - 1 : event.key === "ArrowDown" ? (current + 1) % choices.length : (current - 1 + choices.length) % choices.length;
             choices[next]?.focus();
           }}>{(["queue", "steer", "hardSteer"] as Delivery[]).filter(mode => mode !== delivery).map(mode => <button key={mode} type="button" role="menuitem" data-mode={mode} onClick={() => { setDelivery(mode); setModeOpen(false); modeToggleRef.current?.focus(); }}><strong>{DELIVERY_LABELS[mode].label}</strong><span>{DELIVERY_LABELS[mode].detail}</span></button>)}</div>}
-        </div>} />
+        </div>}</>} />
     </ConversationView>
+    {questionsOpenFor === session.id && <QuestionsSheet key={session.id} sessionId={session.id} questions={questions} open onClose={() => setQuestionsOpenFor(null)} onAccepted={onQuestionAccepted} />}
   </div>;
 }

@@ -8,7 +8,7 @@ const requestTimeout = 60_000;
 export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number }
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const operations = ["spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
+const operations = ["ask", "questions", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -33,7 +33,7 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
     const result = await requestContext.run({ deadline, signal }, () =>
       operation === "await" ? api.await(fields as Parameters<ThreadApi["await"]>[0], signal)
       : operation === "settlements" ? api.settlements(fields.after, fields.limit)
-      : operation === "inspect" ? api.inspect(fields.threadId)
+      : operation === "inspect" || operation === "questions" ? api[operation](fields.threadId)
       : operation === "command" ? api.command(fields.threadId, fields.command)
       : (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input));
     return Response.json(result);
@@ -46,8 +46,8 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
   const base = baseUrl.replace(/\/$/, "");
   async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
     const body = JSON.stringify(input ?? {});
-    const requestId = (operation === "send" || operation === "spawn") ? (input as { requestId?: string })?.requestId : undefined;
-    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "settlements"].includes(operation);
+    const requestId = (["send", "spawn", "ask"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
+    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "answer", "settlements"].includes(operation);
     const terminal = (value: Result<T>): Result<T> => value.ok ? value
       : { ok: false, error: { ...value.error, retryable: false, ...(requestId ? { requestId } : {}) } };
     const inherited = requestContext.getStore();
@@ -88,6 +88,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
       message: `Thread ${operation} ${reason}: ${lastError}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}` } };
   }
   return {
+    ask: input => call("ask", input), questions: threadId => call("questions", { threadId }), answer: input => call("answer", input),
     spawn: input => call("spawn", input), send: input => call("send", input), list: input => call("list", input),
     read: input => call("read", input), control: input => call("control", input),
     inspect: threadId => call("inspect", { threadId }), command: (threadId, command) => call("command", { threadId, command }),
