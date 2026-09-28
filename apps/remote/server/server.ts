@@ -142,6 +142,10 @@ assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
+// Live meeting threads answer in the room, so their first call must be quick. On September 28, 2026,
+// astra at low thinking placed live-research placeholders 5.8 s after a request, against 11.1 s at
+// the destination's high default; Sara chose it over sol at medium.
+const MEETING_THREAD = { model: "astra", thinkingLevel: "low" } as const;
 const OFFERED_DESTINATIONS = (process.env.PI_REMOTE_DESTINATIONS ?? "home").split(",").map((id) => id.trim()).filter(Boolean);
 const destinationDefinitions: ThreadDestination[] = process.env.PI_REMOTE_THREAD_DESTINATIONS === undefined
   ? defaultThreadDestinations()
@@ -1812,9 +1816,9 @@ const server = Bun.serve<AudioSocketData>({
         return;
       }
       const destination = meetingDestination();
-      const model = THREAD_MODELS.get("astra")!;
+      const model = THREAD_MODELS.get(MEETING_THREAD.model)!;
       if (!destination) throw new Error("This host needs a configured Astra destination for meetings");
-      await insertThread(sessionId, name, destination, model.id, meetingId);
+      await insertThread(sessionId, name, destination, model.id, meetingId, undefined, undefined, { thinkingLevel: MEETING_THREAD.thinkingLevel });
     });
     if (externalResponse) return externalResponse;
     const meetingResponse = await meet.handle(req);
