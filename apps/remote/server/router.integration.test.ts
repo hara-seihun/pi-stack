@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
@@ -61,7 +61,7 @@ beforeAll(async () => {
     remoteCalls++;
     const url = new URL(req.url);
     if (url.pathname === "/v1/redirect") return Response.redirect("https://example.org");
-    return Response.json({ path: url.pathname, query: url.search, user: req.headers.get("x-pi-remote-user"), session: req.headers.get("x-pi-remote-session"), authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie"), referer: req.headers.get("referer") });
+    return Response.json({ path: url.pathname, query: url.search, user: req.headers.get("x-pi-remote-user"), session: req.headers.get("x-pi-remote-session"), authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie"), referer: req.headers.get("referer"), upstream: req.headers.get("x-pi-remote-upstream") });
   } });
   supervisors.push(remote);
   writeFileSync(join(root, "host.json"), JSON.stringify({ environments: [
@@ -93,7 +93,7 @@ esac
 async function startRouter(oidcConfig = "") {
   router = Bun.spawn([process.execPath, join(import.meta.dir, "router.ts")], {
     stdout: "ignore", stderr: "pipe",
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, PI_REMOTE_ROUTER_PORT: String(port), PI_REMOTE_PERSONS_DIR: persons, PI_STACK_HOST_FILE: join(root, "host.json"), PI_REMOTE_KEY_DIR: keys, PI_REMOTE_UNLOCK_TIMEOUT_MS: "300", PI_REMOTE_OIDC_CONFIG: oidcConfig },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, PI_REMOTE_ROUTER_PORT: String(port), PI_REMOTE_PERSONS_DIR: persons, PI_STACK_HOST_FILE: join(root, "host.json"), PI_REMOTE_KEY_DIR: keys, PI_REMOTE_UPSTREAM_CREDENTIAL_DIR: join(root, "upstream-credentials"), PI_REMOTE_UNLOCK_TIMEOUT_MS: "300", PI_REMOTE_OIDC_CONFIG: oidcConfig },
   });
   const deadline = Date.now() + 4_000;
   while (Date.now() < deadline) {
@@ -273,9 +273,13 @@ test("immutable bytes cache only under an authenticated session-scoped resource 
 test("remote requests, notifications and downloads share authorization without forwarding credentials", async () => {
   const owner = await token("kenan");
   for (const path of ["/v1/sessions", "/v1/notifications", "/v1/sessions/thread/files"]) {
-    const response = await fetch(`${base}/v1/remotes/lab${path}?session=${owner}&user=kenan&path=%2Ftmp%2Fa`, { headers: { authorization: "Bearer private", cookie: "secret=value", referer: `${base}/v1/file?session=${owner}` } });
+    const response = await fetch(`${base}/v1/remotes/lab${path}?session=${owner}&user=kenan&path=%2Ftmp%2Fa`, { headers: { authorization: "Bearer private", cookie: "secret=value", referer: `${base}/v1/file?session=${owner}`, "x-pi-remote-upstream": "forged" } });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ path, query: "?path=%2Ftmp%2Fa", user: "kenan", session: null, authorization: null, cookie: null, referer: null });
+    // The upstream supervisor learns the person from this router's own credential, never the browser's.
+    const upstream = readFileSync(join(root, "upstream-credentials", "lab"), "utf8");
+    expect(upstream).toMatch(/^[0-9a-f]{64}$/);
+    expect(statSync(join(root, "upstream-credentials", "lab")).mode & 0o777).toBe(0o600);
+    expect(await response.json()).toEqual({ path, query: "?path=%2Ftmp%2Fa", user: "kenan", session: null, authorization: null, cookie: null, referer: null, upstream });
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   }
   expect((await request("/v1/remotes/lab/v1/redirect", owner)).status).toBe(502);

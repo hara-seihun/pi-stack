@@ -24,7 +24,7 @@ export function threadTools(options: PiSessionOptions) {
     if (options.threads) return options.threads;
     const url = options.env.PI_THREAD_API_URL;
     if (!url) throw new Error("Thread owner is unavailable: PI_THREAD_API_URL is not configured");
-    return createThreadClient(url, fetch, { signal });
+    return createThreadClient(url, fetch, { signal, token: options.env.PI_THREAD_TOKEN });
   }
   /** Whether an unavailable recipient is archived, and if so whether it sits below this unarchived thread. */
   async function archivedDescendant(threadId: string, signal?: AbortSignal): Promise<"descendant" | "other" | null> {

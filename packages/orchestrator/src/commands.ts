@@ -37,6 +37,8 @@ export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --pr
 
 const base=()=>orchestratorUrl();
 const threadBase=()=>process.env.PI_THREAD_API_URL??`${base()}/v1/threads`;
+// Inside a thread, the capability proves which thread is calling; the owner refuses a claimed parent or sender without it.
+const threadClient=()=>createThreadClient(threadBase(),fetch,{token:process.env.PI_THREAD_TOKEN||undefined});
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
 function flags(args:string[]):{named:Map<string,string>;positional:string[]}{const named=new Map<string,string>(),positional:string[]=[];for(let i=0;i<args.length;i++){const value=args[i]!;if(!value.startsWith("--")){positional.push(value);continue;}const [name,inline]=value.slice(2).split("=",2);if(inline!==undefined)named.set(name!,inline);else if(["force","background","descendants","resume"].includes(name!))named.set(name!,"true");else if(args[i+1]&&!args[i+1]!.startsWith("--"))named.set(name!,args[++i]!);else named.set(name!,"true");}return{named,positional};}
 function required(named:Map<string,string>,key:string):string{const value=named.get(key);if(!value)throw new Error(`--${key} is required`);return value;}
@@ -91,7 +93,7 @@ async function spawnThreads(input:Omit<SpawnThread,"requestId">,count:number):Pr
     if(input.parentId&&input.parentId!==process.env.PI_THREAD_ID)throw new Error("Agent spawning must use its own thread as parent");
     input={...input,parentId:process.env.PI_THREAD_ID};
   }
-  const api=createThreadClient(threadBase()),threads:Thread[]=[];
+  const api=threadClient(),threads:Thread[]=[];
   for(let index=0;index<count;index++){
     const result=await api.spawn({...input,requestId:randomUUID()});
     if(!result.ok){output({...result,threads});process.exitCode=1;return;}
@@ -122,13 +124,13 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="restore"){
     const {named,positional}=flags(rest),threadId=positional[0];
     if(!threadId||positional.length!==1||[...named.keys()].some(key=>key!=="descendants"&&key!=="resume"))throw new Error("restore accepts one thread id, --descendants and --resume");
-    threadOutput(await createThreadClient(threadBase()).control({threadId,action:"restore",descendants:switchEnabled(named,"descendants"),resume:switchEnabled(named,"resume")}));return;
+    threadOutput(await threadClient().control({threadId,action:"restore",descendants:switchEnabled(named,"descendants"),resume:switchEnabled(named,"resume")}));return;
   }
   if(command==="stop"||command==="resume"){
     const {named,positional}=flags(rest),threadId=positional[0];
     if(!threadId)throw new Error(`${command} requires a thread id`);
     if(positional.length!==1||[...named.keys()].some(key=>command!=="stop"||key!=="descendants"))throw new Error(`${command} accepts one thread id${command==="stop"?" and --descendants":""}`);
-    threadOutput(await createThreadClient(threadBase()).control(command==="stop"?{threadId,action:"stop",descendants:switchEnabled(named,"descendants")}:{threadId,action:"resume"}));return;
+    threadOutput(await threadClient().control(command==="stop"?{threadId,action:"stop",descendants:switchEnabled(named,"descendants")}:{threadId,action:"resume"}));return;
   }
   if(command==="schedule"){
     const [action,...tail]=rest;
@@ -194,19 +196,19 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(positional.length)throw new Error("list accepts named options only");
     const state=named.get("state");
     if(state!==undefined&&!isThreadState(state))throw new Error("Invalid --state");
-    threadOutput(await createThreadClient(threadBase()).list({parentId:named.get("parent"),state,limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined,cursor:named.get("cursor")}));return;
+    threadOutput(await threadClient().list({parentId:named.get("parent"),state,limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined,cursor:named.get("cursor")}));return;
   }
   if(command==="read"){
     const {named,positional}=flags(rest),threadId=positional[0];
     if(!threadId||positional.length!==1)throw new Error("read requires one thread id");
-    threadOutput(await createThreadClient(threadBase()).read({threadId,cursor:named.get("cursor"),limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined}));return;
+    threadOutput(await threadClient().read({threadId,cursor:named.get("cursor"),limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined}));return;
   }
   if(command==="send"){
     const {named,positional}=flags(rest),threadId=positional[0],text=named.get("prompt")??positional.slice(1).join(" "),senderId=process.env.PI_THREAD_ID||undefined,delivery=named.get("delivery")??resolveDelivery({senderId});
     if(!threadId||!text.trim())throw new Error("send requires a thread id and --prompt");
     if(senderId&&delivery==="queue")throw new Error("Agents must use steer or hardSteer; they cannot queue messages");
     if(!['queue','steer','hardSteer'].includes(delivery))throw new Error(`--delivery must be ${senderId?"steer or hardSteer":"queue, steer, or hardSteer"}`);
-    threadOutput(await createThreadClient(threadBase()).send({requestId:randomUUID(),threadId,senderId,text,delivery:delivery as Delivery}));return;
+    threadOutput(await threadClient().send({requestId:randomUUID(),threadId,senderId,text,delivery:delivery as Delivery}));return;
   }
   if(command==="boost"){const {named,positional}=flags(rest),provider=positional[0],value=positional[1]??named.get("multiplier");if(!provider||value===undefined)throw new Error("boost requires provider and multiplier");output(await request("/v1/control","POST",{key:`boost:${provider}`,value:String(value)}));return;}
   if(command==="peer"){

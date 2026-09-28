@@ -1,18 +1,21 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Result, ThreadApi } from "./contracts.js";
+import { THREAD_TOKEN_HEADER, type AdmissionResult } from "./caller.js";
 
 const requestContext = new AsyncLocalStorage<{ deadline: number; signal: AbortSignal }>();
 const deadlineHeader = "x-pi-thread-deadline";
 const requestTimeout = 60_000;
-export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number }
+export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number; /** The calling thread's PI_THREAD_TOKEN. */ token?: string }
+/** Checks and stamps a request with its verified caller before the owner sees it. */
+export type ThreadAdmission = (operation: string, input: Record<string, any>) => Promise<AdmissionResult>;
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 const operations = ["ask", "questions", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
-export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1/threads"): Promise<Response | undefined> {
+export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1/threads", admit?: ThreadAdmission): Promise<Response | undefined> {
   const path = new URL(request.url).pathname;
   if (!path.startsWith(`${prefix}/`)) return undefined;
   const operation = path.slice(prefix.length + 1) as Operation;
@@ -23,6 +26,11 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
   catch { return Response.json({ ok: false, error: { code: "invalid_request", message: "Expected a JSON object" } }, { status: 400 }); }
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return Response.json({ ok: false, error: { code: "invalid_request", message: "Expected a JSON object" } }, { status: 400 });
+  }
+  if (admit) {
+    const admitted = await admit(operation, input as Record<string, any>);
+    if (!admitted.ok) return Response.json({ ok: false, error: { code: "invalid_request", message: admitted.message } }, { status: admitted.status });
+    input = admitted.input;
   }
   try {
     const fields = input as Record<string, any>;
@@ -59,7 +67,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
       let retry = false;
       try {
         const response = await fetcher(`${base}/${operation}`, { method: "POST",
-          headers: { "content-type": "application/json", [deadlineHeader]: String(deadline) }, body, signal });
+          headers: { "content-type": "application/json", [deadlineHeader]: String(deadline), ...(options.token ? { [THREAD_TOKEN_HEADER]: options.token } : {}) }, body, signal });
         if ([502, 503, 504].includes(response.status)) {
           await response.body?.cancel();
           lastError = `Thread owner returned HTTP ${response.status}`;

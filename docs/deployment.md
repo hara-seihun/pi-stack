@@ -85,6 +85,15 @@ Publish the router at `/` or a directory prefix. For `/pi-stack/`, redirect `/pi
 
 A person registry's `remoteAccess` lists allowed environment IDs. Omitting it grants only this host's endpoint. A remote grant requires that person's encrypted-folder identity and an upstream mapping. The router authenticates `POST /v1/unlock`, then sends only that person's allowed same-origin `/v1/remotes/<id>` endpoints through `GET /v1/environments`. Client person hints do not authenticate requests. The router rechecks the person's grant for every forwarded request and removes client authentication before reaching the remote supervisor. Bind private listeners to loopback and enforce host UID gates for the gateway, root deployment and each owning service. Host-owned SSH tunnels forward to a matching remote supervisor, never a shared router.
 
+### Caller identity at supervisors and Orchestrator
+
+Supervisors and Orchestrator daemons verify who creates threads and who sends as a thread; the [unified-thread contract](threads.md#caller-identity) owns the rules. Two host file keys configure it; both are optional:
+
+- `upstreamCredentials`: SHA-256 hex digests of the credentials other hosts' routers present when they forward a person to a supervisor on this host. Each router creates its credential for environment `<id>` on first use at root-only `/var/lib/pi-remote/upstream-credentials/<id>` (`PI_REMOTE_UPSTREAM_CREDENTIAL_DIR` for fixtures) and sends it as `x-pi-remote-upstream`. Install its digest on the upstream host with `sudo sha256sum < /var/lib/pi-remote/upstream-credentials/<id>`, then restart that host's supervisors. Without a listed digest, forwarded requests reach the supervisor as ordinary local processes and cannot create a person's conversation or name a parent.
+- `callerAttestation`: a command list run with a local caller's pid appended when that process creates a thread. Its JSON output is stored as `metadata.createdBy.attestation`, so host policy can classify the thread later from what was true when it was created.
+
+Each person's thread capability key is created on first use at `~/.local/state/pi-stack/thread-capability.key` (mode 0600, `PI_THREAD_CAPABILITY_KEY` for fixtures). Deleting it invalidates every running session's `PI_THREAD_TOKEN` until the session reopens.
+
 `deploy/smoke` checks router authentication, static assets, active supervisor health, Voice and transcription. For a key-bootstrap host, it reads existing root-only `/run/pi-remote-keys/<user>` credentials through a pipe and unlocks only people already open. `PI_REMOTE_KEY_DIR` selects a fixture directory. For an OAuth host it checks unauthenticated rejection and probes supervisors as root; a real browser sign-in remains a host acceptance check. It does not create an OAuth bypass, print keys or lock a person. A code release cannot configure ingress, UID gates, DNS, credentials or tunnels for the host.
 
 ## What deploy/host does

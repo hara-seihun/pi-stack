@@ -41,6 +41,21 @@ The UI stops a thread directly when there are no subthreads. Otherwise it asks "
 
 An execution has exclusive ownership of its thread. Cancellation fences late callbacks but must also stop local effects. Failure to confirm cancellation is a visible failure, not permission to start overlapping execution. Tools receive cancellation signals. CPU-blocking work belongs outside the shared event loop, without a separate Node process per agent.
 
+## Caller identity
+
+Thread owners listen on loopback, and until September 28, 2026 they believed whatever a request said. Any local process could create a child under any thread, send as any thread, or create a root that looked like a person's conversation. Converge grants autonomous sessions less authority than conversations with a watching administrator, and one `curl` escaped that limit. Owners now resolve every spawn and send to a verified caller, in [`caller.ts`](../packages/orchestrator/src/threads/caller.ts):
+
+- **thread**: the request carries `x-pi-thread-token`. The owner puts `PI_THREAD_TOKEN`, an HMAC of the thread ID under the person's key, in every session's environment next to `PI_THREAD_ID`. Thread tools and the `pi-orchestrator` CLI send it. Runner processes never hold one.
+- **runtime** and **service**: the loopback peer is a shared thread runner, a Remote supervisor or an Orchestrator daemon, found from `/proc/net/tcp` and the socket's owning process, with no thread runner among its ancestors. They may name the thread they act for. Sessions opened before tokens existed keep working through this rule.
+- **person**: the local router (peer uid 0) or another host's router presenting a credential listed in host `upstreamCredentials`.
+- **process**: everything else, recorded by uid, pid and command.
+
+A thread may create only its own children and send only as itself; it cannot send as a person. Runtime, service and person callers may name a parent or sender. Root-owned runners (root repair) arrive as uid 0 like the router. A process may not name a parent or an agent sender. A process may still queue human-form messages; publication reports use that route. Refusals return HTTP 403, and an invalid token or untrusted upstream credential returns 401.
+
+Every thread an owner creates records `metadata.createdBy` from that caller: `{kind:"thread",threadId}`, `{kind:"person",via}`, `{kind:"process",uid,pid,command,attestation}`, or `runtime`/`service`. Clients cannot set it; a service forwarding a creation to another owner carries the original creator. The creator is excluded from the spawn receipt, so retries keep their identity. With host `callerAttestation`, the owner runs that command on a creating process's pid and stores its JSON. Root threads therefore say who made them: a person through a router, a thread's tools, or a named local process with the host's verdict.
+
+Everything runs as the person's own Unix user. A process that deliberately reads another session's environment or the key file can still impersonate that thread. The boundary stops ordinary API use, the CLI and thread tools from forging custody; it is not a defense against a determined process with the same uid.
+
 ## Asynchronous user questions
 
 `request_user_input_async` stores a pending question with its thread owner and returns immediately. Suggestions have no fixed count; one may be explicitly recommended. Human answers combine zero or more selections with free text, with only an entirely empty answer rejected. Durable question identity correlates the answer to its question, and ordinary human steer delivery supplies it at a safe boundary without cancelling work. Questions remain pending beyond the current turn and across restarts. The [Remote question contract](../apps/remote/docs/questions.md) describes the shared client and API.
