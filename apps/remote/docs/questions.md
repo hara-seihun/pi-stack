@@ -31,6 +31,8 @@ In an AI conversation, **Questions to answer** sits beside Send below the messag
 - The only empty-answer error is no selected suggestions and no non-whitespace text.
 - Closing the panel or switching conversations does not submit an answer. Failed submissions retain the answer draft for retry.
 
+On phones the composer never takes more than 60dvh; its prompt grows up to six rows or 30dvh, then scrolls internally. Questions open in a separately scrollable sheet, where each question keeps its own selections, text and Submit answer control.
+
 Questions survive the agent's turn ending and owner restarts. Answering removes a question from the pending list only after durable acceptance. Repeated delivery of the same answer does not send another message. Questions remain associated with their original thread, including when accessed through an authorized peer owner; an account cannot answer another person's private thread.
 
 ## Transport and custody
