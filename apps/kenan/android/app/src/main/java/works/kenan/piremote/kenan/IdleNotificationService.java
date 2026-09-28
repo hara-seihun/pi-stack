@@ -110,7 +110,10 @@ public final class IdleNotificationService extends Service {
         }
         JSONObject feed = RemoteTransport.get(endpoint.baseUrl + "/v1/notifications" + query, identity);
         if (!endpoint.id.equals(feed.getString("environmentId"))) throw new java.io.IOException("Environment identity mismatch");
-        NotificationDelivery.receive(this, identity, endpoint.id, endpoint.name, feed, false);
+        synchronized (state) {
+            if (!current(identity)) return;
+            NotificationDelivery.receive(this, identity, endpoint.id, endpoint.name, feed, false);
+        }
     }
 
     private void report(RemoteSession.Identity identity, String message) {

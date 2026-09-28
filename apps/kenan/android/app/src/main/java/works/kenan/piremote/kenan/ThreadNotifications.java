@@ -75,7 +75,10 @@ final class ThreadNotifications {
         pending.clear();
     }
 
-    static synchronized void notReady() { ready = false; }
+    static synchronized void pageStarting() {
+        ready = false;
+        selected = null;
+    }
 
     static synchronized void deliver(Context context, String thread, Notification notification, JSONObject detail) {
         if (resumed && thread.equals(selected)) return;

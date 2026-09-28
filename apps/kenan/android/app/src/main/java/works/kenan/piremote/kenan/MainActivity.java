@@ -3,6 +3,7 @@ package works.kenan.piremote.kenan;
 import android.graphics.Color;
 import android.content.Intent;
 import android.os.Bundle;
+import android.webkit.WebView;
 import android.view.View;
 import android.view.ViewGroup;
 
@@ -14,17 +15,21 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.ServerPath;
+import com.getcapacitor.WebViewListener;
 import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        ThreadNotifications.notReady();
+        ThreadNotifications.pageStarting();
         registerPlugin(KenanRemotePlugin.class);
         // A downloaded web client for this shell replaces the APK's built-in copy.
         WebBundles.Installed bundle = new WebBundles(this).activate();
         if (bundle != null) bridgeBuilder.setServerPath(new ServerPath(ServerPath.PathType.BASE_PATH, bundle.directory.getPath()));
         super.onCreate(savedInstanceState);
+        bridge.addWebViewListener(new WebViewListener() {
+            @Override public void onPageStarted(WebView webView) { ThreadNotifications.pageStarting(); }
+        });
         keepSharedClientBelowSystemBars();
         routeSystemBackThroughClient();
     }
@@ -50,7 +55,7 @@ public class MainActivity extends BridgeActivity {
     /** Switches the running WebView to a bundle (or back to the built-in client) and reloads it. */
     void serveWebBundle(WebBundles.Installed bundle) {
         if (bridge == null) return;
-        ThreadNotifications.notReady();
+        ThreadNotifications.pageStarting();
         if (bundle != null) bridge.setServerBasePath(bundle.directory.getPath());
         else bridge.setServerAssetPath("public");
     }
