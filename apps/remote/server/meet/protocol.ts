@@ -16,6 +16,8 @@ export interface MeetThreadState {
   state: ThreadState;
   /** Halted with cancellation confirmed, holding its pending messages. */
   held: boolean;
+  /** A meeting worker that finished its task and was archived. It reads as Done, never as Stopped. */
+  finished?: boolean;
   /** The same live activity the inbox shows, so the panel reads alike. */
   activity: Activity;
   tools: string[];

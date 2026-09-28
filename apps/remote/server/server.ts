@@ -1745,7 +1745,9 @@ const meet = new MeetServer((id) => {
   return Boolean(row && !row.archived_at);
 }, undefined, db, (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
   const runtime = liveProjections.get(row.id);
-  return { state: row.state, held: Boolean(row.held),
+  // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
+  const finished = Boolean(row.archived_at) && row.state === "idle";
+  return { state: row.state, held: Boolean(row.held) && !finished, finished,
     activity: threadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id)),
     tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));

@@ -74,12 +74,13 @@ type CameraLine = { text: string; label: boolean };
 
 function stateColor(state: string): string {
   if (/error|fail|disconnect|blocked/i.test(state)) return cameraColors.red;
-  if (/running|speaking|playing|active|working|thinking|compact|retry|listening|connected|^unmuted$/i.test(state)) return cameraColors.green;
+  if (/running|speaking|playing|active|working|thinking|compact|retry|listening|connected|^unmuted$|^done$/i.test(state)) return cameraColors.green;
   if (/wait|pause|mute|connecting|stopped/i.test(state)) return cameraColors.amber;
   return cameraColors.accent;
 }
 
 export function meetThreadStatus(thread: MeetThreadState): ThreadStatus {
+  if (thread.finished) return { key: "idle", label: "Done", short: "Done", busy: false, attention: false };
   return threadStatus({
     state: thread.state,
     held: thread.held,

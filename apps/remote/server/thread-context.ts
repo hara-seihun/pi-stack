@@ -45,7 +45,7 @@ export default function threadContext(pi: ExtensionAPI) {
       fileTag: environment.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
       home: environment.HOME || homedir(),
       inlineImages: !!(environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL),
-      activeTime: environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL ? Date.now() : undefined,
+      messageLabels: !!(environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL),
     }) + (meetingInstructions ? `\n\n${meetingInstructions}` : "");
     // Pi persists the incoming user message after before_agent_start.
     const hasConversation = ctx.sessionManager.getBranch().some((entry) =>
