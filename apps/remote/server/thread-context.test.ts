@@ -18,6 +18,15 @@ describe("thread lifecycle context", () => {
     expect(existing).toContain("download link");
   });
 
+  test("keeps the system prompt identical from turn to turn so the provider's prompt cache holds", () => {
+    const options = { name: "Mixed meeting audio", prompt: "Voice handoff", fileTag: "pi-file", home: "/home/a", messageLabels: true, inlineImages: true };
+    const first = threadStateInstructions(options);
+    const later = threadStateInstructions({ ...options, prompt: "Another handoff" });
+    expect(later).toBe(first);
+    expect(first).toContain("the newest message's time is the current time");
+    expect(first).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
+
   test("marks an interrupted prompt as the same unfinished task", () => {
     const instructions = threadStateInstructions({
       name: "Fix Runtime",
