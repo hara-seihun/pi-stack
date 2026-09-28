@@ -38,7 +38,7 @@ export function ConversationHeader({ title, status, onBack, onOpenInspector, tra
   </header>;
 }
 
-export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, images, offline, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
+export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, images, offline, syncing = false, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
   session: Session;
   ancestors: Session[];
   entries: ContextEntry[];
@@ -52,6 +52,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onThinkingOpen(open: boolean): void;
   images: ReadonlyMap<string, InlineImage> | null;
   offline: string;
+  syncing?: boolean;
   pending: boolean;
   home: string;
   prompt: string;
@@ -107,7 +108,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   const modelShort = session.model.split("/").at(-1) || session.model;
   return <div className="conversation-screen">
-    <ConversationHeader title={session.name || "Agent"} status={<StatusPill status={status} />} meta={<span className="conversation-meta">{modelShort}</span>} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
+    <ConversationHeader title={session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<span className="conversation-meta">{modelShort}</span>} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
       trailing={<>{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {ancestors.length > 0 && <nav className="ancestry" aria-label="Parent threads">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <ConversationView key={session.id} active label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
