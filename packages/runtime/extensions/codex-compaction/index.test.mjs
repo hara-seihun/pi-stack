@@ -6,6 +6,7 @@ import { normalizeContext } from "@earendil-works/pi-ai";
 import { stream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import codexCompaction, { checkpointContext, checkpointSummary, createCheckpoint } from "./index.mjs";
 import { KIND, VERSION, compactionObserver, findCheckpoint, modelKey, replaceMarker, retainRecentUsers } from "./native.mjs";
+import { ATTEMPT } from "./operation.mjs";
 
 const model = { api: "openai-codex-responses", provider: "openai-codex-2", id: "gpt-5.6-luna", name: "Luna", baseUrl: "https://chatgpt.com/backend-api", reasoning: true, input: ["text", "image"], contextWindow: 272000, maxTokens: 32768, cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 } };
 const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -142,6 +143,21 @@ test("malformed checkpoints and missing payload markers abort rather than leakin
   f.sm.appendCompaction("broken", f.first, 100, { kind: KIND, version: VERSION, replacementHistory: [] });
   assert.equal(findCheckpoint(f.sm.getBranch()).ok, false);
   assert.equal(checkpointContext(buildSessionContext(f.sm.getBranch()).messages, f.sm.getBranch(), model).ok, false);
+});
+
+test("an interrupted checkpoint permits context and one automatic retry, then fences a terminal failure", async t => {
+  t.mock.method(console, "error", () => {});
+  const f = fixture();
+  f.sm.appendCustomEntry(ATTEMPT, { state: "started", modelKey: modelKey(model), reason: "threshold" });
+  codexCompaction(f.pi);
+  assert.equal(f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx).error, undefined);
+  let calls = 0;
+  f.ctx.modelRegistry.complete = async () => { calls++; return { stopReason: "error", errorMessage: "fixture unavailable", usage: zero }; };
+  const result = await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
+  assert.match(result.error, /fixture unavailable/);
+  assert.equal(calls, 1);
+  assert.equal(f.sm.getBranch().filter(entry => entry.customType === ATTEMPT).at(-1).data.state, "failed");
+  assert.match(f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx).error, /fixture unavailable/);
 });
 
 test("failed native compaction retains context and fences automatic retries across reload and aliases", async t => {

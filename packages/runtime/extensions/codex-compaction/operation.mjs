@@ -8,7 +8,9 @@ export function blockedAttempt(branch, modelKey) {
   for (const entry of [...branch].reverse()) {
     if (entry.type === "compaction") return;
     if (entry.type === "custom" && entry.customType === ATTEMPT && entry.data?.modelKey === modelKey) {
-      return entry.data;
+      // An unfinished request has no outcome to preserve. The next native
+      // compaction may safely retry it against the unchanged session context.
+      return entry.data.state === "started" ? undefined : entry.data;
     }
   }
 }

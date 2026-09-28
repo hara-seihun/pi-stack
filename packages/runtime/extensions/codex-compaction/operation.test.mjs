@@ -33,13 +33,17 @@ test("abort cancels a silent response reader even if fetch stopped forwarding it
   assert.equal(cancelled, 1);
 });
 
-test("in-flight records survive reload and fork, while tree navigation and a committed checkpoint release the fence", () => {
+test("interrupted native requests retry after restart; terminal failures fence until explicit recovery", () => {
   const sm = SessionManager.inMemory();
   const first = sm.appendMessage({ role: "user", content: "fixture", timestamp: 1 });
   sm.appendCustomEntry(ATTEMPT, { state: "started", modelKey: "astra" });
   const branch = JSON.parse(JSON.stringify(sm.getBranch()));
-  assert.equal(blockedAttempt(branch, "astra").state, "started");
-  assert.equal(blockedAttempt(branch, "luna"), undefined);
+  assert.equal(blockedAttempt(branch, "astra"), undefined);
+  sm.appendCustomEntry(ATTEMPT, { state: "failed", modelKey: "astra", error: "provider rejected" });
+  assert.equal(blockedAttempt(sm.getBranch(), "astra").error, "provider rejected");
+  assert.equal(blockedAttempt(sm.getBranch(), "luna"), undefined);
+  sm.appendCustomEntry(ATTEMPT, { state: "started", modelKey: "astra", reason: "manual" });
+  assert.equal(blockedAttempt(JSON.parse(JSON.stringify(sm.getBranch())), "astra"), undefined);
   sm.appendCompaction("checkpoint", first, 100);
   assert.equal(blockedAttempt(sm.getBranch(), "astra"), undefined);
   sm.branch(first);
