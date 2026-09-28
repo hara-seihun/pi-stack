@@ -167,6 +167,70 @@ it("puts every queued steer into one model turn after the current response", asy
   expect(settlement.workIds).toEqual(["root", ...Array.from({ length: 20 }, (_, index) => `worker-${index}`)]);
 }, 3000);
 
+function userTexts(context: { messages: { role: string; content: unknown }[] }) {
+  return context.messages.filter(message => message.role === "user").map(message => typeof message.content === "string" ? message.content
+    : (message.content as { type: string; text?: string }[]).filter(part => part.type === "text").map(part => part.text).join(""));
+}
+
+it("answers a steer that the controller sends after native settlement instead of stranding it in Pi's queue", async () => {
+  const f = await fixture();
+  const requests: string[][] = [];
+  f.native.agent.streamFunction = (_model, context) => {
+    requests.push(userTexts(context));
+    return f.reply(f.message([{ type: "text", text: `reply ${requests.length}` }], "stop"));
+  };
+  expect(await f.command("prompt", { workId: "root", message: "first" })).toMatchObject({ success: true });
+  await f.waitFor(event => event.type === "agent_settled");
+  // The controller has not processed that settlement yet, still believes the execution is live, and steers.
+  expect(await f.command("steer", { workId: "late", message: "late steer" })).toMatchObject({ success: true });
+  const late = await f.waitFor(event => event.type === "agent_settled" && (event.workIds as string[]).includes("late"));
+  expect(late).toMatchObject({ workIds: ["late"], outcome: "complete", lastAssistantMessage: { content: [{ text: "reply 2" }] } });
+  expect(requests.at(-1)?.at(-1)).toContain("late steer");
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0, completedWorkIds: ["root", "late"] } });
+}, 3000);
+
+it("answers a steer that arrives while Pi is emitting settlement, and settles it only after its reply", async () => {
+  const gate = deferred(), settling = deferred();
+  Object.assign(globalThis, { __piSettleGate: gate.promise, __piSettling: settling.resolve });
+  cleanups.push(async () => { delete (globalThis as Record<string, unknown>).__piSettleGate; delete (globalThis as Record<string, unknown>).__piSettling; });
+  const f = await fixture(undefined, `export default pi => pi.on("agent_settled", async () => { globalThis.__piSettling?.(); await globalThis.__piSettleGate; });`);
+  let calls = 0;
+  f.native.agent.streamFunction = () => f.reply(f.message([{ type: "text", text: `reply ${++calls}` }], "stop"));
+  expect(await f.command("prompt", { workId: "root", message: "first" })).toMatchObject({ success: true });
+  await settling.promise;
+  await f.session.command({ type: "steer", id: "window", workId: "window", message: "during settlement" });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(f.events.filter(event => event.type === "agent_settled")).toEqual([]);
+  gate.resolve();
+  const settled = await f.waitFor(event => event.type === "agent_settled");
+  expect(settled).toMatchObject({ workIds: ["root", "window"], outcome: "complete", lastAssistantMessage: { content: [{ text: "reply 2" }] } });
+  expect(calls).toBe(2);
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0 } });
+}, 3000);
+
+it("orders concurrent steers to an idle session into one run rather than overlapping runs", async () => {
+  const f = await fixture(), started = deferred();
+  const first = createAssistantMessageEventStream();
+  const requests: string[][] = [];
+  f.native.agent.streamFunction = (_model, context) => {
+    requests.push(userTexts(context));
+    if (requests.length === 1) { started.resolve(); return first; }
+    return f.reply(f.message([{ type: "text", text: "both considered" }], "stop"));
+  };
+  const steer = (id: string) => { void f.session.command({ type: "steer", id, workId: id, message: `steer ${id}` }); return f.waitFor(event => event.type === "response" && event.id === id); };
+  const a = steer("a"), b = steer("b");
+  await started.promise;
+  first.push({ type: "done", reason: "stop", message: f.message([{ type: "text", text: "saw a" }], "stop") });
+  first.end();
+  expect(await a).toMatchObject({ success: true });
+  expect(await b).toMatchObject({ success: true });
+  const settled = await f.waitFor(event => event.type === "agent_settled");
+  expect(settled).toMatchObject({ workIds: ["a", "b"], outcome: "complete" });
+  expect(f.events.filter(event => event.type === "agent_settled")).toHaveLength(1);
+  // b is acknowledged only once a's run is live, so Pi delivers it into that run (here, its first request).
+  expect(requests.at(-1)).toEqual(expect.arrayContaining([expect.stringContaining("steer a"), expect.stringContaining("steer b")]));
+}, 3000);
+
 it("lets halt own settlement when native completion arrives before the prompt returns", async () => {
   const f = await fixture(), nativeSettled = deferred();
   f.native.subscribe(event => { if (event.type === "agent_settled") nativeSettled.resolve(); });

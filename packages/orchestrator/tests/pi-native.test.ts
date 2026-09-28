@@ -79,8 +79,9 @@ it("retains native history, resources, thread tools and RPC session replacement"
   const before = output.filter(event => event.type === "agent_settled").length;
   expect(await request({ type: "prompt", workId: "handled", resume: true, message: "Do not execute twice" })).toMatchObject({ data: { alreadyAccepted: true, completed: true } });
   expect(output.filter(event => event.type === "agent_settled")).toHaveLength(before);
-  expect(await request({ type: "steer", workId: "queued", message: "steering" })).toMatchObject({ success: true });
-  expect(await request({ type: "clear_queue" })).toMatchObject({ success: true, data: { steering: ["steering"], followUp: [] } });
+  // A steer to an idle session starts its own turn rather than stranding in Pi's queue; this fixture has no model.
+  expect(await request({ type: "steer", workId: "queued", message: "steering" })).toMatchObject({ success: false });
+  expect(await request({ type: "clear_queue" })).toMatchObject({ success: true, data: { steering: [], followUp: [] } });
   expect(await request({ type: "abort" })).toMatchObject({ success: true });
   expect(await request({ type: "new_session" })).toMatchObject({ success: true });
   const next = (await request({ type: "get_state" })).data as { sessionId: string; sessionFile: string };
@@ -93,7 +94,7 @@ it("retains native history, resources, thread tools and RPC session replacement"
   expect(exits).toBe(1);
   const reopened = await openPiSession(options, event => output.push(event), () => exits++);
   await reopened.command({ type: "get_state", id: "reopened" });
-  expect(output.at(-1)).toMatchObject({ id: "reopened", data: { acceptedWorkIds: ["handled", "queued"], completedWorkIds: ["handled", "queued"] } });
+  expect(output.at(-1)).toMatchObject({ id: "reopened", data: { acceptedWorkIds: ["handled"], completedWorkIds: ["handled"] } });
   await reopened.close();
   expect(exits).toBe(2);
 });
