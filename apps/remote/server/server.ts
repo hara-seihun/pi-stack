@@ -45,6 +45,7 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
+import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { ResourceCache } from "../shared/resource-cache";
@@ -341,9 +342,12 @@ async function refreshThreadInspection(id: string, fresh = false) {
   return operation;
 }
 async function inspectThread(id: string, local: boolean) {
-  const result = await directory.inspect(id);
+  const held = peerInspections.get(id);
+  const result = await directory.inspect(id, held?.context ? { contextRevision: held.thread.revision } : undefined);
   if (!result.ok) throw new Error(result.error.message);
-  const inspection = result.value;
+  // An owner that finds this revision already held omits the context instead of rereading the thread's whole history.
+  const inspection = !result.value.context && held?.context && result.value.thread.revision === held.thread.revision ? { ...result.value, context: held.context } : result.value;
+  if (inspection.context === held?.context && held && inspectedContexts.has(held)) inspectedContexts.set(inspection, inspectedContexts.get(held)!);
   const changed = !local && (peerThreads.get(id)?.revision !== inspection.thread.revision
     || JSON.stringify(peerInspections.get(id)?.pending) !== JSON.stringify(inspection.pending));
   if (!local) peerThreads.set(id, inspection.thread);
@@ -1173,9 +1177,10 @@ function pushBootstrap(): void {
 
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
-  const sessions = selected ? stateSnapshot.sessions.map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session) : stateSnapshot.sessions;
+  const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
+    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
+  if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
 
 let messagingVersion = -1;

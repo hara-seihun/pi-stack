@@ -441,6 +441,8 @@ export interface StreamSubscription {
   thinking?: boolean;
   /** Carry the Machine screen. */
   dashboard?: boolean;
+  /** Carry every fleet thread for the Workers screen's "All" view; `state` carries only current ones. */
+  workers?: boolean;
   /** Carry this environment's idle notifications after this cursor. */
   notificationsAfter?: number | null;
   /** Voice: carry durable session events after this cursor. */
@@ -455,6 +457,7 @@ export type StreamSnapshot =
   | ({ type: "state" } & SupervisorState)
   | { type: "messaging"; snapshot: MessagingSnapshot }
   | { type: "dashboard"; dashboard: Dashboard }
+  | { type: "workers"; sessions: Session[] }
   | ({ type: "transcript" } & TranscriptPage)
   | { type: "live"; sessionId: string; text: string; thinking?: string }
   | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot }
