@@ -156,5 +156,5 @@ it("delivers multi-megabyte and multi-line output across arbitrary chunk boundar
   expect(performance.now() - began).toBeLessThan(400);
   expect((events[0] as { text?: string }).text).toBe(big);
   expect(events.slice(1).map(event => event.type)).toEqual(["agent_end", "turn_end"]);
-  connection?.detach?.();
+  void connection;
 });
