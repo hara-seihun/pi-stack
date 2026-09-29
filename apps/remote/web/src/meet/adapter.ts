@@ -7,6 +7,7 @@ import { MeetBrowser } from "./browser";
 import { MeetRoom, post } from "./room";
 import { MeetTranscription } from "./transcription";
 import { meetJson, type MeetRequest } from "./transport";
+import { MeetVoicePlayout } from "./voice-playout";
 
 export type { MeetRequest } from "./transport";
 declare const __MEET_AVATAR__: string;
@@ -19,6 +20,7 @@ export interface MeetAdapterOptions {
   container: HTMLElement;
   onState?(state: MeetAdapterState): void;
   onBrowserStream?(stream: MediaStream | null): void;
+  onAudioDiagnostic?(data: unknown): void;
 }
 
 export interface MeetAdapterState {
@@ -66,6 +68,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   let voice: VoiceSession | null = null;
   let demand: VoiceDemand | null = null;
   let avatar: Awaited<ReturnType<typeof avatarStream>> | null = null;
+  let playout: MeetVoicePlayout | null = null;
   let closing: Promise<void> | null = null;
   let suspending: Promise<void> | null = null;
   let voiceStopping: Promise<void> | null = null;
@@ -80,6 +83,10 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   video.setAttribute("aria-label", "PiStack Meet camera dashboard");
   video.style.cssText = "display:block;width:min(100%,100vh);height:auto;max-height:100%;aspect-ratio:1;object-fit:contain";
   stage.append(video);
+  const outputAudio = document.createElement("audio");
+  outputAudio.autoplay = true;
+  outputAudio.setAttribute("playsinline", "");
+  stage.append(outputAudio);
 
   const update = (patch: Partial<MeetAdapterState> = {}) => {
     state = { ...state, ...patch, room: room!.snapshot };
@@ -110,6 +117,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   const reconcile = (snapshot: MeetSnapshot) => {
     if (suspended) return;
     voice?.setOutputMuted(snapshot.voiceMuted);
+    outputAudio.muted = snapshot.voiceMuted;
     for (const track of avatar?.stream.getAudioTracks() || []) track.enabled = !snapshot.voiceMuted;
     browser?.reconcile(snapshot);
     transcription?.reconcileFlush(snapshot.transcriptFlushRevision);
@@ -126,6 +134,9 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   };
   const releaseMedia = async () => {
     browser?.close();
+    playout?.close();
+    playout = null;
+    outputAudio.pause(); outputAudio.srcObject = null;
     avatar?.close();
     input.getTracks().forEach((track) => track.stop());
     video.pause(); video.srcObject = null; stage.remove();
@@ -198,6 +209,9 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
     }
     media = new MeetMedia();
     await media.audio.resume();
+    playout = await MeetVoicePlayout.create(media.audio, data => options.onAudioDiagnostic?.({ stage: "playout", at: performance.now(), ...data as object }));
+    outputAudio.srcObject = playout.stream;
+    outputAudio.muted = joined.room.voiceMuted;
     transcription = new MeetTranscription(room, notice);
     await transcription.flushPending();
     browser = new MeetBrowser(room, (stream) => options.onBrowserStream?.(stream), notice);
@@ -206,6 +220,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
     avatar = await avatarStream(__MEET_AVATAR__, () => ({
       voice: state.voice, playback: state.playback, muted: room!.snapshot.voiceMuted, threads: room!.snapshot.threads,
     }));
+    for (const track of playout.stream.getAudioTracks()) avatar.stream.addTrack(track.clone());
     room.publish("pi-camera", avatar.stream);
     video.srcObject = avatar.stream;
     options.container.append(stage);
@@ -216,6 +231,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
       sessionId: joined.room.sessionId,
       input: media.voiceInput.stream,
       outputMuted: joined.room.voiceMuted,
+      externalPlayback: true,
       meetingContext,
       handoffContext: () => transcription!.handoff(),
       onVoiceControl: (control) => current.applyVoiceControl(control),
@@ -225,14 +241,11 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
         if (!current.snapshot.voiceMuted) transcription!.saveVoice(fragment);
       },
       onOutput: (stream) => {
-        for (const track of avatar!.stream.getAudioTracks()) { avatar!.stream.removeTrack(track); track.stop(); }
-        for (const track of stream.getAudioTracks()) {
-          const outgoing = track.clone(); outgoing.enabled = !current.snapshot.voiceMuted;
-          avatar!.stream.addTrack(outgoing);
-        }
-        current.publish("pi-camera", avatar!.stream);
+        playout!.attach(stream);
+        void outputAudio.play().catch(error => notice(`Meeting voice playback failed: ${String(error)}`));
       },
       onPlayback: (playback) => update({ playback }),
+      onAudioDiagnostic: data => options.onAudioDiagnostic?.(data),
       // A Voice failure is shown on the dashboard and retried while Voice is wanted; it no longer ends the meeting's transcript and canvas.
       onState: (status, detail) => {
         if (detail === "Agent queued…") demand?.activity();
