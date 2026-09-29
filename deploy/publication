@@ -258,6 +258,7 @@ function submit(sourceArgument, repairedRequestId) {
   if (repairedRequestId) {
     validateRequestId(repairedRequestId);
     repaired = readRequest(repairedRequestId);
+    checkCancellation(repaired);
     const repair = readRepair(repairedRequestId);
     if (repair?.outcome?.status !== "source-fixed" || repair.outcome.sourceSha !== sourceSha)
       throw new Error("Repaired submission requires its dedicated owner's source-fixed outcome and matching commit");
@@ -304,6 +305,10 @@ function submit(sourceArgument, repairedRequestId) {
 function enqueue(requestId, sourceSha, sourceRef, reporterJson, repairedRequestId) {
   validateRequestId(requestId);
   validateSha(sourceSha);
+  if (repairedRequestId) {
+    validateRequestId(repairedRequestId);
+    checkCancellation(readRequest(repairedRequestId));
+  }
   if (sourceRef !== `refs/heads/pi-stack-publications/${requestId}`) throw new Error("source ref does not match request id");
   ensureState();
   const loadState = checked("systemctl", ["--user", "show", "pi-stack-publication.service", "-p", "LoadState", "--value"]);
@@ -361,6 +366,7 @@ function inspect(requestId) {
 function retry(requestId) {
   validateRequestId(requestId);
   const request = readRequest(requestId);
+  checkCancellation(request);
   const repair = readRepair(requestId);
   if (request.repairedRetry?.repairId === repair?.id) return;
   if (request.status !== "failed" || request.repairedRetry || repair?.outcome?.status !== "infrastructure-fixed")
@@ -390,8 +396,12 @@ function cancel(requestId) {
   process.stdout.write(`${JSON.stringify({ requestId, status: "cancellation-requested", receipt: cancellationPath(requestId) })}\n`);
 }
 
+function isCancelled(request) {
+  return request.failure?.reason === "cancelled" || existsSync(cancellationPath(request.requestId));
+}
+
 function checkCancellation(request) {
-  if (existsSync(cancellationPath(request.requestId))) throw new Error("Publication cancelled; any completed host release remains selected");
+  if (isCancelled(request)) throw new Error("Publication cancelled; any completed host release remains selected");
 }
 
 function appendLog(path, text) {
@@ -1839,7 +1849,7 @@ function writeRepair(repair) {
 }
 
 function ensureRepair(request) {
-  if (readRepair(request.requestId)) return;
+  if (isCancelled(request) || readRepair(request.requestId)) return;
   const directory = join(repairRoot, request.requestId);
   const exhausted = (request.repairDepth ?? 0) >= policy.maxRepairDepth;
   writeRepair({ id: repairId(request.requestId), requestId: request.requestId, sourceSha: request.sourceSha,
@@ -1853,7 +1863,7 @@ function ensureRepair(request) {
 function requestRepair(requestId) {
   validateRequestId(requestId);
   const request = readRequest(requestId);
-  if (request.status !== "failed" || request.failure?.reason === "cancelled") throw new Error("Only repairable failed requests need repair adoption");
+  if (request.status !== "failed" || isCancelled(request)) throw new Error("Only repairable failed requests need repair adoption");
   ensureRepair(request);
   checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-watchdog.service"]);
   process.stdout.write(`${JSON.stringify(readRepair(requestId))}\n`);
@@ -1911,6 +1921,14 @@ function watchdog() {
   const repairs = allRequests().map(request => readRepair(request.requestId)).filter(Boolean);
   let busy = false;
   for (const repair of repairs) {
+    if (isCancelled(readRequest(repair.requestId)) && ["pending", "launching", "running", "submitting", "ready-to-retry"].includes(repair.status)) {
+      if (serviceBusy(repair.unit)) { busy = true; continue; }
+      repair.status = "blocked";
+      repair.summary = "Publication cancelled; retained repair work cannot authorize a successor or retry";
+      repair.finishedAt = new Date().toISOString();
+      writeRepair(repair);
+      continue;
+    }
     if (repair.status === "submitted" && repair.successor) {
       const successor = readRequest(repair.successor.requestId);
       if (repair.successor.status !== successor.status) {
@@ -1989,6 +2007,7 @@ function repairRun(requestId) {
   repair.startedAt = new Date().toISOString();
   writeRepair(repair);
   try {
+    checkCancellation(request);
     try {
       const workspace = JSON.parse(checked("agent-workspace", ["create", "--root", config.repairWorkspaceRoot,
         "--name", `publication-repair-${requestId}`, "--repo", checkout, "--owner", repair.id, "--mode", "writer", "--json"], { timeoutSeconds: 45 }));
@@ -2027,6 +2046,7 @@ function acceptRepairResult(repair) {
   if (!existsSync(repair.result)) throw new Error(`Repair agent returned without ${repair.result}`);
   const outcome = JSON.parse(readFileSync(repair.result, "utf8"));
   if (!["source-fixed", "infrastructure-fixed", "blocked"].includes(outcome.status) || !outcome.summary?.trim()) throw new Error("Repair result needs a status and cause/repair summary");
+  if (outcome.status !== "blocked") checkCancellation(readRequest(repair.requestId));
   if (outcome.status !== "blocked" && (!outcome.evidence || !existsSync(outcome.evidence))) throw new Error("Repair result needs an existing focused proof receipt");
   if (outcome.status === "source-fixed") {
     validateSha(outcome.sourceSha);
