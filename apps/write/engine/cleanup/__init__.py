@@ -140,7 +140,11 @@ def clean(words: Sequence[Mapping[str, Any] | str],
             continue
         if predictions is not None:
             label, probability = predictions[i]
-            if label in (1, 2, 3, 4) and probability >= .95:
+            protected = (_bare(raw) in allowed or _bare(raw) in _NUMBERS or
+                         _bare(raw) in {"no", "not", "never", "nothing"} or
+                         any(character.isdigit() for character in raw))
+            if (label in (1, 2, 3, 4) and
+                    probability >= getattr(tagger, 'deletion_threshold', .95) and not protected):
                 edits.append({"kind": "delete", "from": raw, "to": "", "at": [i, i+1]})
                 continue
         candidate = raw

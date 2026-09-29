@@ -1,7 +1,7 @@
-"""Resident ONNX disfluency tagger; initialize once, share across dictations.
+"""Resident joint ONNX tagger, reused across concurrent dictations.
 
-Requires onnxruntime, tokenizers and numpy. Model data is supplied separately
-at startup; the request path never downloads files or loads weights.
+The model has delete, punctuation and capitalization heads. Only the delete
+head is applied: the other heads did not improve held-out end-to-end text.
 """
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ import onnxruntime as ort
 from tokenizers import Tokenizer
 
 
-class OnnxDisfluencyTagger:
-    MODEL_REVISION = 'e1f59b45e03988dd55b8ff307c602f0d4567bf8c'
-    MODEL_SHA256 = 'e8d956f8cd83252e74d970750d3556d70485f27929ef6f50ecb20ac5336a0d3e'
+class JointOnnxTagger:
+    deletion_threshold = .925
 
     def __init__(self, directory: str | Path, threads: int = 4):
         path = Path(directory)
@@ -24,29 +23,35 @@ class OnnxDisfluencyTagger:
         options.intra_op_num_threads = threads
         options.inter_op_num_threads = 1
         self._session = ort.InferenceSession(
-            str(path / 'DisfluencyClassifier.onnx'), sess_options=options,
+            str(path / 'joint-f32.onnx'), sess_options=options,
             providers=['CPUExecutionProvider'])
         self._tokenizer = Tokenizer.from_file(str(path / 'tokenizer.json'))
         self._lock = Lock()
 
-    def predict(self, words: Sequence[str]) -> list[tuple[int, float]]:
-        if not words:
-            return []
-        with self._lock:
-            encoding = self._tokenizer.encode(list(words), is_pretokenized=True)
-            if len(encoding.ids) > 512:
-                raise ValueError('disfluency sentence exceeds 512 model tokens; finalize a sentence earlier')
-            ids = np.asarray([encoding.ids], dtype=np.int64)
-            logits = self._session.run(None, {
-                'input_ids': ids, 'attention_mask': np.ones_like(ids)})[0][0]
+    def _predict_chunk(self, words: Sequence[str]) -> list[tuple[int, float]]:
+        encoding = self._tokenizer.encode(list(words), is_pretokenized=True)
+        if len(encoding.ids) > 512:
+            half = len(words)//2
+            if not half:
+                raise ValueError('one spoken word exceeds the 512-token tagger context')
+            return self._predict_chunk(words[:half]) + self._predict_chunk(words[half:])
+        ids = np.asarray([encoding.ids], dtype=np.int64)
+        logits = self._session.run(None, {
+            'input_ids': ids, 'attention_mask': np.ones_like(ids)})[0][0]
         predictions: list[tuple[int, float] | None] = [None] * len(words)
         for index, word_index in enumerate(encoding.word_ids):
             if word_index is None or predictions[word_index] is not None:
                 continue
             distribution = logits[index]
             probabilities = np.exp(distribution - np.max(distribution))
-            label = int(np.argmax(probabilities))
-            predictions[word_index] = (label, float(probabilities[label] / probabilities.sum()))
+            probability = float(probabilities[1] / probabilities.sum())
+            predictions[word_index] = (1, probability)
         if any(prediction is None for prediction in predictions):
-            raise ValueError('tagger did not align all source words')
+            raise ValueError('joint tagger did not align all source words')
         return [prediction for prediction in predictions if prediction is not None]
+
+    def predict(self, words: Sequence[str]) -> list[tuple[int, float]]:
+        if not words:
+            return []
+        with self._lock:
+            return self._predict_chunk(words)
