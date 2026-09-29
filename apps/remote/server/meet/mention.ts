@@ -5,9 +5,9 @@ import type { MeetTranscriptTurn } from "./protocol";
 const HEARD_AS = ["keenan", "kennan", "kennen", "kennon", "kenen", "kenon", "kenin", "keenen", "kanan", "kanon", "kinan"];
 const NAME = new RegExp(`\\b(?:${[AGENT_NAME.toLowerCase(), ...HEARD_AS].join("|")})\\b`, "i");
 
-/** Whether a line of meeting speech says the agent's name, the cheap signal that someone may be about to talk to it. */
+/** A name or explicit unmute request wakes the agent even when recognition misses its name. */
 export function addressesAgent(text: string): boolean {
-  return NAME.test(text);
+  return NAME.test(text) || /\bunmute\s+yourself\b/i.test(text);
 }
 
 /** The recent speaker-labelled transcript a freshly opened Voice session did not hear, newest last and bounded for its instructions. */

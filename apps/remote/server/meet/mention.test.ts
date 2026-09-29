@@ -10,6 +10,15 @@ test("Kenan's name and Recall's usual mishearings wake Voice; lookalike words do
   }
 });
 
+test("unmute yourself wakes Voice without a recognized name", () => {
+  for (const text of ["unmute yourself", "oh come on can you unmute yourself", "canon can you unmute yourself please", "UNMUTE YOURSELF!", "Please unmute\n yourself."]) {
+    expect(addressesAgent(text)).toBe(true);
+  }
+  for (const text of ["unmute", "unmute yourselves", "unmute yourselfish", "please mute yourself"]) {
+    expect(addressesAgent(text)).toBe(false);
+  }
+});
+
 test("a reopened Voice session gets the recent transcript, newest last and bounded", () => {
   const turn = (speaker: string, text: string, startedAt: number) => ({
     id: `${startedAt}`, speakerId: speaker, speaker, text, startedAt, final: true, status: "done" as const, error: null,
