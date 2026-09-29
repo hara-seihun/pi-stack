@@ -1471,9 +1471,13 @@ function handlePiEvent(sessionId: string, event: any) {
     return;
   }
 
-  if (event.type === "message_start" && event.message?.role === "assistant") responseTiming.start(sessionId);
+  // Time responses by when Pi produced each event, not when it reached this
+  // supervisor: delivery can arrive in bursts, which made a whole response
+  // look like it streamed in a few hundred milliseconds (over 1000 tok/s).
+  const eventAt = typeof event.emittedAt === "number" ? event.emittedAt : Date.now();
+  if (event.type === "message_start" && event.message?.role === "assistant") responseTiming.start(sessionId, eventAt);
   if (event.type === "message_update" && ["text_delta", "thinking_delta"].includes(String(event.assistantMessageEvent?.type)))
-    responseTiming.firstToken(sessionId);
+    responseTiming.firstToken(sessionId, eventAt);
 
   if (event.type === "agent_start") {
     rt.thinkingActive = false;
@@ -1511,7 +1515,7 @@ function handlePiEvent(sessionId: string, event: any) {
       if (completedThinking) rt.liveThinking = thinkingPrefix + completedThinking;
       const finalization = messageFinalizationKey(event.message);
       recordThinkingEvent(sessionId, completedThinking, finalization);
-      recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message), finalization);
+      recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), finalization);
       if (contextFinalizedMessages.get(sessionId) === finalization) {
         rt.pendingContextFinalization = null;
         rt.liveText = "";

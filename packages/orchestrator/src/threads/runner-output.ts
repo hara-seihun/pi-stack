@@ -27,7 +27,9 @@ export class RuntimeOutput {
 
   publishLine(line: string) {
     if (this.closed) return;
-    const record = JSON.stringify({type: 'output', sequence: ++this.sequence, line}) + '\n';
+    // `at` is when the runner produced the event. Delivery to the daemon and on
+    // to clients can batch or stall; timing must not depend on arrival.
+    const record = JSON.stringify({type: 'output', sequence: ++this.sequence, at: Date.now(), line}) + '\n';
     const bytes = Buffer.from(record);
     let written = 0;
     while (written < bytes.length) written += writeSync(this.fd, bytes, written, bytes.length - written);

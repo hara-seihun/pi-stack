@@ -871,6 +871,8 @@ export class ThreadService implements ThreadApi {
   }
   private output(id: string, runtime: Runtime, event: PiEvent): void {
     if (this.runtimes.get(id) !== runtime || this.closed || this.suspended) return;
+    // Runner events carry their production time; in-process sessions are stamped here.
+    if (typeof event.emittedAt !== "number") event.emittedAt = Date.now();
     const projection = this.projections.get(id) ?? { live: { text: "", thinking: "", isThinking: false, tools: [] } };
     this.projections.set(id, projection);
     if (event.type === "context_update" && event.context) {

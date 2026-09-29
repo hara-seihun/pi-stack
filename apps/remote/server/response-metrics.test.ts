@@ -15,6 +15,16 @@ const assistant = (metrics?: unknown) => ({
 });
 
 describe("response timing", () => {
+  test("uses the time Pi produced each event, not a burst of late arrivals", () => {
+    const { clock, tracker } = timing();
+    // A whole 300-token response reaches the supervisor within 200 ms.
+    clock.now = 50_000; tracker.start("session", 40_000);
+    clock.now = 50_001; tracker.firstToken("session", 41_000);
+    clock.now = 50_200;
+    const metrics = tracker.finish("session", { usage: { output: 300 } }, 45_000);
+    expect(metrics).toEqual({ ttftMs: 1_000, generationMs: 4_000, outputTokens: 300, tokensPerSecond: 75 });
+  });
+
   test("measures the wait for the first token and the streaming that followed", () => {
     const { clock, tracker } = timing();
     tracker.start("session");

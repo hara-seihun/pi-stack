@@ -85,7 +85,9 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
             } else if (value.type === "output") {
               const next = Number(value.sequence);
               if (!Number.isSafeInteger(next) || next <= sequence) continue;
-              output(JSON.parse(value.line));
+              const event = JSON.parse(value.line);
+              if (typeof value.at === "number" && event && typeof event === "object" && event.emittedAt === undefined) event.emittedAt = value.at;
+              output(event);
               sequence = next;
               current.write(`${JSON.stringify({ type: "ack", sequence })}\n`);
             } else if (value.type === "exit") finish(Number(value.code));

@@ -75,21 +75,21 @@ export class ResponseTiming {
   constructor(private readonly clock: () => number = Date.now) {}
 
   /** A retry or a new assistant message replaces whatever was in flight. */
-  start(sessionId: string): void {
-    this.pending.set(sessionId, { startedAt: this.clock(), firstTokenAt: null });
+  start(sessionId: string, at = this.clock()): void {
+    this.pending.set(sessionId, { startedAt: at, firstTokenAt: null });
   }
 
   /** The first visible token of the current response. Later deltas are ignored. */
-  firstToken(sessionId: string): void {
+  firstToken(sessionId: string, at = this.clock()): void {
     const response = this.pending.get(sessionId);
-    if (response && response.firstTokenAt === null) response.firstTokenAt = this.clock();
+    if (response && response.firstTokenAt === null) response.firstTokenAt = at;
   }
 
-  finish(sessionId: string, message: unknown): ResponseMetrics | null {
+  finish(sessionId: string, message: unknown, at = this.clock()): ResponseMetrics | null {
     const response = this.pending.get(sessionId);
     this.pending.delete(sessionId);
     if (!response) return null;
-    return responseMetrics(response, this.clock(), outputUsageOf(message));
+    return responseMetrics(response, at, outputUsageOf(message));
   }
 
   forget(sessionId: string): void {
