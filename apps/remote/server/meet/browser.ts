@@ -27,6 +27,9 @@ export class MeetBrowser {
   private watchGeneration = 0;
   private closed = false;
   private cdp: CDPSession | null = null;
+  /** When the last frame arrived. Screencast frames come only on repaint, so a still page is re-captured. */
+  private frameAt = 0;
+  private refresher: ReturnType<typeof setInterval> | null = null;
   private switches = Promise.resolve();
   private desiredPage: Page;
 
@@ -108,7 +111,7 @@ export class MeetBrowser {
         this.cdp = cdp;
         this.error = null;
         cdp.on("Page.screencastFrame", (event) => {
-          if (this.cdp === cdp && !this.closed) this.frame = Buffer.from(event.data, "base64");
+          if (this.cdp === cdp && !this.closed) { this.frame = Buffer.from(event.data, "base64"); this.frameAt = Date.now(); }
           void cdp.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch((cause) => {
             if (this.cdp === cdp && !this.closed && !page.isClosed()) {
               this.frame = null;
@@ -118,7 +121,8 @@ export class MeetBrowser {
         });
         await cdp.send("Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: 1280, maxHeight: 720, everyNthFrame: 1 });
         const capture = await cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 75, captureBeyondViewport: false });
-        if (this.cdp === cdp && !this.closed) this.frame = Buffer.from(capture.data, "base64");
+        if (this.cdp === cdp && !this.closed) { this.frame = Buffer.from(capture.data, "base64"); this.frameAt = Date.now(); }
+        this.refresh(cdp, page);
         return { ok: true, value: undefined };
       } catch (cause) {
         const error = `Browser tab sharing failed: ${String(cause)}`;
@@ -128,6 +132,26 @@ export class MeetBrowser {
     });
     this.switches = operation.then(() => {});
     return operation;
+  }
+
+  /**
+   * Chromium's screencast sends a frame only when the compositor repaints, and it can stop sending
+   * after a fade or a navigation. On September 29, 2026 a meeting kept a dimmed mid-fade slide on the
+   * share for 80 s and missed one slide change entirely, although the page had rendered them. When no
+   * frame has arrived for a second, capture the tab directly.
+   */
+  private refresh(cdp: CDPSession, page: Page) {
+    if (this.refresher) clearInterval(this.refresher);
+    let busy = false;
+    this.refresher = setInterval(() => {
+      if (busy || this.closed || this.cdp !== cdp || page.isClosed() || Date.now() - this.frameAt < 1_000) return;
+      busy = true;
+      void cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 75, captureBeyondViewport: false })
+        .then((capture) => { if (this.cdp === cdp && !this.closed) { this.frame = Buffer.from(capture.data, "base64"); this.frameAt = Date.now(); } })
+        .catch(() => {})
+        .finally(() => { busy = false; });
+    }, 500);
+    this.refresher.unref?.();
   }
 
   async navigate(url: string): Promise<MeetResult<string>> {
@@ -205,6 +229,8 @@ export class MeetBrowser {
 
   async close() {
     this.closed = true;
+    if (this.refresher) clearInterval(this.refresher);
+    this.refresher = null;
     this.stopWatching();
     this.frame = null;
     try { await this.context.close(); }
