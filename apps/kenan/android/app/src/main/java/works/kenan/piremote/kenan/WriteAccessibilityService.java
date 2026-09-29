@@ -39,6 +39,13 @@ import java.util.List;
 
 /** System-wide dictation UI; the overlay never takes input focus away from the editor. */
 public final class WriteAccessibilityService extends AccessibilityService {
+    private static volatile WriteAccessibilityService active;
+    static void sessionChanged() {
+        WriteAccessibilityService service = active;
+        if (service != null) service.main.post(() -> {
+            if (active == service) { service.cancel(); service.hide(); service.refresh(); }
+        });
+    }
     private static final String CHANNEL = "write-recording";
     private static final int NOTIFICATION = 224;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -68,6 +75,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private RemoteSession.Identity learnedIdentity;
 
     @Override public void onServiceConnected() {
+        active = this;
         windows = getSystemService(WindowManager.class);
         getSystemService(NotificationManager.class).createNotificationChannel(
             new NotificationChannel(CHANNEL, "Pi Stack Write", NotificationManager.IMPORTANCE_LOW));
@@ -432,5 +440,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
 
     @Override public void onInterrupt() { cancel(); hide(); }
-    @Override public void onDestroy() { cancel(); hide(); super.onDestroy(); }
+    @Override public void onDestroy() {
+        if (active == this) active = null;
+        cancel(); hide(); super.onDestroy();
+    }
 }

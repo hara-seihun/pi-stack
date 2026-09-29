@@ -23,6 +23,7 @@ final class NotificationIdentity {
                 .clear().putString("user", user).putString("session", session).apply();
             context.getSharedPreferences("idle-notifications", Context.MODE_PRIVATE).edit().clear().apply();
             ThreadNotifications.clear(context);
+            WriteAccessibilityService.sessionChanged();
             return true;
         }
     }
