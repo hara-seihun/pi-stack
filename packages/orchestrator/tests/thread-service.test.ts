@@ -1149,6 +1149,27 @@ it("passes a raw thread to its Pi session as --raw and rejects incompatible raw 
     .toMatchObject({ ok: false, error: { code: "invalid_request" } });
 });
 
+it("allocates separate workspaces, launches sandbox sessions, and refuses boundary changes", async () => {
+  const { service, directory, sessions } = fixture();
+  await service.start();
+  const sandbox = value(await service.spawn({ requestId: "sandbox", cwd: directory, message: "hello", metadata: { raw: true, sandbox: true } }));
+  await waitFor(() => sessions.length === 1);
+  expect(sandbox.cwd).toBe(join(directory, "sessions", "sandboxes", sandbox.id));
+  expect(sessions[0]!.options).toMatchObject({ cwd: sandbox.cwd, env: { PI_THREAD_CAN_SPAWN: "0" } });
+  expect(sessions[0]!.options.args).toEqual(expect.arrayContaining(["--raw", "--sandbox"]));
+  const second = value(await service.spawn({ requestId: "second-sandbox", cwd: directory, metadata: { raw: true, sandbox: true } }));
+  expect(second.cwd).not.toBe(sandbox.cwd);
+  for (const metadata of [{ sandbox: false }, { raw: false }, { mode: "live" }, { execution: "root-repair" }]) {
+    expect(service.update(sandbox.id, { metadata })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  }
+  expect(await service.spawn({ requestId: "sandbox-child", parentId: sandbox.id, cwd: directory })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  for (const metadata of [{ sandbox: true }, { raw: true, sandbox: "yes" }, { raw: true, sandbox: true, context: { tools: [] } }]) {
+    expect(await service.spawn({ requestId: JSON.stringify(metadata), cwd: directory, metadata })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  }
+  expect(service.importThread({ id: "escape-sandbox", title: "Escape", cwd: directory, sessionFile: join(directory, "native.jsonl"), settings: sandbox.settings,
+    metadata: { raw: true, sandbox: true } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+});
+
 describe("thread inspection", () => {
   it("omits an idle thread's context when the caller already holds its revision, through a directory over HTTP", async () => {
     const { service, directory } = fixture();

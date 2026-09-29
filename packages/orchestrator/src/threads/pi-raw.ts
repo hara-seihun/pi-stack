@@ -2,9 +2,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** Session argument that selects a raw Pi session: the model receives the conversation and nothing else. */
 export const RAW_ARGUMENT = "--raw";
+export const SANDBOX_ARGUMENT = "--sandbox";
 
 export function isRawSession(args: readonly string[]): boolean {
-  return args.includes(RAW_ARGUMENT);
+  return args.includes(RAW_ARGUMENT) || args.includes(SANDBOX_ARGUMENT);
+}
+
+export function validSandboxBoundary(metadata: Record<string, unknown>): boolean {
+  return metadata.sandbox === undefined || metadata.sandbox === true && metadata.raw === true
+    && metadata.context === undefined && metadata.execution === undefined && metadata.mode === undefined
+    && metadata.meetingId == null && metadata.contextFiles === undefined;
 }
 
 /**

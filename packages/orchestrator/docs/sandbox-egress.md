@@ -1,0 +1,15 @@
+# Sandbox package-download egress
+
+[`pi-sandbox-egress.ts`](../src/threads/pi-sandbox-egress.ts) owns public HTTP/HTTPS transport for sandbox tools. The backend retains `bwrap --unshare-all`; it never shares the host network namespace.
+
+`startSandboxEgress()` returns a typed startup result. On success it owns an ephemeral mode-0700 directory and mode-0600 Unix proxy socket, exposed as `socketPath`, plus an idempotent `close()` that destroys connections, waits for bounded DNS work and deletes the directory. The caller closes it in the tool subprocess's `finally` block. There is no persistent state or credential store.
+
+The backend binds only that socket at `/run/package-proxy.sock`. A Node loopback relay inside the sandbox connects `127.0.0.1:3128` to the socket. `SANDBOX_PROXY_ENVIRONMENT` supplies upper/lowercase HTTP/HTTPS proxy variables and empty bypass lists. Start the relay before the tool command. The subprocess environment is separately cleared by the backend; neither the host proxy nor relay supplies host credentials. Programs that ignore HTTP proxy settings cannot access the network. Git uses HTTPS remotes; SSH and arbitrary-port protocols are not offered.
+
+The host proxy accepts absolute `http://` URLs on port 80 and CONNECT authorities on ports 80 or 443. Hostnames are strict ASCII DNS names, canonical IPv4 literals, or bracketed IPv6 literals. Userinfo, encoded authorities, unusual numeric-IP spelling, fragments, noncanonical ports and non-HTTP schemes are rejected. DNS resolves A and AAAA records with bounded resolver work. Every returned address must pass the public-address policy; mixed public/private answers fail closed. Outbound sockets connect to the validated numeric address, never a fresh hostname lookup.
+
+The policy excludes loopback, private LAN, carrier-grade NAT/Tailscale, link-local/cloud metadata, multicast, reserved/test networks, IPv6 translated/tunnel address ranges, and the host's current interface addresses, including any public interface address. Azure's public infrastructure/metadata endpoint is explicitly excluded. IPv6 is limited to global unicast `2000::/3` minus special-use ranges. DNS failure, a blocked destination and upstream failure produce distinct useful HTTP error responses. Redirect destinations undergo the same policy on the client's next proxy request. CONNECT is an opaque public TCP tunnel, not TLS interception or a content/package allowlist.
+
+Each helper bounds concurrent DNS work to 64, total client/upstream socket admission to 128, headers to 16 KiB, DNS/connect work to 10 seconds, idle sockets to 30 seconds and every socket lifetime to five minutes. Large downloads stream with backpressure rather than buffering their bodies. The helper adds no host TCP listener and no reusable authentication capability.
+
+Focused contracts: `npx vitest run packages/orchestrator/tests/pi-sandbox-egress.test.ts --maxWorkers=1` from the repository root. The tests cover special-use/host IP exclusions, ambiguous authority parsing, mixed DNS answers, useful Unix-proxy denials and cleanup without depending on the live Internet.
