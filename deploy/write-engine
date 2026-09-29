@@ -46,11 +46,7 @@ PY
   while IFS=$'\t' read -r file source_file repository revision digest; do
     destination="$environment/model/$file"
     install -d "$(dirname "$destination")"
-    if [[ ! -f "$destination" ]] || [[ $(sha256sum "$destination" | cut -d' ' -f1) != "$digest" ]]; then
-      curl -fL --retry 3 -C - "https://huggingface.co/$repository/resolve/$revision/$source_file" -o "$destination.part"
-      echo "$digest  $destination.part" | sha256sum --check --status
-      mv "$destination.part" "$destination"
-    fi
+    pi_stack_download_artifact "https://huggingface.co/$repository/resolve/$revision/$source_file" "$destination" "$digest"
   done < "$environment/model-files.tsv"
   "$environment/venv/bin/python" "$source_dir/convert_fp32.py" "$environment/model"
   chmod -R a+rX "$environment"
@@ -68,11 +64,7 @@ for name,digest in m['files'].items():
 PY
   while IFS=$'\t' read -r file url digest; do
     destination="$cleanup_model/$file"
-    if [[ ! -f "$destination" ]] || [[ $(sha256sum "$destination" | cut -d' ' -f1) != "$digest" ]]; then
-      curl -fL --retry 3 -C - "$url" -o "$destination.part"
-      echo "$digest  $destination.part" | sha256sum --check --status
-      mv "$destination.part" "$destination"
-    fi
+    pi_stack_download_artifact "$url" "$destination" "$digest"
   done < "$cleanup_model/files.tsv"
   chmod -R a+rX "$cleanup_model"
   touch "$cleanup_model/ready"
