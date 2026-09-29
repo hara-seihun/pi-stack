@@ -9,7 +9,7 @@ import { isRunContext } from "../isolated-context-contract.js";
 import { isModelConfigurationError } from "../provider-errors.js";
 import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
-import { RAW_ARGUMENT } from "./pi-raw.js";
+import { RAW_ARGUMENT, SANDBOX_ARGUMENT, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
@@ -344,6 +344,7 @@ export class ThreadService implements ThreadApi {
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (parent && (parent.parentId || parent.role === "worker")) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
+      if (parent?.metadata?.sandbox) return bad("invalid_request", "Sandbox threads cannot create workers");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
       if (input.metadata?.mode !== undefined && (!isThreadModeName(input.metadata.mode) || parent && input.metadata.mode !== parent.metadata?.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts, and a child keeps its parent's mode");
@@ -351,12 +352,13 @@ export class ThreadService implements ThreadApi {
       // Check local receipts first so retries of previously accepted children retain their identity.
       const workerOwner = parent && this.workerOwner?.(parent, input);
       if (workerOwner) return workerOwner.spawn(input);
-      const metadata: Record<string, unknown> = { ...Object.fromEntries(["profileId", "meetingId", "bashTimeoutSeconds", "context", "execution", "source", "raw", "mode"].filter(key => parent?.metadata?.[key] !== undefined).map(key => [key, parent!.metadata![key]])), ...input.metadata, ...(input.ephemeral ? { ephemeral: true } : {}) };
+      const metadata: Record<string, unknown> = { ...Object.fromEntries(["profileId", "meetingId", "bashTimeoutSeconds", "context", "execution", "source", "raw", "sandbox", "mode"].filter(key => parent?.metadata?.[key] !== undefined).map(key => [key, parent!.metadata![key]])), ...input.metadata, ...(input.ephemeral ? { ephemeral: true } : {}) };
       delete metadata.createdBy;
       if (createdBy) metadata.createdBy = createdBy;
-      for (const key of ["context", "execution", "raw"] as const) if (parent && input.metadata && key in input.metadata && digest(input.metadata[key] ?? null) !== digest(parent.metadata?.[key] ?? null)) return bad("conflict", "A child must remain in its parent's execution boundary");
+      for (const key of ["context", "execution", "raw", "sandbox"] as const) if (parent && input.metadata && key in input.metadata && digest(input.metadata[key] ?? null) !== digest(parent.metadata?.[key] ?? null)) return bad("conflict", "A child must remain in its parent's execution boundary");
       if (metadata.context !== undefined && !isRunContext(metadata.context)) return bad("invalid_request", "Invalid isolated context contract");
       if (metadata.execution === "root-repair" && metadata.context) return bad("invalid_request", "Root repair requires full normal Pi context");
+      if (!validSandboxBoundary(metadata)) return bad("invalid_request", "Sandbox threads require raw context and cannot carry an execution override or mode");
       if (metadata.raw !== undefined && metadata.raw !== true) return bad("invalid_request", "Thread metadata raw must be true when present");
       if (metadata.raw === true && (metadata.context !== undefined || metadata.execution === "root-repair")) return bad("invalid_request", "Raw threads carry no isolated context and cannot perform root repair");
       if (input.admission !== undefined && !["force", "background"].includes(input.admission)) return bad("invalid_request", "Invalid admission policy");
@@ -365,10 +367,12 @@ export class ThreadService implements ThreadApi {
       if (input.parentId === id) return bad("invalid_request", "A thread cannot be its own parent");
       if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id)) return bad("invalid_request", "Thread ID must be a nonempty filename-safe identifier");
       if (this.get(id)) return bad("conflict", "Thread ID already exists");
+      const cwd = metadata.sandbox ? join(this.options.sessionsDir, "sandboxes", id) : input.cwd;
+      if (metadata.sandbox) mkdirSync(cwd, { recursive: true, mode: 0o700 });
       this.transaction(() => {
         const now = Date.now();
         this.sql("INSERT INTO thread(id,parent_id,title,cwd,session_file,settings,admission,state,created_at,updated_at,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-          .run(id, input.parentId ?? null, input.title ?? `Thread ${id.slice(0, 8)}`, input.cwd, join(this.options.sessionsDir, `${id}.jsonl`), JSON.stringify(settings.value), admission, input.message ? "running" : "idle", now, now, JSON.stringify(metadata));
+          .run(id, input.parentId ?? null, input.title ?? `Thread ${id.slice(0, 8)}`, cwd, join(this.options.sessionsDir, `${id}.jsonl`), JSON.stringify(settings.value), admission, input.message ? "running" : "idle", now, now, JSON.stringify(metadata));
         if (input.message) this.insertMessage(input.requestId, { requestId: input.requestId, threadId: id, senderId: input.parentId, text: input.message, images: input.images, delivery: resolveDelivery({ senderId: input.parentId }) }, settings.value);
         this.recordRequest(input.requestId, receipt, "spawn", id);
       });
@@ -508,8 +512,9 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
     if (patch.title !== undefined && !patch.title.trim()) return bad("invalid_request", "Thread title cannot be empty");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["context", "execution", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["context", "execution", "raw", "sandbox", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
+    if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
     const admission = patch.metadata && "mode" in patch.metadata ? threadMode(patch.metadata.mode)!.admission : thread.admission;
     if (patch.archived && (this.execution(id) || this.runtimes.get(id)?.busy || thread.state === "running")) return bad("conflict", "Stop this thread before archiving it, or use control(update)");
     // Archiving an archived thread is a no-op rather than a fresh archivedAt: a
@@ -828,18 +833,21 @@ export class ThreadService implements ThreadApi {
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
     const raw = thread.metadata?.raw === true;
+    const sandbox = thread.metadata?.sandbox === true;
+    if (!validSandboxBoundary(thread.metadata ?? {})) throw new Error("Invalid recorded sandbox boundary");
+    if (sandbox && thread.cwd !== join(this.options.sessionsDir, "sandboxes", id)) throw new Error("Sandbox workspace does not match its thread owner");
     if (raw && (context !== undefined || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded raw execution boundary");
     const env = { ...this.options.environment?.(thread), ...extraEnv, ...(context ? { HOME: join(thread.cwd, ".home") } : {}), PI_THREAD_ID: id, PI_THREAD_SPEED: settings.speed, PI_THREAD_TOKEN: this.options.capability?.issue(id),
       PI_THREAD_DATABASE: this.options.databasePath,
       // Explicit false survives JSON transport and overrides older runners' launch environment.
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",
-      PI_THREAD_CAN_SPAWN: thread.role === "worker" ? "0" : "1",
+      PI_THREAD_CAN_SPAWN: sandbox || thread.role === "worker" ? "0" : "1",
       PI_THREAD_MODE: isThreadModeName(thread.metadata?.mode) ? thread.metadata.mode : undefined,
       PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined };
     this.runtimes.set(id, runtime);
     try {
       runtime.session = await this.options.openSession({ threadId: id, cwd: thread.cwd, sessionFile: thread.sessionFile,
-        args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
+        args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(sandbox ? [SANDBOX_ARGUMENT] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
       const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
       await this.rpc(runtime, { type: "set_session_name", name: thread.title });
@@ -1073,6 +1081,7 @@ export class ThreadService implements ThreadApi {
     try {
       const existing = this.get(input.id); if (existing) return existing.sessionFile === input.sessionFile ? good(existing) : bad("conflict", "Imported thread identity names a different transcript");
       if (input.metadata?.context !== undefined && (!isRunContext(input.metadata.context) || input.metadata.execution === "root-repair")) return bad("invalid_request", "Invalid imported isolated execution boundary");
+      if (!validSandboxBoundary(input.metadata ?? {}) || input.metadata?.sandbox && input.cwd !== join(this.options.sessionsDir, "sandboxes", input.id)) return bad("invalid_request", "Invalid imported sandbox boundary");
       if (input.metadata?.raw !== undefined && (input.metadata.raw !== true || input.metadata.context !== undefined || input.metadata.execution === "root-repair")) return bad("invalid_request", "Invalid imported raw execution boundary");
       const settings = resolveThreadSettings(input.settings); if (!settings.ok) return settings;
       this.sql("INSERT INTO thread(id,parent_id,title,cwd,session_file,settings,admission,state,held,created_at,updated_at,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
