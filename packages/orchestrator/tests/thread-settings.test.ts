@@ -6,8 +6,12 @@ test.each(["openai-codex/missing-model", "openai-codex-8/missing-model", "openai
   expect(resolveThreadSettings({ model })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
 });
 
-test.each(["sol", "gpt-6-sol", "openai-codex/gpt-6-sol", "openai-codex-8/gpt-6-sol"])("resolves %s without inventing a model version", model => {
-  expect(resolveThreadSettings({ model })).toMatchObject({ ok: true, value: { model: "openai-codex/gpt-6-sol" } });
+test.each(["sol", "gpt-6.1-sol", "openai-codex/gpt-6.1-sol", "openai-codex-8/gpt-6.1-sol"])("resolves current Sol %s", model => {
+  expect(resolveThreadSettings({ model })).toMatchObject({ ok: true, value: { model: "openai-codex/gpt-6.1-sol" } });
+});
+
+test.each(["openai-codex/gpt-6-sol", "openai-codex-8/gpt-6-sol"])("preserves explicit Sol 6 %s", model => {
+  expect(resolveThreadSettings({ model })).toMatchObject({ ok: true, value: { model } });
 });
 
 test.each(["openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.6-luna", "anthropic/claude-fable-5-1", "anthropic/claude-sonnet-4-5", "private/local-model"])("retains supported additions and explicit private providers: %s", model => {
