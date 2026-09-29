@@ -134,6 +134,10 @@ Repair threads retain forced admission and full Pi context. Fleet admission hold
 
 `pause --ordinary` sets `ordinary-launches=paused`; `resume --ordinary` clears it. The global `launches=paused` control stops all new admission. Neither control cancels an admitted turn. Thread stop and resume use the same API as Remote and agent tools.
 
+## Focused model checks
+
+Run `npm test --workspace=pi-orchestrator -- tests/catalog-config.test.ts tests/routing-runtime.test.ts` to check model selection and routing. The npm lifecycle prepares the shared RPC runtime before Vitest runs. Provider assertions use `nativeProviders`, which includes the custom definitions, rather than the upstream catalog alone. Fresh-session fixtures load the same `models.json` definitions deployed to each account before selecting a model; pin and model-switch cases resolve current choices through `catalogModel` instead of constructing versioned IDs. Explicit historical model IDs in resume fixtures remain intentional.
+
 ## Operations
 
 ```bash
