@@ -609,10 +609,14 @@ export class ThreadService implements ThreadApi {
         }
       });
       this.changed(input.threadId);
+      // A session still opening has no native session to command yet. Wait for it, then apply the saved
+      // settings to it: Voice sets thinking on the meeting thread at the moment a mention's prompt opens it.
+      await this.opening.get(input.threadId)?.catch(() => undefined);
       const runtime = this.runtimes.get(input.threadId), execution = this.execution(input.threadId);
       const activeSettings: ThreadSettings | undefined = execution ? JSON.parse(execution.settings) : runtime?.settings;
       const activeSelection = activeSettings && resolveThreadSettings({}, activeSettings);
-      if (runtime && activeSettings && activeSelection?.ok && activeSelection.value.model === settings.value.model) {
+      // An attaching runner has no native session yet either; it keeps the saved settings for its next open.
+      if (runtime?.session && activeSettings && activeSelection?.ok && activeSelection.value.model === settings.value.model) {
         const applied = { ...activeSettings };
         const remember = () => {
           runtime.settings = { ...applied };

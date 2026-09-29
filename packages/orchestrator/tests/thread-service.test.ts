@@ -372,6 +372,24 @@ it("reports persisted settings when the running session rejects their applicatio
   expect(f.service.get(thread.id)!.settings.thinkingLevel).toBe("low");
 });
 
+it("applies settings changed while the thread's session is still opening", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-service-")); roots.push(directory);
+  const sessions: FakePiSession[] = [];
+  let release!: () => void, opened!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }), opening = new Promise<void>(resolve => { opened = resolve; });
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+    openSession: async (options, output) => { opened(); await gate; const session = new FakePiSession(options, output); sessions.push(session); return session; } });
+  services.push(service);
+  await service.start();
+  const thread = value(await service.spawn({ requestId: "settings-while-opening", cwd: directory, message: "mention" }));
+  await opening;
+  const applied = service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "off" } });
+  release();
+  expect(await applied).toMatchObject({ ok: true });
+  expect(sessions[0]!.commands.some(command => command.type === "set_thinking_level" && command.level === "off")).toBe(true);
+  expect(service.get(thread.id)!.settings.thinkingLevel).toBe("off");
+});
+
 describe("await child settlements", () => {
   async function children() {
     const f = fixture();
