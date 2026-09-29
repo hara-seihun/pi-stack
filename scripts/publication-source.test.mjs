@@ -143,6 +143,9 @@ test("a genuinely busy host lock requeues the same integration, while unrelated 
   assert.equal(busy.request.integrationSha, f.commit);
   assert.ok(Date.parse(busy.request.nextAttemptAt) > Date.now());
   assert.equal(JSON.parse(readFileSync(join(f.root, "requests", `${request.requestId}.json`), "utf8")).status, "queued");
+  const meeting = run("live meeting rooms on this host (kenan:1); deploying now would end them");
+  assert.equal(meeting.result.kind, "host-lock-busy");
+  assert.equal(meeting.request.status, "queued");
   const unrelated = run("release checkout failed for another reason");
   assert.equal(unrelated.result.kind, undefined);
   assert.equal(unrelated.request.status, "running");

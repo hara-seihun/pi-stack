@@ -26,6 +26,17 @@ if (( services )); then
   pi_stack_check_person_configs
   "$root/deploy/voice" --check
 fi
+# Activation restarts Pi Remote, which ends every live Meet room: the meeting bot stays
+# in the call with no voice, canvas or agent (a release at 06:40Z on 2026-09-29 cut a
+# live Meet test mid-brief). Defer instead; the publication owner requeues this exit 75
+# and retries within its wait budget. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
+if (( services )) && [[ ${PI_STACK_ALLOW_LIVE_MEETING_RESTART:-0} != 1 ]]; then
+  live_rooms=$(pi_stack_live_meeting_rooms)
+  if [[ -n $live_rooms ]]; then
+    echo "live meeting rooms on this host ($live_rooms); deploying now would end them" >&2
+    exit 75
+  fi
+fi
 # Write needs its host-declared engine unit and a CPU able to stream Nemotron;
 # a host without the unit keeps Remote working and reports Write unavailable.
 write=0
