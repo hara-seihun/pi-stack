@@ -221,6 +221,13 @@ function install(activate = true) {
   process.stdout.write(`installed pi-stack publication owner${activate ? "" : " code only; services unchanged"}; state=${stateRoot}\n`);
 }
 
+export function adoptPublicationOwner(sourceRoot, integrationSha) {
+  const ownerSource = checked("git", ["-C", sourceRoot, "rev-parse", "HEAD"]);
+  if (ownerSource !== integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${integrationSha}`);
+  // The candidate owns its installation layout; the running worker already holds the lock.
+  checked(process.execPath, [join(sourceRoot, "deploy/publication"), "install"], { timeoutSeconds: 90 });
+}
+
 function gitRoot() {
   return checked("git", ["rev-parse", "--show-toplevel"], { cwd: process.cwd() });
 }
@@ -1718,9 +1725,7 @@ export function processRequest(request) {
     request.status = "running";
     request.step = "adopt-publication-owner";
     writeRequest(request);
-    const ownerSource = checked("git", ["-C", checkout, "rev-parse", "HEAD"]);
-    if (ownerSource !== request.integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${request.integrationSha}`);
-    installFrom(checkout);
+    adoptPublicationOwner(checkout, request.integrationSha);
     for (const target of targets) restoreReservation(request, target);
 
     request.status = "published";
