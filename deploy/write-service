@@ -13,17 +13,26 @@ case ${1:---activate} in
     }
     ;;
   --activate)
-    pi_stack_as_root systemctl enable pi-stack-write.service
-    pi_stack_as_root systemctl reset-failed pi-stack-write.service
-    pi_stack_as_root systemctl restart pi-stack-write.service
-    systemctl is-active --quiet pi-stack-write.service
-    # A TCP connection proves that the unit has bound its loopback listener;
-    # it does not consume an ASR slot or start a dictation.
     port=$(printf '%s' "$base" | cut -d: -f3 | cut -d/ -f1)
     [[ $port =~ ^[0-9]+$ ]] || { echo "Invalid Write endpoint: $base" >&2; exit 64; }
-    deadline=$((SECONDS + 10))
-    until pi_stack_as_root bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; do
-      (( SECONDS < deadline )) || { echo 'Write engine did not bind its listener within 10 seconds' >&2; exit 1; }
+    fail() {
+      echo "$1" >&2
+      pi_stack_as_root systemctl status pi-stack-write.service --no-pager --full >&2 || true
+      exit 1
+    }
+    pi_stack_as_root systemctl enable pi-stack-write.service
+    pi_stack_as_root systemctl reset-failed pi-stack-write.service
+    pi_stack_as_root systemctl restart pi-stack-write.service || fail 'Write engine restart failed'
+    # Type=simple reports active before model loading and GPU warmup finish.
+    # GPU startup took 10.8 seconds in PUB-819a4d53104745bfb703640c. This
+    # readiness budget leaves room within the enclosing 50-second deploy bound.
+    readiness_seconds=30
+    deadline=$((SECONDS + readiness_seconds))
+    while :; do
+      systemctl is-active --quiet pi-stack-write.service || fail 'Write engine stopped before its listener was ready'
+      # No ASR slot or dictation is started by this loopback TCP probe.
+      if pi_stack_as_root bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then break; fi
+      (( SECONDS < deadline )) || fail "Write engine did not bind its listener within $readiness_seconds seconds"
       sleep 0.1
     done
     ;;
