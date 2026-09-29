@@ -1606,8 +1606,8 @@ export function recoverOutstandingCustody(request, status = request.status) {
 }
 
 export function processRequest(request) {
-  if (request.waiting?.kind === "live-meeting") {
-    request.meetingWait = { ...request.waiting, resumedAt: new Date().toISOString() };
+  if (["live-meeting", "native-source"].includes(request.waiting?.kind)) {
+    request[request.waiting.kind === "live-meeting" ? "meetingWait" : "nativeWait"] = { ...request.waiting, resumedAt: new Date().toISOString() };
     delete request.waiting;
     delete request.nextAttemptAt;
   } else request.attempt = (request.attempt ?? 0) + 1;

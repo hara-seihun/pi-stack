@@ -136,6 +136,36 @@ test("native release prerequisites wait for a selected ancestor, then accept the
   assert.notEqual(probe(required).status, 0, "malformed host declaration is not a satisfied dependency");
 });
 
+test("publication retains a native-source wait and resumes without consuming an attempt", t => {
+  const f = fixture(t);
+  const id = "PUB-0123456789abcdef01234567";
+  const old = "1".repeat(40), required = "2".repeat(40);
+  f.put("host.json", JSON.stringify({ version: 1, fleetUser: "alice", releasePrerequisites: [{ name: "native",
+    piStackSource: "a".repeat(40), nativeSource: required, statusSocket: `${f.state}/status.sock`, nativeRepository: `${f.state}/native` }] }));
+  writeFileSync(join(f.state, "bin", "curl"), '#!/bin/sh\nprintf \'{"source":{"commit":"%s"}}\\n\' "$SELECTED"\n', { mode: 0o755 });
+  writeFileSync(join(f.state, "bin", "git"), `#!/bin/sh\nif [ "$3" = "merge-base" ] && [ "$5" = "${required}" ]; then [ "${"$SELECTED"}" = "${required}" ]; exit; fi\n[ "$3" = "merge-base" ] && exit 0\n[ "$3" = "cat-file" ] && exit 0\necho "fixture stops resumed checkout" >&2\nexit 42\n`, { mode: 0o755 });
+  const file = `requests/${id}.json`;
+  const request = { requestId: id, sourceSha: "a".repeat(40), integrationSha: "b".repeat(40), status: "queued",
+    step: "waiting-for-native-source", attempt: policy.maxAttempts, nextAttemptAt: new Date(0).toISOString(),
+    waiting: { kind: "native-source", host: "gmktec", log: join(f.state, "wait.log") },
+    checks: { status: "passed" }, hosts: { converge: { status: "passed" } }, failures: [] };
+  f.put(file, JSON.stringify(request));
+  const drain = selected => f.run(process.execPath, [join(root, "deploy/publication"), "drain"], { SELECTED: selected });
+  const read = () => JSON.parse(readFileSync(join(f.state, file), "utf8"));
+  assert.equal(drain(old).status, 0);
+  const waiting = read();
+  assert.equal(waiting.status, "queued");
+  assert.equal(waiting.attempt, policy.maxAttempts);
+  assert.match(waiting.waiting.probe.selected, /native source prerequisite/);
+  waiting.nextAttemptAt = new Date(0).toISOString();
+  f.put(file, JSON.stringify(waiting));
+  assert.equal(drain(required).status, 0);
+  const resumed = read();
+  assert.equal(resumed.status, "failed", "the fixture's subsequent checkout fails, not the prerequisite");
+  assert.equal(resumed.attempt, request.attempt);
+  assert.equal(resumed.nativeWait.probe.selected, "ready");
+});
+
 test("ordinary lock and gate waits retain both progress limits", () => {
   assert.equal(progressBudgetExhausted({ attempt: policy.maxAttempts, waiting: { kind: "host-lock" } }), true);
   assert.equal(progressBudgetExhausted({ attempt: 1, blockedSince: new Date(0).toISOString() }), true);
