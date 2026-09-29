@@ -28,8 +28,8 @@ if (( services )); then
 fi
 # Activation restarts Pi Remote, which ends every live Meet room: the meeting bot stays
 # in the call with no voice, canvas or agent (a release at 06:40Z on 2026-09-29 cut a
-# live Meet test mid-brief). Defer instead; the publication owner requeues this exit 75
-# and retries within its wait budget. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
+# live Meet test mid-brief). Defer instead; the publication owner probes this exit 75
+# without consuming deployment attempts. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
 if (( services )) && [[ ${PI_STACK_ALLOW_LIVE_MEETING_RESTART:-0} != 1 ]]; then
   live_rooms=$(pi_stack_live_meeting_rooms)
   if [[ -n $live_rooms ]]; then
