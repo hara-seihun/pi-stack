@@ -23,7 +23,10 @@ if [[ ! -f "$environment/ready" ]]; then
   command -v uv >/dev/null && command -v curl >/dev/null || { echo 'PiStack Write requires uv and curl' >&2; exit 1; }
   pi_stack_as_root install -d -m 0755 "$store" "$environment"
   pi_stack_as_root chown "$(id -u):$(id -g)" "$environment"
-  [[ -x "$environment/venv/bin/python" ]] || uv venv --python 3.12 "$environment/venv"
+  # uv's managed interpreter normally lives in the installing user's home, which
+  # the service's dynamic user cannot read; keep it inside the shared tree.
+  export UV_PYTHON_INSTALL_DIR="$environment/python"
+  [[ -x "$environment/venv/bin/python" ]] || uv venv --managed-python --python 3.12 "$environment/venv"
   uv pip sync --python "$environment/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
   "$environment/venv/bin/python" - "$source_dir/model.json" > "$environment/model-files.tsv" <<'PY'
 import json,sys
