@@ -32,8 +32,25 @@ export function runnable(request, now = Date.now()) {
   return request.status === "queued" && now >= Date.parse(request.nextAttemptAt ?? request.updatedAt ?? 0);
 }
 
+export function observeQueueProgress(request, previous, now = Date.now()) {
+  if (!request || !runnable(request, now)) return undefined;
+  const identity = { requestId: request.requestId, updatedAt: request.updatedAt ?? null, nextAttemptAt: request.nextAttemptAt ?? null };
+  const gap = now - Date.parse(previous?.observedAt);
+  const continuing = previous && Object.entries(identity).every(([key, value]) => previous[key] === value)
+    && gap >= 0 && gap <= policy.betweenStepsMs;
+  return { ...identity, since: continuing ? previous.since : new Date(now).toISOString(), observedAt: new Date(now).toISOString() };
+}
+
+export function queueStallReason(request, observation, now = Date.now()) {
+  const current = observeQueueProgress(request, observation, now);
+  if (!current || now - Date.parse(current.since) <= policy.betweenStepsMs) return null;
+  return request.waiting?.kind === "live-meeting"
+    ? "Meeting probe was not serviced for 90s while the watchdog was observing the queue"
+    : "Queue made no progress for 90s; worker never claimed a request";
+}
+
 export function progressBudgetExhausted(request, now = Date.now()) {
-  if (request.waiting?.kind === "live-meeting") return false;
+  if (["live-meeting", "native-source"].includes(request.waiting?.kind)) return false;
   return (request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
     || !!request.blockedSince && now - Date.parse(request.blockedSince) > policy.blockedLimitMs;
 }

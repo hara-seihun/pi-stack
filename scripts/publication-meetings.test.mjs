@@ -102,6 +102,70 @@ test("a host meeting census adds the meetings Pi Remote cannot see and never rea
   assert.notEqual(census({ ROOMS: '{"rooms":[]}' }).status, 0, "a malformed meetingCensus is not an empty host");
 });
 
+test("native release prerequisites wait for a selected ancestor, then accept the switched source", t => {
+  const dir = mkdtempSync(join(tmpdir(), "publication-native-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const native = join(dir, "native");
+  mkdirSync(native);
+  const git = (...args) => {
+    const result = spawnSync("git", ["-C", native, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git("init", "-q");
+  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "old selected");
+  const old = git("rev-parse", "HEAD");
+  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "required native");
+  const required = git("rev-parse", "HEAD");
+  const candidate = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  const source = "35961a5ab09c295833853775ecfe474a9d40b32d";
+  const host = join(dir, "host.json");
+  writeFileSync(host, JSON.stringify({ releasePrerequisites: [{ name: "kenan-meeting-runtime", piStackSource: source,
+    nativeSource: required, statusSocket: join(dir, "status.sock"), nativeRepository: native }] }));
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "curl"), '#!/bin/sh\nprintf \'{"source":{"commit":"%s"}}\\n\' "$SELECTED"\n', { mode: 0o755 });
+  const probe = selected => spawnSync("bash", [join(root, "deploy/native-prerequisites"), host, root, candidate],
+    { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SELECTED: selected } });
+  const waiting = probe(old);
+  assert.equal(waiting.status, 75, waiting.stderr);
+  assert.match(waiting.stderr, /native source prerequisite kenan-meeting-runtime requires/);
+  assert.equal(probe(required).status, 0);
+  assert.equal(progressBudgetExhausted({ attempt: policy.maxAttempts, waiting: { kind: "native-source" } }), false);
+  writeFileSync(host, JSON.stringify({ releasePrerequisites: "malformed" }));
+  assert.notEqual(probe(required).status, 0, "malformed host declaration is not a satisfied dependency");
+});
+
+test("publication retains a native-source wait and resumes without consuming an attempt", t => {
+  const f = fixture(t);
+  const id = "PUB-0123456789abcdef01234567";
+  const old = "1".repeat(40), required = "2".repeat(40);
+  f.put("host.json", JSON.stringify({ version: 1, fleetUser: "alice", releasePrerequisites: [{ name: "native",
+    piStackSource: "a".repeat(40), nativeSource: required, statusSocket: `${f.state}/status.sock`, nativeRepository: `${f.state}/native` }] }));
+  writeFileSync(join(f.state, "bin", "curl"), '#!/bin/sh\nprintf \'{"source":{"commit":"%s"}}\\n\' "$SELECTED"\n', { mode: 0o755 });
+  writeFileSync(join(f.state, "bin", "git"), `#!/bin/sh\nif [ "$3" = "merge-base" ] && [ "$5" = "${required}" ]; then [ "${"$SELECTED"}" = "${required}" ]; exit; fi\n[ "$3" = "merge-base" ] && exit 0\n[ "$3" = "cat-file" ] && exit 0\necho "fixture stops resumed checkout" >&2\nexit 42\n`, { mode: 0o755 });
+  const file = `requests/${id}.json`;
+  const request = { requestId: id, sourceSha: "a".repeat(40), integrationSha: "b".repeat(40), status: "queued",
+    step: "waiting-for-native-source", attempt: policy.maxAttempts, nextAttemptAt: new Date(0).toISOString(),
+    waiting: { kind: "native-source", host: "gmktec", log: join(f.state, "wait.log") },
+    checks: { status: "passed" }, hosts: { converge: { status: "passed" } }, failures: [] };
+  f.put(file, JSON.stringify(request));
+  const drain = selected => f.run(process.execPath, [join(root, "deploy/publication"), "drain"], { SELECTED: selected });
+  const read = () => JSON.parse(readFileSync(join(f.state, file), "utf8"));
+  assert.equal(drain(old).status, 0);
+  const waiting = read();
+  assert.equal(waiting.status, "queued");
+  assert.equal(waiting.attempt, policy.maxAttempts);
+  assert.match(waiting.waiting.probe.selected, /native source prerequisite/);
+  waiting.nextAttemptAt = new Date(0).toISOString();
+  f.put(file, JSON.stringify(waiting));
+  assert.equal(drain(required).status, 0);
+  const resumed = read();
+  assert.equal(resumed.status, "failed", "the fixture's subsequent checkout fails, not the prerequisite");
+  assert.equal(resumed.attempt, request.attempt);
+  assert.equal(resumed.nativeWait.probe.selected, "ready");
+});
+
 test("ordinary lock and gate waits retain both progress limits", () => {
   assert.equal(progressBudgetExhausted({ attempt: policy.maxAttempts, waiting: { kind: "host-lock" } }), true);
   assert.equal(progressBudgetExhausted({ attempt: 1, blockedSince: new Date(0).toISOString() }), true);
