@@ -1,6 +1,7 @@
 package works.kenan.piremote.kenan;
 
 import android.content.Context;
+import android.util.Log;
 import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
@@ -70,7 +71,8 @@ final class WriteConnection {
                             if (!valid()) { webSocket.close(1000, "Session changed"); return; }
                             try {
                                 JSONObject start = new JSONObject().put("type", "start")
-                                    .put("dictation", UUID.randomUUID().toString()).put("context", contextText);
+                                    .put("dictation", UUID.randomUUID().toString()).put("context", contextText)
+                                    .put("audio", "opus");
                                 if (!webSocket.send(start.toString())) throw new IOException("Could not start dictation");
                                 events.connected();
                             } catch (Exception error) { events.failed(error.getMessage()); webSocket.cancel(); }
@@ -101,11 +103,16 @@ final class WriteConnection {
     }
 
     private synchronized boolean valid() { return !closed && state.isCurrent(identity); }
-    synchronized boolean audio(byte[] buffer, int bytes) {
-        return !closed && socket != null && socket.queueSize() < 512 * 1024
-            && socket.send(ByteString.of(buffer, 0, bytes));
+    synchronized boolean audio(byte[] packet) {
+        return !closed && socket != null && socket.queueSize() < 10_000
+            && socket.send(ByteString.of(packet));
     }
-    synchronized void finish() { if (socket != null && !closed) socket.send("{\"type\":\"finish\"}"); }
+    synchronized long queueSize() { return socket == null ? 0 : socket.queueSize(); }
+    synchronized void finish() {
+        if (socket == null || closed) return;
+        Log.i("PiStackWrite", "Opus queue at finish: " + socket.queueSize() + " bytes");
+        if (!socket.send("{\"type\":\"finish\"}")) events.failed("Could not finish dictation");
+    }
     synchronized void cancel() {
         if (closed) return;
         closed = true;
