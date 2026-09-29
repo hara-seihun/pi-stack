@@ -107,6 +107,26 @@ fi
 [[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" && -f "$tree/cleanup-model/joint-f32.onnx" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
 next="$base.next.$$"
 trap 'pi_stack_as_root rm -f "$next"' EXIT
+previous=$(readlink -f "$base" 2>/dev/null || true)
 pi_stack_as_root ln -s "$tree" "$next"
 pi_stack_as_root mv -Tf "$next" "$base"
 echo "PiStack Write engine ready: $key"
+# Keep the selected tree and the one it replaced (which the running unit may
+# still use, and which rollback selects), with everything they link to. Remove
+# every other store entry, so model and dependency changes do not accumulate.
+keep=()
+for selected in "$tree" "$previous"; do
+  [[ -n $selected && -d $selected ]] || continue
+  keep+=("$(readlink -f "$selected")")
+  for link in "$selected"/venv "$selected"/model "$selected"/cleanup-model; do
+    [[ -L $link ]] || continue
+    target=$(readlink -f "$link")
+    while [[ $(dirname "$target") != "$store" && $target != / ]]; do target=$(dirname "$target"); done
+    keep+=("$target")
+  done
+done
+for entry in "$store"/*; do
+  [[ -e $entry ]] || continue
+  printf '%s\n' "${keep[@]}" | grep -qxF "$(readlink -f "$entry")" && continue
+  pi_stack_as_root rm -rf -- "$entry"
+done
