@@ -6,6 +6,8 @@ export const policy = Object.freeze({
   betweenStepsMs: 90_000,
   blockedRetryMs: 30_000,
   blockedLimitMs: 300_000,
+  // A meeting census that keeps failing for this long is a broken probe, not a long meeting.
+  meetingProbeFailureLimitMs: 2 * 60 * 60_000,
   maxAttempts: 3,
   maxRepairDepth: 2,
   maxLaunchAttempts: 3,

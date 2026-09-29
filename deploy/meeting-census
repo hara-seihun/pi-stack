@@ -28,4 +28,25 @@ for file in "$dir"/*.json; do
   fi
   (( count == 0 )) || live+=("$user:$count")
 done
+# Meetings a host service owns outside Pi Remote (a Recall bot waiting in a lobby, a
+# scheduler about to join) have no room here yet, but a restart still cuts them. The
+# host file's optional meetingCensus command prints one live meeting per line; a
+# failing census is unknown state, never an empty host.
+host_file=${PI_STACK_HOST_FILE:-/etc/pi-stack/host.json}
+if [[ -f $host_file ]]; then
+  commands=$(jq -r '.meetingCensus // [] | if type == "array" and all(type == "string") then .[] else error("meetingCensus must be a list of strings") end' "$host_file")
+  census=()
+  [[ -z $commands ]] || mapfile -t census <<< "$commands"
+  if (( ${#census[@]} )); then
+    errors=$(mktemp)
+    trap 'rm -f "$errors"' EXIT
+    if ! output=$(timeout 20 "${become[@]}" "${census[@]}" 2>"$errors"); then
+      echo "cannot census host meetings (${census[0]}): $(<"$errors") $output" >&2; exit 1
+    fi
+    while IFS= read -r line; do
+      line=${line//[[:space:]]/_}
+      [[ -n $line ]] && live+=("$line")
+    done <<< "$output"
+  fi
+fi
 printf '%s\n' "${live[*]}"
