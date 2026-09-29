@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+base=${PI_STACK_WRITE_URL:-ws://127.0.0.1:8797/}
+
+case ${1:---activate} in
+  --check)
+    [[ $(systemctl show pi-stack-write.service -p LoadState --value) == loaded ]] || {
+      echo 'Install the host pi-stack-write.service declaration before deploying Pi Stack Write.' >&2
+      exit 66
+    }
+    ;;
+  --activate)
+    pi_stack_as_root systemctl enable pi-stack-write.service
+    pi_stack_as_root systemctl reset-failed pi-stack-write.service
+    pi_stack_as_root systemctl restart pi-stack-write.service
+    systemctl is-active --quiet pi-stack-write.service
+    # A TCP connection proves that the unit has bound its loopback listener;
+    # it does not consume an ASR slot or start a dictation.
+    port=$(printf '%s' "$base" | cut -d: -f3 | cut -d/ -f1)
+    [[ $port =~ ^[0-9]+$ ]] || { echo "Invalid Write endpoint: $base" >&2; exit 64; }
+    deadline=$((SECONDS + 10))
+    until pi_stack_as_root bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; do
+      (( SECONDS < deadline )) || { echo 'Write engine did not bind its listener within 10 seconds' >&2; exit 1; }
+      sleep 0.1
+    done
+    ;;
+  *) echo 'usage: deploy/write-service [--check|--activate]' >&2; exit 64 ;;
+esac
