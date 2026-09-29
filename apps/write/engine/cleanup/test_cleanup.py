@@ -27,6 +27,17 @@ class CleanupTest(unittest.TestCase):
             session.update(words[i:i+2])
         self.assertEqual(session.finish(), clean(words))
 
+    def test_tagger_keeps_original_edit_positions(self):
+        class Tagger:
+            def predict(self, words):
+                return [(1, 1.0) if w == 'uh' else (0, 1.0) for w in words]
+        result = clean('Send uh notes'.split(), tagger=Tagger())
+        self.assertEqual(result['text'], 'Send notes.')
+        self.assertIn({'kind':'delete','from':'uh','to':'','at':[1,2]}, result['edits'])
+        session = IncrementalCleaner(tagger=Tagger())
+        session.update(['Send'])
+        self.assertEqual(session.finish(['uh', 'notes']), result)
+
     def test_commands_are_format_edits(self):
         words = 'tasks colon bullet point review code bullet point send notes'.split()
         self.assertEqual(clean(words)['text'], 'Tasks:\n- Review code\n- Send notes.')

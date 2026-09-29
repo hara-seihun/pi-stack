@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 _FILLERS = {"um", "uh", "erm", "er", "ah", "hmm"}
 _REPAIR = {"sorry", "rather"}
@@ -37,6 +37,10 @@ def _word(item: Mapping[str, Any] | str) -> str:
 def _conf(item: Mapping[str, Any] | str) -> float:
     value = item.get("conf") if isinstance(item, Mapping) else None
     return float(value) if value is not None else 1.0
+
+
+class WordTagger(Protocol):
+    def predict(self, words: Sequence[str]) -> Sequence[tuple[int, float]]: ...
 
 
 @dataclass(frozen=True)
@@ -115,7 +119,8 @@ def _format(tokens: list[_Token], context: str) -> tuple[str, list[dict]]:
 
 def clean(words: Sequence[Mapping[str, Any] | str],
           dictionary: Mapping[str, Any] | None = None,
-          context: str = "") -> dict[str, Any]:
+          context: str = "",
+          tagger: WordTagger | None = None) -> dict[str, Any]:
     """Clean committed ASR words; edits use half-open source word indices.
 
     Alternatives are accepted only when they match a dictionary word and the
@@ -126,10 +131,18 @@ def clean(words: Sequence[Mapping[str, Any] | str],
     allowed = {_bare(str(w)) for w in dictionary.get("words", [])}
     tokens: list[_Token] = []
     edits: list[dict] = []
+    predictions = tagger.predict([_word(item) for item in words]) if tagger else None
+    if predictions is not None and len(predictions) != len(words):
+        raise ValueError('tagger must return one prediction per source word')
     for i, item in enumerate(words):
         raw = _word(item).strip()
         if not raw:
             continue
+        if predictions is not None:
+            label, probability = predictions[i]
+            if label in (1, 2, 3, 4) and probability >= .95:
+                edits.append({"kind": "delete", "from": raw, "to": "", "at": [i, i+1]})
+                continue
         candidate = raw
         if isinstance(item, Mapping) and _conf(item) < .78:
             alternatives = item.get("alts", [])
@@ -229,10 +242,11 @@ class IncrementalCleaner:
     A client must treat partial text as provisional until final.
     """
     def __init__(self, dictionary: Mapping[str, Any] | None = None, context: str = "",
-                 lookbehind: int = 12):
+                 lookbehind: int = 12, tagger: WordTagger | None = None):
         self.dictionary = dictionary or {}
         self.context = context
         self.lookbehind = lookbehind
+        self.tagger = tagger
         self._prefix = ""
         self._pending: list[Mapping[str, Any] | str] = []
         self._consumed = 0
@@ -245,12 +259,12 @@ class IncrementalCleaner:
             n = max((i+1 for i, item in enumerate(self._pending[:limit])
                      if _word(item).rstrip().endswith(tuple(_END))), default=0)
             if n:
-                stable = clean(self._pending[:n], self.dictionary, self.context + self._prefix)
+                stable = clean(self._pending[:n], self.dictionary, self.context + self._prefix, self.tagger)
                 self._prefix += stable["text"] + " "
                 self._edits.extend(_shift_edits(stable["edits"], self._consumed))
                 self._consumed += n
                 del self._pending[:n]
-        result = clean(self._pending, self.dictionary, self.context + self._prefix)
+        result = clean(self._pending, self.dictionary, self.context + self._prefix, self.tagger)
         edits = self._edits + _shift_edits(result["edits"], self._consumed)
         edits.sort(key=lambda edit: (edit["at"][0], edit["at"][1], edit["kind"]))
         return {"text": self._prefix + result["text"], "edits": edits}
