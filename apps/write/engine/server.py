@@ -3,9 +3,13 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
+# 32 OpenBLAS threads spin after every small mel projection and steal cores
+# from ONNX's small encoder pool, tripling the 160 ms step latency.
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
 import numpy as np
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -18,7 +22,7 @@ LOG = logging.getLogger(__name__)
 
 
 class Engine:
-    def __init__(self, model_dir: Path, threads=8, streams=4, cleanup_dir: Path | None = None):
+    def __init__(self, model_dir: Path, threads=6, streams=4, cleanup_dir: Path | None = None):
         self.recognizer = Nemotron(model_dir, threads)
         self.tagger = JointOnnxTagger(cleanup_dir) if cleanup_dir is not None else None
         self.slots = asyncio.Semaphore(streams)
@@ -120,7 +124,7 @@ async def main():
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8797)
-    parser.add_argument('--threads', type=int, default=8)
+    parser.add_argument('--threads', type=int, default=6)
     parser.add_argument('--streams', type=int, default=4)
     parser.add_argument('--cleanup-model', type=Path,
                         default=Path(__file__).resolve().parent/'cleanup-model')
