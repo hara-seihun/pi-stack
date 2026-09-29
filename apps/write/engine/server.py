@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 from cleanup import IncrementalCleaner
 from cleanup.tagger import JointOnnxTagger
 from nemotron import Nemotron
+from opus import OpusDecoder
 
 LOG = logging.getLogger(__name__)
 
@@ -28,6 +29,11 @@ class Engine:
         self.slots = asyncio.Semaphore(streams)
 
     async def handle(self, socket):
+        connected_at = time.perf_counter()
+        last_audio_at = None
+        audio_samples = 0
+        audio_format = 'pcm'
+        opus_decoder = None
         stream = None
         dictionary = {}
         context = ''
@@ -56,12 +62,17 @@ class Engine:
                 if isinstance(frame, bytes):
                     if stream is None:
                         raise ValueError('start must precede audio')
-                    data = remainder + frame
-                    remainder = data[len(data) & ~1:]
-                    data = data[:len(data) & ~1]
-                    if not data:
-                        continue
-                    samples = np.frombuffer(data, dtype='<i2').astype(np.float32) / 32768
+                    last_audio_at = time.perf_counter()
+                    if opus_decoder is not None:
+                        samples = opus_decoder.decode(frame)
+                    else:
+                        data = remainder + frame
+                        remainder = data[len(data) & ~1:]
+                        data = data[:len(data) & ~1]
+                        if not data:
+                            continue
+                        samples = np.frombuffer(data, dtype='<i2').astype(np.float32) / 32768
+                    audio_samples += len(samples)
                     rms = float(np.sqrt(np.mean(samples * samples)))
                     peak_rms = max(peak_rms, rms)
                     voiced = rms > min(0.004, 0.08 * peak_rms)
@@ -88,14 +99,18 @@ class Engine:
                 if kind == 'start' and stream is None:
                     dictionary = command.get('dictionary') or {}
                     context = command.get('context') or ''
-                    if not isinstance(dictionary.get('words', []), list) or not isinstance(context, str):
-                        raise ValueError('invalid dictionary or context')
+                    audio_format = command.get('audio', 'pcm')
+                    if not isinstance(dictionary.get('words', []), list) or not isinstance(context, str) or audio_format not in ('pcm', 'opus'):
+                        raise ValueError('invalid dictionary, context or audio format')
+                    if audio_format == 'opus':
+                        opus_decoder = OpusDecoder()
                     stream = self.recognizer.create_stream(dictionary)
                     cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger)
                 elif kind == 'cancel' and stream is not None:
                     return
                 elif kind == 'finish' and stream is not None:
                     began = time.perf_counter()
+                    last_audio_gap_ms = (began - last_audio_at)*1000 if last_audio_at is not None else None
                     if speculative is None and speculation_task is not None:
                         await speculation_task
                     hit = speculative is not None
@@ -107,6 +122,9 @@ class Engine:
                     cleaned = await asyncio.to_thread(cleaner.finish, result['words'][len(committed):])
                     elapsed = (time.perf_counter() - began)*1000
                     await socket.send(json.dumps({'type': 'final', 'text': cleaned['text'], 'raw': result['text'], 'edits': cleaned['edits'], 'words': result['words'], 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit}}))
+                    LOG.info('write dictation audio=%s audioSeconds=%.3f connectionSeconds=%.3f lastAudioToFinishMs=%s flushMs=%.2f speculative=%s',
+                             audio_format, audio_samples/16000, (time.perf_counter()-connected_at),
+                             'none' if last_audio_gap_ms is None else f'{last_audio_gap_ms:.2f}', elapsed, hit)
                     return
                 else:
                     raise ValueError('invalid command sequence')

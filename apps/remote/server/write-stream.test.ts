@@ -28,13 +28,14 @@ test("supervisor injects its person's dictionary and relays streaming engine fra
     const socket = new WebSocket(`ws://127.0.0.1:${supervisor.port}/`);
     await new Promise<void>(resolve => socket.addEventListener("open", () => resolve(), { once: true }));
     const partial = new Promise<any>(resolve => socket.addEventListener("message", event => resolve(JSON.parse(event.data)), { once: true }));
-    socket.send(JSON.stringify({ type: "start", dictation: "a", dictionary: { words: ["attacker"], replacements: [] } }));
+    socket.send(JSON.stringify({ type: "start", dictation: "a", audio: "opus", dictionary: { words: ["attacker"], replacements: [] } }));
     socket.send(new Uint8Array([1, 2, 3, 4]));
     expect(await partial).toMatchObject({ type: "partial", committed: "Kela", tail: "na" });
     const final = new Promise<any>(resolve => socket.addEventListener("message", event => resolve(JSON.parse(event.data)), { once: true }));
     socket.send(JSON.stringify({ type: "finish" }));
     expect(await final).toMatchObject({ type: "final", text: "Kelana", timing: { flushMs: 2 } });
     expect(start.dictionary).toEqual({ words: ["Kelana"], replacements: [] });
+    expect(start.audio).toBe("opus");
     expect(pcm).toEqual([1, 2, 3, 4]);
     socket.close();
   } finally { supervisor.stop(); engine.stop(); db.close(); }

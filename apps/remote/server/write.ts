@@ -149,9 +149,9 @@ export function connectWrite(socket: Bun.ServerWebSocket<WriteSocketData>, endpo
       let frame: Record<string, unknown>;
       try { frame = JSON.parse(message); } catch { socket.close(1003, "Invalid Write frame"); return; }
       if (!socket.data.started) {
-        if (frame.type !== "start" || typeof frame.dictation !== "string" || frame.dictation.length > 128 || typeof frame.context !== "undefined" && typeof frame.context !== "string") { socket.close(1008, "Expected Write start"); return; }
+        if (frame.type !== "start" || typeof frame.dictation !== "string" || frame.dictation.length > 128 || typeof frame.context !== "undefined" && typeof frame.context !== "string" || frame.audio !== undefined && frame.audio !== "pcm" && frame.audio !== "opus") { socket.close(1008, "Expected Write start"); return; }
         socket.data.started = true;
-        forward(JSON.stringify({ type: "start", dictation: frame.dictation, dictionary: dictionary.get(), context: String(frame.context ?? "").slice(-2000) }));
+        forward(JSON.stringify({ type: "start", dictation: frame.dictation, dictionary: dictionary.get(), context: String(frame.context ?? "").slice(-2000), audio: frame.audio ?? "pcm" }));
       } else if (!socket.data.finished && (frame.type === "finish" || frame.type === "cancel")) {
         socket.data.finished = true;
         forward(JSON.stringify({ type: frame.type }));
