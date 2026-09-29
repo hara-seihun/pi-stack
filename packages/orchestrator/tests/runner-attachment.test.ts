@@ -129,3 +129,32 @@ it("attaches, forwards commands and owns detach/close without needing a cwd or a
   await expect(attachedAgain!.command({ type: "get_state" })).rejects.toThrow("detached");
   expect(requests).toHaveLength(3);
 });
+
+it("delivers multi-megabyte and multi-line output across arbitrary chunk boundaries in linear time", async () => {
+  const { opener, reference } = fixture(), events: PiEvent[] = [];
+  await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
+  // 24 MiB of text in 64 KiB writes. Quadratic rescanning grows with the square of the line.
+  const big = "é".repeat(12 * 1024 * 1024) + "✓";
+  const lines = [
+    { type: "output", sequence: 1, line: JSON.stringify({ type: "message_update", text: big }) },
+    { type: "output", sequence: 2, line: JSON.stringify({ type: "agent_end" }) },
+    { type: "output", sequence: 3, line: JSON.stringify({ type: "turn_end" }) },
+  ].map(value => `${JSON.stringify(value)}\n`).join("");
+  const bytes = Buffer.from(lines);
+  let done!: () => void;
+  const received = new Promise<void>(resolve => { done = resolve; });
+  await listen(reference.socketPath, (value, socket) => {
+    if (value.type !== "attach") return;
+    socket.write('{"type":"attached"}\n');
+    // Odd-sized writes split UTF-8 sequences and put several lines in one chunk.
+    for (let offset = 0; offset < bytes.length; offset += 65_521) socket.write(bytes.subarray(offset, offset + 65_521));
+  });
+  const began = performance.now();
+  const connection = await opener.attachSession(reference, event => { if (event.type === "runner_attached") return; events.push(event); if (events.length === 3) done(); }, () => {});
+  await received;
+  // Linear parsing takes ~125 ms here; the quadratic loop took ~770 ms.
+  expect(performance.now() - began).toBeLessThan(400);
+  expect((events[0] as { text?: string }).text).toBe(big);
+  expect(events.slice(1).map(event => event.type)).toEqual(["agent_end", "turn_end"]);
+  connection?.detach?.();
+});

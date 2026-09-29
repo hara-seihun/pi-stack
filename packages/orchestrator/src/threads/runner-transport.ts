@@ -53,7 +53,10 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
     function open() {
       if (detached || ended) return;
       const current = socket = createConnection(path);
-      let input = "";
+      // A runner's output line can be megabytes (tool results, images). Keep a
+      // partial line as chunks and scan only new text: rescanning and re-slicing
+      // the whole buffer on every 64 KiB chunk held the daemon at a full core.
+      let partial: string[] = [];
       const decoder = new StringDecoder("utf8");
       connected = false;
       const timer = setTimeout(() => current.destroy(new Error("Thread runner attach timed out")), 5000);
@@ -61,10 +64,17 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
       current.on("connect", () => current.write(`${JSON.stringify({ type: "attach", after: sequence })}\n`));
       current.on("data", chunk => {
         if (current !== socket) return;
-        input += decoder.write(chunk);
-        let end: number;
-        while ((end = input.indexOf("\n")) >= 0) {
-          const line = input.slice(0, end); input = input.slice(end + 1);
+        const text = decoder.write(chunk);
+        let start = 0, end: number;
+        const lines: string[] = [];
+        while ((end = text.indexOf("\n", start)) >= 0) {
+          partial.push(text.slice(start, end));
+          lines.push(partial.length === 1 ? partial[0]! : partial.join(""));
+          partial = []; start = end + 1;
+        }
+        if (start < text.length) partial.push(text.slice(start));
+        for (const line of lines) {
+          if (current !== socket || current.destroyed) return;
           if (!line) continue;
           try {
             const value = JSON.parse(line);
