@@ -11,9 +11,11 @@ import { Store } from "./store.js";
 import { CompletionService } from "./completion.js";
 import { isCompletionInput, isCompletionRequestId } from "./completion-contract.js";
 import { catalogModel, modelDrainsMeter } from "./catalog.js";
-import type { UsageComponent } from "./domain.js";
+import { allowsAccountUse, type UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
+import { codexTierExclusions } from "./auth/codex-capabilities.js";
+import { modelSpeedModes } from "./threads/speed.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { repairProviderCredential, providerResponseFailure, quarantineProviderCredential } from "./auth/provider-rejection.js";
 import { isRejectedTokenError } from "./provider-errors.js";
@@ -170,17 +172,26 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       const invalid = validateBrokerBody(family, body);
       if (invalid) { json(res, 400, invalid); return; }
       if (!grant.models.includes(`${family}/${body.model}`)) { json(res, 403, "This model is not shared with your Unix account"); return; }
+      const ultrafast = body.service_tier === "ultrafast";
+      if (ultrafast && !modelSpeedModes(family, body.model).includes("ultrafast")) { json(res, 400, "Ultrafast is only available for Codex Astra models"); return; }
       const refusal = overAllowance(listener.principal);
       if (refusal) { json(res, 403, refusal); return; }
       const shared = auth.get(family)!;
-      const exclude = new Set(store.accounts().filter(account => !grant.accounts.includes(account.id)
+      let exclude = new Set(store.accounts().filter(account => !grant.accounts.includes(account.id)
+        || !allowsAccountUse(account, "interactive")
         || store.latestMeters(account.id).some(meter => modelDrainsMeter(family, body.model, meter.meter_id)
           && Number(meter.used_percent) >= 100 && (!meter.reset_at || Number(meter.reset_at) > Date.now()))).map(account => account.id));
+      if (ultrafast) exclude = await codexTierExclusions(store, shared, body.model, "ultrafast", exclude, signal, transport as typeof fetch);
       const affinity = scoped(listener.principal, body.prompt_cache_key ?? req.headers["session-id"] ?? req.headers["session_id"] ?? req.headers["x-claude-code-session-id"]);
       const retained = sticky.get(affinity);
       const account = eligibleInteractiveAccounts(store, shared, family, exclude).find(account => account.id === retained)
         ?? chooseInteractiveAccount(store, shared, family, exclude, { includeCooling: true, model: body.model });
-      if (!account) { json(res, 503, "No eligible shared model account. The granted pool is unavailable or out of quota."); return; }
+      if (!account) {
+        json(res, 503, ultrafast
+          ? "No eligible shared model account advertises Ultrafast for this model. The granted pool is unavailable, out of quota, or not entitled; no slower tier was used."
+          : "No eligible shared model account. The granted pool is unavailable or out of quota.");
+        return;
+      }
       if (sticky.size >= 4096) sticky.delete(sticky.keys().next().value!);
       sticky.set(affinity, account.id);
       lease = `broker:${listener.principal}:${randomUUID()}`;

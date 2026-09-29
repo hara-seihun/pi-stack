@@ -139,7 +139,7 @@ it("captures tool results before the next request without duplicating completed 
 
 it("applies validated speed changes to this session's provider requests", async () => {
   const processSpeed = process.env.PI_THREAD_SPEED;
-  const f = await fixture(undefined, undefined, { PI_THREAD_SPEED: "standard" });
+  const f = await fixture(undefined, undefined, { PI_THREAD_SPEED: "standard", PI_MODEL_BROKER_URL: "http://127.0.0.1:1" });
   f.native.agent.state.model = { ...f.native.agent.state.model!, api: "openai-responses" };
   const providerPayload = () => f.native.extensionRunner.emitBeforeProviderRequest({ request: "fixture" });
 
