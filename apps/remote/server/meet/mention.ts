@@ -1,8 +1,8 @@
 import { AGENT_NAME } from "../agent-identity";
 import type { MeetTranscriptTurn } from "./protocol";
 
-/** Spellings meeting recognizers produce for "Kenan" (Recall has written "kanon" and "keenan"). */
-const HEARD_AS = ["keenan", "kennan", "kenen", "kenon", "kenin", "keenen", "kanan", "kanon", "kinan"];
+/** Spellings meeting recognizers produce for "Kenan" (Recall has written "kanon", "keenan" and, most often for a synthetic voice, "kennen"). */
+const HEARD_AS = ["keenan", "kennan", "kennen", "kennon", "kenen", "kenon", "kenin", "keenen", "kanan", "kanon", "kinan"];
 const NAME = new RegExp(`\\b(?:${[AGENT_NAME.toLowerCase(), ...HEARD_AS].join("|")})\\b`, "i");
 
 /** Whether a line of meeting speech says the agent's name, the cheap signal that someone may be about to talk to it. */
