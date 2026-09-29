@@ -17,6 +17,14 @@ public final class WriteBubblePositionTest {
         assertEquals(new WriteBubblePosition.Point(8, 40), WriteBubblePosition.clamp(-500, -500, screen, 56));
     }
 
+    @Test public void dismissAttractorUsesScreenCenters() {
+        WriteBubblePosition.Point target = new WriteBubblePosition.Point(180, 540);
+        assertTrue(WriteBubblePosition.nearDismiss(new WriteBubblePosition.Point(187, 543), 50, target, 52, 72));
+        assertFalse(WriteBubblePosition.nearDismiss(new WriteBubblePosition.Point(16, 480), 50, target, 52, 72));
+        WriteBubblePosition.Point magnet = WriteBubblePosition.magnet(new WriteBubblePosition.Point(140, 520), target, 50, 52);
+        assertTrue(magnet.x() > 140 && magnet.x() < 181);
+    }
+
     @Test public void normalizedHeightSurvivesKeyboardResize() {
         int restored = WriteBubblePosition.restoreY(.5f, screen, 56);
         assertEquals(.5f, WriteBubblePosition.saveY(restored, screen, 56), .002f);

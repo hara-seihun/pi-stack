@@ -8,7 +8,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.content.res.Configuration;
@@ -23,6 +22,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
@@ -34,6 +34,7 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Toast;
+import android.util.Log;
 import androidx.core.app.NotificationCompat;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,7 +45,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     static void sessionChanged() {
         WriteAccessibilityService service = active;
         if (service != null) service.main.post(() -> {
-            if (active == service) { service.cancel(); service.hide(); service.refresh(); }
+            if (active == service) { service.dismissal.clear(); service.cancel(); service.hide(); service.refresh(); }
         });
     }
     private static final String CHANNEL = "write-recording";
@@ -57,6 +58,9 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private WindowManager.LayoutParams placement;
     private WriteBubblePosition.Bounds lastBounds;
     private Bubble bubble;
+    private DismissTarget dismissTarget;
+    private WindowManager.LayoutParams dismissPlacement;
+    private final WriteFieldDismissal dismissal = new WriteFieldDismissal();
     private ValueAnimator snapAnimation;
     private AccessibilityNodeInfo target;
     private AccessibilityNodeInfo insertedNode;
@@ -67,11 +71,10 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private RemoteSession.Identity learnedIdentity;
     private WriteOpusRecorder recorder;
     private WriteConnection connection;
-    private boolean recording, connecting, finishing, dragging, clipboardReady;
+    private boolean recording, connecting, finishing, dragging, pressed, overDismiss, clipboardReady;
     private volatile boolean stopped;
     private volatile int sentPackets;
     private boolean backlog;
-    private String failure;
     private int waveLevel;
 
     @Override public void onServiceConnected() {
@@ -83,6 +86,15 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (dismissal.active() && event.getEventType() == AccessibilityEvent.TYPE_VIEW_FOCUSED
+            && isApplicationWindow(event.getWindowId())) {
+            AccessibilityNodeInfo source = event.getSource();
+            if (source != null) {
+                WriteFieldDismissal.Field focused = field(source);
+                dismissal.focusLeft(focused);
+                if (eligible(source)) dismissal.hides(focused, true);
+            }
+        }
         if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED && insertedField != null
             && System.currentTimeMillis() < watchUntil && event.getWindowId() == windowId
             && event.getSource() != null && insertedNode != null && event.getSource().equals(insertedNode)) {
@@ -99,6 +111,20 @@ public final class WriteAccessibilityService extends AccessibilityService {
         }
         if (!recording && !finishing && !connecting) refresh();
         else if (!dragging) constrain();
+    }
+
+    private boolean isApplicationWindow(int id) {
+        List<AccessibilityWindowInfo> visible = getWindows();
+        if (visible != null) for (AccessibilityWindowInfo window : visible)
+            if (window.getId() == id) return window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION;
+        return false;
+    }
+
+    private WriteFieldDismissal.Field field(AccessibilityNodeInfo node) {
+        Rect bounds = new Rect();
+        node.getBoundsInScreen(bounds);
+        return new WriteFieldDismissal.Field(node, node.getWindowId(), node.getViewIdResourceName(),
+            bounds.left, bounds.top, bounds.right, bounds.bottom);
     }
 
     private boolean hasKeyboard() {
@@ -135,7 +161,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
         if (focused == null && getRootInActiveWindow() != null)
             focused = getRootInActiveWindow().findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
         boolean keyboardRequired = getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true);
-        if (!allowed || !eligible(focused) || keyboardRequired && !hasKeyboard()) {
+        if (!allowed || !eligible(focused) || keyboardRequired && !hasKeyboard()
+            || focused != null && dismissal.hides(field(focused), false)) {
             if (bubble != null && !recording && !finishing && !connecting) hide();
             return;
         }
@@ -145,7 +172,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
 
     private int dp(float pixels) { return (int) (getResources().getDisplayMetrics().density * pixels + .5f); }
-    private int diameter() { return dp(56); }
+    private int diameter() { return dp(50); }
+    private int dismissSize() { return dp(52); }
 
     private WriteBubblePosition.Bounds available() {
         int left, top, right, bottom;
@@ -250,16 +278,31 @@ public final class WriteAccessibilityService extends AccessibilityService {
                     downX = event.getRawX(); downY = event.getRawY();
                     startX = placement.x; startY = placement.y;
                     moved = false;
+                    pressed = true; render();
                     velocity = VelocityTracker.obtain(); addRawMovement(event);
                     return true;
                 }
                 case MotionEvent.ACTION_MOVE -> {
                     addRawMovement(event);
                     if (!moved && WriteBubblePosition.dragged(downX, downY, event.getRawX(), event.getRawY(),
-                        ViewConfiguration.get(WriteAccessibilityService.this).getScaledTouchSlop())) moved = true;
+                        ViewConfiguration.get(WriteAccessibilityService.this).getScaledTouchSlop())) {
+                        moved = true;
+                        if (canDismiss()) showDismissTarget();
+                    }
                     if (moved) {
                         dragging = true;
-                        move(startX + Math.round(event.getRawX() - downX), startY + Math.round(event.getRawY() - downY));
+                        WriteBubblePosition.Point wanted = WriteBubblePosition.clamp(
+                            startX + Math.round(event.getRawX() - downX), startY + Math.round(event.getRawY() - downY),
+                            available(), diameter());
+                        boolean near = canDismiss() && dismissTarget != null && WriteBubblePosition.nearDismiss(
+                            wanted, diameter(), new WriteBubblePosition.Point(dismissPlacement.x, dismissPlacement.y),
+                            dismissSize(), dp(72));
+                        if (near && !overDismiss) bubble.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                        overDismiss = near;
+                        if (dismissTarget != null) dismissTarget.invalidate();
+                        WriteBubblePosition.Point at = near ? WriteBubblePosition.magnet(wanted,
+                            new WriteBubblePosition.Point(dismissPlacement.x, dismissPlacement.y), diameter(), dismissSize()) : wanted;
+                        move(at.x(), at.y());
                     }
                     return true;
                 }
@@ -269,9 +312,13 @@ public final class WriteAccessibilityService extends AccessibilityService {
                         addRawMovement(event); velocity.computeCurrentVelocity(1000);
                         vx = velocity.getXVelocity(); velocity.recycle(); velocity = null;
                     }
-                    dragging = false;
-                    if (moved) snap(vx);
+                    boolean dropped = moved && overDismiss && event.getActionMasked() == MotionEvent.ACTION_UP && canDismiss();
+                    dragging = false; pressed = false;
+                    hideDismissTarget();
+                    if (dropped) dismiss();
+                    else if (moved) snap(vx);
                     else if (event.getActionMasked() == MotionEvent.ACTION_UP) tapped();
+                    render();
                     return true;
                 }
                 default -> { return true; }
@@ -279,8 +326,32 @@ public final class WriteAccessibilityService extends AccessibilityService {
         }
     }
 
+    private boolean canDismiss() { return !recording && !connecting && !finishing; }
+    private void showDismissTarget() {
+        if (dismissTarget != null) return;
+        dismissTarget = new DismissTarget();
+        int size = dismissSize();
+        WriteBubblePosition.Bounds bounds = available();
+        dismissPlacement = new WindowManager.LayoutParams(size, size, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
+        dismissPlacement.gravity = Gravity.TOP | Gravity.LEFT;
+        dismissPlacement.x = bounds.left() + (bounds.width() - size) / 2;
+        dismissPlacement.y = bounds.bottom() - size;
+        windows.addView(dismissTarget, dismissPlacement);
+    }
+    private void hideDismissTarget() {
+        if (dismissTarget != null) windows.removeView(dismissTarget);
+        dismissTarget = null; dismissPlacement = null; overDismiss = false;
+    }
+    private void dismiss() {
+        if (target != null) dismissal.dismiss(field(target));
+        hide();
+    }
+
     private void hide() {
         if (snapAnimation != null) { snapAnimation.cancel(); snapAnimation = null; }
+        hideDismissTarget();
         if (bubble == null) return;
         windows.removeView(bubble);
         bubble = null;
@@ -293,31 +364,26 @@ public final class WriteAccessibilityService extends AccessibilityService {
         if (recording) { finish(); return; }
         if (clipboardReady && target != null && eligible(target)
             && target.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
-            clipboardReady = false; failure = null; render(); return;
+            clipboardReady = false; render(); return;
         }
-        if (!connecting) {
-            boolean retry;
-            synchronized (packetsLock) { retry = failure != null && !packets.isEmpty(); }
-            start(retry);
-        }
+        if (!connecting) start();
     }
 
     private void render() {
         if (bubble == null) return;
         bubble.setContentDescription(finishing ? "Finishing dictation" : recording ? "Tap to finish Pi Stack Write"
-            : clipboardReady ? "Tap to paste dictated text" : failure == null ? "Tap to start Pi Stack Write" : "Tap to retry Pi Stack Write");
+            : clipboardReady ? "Tap to paste dictated text" : "Tap to start Pi Stack Write");
+        bubble.setAlpha(recording || connecting || finishing || pressed ? 1f : .6f);
         bubble.invalidate();
     }
 
-    private void start(boolean retry) {
+    private void start() {
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
-        if (identity == null || target == null || !eligible(target)) {
-            failMessage("Select an editable field"); return;
-        }
-        if (!retry) synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
-        failure = null; clipboardReady = false; waveLevel = 0; backlog = false;
+        if (identity == null || target == null || !eligible(target)) return;
+        synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
+        clipboardReady = false; waveLevel = 0; backlog = false;
         long attempt = ++generation;
-        connecting = true; stopped = retry; sentPackets = 0;
+        connecting = true; stopped = false; sentPackets = 0;
         render();
         if (connection != null) connection.cancel();
         CharSequence field = target.getText();
@@ -337,7 +403,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
             @Override public void failed(String message) { main.post(() -> { if (attempt == generation) failed(message); }); }
         });
         connection = stream;
-        if (!retry) startRecorder(attempt, stream);
+        startRecorder(attempt, stream);
         if (connecting) stream.connect(context);
     }
 
@@ -357,12 +423,12 @@ public final class WriteAccessibilityService extends AccessibilityService {
                     if (stream.queueSize() > 6000) {
                         if (backedUpAt == 0) backedUpAt = android.os.SystemClock.uptimeMillis();
                         if (android.os.SystemClock.uptimeMillis() - backedUpAt > 3000)
-                            throw new java.io.IOException("Network cannot keep up; tap to retry");
+                            throw new java.io.IOException("Network cannot keep up");
                         Thread.sleep(20);
                         continue;
                     }
                     backedUpAt = 0;
-                    if (!stream.audio(packet)) throw new java.io.IOException("Dictation connection closed; tap to retry");
+                    if (!stream.audio(packet)) throw new java.io.IOException("Dictation connection closed");
                     sentPackets = ++index;
                 }
                 main.post(() -> {
@@ -371,7 +437,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
                     stream.finish();
                     render();
                     main.postDelayed(() -> {
-                        if (attempt == generation && finishing) failed("Server did not finish; tap to retry");
+                        if (attempt == generation && finishing) failed("Server did not finish");
                     }, 5000);
                 });
             } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
@@ -437,33 +503,30 @@ public final class WriteAccessibilityService extends AccessibilityService {
         stopForeground(STOP_FOREGROUND_REMOVE);
     }
 
-    private void cancel() {
+    private void idle() {
         stopRecorder();
         if (connection != null) connection.cancel();
         connection = null;
         ++generation;
-        connecting = false; finishing = false; stopped = false;
-        clipboardReady = false; failure = null; backlog = false;
-        synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
+        connecting = false; finishing = false; stopped = false; backlog = false; clipboardReady = false;
+        synchronized (packetsLock) { packets.clear(); audioBytes = 0; packetsLock.notifyAll(); }
         render(); refresh();
     }
 
-    private void failMessage(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
+    private void cancel() { idle(); }
+
     private void failed(String message) {
         if (!recording && !finishing && !connecting) return;
-        stopRecorder();
-        if (connection != null) connection.cancel();
-        connecting = false; finishing = false; failure = message;
-        ++generation;
-        failMessage("Pi Stack Write: " + message);
-        render();
+        Log.w("PiStackWrite", "Dictation ended: " + message);
+        if (bubble != null) bubble.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        idle();
     }
 
     private void completed(String text) {
         if (!finishing && !recording) return;
         stopRecorder();
         finishing = false; connecting = false;
-        if (text == null || text.isBlank()) { failure = "No speech recognized"; failMessage(failure); render(); return; }
+        if (text == null || text.isBlank()) { idle(); return; }
         AccessibilityNodeInfo node = target;
         if (node == null || !eligible(node) || node.getWindowId() != windowId) { fallback(text); return; }
         String original = node.getText() == null ? "" : node.getText().toString();
@@ -480,15 +543,15 @@ public final class WriteAccessibilityService extends AccessibilityService {
             watchUntil = System.currentTimeMillis() + 20_000;
             learnedIdentity = NotificationIdentity.get(this).current();
             synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
-            failure = null; backlog = false; render(); refresh();
+            backlog = false; render(); refresh();
         } else fallback(text);
     }
 
     private void fallback(String text) {
         getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("Pi Stack Write", text));
-        clipboardReady = true; failure = null;
+        clipboardReady = true;
         synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
-        failMessage("Write copied text. Tap the bubble to paste.");
+        Toast.makeText(this, "Write copied text. Tap the bubble to paste.", Toast.LENGTH_LONG).show();
         render();
     }
 
@@ -497,6 +560,23 @@ public final class WriteAccessibilityService extends AccessibilityService {
     @Override public void onDestroy() {
         if (active == this) active = null;
         cancel(); hide(); super.onDestroy();
+    }
+
+    private final class DismissTarget extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        DismissTarget() { super(WriteAccessibilityService.this); setContentDescription("Drop here to hide Write until the next text field"); }
+        @Override protected void onDraw(Canvas canvas) {
+            float scale = getResources().getDisplayMetrics().density;
+            float cx = getWidth() / 2f, cy = getHeight() / 2f;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(overDismiss ? 0xe2a53d51 : 0xb0283042);
+            canvas.drawCircle(cx, cy, Math.min(cx, cy) - scale, paint);
+            paint.setColor(Color.WHITE);
+            paint.setStrokeWidth(2.5f * scale);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            canvas.drawLine(cx - 7 * scale, cy - 7 * scale, cx + 7 * scale, cy + 7 * scale, paint);
+            canvas.drawLine(cx + 7 * scale, cy - 7 * scale, cx - 7 * scale, cy + 7 * scale, paint);
+        }
     }
 
     private final class Bubble extends View {
@@ -509,8 +589,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
             boolean busy = finishing || (connecting && !recording);
             float pulse = (float) (Math.sin(android.os.SystemClock.uptimeMillis() / 160.0) * .5 + .5);
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(failure != null ? 0xffa63741 : backlog ? 0xff555b71 : 0xff242b40);
-            canvas.drawCircle(cx, cy, Math.min(cx, cy) - scale, paint);
+            paint.setColor(backlog ? 0xff555b71 : 0xff242b40);
+            canvas.drawCircle(cx, cy, Math.min(cx, cy) - 3 * scale, paint);
             paint.setColor(Color.WHITE);
             paint.setStrokeWidth(2.7f * scale);
             paint.setStrokeCap(Paint.Cap.ROUND);

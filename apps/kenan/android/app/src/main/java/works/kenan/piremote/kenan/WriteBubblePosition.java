@@ -26,6 +26,17 @@ final class WriteBubblePosition {
         return new Point(side, clamped.y);
     }
 
+    static boolean nearDismiss(Point bubble, int bubbleSize, Point target, int targetSize, int radius) {
+        int dx = bubble.x + bubbleSize / 2 - target.x - targetSize / 2;
+        int dy = bubble.y + bubbleSize / 2 - target.y - targetSize / 2;
+        return dx * dx + dy * dy <= radius * radius;
+    }
+
+    static Point magnet(Point bubble, Point target, int bubbleSize, int targetSize) {
+        return new Point(Math.round(bubble.x * .35f + (target.x + (targetSize - bubbleSize) / 2f) * .65f),
+            Math.round(bubble.y * .35f + (target.y + (targetSize - bubbleSize) / 2f) * .65f));
+    }
+
     static int restoreY(float fraction, Bounds available, int diameter) {
         return available.top + Math.round(Math.max(0, Math.min(1, fraction)) * Math.max(0, available.height() - diameter));
     }
