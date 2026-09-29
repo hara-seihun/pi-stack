@@ -49,6 +49,9 @@ describe("thread naming", () => {
       { role: "assistant", text: "a2" }, { role: "user", text: "third" },
     ])).toBe("User: first\nAgent: a2\nUser: third");
     expect(localNamingPrompt([{ role: "assistant", text: "greeting" }, { role: "user", text: "ask" }])).toBe("User: ask");
+    const unicode = localNamingPrompt([{ role: "user", text: "界".repeat(1000) }, { role: "assistant", text: "界".repeat(1000) }, { role: "user", text: "界".repeat(1000) }]);
+    expect(Buffer.byteLength(unicode)).toBeLessThanOrEqual(1400);
+    expect(unicode).not.toContain("�");
   });
 
   test("keeps trying a numeric thread, then runs once per twentieth-message interval", () => {

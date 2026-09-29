@@ -29,7 +29,7 @@ if [[ -f $(pi_stack_host_file) ]]; then
   host_models_path=$(pi_stack_host_value '.models // empty')
   if [[ -n $host_models_path ]]; then
     [[ $host_models_path = /* ]] || { echo "host models must name an absolute path" >&2; exit 66; }
-    host_models=$(jq -ce 'if (.providers | type) == "object" then . else error("host models must contain providers") end' "$host_models_path")
+    host_models=$(jq -ce 'if (.providers | type) == "object" and ((.removeProviders // []) | type) == "array" and all((.removeProviders // [])[]; type == "string") then . else error("host models must contain providers and optional string removeProviders") end' "$host_models_path")
   fi
 fi
 
@@ -118,6 +118,7 @@ const path=process.env.PI_STACK_MODELS;
 const catalogs=[JSON.parse(readFileSync(process.env.PI_STACK_CUSTOM_MODELS,"utf8")),JSON.parse(process.env.PI_STACK_HOST_MODELS)];
 const current=existsSync(path)?JSON.parse(readFileSync(path,"utf8")):{};
 const providers={...(current.providers??{})};
+for(const id of catalogs[1].removeProviders??[]) delete providers[id];
 for(const catalog of catalogs) for(const [providerId,addition] of Object.entries(catalog.providers)){
   const provider=providers[providerId]??{};
   const replacements=new Map((addition.models??[]).map((model)=>[model.id,model]));

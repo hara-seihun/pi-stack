@@ -60,6 +60,7 @@ test("manifest parsing fills defaults and rejects malformed entries", () => {
   assert.throws(() => parseManifest(JSON.stringify({ version: 1, engines: [{ id: "a", baseUrl: "http://x", models: [] }] })), /at least one model/);
   assert.throws(() => parseManifest(JSON.stringify({ version: 1, engines: [{ id: "a", baseUrl: "http://x", models: [{ id: "m" }] }] })), /icon is required/);
   assert.throws(() => parseManifest(JSON.stringify({ version: 1, engines: [{ id: "a", baseUrl: "http://x", models: [{ id: "m", icon: "🌳" }], start: { command: [] } }] })), /start.command/);
+  assert.throws(() => parseManifest(JSON.stringify({ version: 1, engines: [{ id: "a", baseUrl: "http://x", publish: "no", models: [{ id: "m", icon: "🌳" }] }] })), /publish must be boolean/);
 });
 
 test("an advertised context window fills a model that did not declare one", () => {
@@ -76,6 +77,25 @@ test("catalog merge replaces engine providers and keeps the rest", () => {
   const merged = mergeCatalog(current, [engine], ["old"]);
   assert.deepEqual(Object.keys(merged.providers).sort(), ["anthropic", "halo"]);
   assert.equal(merged.providers.halo.name, "Halo");
+});
+
+test("a naming-only engine is not started, registered or retained in the catalog", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "local-models-naming-"));
+  try {
+    const port = await freePort();
+    await writeFile(join(dir, "models.json"), JSON.stringify({ providers: { halo: { baseUrl: "http://stale" }, keep: { models: [] } } }));
+    await writeFile(join(dir, "local-models.json"), JSON.stringify({ version: 1, engines: [{ id: "halo", publish: false,
+      baseUrl: `http://127.0.0.1:${port}/v1`, models: [{ id: "m", icon: "🌳" }],
+      start: { command: [process.execPath, join(here, "fake-engine.mjs"), String(port), "0"] } }] }));
+    const registered = [];
+    const previous = { ...process.env };
+    Object.assign(process.env, { PI_CODING_AGENT_DIR: dir, PI_STACK_LOCAL_MODELS_LAUNCHER: "direct", PI_STACK_LOCAL_MODELS_QUIET: "1" });
+    try { await localModels({ registerProvider: (id) => registered.push(id) }); }
+    finally { for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key]; Object.assign(process.env, previous); }
+    assert.deepEqual(registered, []);
+    assert.equal(await reachable(`http://127.0.0.1:${port}/v1`), false);
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(join(dir, "models.json"), "utf8")).providers), ["keep"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("an unreachable engine with a start command is launched and awaited", async () => {

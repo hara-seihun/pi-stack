@@ -1,6 +1,6 @@
 # Local models
 
-Engines listed in the host manifest become Pi providers. The manifest is `~/.pi/agent/local-models.json` (or `$PI_STACK_LOCAL_MODELS`); a host without one loads nothing. Each engine is an OpenAI-compatible server on this machine: the extension probes `GET <baseUrl>/models`, starts a listed engine that is not answering, waits for it, registers its models through `pi.registerProvider`, and writes the same providers into `~/.pi/agent/models.json` so every Pi surface, including PiStack's thread model catalog, lists them. Engines that stay down are left out of the catalog and reported on stderr.
+Engines listed in the host manifest become Pi providers unless `publish: false` is set. A naming-only engine remains available to Pi Remote through the same manifest and maintenance reservation, but this extension neither starts it nor registers it nor lists it in any Pi model picker; it removes a prior entry from its local catalog. The manifest is `~/.pi/agent/local-models.json` (or `$PI_STACK_LOCAL_MODELS`); a host without one loads nothing. Each engine is an OpenAI-compatible server on this machine: the extension probes `GET <baseUrl>/models`, starts a listed engine that is not answering, waits for it, registers its models through `pi.registerProvider`, and writes the same providers into `~/.pi/agent/models.json` so every Pi surface, including PiStack's thread model catalog, lists them. Engines that stay down are left out of the catalog and reported on stderr.
 
 ```json
 {
@@ -9,10 +9,11 @@ Engines listed in the host manifest become Pi providers. The manifest is `~/.pi/
     {
       "id": "bonsai-halo",
       "name": "Bonsai Halo",
+      "publish": false,
       "baseUrl": "http://127.0.0.1:8471/v1",
       "start": {
         "unit": "bonsai-halo",
-        "command": ["/path/to/bonsai-halo", "serve", "--port", "8471", "--dflash", "/path/to/dflash2.safetensors"],
+        "command": ["/path/to/bonsai-halo", "serve", "--port", "8471", "--slots", "1", "--context", "2048"],
         "cwd": "/path/to/engine-directory",
         "readySeconds": 120
       },
@@ -25,7 +26,7 @@ Engines listed in the host manifest become Pi providers. The manifest is `~/.pi/
 }
 ```
 
-Fields: `id` (lowercase identifier, also the Pi provider id), `name`, `baseUrl` (the `/v1` root), optional `apiKey` (default `local`, a placeholder Pi requires), optional `reservation` (see below), optional `compat` (default `supportsDeveloperRole: false`, `supportsReasoningEffort: true`), `models` with `id`, `name`, `icon` (required: an emoji such as `🌳` or a Pi Remote asset name; a model without one is refused at parse time, so it is never registered or written to the catalog), `reasoning`, `input`, `contextWindow` (when unset, the engine's advertised `context_window` from `/models` is used, else 8192), `maxTokens` and, for reasoning models, `thinkingLevelMap` (default: `off` and `minimal` send `none`, `low`, `medium`, and `high`/`xhigh`/`max` send `xhigh`). `start.command` runs through `systemd-run --user --unit <unit> --collect`, so the engine outlives the session that started it and answers to `systemctl --user status <unit>`; `readySeconds` bounds the wait. `PI_STACK_LOCAL_MODELS_LAUNCHER=direct` spawns the command directly (tests). `PI_STACK_LOCAL_MODELS_QUIET=1` silences the log lines.
+Fields: `id` (lowercase identifier, also the Pi provider id when published), `publish` (default `true`; `false` leaves engine startup to a direct consumer such as Remote naming), `name`, `baseUrl` (the `/v1` root), optional `apiKey` (default `local`, a placeholder Pi requires), optional `reservation` (see below), optional `compat` (default `supportsDeveloperRole: false`, `supportsReasoningEffort: true`), `models` with `id`, `name`, `icon` (required: an emoji such as `🌳` or a Pi Remote asset name; a model without one is refused at parse time, so it is never registered or written to the catalog), `reasoning`, `input`, `contextWindow` (when unset, the engine's advertised `context_window` from `/models` is used, else 8192), `maxTokens` and, for reasoning models, `thinkingLevelMap` (default: `off` and `minimal` send `none`, `low`, `medium`, and `high`/`xhigh`/`max` send `xhigh`). `start.command` runs through `systemd-run --user --unit <unit> --collect`, so the engine outlives the session that started it and answers to `systemctl --user status <unit>`; `readySeconds` bounds the wait. `PI_STACK_LOCAL_MODELS_LAUNCHER=direct` spawns the command directly (tests). `PI_STACK_LOCAL_MODELS_QUIET=1` silences the log lines.
 
 ## Maintenance reservation
 
@@ -40,7 +41,7 @@ Neither side has a check-then-start window. A consumer that already holds the sh
 
 `waitSeconds` is how long a consumer keeps trying, default `0`. At `0` a consumer reports the reservation at once; a larger value lets a session wait a bounded time for the device to come free. Background work such as Pi Remote's thread naming always passes `0` and retries after the lease rather than occupying it.
 
-A reserved engine comes back from `ensureEngine` as `{ ready: false, reserved: true, detail }`. The extension does not start it, keeps its models registered and in `models.json` — a pause is not a broken engine, and the picker should not lose the model for the length of a benchmark — and requests to it fail while it is down. A reservation whose lock cannot be evaluated at all, for example without `flock` on `PATH`, refuses the start as well: a declared reservation is never silently ignored.
+A published, reserved engine comes back from `ensureEngine` as `{ ready: false, reserved: true, detail }`. The extension does not start it, keeps its models registered and in `models.json` — a pause is not a broken engine, and the picker should not lose the model for the length of a benchmark — and requests to it fail while it is down. A reservation whose lock cannot be evaluated at all, for example without `flock` on `PATH`, refuses the start as well: a declared reservation is never silently ignored.
 
 An engine with no `reservation` behaves exactly as it did before.
 
