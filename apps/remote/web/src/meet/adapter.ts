@@ -103,7 +103,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
         requestId: crypto.randomUUID(), delivery: "steer", includeMeetingImages: true,
         text: ["Meeting mention", meetingContext(),
           `${wake.speaker} said your name while your voice connection was closed, so no one has answered yet: "${wake.text}"`,
-          "If it asks something of you, such as unmuting or doing some work, handle it as you would a Voice handoff. If it only mentions you in passing, end your turn without acting."].join("\n\n"),
+          "If it asks something of you, such as unmuting or doing some work, handle it as you would a Voice handoff. The transcript below can also hold earlier requests to you that nobody heard; handle every one still unanswered, not only this line. If it only mentions you in passing, end your turn without acting."].join("\n\n"),
       }));
     } catch (cause) { notice(`Mention handoff failed: ${String(cause instanceof Error ? cause.message : cause)}`); }
   };
