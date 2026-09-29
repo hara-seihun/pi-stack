@@ -9,6 +9,7 @@ import { threadTools } from "./pi-tools.js";
 import { argument, assertPiSessionFile, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
+import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT } from "./pi-raw.js";
@@ -92,7 +93,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const initializationErrors = services.diagnostics.filter(diagnostic => diagnostic.type === "error");
       if (initializationErrors.length) throw new Error(`Pi session initialization failed: ${initializationErrors.map(diagnostic => diagnostic.message).join("; ")}`);
       const provider = argument(options.args, "--provider"), modelId = argument(options.args, "--model");
-      const selection = provider && modelId ? resolveSessionModel(services.modelRuntime.getModels(), provider, modelId, env) : undefined;
+      const selection = provider && modelId ? await resolveSessionModel(services.modelRuntime.getModels(), provider, modelId, env) : undefined;
       if (selection && !selection.ok) throw new Error(selection.error);
       const bash = createBashTool(cwd, { spawnHook: context => ({ ...context, env: { ...context.env, ...env,
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
@@ -243,7 +244,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             return;
           }
           if (command.type === "set_model") {
-            const selection = resolveSessionModel(runtime.session.modelRuntime.getModels(), String(command.provider), String(command.modelId), env);
+            const selection = await resolveSessionModel(runtime.session.modelRuntime.getModels(), String(command.provider), String(command.modelId), env);
             if (!selection.ok) { response(false, selection.error); return; }
             try { await runtime.session.setModel(selection.model); response(true, undefined, selection.model); }
             catch (error) { response(false, error instanceof Error ? error.message : String(error)); }
@@ -251,8 +252,23 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             return;
           }
           if (command.type === "set_speed") {
-            const updated = updateThreadSpeed(env, command.speed);
+            const candidateEnv = { ...env };
+            const updated = updateThreadSpeed(candidateEnv, command.speed, runtime.session.model);
             if (!updated.ok) { response(false, updated.error); return; }
+            if ((env.PI_THREAD_SPEED === "ultrafast") !== (updated.value === "ultrafast") && loadConfig(undefined, undefined, env).ultrafastModelBrokerUrl) {
+              response(false, "Changing the Ultrafast broker route requires the next execution; the active request keeps its admitted route.");
+              return;
+            }
+            if (updated.value === "ultrafast" && runtime.session.model) {
+              const current = runtime.session.model;
+              const selection = await resolveSessionModel(runtime.session.modelRuntime.getModels(), current.provider.replace(/-\d+$/, ""), current.id, candidateEnv);
+              if (!selection.ok) { response(false, selection.error); return; }
+              if (selection.model.provider !== current.provider) {
+                try { await runtime.session.setModel(selection.model); }
+                catch (error) { response(false, error instanceof Error ? error.message : String(error)); return; }
+              }
+            }
+            env.PI_THREAD_SPEED = updated.value;
             response(true, undefined, { speed: updated.value });
             return;
           }

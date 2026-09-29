@@ -13,6 +13,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, prepareWithDrainWait, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
 import { fetchAccountFromPeer, resolveFetchPeer, resolvePeerHost } from "./auth/account-peers.js";
 import { isAccountReservation } from "./admission-reservation.js";
+import { isSpeed, SPEEDS } from "./threads/speed.js";
 
 export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
@@ -29,11 +30,11 @@ export const COMMANDS=[
   ["resume THREAD_ID","Release a held thread's pending messages"],
   ["restore","Unarchive THREAD_ID; --descendants also restores every thread below it; --resume continues the work its archive interrupted"],
   ["boost","Set a provider pacing multiplier or halt"],
-  ["account","Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts"],
+  ["account","Import, refresh, inspect capabilities, remove, list, reserve, or exclusively transfer pooled accounts"],
   ["peer","List configured account-transfer peers"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
-export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID`;
+export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | capabilities [ID] | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID`;
 
 const base=()=>orchestratorUrl();
 const threadBase=()=>process.env.PI_THREAD_API_URL??`${base()}/v1/threads`;
@@ -83,7 +84,7 @@ function scheduleStart(value:string|undefined):number|undefined{
 function threadSettings(named:Map<string,string>):SettingsOverrides|undefined{
   const model=named.get("model"),thinkingLevel=named.get("thinking"),speed=named.get("speed");
   if(thinkingLevel&&!isThinkingLevel(thinkingLevel))throw new Error(`Invalid --thinking level; use ${THINKING_LEVELS.join(", ")}`);
-  if(speed&&speed!=="standard"&&speed!=="priority")throw new Error("--speed must be standard or priority");
+  if(speed&&!isSpeed(speed))throw new Error(`--speed must be ${SPEEDS.join(", ")}`);
   if(!model&&!thinkingLevel&&!speed)return undefined;
   return{...(model?{model}:{}),...(thinkingLevel?{thinkingLevel:thinkingLevel as SettingsOverrides["thinkingLevel"]}:{}),...(speed?{speed:speed as SettingsOverrides["speed"]}:{})};
 }
@@ -135,7 +136,7 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="schedule"){
     const [action,...tail]=rest;
     if(action===undefined||action==="help"||action==="--help"){
-      console.log("usage: pi-orchestrator schedule list | create --prompt TEXT --every DURATION [--start now|ISO] [--cwd PATH] [--model MODEL] [--thinking LEVEL] [--speed standard|priority] [--background] [--id ID] [--title TITLE] | show ID | pause ID | resume ID | remove ID --yes");
+      console.log("usage: pi-orchestrator schedule list | create --prompt TEXT --every DURATION [--start now|ISO] [--cwd PATH] [--model MODEL] [--thinking LEVEL] [--speed standard|priority|ultrafast] [--background] [--id ID] [--title TITLE] | show ID | pause ID | resume ID | remove ID --yes");
       return;
     }
     const {named,positional}=flags(tail);
@@ -224,6 +225,10 @@ export async function dispatch(argv:string[]):Promise<void>{
       return;
     }
     if(action==="list"){output((await request("/v1/plans")).accounts);return;}
+    if(action==="capabilities"){
+      if(tail.length>1||tail[0]?.startsWith("--"))throw new Error("usage: pi-orchestrator account capabilities [ID]");
+      output(await request("/v1/accounts/capabilities","POST",tail[0]?{accountId:tail[0]}:{}));return;
+    }
     if(action==="transfer-receive"){
       const store=Store.open(ledgerPath());
       try {
@@ -307,7 +312,7 @@ export async function dispatch(argv:string[]):Promise<void>{
       output({id,provider:account.provider,expires:new Date(refreshed.expires).toISOString()});
       return;
     }
-    throw new Error("account action must be import, refresh, remove, list, use, transfer, fetch, reserve, or reservation");
+    throw new Error("account action must be import, refresh, capabilities, remove, list, use, transfer, fetch, reserve, or reservation");
   }
   throw new Error(USAGE);
 }

@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Result, ThreadSettings, WorkOutcome } from "./contracts.js";
 import type { ImportMessage, ImportThread, ThreadService } from "./service.js";
 import { resolveThreadSettings } from "./settings.js";
+import { isSpeed } from "./speed.js";
 import { catalogModel } from "../catalog.js";
 import { adoptImportProvenance } from "./import-provenance.js";
 import { serializeThreadNotification } from "./message-format.js";
@@ -40,7 +41,7 @@ export function importRemoteThreads(service: ThreadService, db: DatabaseSync, op
       const provider = native?.provider ?? row.current_provider ?? row.initial_provider;
       const requested = model.includes("/") || !provider ? model : `${provider}/${model}`;
       const selected = resolveThreadSettings({ model: catalogModel(model)?.id ?? requested, thinkingLevel: native?.thinkingLevel ?? row.initial_thinking ?? undefined,
-        speed: row.service_tier === "priority" ? "priority" : "standard" });
+        speed: isSpeed(row.service_tier) ? row.service_tier : "standard" });
       if (!selected.ok) return selected;
       threads.set(row.id, { id: row.id, parentId: children.find(child => child.session_id === row.id)?.parent_session_id ?? null,
         title: row.name, cwd: native?.cwd ?? options.resolveCwd?.(row.workspace_id) ?? row.workspace_id,

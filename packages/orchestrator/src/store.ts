@@ -157,6 +157,8 @@ export function openLedgerDatabase(path: string): DatabaseSync {
 export class Store {
   readonly db: DatabaseSync;
   private transactionDepth=0;
+  private isClosed=false;
+  get closed():boolean { return this.isClosed; }
 
   private constructor(db: DatabaseSync, readonly path: string) { this.db = db; }
 
@@ -186,7 +188,7 @@ export class Store {
     return new Store(db, path === ":memory:" ? path : resolve(path));
   }
 
-  close(): void { this.db.close(); }
+  close(): void { this.isClosed=true; this.db.close(); }
   transaction<T>(fn: () => T): T {
     const depth=this.transactionDepth++,savepoint=`orchestrator_${depth}`;
     try {

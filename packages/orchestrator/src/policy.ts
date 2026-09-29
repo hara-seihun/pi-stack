@@ -80,7 +80,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   return{sessions:boosted,spent,meterAt,reason:multiplier===1?reason:`${sessions} base × ${multiplier} = ${boosted} sessions; ${reason}`};
 }
 
-export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user"):{assignment?:Assignment;refusals:Refusal[]}{
+export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user",excludedAccounts:ReadonlySet<string>=new Set()):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
@@ -91,6 +91,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
+      if(excludedAccounts.has(account.id)){refusals.push({accountId:account.id,reason:"requested service tier unavailable"});continue;}
       const capacity=accountCapacity(store,account.id,budget,cfg,now,runId);
       const active=store.activeSessionLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}

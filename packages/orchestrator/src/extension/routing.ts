@@ -18,6 +18,8 @@ import { interruptedTurnPrompt } from "../host/continuations.js";
 import { withCustomModels } from "../models.js";
 import { BROKER_ROUTES, modelBrokerUrl } from "../model-broker-contract.js";
 import { installBrokerRouting } from "./broker-routing.js";
+import { codexTierExclusions, requireCodexTier } from "../auth/codex-capabilities.js";
+import { withCodexTierGuard } from "../auth/codex-tier-provider.js";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
@@ -27,14 +29,14 @@ export const EXPLICIT_THREAD_MODEL_ENV="PI_THREAD_EXPLICIT_MODEL";
 
 export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{return env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 
-export function resolveSessionModel(models:readonly Model<any>[],provider:string,modelId:string,env:NodeJS.ProcessEnv=process.env):
-  {ok:true;model:Model<any>}|{ok:false;error:string} {
+export async function resolveSessionModel(models:readonly Model<any>[],provider:string,modelId:string,env:NodeJS.ProcessEnv=process.env):
+  Promise<{ok:true;model:Model<any>}|{ok:false;error:string}> {
   if(modelBrokerUrl(env) && baseProvider(provider) in BROKER_ROUTES){
     const model=models.find(model=>model.id===modelId&&model.provider===baseProvider(provider));
     return model?{ok:true,model}:{ok:false,error:`Model not found through model broker: ${provider}/${modelId}`};
   }
   const candidates=models.filter(model=>model.id===modelId);
-  const family=builtinProviders().find(family=>family.id===provider&&family.auth.oauth);
+  const family=builtinProviders().find(family=>family.id===baseProvider(provider)&&family.auth.oauth);
   // Pooled families answer only through an account, even when the family id is
   // the one the caller named: the family provider itself holds no credential.
   if(!family||!candidates.length){
@@ -45,10 +47,12 @@ export function resolveSessionModel(models:readonly Model<any>[],provider:string
   try{
     const shared=providerOAuth(family,env.PI_ORCHESTRATOR_AUTH??defaultSharedAuthPath(defaultLedgerPath(env)));
     const available=new Set(candidates.map(model=>model.provider));
-    const exclude=new Set(store.accounts().filter(account=>!available.has(account.id)).map(account=>account.id));
+    let exclude=new Set(store.accounts().filter(account=>!available.has(account.id)).map(account=>account.id));
+    if(family.id==="openai-codex")exclude=await codexTierExclusions(store,shared,modelId,env.PI_THREAD_SPEED,exclude);
     const assigned=env.PI_ORCHESTRATOR_ASSIGNED==="1"&&env.PI_ORCHESTRATOR_RUN_ID?store.run(env.PI_ORCHESTRATOR_RUN_ID):undefined;
-    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude,{includeCooling:true,model:modelId,live:env.PI_THREAD_MODE==="live"});
-    if(account&&account.provider===provider&&available.has(account.id)&&shared.has(account.id)){
+    const pinned=env.PI_ORCHESTRATOR_ASSIGNED==="1"?(env.PI_ORCHESTRATOR_ACCOUNT_ID??assigned?.accountId):provider!==family.id?provider:undefined;
+    const account=pinned?store.account(pinned):chooseInteractiveAccount(store,shared,family.id,exclude,{includeCooling:true,model:modelId,live:env.PI_THREAD_MODE==="live"});
+    if(account&&!exclude.has(account.id)&&account.provider===family.id&&available.has(account.id)&&shared.has(account.id)){
       const model=candidates.find(model=>model.provider===account.id)!;
       return {ok:true,model};
     }
@@ -57,7 +61,7 @@ export function resolveSessionModel(models:readonly Model<any>[],provider:string
     // assigned run is pinned to an account that is cooling.
     const cooling=store.accounts().filter(account=>account.provider===provider&&allowsAccountUse(account,"interactive")&&shared.has(account.id)&&account.cooldownUntil&&account.cooldownUntil>Date.now());
     const resume=cooling.length?` Earliest cooldown ends at ${new Date(Math.min(...cooling.map(account=>account.cooldownUntil!))).toISOString()}.`:"";
-    return {ok:false,error:`No eligible pooled account for ${provider}/${modelId}.${resume}`};
+    return {ok:false,error:`No eligible pooled account for ${provider}/${modelId}${env.PI_THREAD_SPEED==="ultrafast"?" advertising ultrafast":""}.${resume}`};
   }finally{store.close();}
 }
 export function baseProvider(provider:string):string{
@@ -88,7 +92,8 @@ export default function routing(pi:ExtensionAPI):void{
   const assigned=environment.PI_ORCHESTRATOR_ASSIGNED==="1"&&environment.PI_ORCHESTRATOR_RUN_ID?store.run(environment.PI_ORCHESTRATOR_RUN_ID):undefined;
   for(const account of store.accounts()){
     const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||(!allowsAccountUse(account,"interactive")&&assigned?.accountId!==account.id))continue;
-    pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth,token=>requestTokens.set(account.id,token)));
+    const pooled=sharedOAuthProvider(family,account.id,account.label,auth,token=>requestTokens.set(account.id,token));
+    pi.registerProvider(family.id==="openai-codex"?withCodexTierGuard(pooled,store,auth,account.id):pooled);
   }
   installImageGeneration(pi, store, shared.get("openai-codex"));
   installProviderOperations(pi, store, shared);
@@ -96,7 +101,11 @@ export default function routing(pi:ExtensionAPI):void{
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
-  const choose=(family:string,model:string,exclude=new Set<string>(),includeCooling=false)=>chooseInteractiveAccount(store,shared.get(family),family,exclude,{includeCooling,model,live:environment.PI_THREAD_MODE==="live"});
+  const choose=async(family:string,model:string,exclude=new Set<string>(),includeCooling=false)=>{
+    if(family==="openai-codex")exclude=await codexTierExclusions(store,shared.get(family),model,environment.PI_THREAD_SPEED,exclude,lifecycle.signal);
+    if(closed)return;
+    return chooseInteractiveAccount(store,shared.get(family),family,exclude,{includeCooling,model,live:environment.PI_THREAD_MODE==="live"});
+  };
   const select=async(ctx:ExtensionContext,model:Model<never>,thinking:ThinkingLevel):Promise<boolean>=>{
     if(closed)return false;
     await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false,signal:lifecycle.signal});
@@ -108,7 +117,7 @@ export default function routing(pi:ExtensionAPI):void{
   // because there the point is to leave the account that just refused the turn.
   const bind=async(ctx:ExtensionContext,exclude?:Set<string>,requested?:{family:string;modelId:string;thinking:ThinkingLevel},includeCooling=!exclude?.size):Promise<string|undefined>=>{
     const current=ctx.model,thinking=requested?.thinking??pi.getThinkingLevel();if(!current&&!requested)return;
-    const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=choose(family,modelId,exclude,includeCooling);
+    const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=await choose(family,modelId,exclude,includeCooling);
     if(!choice)return;
     if(!requested&&choice.id===current?.provider&&modelId===current.id)return choice.id;
     const next=resolve(choice.id,family,modelId);if(!next)return;
@@ -127,7 +136,7 @@ export default function routing(pi:ExtensionAPI):void{
     if(matchesPin(ctx))return;
     if(!pinned){void ctx.abort();throw new Error(`Unknown subagent model pin ${requestedPin}`);}
     const current=store.account(ctx.model?.provider??"");
-    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")&&shared.get(pinned.provider)?.has(current.id)?current.id:choose(pinned.provider,pinned.model,undefined,true)?.id);
+    const accountId=environment.PI_ORCHESTRATOR_ACCOUNT_ID??assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")&&shared.get(pinned.provider)?.has(current.id)?current.id:(await choose(pinned.provider,pinned.model,undefined,true))?.id);
     const model=accountId?resolve(accountId,pinned.provider,pinned.model):undefined;
     if(!model||!await select(ctx,model,assigned?.thinking as ThinkingLevel??(pi.getThinkingLevel()==="off"?pinned.thinking as ThinkingLevel:pi.getThinkingLevel()))){
       void ctx.abort();throw new Error(`Pinned model ${pinned.provider}/${pinned.model} has no available account`);
@@ -184,7 +193,8 @@ export default function routing(pi:ExtensionAPI):void{
     const explicit=ctx.model?.provider&&/-\d+$/.test(ctx.model.provider)?store.account(ctx.model.provider):undefined;
     const retain=explicit&&allowsAccountUse(explicit,"interactive")
       &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id);
-    if(!retain)await bind(ctx);
+    const tierAllowed=retain&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(explicit.provider),explicit.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
+    if(!retain||!tierAllowed){const bound=await bind(ctx);if(!bound&&environment.PI_THREAD_SPEED==="ultrafast")throw new Error("No eligible account advertises Astra ultrafast");}
   };
   pi.on("session_start",async(_event,ctx)=>{
     const branch=ctx.sessionManager.getBranch(),history=branch.some((entry)=>entry.type==="message"&&entry.message.role==="assistant");
@@ -213,8 +223,9 @@ export default function routing(pi:ExtensionAPI):void{
   });
   pi.on("before_agent_start",async(_event,ctx)=>{
     const current=store.account(ctx.model?.provider??"");
-    if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&!allowsAccountUse(current,"interactive"))){
-      if(fleetAssigned)throw new Error(`Account ${current.id} shared OAuth credential requires recovery before this assigned run can continue`);
+    const tierAllowed=current&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(current.provider),current.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
+    if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&!allowsAccountUse(current,"interactive")||!tierAllowed)){
+      if(fleetAssigned)throw new Error(tierAllowed?`Account ${current.id} shared OAuth credential requires recovery before this assigned run can continue`:`Assigned account ${current.id} no longer advertises Astra ultrafast; refusing to downgrade`);
       const moved=await bind(ctx,new Set([current.id]),undefined,true);
       if(!moved)throw new Error(`Account ${current.id} is unavailable for interactive agents; no shared account is available`);
       reconcileLease(ctx);

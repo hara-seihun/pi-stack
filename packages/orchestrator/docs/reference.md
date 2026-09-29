@@ -7,7 +7,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `daemon`: Run reconciliation and the local API.
 - `status`: Print accounts, lanes, leases, and active threads.
 - `usage-evidence`: Print a read-only 24-hour quota and token snapshot; optional --ledger FILE.
-- `run`: Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--ephemeral[=true|false]] [--background].
+- `run`: Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--ephemeral[=true|false]] [--background] [--mode live].
 - `schedule`: Create and manage recurring thread jobs.
 - `wave`: Spawn a one-off batch from a declared lane [--count N] [--background].
 - `list`: List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR].
@@ -16,14 +16,15 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `stop`: Stop THREAD_ID; --descendants also stops its descendants.
 - `pause / resume`: Set or clear the global launch halt; --ordinary controls only ordinary work.
 - `resume THREAD_ID`: Release a held thread's pending messages.
+- `restore`: Unarchive THREAD_ID; --descendants also restores every thread below it; --resume continues the work its archive interrupted.
 - `boost`: Set a provider pacing multiplier or halt.
-- `account`: Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts.
+- `account`: Import, refresh, inspect capabilities, remove, list, reserve, or exclusively transfer pooled accounts.
 - `peer`: List configured account-transfer peers.
 
 ## Account operations
 
 ```text
-usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID
+usage: pi-orchestrator account list | capabilities [ID] | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID
 ```
 
 ## Durable tables

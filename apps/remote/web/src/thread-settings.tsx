@@ -10,7 +10,6 @@ function bashTimeoutLabel(seconds: number) {
   return seconds === 60 ? "60 seconds" : seconds === 300 ? "5 minutes" : "Half an hour";
 }
 type UpdateSettings = (field: string, body: Record<string, string | number>) => void;
-type ModelOption = ThreadSettings["models"][number] & { thinkingLevels?: string[] };
 
 function defaultThinkingLevel(model: { provider: string; id: string }) {
   return model.provider === "openai-codex" && model.id === "gpt-6-luna" ? "max" : "high";
@@ -19,7 +18,7 @@ function defaultThinkingLevel(model: { provider: string; id: string }) {
 export function optimisticThreadSettings(settings: ThreadSettings, body: Record<string, string | number>): ThreadSettings {
   let next = settings;
   if (typeof body.modelProvider === "string" && typeof body.modelId === "string") {
-    const model = settings.models.find(candidate => candidate.provider === body.modelProvider && candidate.id === body.modelId) as ModelOption | undefined;
+    const model = settings.models.find(candidate => candidate.provider === body.modelProvider && candidate.id === body.modelId);
     const selected = { provider: body.modelProvider, id: body.modelId };
     const thinkingLevel = defaultThinkingLevel(selected);
     next = {
@@ -27,7 +26,7 @@ export function optimisticThreadSettings(settings: ThreadSettings, body: Record<
       model: selected,
       thinkingLevels: model?.thinkingLevels?.length ? model.thinkingLevels : [thinkingLevel],
       thinkingLevel,
-      speedModes: selected.provider === "openai-codex" ? ["standard", "priority"] : [],
+      speedModes: model?.speedModes ?? [],
       speedMode: "standard",
     };
   }
@@ -54,7 +53,7 @@ export function SettingsFields({ session, settings, saving, onUpdate }: { sessio
       <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{settings.thinkingLevels.map(level => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={disabled} onClick={() => onUpdate("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
     </section>
     <section className="setting-card">
-      <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling priority</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
+      <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling and service tier</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
       {settings.speedModes.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map(mode => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={disabled} onClick={() => onUpdate("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
     </section>
     <section className="setting-card">

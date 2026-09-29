@@ -51,7 +51,7 @@ test("custom models pass direct and broker session admission without pooled alia
   const runtime = await ModelRuntime.create({ modelsPath: join(root, "models.json"), authPath: join(root, "auth.json") });
   const model = runtime.getModel("private-2", "z/default")!;
   for (const env of [{ PI_ORCHESTRATOR_CONFIG: join(root, "no-config.json") }, { PI_MODEL_BROKER_URL: "http://127.0.0.1:9999" }]) {
-    expect(resolveSessionModel(runtime.getModels(), model.provider, model.id, env)).toEqual({ ok: true, model });
+    expect(await resolveSessionModel(runtime.getModels(), model.provider, model.id, env)).toEqual({ ok: true, model });
   }
   const handlers = new Map<string, Function>();
   const pi = { registerProvider() {}, registerTool() {}, on(event: string, handler: Function) { handlers.set(event, handler); } };

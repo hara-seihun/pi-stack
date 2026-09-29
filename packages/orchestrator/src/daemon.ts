@@ -22,6 +22,7 @@ import { ORCHESTRATOR_CATALOG } from "./catalog.js";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { providerOAuth } from "./auth/shared-oauth.js";
+import { readCodexCapabilities, refreshCodexCapabilities } from "./auth/codex-capabilities.js";
 import { ThreadService } from "./threads/service.js";
 import { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 import { createThreadClient, threadHttp } from "./threads/http.js";
@@ -413,6 +414,15 @@ export class Daemon {
       }
       if(method==="GET"&&url.pathname==="/v1/status")return json(res,200,this.status());
       if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT key,value FROM control INDEXED BY sqlite_autoindex_control_1 WHERE key NOT GLOB 'completion:*' AND key NOT GLOB 'completion-attempt:*' AND key NOT GLOB 'completion-receipt:*' AND key NOT GLOB 'completion-recovery:*' AND key NOT GLOB 'run-context:*' AND key NOT GLOB 'run-core:*' AND key NOT GLOB 'run-environment:*' AND key NOT GLOB 'run-execution:*' AND key NOT GLOB 'run-usage:*' AND key NOT GLOB 'fleet-child:*'").all() as any[]).map((r)=>[r.key,r.value]))});
+      if(method==="POST"&&url.pathname==="/v1/accounts/capabilities"){
+        if(this.config.modelBrokerUrl)return json(res,409,{error:"Refresh capabilities through the account-owning daemon, not a broker client."});
+        const input=await body(req);
+        if(input.accountId!==undefined&&(typeof input.accountId!=="string"||!input.accountId))return json(res,400,{error:"accountId must be a nonempty account alias"});
+        if(input.accountId&&this.store.account(input.accountId)?.provider!=="openai-codex")return json(res,404,{error:"Codex account not found"});
+        const auth=providerOAuth(openaiCodexProvider(),this.config.authPath);
+        const capabilities=await refreshCodexCapabilities(this.store,auth,input.accountId,AbortSignal.timeout(10_000));
+        return json(res,200,{codexCapabilities:capabilities});
+      }
       if(method==="POST"&&url.pathname==="/v1/accounts"){
         const input=await body(req);
         this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true,concurrency:Number(input.concurrency??this.config.defaultAccountConcurrency)});
@@ -481,7 +491,7 @@ export class Daemon {
     readinessError:this.store.control("readiness_error")||undefined,
     meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),
     capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,this.laneBudget,this.config)})),
-    accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.laneActive(lane.id)})),
+    accounts:this.store.accounts(),codexCapabilities:readCodexCapabilities(this.store),lanes:this.store.lanes().map((lane)=>({...lane,active:this.laneActive(lane.id)})),
     threads:this.threads.snapshot(),leases:this.store.activeLeases(),
   };}
 }

@@ -39,7 +39,7 @@ test.each(["openai-codex", "anthropic"])("%s keeps its models and refuses ambien
   expect(upstream.auth.oauth ?? await upstream.auth.apiKey?.resolve(context)).toBeTruthy();
 });
 
-test("a family with no pooled account cannot serve a session", () => {
+test("a family with no pooled account cannot serve a session", async () => {
   const root = mkdtempSync(join(tmpdir(), "pooled-only-"));
   roots.push(root);
   const ledger = join(root, "ledger.sqlite3"), auth = join(root, "auth.json");
@@ -48,15 +48,15 @@ test("a family with no pooled account cannot serve a session", () => {
   store.close();
   const env = { PI_ORCHESTRATOR_LEDGER: ledger, PI_ORCHESTRATOR_AUTH: auth, PI_ORCHESTRATOR_ASSIGNED: "0", OPENAI_API_KEY: "sk-should-never-be-used" };
   const models = [{ api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6-astra" } as Model<never>];
-  expect(resolveSessionModel(models, "openai-codex", "gpt-6-astra", env)).toEqual({
+  expect(await resolveSessionModel(models, "openai-codex", "gpt-6-astra", env)).toEqual({
     ok: false,
     error: "No eligible pooled account for openai-codex/gpt-6-astra.",
   });
-  expect(resolveSessionModel(models, "openai-codex", "gpt-9-nonexistent", env))
+  expect(await resolveSessionModel(models, "openai-codex", "gpt-9-nonexistent", env))
     .toEqual({ ok: false, error: "Model not found: openai-codex/gpt-9-nonexistent" });
 });
 
-test("admission prefers a free account and still admits when the whole pool is cooling", () => {
+test("admission prefers a free account and still admits when the whole pool is cooling", async () => {
   const root = mkdtempSync(join(tmpdir(), "pooled-cooling-"));
   roots.push(root);
   const ledger = join(root, "ledger.sqlite3"), authPath = join(root, "auth.json");
@@ -68,18 +68,18 @@ test("admission prefers a free account and still admits when the whole pool is c
   const env = { PI_ORCHESTRATOR_LEDGER: ledger, PI_ORCHESTRATOR_AUTH: authPath, PI_ORCHESTRATOR_ASSIGNED: "0" };
   const models = [{ api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6-astra" } as Model<never>,
     ...accounts.map(id => ({ api: "openai-codex-responses", provider: id, id: "gpt-6-astra" } as Model<never>))];
-  const chosen = () => {
-    const selection = resolveSessionModel(models, "openai-codex", "gpt-6-astra", env);
+  const chosen = async () => {
+    const selection = await resolveSessionModel(models, "openai-codex", "gpt-6-astra", env);
     return selection.ok ? selection.model.provider : selection.error;
   };
   store.setCooldown("openai-codex-2", Date.now() + 600_000);
-  expect(chosen()).toBe("openai-codex-3");
+  expect(await chosen()).toBe("openai-codex-3");
   store.setCooldown("openai-codex-3", Date.now() + 300_000);
   store.setCooldown("openai-codex-4", Date.now() + 900_000);
   // Every account is cooling. The session lands on the one nearest to expiry
   // rather than being refused: the provider decides, not our guess.
-  expect(chosen()).toBe("openai-codex-3");
+  expect(await chosen()).toBe("openai-codex-3");
   store.setCooldown("openai-codex-3", Date.now() + 1_200_000);
-  expect(chosen()).toBe("openai-codex-2");
+  expect(await chosen()).toBe("openai-codex-2");
   store.close();
 });
