@@ -7,7 +7,8 @@ export function isSupportedModel(model: { id: string }): boolean {
 }
 
 export function withCustomModels(provider: Provider): Provider {
-  const custom = provider.id === "anthropic" ? customModelConfig.providers.anthropic.models as unknown as Model<"anthropic-messages">[] : [];
+  const custom = provider.id === "anthropic" ? customModelConfig.providers.anthropic.models as unknown as Model<"anthropic-messages">[]
+    : provider.id === "openai-codex" ? customModelConfig.providers["openai-codex"].models as unknown as Model<"openai-codex-responses">[] : [];
   const replacements = new Set(custom.map(model => model.id));
   return { ...provider, getModels: () => [...provider.getModels().filter(model => isSupportedModel(model) && !replacements.has(model.id)), ...custom] };
 }

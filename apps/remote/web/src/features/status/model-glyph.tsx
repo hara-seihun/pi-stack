@@ -3,7 +3,7 @@
 // pooled provider aliases and full ids like openai-codex-3/gpt-6-sol resolve.
 const GLYPHS: [RegExp, string, string][] = [
   [/astra/i, "⭐", "Astra"],
-  [/\bsol\b|gpt-6-sol/i, "☀️", "Sol"],
+  [/\bsol\b|gpt-6(?:\.1)?-sol/i, "☀️", "Sol"],
   [/luna/i, "🌙", "Luna"],
   [/opus/i, "🎨", "Opus"],
   [/fable/i, "🪶", "Fable"],

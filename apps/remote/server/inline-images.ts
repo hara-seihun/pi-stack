@@ -27,7 +27,8 @@ export class InlineImages {
   private pumping = false;
   private scheduled = false;
   constructor(private db: Database, private root: string, private generate: InlineImageGenerator,
-    private changed: () => void, private concurrency = 2, private isOwner: () => boolean = () => true) {
+    private changed: () => void, private concurrency = 2, private isOwner: () => boolean = () => true,
+    private acceptsThread: (sessionId: string) => boolean = () => true) {
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("Image concurrency must be an integer from 1 to 8");
     db.exec(`CREATE TABLE IF NOT EXISTS inline_images (
       session_id TEXT NOT NULL REFERENCES thread_views(id) ON DELETE CASCADE,
@@ -50,7 +51,7 @@ export class InlineImages {
 
   /** Definitions enter durable custody before scheduling or notifying the client. */
   accept(sessionId: string, messageKey: string, text: string) {
-    if (!text.includes("<pi-remote-image")) return;
+    if (!this.acceptsThread(sessionId) || !text.includes("<pi-remote-image")) return;
     const accepted = this.db.transaction(() => {
       if (!this.db.query("SELECT 1 FROM thread_views WHERE id=?").get(sessionId)) return false;
       if (this.db.query("SELECT 1 FROM inline_image_messages WHERE session_id=? AND message_key=?").get(sessionId, messageKey)) return false;

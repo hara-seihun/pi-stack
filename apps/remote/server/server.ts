@@ -439,7 +439,7 @@ const inlineImages = new InlineImages(db, join(DATA, "inline-images"), async (in
   } catch (cause) {
     return { ok: false, error: { message: cause instanceof Error ? cause.message : String(cause) } };
   }
-}, signalSync, 2, ownsSupervisorLease);
+}, signalSync, 2, ownsSupervisorLease, id => liveThread(id)?.metadata?.sandbox !== true);
 
 /** Live event streams by id, the only thing a client keeps open. */
 const streams = new Map<string, ClientStream>();
@@ -1767,6 +1767,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
   const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId, createdBy,
     cwd: admitted.value.cwd, message, settings: { model, ...settings },
     metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode } : {}), ...(destination.raw ? { raw: true } : {}),
+      ...(destination.sandbox ? { sandbox: true } : {}),
       ...(contextFiles.length ? { contextFiles } : {}) },
   }));
   ensureThreadView(db, thread.id);

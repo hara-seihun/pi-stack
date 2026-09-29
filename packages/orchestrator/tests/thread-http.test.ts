@@ -130,7 +130,7 @@ it("deduplicates overlapping spawn retries after asynchronous parent discovery",
   expect(results[1]).toEqual(results[0]);
   const children = owner.snapshot();
   expect(children).toHaveLength(1);
-  expect(children[0]).toMatchObject({ parentId: "parent", settings: { model: "openai-codex/gpt-6-sol" } });
+  expect(children[0]).toMatchObject({ parentId: "parent", settings: { model: "openai-codex/gpt-6.1-sol" } });
   expect(owner.pending(children[0]!.id)).toMatchObject([{ id: request.requestId, text: request.message }]);
 });
 

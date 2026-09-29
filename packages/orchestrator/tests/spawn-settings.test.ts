@@ -48,10 +48,10 @@ afterEach(async () => {
 
 describe("child spawn settings", () => {
   it.each([
-    ["openai-codex/gpt-6-astra", "openai-codex/gpt-6-sol"],
-    ["openai-codex-8/gpt-6-astra", "openai-codex/gpt-6-sol"],
-    ["anthropic/claude-sonnet", "openai-codex/gpt-6-sol"],
-    ["anthropic-3/claude-opus-5", "openai-codex/gpt-6-sol"],
+    ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol"],
+    ["openai-codex-8/gpt-6-astra", "openai-codex/gpt-6.1-sol"],
+    ["anthropic/claude-sonnet", "openai-codex/gpt-6.1-sol"],
+    ["anthropic-3/claude-opus-5", "openai-codex/gpt-6.1-sol"],
   ])("defaults a %s parent to %s", (parentModel, childModel) => {
     expect(resolveSpawnSettings(undefined, parent(parentModel))).toEqual({
       ok: true,
@@ -62,9 +62,9 @@ describe("child spawn settings", () => {
   it.each([
     ["luna", "openai-codex/gpt-6-luna"],
     ["Luna", "openai-codex/gpt-6-luna"],
-    ["SOL", "openai-codex/gpt-6-sol"],
-    ["Sol", "openai-codex/gpt-6-sol"],
-    ["sol", "openai-codex/gpt-6-sol"],
+    ["SOL", "openai-codex/gpt-6.1-sol"],
+    ["Sol", "openai-codex/gpt-6.1-sol"],
+    ["sol", "openai-codex/gpt-6.1-sol"],
   ])("preserves the explicit %s choice", (requested, model) => {
     expect(resolveSpawnSettings({ model: requested, thinkingLevel: "minimal", speed: "priority" }, parent("openai-codex/gpt-6-astra"))).toEqual({
       ok: true,
@@ -111,7 +111,7 @@ describe("ThreadService child spawn policy", () => {
     const { root, service } = fixture();
     const conversation = value(await service.spawn({ requestId: "root", cwd: root, settings: { model: "opus" } }));
     const child = value(await service.spawn({ requestId: "child", cwd: root, parentId: conversation.id }));
-    expect(child.settings.model).toBe("openai-codex/gpt-6-sol");
+    expect(child.settings.model).toBe("openai-codex/gpt-6.1-sol");
     expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "opus" } })).toMatchObject({ ok: true });
     expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "fable" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(value(await service.spawn({ requestId: "direct", cwd: root, settings: { model: "opus" }, metadata: { source: "direct" } })).settings.model).toMatch(/^anthropic\//);
@@ -157,7 +157,7 @@ describe("live mode", () => {
     const worker = value(await service.spawn({ requestId: "worker", cwd: root, parentId: conversation.id }));
     expect(worker).toMatchObject({ admission: "live", metadata: { mode: "live" }, settings: { model: "openai-codex/gpt-6-luna", thinkingLevel: "medium", speed: "priority" } });
     const sol = value(await service.spawn({ requestId: "synthesis", cwd: root, parentId: conversation.id, settings: { model: "sol" } }));
-    expect(sol.settings).toEqual({ model: "openai-codex/gpt-6-sol", thinkingLevel: "medium", speed: "priority" });
+    expect(sol.settings).toEqual({ model: "openai-codex/gpt-6.1-sol", thinkingLevel: "medium", speed: "priority" });
     expect(await service.spawn({ requestId: "escape", cwd: root, parentId: conversation.id, metadata: { mode: "other" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     const ordinary = value(await service.spawn({ requestId: "ordinary", cwd: root }));
     expect(ordinary).toMatchObject({ admission: "force", settings: { speed: "standard" } });

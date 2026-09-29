@@ -1,12 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { ORCHESTRATOR_CATALOG, catalogAgentType, catalogModel } from "../src/catalog.js";
 import { loadConfig } from "../src/config.js";
-import { nativeModels } from "../src/models.js";
+import { nativeModels, nativeProviders } from "../src/models.js";
 import { resolveThreadSettings } from "../src/threads/settings.js";
 
 const openaiModels = ["astra", "sol", "luna"];
@@ -35,7 +34,7 @@ describe("shared model selection", () => {
   });
 
   it("resolves all three OpenAI choices through the provider and shared quota meters", () => {
-    const provider = builtinProviders().find(provider => provider.id === "openai-codex")!;
+    const provider = nativeProviders.find(provider => provider.id === "openai-codex")!;
     const available = provider.getModels();
     expect(ORCHESTRATOR_CATALOG.agentOrder.slice(0, 3)).toEqual(openaiModels);
     for (const id of openaiModels) {

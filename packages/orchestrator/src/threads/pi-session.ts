@@ -11,7 +11,8 @@ import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
-import { isRawSession, rawModelContext } from "./pi-raw.js";
+import { isRawSession, rawModelContext, SANDBOX_ARGUMENT } from "./pi-raw.js";
+import { createSandboxTools } from "./pi-sandbox.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, resolveSessionModel } from "../extension/routing.js";
 import usageLogger from "../extension/usage-logger.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
@@ -38,6 +39,8 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     const extensions = options.args.flatMap((arg, index) => arg === "--extension" ? [resolve(options.cwd, options.args[index + 1])] : []);
     const agentDir = env.PI_CODING_AGENT_DIR ?? getAgentDir();
     const raw = isRawSession(options.args);
+    const sandbox = options.args.includes(SANDBOX_ARGUMENT);
+    const sandboxTools = sandbox ? await createSandboxTools(options.cwd) : undefined;
     if (raw && options.args.includes("--orchestrator-context")) throw new Error("Raw Pi sessions cannot carry an isolated application context");
     if (options.args.includes("--orchestrator-context") && process.env.HOME !== join(options.cwd, ".home")) throw new Error("Isolated Pi sessions require their application runner environment");
     if (!existsSync(options.sessionFile)) {
@@ -48,6 +51,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     let acceptedContext: unknown;
     const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
       cwd = requirePiCwd(admission, cwd, "runtime.cwd");
+      if (sandbox && cwd !== options.cwd) throw new Error("Sandbox sessions cannot switch workspaces");
       preparePiSession(sessionManager);
       const isolated = await isolatedPiContext({ ...options, cwd, sessionFile: sessionManager.getSessionFile()! }, env);
       // Pi Remote's context-mirror extension owns context capture when it is loaded; a raw session loads no packages, so the runner reports.
@@ -94,7 +98,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
-        tools: isolated?.tools ?? (raw ? [] : undefined), customTools: raw ? [] : [bash, ...threadTools({ ...options, cwd, env })] });
+        tools: sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined), customTools: sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env })]) });
       execution.bind(created.session);
       created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });
@@ -230,6 +234,9 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         command: command => piEnvironmentScope.run(env, async () => {
           const response = (success: boolean, error?: string, data?: unknown) => output({ type: "response", id: command.id, command: command.type, success, ...(error ? { error } : {}), ...(data === undefined ? {} : { data }) });
           if (closed) { response(false, "Pi session is closed"); return; }
+          if (sandbox && ["bash", "switch_session", "new_session", "fork", "import_from_jsonl"].includes(command.type)) {
+            response(false, "Sandbox sessions use only their confined tools and workspace"); return;
+          }
           if (command.type === "get_context") {
             response(true, undefined, { systemPrompt: raw ? "" : runtime.session.systemPrompt, messages: runtime.session.messages,
               tools: runtime.session.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })) });

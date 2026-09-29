@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { policy, repairPrompt, runnable, stallReason } from "../deploy/publication-control.mjs";
+import { policy, repairPrompt, runnable, stallReason, observeQueueProgress, queueStallReason } from "../deploy/publication-control.mjs";
 import { publicationConfig } from "./publication-fixture.mjs";
 
 const configRoot = mkdtempSync(join(tmpdir(), "publication-config-"));
@@ -526,15 +526,59 @@ test("activation leaves historical failures assigned to their existing agents", 
   assert.equal(JSON.parse(readFileSync(fixture.requestPath, "utf8")).status, "failed");
 });
 
-test("an unclaimed queue gets a repair owner after its progress budget", t => {
+function expiredQueueObservation(request) {
+  return { ...observeQueueProgress(request), since: new Date(Date.now() - policy.betweenStepsMs - 10_000).toISOString() };
+}
+
+for (const scenario of ["watchdog resumed", "probe progressed", "worker owns census"]) {
+  test(`meeting watchdog preserves custody when ${scenario}`, t => {
+    const f = repairFixture(t);
+    rmSync(join(f.root, "repairs"), { recursive: true });
+    const request = { ...f.request, status: "queued", step: "waiting-for-live-meetings", updatedAt: new Date().toISOString(),
+      waiting: { kind: "live-meeting", host: "converge", probe: { at: new Date().toISOString(), rooms: "runtime:5" } },
+      checks: { status: "passed" }, maintenance: { hosts: { converge: { state: "restored", plan: { intake: "paused" } } } } };
+    const observation = expiredQueueObservation(request);
+    if (scenario === "watchdog resumed") observation.observedAt = observation.since;
+    if (scenario === "probe progressed") observation.updatedAt = observation.since;
+    writeJson(f.requestPath, request);
+    writeJson(join(f.root, "worker-watch.json"), { since: observation.since, queue: observation });
+    const result = scenario === "worker owns census"
+      ? run("flock", [join(f.root, "worker.lock"), process.execPath, publication, "watchdog"], {
+        env: { ...process.env, ...f.environment, PATH: `${f.bin}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: f.root,
+          PI_STACK_PUBLICATION_ALERT_INBOX: join(f.root, "inbox") } })
+      : runPublication(f.root, f.bin, "watchdog", f.environment);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), request);
+    assert.equal(existsSync(f.repairPath), false);
+    const calls = readFileSync(f.environment.SYSTEMCTL_LOG, "utf8");
+    assert.doesNotMatch(calls, /stop pi-stack-publication.service/);
+    assert.match(calls, /start --no-block pi-stack-publication.service/);
+  });
+}
+
+test("queue failure rechecks the request after acquiring the worker lock", t => {
+  const f = repairFixture(t);
+  const request = { ...f.request, status: "queued", updatedAt: new Date().toISOString() };
+  const observation = expiredQueueObservation(request);
+  const progressed = { ...request, nextAttemptAt: new Date(Date.now() + policy.blockedRetryMs).toISOString() };
+  writeJson(f.requestPath, progressed);
+  const result = run(process.execPath, [publication, "_fail-unclaimed", requestId, JSON.stringify(observation)], {
+    env: { ...process.env, ...f.environment, PI_STACK_PUBLICATION_STATE: f.root } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), progressed);
+});
+
+for (const kind of ["queued", "live-meeting"]) test(`unserviced ${kind} work gets a repair owner after its progress budget`, t => {
   const fixture = repairFixture(t);
   rmSync(join(fixture.root, "repairs"), { recursive: true });
-  writeJson(fixture.requestPath, { ...fixture.request, status: "queued", step: "queued", updatedAt: new Date().toISOString() });
-  writeJson(join(fixture.root, "worker-watch.json"), { since: "2026-01-01T00:00:00.000Z" });
+  const request = { ...fixture.request, status: "queued", step: "queued", updatedAt: new Date().toISOString(),
+    ...(kind === "live-meeting" ? { waiting: { kind, host: "converge" } } : {}) };
+  writeJson(fixture.requestPath, request);
+  writeJson(join(fixture.root, "worker-watch.json"), { queue: expiredQueueObservation(request) });
   const result = runPublication(fixture.root, fixture.bin, "watchdog", fixture.environment);
   assert.equal(result.status, 0, result.stderr);
   const failed = JSON.parse(readFileSync(fixture.requestPath, "utf8"));
   assert.equal(failed.status, "failed");
-  assert.match(failed.failure.message, /worker never claimed/);
+  assert.match(failed.failure.message, kind === "live-meeting" ? /Meeting probe was not serviced/ : /worker never claimed/);
   assert.equal(JSON.parse(readFileSync(fixture.repairPath, "utf8")).status, "launching");
 });
