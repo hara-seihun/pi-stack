@@ -38,3 +38,12 @@ test("Active shows a working parent's settled workers, not a finished tree", () 
   expect(visibleWorker(done.children[0], "active", false)).toBe(false);
   expect(visibleWorker(done, "all")).toBe(true);
 });
+
+test("archived workers are not listed", () => {
+  const [root] = buildWorkerTree([
+    session("root", { hasChildren: true }),
+    session("live", { parentId: "root" }),
+    session("archived", { parentId: "root", archivedAt: "2026-01-02T00:00:00.000Z" }),
+  ]);
+  expect(root.children.map(node => node.session.id)).toEqual(["live"]);
+});

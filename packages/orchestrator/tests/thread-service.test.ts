@@ -571,6 +571,10 @@ describe("ThreadService", () => {
     service.reconcile();
     expect(service.get(child.id)?.metadata?.archivedAt).toBe(archivedAt);
     expect(await service.send({ requestId: "after", threadId: child.id, senderId: root.id, text: "More" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    const ids = async (archived?: boolean) => value(await service.list({ parentId: root.id, archived })).threads.map(thread => thread.id);
+    expect(await ids()).toContain(child.id);
+    expect(await ids(false)).not.toContain(child.id);
+    expect(await ids(true)).toEqual([child.id]);
   });
 
   it("applies import provenance without treating retained archive metadata as a new archive request", async () => {

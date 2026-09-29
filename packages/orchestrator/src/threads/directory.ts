@@ -168,7 +168,7 @@ export class ThreadDirectory implements ThreadApi {
   async list(input: ThreadList = {}): Promise<Result<ThreadPage>> {
     const limit = input.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return error("invalid_request", "List limit must be 1..100");
-    const query = JSON.stringify({ id: input.id, parentId: input.parentId, state: input.state, owners: this.owners.map(owner => owner.id) });
+    const query = JSON.stringify({ id: input.id, parentId: input.parentId, state: input.state, archived: input.archived, owners: this.owners.map(owner => owner.id) });
     let position: { owner: number; cursor?: string; query: string } = { owner: 0, query };
     if (input.cursor) {
       try { position = JSON.parse(Buffer.from(input.cursor, "base64url").toString()); }

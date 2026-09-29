@@ -137,9 +137,9 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_list", label: "List threads",
-      description: "List accessible persistent threads without starting them. Select children to list this thread's direct children; otherwise list the current environment.",
-      parameters: Type.Object({ children: Type.Optional(Type.Boolean()), parentId: Type.Optional(Type.String()), cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
-      execute: async (_id, input, signal) => result(await api(signal).list({ parentId: input.children ? options.threadId : input.parentId, cursor: input.cursor, limit: input.limit })),
+      description: "List accessible persistent threads without starting them. Select children to list this thread's direct children; otherwise list the current environment. Archived threads are omitted unless includeArchived is set.",
+      parameters: Type.Object({ children: Type.Optional(Type.Boolean()), parentId: Type.Optional(Type.String()), includeArchived: Type.Optional(Type.Boolean({ description: "Also list archived threads, for example to find one to restore." })), cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+      execute: async (_id, input, signal) => result(await api(signal).list({ parentId: input.children ? options.threadId : input.parentId, ...(input.includeArchived ? {} : { archived: false }), cursor: input.cursor, limit: input.limit })),
     }),
     defineTool({
       name: "thread_read", label: "Read thread history",

@@ -33,6 +33,8 @@ function compareWorkers(left: Session, right: Session): number {
 }
 
 export function buildWorkerTree(sessions: Session[]): WorkerNode[] {
+  // Archived workers belong to the archive, not the worker lists.
+  sessions = sessions.filter(session => !session.archivedAt);
   const byId = new Map<string, WorkerNode>(sessions.map(session => [session.id, { session, children: [], depth: 0, activeDescendants: 0 }]));
   const roots: WorkerNode[] = [];
 

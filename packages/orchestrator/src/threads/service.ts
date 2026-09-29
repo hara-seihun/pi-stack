@@ -484,6 +484,8 @@ export class ThreadService implements ThreadApi {
     if (input.id !== undefined) { clauses.push("t.id=?"); values.push(input.id); }
     if (input.parentId !== undefined) { clauses.push("t.parent_id IS ?"); values.push(input.parentId); }
     if (input.state !== undefined) { clauses.push("t.state=?"); values.push(input.state); }
+    if (input.archived === false) clauses.push("json_extract(t.metadata,'$.archived') IS NOT 1");
+    else if (input.archived === true) clauses.push("json_extract(t.metadata,'$.archived') IS 1");
     if (input.cursor !== undefined) { clauses.push("t.id>?"); values.push(input.cursor); }
     const rows = this.sql(`SELECT t.*,(SELECT count(*) FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done') pending_count FROM thread t ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY t.id LIMIT ?`).all(...values, limit + 1) as Json[];
     const page = rows.map(row => this.project(row));

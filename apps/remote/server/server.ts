@@ -1680,7 +1680,8 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
   const children: Thread[] = [];
   let cursor: string | undefined;
   do {
-    const page = await directory.list({ parentId: id, limit: 100, cursor });
+    // Archived workers stay reachable from the archive, not the live worker list.
+    const page = await directory.list({ parentId: id, archived: false, limit: 100, cursor });
     if (!page.ok) return page;
     children.push(...page.value.threads);
     cursor = page.value.nextCursor;

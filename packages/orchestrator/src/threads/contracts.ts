@@ -111,6 +111,8 @@ export interface ThreadList {
   id?: string;
   parentId?: string | null;
   state?: ThreadState;
+  /** `false` omits archived threads; unset lists both. */
+  archived?: boolean;
   limit?: number;
   cursor?: string;
 }
