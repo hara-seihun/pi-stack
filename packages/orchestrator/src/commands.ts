@@ -303,8 +303,7 @@ export async function dispatch(argv:string[]):Promise<void>{
       const family=builtinProviders().find((provider)=>provider.id===account.provider);
       if(!family)throw new Error(`account ${id} names an unknown provider family ${account.provider}`);
       const auth=providerOAuth(family,config.authPath),signal=AbortSignal.timeout(60_000);
-      const current=await auth.credential(id,signal);
-      const refreshed=await auth.refreshRejected(id,current.access,signal);
+      const refreshed=await auth.refresh(id,signal);
       output({id,provider:account.provider,expires:new Date(refreshed.expires).toISOString()});
       return;
     }

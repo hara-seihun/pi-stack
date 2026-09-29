@@ -2,8 +2,10 @@ import { normalizeContext, type Api, type Context, type Model, type Provider, ty
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createParser } from "eventsource-parser";
 import { providerOAuth } from "../auth/shared-oauth.js";
+import { providerResponseFailure, quarantineProviderCredential, repairProviderCredential } from "../auth/provider-rejection.js";
 import type { CompletionExecution, CompletionFetch, CompletionInput, CompletionUsage } from "../completion-contract.js";
 import type { Run } from "../domain.js";
+import { isRejectedTokenError } from "../provider-errors.js";
 
 interface NativeResponse {
   id?: string;
@@ -58,12 +60,34 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
     ? { state: "cancelled", error: { code: "cancelled", message: "Completion cancelled; an in-flight request may have spent tokens." } }
     : { state: dispatched ? "indeterminate" : "failed", error: { code: dispatched ? "indeterminate" : "provider", message: "Completion provider deadline elapsed. An accepted request will not be sent again." } };
   try {
-    const resolveAuth = options.resolveAuth ?? ((accountId: string, signal: AbortSignal) => providerOAuth(provider, options.authPath).resolve(accountId, signal));
-    const auth = await resolveAuth(run.accountId, signal);
+    const shared = options.resolveAuth ? undefined : providerOAuth(provider, options.authPath);
+    const resolveAuth = options.resolveAuth ?? ((accountId: string, signal: AbortSignal) => shared!.resolve(accountId, signal));
+    let auth = await resolveAuth(run.accountId, signal);
+    let repaired = false, repairAttempted = false;
     phase = "provider";
     const observedFetch = (async (url: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
       dispatched = true;
-      const response = await fetchProvider(url, init);
+      let response = await fetchProvider(url, init);
+      if (shared && !response.ok) {
+        const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        const failure = await providerResponseFailure(response);
+        const notFound = response.status === 404;
+        if (repaired) await quarantineProviderCredential(shared, run.accountId!, failure, notFound, repairSignal, auth.apiKey);
+        else {
+          const repair = await repairProviderCredential(shared, run.accountId!, failure, notFound, repairSignal, auth.apiKey);
+          repairAttempted = repair.outcome !== "not-rejected";
+          if (repair.outcome === "repaired") {
+            repaired = true;
+            await response.body?.cancel();
+            auth = await resolveAuth(run.accountId!, signal);
+            const headers = new Headers(init?.headers);
+            headers.set("authorization", `Bearer ${auth.apiKey}`);
+            for (const [key, value] of Object.entries(auth.headers ?? {})) if (value !== null) headers.set(key, value);
+            response = await fetchProvider(url, { ...init, headers });
+            await quarantineProviderCredential(shared, run.accountId!, await providerResponseFailure(response), response.status === 404, repairSignal, auth.apiKey);
+          }
+        }
+      }
       responseStatus = response.status;
       if (response.status === 429) {
         const after = response.headers.get("retry-after");
@@ -100,6 +124,11 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
     if (signal.aborted) return interrupted();
     if (message.stopReason === "aborted") return { state: "indeterminate", error: { code: "indeterminate", message: "Provider aborted without a terminal response." } };
     if (message.stopReason === "error") {
+      if (shared && isRejectedTokenError(message.errorMessage ?? "")) {
+        const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        if (repaired) await quarantineProviderCredential(shared, run.accountId, message.errorMessage!, false, repairSignal, auth.apiKey);
+        else if (!repairAttempted) await repairProviderCredential(shared, run.accountId, message.errorMessage!, false, repairSignal, auth.apiKey);
+      }
       if (responseStatus === 429 && !nativeTerminal) return rateLimited(message.errorMessage ?? "Provider rejected the request with HTTP 429.");
       const uncertain = dispatched && !nativeTerminal && (responseStatus === undefined || responseStatus < 400);
       return { state: uncertain ? "indeterminate" : "failed", error: { code: uncertain ? "indeterminate" : "provider", message: message.errorMessage ?? "Provider did not complete the request." } };

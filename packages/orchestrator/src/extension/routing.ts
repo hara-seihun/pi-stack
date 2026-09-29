@@ -9,7 +9,7 @@ import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { pooledOnlyProvider } from "../auth/pooled-only.js";
 import { isRateLimitError, isRejectedTokenError, providerAccepted, rateLimitCooldownMs } from "../provider-errors.js";
-import { isCodexNotFoundError, repairProviderCredential, type CredentialRepair } from "../auth/provider-rejection.js";
+import { isCodexNotFoundError, repairProviderCredential, quarantineProviderCredential, type CredentialRepair } from "../auth/provider-rejection.js";
 import { withAnthropicFiles } from "../auth/anthropic-files-provider.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { installImageGeneration } from "./image-generation.js";
@@ -127,7 +127,7 @@ export default function routing(pi:ExtensionAPI):void{
     if(matchesPin(ctx))return;
     if(!pinned){void ctx.abort();throw new Error(`Unknown subagent model pin ${requestedPin}`);}
     const current=store.account(ctx.model?.provider??"");
-    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")?current.id:choose(pinned.provider,pinned.model,undefined,true)?.id);
+    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")&&shared.get(pinned.provider)?.has(current.id)?current.id:choose(pinned.provider,pinned.model,undefined,true)?.id);
     const model=accountId?resolve(accountId,pinned.provider,pinned.model):undefined;
     if(!model||!await select(ctx,model,assigned?.thinking as ThinkingLevel??(pi.getThinkingLevel()==="off"?pinned.thinking as ThinkingLevel:pi.getThinkingLevel()))){
       void ctx.abort();throw new Error(`Pinned model ${pinned.provider}/${pinned.model} has no available account`);
@@ -149,7 +149,7 @@ export default function routing(pi:ExtensionAPI):void{
     if(providerAccepted(message)&&store.account(message.provider))
       store.recordProviderSuccess(message.provider,{model:message.model,startedAt:message.timestamp,source:environment.PI_ORCHESTRATOR_ASSIGNED==="1"?"assigned":"interactive"});
   });
-  if(environment.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>{if(closed)return;closed=true;lifecycle.abort();store.close();});return;}
+  const fleetAssigned=environment.PI_ORCHESTRATOR_ASSIGNED==="1";
   let leaseId:string|undefined,leasedAccount:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
   let running=false,turnActive=false,compacting=false;
   const releaseLease=()=>{
@@ -158,7 +158,7 @@ export default function routing(pi:ExtensionAPI):void{
     timer=undefined;leaseId=undefined;leasedAccount=undefined;
   };
   const reconcileLease=(ctx:ExtensionContext)=>{
-    if(closed)return;
+    if(closed||fleetAssigned)return;
     const account=ctx.model?.provider;
     if((running||compacting)&&store.account(account??"")){
       if(leasedAccount===account)return;
@@ -189,6 +189,7 @@ export default function routing(pi:ExtensionAPI):void{
   pi.on("session_start",async(_event,ctx)=>{
     const branch=ctx.sessionManager.getBranch(),history=branch.some((entry)=>entry.type==="message"&&entry.message.role==="assistant");
     if(hasPin){await enforcePin(ctx);}
+    else if(fleetAssigned)return;
     else if(environment[EXPLICIT_THREAD_MODEL_ENV]==="1")await bindCurrent(ctx);
     else if(history){
       let selected:{provider:string;modelId:string}|undefined;
@@ -212,7 +213,8 @@ export default function routing(pi:ExtensionAPI):void{
   });
   pi.on("before_agent_start",async(_event,ctx)=>{
     const current=store.account(ctx.model?.provider??"");
-    if(current&&!allowsAccountUse(current,"interactive")){
+    if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&!allowsAccountUse(current,"interactive"))){
+      if(fleetAssigned)throw new Error(`Account ${current.id} shared OAuth credential requires recovery before this assigned run can continue`);
       const moved=await bind(ctx,new Set([current.id]),undefined,true);
       if(!moved)throw new Error(`Account ${current.id} is unavailable for interactive agents; no shared account is available`);
       reconcileLease(ctx);
@@ -258,6 +260,11 @@ export default function routing(pi:ExtensionAPI):void{
     const codexNotFound=familyOf(failing)==="openai-codex"&&last.usage?.totalTokens===0
       &&isCodexNotFoundError(failure,ctx.model);
     if(isRejectedTokenError(failure)||codexNotFound){
+      if(repaired.has(failing)){
+        const auth=shared.get(familyOf(failing));
+        if(auth)await quarantineProviderCredential(auth,failing,failure,codexNotFound,
+          AbortSignal.any([lifecycle.signal,AbortSignal.timeout(30_000)]),requestTokens.get(failing));
+      }
       const result=await repairCredential(failing,failure,codexNotFound);
       if(closed||ctx.model?.provider!==failing)return;
       if(result){
@@ -266,8 +273,9 @@ export default function routing(pi:ExtensionAPI):void{
         if(result.outcome==="repaired"){unresolved={failure:result.detail,account:failing,prompt:credentialRepairPrompt};return;}
       }
     }
-    if(!isRateLimitError(failure))return;
-    if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure),{model:last.model});
+    const credentialUnavailable=!!shared.get(familyOf(failing))?.rejection(failing);
+    if(fleetAssigned||!credentialUnavailable&&!isRateLimitError(failure))return;
+    if(!credentialUnavailable&&store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure),{model:last.model});
     // Rotate away from the refusing account; when every sibling is cooling, take the
     // one nearest expiry rather than ending the turn. A cooldown is this machine's
     // guess and the provider decides, so a rate limit stays weather the session

@@ -15,6 +15,7 @@ function fixture() {
     resolve: vi.fn(async (account: string) => ({ apiKey: `${account}:token-${generation}` })),
     credential: vi.fn(async (account: string) => ({ type: "oauth", access: `${account}:token-${generation}`, accountId: "account", expires: Date.now() + 3_600_000 })),
     refreshRejected: vi.fn(async () => { generation++; }),
+    reject: vi.fn(async () => {}),
     has: () => true,
   };
   const request: ProviderOperation = {
@@ -51,7 +52,8 @@ test.each(["repaired", "still-rejected", "usage-healthy"])("compaction uses corr
     : { ok: false as const, error: "Not Found" });
   const result = await f.run();
   expect(result.ok).toBe(kind === "repaired");
-  expect(probe).toHaveBeenCalledOnce();
+  expect(probe).toHaveBeenCalledTimes(kind === "still-rejected" ? 2 : 1);
+  expect(f.auth.reject).toHaveBeenCalledTimes(kind === "still-rejected" ? 1 : 0);
   expect(probe.mock.calls[0][0]).toBe("openai-codex-2:token-0");
   expect(f.auth.refreshRejected).toHaveBeenCalledTimes(kind === "usage-healthy" ? 0 : 1);
   expect(f.request.run).toHaveBeenCalledTimes(kind === "usage-healthy" ? 1 : 2);
