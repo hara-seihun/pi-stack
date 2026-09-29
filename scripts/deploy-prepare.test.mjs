@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -96,6 +97,73 @@ printf '%s\\n' '${writeLoadState}'`);
       assert.equal(existsSync(join(f.directory, ".pi-write")), false);
     }
     assert.equal(existsSync(destination), false);
+  } finally { f.close(); }
+});
+
+test("Write resumes both model downloads, reuses pinned copies, and keeps weights across dependency changes", () => {
+  const f = fixture();
+  try {
+    copyFileSync(join(root, "deploy/write-engine"), join(f.repo, "deploy/write-engine"));
+    const source = join(f.repo, "apps/write/engine");
+    mkdirSync(join(source, "cleanup"), { recursive: true });
+    const bytes = Buffer.from("fixture pinned model bytes\n".repeat(8));
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const payload = join(f.directory, "payload");
+    writeFileSync(payload, bytes);
+    writeFileSync(join(source, "requirements.lock"), "first dependencies\n");
+    writeFileSync(join(source, "server.py"), "# fixture\n");
+    writeFileSync(join(source, "convert_fp32.py"), 'import os\nwith open(os.environ["TRACE"], "a") as f: f.write("convert\\n")\n');
+    writeFileSync(join(source, "model.json"), JSON.stringify({
+      files: { "encoder.onnx": digest }, repository: "fixture", revision: "pin",
+      tokenizer_file: "tokenizer.json", tokenizer_repository: "fixture", tokenizer_revision: "pin", tokenizer_sha256: digest,
+    }));
+    writeFileSync(join(source, "cleanup/model.json"), JSON.stringify({ release: "https://fixture.invalid", files: { "joint-f32.onnx": digest } }));
+    const store = join(f.directory, ".pi-write");
+    const cached = join(store, "weights-cached/shared");
+    mkdirSync(cached, { recursive: true });
+    writeFileSync(join(cached, "tokenizer.json"), bytes);
+    f.executable(join(f.bin, "uv"), `if [[ $1 == venv ]]; then
+  mkdir -p "\${@: -1}/bin"
+  ln -s "$(command -v python3)" "\${@: -1}/bin/python"
+fi`);
+    f.executable(join(f.bin, "sleep"), ":");
+    f.executable(join(f.bin, "curl"), `while (( $# )); do
+  if [[ $1 == -o ]]; then destination=$2; shift; fi
+  shift
+done
+size=0
+[[ ! -f $destination ]] || size=$(stat -c %s "$destination")
+printf '%s %s\\n' "$(basename "$destination")" "$size" >> "$TRACE"
+if (( size == 0 )); then
+  head -c 32 "$PAYLOAD" > "$destination"
+  printf '200'
+  exit 92
+fi
+tail -c +$((size + 1)) "$PAYLOAD" >> "$destination"
+printf '206'`);
+    f.commit();
+    const destination = join(f.directory, "write-engine");
+    const env = { PI_STACK_WRITE_ENGINE_DEST: destination, PI_STACK_WRITE_ENGINE_FORCE: "1", PAYLOAD: payload };
+    const first = f.run("write-engine", env);
+    assert.equal(first.status, 0, first.stderr);
+    const firstTree = realpathSync(destination);
+    const weights = realpathSync(join(destination, "model"));
+    const venv = realpathSync(join(destination, "venv"));
+    assert.deepEqual(readFileSync(join(weights, "encoder.onnx")), bytes);
+    assert.deepEqual(readFileSync(join(weights, "shared/tokenizer.json")), bytes);
+    assert.deepEqual(readFileSync(join(destination, "cleanup-model/joint-f32.onnx")), bytes);
+    const trace = readFileSync(f.env.TRACE, "utf8");
+    assert.equal(trace, "encoder.onnx.part 0\nencoder.onnx.part 32\nconvert\njoint-f32.onnx.part 0\njoint-f32.onnx.part 32\n");
+    writeFileSync(join(source, "requirements.lock"), "second dependencies\n");
+    f.commit();
+    const second = f.run("write-engine", env);
+    assert.equal(second.status, 0, second.stderr);
+    assert.notEqual(realpathSync(destination), firstTree);
+    assert.notEqual(realpathSync(join(destination, "venv")), venv);
+    assert.equal(realpathSync(join(destination, "model")), weights);
+    assert.equal(readFileSync(f.env.TRACE, "utf8"), trace, "dependency changes neither download nor convert weights again");
+    assert.equal(existsSync(join(firstTree, "ready")), true, "previous release remains selectable");
+    assert.equal(existsSync(join(firstTree, "venv/bin/python")), true, "previous dependencies remain available");
   } finally { f.close(); }
 });
 

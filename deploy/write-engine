@@ -11,24 +11,38 @@ if [[ $mode == prepare && ${PI_STACK_WRITE_ENGINE_FORCE:-0} != 1 ]] && [[ $(syst
   exit 0
 fi
 source_dir="$root/apps/write/engine"
-# The venv and 1.2 GB of weights are keyed only by the lock and model pins, so
-# a source change reinstalls a few Python files instead of refetching them.
+# The venv is keyed by the lock and the 1.2 GB of weights by the model pins and
+# their converter, so neither a source change nor a dependency change refetches
+# the weights. A download also reuses any already verified copy of a pinned file.
 mapfile -t sources < <(cd "$source_dir" && find . -name '*.py' ! -name 'test_*' | LC_ALL=C sort)
-environment_key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha256sum | cut -d' ' -f1)
+venv_key=$(sha256sum "$source_dir/requirements.lock" | cut -d' ' -f1)
+weights_key=$(cat "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha256sum | cut -d' ' -f1)
+environment_key=$(printf '%s\n%s\n' "$venv_key" "$weights_key" | sha256sum | cut -d' ' -f1)
 cleanup_manifest="$source_dir/cleanup/model.json"
 cleanup_key=$(sha256sum "$cleanup_manifest" | cut -d' ' -f1)
 key=$( { echo "$environment_key"; echo "$cleanup_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
 base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
 store="$(dirname "$base")/.pi-write"
-environment="$store/environment-$environment_key"
+environment="$store/venv-$venv_key"
+weights="$store/weights-$weights_key"
 cleanup_model="$store/cleanup-$cleanup_key"
 tree="$store/$key"
 if [[ ! -f "$tree/ready" && $mode == --select ]]; then
   echo "PiStack Write engine is not prepared at $tree; run deploy/prepare first" >&2
   exit 66
 fi
+fetch() { # URL DIGEST DESTINATION
+  local url=$1 digest=$2 destination=$3 existing
+  [[ -f "$destination" && $(sha256sum "$destination" | cut -d' ' -f1) == "$digest" ]] && return
+  install -d "$(dirname "$destination")"
+  for existing in "$store"/*/model/"${destination#"$weights"/}" "$store"/weights-*/"${destination#"$weights"/}"; do
+    [[ -f "$existing" && "$existing" != "$destination" ]] || continue
+    if [[ $(sha256sum "$existing" | cut -d' ' -f1) == "$digest" ]]; then cp --reflink=auto "$existing" "$destination.part" && mv "$destination.part" "$destination" && return; fi
+  done
+  pi_stack_download_artifact "$url" "$destination" "$digest"
+}
 if [[ ! -f "$environment/ready" ]]; then
-  command -v uv >/dev/null && command -v curl >/dev/null || { echo 'PiStack Write requires uv and curl' >&2; exit 1; }
+  command -v uv >/dev/null || { echo 'PiStack Write requires uv' >&2; exit 1; }
   pi_stack_as_root install -d -m 0755 "$store" "$environment"
   pi_stack_as_root chown "$(id -u):$(id -g)" "$environment"
   # uv's managed interpreter normally lives in the installing user's home, which
@@ -36,7 +50,14 @@ if [[ ! -f "$environment/ready" ]]; then
   export UV_PYTHON_INSTALL_DIR="$environment/python"
   [[ -x "$environment/venv/bin/python" ]] || uv venv --managed-python --python 3.12 "$environment/venv"
   uv pip sync --python "$environment/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
-  "$environment/venv/bin/python" - "$source_dir/model.json" > "$environment/model-files.tsv" <<'PY'
+  chmod -R a+rX "$environment"
+  touch "$environment/ready"
+fi
+if [[ ! -f "$weights/ready" ]]; then
+  command -v curl >/dev/null || { echo 'PiStack Write requires curl' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$store" "$weights"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$weights"
+  "$environment/venv/bin/python" - "$source_dir/model.json" > "$weights/files.tsv" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]))
 for path,digest in m['files'].items():
@@ -44,13 +65,11 @@ for path,digest in m['files'].items():
 print('shared/'+m['tokenizer_file'],m['tokenizer_file'],m['tokenizer_repository'],m['tokenizer_revision'],m['tokenizer_sha256'],sep='\t')
 PY
   while IFS=$'\t' read -r file source_file repository revision digest; do
-    destination="$environment/model/$file"
-    install -d "$(dirname "$destination")"
-    pi_stack_download_artifact "https://huggingface.co/$repository/resolve/$revision/$source_file" "$destination" "$digest"
-  done < "$environment/model-files.tsv"
-  "$environment/venv/bin/python" "$source_dir/convert_fp32.py" "$environment/model"
-  chmod -R a+rX "$environment"
-  touch "$environment/ready"
+    fetch "https://huggingface.co/$repository/resolve/$revision/$source_file" "$digest" "$weights/$file"
+  done < "$weights/files.tsv"
+  "$environment/venv/bin/python" "$source_dir/convert_fp32.py" "$weights"
+  chmod -R a+rX "$weights"
+  touch "$weights/ready"
 fi
 if [[ ! -f "$cleanup_model/ready" ]]; then
   command -v curl >/dev/null || { echo 'PiStack Write cleanup requires curl' >&2; exit 1; }
@@ -73,7 +92,7 @@ if [[ ! -f "$tree/ready" ]]; then
   pi_stack_as_root install -d -m 0755 "$tree"
   pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
   ln -sfn "$environment/venv" "$tree/venv"
-  ln -sfn "$environment/model" "$tree/model"
+  ln -sfn "$weights" "$tree/model"
   ln -sfn "$cleanup_model" "$tree/cleanup-model"
   for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
   chmod -R a+rX "$tree"
@@ -82,6 +101,28 @@ fi
 [[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" && -f "$tree/cleanup-model/joint-f32.onnx" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
 next="$base.next.$$"
 trap 'pi_stack_as_root rm -f "$next"' EXIT
+previous=$(readlink -f "$base" 2>/dev/null || true)
 pi_stack_as_root ln -s "$tree" "$next"
 pi_stack_as_root mv -Tf "$next" "$base"
 echo "PiStack Write engine ready: $key"
+# Keep the selected tree and the one it replaced (which the running unit may
+# still use, and which rollback selects), with everything they link to. Remove
+# every other store entry, so model and dependency changes do not accumulate.
+keep=()
+for selected in "$tree" "$previous"; do
+  [[ -n $selected && -d $selected ]] || continue
+  keep+=("$(readlink -f "$selected")")
+  for link in "$selected"/venv "$selected"/model "$selected"/cleanup-model; do
+    [[ -L $link ]] || continue
+    target=$(readlink -f "$link")
+    while [[ $(dirname "$target") != "$store" && $target != / ]]; do target=$(dirname "$target"); done
+    keep+=("$target")
+  done
+done
+# A running engine (or anything else) that maps files from an entry keeps it.
+while read -r used; do keep+=("$used"); done < <(pi_stack_as_root sh -c 'cat /proc/[0-9]*/maps 2>/dev/null' | grep -o "$store/[^/ ]*" | sort -u)
+for entry in "$store"/*; do
+  [[ -e $entry ]] || continue
+  printf '%s\n' "${keep[@]}" | grep -qxF "$(readlink -f "$entry")" && continue
+  pi_stack_as_root rm -rf -- "$entry"
+done
