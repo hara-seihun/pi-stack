@@ -6,6 +6,7 @@ import { API_CORS_HEADERS } from "../cors";
 import { MeetBrowser } from "./browser";
 import { meetIceServers } from "./config";
 import { addressesAgent } from "./mention";
+import { TranscriptHook } from "./transcript-hook";
 import type { MeetEnvelope, MeetParticipant, MeetSignal, MeetSnapshot, MeetThreadState, MeetJoined, MeetVoiceWake } from "./protocol";
 
 type Member = { participant: MeetParticipant; seen: number; messages: MeetEnvelope[]; frame: Buffer | null; frameAt: number };
@@ -17,6 +18,8 @@ type Room = {
   voiceMuted: boolean; voiceRevision: number; threads(): MeetThreadState[];
   /** Latest transcript line naming Kenan, and the platform turns that already produced one, so partial updates wake Voice once. */
   voiceWake: MeetVoiceWake | null; wokenTurns: Set<string>;
+  /** Final platform turns already handed to the host's transcript hook. */
+  hookedTurns: Set<string>;
   transcriptFlushRevision: number; flushes: Map<number, PendingFlush>;
   /** The meeting platform supplies speaker-labelled turns, so the host's mixed audio is not recognized locally. */
   platformTranscript: boolean;
@@ -49,7 +52,8 @@ export class MeetServer {
   readonly transcripts: MeetTranscriptStore;
   private readonly transcriber: MeetTranscriber;
   constructor(private readonly sessionExists: (id: string) => boolean, private readonly openBrowser = MeetBrowser.open, db?: Database,
-    private readonly threadActivity: (meetingId: string, sessionId: string) => MeetThreadState[] = () => []) {
+    private readonly threadActivity: (meetingId: string, sessionId: string) => MeetThreadState[] = () => [],
+    private readonly transcriptHook = new TranscriptHook()) {
     this.transcripts = new MeetTranscriptStore(db ?? new Database(":memory:"));
     this.transcriber = new MeetTranscriber(this.transcripts);
     this.timer = setInterval(() => {
@@ -63,7 +67,7 @@ export class MeetServer {
   private createRoom(id: string, sessionId: string, apiUrl: string, name: string, kind: Room["kind"] = "peer-to-peer", platformTranscript = false): MeetJoined {
     const participantId = kind === "external" ? "external-host" : crypto.randomUUID();
     const room: Room = { id, sessionId, apiUrl, kind, members: new Map(), speakers: new Map(), seq: 0,
-      browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0, voiceWake: null, wokenTurns: new Set(),
+      browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0, voiceWake: null, wokenTurns: new Set(), hookedTurns: new Set(),
       transcriptFlushRevision: 0, flushes: new Map(), platformTranscript, threads: () => this.threadActivity(id, sessionId) };
     const participant: MeetParticipant = { id: participantId, name: name.slice(0, 80), host: true };
     room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0 });
@@ -302,6 +306,12 @@ export class MeetServer {
         room.wokenTurns.add(body.id);
         room.voiceWake = { revision: (room.voiceWake?.revision ?? 0) + 1, turnId: body.id, speaker: body.speaker.trim().slice(0, 120),
           text: body.text.slice(0, 2_000), at: Date.now() };
+      }
+      if ((body.final ?? true) && !room.hookedTurns.has(body.id)) {
+        if (room.hookedTurns.size >= 1_000) room.hookedTurns.clear();
+        room.hookedTurns.add(body.id);
+        void this.transcriptHook.deliver({ roomId: room.id, sessionId: room.sessionId, id: body.id, speaker: body.speaker.trim().slice(0, 120),
+          speakerId: body.speakerId, text: body.text.slice(0, 2_000), startedAt: body.startedAt });
       }
       return json({ ok: true });
     }
