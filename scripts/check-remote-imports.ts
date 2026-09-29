@@ -8,6 +8,7 @@ const release = resolve(process.argv[2]);
 for (const resource of [
   "deploy/lib",
   "deploy/release-checkout",
+  "deploy/meeting-census",
   "deploy/smoke",
   "skills/livedev/SKILL.md",
   "server/voice/delegation-policy.md",

@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 const root = resolve(import.meta.dirname, "..");
 const releaseResources = [
-  "deploy/lib", "deploy/release-checkout", "deploy/smoke", "skills/livedev/SKILL.md", "server/voice/delegation-policy.md",
+  "deploy/lib", "deploy/release-checkout", "deploy/meeting-census", "deploy/smoke", "skills/livedev/SKILL.md", "server/voice/delegation-policy.md",
   "server/meet/transcriber.ts", "server/write.ts",
   "web/dist/index.html", "web/dist/meet.html", "web/dist/meet-adapter.js", "web/dist/voice.html", "web/dist/kenan.png",
   "shared/state.ts", "shared/value.ts",
@@ -20,7 +20,7 @@ function fixture() {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, text, { mode });
   };
-  for (const file of ["deploy/remote", "deploy/lib", "deploy/release-checkout", "deploy/smoke", "scripts/check-remote-imports.ts", "scripts/build-workspace.mjs"]) {
+  for (const file of ["deploy/remote", ...releaseResources.filter(path => path.startsWith("deploy/")), "scripts/check-remote-imports.ts", "scripts/build-workspace.mjs"]) {
     mkdirSync(dirname(join(repo, file)), { recursive: true });
     cpSync(join(root, file), join(repo, file));
   }
