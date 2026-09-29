@@ -49,7 +49,9 @@ test("a publication reserves the host across separate commands, until its own re
     assert.equal(f.reserve(operation, "another-publication").status, 75);
     assert.equal(JSON.parse(readFileSync(f.reservation)).requestId, request);
   }
+  writeFileSync(`${f.reservation}.next`, '{"requestId":');
   assert.equal(f.reserve("release").status, 0);
+  assert.equal(existsSync(`${f.reservation}.next`), false, "recovery removes interrupted temporary writes");
   assert.equal(f.reserve("release").status, 0, "release after a crash is idempotent");
   assert.equal(existsSync(f.reservation), false);
   assert.equal(f.check().status, 0);

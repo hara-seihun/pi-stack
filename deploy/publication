@@ -883,7 +883,7 @@ case "$operation" in
     "\${become[@]}" chmod 644 "$reservation.next"
     "\${become[@]}" mv -f "$reservation.next" "$reservation"
     ;;
-  release) "\${become[@]}" rm -f "$reservation" ;;
+  release) "\${become[@]}" rm -f "$reservation" "$reservation.next" ;;
   *) exit 64 ;;
 esac
 `.replaceAll("\\${", "${");
