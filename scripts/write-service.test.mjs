@@ -51,7 +51,7 @@ pi_stack_as_root() {
   };
 }
 
-for (const readyAt of [0, 11, 29]) {
+for (const readyAt of [0, 11, 18, 29]) {
   test(`Write accepts a healthy listener ready after ${readyAt} seconds without restarting again`, () => {
     const f = fixture();
     try {
