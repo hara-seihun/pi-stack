@@ -8,6 +8,7 @@ import time
 import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer
+from gpu_encoder import maybe_load
 
 BLANK = 1024
 LOG_FLOOR = math.log(2**-24)
@@ -33,6 +34,7 @@ class Nemotron:
         self.tokenizer = Tokenizer.from_file(str(model_dir / 'shared/tokenizer.json'))
         self.chunk_frames = json.loads((model_dir / 'config.json').read_text())['encoder']['chunk_mel_frames']
         self.chunk_samples = self.chunk_frames*160
+        self.gpu = maybe_load(Path(__file__).resolve().parent / 'gpu-model')
 
     def create_stream(self, dictionary=None):
         phrases = []
@@ -60,7 +62,10 @@ class Nemotron:
         window = np.pad(emphasised, (begin - lo, hi - end))
         frames = np.lib.stride_tricks.sliding_window_view(window, 512)[::160]
         power = np.abs(np.fft.rfft(frames*self.window, axis=-1))**2
-        return np.log(np.maximum(power@self.mel.T, 2**-24)).astype(np.float32)
+        mel = power@self.mel.T
+        # The native Transformers frontend adds the guard before log; the ONNX
+        # export clamps at the guard. Keep each encoder's training frontend.
+        return np.log(mel + 2**-24 if self.gpu else np.maximum(mel, 2**-24)).astype(np.float32)
 
 
 class Stream:
@@ -73,6 +78,9 @@ class Stream:
         self.cache_ch = np.zeros((1, 24, 70, 1024), np.float32)
         self.cache_t = np.zeros((1, 24, 1024, 8), np.float32)
         self.cache_n = np.zeros(1, np.int64)
+        self.gpu_cache = None
+        self.gpu_padding = None
+        self.is_speculative = False
         self.state1 = np.zeros((2, 1, 640), np.float32)
         self.state2 = np.zeros((2, 1, 640), np.float32)
         self.last = BLANK
@@ -81,12 +89,16 @@ class Stream:
         self.alternative_pieces = []
         self.token_times = []
         self.timings = []
+        self.stage_timings = []
 
     def accept(self, samples):
         self.audio = np.concatenate((self.audio, samples))
         while len(self.audio) - self.samples_decoded >= self.model.chunk_samples:
-            self._step(self.model.chunk_frames)
-            self.samples_decoded += self.model.chunk_samples
+            # A GPU call has a fixed launch overhead. If a congested decoder
+            # has accumulated audio, encode up to four chunks in one call.
+            chunks = min(4, (len(self.audio) - self.samples_decoded) // self.model.chunk_samples) if self.model.gpu else 1
+            self._step(chunks * self.model.chunk_frames)
+            self.samples_decoded += chunks * self.model.chunk_samples
 
     def fork(self):
         duplicate = object.__new__(Stream)
@@ -98,6 +110,9 @@ class Stream:
         duplicate.cache_ch = self.cache_ch.copy()
         duplicate.cache_t = self.cache_t.copy()
         duplicate.cache_n = self.cache_n.copy()
+        duplicate.gpu_cache = self.model.gpu.fork(self.gpu_cache) if self.model.gpu else None
+        duplicate.gpu_padding = self.model.gpu.fork(self.gpu_padding) if self.model.gpu else None
+        duplicate.is_speculative = True
         duplicate.state1 = self.state1.copy()
         duplicate.state2 = self.state2.copy()
         duplicate.last = self.last
@@ -106,6 +121,7 @@ class Stream:
         duplicate.alternative_pieces = self.alternative_pieces.copy()
         duplicate.token_times = self.token_times.copy()
         duplicate.timings = self.timings.copy()
+        duplicate.stage_timings = self.stage_timings.copy()
         return duplicate
 
     def finish(self, silence_samples=3200):
@@ -113,27 +129,37 @@ class Stream:
             self.audio = np.concatenate((self.audio, np.zeros(silence_samples, np.float32)))
         if len(self.audio) > self.samples_decoded:
             while len(self.audio) > self.samples_decoded:
-                self._step(math.ceil(min(len(self.audio)-self.samples_decoded, self.model.chunk_samples) / 160))
-                self.samples_decoded += self.model.chunk_samples
+                chunks = min(4, math.ceil((len(self.audio)-self.samples_decoded)/self.model.chunk_samples)) if self.model.gpu else 1
+                self._step(math.ceil(min(len(self.audio)-self.samples_decoded, chunks*self.model.chunk_samples) / 160))
+                self.samples_decoded += chunks * self.model.chunk_samples
         return self.result()
 
     def _step(self, valid_frames):
         began = time.perf_counter()
         pos = self.samples_decoded // 160
         first = max(0, pos-9)
-        features = self.model.features(self.audio[:min(len(self.audio), self.samples_decoded + self.model.chunk_samples)],
-                                       first, pos + self.model.chunk_frames - first)
+        step_frames = (math.ceil(valid_frames / self.model.chunk_frames) * self.model.chunk_frames
+                       if self.model.gpu else self.model.chunk_frames)
+        features = self.model.features(self.audio[:min(len(self.audio), self.samples_decoded + step_frames*160)],
+                                       first, pos + step_frames - first)
         previous = features[:pos-first]
         previous = np.pad(previous, ((9-len(previous), 0), (0, 0)), constant_values=LOG_FLOOR)
-        segment = features[pos-first:pos-first+self.model.chunk_frames]
-        segment = np.pad(segment, ((0, self.model.chunk_frames-len(segment)), (0, 0)), constant_values=LOG_FLOOR)
-        encoded, lengths, self.cache_ch, self.cache_t, self.cache_n = self.model.encoder.run(None, {
-            'audio_signal': np.concatenate((previous, segment)).T[None],
-            'length': np.array([self.model.chunk_frames+9], np.int64),
-            'cache_last_channel': self.cache_ch,
-            'cache_last_time': self.cache_t,
-            'cache_last_channel_len': self.cache_n,
-        })
+        segment = features[pos-first:pos-first+step_frames]
+        segment = np.pad(segment, ((0, step_frames-len(segment)), (0, 0)), constant_values=LOG_FLOOR)
+        feature_ms = (time.perf_counter()-began)*1000
+        if self.model.gpu:
+            encoded, self.gpu_cache, self.gpu_padding, gpu_metrics = self.model.gpu.step(
+                segment, self.gpu_cache, self.gpu_padding, speculative=self.is_speculative)
+            lengths = (encoded.shape[-1],)
+        else:
+            encoded, lengths, self.cache_ch, self.cache_t, self.cache_n = self.model.encoder.run(None, {
+                'audio_signal': np.concatenate((previous, segment)).T[None],
+                'length': np.array([self.model.chunk_frames+9], np.int64),
+                'cache_last_channel': self.cache_ch,
+                'cache_last_time': self.cache_t,
+                'cache_last_channel_len': self.cache_n,
+            })
+        encoded_at = time.perf_counter()
         for frame in range(min(int(lengths[0]), max(1, math.ceil(valid_frames/8)))):
             for _ in range(10):
                 logits, _, next1, next2 = self.model.decoder.run(None, {
@@ -164,7 +190,13 @@ class Stream:
                 self.token_times.append((self.samples_decoded / 16000) + frame*0.08)
                 self.last = token
                 self.state1, self.state2 = next1, next2
-        self.timings.append((time.perf_counter()-began)*1000)
+        completed = time.perf_counter()
+        self.timings.append((completed-began)*1000)
+        self.stage_timings.append({'featureMs': feature_ms,
+                                   'gpuWaitMs': gpu_metrics[0] if self.model.gpu else 0,
+                                   'gpuEncodeMs': gpu_metrics[1] if self.model.gpu else 0,
+                                   'jointMs': (completed-encoded_at)*1000,
+                                   'frames': step_frames})
 
     def result(self):
         words = []
