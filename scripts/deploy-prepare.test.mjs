@@ -72,9 +72,13 @@ printf 'discovery\\n' >> "$TRACE"
 printf '%s\\n' '${writeLoadState}'`);
     f.executable(join(f.bin, "uv"), 'printf "uv\\n" >> "$TRACE"; exit 23');
     f.executable(join(f.bin, "curl"), 'echo "fixture must not download weights" >&2; exit 64');
-    const source = join(f.repo, "apps/write/engine");
-    mkdirSync(join(source, "cleanup"), { recursive: true });
-    for (const file of ["requirements.lock", "model.json", "convert_fp32.py", "server.py", "cleanup/model.json"]) writeFileSync(join(source, file), "\n");
+    const sources = spawnSync("git", ["-C", root, "ls-files", "-z", "--", "apps/write/engine"], { encoding: "utf8" });
+    assert.equal(sources.status, 0, sources.stderr);
+    assert.notEqual(sources.stdout, "", "the fixture needs the tracked Write engine inputs");
+    for (const file of sources.stdout.split("\0").filter(Boolean)) {
+      mkdirSync(dirname(join(f.repo, file)), { recursive: true });
+      copyFileSync(join(root, file), join(f.repo, file));
+    }
     f.commit();
     const destination = join(f.directory, "write-engine");
     const result = f.run("prepare", { PI_STACK_WRITE_ENGINE_DEST: destination, PI_STACK_WRITE_ENGINE_FORCE: "0" });
