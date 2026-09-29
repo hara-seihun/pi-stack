@@ -14,16 +14,16 @@ export default async function localModels(pi) {
   if (manifest.missing) return;
   const ready = [];
   const reserved = [];
-  const down = [];
-  for (const engine of manifest.engines) {
+  const down = manifest.engines.filter((engine) => !engine.publish).map((engine) => engine.id);
+  for (const engine of manifest.engines.filter((engine) => engine.publish)) {
     const state = await ensureEngine(engine, { environment, log });
     if (state.ready) { ready.push(applyAdvertised(engine, await listModels(engine.baseUrl))); if (state.launched) log(`${engine.id} is up (${state.detail})`); }
     // A reservation is a pause somebody else is holding, not a broken engine: keep the models in the
     // catalog and registered so the picker does not lose them, and let the request fail while it lasts.
     else if (state.reserved) { reserved.push(engine); log(`${engine.id} ${state.detail}; not starting it`); }
-    else { down.push(engine); log(`${engine.id} unavailable: ${state.detail}`); }
+    else { down.push(engine.id); log(`${engine.id} unavailable: ${state.detail}`); }
   }
   for (const engine of [...ready, ...reserved]) pi.registerProvider(engine.id, providerConfig(engine));
-  try { await syncCatalog([...ready, ...reserved], { environment, stale: down.map((engine) => engine.id) }); }
+  try { await syncCatalog([...ready, ...reserved], { environment, stale: down }); }
   catch (error) { log(`catalog update failed: ${error.message}`); }
 }

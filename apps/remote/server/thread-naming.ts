@@ -11,6 +11,7 @@ export const LOCAL_THREAD_NAMING_INSTRUCTION = "Title this chat in 1-3 words. Ou
 export const LOCAL_THREAD_NAMING_FIRST_CHARS = 600;
 export const LOCAL_THREAD_NAMING_RECENT_CHARS = 300;
 export const LOCAL_THREAD_NAMING_MAX_TOKENS = 16;
+export const LOCAL_THREAD_NAMING_MAX_BYTES = 1400;
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ThreadNamingSelection =
@@ -51,7 +52,16 @@ export function localNamingPrompt(messages: NamingMessage[]): string {
   const opening = first >= 0 ? messages[first]! : messages[0];
   if (!opening) return "";
   const recent = messages.slice(Math.max(first + 1, messages.length - 2)).filter((message) => message !== opening);
-  return [line(opening, LOCAL_THREAD_NAMING_FIRST_CHARS), ...recent.map((message) => line(message, LOCAL_THREAD_NAMING_RECENT_CHARS))].join("\n");
+  const prompt = [line(opening, LOCAL_THREAD_NAMING_FIRST_CHARS), ...recent.map((message) => line(message, LOCAL_THREAD_NAMING_RECENT_CHARS))].join("\n");
+  let bytes = 0;
+  let result = "";
+  for (const character of prompt) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > LOCAL_THREAD_NAMING_MAX_BYTES) break;
+    result += character;
+    bytes += size;
+  }
+  return result;
 }
 
 /** Oldest-first messages become the completion prompt. */

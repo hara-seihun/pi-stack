@@ -24,6 +24,7 @@ export function parseManifest(text) {
     if (ids.has(engine.id)) fail(`repeated engine id ${engine.id}`);
     ids.add(engine.id);
     if (typeof engine.baseUrl !== "string" || !/^https?:\/\//.test(engine.baseUrl)) fail(`${where}.baseUrl must be an http(s) URL`);
+    if (engine.publish !== undefined && typeof engine.publish !== "boolean") fail(`${where}.publish must be boolean`);
     if (!Array.isArray(engine.models) || engine.models.length === 0) fail(`${where}.models must list at least one model`);
     const models = engine.models.map((model, mi) => {
       if (typeof model?.id !== "string" || !model.id) fail(`${where}.models[${mi}].id is required`);
@@ -54,6 +55,7 @@ export function parseManifest(text) {
     }
     return {
       id: engine.id,
+      publish: engine.publish !== false,
       name: typeof engine.name === "string" ? engine.name : engine.id,
       baseUrl: engine.baseUrl.replace(/\/+$/u, ""),
       reservation: parseReservation(engine.reservation, fail, where),
