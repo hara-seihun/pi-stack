@@ -46,14 +46,17 @@ class OpusPacketTest(unittest.TestCase):
 
 
 class FakeStream:
-    def __init__(self, delay=0.0):
-        self.audio = []; self.delay = delay; self.samples_decoded = 0; self.timings = []; self.accepts = 0
+    def __init__(self, delay=0.0, finish_delay=0.0):
+        self.audio = []; self.delay = delay; self.finish_delay = finish_delay
+        self.samples_decoded = 0; self.timings = []; self.accepts = 0
     def accept(self, samples):
         import time; time.sleep(self.delay)
         self.audio.extend(samples); self.samples_decoded = len(self.audio); self.accepts += 1
     def result(self): return {'words': []}
     def fork(self): return self
-    def finish(self, silence_samples=3200): return {'words': [], 'text': ''}
+    def finish(self, silence_samples=3200):
+        import time; time.sleep(self.finish_delay)
+        return {'words': [], 'text': ''}
 
 
 class EngineProtocolTest(unittest.IsolatedAsyncioTestCase):
@@ -88,6 +91,68 @@ class EngineProtocolTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DualBackendTest(unittest.IsolatedAsyncioTestCase):
+    def test_cpu_shadow_only_when_gpu_busy(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import time
+        from server import Engine
+        gpu = SimpleNamespace(busy_until=0)
+        with patch('pathlib.Path.read_text', return_value='0'):
+            self.assertFalse(Engine.cpu_shadow_needed(gpu))
+        with patch('pathlib.Path.read_text', return_value='94'):
+            self.assertTrue(Engine.cpu_shadow_needed(gpu))
+        gpu.busy_until = time.monotonic()+1
+        with patch('pathlib.Path.read_text', return_value='0'):
+            self.assertTrue(Engine.cpu_shadow_needed(gpu))
+
+    async def test_retry_promotes_future_dictations_without_mutating_cpu_streams(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from server import Engine
+        engine = Engine.__new__(Engine)
+        engine.model_dir = 'unused'
+        engine.GPU_RETRY_SECONDS = .001
+        original = SimpleNamespace(gpu=None)
+        engine.recognizer = original
+        engine.cpu_recognizer = None
+        new_gpu = object()
+        with patch.dict('os.environ', {'PI_STACK_WRITE_DEVICE':'auto'}), patch('server.maybe_load', return_value=new_gpu), patch('server.Nemotron', return_value=SimpleNamespace(gpu=None)):
+            await engine.promote_when_available()
+        self.assertIsNone(original.gpu)
+        self.assertIs(engine.recognizer.gpu, new_gpu)
+        self.assertIsNot(engine.recognizer, original)
+        self.assertIsNotNone(engine.cpu_recognizer)
+
+    async def test_cpu_shadow_wins_while_gpu_step_is_busy(self):
+        from types import SimpleNamespace
+        import time
+        from websockets.asyncio.server import serve
+        from websockets.asyncio.client import connect
+        from server import Engine
+        engine = Engine.__new__(Engine)
+        gpu = FakeStream(delay=.15, finish_delay=.15)
+        cpu = FakeStream()
+        engine.recognizer = SimpleNamespace(create_stream=lambda dictionary: gpu)
+        engine.cpu_recognizer = SimpleNamespace(create_stream=lambda dictionary: cpu)
+        engine.tagger = None
+        engine.slots = asyncio.Semaphore(2)
+        engine.cpu_slots = asyncio.Semaphore(2)
+        async with serve(engine.handle, '127.0.0.1', 0) as listener:
+            port = listener.sockets[0].getsockname()[1]
+            async with connect(f'ws://127.0.0.1:{port}') as socket:
+                await socket.send('{"type":"start", "dictionary":{"words":[]}}')
+                await socket.send(b'\x10\x00'*320)
+                began = time.perf_counter()
+                await socket.send('{"type":"finish"}')
+                while (reply := json.loads(await socket.recv()))['type'] == 'partial':
+                    pass
+                self.assertEqual(reply['type'], 'final')
+                self.assertEqual(reply['timing']['encoder'], 'cpu')
+                self.assertLess(time.perf_counter()-began, .1)
+        self.assertEqual(len(cpu.audio), 320)
 
 
 class SlowStepTest(unittest.IsolatedAsyncioTestCase):

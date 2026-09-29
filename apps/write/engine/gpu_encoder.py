@@ -36,12 +36,18 @@ class GpuEncoder:
             if not torch.cuda.is_available():
                 raise RuntimeError('ROCm device unavailable')
             self.torch = torch
+            self.busy_until = 0.0
             self.gate = threading.Condition()
             self.running = False
             self.waiting_live = 0
             self.model = NemotronAsrStreamingForRNNT.from_pretrained(
                 str(directory), local_files_only=True, low_cpu_mem_usage=True,
                 torch_dtype=torch.float16).eval().to('cuda')
+            # HIP maps this to the interactive priority queue; it cannot
+            # preempt a peer's already-running kernel, so the CPU shadow races
+            # the tail whenever the GPU is occupied.
+            self.stream = torch.cuda.Stream(priority=-1)
+            self.stream.wait_stream(torch.cuda.default_stream())
             # ROCm initializes kernels lazily. Paying that cost on the first
             # dictation once caused a 4.3-second finalization backlog.
             silent = np.full((16, 128), np.log(2**-24), np.float32)
@@ -50,6 +56,7 @@ class GpuEncoder:
                 _, cache, padding, _ = self.step(silent, cache, padding)
             for chunks in (2, 3, 4):
                 self.step(np.tile(silent, (chunks, 1)), cache, padding)
+            self.busy_until = 0.0  # first-use kernels are not co-tenant pressure
             LOG.info('Write native GPU encoder warmed, allocatedMiB=%.0f',
                      torch.cuda.memory_allocated() / 1024**2)
         except BaseException:
@@ -79,13 +86,15 @@ class GpuEncoder:
             torch = self.torch
             began = time.perf_counter()
             wait_ms = (began - queued)*1000
-            with torch.inference_mode():
+            with torch.inference_mode(), torch.cuda.stream(self.stream):
                 x = torch.as_tensor(np.ascontiguousarray(mel[None]), device='cuda', dtype=torch.float16)
                 out = self.model.encoder(x, past_key_values=cache,
                                          padding_cache=padding, use_cache=True,
                                          num_lookahead_tokens=1)
                 encoded = out.last_hidden_state.float().cpu().numpy().transpose(0, 2, 1)
             elapsed = (time.perf_counter() - began)*1000
+            if elapsed > 100 or wait_ms > 100:
+                self.busy_until = time.monotonic() + 30
             if elapsed > 100:
                 LOG.warning('Write GPU encoder slow step melFrames=%d elapsedMs=%.1f', len(mel), elapsed)
             return encoded, out.past_key_values, out.padding_cache, (round(wait_ms, 2), round(elapsed, 2))
@@ -103,6 +112,12 @@ def maybe_load(directory):
         return None
     try:
         return GpuEncoder(Path(directory))
+    except RuntimeError as error:
+        if str(error).startswith('GPU residency denied: Busy('):
+            LOG.info('Write GPU busy; serving CPU until admission is available: %s', error)
+        else:
+            LOG.exception('Write GPU initialization failed; using CPU encoder')
+        return None
     except Exception:
         LOG.exception('Write GPU initialization failed; using CPU encoder')
         return None

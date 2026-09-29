@@ -1,6 +1,7 @@
 """Resident English streaming dictation on a loopback WebSocket."""
 import argparse
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from websockets.exceptions import ConnectionClosed
 from cleanup import IncrementalCleaner
 from cleanup.tagger import JointOnnxTagger
 from nemotron import Nemotron
+from gpu_encoder import maybe_load
 from opus import OpusDecoder
 
 LOG = logging.getLogger(__name__)
@@ -33,18 +35,63 @@ class Engine:
     PARTIAL_INTERVAL = 0.1
     SPECULATE_AFTER_SILENCE = 0.12
     IMMEDIATE_PADDING = 1600
+    GPU_RETRY_SECONDS = 20
 
     def __init__(self, model_dir: Path, threads=4, streams=4, cleanup_dir: Path | None = None):
+        self.model_dir = model_dir
         self.recognizer = Nemotron(model_dir, threads)
+        # A separate two-thread ORT pool keeps the CPU shadow warm without
+        # oversubscribing the four-thread GPU service's dormant CPU encoder.
+        self.cpu_recognizer = Nemotron(model_dir, threads=2, enable_gpu=False) if self.recognizer.gpu else None
+        self.cpu_slots = asyncio.Semaphore(2)
         self.tagger = JointOnnxTagger(cleanup_dir) if cleanup_dir is not None else None
         self.slots = asyncio.Semaphore(streams)
+
+    async def promote_when_available(self):
+        """Transient GPU admission denial must not pin the daemon to CPU forever.
+
+        Replace the model *object*, not its gpu field: existing CPU dictations
+        retain their independent cache representation until their sockets close.
+        """
+        if os.getenv('PI_STACK_WRITE_DEVICE', 'cpu') not in ('auto', 'gpu'):
+            return
+        while self.recognizer.gpu is None:
+            await asyncio.sleep(self.GPU_RETRY_SECONDS)
+            gpu = await asyncio.to_thread(maybe_load, Path(__file__).resolve().parent/'gpu-model')
+            if gpu is None:
+                continue
+            try:
+                shadow = await asyncio.to_thread(Nemotron, self.model_dir, 2, False)
+            except Exception:
+                LOG.exception('Write CPU shadow pool failed to load; sharing the existing CPU pool')
+                shadow = self.recognizer
+            updated = copy.copy(self.recognizer)
+            updated.gpu = gpu
+            self.cpu_recognizer, self.recognizer = shadow, updated
+            LOG.info('Write GPU admitted after CPU fallback; future dictations use dual encoder')
+
+    @staticmethod
+    def cpu_shadow_needed(gpu):
+        if gpu is None:
+            return False
+        try:
+            busy = int(Path('/sys/class/drm/card0/device/gpu_busy_percent').read_text())
+        except (OSError, ValueError):
+            busy = 0
+        return busy >= 75 or time.monotonic() < gpu.busy_until
 
     async def handle(self, socket):
         connected_at = time.perf_counter()
         state = {'last_audio_at': None, 'samples': 0, 'format': 'pcm'}
         pending = []
         arrived = asyncio.Event()
+        cpu_pending = []
+        cpu_arrived = asyncio.Event()
         stream = cleaner = decoder_task = None
+        cpu_stream = cpu_cleaner = cpu_task = None
+        cpu_live_step = cpu_clean_step = None
+        cpu_committed = []
+        cpu_cleaned = [0]
         committed = []
         cleaned = [0]          # words already handed to the incremental cleaner
         voiced_at = 0          # samples received when the last voiced frame ended
@@ -70,6 +117,31 @@ class Engine:
             new_words = stable[len(committed):]
             committed = stable
             return result, new_words
+
+        async def cpu_advance():
+            nonlocal cpu_live_step, cpu_clean_step, cpu_committed
+            while cpu_pending:
+                batch = np.concatenate(cpu_pending); cpu_pending.clear()
+                async with self.cpu_slots:
+                    cpu_live_step = asyncio.ensure_future(asyncio.to_thread(cpu_stream.accept, batch))
+                    await asyncio.shield(cpu_live_step)
+            result = cpu_stream.result()
+            stable = result['words'][:-2]
+            if [w['w'] for w in stable[:len(cpu_committed)]] != [w['w'] for w in cpu_committed]:
+                raise RuntimeError('CPU Nemotron changed an emitted token')
+            new_words = stable[len(cpu_committed):]
+            cpu_committed = stable
+            if new_words:
+                cpu_cleaned[0] += len(new_words)
+                cpu_clean_step = asyncio.ensure_future(asyncio.to_thread(cpu_cleaner.update, new_words))
+                await asyncio.shield(cpu_clean_step)
+
+        async def cpu_decode():
+            while not closing:
+                await cpu_arrived.wait(); cpu_arrived.clear()
+                if closing:
+                    return
+                await cpu_advance()
 
         async def decode():
             nonlocal speculative, speculating_at
@@ -129,6 +201,9 @@ class Engine:
                         speculative = None
                     pending.append(samples)
                     arrived.set()
+                    if cpu_stream is not None:
+                        cpu_pending.append(samples)
+                        cpu_arrived.set()
                     continue
                 command = json.loads(frame)
                 kind = command.get('type')
@@ -143,6 +218,11 @@ class Engine:
                     stream = self.recognizer.create_stream(dictionary)
                     cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger)
                     decoder_task = asyncio.create_task(decode())
+                    gpu = getattr(getattr(stream, 'model', None), 'gpu', None)
+                    if getattr(self, 'cpu_recognizer', None) is not None and (gpu is None or self.cpu_shadow_needed(gpu)):
+                        cpu_stream = self.cpu_recognizer.create_stream(dictionary)
+                        cpu_cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger)
+                        cpu_task = asyncio.create_task(cpu_decode())
                 elif kind == 'cancel' and stream is not None:
                     return
                 elif kind == 'finish' and stream is not None:
@@ -150,45 +230,104 @@ class Engine:
                     gap = state['last_audio_at']
                     received = state['samples']
                     behind = (received - stream.samples_decoded) / 16000
+                    cpu_behind = (received - cpu_stream.samples_decoded) / 16000 if cpu_stream is not None else 0
                     closing = True; arrived.set()
                     hit = speculative is not None and speculative[0] <= received and voiced_at <= speculative[0]
                     # Never wait for a speculation: cancel the decoder. A hit already
                     # holds the cleaned final; otherwise let at most the one live
                     # step already running complete, then take over the stream.
                     decoder_task.cancel()
+                    if cpu_task is not None:
+                        cpu_task.cancel(); cpu_arrived.set()
                     waited_at = advanced_at = tail_at = cleaned_at = began
-                    if hit:
-                        result, final = speculative[1], speculative[2]
-                    else:
+                    winner = 'speculative' if hit else ('gpu' if getattr(getattr(stream, 'model', None), 'gpu', None) else 'cpu')
+                    cpu_phases = [began, began, began, began, began]
+
+                    async def gpu_finish():
+                        nonlocal waited_at, advanced_at, tail_at, cleaned_at
                         if live_step is not None and not live_step.done():
                             await live_step
                         waited_at = time.perf_counter()
                         await advance()
                         advanced_at = time.perf_counter()
-                        # No speculation covers the tail (✓ while still speaking):
-                        # 100 ms of silence padding instead of 200 keeps this to
-                        # two encoder steps (+0.7 WER points on the last words).
+                        # Keep 100 ms of additional silence to resolve terminal
+                        # wordpieces (removing it lost "default" as "def").
                         async with self.slots:
-                            result = await asyncio.to_thread(stream.finish, self.IMMEDIATE_PADDING)
+                            recognized = await asyncio.to_thread(stream.finish, self.IMMEDIATE_PADDING)
                         tail_at = time.perf_counter()
                         if clean_step is not None and not clean_step.done():
                             await clean_step
-                        final = await asyncio.to_thread(cleaner.finish, result['words'][cleaned[0]:])
+                        cleaned_result = await asyncio.to_thread(cleaner.finish, recognized['words'][cleaned[0]:])
                         cleaned_at = time.perf_counter()
+                        return recognized, cleaned_result
+
+                    async def cpu_finish():
+                        if cpu_live_step is not None and not cpu_live_step.done():
+                            await cpu_live_step
+                        if cpu_clean_step is not None and not cpu_clean_step.done():
+                            await cpu_clean_step
+                        cpu_phases[1] = time.perf_counter()
+                        await cpu_advance()
+                        cpu_phases[2] = time.perf_counter()
+                        async with self.cpu_slots:
+                            recognized = await asyncio.to_thread(cpu_stream.finish, self.IMMEDIATE_PADDING)
+                        cpu_phases[3] = time.perf_counter()
+                        if cpu_clean_step is not None and not cpu_clean_step.done():
+                            await cpu_clean_step
+                        cleaned_result = await asyncio.to_thread(cpu_cleaner.finish, recognized['words'][cpu_cleaned[0]:])
+                        cpu_phases[4] = time.perf_counter()
+                        return recognized, cleaned_result
+
+                    if hit:
+                        result, final = speculative[1], speculative[2]
+                    else:
+                        tasks = {asyncio.create_task(gpu_finish()): 'gpu'}
+                        if cpu_stream is not None:
+                            tasks[asyncio.create_task(cpu_finish())] = 'cpu'
+                        while tasks:
+                            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                            chosen = False
+                            for task in done:
+                                source = tasks.pop(task)
+                                try:
+                                    result, final = task.result()
+                                except Exception:
+                                    LOG.exception('Write %s finalization failed; trying other encoder', source)
+                                    continue
+                                winner, chosen = source, True
+                                break
+                            if chosen:
+                                for task in tasks:
+                                    task.cancel()
+                                break
+                        else:
+                            raise RuntimeError('Both Write encoders failed to finish')
+                    if winner == 'cpu':
+                        waited_at = advanced_at = tail_at = cleaned_at = began
+                    else:
+                        # A losing CPU task may have been canceled halfway
+                        # through a phase; do not report negative durations.
+                        cpu_phases = [began]*5
                     elapsed = (time.perf_counter() - began)*1000
-                    await socket.send(json.dumps({'type': 'final', 'text': final['text'], 'raw': result['text'], 'edits': final['edits'], 'words': result['words'], 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit}}))
+                    await socket.send(json.dumps({'type': 'final', 'text': final['text'], 'raw': result['text'], 'edits': final['edits'], 'words': result['words'], 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit, 'encoder': winner}}))
                     steps = sorted(stream.timings) or [0.0]
                     stages = getattr(stream, 'stage_timings', ())
                     gpu_wait = max((s['gpuWaitMs'] for s in stages), default=0)
                     gpu_encode = max((s['gpuEncodeMs'] for s in stages), default=0)
                     joint = max((s['jointMs'] for s in stages), default=0)
-                    LOG.info('write dictation audio=%s audioSeconds=%.3f connectionSeconds=%.3f lastAudioToFinishMs=%s behindSeconds=%.3f stepP50Ms=%.1f stepMaxMs=%.1f flushMs=%.2f speculative=%s finishWaitMs=%.1f finishAdvanceMs=%.1f finishTailMs=%.1f finishCleanMs=%.1f gpuWaitMaxMs=%.1f gpuEncodeMaxMs=%.1f jointMaxMs=%.1f',
+                    LOG.info('write dictation audio=%s audioSeconds=%.3f connectionSeconds=%.3f lastAudioToFinishMs=%s behindSeconds=%.3f stepP50Ms=%.1f stepMaxMs=%.1f flushMs=%.2f speculative=%s finishWaitMs=%.1f finishAdvanceMs=%.1f finishTailMs=%.1f finishCleanMs=%.1f gpuWaitMaxMs=%.1f gpuEncodeMaxMs=%.1f jointMaxMs=%.1f encoder=%s cpuBehindSeconds=%.3f cpuStepP50Ms=%.1f cpuStepMaxMs=%.1f cpuWaitMs=%.1f cpuAdvanceMs=%.1f cpuTailMs=%.1f cpuCleanMs=%.1f',
                              state['format'], received/16000, (time.perf_counter()-connected_at),
                              'none' if gap is None else f'{(began-gap)*1000:.2f}', behind,
                              steps[len(steps)//2], steps[-1], elapsed, hit,
                              (waited_at-began)*1000, (advanced_at-waited_at)*1000,
                              (tail_at-advanced_at)*1000, (cleaned_at-tail_at)*1000,
-                             gpu_wait, gpu_encode, joint)
+                             gpu_wait, gpu_encode, joint, winner, cpu_behind,
+                             sorted(cpu_stream.timings)[len(cpu_stream.timings)//2] if cpu_stream and cpu_stream.timings else 0,
+                             max(cpu_stream.timings) if cpu_stream and cpu_stream.timings else 0,
+                             (cpu_phases[1]-cpu_phases[0])*1000,
+                             (cpu_phases[2]-cpu_phases[1])*1000,
+                             (cpu_phases[3]-cpu_phases[2])*1000,
+                             (cpu_phases[4]-cpu_phases[3])*1000)
                     return
                 else:
                     raise ValueError('invalid command sequence')
@@ -203,6 +342,8 @@ class Engine:
             closing = True
             if decoder_task is not None and not decoder_task.done():
                 decoder_task.cancel()
+            if cpu_task is not None and not cpu_task.done():
+                cpu_task.cancel()
 
 
 async def main():
@@ -217,6 +358,7 @@ async def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     engine = Engine(args.model, args.threads, args.streams, args.cleanup_model)
+    asyncio.create_task(engine.promote_when_available())
     async with serve(engine.handle, args.host, args.port, max_size=4*1024*1024):
         LOG.info('Write ASR listening at %s:%d', args.host, args.port)
         await asyncio.Future()

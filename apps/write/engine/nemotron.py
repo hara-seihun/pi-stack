@@ -15,7 +15,7 @@ LOG_FLOOR = math.log(2**-24)
 
 
 class Nemotron:
-    def __init__(self, model_dir: Path, threads=6):
+    def __init__(self, model_dir: Path, threads=6, enable_gpu=True):
         def options(count):
             opts = ort.SessionOptions()
             opts.intra_op_num_threads = count
@@ -34,7 +34,7 @@ class Nemotron:
         self.tokenizer = Tokenizer.from_file(str(model_dir / 'shared/tokenizer.json'))
         self.chunk_frames = json.loads((model_dir / 'config.json').read_text())['encoder']['chunk_mel_frames']
         self.chunk_samples = self.chunk_frames*160
-        self.gpu = maybe_load(Path(__file__).resolve().parent / 'gpu-model')
+        self.gpu = maybe_load(Path(__file__).resolve().parent / 'gpu-model') if enable_gpu else None
 
     def create_stream(self, dictionary=None):
         phrases = []
