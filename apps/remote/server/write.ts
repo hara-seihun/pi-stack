@@ -1,4 +1,11 @@
 import type { Database } from "bun:sqlite";
+import { modelBrokerUrl } from "pi-orchestrator/api";
+
+export function writeEngineEndpoint(): string {
+  const broker = modelBrokerUrl();
+  return broker ? `${broker.replace(/^http/, "ws").replace(/\/$/, "")}/v1/write/stream`
+    : process.env.PI_STACK_WRITE_URL ?? "ws://127.0.0.1:8797/";
+}
 
 export type Dictionary = { words: string[]; replacements: Array<{ from: string; to: string }> };
 const word = /^[\p{L}][\p{L}\p{M}'’-]{0,79}$/u;
