@@ -216,7 +216,7 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));chmodSync(join(deploy, "host"), 0o755);
-    copyFileSync(join(root, "deploy", "release-checkout"), join(deploy, "release-checkout"));
+    for (const name of ["release-checkout", "meeting-census"]) copyFileSync(join(root, "deploy", name), join(deploy, name));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice"; touch "$release/server/voice/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
@@ -280,6 +280,9 @@ exit 0
     writeFileSync(join(bin, "curl"), `#!/bin/sh
 for arg; do
   case $arg in
+    http://127.0.0.1:18798/v1/meet|http://127.0.0.1:18799/v1/meet)
+      printf '%s\\n' "$MEETING_ROOMS"
+      exit 0;;
     http://127.0.0.1:8788/v1/router-health)
       printf '{"people":[{"user":"alice","unlocked":true},{"user":"guest-person","unlocked":false}]}\\n'
       exit 0;;
@@ -294,6 +297,8 @@ exit 64
 `, { mode: 0o755 });
     const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,VOICE_TRACE:join(directory,"voice.trace"),SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,HEALTH_TRACE:join(directory,"health.trace"),PI_REMOTE_PERSONS_DIR:personsDir,PI_REMOTE_ROUTER_PORT:"8788",PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
     env.PERSON_READ_TRACE = personReadTrace;
+    env.PI_STACK_ALLOW_LIVE_MEETING_RESTART = "0";
+    env.MEETING_ROOMS = '{"rooms":[]}';
     for (const person of ["alice", "guest-person"]) {
       const config = join(personsDir, `${person}.json`);
       chmodSync(config, 0o600);
@@ -308,6 +313,11 @@ exit 64
       }
       chmodSync(config, 0o644);
     }
+    const liveMeeting = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, MEETING_ROOMS: '{"rooms":[{"id":"active-room"}]}' } });
+    assert.equal(liveMeeting.status, 75, liveMeeting.stderr);
+    assert.match(liveMeeting.stderr, /live meeting rooms on this host/);
+    assert.equal(existsSync(systemctlTrace), false, "live rooms must defer deployment before any service changes");
+    for (const destination of Object.values(destinations)) assert.equal(existsSync(destination), false);
     const discoveryFailure = spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,DISCOVERY_EXIT:"1"}});
     assert.equal(discoveryFailure.status, 1, discoveryFailure.stderr);
     assert.match(discoveryFailure.stderr, /could not discover Orchestrator daemon units/);

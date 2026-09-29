@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { policy, stallReason, runnable, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
+import { policy, stallReason, runnable, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
 
 const config = loadPublicationConfig();
@@ -43,7 +43,7 @@ let trackingCommand = false;
 
 function usage() {
   process.stderr.write(`usage:
-  deploy/publication install
+  deploy/publication install [--code-only]
   deploy/publication submit SHA
   deploy/publication inspect REQUEST
   deploy/publication issues
@@ -190,11 +190,11 @@ function validateSha(value) {
   if (!/^[a-f0-9]{40}$/.test(value)) throw new Error(`invalid source SHA: ${value}`);
 }
 
-function installFrom(sourceRoot) {
+function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "release-checkout"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "release-checkout", "meeting-census"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -203,6 +203,7 @@ function installFrom(sourceRoot) {
   mkdirSync(userUnitRoot, { recursive: true, mode: 0o700 });
   for (const name of modules) atomicWrite(join(dirname(installedCommand), name), readFileSync(join(sourceRoot, "deploy", name)), 0o644);
   atomicWrite(installedCommand, readFileSync(commandSource), 0o750);
+  if (!activate) return;
   const replacements = { "@PUBLICATION_COMMAND@": installedCommand, "@PUBLICATION_WAKE@": join(stateRoot, "wake"), "@PUBLICATION_PATH@": `${join(homedir(), ".local/bin")}:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin` };
   for (const name of unitNames) {
     let unit = readFileSync(join(sourceRoot, "deploy/systemd", name), "utf8");
@@ -214,10 +215,17 @@ function installFrom(sourceRoot) {
   checked("systemctl", ["--user", "enable", "--now", "pi-stack-publication.timer", "pi-stack-publication.path", "pi-stack-publication-watchdog.timer"]);
 }
 
-function install() {
+function install(activate = true) {
   const sourceRoot = resolve(dirname(self), "..");
-  installFrom(sourceRoot);
-  process.stdout.write(`installed pi-stack publication owner; state=${stateRoot}\n`);
+  installFrom(sourceRoot, activate);
+  process.stdout.write(`installed pi-stack publication owner${activate ? "" : " code only; services unchanged"}; state=${stateRoot}\n`);
+}
+
+export function adoptPublicationOwner(sourceRoot, integrationSha) {
+  const ownerSource = checked("git", ["-C", sourceRoot, "rev-parse", "HEAD"]);
+  if (ownerSource !== integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${integrationSha}`);
+  // The candidate owns its installation layout; the running worker already holds the lock.
+  checked(process.execPath, [join(sourceRoot, "deploy/publication"), "install"], { timeoutSeconds: 90 });
 }
 
 function gitRoot() {
@@ -929,19 +937,33 @@ export function requeueBusyHost(request, target, logPath, liveMeeting = false) {
   }
   request.progress = progress;
   request.status = "queued";
-  request.step = "waiting-for-host-deployment-lock";
-  request.blockedSince ??= new Date().toISOString();
+  request.step = liveMeeting ? "waiting-for-live-meetings" : "waiting-for-host-deployment-lock";
+  if (liveMeeting) delete request.blockedSince;
+  else request.blockedSince ??= new Date().toISOString();
   request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
   request.waiting = {
-    kind: "host-lock", host: target.id, at: new Date().toISOString(), log: logPath,
+    kind: liveMeeting ? "live-meeting" : "host-lock", host: target.id, at: new Date().toISOString(), log: logPath,
     reason: liveMeeting
-      ? `${target.id} has live meeting rooms that a Pi Remote restart would end. The publication owner will resume once they close, within its existing attempt and wait budgets.`
+      ? `${target.id} has live meeting rooms that a Pi Remote restart would end. The publication owner will probe without deploying and resume this attempt once they close.`
       : `${target.id} has an active Pi Stack deployment. The publication owner will resume after the host lock is released, within its existing attempt and wait budgets.`,
   };
   (request.hostLockWaits ??= []).push({ ...request.waiting, attempt: request.attempt, progress });
   writeRequest(request);
   appendLog(logPath, `[${new Date().toISOString()}] ${request.waiting.reason}\n`);
   deliverNotice(request);
+}
+
+export function refreshMeetingWait(request) {
+  const target = targets.find(target => target.id === request.waiting.host);
+  if (!target) throw new Error(`Unknown meeting-wait host: ${request.waiting.host}`);
+  const script = readFileSync(join(dirname(self), "meeting-census"), "utf8");
+  const rooms = target.sshHost
+    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s"], { input: script, timeoutSeconds: 20 })
+    : runCapture("bash", ["-s"], { input: script, timeoutSeconds: 20 });
+  request.waiting.probe = { at: new Date().toISOString(), rooms };
+  if (rooms) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
+  writeRequest(request);
+  return !rooms;
 }
 
 export function requeueMovedIntegration(request, remoteMain, logPath) {
@@ -1546,7 +1568,11 @@ export function recoverOutstandingCustody(request, status = request.status) {
 }
 
 export function processRequest(request) {
-  request.attempt = (request.attempt ?? 0) + 1;
+  if (request.waiting?.kind === "live-meeting") {
+    request.meetingWait = { ...request.waiting, resumedAt: new Date().toISOString() };
+    delete request.waiting;
+    delete request.nextAttemptAt;
+  } else request.attempt = (request.attempt ?? 0) + 1;
   activeRequest = request;
   request.status = "running";
   request.startedAt ??= new Date().toISOString();
@@ -1699,9 +1725,7 @@ export function processRequest(request) {
     request.status = "running";
     request.step = "adopt-publication-owner";
     writeRequest(request);
-    const ownerSource = checked("git", ["-C", checkout, "rev-parse", "HEAD"]);
-    if (ownerSource !== request.integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${request.integrationSha}`);
-    installFrom(checkout);
+    adoptPublicationOwner(checkout, request.integrationSha);
     for (const target of targets) restoreReservation(request, target);
 
     request.status = "published";
@@ -2041,8 +2065,15 @@ function drain() {
       failStalled(request.requestId, "Publication worker interrupted; retained host custody has been recovered. Repair required before retry.");
       continue;
     }
-    if ((request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
-      || request.blockedSince && Date.now() - Date.parse(request.blockedSince) > policy.blockedLimitMs) {
+    if (request.waiting?.kind === "live-meeting") {
+      try {
+        if (!refreshMeetingWait(request)) continue;
+      } catch (error) {
+        updateFailure(request, `Meeting wait probe failed: ${error.message}`, request.waiting.log);
+        continue;
+      }
+    }
+    if (progressBudgetExhausted(request)) {
       updateFailure(request, "Publication progress budget exhausted", request.waiting?.log ?? join(logRoot, request.requestId, `attempt-${request.attempt}.log`), true,
         request.waiting?.reason ?? "Publication progress budget exhausted");
       continue;
@@ -2084,6 +2115,8 @@ function main() {
   if (operation === "_retry" && args.length === 1) return retry(args[0]);
   if (operation === "_report" && [1, 3].includes(args.length)) return report(...args);
   if (operation === "install" && args.length === 0) return install();
+  if (operation === "install" && args.length === 1 && args[0] === "--code-only") return locked("worker", "install-code");
+  if (operation === "_install-code" && args.length === 0) return install(false);
   if (operation === "submit" && args.length === 1) return submit(args[0]);
   if (operation === "submit" && args.length === 3 && args[1] === "--repair-of") return submit(args[0], args[2]);
   if (operation === "inspect" && args.length === 1) return inspect(args[0]);

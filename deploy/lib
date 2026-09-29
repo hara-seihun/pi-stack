@@ -192,18 +192,7 @@ pi_stack_supervisor_health() {
 # Live Meet rooms held by each person's supervisor, as "user:count" words; empty when none.
 # A restart of Pi Remote ends every one of them.
 pi_stack_live_meeting_rooms() {
-  local dir file user port count
-  local -a live=()
-  dir=$(pi_stack_persons_dir)
-  [[ -d $dir ]] || return 0
-  for file in "$dir"/*.json; do
-    [[ -f $file ]] || continue
-    user=$(pi_stack_as_root jq -r '.user' "$file") || continue
-    port=$(pi_stack_as_root jq -er '.port | select(type == "number" and . > 0 and . < 65536)' "$file") || continue
-    count=$(pi_stack_as_root curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/meet" 2>/dev/null | jq -r '.rooms | length' 2>/dev/null) || continue
-    [[ $count =~ ^[1-9][0-9]*$ ]] && live+=("$user:$count")
-  done
-  echo "${live[*]}"
+  bash "$(dirname "${BASH_SOURCE[0]}")/meeting-census"
 }
 # Every unix account that runs Pi here: each Pi Remote person plus the fleet user.
 pi_stack_users() {
