@@ -56,6 +56,10 @@ Client-only errors, such as upload and connection failures, still dismiss locall
 
 [`in-flight.ts`](src/in-flight.ts) tracks page-level progress separately from request timings, so slow nested/background API reads remain diagnosable without keeping the bar active. After 1 second, the client reports a pending timing to `POST /v1/diagnostics/requests`; when that request settles, it reports the final duration. Each report has an ephemeral page UUID, Android/browser platform, request ID, method, queryless path, epoch start time and elapsed milliseconds. It includes no body, header, message or credential. Stream, haptic and diagnostic requests stay in the background; the diagnostic POST uses the normal authenticated `window.fetch` transport and cannot keep the bar active or trigger another report. Network failures do not retry or change the original request. `inFlight.timings()` retains the latest 100 local timing records for inspection, including reports the server could not receive. The server's authenticated `GET /v1/diagnostics/requests` returns recent reports for the current person. Use the request ID and path there to identify the next slow operation rather than guessing from the bar.
 
+## Write dictation
+
+The shared [`Composer`](src/Composer.tsx) owns the dictation span and separate unstable-tail preview. The browser and Android WebView use the same microphone capture; the Android native bubble uses the documented [Write API](../docs/write.md) directly. The dictionary editor lives in the inspector Settings tab, and correction-learning notices use the shared Undo toast. Voice mode's microphone remains a separate `window.PiRemoteVoice` control.
+
 ## Toasts
 
 [`toasts.tsx`](src/toasts.tsx) exports `toast` for short app-wide notices and `ToastViewport`, mounted once in the authenticated shell. [`toasts.css`](src/toasts.css) owns their styling. Sonner dismisses a toast after 3 seconds by default, pauses its timer during interaction, and lets people dismiss it with the close button or a left/right swipe. Changing account or environment clears visible toasts. Toast dismissal never changes the operation or its recovery state.

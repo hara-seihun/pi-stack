@@ -36,6 +36,7 @@ import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles } from "./thread-context-files";
 import { API } from "./api";
+import { WriteDictionary, connectWrite, parseDictionary, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
@@ -263,6 +264,7 @@ unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "thread
   resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
 ensureSupervisorSchema(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
+const writeDictionary = new WriteDictionary(db);
 const fleetUrl = configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 const namingUrl = modelBrokerUrl() ?? fleetUrl;
@@ -1756,9 +1758,13 @@ const meet = new MeetServer((id) => {
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
-type AudioSocketData = { callId: string; audio?: ReturnType<typeof openCallAudio> };
+type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
+type SocketData = AudioSocketData | WriteSocketData;
+const writeEndpoint = modelBrokerUrl()
+  ? `${modelBrokerUrl()!.replace(/^http/, "ws").replace(/\/$/, "")}/v1/write/stream`
+  : process.env.PI_STACK_WRITE_URL ?? "ws://127.0.0.1:8797/";
 const requestTimings = new RequestTimings();
-const server = Bun.serve<AudioSocketData>({
+const server = Bun.serve<SocketData>({
   hostname: HOST,
   port: PORT,
   idleTimeout: 30,
@@ -1775,6 +1781,26 @@ const server = Bun.serve<AudioSocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (API.writeStream.match(req.method, url.pathname) && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      return httpServer.upgrade(req, { data: { kind: "write", started: false, finished: false } })
+        ? undefined : error("WebSocket upgrade failed", 400);
+    }
+    if (API.writeDictionary.match(req.method, url.pathname)) return json(writeDictionary.get());
+    if (API.updateWriteDictionary.match(req.method, url.pathname)) {
+      const dictionary = parseDictionary(await readBody(req));
+      return dictionary ? json(writeDictionary.put(dictionary)) : error("Invalid Write dictionary", 400);
+    }
+    if (API.writeLearn.match(req.method, url.pathname)) {
+      const body = await readBody(req);
+      if (typeof body?.inserted !== "string" || typeof body?.final !== "string" || body.inserted.length > 4000 || body.final.length > 4000) return error("Invalid Write correction", 400);
+      return json(writeDictionary.learn(body.inserted, body.final));
+    }
+    if (API.writeUndo.match(req.method, url.pathname)) {
+      const body = await readBody(req);
+      if (typeof body?.undoId !== "string") return error("Invalid Write undo receipt", 400);
+      const dictionary = writeDictionary.undo(body.undoId);
+      return dictionary ? json({ dictionary }) : error("Write undo receipt not found", 404);
+    }
     const callAudio = req.method === "GET" && req.headers.get("upgrade")?.toLowerCase() === "websocket"
       ? /^\/v1\/messaging\/calls\/([^/]+)\/audio$/.exec(url.pathname)
       : null;
@@ -1782,7 +1808,7 @@ const server = Bun.serve<AudioSocketData>({
       let callId: string;
       try { callId = decodeURIComponent(callAudio[1]!); }
       catch { return error("Invalid call id", 400); }
-      return httpServer.upgrade(req, { data: { callId } })
+      return httpServer.upgrade(req, { data: { kind: "call", callId } })
         ? undefined
         : error("WebSocket upgrade failed", 400);
     }
@@ -2477,6 +2503,7 @@ const server = Bun.serve<AudioSocketData>({
     backpressureLimit: AUDIO_SOCKET_BACKPRESSURE_BYTES,
     closeOnBackpressureLimit: false,
     open(socket) {
+      if (socket.data.kind === "write") { socket.data.receive = connectWrite(socket as Bun.ServerWebSocket<WriteSocketData>, writeEndpoint, writeDictionary); return; }
       const audio = openCallAudio(socket.data.callId);
       if (!audio) {
         socket.close(1008, "Call is unavailable");
@@ -2493,11 +2520,22 @@ const server = Bun.serve<AudioSocketData>({
       }
     },
     message(socket, message) {
+      if (socket.data.kind === "write") {
+        const write = socket as Bun.ServerWebSocket<WriteSocketData>;
+        write.data.receive?.(message);
+        return;
+      }
       if (typeof message === "string") return;
       const frame = message instanceof Uint8Array ? message : new Uint8Array(message);
       socket.data.audio?.receive(frame);
     },
     close(socket) {
+      if (socket.data.kind === "write") {
+        const write = socket as Bun.ServerWebSocket<WriteSocketData>;
+        if (!write.data.finished && write.data.upstream?.readyState === WebSocket.OPEN) write.data.upstream.send(JSON.stringify({ type: "cancel" }));
+        write.data.upstream?.close();
+        return;
+      }
       socket.data.audio?.detach();
       socket.data.audio = undefined;
     },
