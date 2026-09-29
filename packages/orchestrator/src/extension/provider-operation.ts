@@ -5,7 +5,7 @@ import type { Store } from "../store.js";
 import type { SharedOAuthAuth } from "../auth/shared-oauth.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
-import { isCodexNotFoundError, repairProviderCredential } from "../auth/provider-rejection.js";
+import { isCodexNotFoundError, repairProviderCredential, quarantineProviderCredential } from "../auth/provider-rejection.js";
 import { recordModelUsage } from "./usage-logger.js";
 
 export const PROVIDER_OPERATION_EVENT = "pi-stack:provider-operation";
@@ -48,8 +48,10 @@ export async function runProviderOperation(
         const startedAt = Date.now();
         last = await request.run(model, { ...credential, signal });
         if (last.ok) store.recordProviderSuccess(account, { model: model.id, startedAt, source: "provider-operation" });
-        if (!last.ok && repairDetail) last = { ...last, error: `${repairDetail}; after shared OAuth repair: ${last.error}` };
         if (last.usage) recordModelUsage(store, account, model.id, last.usage, request.sessionId);
+        if (!last.ok && attempt === 1) await quarantineProviderCredential(auth, account, last.error,
+          family === "openai-codex" && !last.usage?.totalTokens && isCodexNotFoundError(last.error, model), signal, credential.apiKey);
+        if (!last.ok && repairDetail) last = { ...last, error: `${repairDetail}; after shared OAuth repair: ${last.error}` };
         if (last.ok || attempt !== 0 || !credential.apiKey) break;
         const repair = await repairProviderCredential(auth, account, last.error,
           family === "openai-codex" && !last.usage?.totalTokens && isCodexNotFoundError(last.error, model), signal, credential.apiKey);

@@ -18,6 +18,12 @@ vi.mock("@earendil-works/pi-coding-agent", async importOriginal => {
   } };
 });
 
+vi.mock("../src/threads/pi-sandbox.js", async () => {
+  const sdk = await import("@earendil-works/pi-coding-agent");
+  return { createSandboxTools: vi.fn(async () => [sdk.createReadTool("/workspace"), sdk.createWriteTool("/workspace"), sdk.createEditTool("/workspace"), sdk.createBashTool("/workspace")]
+    .map(tool => ({ ...tool, description: `${tool.description} Confined test implementation.` }))) };
+});
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
@@ -26,10 +32,10 @@ function deferred() {
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
-async function fixture(prepare?: (session: AgentSession) => void, extension?: string, env: NodeJS.ProcessEnv = {}, raw = false) {
+async function fixture(prepare?: (session: AgentSession) => void, extension?: string, env: NodeJS.ProcessEnv = {}, raw = false, sandbox = false) {
   captured.prepare = prepare;
   const cwd = mkdtempSync(join(tmpdir(), "pi-halt-")), events: PiEvent[] = [];
-  const args: string[] = raw ? ["--raw"] : [];
+  const args: string[] = [...(raw ? ["--raw"] : []), ...(sandbox ? ["--sandbox"] : [])];
   if (raw) env = { PI_ORCHESTRATOR_CONFIG: join(cwd, "config.json"), PI_ORCHESTRATOR_LEDGER: join(cwd, "ledger.sqlite3"),
     PI_ORCHESTRATOR_AUTH: join(cwd, "auth.json"), PI_MODEL_BROKER_URL: undefined, PI_ORCHESTRATOR_ASSIGNED: "0", PI_SUBAGENT_MODEL: undefined, ...env };
   if (extension) {
@@ -91,6 +97,19 @@ it.each([
   ]);
   if (raw) for (const update of updates) expect(update.context).toMatchObject({ systemPrompt: "", tools: [] });
   expect(f.events.indexOf(updates[1]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
+}, 3000);
+
+it("sandbox exposes exactly four tools without instructions, discovered extensions, or host shell RPC", async () => {
+  const f = await fixture(undefined, `export default pi => { throw new Error("must not load sandbox extensions"); };`, {}, true, true);
+  expect(f.native.getActiveToolNames().sort()).toEqual(["bash", "edit", "read", "write"]);
+  expect(await f.command("prompt", { workId: "sandbox-context", message: "hello" })).toMatchObject({ success: true });
+  await f.waitFor(event => event.type === "agent_settled");
+  const context = (await f.command("get_context")).data as { systemPrompt: string; tools: { name: string; description: string }[] };
+  expect(context.systemPrompt).toBe("");
+  expect(context.tools.map(tool => tool.name).sort()).toEqual(["bash", "edit", "read", "write"]);
+  expect(context.tools.every(tool => tool.description.includes("Confined test implementation."))).toBe(true);
+  expect(await f.command("bash", { command: "id" })).toMatchObject({ success: false });
+  expect(await f.command("switch_session", { sessionPath: "/etc/passwd" })).toMatchObject({ success: false });
 }, 3000);
 
 it("captures tool results before the next request without duplicating completed messages", async () => {

@@ -15,7 +15,8 @@ import type { UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
-import { repairProviderCredential } from "./auth/provider-rejection.js";
+import { repairProviderCredential, providerResponseFailure, quarantineProviderCredential } from "./auth/provider-rejection.js";
+import { isRejectedTokenError } from "./provider-errors.js";
 import { BROKER_ROUTES, validateBrokerBody, type BrokerFamily } from "./model-broker-contract.js";
 import { anthropicMeterReadings } from "./extension/usage-logger.js";
 import { forwardVoiceRequest } from "./voice-broker.js";
@@ -210,15 +211,20 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       let startedAt = 0;
       const send = () => (startedAt = Date.now(), transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: family === "anthropic" ? Uint8Array.from(requestBytes) : JSON.stringify(body), signal, redirect: "error" }));
       let response = await send();
-      if ((response.status === 401 || family === "openai-codex" && response.status === 404) && credential.apiKey) {
-        const repair = await repairProviderCredential(shared, account.id, `HTTP ${response.status}`,
-          family === "openai-codex" && response.status === 404, signal, credential.apiKey);
+      let repaired = false, streamRejection: string | undefined;
+      if (!response.ok && credential.apiKey) {
+        const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        const repair = await repairProviderCredential(shared, account.id, await providerResponseFailure(response),
+          family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
         res.setHeader("x-pi-credential-repair", encodeURIComponent(repair.detail));
         if (repair.outcome === "repaired") {
+          repaired = true;
           await response.body?.cancel();
           credential = await shared.resolve(account.id, signal);
           authorize();
           response = await send();
+          await quarantineProviderCredential(shared, account.id, await providerResponseFailure(response),
+            family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
         }
       }
       if (response.status === 429) store.setCooldown(account.id, Math.max(account.cooldownUntil ?? 0, Date.now() + 60_000), { model: body.model });
@@ -236,6 +242,11 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       const parser = createParser({ onEvent(event) {
         let value: any;
         try { value = JSON.parse(event.data); } catch { return; }
+        const failure = value.error ?? value.response?.error ?? (value.type === "error" ? value : undefined);
+        if (failure) {
+          const detail = `${failure.code ?? ""} ${failure.message ?? ""}`;
+          if (isRejectedTokenError(detail)) streamRejection = detail;
+        }
         const usage = value.type === "response.completed" ? value.response?.usage : value.type === "message_start" ? value.message?.usage : value.type === "message_delta" ? value.usage : undefined;
         if (!usage) return;
         const cached = Number(usage.input_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0);
@@ -249,6 +260,11 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       if (response.body) for await (const chunk of response.body) {
         if (response.ok) parser.feed(decoder.decode(chunk, { stream: true }));
         if (!res.write(chunk)) await once(res, "drain", { signal });
+      }
+      if (streamRejection) {
+        const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        if (repaired) await quarantineProviderCredential(shared, account.id, streamRejection, false, repairSignal, credential.apiKey);
+        else await repairProviderCredential(shared, account.id, streamRejection, false, repairSignal, credential.apiKey);
       }
       res.end();
     } catch (error) {

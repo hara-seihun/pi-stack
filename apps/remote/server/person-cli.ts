@@ -72,7 +72,7 @@ function defaultEnvironment(person: Omit<Person, "environment">, folder: string,
     PI_REMOTE_INGESTION: join(privateDir, ".ingestion"),
     PI_REMOTE_PORT: person.port,
     PI_REMOTE_THREAD_NAMING_MODEL: threadNamingModel,
-    PI_REMOTE_DESTINATIONS: "personal,home,raw",
+    PI_REMOTE_DESTINATIONS: "personal,home,raw,sandbox",
     PI_REMOTE_ORCHESTRATOR_DB: join(home, ".local/share/pi-orchestrator/ledger.sqlite3"),
     PI_REMOTE_ORCHESTRATOR_RUNS: join(home, ".local/share/pi-orchestrator/runs"),
     PI_REMOTE_WORKSPACES: [

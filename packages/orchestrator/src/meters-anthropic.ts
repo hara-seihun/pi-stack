@@ -267,7 +267,12 @@ export class AnthropicMeterSampler {
         credential.access,
         AbortSignal.timeout(this.requestTimeoutMs),
       );
-      return await fetchAnthropicUsage(repaired.access, this.fetchFn, this.requestTimeoutMs);
+      try {
+        return await fetchAnthropicUsage(repaired.access, this.fetchFn, this.requestTimeoutMs);
+      } catch (second) {
+        if (second instanceof AnthropicUnauthorizedError) await this.auth.reject(accountId, repaired.access, AbortSignal.timeout(this.requestTimeoutMs));
+        throw second;
+      }
     }
   }
 

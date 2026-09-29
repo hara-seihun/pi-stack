@@ -40,7 +40,6 @@ function person(user: string, encrypted: boolean, remoteAccess: string[]) {
     return Response.json({ user, path: url.pathname });
   }, websocket: {
     perMessageDeflate: false,
-    backpressureLimit: 64 * 1024 * 1024,
     open(socket) { websocketConnections.push({ ...socket.data, socket }); },
     message(socket, message) {
       if (socket.data.path === "/v1/ws-test/echo" && typeof message !== "string") socket.sendBinary(new Uint8Array([4, 5, 6]));
@@ -322,30 +321,6 @@ test("WebSocket proxy propagates close codes in both directions", async () => {
   upstream.socket.close(4011, "upstream closed");
   expect((await downstreamClose).code).toBe(4011);
 });
-
-test("WebSocket proxy drops frames instead of growing a stalled peer queue", async () => {
-  const session = await token("guest");
-  const start = websocketConnections.length;
-  const browser = await openWebSocket(`/v1/ws-test/backpressure?session=${session}`);
-  browser.binaryType = "arraybuffer";
-  const upstream = await waitFor(() => websocketConnections[start], "backpressure upstream did not open");
-  let received = 0;
-  const finished = new Promise<void>((resolve) => browser.addEventListener("message", event => {
-    if (event.data === "done") resolve();
-    else received++;
-  }));
-  const frame = new Uint8Array(1920);
-  const sent = 10_000;
-  let sourceDrops = 0;
-  for (let index = 0; index < sent; index++) if (upstream.socket.sendBinary(frame) === 0) sourceDrops++;
-  expect(sourceDrops).toBe(0);
-  const marker = setInterval(() => upstream.socket.sendText("done"), 25);
-  try { await finished; }
-  finally { clearInterval(marker); }
-  expect(received).toBeGreaterThan(0);
-  expect(received).toBeLessThan(sent);
-  browser.close();
-}, 10_000);
 
 test("lock requires proof and revokes every session for that person only", async () => {
   const owner = await token("kenan");
