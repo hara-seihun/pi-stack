@@ -39,23 +39,36 @@ export function mergeHumanMessages(current: MessagingMessage[], incoming: Messag
   return [...messages.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
 }
 
-/** A run of messages from one sender stays one block until this much quiet time passes. */
-export const HUMAN_MESSAGE_GROUP_GAP_MS = 15 * 60_000;
+/** A pause this long, or a new day, earns a time marker. */
+export const CHAT_TIME_GAP_MS = 60 * 60_000;
+
+export type ChatRow =
+  | { kind: "time"; key: string; timestamp: number }
+  | { kind: "message"; key: string; message: MessagingMessage; head: boolean; tail: boolean };
+
+const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Date(b).toDateString();
 
 /**
- * Contiguous messages from the same sender in the same direction read as one
- * block. A block ends when the sender changes or the gap since the previous
- * message exceeds `gap`, so a reply hours later still gets its own header.
+ * The chat as it reads: time markers where the conversation paused, and
+ * messages that know whether they open (`head`) or close (`tail`) a run from
+ * one sender. A marker always starts a fresh run.
  */
-export function groupHumanMessages(messages: MessagingMessage[], gap = HUMAN_MESSAGE_GROUP_GAP_MS): MessagingMessage[][] {
-  const groups: MessagingMessage[][] = [];
+export function chatRows(messages: MessagingMessage[], gap = CHAT_TIME_GAP_MS): ChatRow[] {
+  const rows: ChatRow[] = [];
+  let previous: MessagingMessage | undefined;
+  let run: Extract<ChatRow, { kind: "message" }> | undefined;
   for (const message of messages) {
-    const group = groups.at(-1);
-    const previous = group?.at(-1);
-    if (group && previous && previous.direction === message.direction && previous.sender === message.sender && message.timestamp - previous.timestamp <= gap) group.push(message);
-    else groups.push([message]);
+    const marked = !previous || message.timestamp - previous.timestamp > gap || !sameDay(previous.timestamp, message.timestamp);
+    if (marked) rows.push({ kind: "time", key: `time:${message.id}`, timestamp: message.timestamp });
+    // Own messages may be recorded as "You" or as the account number; both are one voice.
+    const head = marked || previous!.direction !== message.direction || message.direction === "incoming" && previous!.sender !== message.sender;
+    if (head && run) run.tail = true;
+    run = { kind: "message", key: message.id, message, head, tail: false };
+    rows.push(run);
+    previous = message;
   }
-  return groups;
+  if (run) run.tail = true;
+  return rows;
 }
 
 export function draftFromHumanMessage(message: MessagingMessage): HumanDraft {

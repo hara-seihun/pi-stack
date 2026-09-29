@@ -1,4 +1,5 @@
-export interface MessageSender { id: string; name?: string }
+/** `own` marks the viewing person's own account, which a service may not name. */
+export interface MessageSender { id: string; name?: string; own?: boolean }
 
 export interface MessageIdentity {
   id: string;

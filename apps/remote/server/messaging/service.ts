@@ -779,8 +779,10 @@ export class MessagingService {
       ?? (this.db.query("SELECT * FROM messages WHERE conversation_id=? AND timestamp=? AND status IN ('received','sent')").all(row.conversation_id, row.quote_timestamp) as MessageRow[])
         .find(candidate => this.messageSender(candidate, conversation.backend_id) === author);
     const sender = this.db.query("SELECT name FROM messaging_senders WHERE backend_id=? AND id=?").get(conversation.backend_id, author) as { name: string | null } | null;
+    const account = this.db.query("SELECT sender_id FROM messaging_accounts WHERE backend_id=?").get(conversation.backend_id) as { sender_id: string } | null;
+    const own = !!account && this.canonical(conversation.backend_id, account.sender_id) === author;
     return { messageId: target ? messageReference({ transport: "messaging", messageId: target.id }) : null,
-      sender: { id: author, ...(sender?.name ? { name: sender.name } : {}) }, text: row.quote_text, timestamp: row.quote_timestamp };
+      sender: { id: author, ...(sender?.name ? { name: sender.name } : {}), ...(own ? { own } : {}) }, text: row.quote_text, timestamp: row.quote_timestamp };
   }
   private message(row: MessageRow, prepared?: { attachments: MessagingAttachment[]; sender: { name: string | null; avatar: number | null } | null; account: string | null; reactions: MessageReaction[] }): MessagingMessage {
     const attachments = prepared?.attachments ?? (this.db.query("SELECT a.* FROM attachments a JOIN message_attachments ma ON ma.attachment_id=a.id WHERE ma.message_id=? ORDER BY a.rowid").all(row.id) as AttachmentRow[]).map(item => this.attachment(item));
@@ -797,7 +799,7 @@ export class MessagingService {
     const reply = this.reply(row);
     return { id: row.id, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), ...(sender?.avatar ? { senderAvatar: sender.avatar } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
       ...((row.status === "received" || row.status === "sent") && row.external_id ? {
-        identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account ?? row.sender, ...(sender?.name ? { name: sender.name } : {}) } },
+        identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account ?? row.sender, ...(sender?.name ? { name: sender.name } : {}), ...(row.direction === "outgoing" ? { own: true } : {}) } },
       } : {}),
       reactions: prepared?.reactions ?? this.reactions(row),
       ...(reply ? { reply } : {}),
