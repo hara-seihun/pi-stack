@@ -166,8 +166,12 @@ import { createStreamClient } from "./stream";
           if (this.externalPlayback) {
             const receiver = event.receiver;
             if ("jitterBufferTarget" in receiver) {
-              receiver.jitterBufferTarget = 80;
-              this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetMs: receiver.jitterBufferTarget });
+              try {
+                receiver.jitterBufferTarget = 80;
+                this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetMs: receiver.jitterBufferTarget });
+              } catch (error) {
+                this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetError: String(error) });
+              }
             } else this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetUnavailable: true });
           }
           const stream = new MediaStream([event.track]);
@@ -222,8 +226,11 @@ import { createStreamClient } from "./stream";
             if (peer !== this.peer) return;
             for (const report of stats.values()) if (report.type === "inbound-rtp" && report.kind === "audio") {
               this.onAudioDiagnostic({ stage: "webrtc", at: performance.now(), packetsReceived: report.packetsReceived,
-                packetsLost: report.packetsLost, jitterMs: Math.round((report.jitter || 0) * 1000),
+                packetsLost: report.packetsLost, bytesReceived: report.bytesReceived,
+                jitterMs: Math.round((report.jitter || 0) * 1000),
                 jitterBufferDelayMs: Math.round((report.jitterBufferDelay || 0) * 1000),
+                jitterBufferTargetDelayMs: Number.isFinite(report.jitterBufferTargetDelay) ? Math.round(report.jitterBufferTargetDelay * 1000) : null,
+                jitterBufferMinimumDelayMs: Number.isFinite(report.jitterBufferMinimumDelay) ? Math.round(report.jitterBufferMinimumDelay * 1000) : null,
                 jitterBufferEmittedCount: report.jitterBufferEmittedCount, concealedSamples: report.concealedSamples,
                 silentConcealedSamples: report.silentConcealedSamples, concealmentEvents: report.concealmentEvents });
             }
