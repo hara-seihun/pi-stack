@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">Kenan</string>
     <string name="title_activity_main">Kenan</string>
+    <string name="write_accessibility_description">Shows a dictation bubble in editable fields and inserts your finished speech at the cursor. Password, number and phone fields are excluded.</string>
     <string name="package_name">works.kenan.piremote.kenan</string>
     <string name="custom_url_scheme">works.kenan.piremote.kenan</string>
 </resources>
