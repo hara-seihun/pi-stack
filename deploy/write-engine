@@ -5,6 +5,11 @@ source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 [[ $# == 0 || ( $# == 1 && $1 == --select ) ]] || { echo 'usage: deploy/write-engine [--select]' >&2; exit 64; }
 mode=${1:-prepare}
+# Only a host that declares the engine unit fetches its 1.2 GB model.
+if [[ $mode == prepare && ${PI_STACK_WRITE_ENGINE_FORCE:-0} != 1 ]] && [[ $(systemctl show pi-stack-write.service -p LoadState --value 2>/dev/null) != loaded ]]; then
+  echo 'Pi Stack Write: no pi-stack-write.service on this host; nothing to prepare'
+  exit 0
+fi
 source_dir="$root/apps/write/engine"
 # The venv and 1.2 GB of weights are keyed only by the lock and model pins, so
 # a source change reinstalls a few Python files instead of refetching them.

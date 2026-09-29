@@ -33,13 +33,13 @@ function fixture() {
 function preparationFixture() {
   const f = fixture();
   writeFileSync(join(f.repo, "deploy/lib"), `${readFileSync(join(root, "deploy/lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
-  for (const name of ["runtime", "transcription", "host"]) {
+  for (const name of ["runtime", "transcription", "write-engine", "host"]) {
     f.executable(join(f.repo, "deploy", name), `root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 printf '%s\\n' "${name}" >> "$TRACE"
 sleep "\${WORK_SECONDS:-0}"
-exit "\${${name.toUpperCase()}_EXIT:-0}"`);
+exit "\${${name.toUpperCase().replace("-", "_")}_EXIT:-0}"`);
   }
   // Any nested activation deadline fails immediately, without a 50-second test.
   f.executable(join(f.bin, "timeout"), 'printf "deadline %s\\n" "$*" >> "$TRACE"; exit 124');
@@ -52,7 +52,7 @@ test("preparation children use the caller deadline; later activation and standal
   try {
     const prepared = f.run("prepare");
     assert.equal(prepared.status, 0, prepared.stderr);
-    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["runtime", "transcription"]);
+    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["runtime", "transcription", "write-engine"]);
     for (const name of ["host", "runtime", "transcription"]) {
       const deployed = f.run(name);
       assert.equal(deployed.status, 124, deployed.stderr);
