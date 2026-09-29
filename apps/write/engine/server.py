@@ -23,108 +23,160 @@ LOG = logging.getLogger(__name__)
 
 
 class Engine:
-    def __init__(self, model_dir: Path, threads=6, streams=4, cleanup_dir: Path | None = None):
+    """One WebSocket per dictation. A reader task only decodes and buffers audio,
+    so a slow step never backs frames up in the socket; one decoder task per
+    dictation advances the recognizer over everything buffered at once. While the
+    tail is silent, a fork of the stream is finished ahead of ✓; `finish` uses it
+    when nothing voiced arrived since, and otherwise finishes the live stream
+    immediately rather than waiting for an obsolete speculation."""
+
+    PARTIAL_INTERVAL = 0.1
+    SPECULATE_AFTER_SILENCE = 0.12
+    IMMEDIATE_PADDING = 1600
+
+    def __init__(self, model_dir: Path, threads=4, streams=4, cleanup_dir: Path | None = None):
         self.recognizer = Nemotron(model_dir, threads)
         self.tagger = JointOnnxTagger(cleanup_dir) if cleanup_dir is not None else None
         self.slots = asyncio.Semaphore(streams)
 
     async def handle(self, socket):
         connected_at = time.perf_counter()
-        last_audio_at = None
-        audio_samples = 0
-        audio_format = 'pcm'
-        opus_decoder = None
-        stream = None
-        dictionary = {}
-        context = ''
+        state = {'last_audio_at': None, 'samples': 0, 'format': 'pcm'}
+        pending = []
+        arrived = asyncio.Event()
+        stream = cleaner = decoder_task = None
         committed = []
-        cleaner = None
-        remainder = b''
-        generation = 0
+        cleaned = [0]          # words already handed to the incremental cleaner
+        voiced_at = 0          # samples received when the last voiced frame ended
         peak_rms = 0.0
-        speculative = None
-        speculation_task = None
-        stream_lock = asyncio.Lock()
+        speculative = None     # (samples covered, result) finished from a fork
+        speculating_at = None
+        closing = False
+        live_step = None       # the thread currently advancing the live stream
+        clean_step = None      # the thread currently updating the cleaner
 
-        async def speculate():
-            nonlocal speculative
-            while True:
-                version = generation
-                async with stream_lock:
-                    candidate = stream.fork()
+        async def advance():
+            """Feed buffered audio to the stream; returns when the buffer is empty."""
+            nonlocal committed, live_step
+            while pending:
+                batch = np.concatenate(pending); pending.clear()
                 async with self.slots:
-                    result = await asyncio.to_thread(candidate.finish)
-                if version == generation:
-                    speculative = result
+                    live_step = asyncio.ensure_future(asyncio.to_thread(stream.accept, batch))
+                    await asyncio.shield(live_step)
+            result = stream.result()
+            stable = result['words'][:-2]
+            if [w['w'] for w in stable[:len(committed)]] != [w['w'] for w in committed]:
+                raise RuntimeError('Nemotron changed an emitted token')
+            new_words = stable[len(committed):]
+            committed = stable
+            return result, new_words
+
+        async def decode():
+            nonlocal speculative, speculating_at
+            last_partial = 0.0
+            sent = None
+            while not closing:
+                await arrived.wait(); arrived.clear()
+                if closing:
                     return
+                result, new_words = await advance()
+                partial = None
+                if new_words:
+                    nonlocal clean_step
+                    cleaned[0] += len(new_words)
+                    clean_step = asyncio.ensure_future(asyncio.to_thread(cleaner.update, new_words))
+                    partial = await asyncio.shield(clean_step)
+                now = time.perf_counter()
+                tail = ' '.join(w['w'] for w in result['words'][len(committed):])
+                text = (partial or {}).get('text', sent[0] if sent else '')
+                if (text, tail) != sent and now - last_partial >= self.PARTIAL_INTERVAL:
+                    await socket.send(json.dumps({'type': 'partial', 'committed': text, 'tail': tail}))
+                    sent, last_partial = (text, tail), now
+                received = state['samples']
+                silent = (received - voiced_at) / 16000
+                if silent >= self.SPECULATE_AFTER_SILENCE and not pending and speculating_at != received \
+                        and (speculative is None or speculative[0] != received):
+                    speculating_at = received
+                    candidate, cleaner_copy, offset = stream.fork(), cleaner.fork(), cleaned[0]
+                    def ahead():
+                        finished = candidate.finish()
+                        return finished, cleaner_copy.finish(finished['words'][offset:])
+                    async with self.slots:
+                        finished, final = await asyncio.to_thread(ahead)
+                    if voiced_at <= received:
+                        speculative = (received, finished, final)
+
         try:
             async for frame in socket:
                 if isinstance(frame, bytes):
                     if stream is None:
                         raise ValueError('start must precede audio')
-                    last_audio_at = time.perf_counter()
-                    if opus_decoder is not None:
+                    state['last_audio_at'] = time.perf_counter()
+                    if state['format'] == 'opus':
                         samples = opus_decoder.decode(frame)
                     else:
-                        data = remainder + frame
-                        remainder = data[len(data) & ~1:]
+                        data = remainder[0] + frame
+                        remainder[0] = data[len(data) & ~1:]
                         data = data[:len(data) & ~1]
                         if not data:
                             continue
                         samples = np.frombuffer(data, dtype='<i2').astype(np.float32) / 32768
-                    audio_samples += len(samples)
                     rms = float(np.sqrt(np.mean(samples * samples)))
                     peak_rms = max(peak_rms, rms)
-                    voiced = rms > min(0.004, 0.08 * peak_rms)
-                    if voiced:
-                        generation += 1
+                    state['samples'] += len(samples)
+                    if rms > min(0.004, 0.08 * peak_rms):
+                        voiced_at = state['samples']
                         speculative = None
-                    async with stream_lock, self.slots:
-                        await asyncio.to_thread(stream.accept, samples)
-                    result = stream.result()
-                    observed = result['words']
-                    stable = observed[:-2]
-                    if [w['w'] for w in stable[:len(committed)]] != [w['w'] for w in committed]:
-                        raise RuntimeError('Nemotron changed an emitted token')
-                    new_words = stable[len(committed):]
-                    committed = stable
-                    partial = await asyncio.to_thread(cleaner.update, new_words)
-                    tail = observed[len(committed):]
-                    await socket.send(json.dumps({'type': 'partial', 'committed': partial['text'], 'tail': ' '.join(w['w'] for w in tail), 'words': committed, 'unstableWords': tail}))
-                    if speculation_task is None or speculation_task.done():
-                        speculation_task = asyncio.create_task(speculate())
+                    pending.append(samples)
+                    arrived.set()
                     continue
                 command = json.loads(frame)
                 kind = command.get('type')
                 if kind == 'start' and stream is None:
                     dictionary = command.get('dictionary') or {}
                     context = command.get('context') or ''
-                    audio_format = command.get('audio', 'pcm')
-                    if not isinstance(dictionary.get('words', []), list) or not isinstance(context, str) or audio_format not in ('pcm', 'opus'):
+                    state['format'] = command.get('audio', 'pcm')
+                    if not isinstance(dictionary.get('words', []), list) or not isinstance(context, str) or state['format'] not in ('pcm', 'opus'):
                         raise ValueError('invalid dictionary, context or audio format')
-                    if audio_format == 'opus':
-                        opus_decoder = OpusDecoder()
+                    opus_decoder = OpusDecoder() if state['format'] == 'opus' else None
+                    remainder = [b'']
                     stream = self.recognizer.create_stream(dictionary)
                     cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger)
+                    decoder_task = asyncio.create_task(decode())
                 elif kind == 'cancel' and stream is not None:
                     return
                 elif kind == 'finish' and stream is not None:
                     began = time.perf_counter()
-                    last_audio_gap_ms = (began - last_audio_at)*1000 if last_audio_at is not None else None
-                    if speculative is None and speculation_task is not None:
-                        await speculation_task
-                    hit = speculative is not None
+                    gap = state['last_audio_at']
+                    received = state['samples']
+                    behind = (received - stream.samples_decoded) / 16000
+                    closing = True; arrived.set()
+                    hit = speculative is not None and speculative[0] <= received and voiced_at <= speculative[0]
+                    # Never wait for a speculation: cancel the decoder. A hit already
+                    # holds the cleaned final; otherwise let at most the one live
+                    # step already running complete, then take over the stream.
+                    decoder_task.cancel()
                     if hit:
-                        result = speculative
+                        result, final = speculative[1], speculative[2]
                     else:
+                        if live_step is not None and not live_step.done():
+                            await live_step
+                        await advance()
+                        # No speculation covers the tail (✓ while still speaking):
+                        # 100 ms of silence padding instead of 200 keeps this to
+                        # two encoder steps (+0.7 WER points on the last words).
                         async with self.slots:
-                            result = await asyncio.to_thread(stream.finish)
-                    cleaned = await asyncio.to_thread(cleaner.finish, result['words'][len(committed):])
+                            result = await asyncio.to_thread(stream.finish, self.IMMEDIATE_PADDING)
+                        if clean_step is not None and not clean_step.done():
+                            await clean_step
+                        final = await asyncio.to_thread(cleaner.finish, result['words'][cleaned[0]:])
                     elapsed = (time.perf_counter() - began)*1000
-                    await socket.send(json.dumps({'type': 'final', 'text': cleaned['text'], 'raw': result['text'], 'edits': cleaned['edits'], 'words': result['words'], 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit}}))
-                    LOG.info('write dictation audio=%s audioSeconds=%.3f connectionSeconds=%.3f lastAudioToFinishMs=%s flushMs=%.2f speculative=%s',
-                             audio_format, audio_samples/16000, (time.perf_counter()-connected_at),
-                             'none' if last_audio_gap_ms is None else f'{last_audio_gap_ms:.2f}', elapsed, hit)
+                    await socket.send(json.dumps({'type': 'final', 'text': final['text'], 'raw': result['text'], 'edits': final['edits'], 'words': result['words'], 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit}}))
+                    steps = sorted(stream.timings) or [0.0]
+                    LOG.info('write dictation audio=%s audioSeconds=%.3f connectionSeconds=%.3f lastAudioToFinishMs=%s behindSeconds=%.3f stepP50Ms=%.1f stepMaxMs=%.1f flushMs=%.2f speculative=%s',
+                             state['format'], received/16000, (time.perf_counter()-connected_at),
+                             'none' if gap is None else f'{(began-gap)*1000:.2f}', behind,
+                             steps[len(steps)//2], steps[-1], elapsed, hit)
                     return
                 else:
                     raise ValueError('invalid command sequence')
@@ -135,6 +187,10 @@ class Engine:
         except Exception:
             LOG.exception('dictation failed')
             await socket.send(json.dumps({'type': 'error', 'message': 'recognition failed'}))
+        finally:
+            closing = True
+            if decoder_task is not None and not decoder_task.done():
+                decoder_task.cancel()
 
 
 async def main():
@@ -142,7 +198,7 @@ async def main():
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8797)
-    parser.add_argument('--threads', type=int, default=6)
+    parser.add_argument('--threads', type=int, default=4)
     parser.add_argument('--streams', type=int, default=4)
     parser.add_argument('--cleanup-model', type=Path,
                         default=Path(__file__).resolve().parent/'cleanup-model')

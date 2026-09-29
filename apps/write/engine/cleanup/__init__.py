@@ -273,6 +273,15 @@ class IncrementalCleaner:
         edits.sort(key=lambda edit: (edit["at"][0], edit["at"][1], edit["kind"]))
         return {"text": self._prefix + result["text"], "edits": edits}
 
+    def fork(self) -> "IncrementalCleaner":
+        """An independent copy at this point, for speculative finals."""
+        duplicate = IncrementalCleaner(self.dictionary, self.context, self.lookbehind, self.tagger)
+        duplicate._prefix = self._prefix
+        duplicate._pending = list(self._pending)
+        duplicate._consumed = self._consumed
+        duplicate._edits = list(self._edits)
+        return duplicate
+
     def finish(self, tail: Sequence[Mapping[str, Any] | str] = ()) -> dict[str, Any]:
         result = self.update(tail)
         self._pending.clear()

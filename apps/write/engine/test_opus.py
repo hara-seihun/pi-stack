@@ -46,11 +46,14 @@ class OpusPacketTest(unittest.TestCase):
 
 
 class FakeStream:
-    def __init__(self): self.audio = []
-    def accept(self, samples): self.audio.extend(samples)
+    def __init__(self, delay=0.0):
+        self.audio = []; self.delay = delay; self.samples_decoded = 0; self.timings = []; self.accepts = 0
+    def accept(self, samples):
+        import time; time.sleep(self.delay)
+        self.audio.extend(samples); self.samples_decoded = len(self.audio); self.accepts += 1
     def result(self): return {'words': []}
     def fork(self): return self
-    def finish(self): return {'words': [], 'text': ''}
+    def finish(self, silence_samples=3200): return {'words': [], 'text': ''}
 
 
 class EngineProtocolTest(unittest.IsolatedAsyncioTestCase):
@@ -72,9 +75,10 @@ class EngineProtocolTest(unittest.IsolatedAsyncioTestCase):
                     packets = encoded_packets()
                     for packet in packets:
                         await socket.send(packet)
-                        self.assertEqual(json.loads(await socket.recv())['type'], 'partial')
                     await socket.send('{"type":"finish"}')
-                    self.assertEqual(json.loads(await socket.recv())['type'], 'final')
+                    while (reply := json.loads(await socket.recv()))['type'] == 'partial':
+                        pass
+                    self.assertEqual(reply['type'], 'final')
         self.assertEqual(len(audio.audio), len(packets)*320)
         self.assertIn(f'audioSeconds={len(packets)*.02:.3f}', logs.output[-1])
         self.assertIn('lastAudioToFinishMs=', logs.output[-1])
@@ -84,3 +88,32 @@ class EngineProtocolTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SlowStepTest(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_arriving_during_a_slow_step_is_batched(self):
+        """A step slower than real time must not make finish wait for one step per frame."""
+        from types import SimpleNamespace
+        import time
+        from websockets.asyncio.server import serve
+        from websockets.asyncio.client import connect
+        from server import Engine
+        engine = Engine.__new__(Engine)
+        audio = FakeStream(delay=0.1)
+        engine.recognizer = SimpleNamespace(create_stream=lambda dictionary: audio)
+        engine.tagger = None
+        engine.slots = asyncio.Semaphore(2)
+        async with serve(engine.handle, '127.0.0.1', 0) as listener:
+            port = listener.sockets[0].getsockname()[1]
+            async with connect(f'ws://127.0.0.1:{port}') as socket:
+                await socket.send(json.dumps({'type': 'start', 'dictation': 'slow', 'dictionary': {'words': [], 'replacements': []}}))
+                for _ in range(50):  # one second of PCM in 20 ms frames, sent at once
+                    await socket.send(b'\x10\x00'*320)
+                began = time.perf_counter()
+                await socket.send('{"type":"finish"}')
+                while (reply := json.loads(await socket.recv()))['type'] == 'partial':
+                    pass
+                self.assertEqual(reply['type'], 'final')
+                self.assertLess(time.perf_counter() - began, 0.5)
+        self.assertEqual(len(audio.audio), 50*320)
+        self.assertLess(audio.accepts, 10)

@@ -21,6 +21,7 @@ class JointOnnxTagger:
         path = Path(directory)
         options = ort.SessionOptions()
         options.intra_op_num_threads = threads
+        options.add_session_config_entry('session.intra_op.allow_spinning', '0')
         options.inter_op_num_threads = 1
         self._session = ort.InferenceSession(
             str(path / 'joint-f32.onnx'), sess_options=options,

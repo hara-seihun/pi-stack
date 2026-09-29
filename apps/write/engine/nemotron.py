@@ -15,11 +15,18 @@ LOG_FLOOR = math.log(2**-24)
 
 class Nemotron:
     def __init__(self, model_dir: Path, threads=6):
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = threads
+        def options(count):
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = count
+            # ORT's pool otherwise busy-waits between runs: the idle service held
+            # 2.8 cores and competed with the very steps it was waiting for.
+            opts.add_session_config_entry('session.intra_op.allow_spinning', '0')
+            return opts
         model_dir = Path(model_dir)
-        self.encoder = ort.InferenceSession(str(model_dir / 'int8/encoder_model.onnx'), sess_options=opts, providers=['CPUExecutionProvider'])
-        self.decoder = ort.InferenceSession(str(model_dir / 'fp32/decoder_model.onnx'), sess_options=opts, providers=['CPUExecutionProvider'])
+        self.encoder = ort.InferenceSession(str(model_dir / 'int8/encoder_model.onnx'), sess_options=options(threads), providers=['CPUExecutionProvider'])
+        # The joint/prediction network runs once per emitted token on a 1x1 input;
+        # extra threads only add wake-up latency.
+        self.decoder = ort.InferenceSession(str(model_dir / 'fp32/decoder_model.onnx'), sess_options=options(1), providers=['CPUExecutionProvider'])
         self.mel = np.fromfile(model_dir / 'shared/filterbank.bin', dtype='<f4').reshape(128, 257)
         self.window = np.pad(np.hanning(400).astype(np.float32), (56, 56))
         self.vocab = {int(line.rsplit(' ', 1)[1]): line.rsplit(' ', 1)[0] for line in (model_dir / 'shared/tokens.txt').read_text().splitlines()}
@@ -34,11 +41,24 @@ class Nemotron:
                 phrases.append(self.tokenizer.encode(text.strip()).ids)
         return Stream(self, phrases)
 
-    def features(self, audio):
+    def features(self, audio, first=0, count=None):
+        """Log-mel frames [first, first+count) of `audio`, identical to slicing the
+        full-signal features. Frame k covers pre-emphasised samples k*160-256 ..
+        k*160+256 of the zero-padded signal, so only that window is transformed;
+        recomputing the whole utterance per chunk made each step grow with its length."""
         x = np.asarray(audio, dtype=np.float32)
-        x = np.r_[x[0], x[1:] - 0.97*x[:-1]]
-        x = np.pad(x, 256)
-        frames = np.lib.stride_tricks.sliding_window_view(x, 512)[::160]
+        total = len(x)//160 + 1
+        count = total - first if count is None else min(count, total - first)
+        if count <= 0:
+            return np.empty((0, self.mel.shape[0]), np.float32)
+        lo = first*160 - 256
+        hi = (first + count - 1)*160 + 256
+        begin, end = max(0, lo), min(len(x), hi)
+        emphasised = x[begin:end] - 0.97*(x[begin-1:end-1] if begin > 0 else np.r_[0, x[:end-1]])
+        if begin == 0:
+            emphasised[0] = x[0]
+        window = np.pad(emphasised, (begin - lo, hi - end))
+        frames = np.lib.stride_tricks.sliding_window_view(window, 512)[::160]
         power = np.abs(np.fft.rfft(frames*self.window, axis=-1))**2
         return np.log(np.maximum(power@self.mel.T, 2**-24)).astype(np.float32)
 
@@ -99,11 +119,13 @@ class Stream:
 
     def _step(self, valid_frames):
         began = time.perf_counter()
-        features = self.model.features(self.audio[:min(len(self.audio), self.samples_decoded + self.model.chunk_samples)])
         pos = self.samples_decoded // 160
-        previous = features[max(0, pos-9):pos]
+        first = max(0, pos-9)
+        features = self.model.features(self.audio[:min(len(self.audio), self.samples_decoded + self.model.chunk_samples)],
+                                       first, pos + self.model.chunk_frames - first)
+        previous = features[:pos-first]
         previous = np.pad(previous, ((9-len(previous), 0), (0, 0)), constant_values=LOG_FLOOR)
-        segment = features[pos:pos+self.model.chunk_frames]
+        segment = features[pos-first:pos-first+self.model.chunk_frames]
         segment = np.pad(segment, ((0, self.model.chunk_frames-len(segment)), (0, 0)), constant_values=LOG_FLOOR)
         encoded, lengths, self.cache_ch, self.cache_t, self.cache_n = self.model.encoder.run(None, {
             'audio_signal': np.concatenate((previous, segment)).T[None],
