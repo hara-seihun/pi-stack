@@ -21,9 +21,11 @@ case ${1:---activate} in
     # it does not consume an ASR slot or start a dictation.
     port=$(printf '%s' "$base" | cut -d: -f3 | cut -d/ -f1)
     [[ $port =~ ^[0-9]+$ ]] || { echo "Invalid Write endpoint: $base" >&2; exit 64; }
-    deadline=$((SECONDS + 10))
+    # Since 2f2d7921 the engine loads the Nemotron encoder onto admitted ROCm (or falls back to
+    # CPU) before it listens; on GMKtec that measured 9.6-18 s, around the old 10 s limit, so allow a minute.
+    deadline=$((SECONDS + 60))
     until pi_stack_as_root bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; do
-      (( SECONDS < deadline )) || { echo 'Write engine did not bind its listener within 10 seconds' >&2; exit 1; }
+      (( SECONDS < deadline )) || { echo 'Write engine did not bind its listener within 60 seconds' >&2; exit 1; }
       sleep 0.1
     done
     ;;
