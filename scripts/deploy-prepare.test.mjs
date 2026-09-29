@@ -74,7 +74,7 @@ printf '%s\\n' '${writeLoadState}'`);
     f.executable(join(f.bin, "curl"), 'echo "fixture must not download weights" >&2; exit 64');
     const source = join(f.repo, "apps/write/engine");
     mkdirSync(join(source, "cleanup"), { recursive: true });
-    for (const file of ["requirements.lock", "model.json", "server.py", "cleanup/model.json"]) writeFileSync(join(source, file), "\n");
+    for (const file of ["requirements.lock", "model.json", "convert_fp32.py", "server.py", "cleanup/model.json"]) writeFileSync(join(source, file), "\n");
     f.commit();
     const destination = join(f.directory, "write-engine");
     const result = f.run("prepare", { PI_STACK_WRITE_ENGINE_DEST: destination, PI_STACK_WRITE_ENGINE_FORCE: "0" });

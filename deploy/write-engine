@@ -14,7 +14,7 @@ source_dir="$root/apps/write/engine"
 # The venv and 1.2 GB of weights are keyed only by the lock and model pins, so
 # a source change reinstalls a few Python files instead of refetching them.
 mapfile -t sources < <(cd "$source_dir" && find . -name '*.py' ! -name 'test_*' | LC_ALL=C sort)
-environment_key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" | sha256sum | cut -d' ' -f1)
+environment_key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha256sum | cut -d' ' -f1)
 cleanup_manifest="$source_dir/cleanup/model.json"
 cleanup_key=$(sha256sum "$cleanup_manifest" | cut -d' ' -f1)
 key=$( { echo "$environment_key"; echo "$cleanup_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
@@ -52,6 +52,7 @@ PY
       mv "$destination.part" "$destination"
     fi
   done < "$environment/model-files.tsv"
+  "$environment/venv/bin/python" "$source_dir/convert_fp32.py" "$environment/model"
   chmod -R a+rX "$environment"
   touch "$environment/ready"
 fi

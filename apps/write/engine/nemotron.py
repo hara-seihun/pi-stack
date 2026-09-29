@@ -14,12 +14,12 @@ LOG_FLOOR = math.log(2**-24)
 
 
 class Nemotron:
-    def __init__(self, model_dir: Path, threads=8):
+    def __init__(self, model_dir: Path, threads=6):
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = threads
         model_dir = Path(model_dir)
-        self.encoder = ort.InferenceSession(str(model_dir / 'fp16/encoder_model.onnx'), sess_options=opts, providers=['CPUExecutionProvider'])
-        self.decoder = ort.InferenceSession(str(model_dir / 'fp16/decoder_model.onnx'), sess_options=opts, providers=['CPUExecutionProvider'])
+        self.encoder = ort.InferenceSession(str(model_dir / 'int8/encoder_model.onnx'), sess_options=opts, providers=['CPUExecutionProvider'])
+        self.decoder = ort.InferenceSession(str(model_dir / 'fp32/decoder_model.onnx'), sess_options=opts, providers=['CPUExecutionProvider'])
         self.mel = np.fromfile(model_dir / 'shared/filterbank.bin', dtype='<f4').reshape(128, 257)
         self.window = np.pad(np.hanning(400).astype(np.float32), (56, 56))
         self.vocab = {int(line.rsplit(' ', 1)[1]): line.rsplit(' ', 1)[0] for line in (model_dir / 'shared/tokens.txt').read_text().splitlines()}
