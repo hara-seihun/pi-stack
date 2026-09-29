@@ -163,6 +163,13 @@ import { createStreamClient } from "./stream";
         peer.addEventListener("track", (event) => {
           if (generation !== this.generation) return;
           if (event.track.kind !== "audio") return;
+          if (this.externalPlayback) {
+            const receiver = event.receiver;
+            if ("jitterBufferTarget" in receiver) {
+              receiver.jitterBufferTarget = 80;
+              this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetMs: receiver.jitterBufferTarget });
+            } else this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetUnavailable: true });
+          }
           const stream = new MediaStream([event.track]);
           const speaker = this.speaker || new Audio();
           speaker.muted = this.outputMuted || this.externalPlayback;
