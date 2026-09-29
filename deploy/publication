@@ -1002,7 +1002,8 @@ done <<<"$users"
 jq -n --arg host "$host" --arg expected "$expected" --arg remote "$remote" --arg orchestrator "$orchestrator" \
   --arg voice "$voice" --arg environment "$environment" --argjson services "$services" --argjson people "$people" \
   '{host:$host,verifiedAt:(now|todateiso8601),integrationSha:$expected,remoteCommit:$remote,orchestratorCommit:$orchestrator,
-    voiceCommit:$voice,environmentId:$environment,router:$services.router,units:$services.units,supervisors:$people}'
+    voiceCommit:$voice,environmentId:$environment,router:$services.router,units:$services.units,
+    otherFailedPiUnits:$services.otherFailedPiUnits,supervisors:$people}'
 `;
 
 export function verifyTarget(target, expected) {

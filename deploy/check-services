@@ -32,9 +32,30 @@ while IFS= read -r user; do
   require_active "pi-remote@$user.service"
 done <<< "$users"
 failed=$(systemctl --failed --legend=no --plain --no-pager | awk '$1 ~ /^pi-/ {print $1}')
-[[ -z $failed ]] || { printf 'failed Pi units after release:\n%s\n' "$failed" >&2; exit 1; }
+release_failed=()
+other_failed=()
+while IFS= read -r unit; do
+  case "$unit" in
+    '') ;;
+    pi-orchestrator@*.service|pi-remote@*.service|pi-remote-router.service|pi-stack-voice.service|pi-stack-write.service|pi-model-broker.service|pi-stack-model-broker@*.service)
+      release_failed+=("$unit");;
+    *) other_failed+=("$unit");;
+  esac
+done <<< "$failed"
+# Host maintenance (for example the Claude balance collector) is not a runtime
+# dependency. Keep its failures visible without making release acceptance own it.
+if (( ${#other_failed[@]} )); then
+  printf 'failed Pi units outside the release runtime (host owner):\n' >&2
+  printf '%s\n' "${other_failed[@]}" >&2
+fi
+if (( ${#release_failed[@]} )); then
+  printf 'failed Pi runtime units after release:\n' >&2
+  printf '%s\n' "${release_failed[@]}" >&2
+  exit 1
+fi
 if [[ $format == --json ]]; then
-  jq -n --argjson router "$router" --argjson units "$units" '{router:$router,units:$units}'
+  jq -n --argjson router "$router" --argjson units "$units" \
+    --args '{router:$router,units:$units,otherFailedPiUnits:$ARGS.positional}' "${other_failed[@]}"
 else
   echo "services: $environment shared services and every unlocked supervisor are active"
 fi

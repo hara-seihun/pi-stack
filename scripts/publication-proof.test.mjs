@@ -51,10 +51,10 @@ esac
   ] };
   const health = { ok: true, releaseCommit: revision, environmentId: environment };
   const script = hostProofScript.replaceAll("/srv/pi", root);
-  function run(overrides = {}) {
+  function run(overrides = {}, requiredUnits = []) {
     writeFileSync(trace, "");
     const result = spawnSync("bash", ["-s", "--", revision, environment, environment, hostConfig,
-      "http://127.0.0.1:8796/status", resolve("deploy/check-services")], {
+      "http://127.0.0.1:8796/status", resolve("deploy/check-services"), ...requiredUnits], {
       input: script, encoding: "utf8", timeout: 3000,
       env: { ...process.env, PATH: `${root}:${process.env.PATH}`, TRACE: trace,
         ROUTER: JSON.stringify(router), HEALTH: JSON.stringify(health), VOICE: JSON.stringify({ releaseCommit: revision }),
@@ -91,6 +91,21 @@ for (const environment of ["local", "converge"]) {
     result = run({ ROUTER: JSON.stringify(router), INACTIVE: "" });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout).supervisors.map(person => person.user), ["kenan"]);
+  });
+
+  test(`${environment}: host failures are retained and explicit host dependencies still gate publication`, t => {
+    const { run } = fixture(t, environment);
+    const unit = "pi-claude-reset-read.service";
+    const overrides = { FAILED: `${unit} loaded failed failed Collector`, INACTIVE: unit };
+    const result = run(overrides);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).otherFailedPiUnits, [unit]);
+    assert.match(result.stderr, /host owner/);
+    assert.doesNotMatch(result.trace, /reset-failed|\b(start|restart|stop)\b/);
+    const required = run(overrides, [unit]);
+    assert.equal(required.status, 1);
+    assert.ok(required.stderr.includes(`${unit} is not active`));
+    assert.equal(required.stdout, "");
   });
 
   test(`${environment}: publication rejects missing services, bad health and stale releases`, t => {

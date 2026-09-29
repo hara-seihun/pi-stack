@@ -28,9 +28,9 @@ esac
     { user: "kenan", unlocked: false },
     { user: "sybil", unlocked: true },
   ] };
-  const run = (overrides = {}) => {
+  const run = (overrides = {}, args = []) => {
     writeFileSync(trace, "");
-    const result = spawnSync("bash", [script, "kenan", "local"], {
+    const result = spawnSync("bash", [script, "kenan", "local", ...args], {
       encoding: "utf8", timeout: 3000,
       env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, TRACE: trace,
         ROUTER: JSON.stringify(router), INACTIVE: "pi-remote@kenan.service", FAILED: "", ...overrides },
@@ -77,11 +77,28 @@ test("an all-locked host still requires shared services and valid router health"
   assert.notEqual(run({ CURL_STATUS: "22" }).status, 0);
 });
 
-test("failed Pi units and failed unit enumeration remain errors", (t) => {
+test("failed runtime units and failed unit enumeration remain errors", (t) => {
   const { run } = fixture(t);
-  const result = run({ FAILED: "pi-remote@kenan.service loaded failed failed Remote" });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /failed Pi units after release:\npi-remote@kenan.service/);
+  for (const unit of ["pi-remote@kenan.service", "pi-orchestrator@sybil.service",
+    "pi-remote-router.service", "pi-stack-voice.service", "pi-stack-write.service",
+    "pi-model-broker.service", "pi-stack-model-broker@sybil.service"]) {
+    const result = run({ FAILED: `${unit} loaded failed failed Runtime\npi-claude-reset-read.service loaded failed failed Collector` });
+    assert.equal(result.status, 1);
+    assert.ok(result.stderr.includes(`failed Pi runtime units after release:\n${unit}`));
+    assert.match(result.stderr, /host owner\):\npi-claude-reset-read.service/);
+  }
   assert.notEqual(run({ SYSTEMCTL_STATUS: "1" }).status, 0);
   assert.equal(run({ FAILED: "unrelated.service loaded failed failed Unrelated" }).status, 0);
+});
+
+test("host job failures remain visible without rejecting a healthy runtime", (t) => {
+  const { run } = fixture(t);
+  const FAILED = "pi-claude-reset-read.service loaded failed failed Collector\npi-host-maintenance.service loaded failed failed Maintenance";
+  const result = run({ FAILED }, ["--json"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).otherFailedPiUnits,
+    ["pi-claude-reset-read.service", "pi-host-maintenance.service"]);
+  assert.match(result.stderr, /host owner\):\npi-claude-reset-read.service\npi-host-maintenance.service/);
+  assert.doesNotMatch(result.trace, /reset-failed|\b(start|restart|stop|unlock)\b/);
+  assert.deepEqual(JSON.parse(run({}, ["--json"]).stdout).otherFailedPiUnits, []);
 });
