@@ -58,6 +58,52 @@ pi_stack_enter_deployment() {
   fi
 }
 
+# Each curl invocation resumes from the bytes actually retained on disk. Curl's
+# built-in retries neither cover HTTP/2 resets by default nor advance -C's offset.
+pi_stack_download_artifact() {
+  local url=$1 destination=$2 digest=$3 part="$2.part" attempt status http_code
+  if [[ -f $destination ]] && echo "$digest  $destination" | sha256sum --check --status; then
+    return 0
+  fi
+  if [[ -f $part ]] && echo "$digest  $part" | sha256sum --check --status; then
+    mv "$part" "$destination"
+    return
+  fi
+  for attempt in 1 2 3 4; do
+    status=0
+    http_code=$(curl -fL --silent --show-error --retry 0 --connect-timeout 15 \
+      --speed-limit 1024 --speed-time 30 -C - --write-out '%{http_code}' \
+      "$url" -o "$part") || status=$?
+    if (( status == 0 )); then
+      if echo "$digest  $part" | sha256sum --check --status; then
+        mv "$part" "$destination"
+        return
+      fi
+      # curl can report success for 416 with -C, even for an invalid prefix.
+      if [[ $http_code == 416 ]]; then
+        status=22
+      else
+        echo "Checksum mismatch for $destination; removing invalid partial download" >&2
+        rm -f "$part"
+        return 65
+      fi
+    fi
+    case "$status:$http_code" in
+      5:*|6:*|7:*|16:*|18:*|28:*|35:*|52:*|55:*|56:*|92:*|95:*|22:408|22:429|22:500|22:502|22:503|22:504) ;;
+      33:*|36:*|22:416)
+        echo "Server cannot resume $destination; restarting partial download" >&2
+        rm -f "$part" ;;
+      *) return "$status" ;;
+    esac
+    if (( attempt == 4 )); then
+      echo "Download exhausted 4 attempts for $destination (curl $status, HTTP $http_code)" >&2
+      return "$status"
+    fi
+    echo "Retrying $destination after curl $status, HTTP $http_code (attempt $((attempt + 1))/4)" >&2
+    sleep "$((1 << (attempt - 1)))"
+  done
+}
+
 pi_stack_dependency_key() {
   local root=$1
   sha256sum "$root/package.json" "$root/package-lock.json" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1

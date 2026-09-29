@@ -39,9 +39,7 @@ fetch() { # URL DIGEST DESTINATION
     [[ -f "$existing" && "$existing" != "$destination" ]] || continue
     if [[ $(sha256sum "$existing" | cut -d' ' -f1) == "$digest" ]]; then cp --reflink=auto "$existing" "$destination.part" && mv "$destination.part" "$destination" && return; fi
   done
-  curl -fL --retry 5 --retry-all-errors --retry-delay 2 -C - "$url" -o "$destination.part"
-  echo "$digest  $destination.part" | sha256sum --check --status
-  mv "$destination.part" "$destination"
+  pi_stack_download_artifact "$url" "$destination" "$digest"
 }
 if [[ ! -f "$environment/ready" ]]; then
   command -v uv >/dev/null || { echo 'PiStack Write requires uv' >&2; exit 1; }
@@ -85,11 +83,7 @@ for name,digest in m['files'].items():
 PY
   while IFS=$'\t' read -r file url digest; do
     destination="$cleanup_model/$file"
-    if [[ ! -f "$destination" ]] || [[ $(sha256sum "$destination" | cut -d' ' -f1) != "$digest" ]]; then
-      curl -fL --retry 5 --retry-all-errors --retry-delay 2 -C - "$url" -o "$destination.part"
-      echo "$digest  $destination.part" | sha256sum --check --status
-      mv "$destination.part" "$destination"
-    fi
+    pi_stack_download_artifact "$url" "$destination" "$digest"
   done < "$cleanup_model/files.tsv"
   chmod -R a+rX "$cleanup_model"
   touch "$cleanup_model/ready"
