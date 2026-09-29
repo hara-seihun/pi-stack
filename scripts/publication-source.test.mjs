@@ -113,6 +113,41 @@ for (const remoteHost of [undefined, "converge-kenan"]) {
   });
 }
 
+test("a genuinely busy host lock requeues the same integration, while unrelated exit 75 remains a failure", t => {
+  const f = fixture(t);
+  const release = join(f.root, "release");
+  const log = join(f.root, "deployment.log");
+  const request = { requestId: "PUB-0123456789abcdef01234567", integrationSha: f.commit,
+    attempt: 1, status: "running", progress: { step: "deploy-converge" },
+    hosts: { gmktec: { status: "passed" } } };
+  const run = message => {
+    writeFileSync(release, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(message)} >&2\nexit 75\n`, { mode: 0o700 });
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { deployTarget, requeueBusyHost } from ${JSON.stringify(publication)};
+      const request = ${JSON.stringify(request)};
+      const target = { id: "converge", sshHost: null, releaseCommand: ${JSON.stringify(release)} };
+      const result = deployTarget(request, target, ${JSON.stringify(log)});
+      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)});
+      console.log(JSON.stringify({ result, request }));
+    `], { encoding: "utf8", timeout: 5000, env: { ...process.env,
+      PI_STACK_PUBLICATION_STATE: f.root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(f.root, f.source) } });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const busy = run("another Pi stack deployment owns /srv/pi/.pi-stack-deploy.lock");
+  assert.equal(busy.result.kind, "host-lock-busy");
+  assert.equal(busy.request.status, "queued");
+  assert.equal(busy.request.waiting.host, "converge");
+  assert.equal(busy.request.attempt, 1);
+  assert.deepEqual(busy.request.hosts, request.hosts);
+  assert.equal(busy.request.integrationSha, f.commit);
+  assert.ok(Date.parse(busy.request.nextAttemptAt) > Date.now());
+  assert.equal(JSON.parse(readFileSync(join(f.root, "requests", `${request.requestId}.json`), "utf8")).status, "queued");
+  const unrelated = run("release checkout failed for another reason");
+  assert.equal(unrelated.result.kind, undefined);
+  assert.equal(unrelated.request.status, "running");
+});
+
 function integrationFixture(t) {
   const f = fixture(t);
   const remote = join(f.root, "remote.git");
