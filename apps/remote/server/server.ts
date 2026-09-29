@@ -36,7 +36,7 @@ import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles } from "./thread-context-files";
 import { API } from "./api";
-import { WriteDictionary, connectWrite, parseDictionary, type WriteSocketData } from "./write";
+import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
@@ -1777,9 +1777,7 @@ const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
 type SocketData = AudioSocketData | WriteSocketData;
-const writeEndpoint = modelBrokerUrl()
-  ? `${modelBrokerUrl()!.replace(/^http/, "ws").replace(/\/$/, "")}/v1/write/stream`
-  : process.env.PI_STACK_WRITE_URL ?? "ws://127.0.0.1:8797/";
+const writeEndpoint = writeEngineEndpoint();
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({
   hostname: HOST,

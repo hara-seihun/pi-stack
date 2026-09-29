@@ -41,15 +41,13 @@ if (( services )); then
 fi
 
 # Builds share checkout dependencies, not output directories. Prepare them
-# together while the independent production runtime and transcription install.
+# together while selecting the prepared Write engine on hosts that own it.
 # The Write engine's 1.2 GB model is fetched by deploy/prepare, outside this
 # deadline; here it is only selected, and a missing preparation fails loudly.
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
-"$root/deploy/transcription" &
-transcription_pid=$!
 if (( write )); then
   "$root/deploy/write-engine" --select &
   write_pid=$!
@@ -61,7 +59,6 @@ fi
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1
 wait "$runtime_pid" || preparation_failed=1
-wait "$transcription_pid" || preparation_failed=1
 wait "$write_pid" || preparation_failed=1
 (( preparation_failed == 0 )) || exit 1
 

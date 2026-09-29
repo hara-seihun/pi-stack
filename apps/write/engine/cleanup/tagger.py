@@ -17,7 +17,7 @@ from tokenizers import Tokenizer
 class JointOnnxTagger:
     deletion_threshold = .925
 
-    def __init__(self, directory: str | Path, threads: int = 4):
+    def __init__(self, directory: str | Path, threads: int = 2):
         path = Path(directory)
         options = ort.SessionOptions()
         options.intra_op_num_threads = threads
