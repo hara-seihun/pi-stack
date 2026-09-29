@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { OrchestratorConfig } from "./domain.js";
 import { assign, commitMeterAdmission } from "./policy.js";
-import { isCredentialError, isRateLimitError, rateLimitCooldownMs } from "./provider-errors.js";
+import { isCredentialError, isRateLimitError, providerAccepted, rateLimitCooldownMs } from "./provider-errors.js";
 import type { Store } from "./store.js";
 import type { PiEvent, Result, Thread, ThreadSettings } from "./threads/contracts.js";
 import type { ThreadAdmission } from "./threads/service.js";
@@ -97,8 +97,10 @@ export class Fleet {
     // spend ceiling must not be retried after thirty minutes (September 24, 2026:
     // one throttle cooled the only healthy Anthropic account while three workers
     // kept being admitted onto one at its monthly limit, and all three failed).
-    if (message.stopReason === "error" && isRateLimitError(failure)) this.store.setCooldown(lease.accountId, Date.now() + rateLimitCooldownMs(failure));
-    else if (message.stopReason === "error" && isCredentialError(failure)) this.store.setCooldown(lease.accountId, Date.now() + 30 * 60_000);
+    const model = typeof message.model === "string" ? message.model : undefined;
+    if (message.stopReason === "error" && isRateLimitError(failure)) this.store.setCooldown(lease.accountId, Date.now() + rateLimitCooldownMs(failure), { model });
+    else if (message.stopReason === "error" && isCredentialError(failure)) this.store.setCooldown(lease.accountId, Date.now() + 30 * 60_000, { model });
+    else if (providerAccepted(message)) this.store.recordProviderSuccess(lease.accountId, { model: model!, startedAt: Number(message.timestamp), source: "fleet" });
     if (!message.usage) return;
     const receipt = `thread-usage:${threadId}:${createHash("sha256").update(JSON.stringify(message)).digest("hex")}`;
     this.store.transaction(() => {

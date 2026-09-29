@@ -45,7 +45,9 @@ export async function runProviderOperation(
       const model = { ...request.model, provider: account };
       for (let attempt = 0; attempt < 2 && !signal.aborted; attempt++) {
         const credential = await auth.resolve(account, signal);
+        const startedAt = Date.now();
         last = await request.run(model, { ...credential, signal });
+        if (last.ok) store.recordProviderSuccess(account, { model: model.id, startedAt, source: "provider-operation" });
         if (!last.ok && repairDetail) last = { ...last, error: `${repairDetail}; after shared OAuth repair: ${last.error}` };
         if (last.usage) recordModelUsage(store, account, model.id, last.usage, request.sessionId);
         if (last.ok || attempt !== 0 || !credential.apiKey) break;
@@ -65,7 +67,7 @@ export async function runProviderOperation(
         return last;
       }
       if (!isRateLimitError(last.error)) return last;
-      store.setCooldown(account, Date.now() + rateLimitCooldownMs(last.error));
+      store.setCooldown(account, Date.now() + rateLimitCooldownMs(last.error), { model: model.id });
       if (process.env.PI_ORCHESTRATOR_ASSIGNED === "1") return last;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

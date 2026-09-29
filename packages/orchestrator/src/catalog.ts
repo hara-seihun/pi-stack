@@ -122,6 +122,22 @@ export function modelDrainsMeter(provider: string, model: string, meterId: strin
   return meter.drainedBy.some(key => key.startsWith(`${meterClass}:`) || key.startsWith("default:"));
 }
 
+/**
+ * Whether a request for `served` passed through every provider quota a request
+ * for `refused` draws on, so its success shows the refusal's limit is no longer
+ * in force. A Fable request covers Opus (Fable also drains its own weekly
+ * meter), but an Opus success says nothing about Fable's separate allowance.
+ * Models the catalog does not describe, such as image models, only cover
+ * themselves.
+ */
+export function quotaScopeCovers(provider: string, served: string, refused: string): boolean {
+  if (served === refused) return true;
+  const known = (model: string) => ORCHESTRATOR_CATALOG.models.some(item => item.provider === provider && item.model === model);
+  if (!known(served) || !known(refused)) return false;
+  return ORCHESTRATOR_CATALOG.meters.filter(meter => meter.provider === provider)
+    .every(meter => !modelDrainsMeter(provider, refused, meter.id) || modelDrainsMeter(provider, served, meter.id));
+}
+
 export function catalogAgentType(raw: string): { key: string; label: string } {
   const value = raw.toLowerCase();
   const match = ORCHESTRATOR_CATALOG.models.find((model) => {

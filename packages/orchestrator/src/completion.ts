@@ -90,7 +90,7 @@ export class CompletionService {
       this.rememberAttempt(value);
       this.evidence(`completion-recovery:${run.id}:${value.attemptId}`, "Caller-authorized recovery of an explicit Codex rate-limit rejection; original receipt retained.");
       const observed = Number((this.store.db.prepare("SELECT count(*) n FROM run WHERE account_id=? AND started_at<=? AND (ended_at IS NULL OR ended_at>=?)").get(run.accountId!, value.record.updatedAt, value.record.updatedAt) as {n:number}).n);
-      const retryAt = recordCompletionRejection(this.store, run.accountId!, Date.now(), undefined, Math.max(1, observed));
+      const retryAt = recordCompletionRejection(this.store, run.accountId!, Date.now(), undefined, Math.max(1, observed), run.model);
       return { ok: true, value: this.requeue(value, retryAt) };
     });
   }
@@ -175,11 +175,14 @@ export class CompletionService {
       this.rememberAttempt(value);
       this.evidence(`completion-receipt:${runId}:${attemptId}`, outcome);
       if (outcome.state === "failed" && outcome.error.code === "rate-limited" && outcome.error.httpStatus === 429 && value.record.state !== "cancelled") {
-        const retryAt = recordCompletionRejection(this.store, run.accountId!, Date.now(), outcome.error.retryAfterMs);
+        const retryAt = recordCompletionRejection(this.store, run.accountId!, Date.now(), outcome.error.retryAfterMs, undefined, run.model);
         return { ok: true, value: this.requeue(value, retryAt) };
       }
       if (outcome.state === "completed") {
         recordCompletionSuccess(this.store, run.accountId!, Date.now());
+        // Admission precedes the provider request, so the lease start is a conservative request start.
+        const admitted = this.store.db.prepare("SELECT started_at FROM lease WHERE id=?").get(`run:${runId}`) as { started_at: number } | undefined;
+        if (admitted && run.model) this.store.recordProviderSuccess(run.accountId!, { model: run.model, startedAt: admitted.started_at, source: "completion" });
         for (const component of ["input", "output", "cacheRead", "cacheWrite"] as const) {
           this.store.recordUsage({ accountId: run.accountId!, hour: Math.floor(Date.now() / 3_600_000) * 3_600_000, source: "completion", runId, model: outcome.result.model, component, tokens: outcome.result.usage[component] });
         }

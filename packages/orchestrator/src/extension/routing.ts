@@ -8,7 +8,7 @@ import { allowsAccountUse } from "../domain.js";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { pooledOnlyProvider } from "../auth/pooled-only.js";
-import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
+import { isRateLimitError, isRejectedTokenError, providerAccepted, rateLimitCooldownMs } from "../provider-errors.js";
 import { isCodexNotFoundError, repairProviderCredential, type CredentialRepair } from "../auth/provider-rejection.js";
 import { withAnthropicFiles } from "../auth/anthropic-files-provider.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
@@ -141,6 +141,14 @@ export default function routing(pi:ExtensionAPI):void{
       if(!matchesPin(ctx)){void ctx.abort();throw new Error(`Model change refused: this run is pinned to ${pinned?.model??requestedPin}`);}
     });
   }
+  // Every consumer shares the ledger's cooldowns, so an answer on a pooled account
+  // here is evidence for the fleet and brokers too, not just for this session.
+  pi.on("message_end",event=>{
+    if(closed)return;
+    const message=event.message as any;
+    if(providerAccepted(message)&&store.account(message.provider))
+      store.recordProviderSuccess(message.provider,{model:message.model,startedAt:message.timestamp,source:environment.PI_ORCHESTRATOR_ASSIGNED==="1"?"assigned":"interactive"});
+  });
   if(environment.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>{if(closed)return;closed=true;lifecycle.abort();store.close();});return;}
   let leaseId:string|undefined,leasedAccount:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
   let running=false,turnActive=false,compacting=false;
@@ -259,7 +267,7 @@ export default function routing(pi:ExtensionAPI):void{
       }
     }
     if(!isRateLimitError(failure))return;
-    if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure));
+    if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure),{model:last.model});
     // Rotate away from the refusing account; when every sibling is cooling, take the
     // one nearest expiry rather than ending the turn. A cooldown is this machine's
     // guess and the provider decides, so a rate limit stays weather the session
