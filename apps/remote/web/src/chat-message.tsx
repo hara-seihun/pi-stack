@@ -1,16 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
-import { API } from "../../server/api";
-import type { MessagingMessage } from "../../server/messaging/protocol";
-import { extractMessageLinks } from "../../server/messaging/links";
 import type { ResponseMetrics } from "../../server/protocol";
 import type { MessageIdentity, MessageReaction, MessageReply } from "../../server/message-protocol";
 import { ReplyQuote, replyTarget, type ReplyTarget } from "./message-reply";
 import { MessageReactions } from "./message-reactions";
 import { AGENT_AVATAR } from "../../server/agent-identity";
 import { appPath } from "./app-path";
-import { messagingAvatarUrl } from "./messaging-avatar";
 import { CachedImage, useCachedMedia } from "./cached-media";
-import { resourceUrl } from "./resource-url";
 import { MessageLinkPreviews } from "./link-previews";
 import { useNearViewport } from "./near-viewport";
 import { formatResponseMetrics } from "./response-metrics";
@@ -47,22 +42,6 @@ export function attachmentKind(mimeType: string): ChatAttachmentKind {
   return "file";
 }
 export type ChatDelivery = { status: string; error?: string | null; canCheck: boolean; canRetry: boolean };
-
-/** One message's body: its text, files and delivery state. A block shows one or more of these under a single header. */
-export type ChatMessageSegment = {
-  id: string;
-  text: string;
-  timestamp?: number;
-  previewMessageId?: string;
-  identity?: MessageIdentity;
-  reactions?: MessageReaction[];
-  reply?: MessageReply;
-  onReply?(target: ReplyTarget): void;
-  attachments?: ChatAttachment[];
-  delivery?: ChatDelivery;
-  onCheck?(): void;
-  onRetry?(): void;
-};
 
 /** Kenan's head, for the agent's own messages. */
 export const agentAvatar = () => appPath(AGENT_AVATAR);
@@ -160,104 +139,7 @@ export function ChatMessage(props: ChatMessageProps) {
   </MessageFrame>;
 }
 
-/**
- * Several literal messages from one sender under one header, each in its own
- * paragraph. The header carries the first message's time; each paragraph
- * carries its own on hover. "sent" footers only show on the last segment so a
- * run of delivered messages does not repeat itself; anything unresolved or
- * failed stays visible on the segment it belongs to.
- */
-export function ChatMessageGroup({ kind, label, avatar, segments, checking = false, menu, onEditImage, newestFirstDom = false }: {
-  kind: string;
-  label: string;
-  avatar?: string;
-  segments: ChatMessageSegment[];
-  checking?: boolean;
-  menu?: MessageMenuItem[];
-  onEditImage?(image: HTMLImageElement): void;
-  newestFirstDom?: boolean;
-}) {
-  const text = segments.map(segment => segment.text).filter(Boolean).join("\n\n");
-  return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={segments[0]?.timestamp} menu={menu}>
-    <div className={newestFirstDom ? "message-segments newest-first-dom" : "message-segments"}>
-    {(newestFirstDom ? segments.map((segment, index) => ({ segment, index })).reverse() : segments.map((segment, index) => ({ segment, index }))).map(({ segment, index }) => {
-      const last = index === segments.length - 1;
-      const delivery = segment.delivery && (last || segment.delivery.status !== "sent") ? segment.delivery : undefined;
-      const time = segment.timestamp === undefined ? undefined : new Date(segment.timestamp);
-      return <GroupSegment key={segment.id} segment={segment} label={label} time={time} delivery={delivery} checking={checking} onEditImage={onEditImage} />;
-    })}
-    </div>
-  </MessageFrame>;
-}
-
-function GroupSegment({ segment, label, time, delivery, checking, onEditImage }: {
-  segment: ChatMessageSegment;
-  label: string;
-  time?: Date;
-  delivery?: ChatDelivery;
-  checking: boolean;
-  onEditImage?(image: HTMLImageElement): void;
-}) {
-  const { identity, onReply } = segment;
-  const [reactionsOpen, setReactionsOpen] = useState(false);
-  const { menu, handlers } = useMessageMenu([
-    { label: "Copy", onSelect: () => copyText(segment.text) },
-    ...(identity && onReply ? [{ label: "Reply", onSelect: () => onReply(replyTarget(identity, segment.text)) }] : []),
-    ...(identity ? [{ label: "React", onSelect: () => setReactionsOpen(true) }] : []),
-  ]);
-  return <div className="message-segment" data-message-id={identity?.id ?? segment.id} tabIndex={identity ? 0 : undefined} title={time?.toLocaleString()}
-    {...handlers} onContextMenu={event => { event.stopPropagation(); handlers.onContextMenu?.(event); }}
-    onPointerDown={event => { event.stopPropagation(); handlers.onPointerDown?.(event); }}
-    onPointerMove={event => { event.stopPropagation(); handlers.onPointerMove?.(event); }}
-    onPointerUp={event => { event.stopPropagation(); handlers.onPointerUp?.(); }}
-    onPointerCancel={event => { event.stopPropagation(); handlers.onPointerCancel?.(); }}>
-    {menu}
-    <MessageBody attachments={segment.attachments} delivery={delivery} checking={checking} onCheck={segment.onCheck} onRetry={segment.onRetry} onEditImage={onEditImage}>
-      {segment.reply && <ReplyQuote reply={segment.reply} />}
-      {segment.text && <p className="message-text">{segment.text}</p>}
-      {segment.previewMessageId && <MessageLinkPreviews key={segment.previewMessageId} messageId={segment.previewMessageId} />}
-    </MessageBody>
-    {identity && <MessageReactions identity={identity} reactions={segment.reactions} open={reactionsOpen} onOpenChange={setReactionsOpen} />}
-  </div>;
-}
-
-/** One Signal message as a segment of a sender's block; check/retry handlers are wired by the caller. */
-export function messagingMessageSegment(message: MessagingMessage, handlers: { onCheck?(): void; onRetry?(): void; onReply?(target: ReplyTarget): void } = {}): ChatMessageSegment {
-  const { text, timestamp, attachments, delivery, previewMessageId, identity, reactions, reply } = messagingMessageProps(message);
-  return { id: message.id, text, timestamp, attachments, delivery, previewMessageId, identity, reactions, reply, ...handlers };
-}
-
-export function messagingMessageProps(message: MessagingMessage, backendId = ""): ChatMessageProps {
-  const outgoing = message.direction === "outgoing";
-  return {
-    kind: outgoing ? "user" : "assistant",
-    label: outgoing ? "You" : message.senderName || message.sender,
-    avatar: outgoing ? undefined : messagingAvatarUrl(backendId, message.sender, message.senderAvatar),
-    text: message.text,
-    previewMessageId: (message.status === "received" || message.status === "sent") && extractMessageLinks(message.text, 1).length > 0 ? message.id : undefined,
-    contentFormat: "literal",
-    timestamp: message.timestamp,
-    identity: message.identity,
-    reactions: message.reactions,
-    reply: message.reply,
-    attachments: message.attachments.map(attachment => ({
-      id: attachment.id,
-      name: attachment.name,
-      url: resourceUrl(API.messagingAttachment.path({ attachmentId: attachment.id })),
-      size: attachment.size,
-      kind: attachmentKind(attachment.mimeType),
-    })),
-    delivery: outgoing ? {
-      status: message.status,
-      error: message.error,
-      // `sending` is the supervisor at work; a supervisor that stops mid-send records `unknown`, and only that needs a check.
-      canCheck: !!message.requestId && message.status === "unknown",
-      canRetry: !!message.requestId && message.status === "failed",
-    } : undefined,
-  };
-}
-
-function AttachmentPlayback({ attachment }: { attachment: ChatAttachment }) {
+export function AttachmentPlayback({ attachment }: { attachment: ChatAttachment }) {
   const { ref, near } = useNearViewport<HTMLDivElement>();
   const [error, setError] = useState(false);
   const [ready, setReady] = useState(false);

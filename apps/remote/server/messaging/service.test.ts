@@ -154,7 +154,7 @@ describe("messaging custody", () => {
     const chat = { id: conversation.externalId, title: conversation.title, kind: 'direct' as const };
     await context.message({ id: 'quote-first', conversation: chat, direction: 'incoming', sender: 'friend-uuid', text: 'answer', timestamp: 200, attachments: [], reply: { author: 'self-number', timestamp: 100, text: 'original' } });
     const first = service.history(conversation.id).messages[0];
-    expect(first.reply).toMatchObject({ messageId: null, text: 'original', sender: { id: 'self-number' }, timestamp: 100 });
+    expect(first.reply).toMatchObject({ messageId: null, text: 'original', sender: { id: 'self-number', own: true }, timestamp: 100 });
     await context.message({ id: 'other', conversation: chat, direction: 'incoming', sender: 'friend-uuid', text: 'wrong', timestamp: 100, attachments: [] });
     expect(service.history(conversation.id).messages[0].reply?.messageId).toBeNull();
     await context.message({ id: 'mine', conversation: chat, direction: 'outgoing', sender: 'self-number', text: 'original', timestamp: 100, attachments: [] });
@@ -178,6 +178,7 @@ describe("messaging custody", () => {
     plugin.send = async (_conversation, value) => { sentReply = value.reply; return { ok: false, error: { code: 'unknown', message: 'uncertain' } }; };
     const accepted = service.accept(conversation.id, input);
     expect(accepted.message.reply).toMatchObject({ messageId: target.identity!.id, text: 'exact quote', sender: { id: 'friend-uuid', name: 'Friend' } });
+    expect(accepted.message.reply?.sender.own).toBeUndefined();
     expect(sentReply).toEqual({ author: 'friend-uuid', timestamp: 123, text: 'exact quote' });
     expect((await accepted.settled).status).toBe('unknown');
     expect(await service.send(conversation.id, input)).toMatchObject({ status: 'unknown', reply: { messageId: target.identity!.id } });

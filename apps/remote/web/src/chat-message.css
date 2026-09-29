@@ -2,9 +2,6 @@
 .message-time { flex: 0 1 auto; padding-top: 5px; color: var(--muted); font-size: 11px; text-align: right; }
 .message-text { white-space: pre-wrap; }
 p.message-text { margin: 0; }
-.message-segment + .message-segment { margin-top: var(--space-2); }
-.message-segments.newest-first-dom { display: flex; flex-direction: column-reverse; }
-.message-segments.newest-first-dom .message-segment + .message-segment { margin-top: 0; margin-bottom: var(--space-2); }
 .message-attachment { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .message-attachment a { color: var(--accent); }
 .message-attachment-media { display: block; width: 100%; border-radius: 10px; }
@@ -27,7 +24,7 @@ p.message-text { margin: 0; }
 .message-reactions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 6px; font-size: 13px; }
 .message-reaction-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 32px; min-height: 28px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); line-height: 1; }
 .message-reaction-chip[data-own="true"], .message-reaction-picker button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-.message[data-message-id]:focus-visible, .message-segment[data-message-id]:focus-visible, .message-reaction-picker button:focus-visible, .message-reaction-picker input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.message[data-message-id]:focus-visible, .message-reaction-picker button:focus-visible, .message-reaction-picker input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .message-reaction-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-2); background: var(--surface-2); }
 .message-reaction-picker > button { min-width: 36px; min-height: 36px; border-radius: var(--radius-1); font-size: 20px; }
 .message-reaction-picker > button:hover { background: var(--surface-3); }

@@ -1,8 +1,11 @@
 import { useState } from "react";
-import type { MessageIdentity, MessageReply } from "../../server/message-protocol";
+import type { MessageIdentity, MessageReply, MessageSender } from "../../server/message-protocol";
 import "./message-reply.css";
 
 export interface ReplyTarget { identity: MessageIdentity; text: string }
+
+/** What a person sees for a sender: "You" for their own account, never a bare number when a name exists. */
+export function senderName(sender: MessageSender): string { return sender.own ? "You" : sender.name || sender.id; }
 
 export function replyTarget(identity: MessageIdentity, text: string): ReplyTarget { return { identity, text }; }
 
@@ -22,8 +25,8 @@ export function ReplyQuote({ reply }: { reply: MessageReply }) {
     original.classList.add("reply-highlight");
   };
   return <div className="reply-quote">
-    <button type="button" className="reply-quote-link" onClick={jump} aria-label={`Go to message from ${reply.sender.name || reply.sender.id}`}>
-      <strong>{reply.sender.name || reply.sender.id}</strong>
+    <button type="button" className="reply-quote-link" onClick={jump} aria-label={`Go to message from ${senderName(reply.sender)}`}>
+      <strong>{senderName(reply.sender)}</strong>
       <span>{reply.text || "Attachment"}</span>
     </button>
     {missing && <span className="reply-missing" role="status">Original message isn't loaded here.</span>}
@@ -32,7 +35,7 @@ export function ReplyQuote({ reply }: { reply: MessageReply }) {
 
 export function ReplyComposer({ target, onCancel }: { target: ReplyTarget; onCancel(): void }) {
   return <div className="reply-composer" role="status">
-    <div><strong>Replying to {target.identity.sender.name || target.identity.sender.id}</strong><span>{target.text || "Attachment"}</span></div>
+    <div><strong>Replying to {senderName(target.identity.sender)}</strong><span>{target.text || "Attachment"}</span></div>
     <button type="button" aria-label="Cancel reply" title="Cancel reply" onClick={onCancel}>×</button>
   </div>;
 }

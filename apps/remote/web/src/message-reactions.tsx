@@ -3,6 +3,7 @@ import { API } from "../../server/api";
 import type { MessageIdentity, MessageReaction, ReactionRequest } from "../../server/message-protocol";
 import { piFetch } from "./client";
 import { DismissibleError } from "./dismissible-error";
+import { senderName } from "./message-reply";
 
 const emptyReactions: MessageReaction[] = [];
 const choices = ["👍", "❤️", "😂", "🎉", "😮", "😢"];
@@ -80,10 +81,10 @@ export function MessageReactions({ identity, reactions = emptyReactions, open, o
   };
 
   if (!grouped.size && !open && !error) return null;
-  return <div ref={container} className="message-reactions" aria-label={`Reactions to ${identity.sender.name || identity.sender.id}'s message`}>
+  return <div ref={container} className="message-reactions" aria-label={`Reactions to ${identity.sender.own ? "your" : `${senderName(identity.sender)}'s`} message`}>
     {Array.from(grouped, ([emoji, senders]) => {
       const mine = senders.some(isMine);
-      const names = senders.map(reaction => reaction.sender.name || reaction.sender.id).join(", ");
+      const names = senders.map(reaction => isMine(reaction) ? "You" : senderName(reaction.sender)).join(", ");
       return <span key={emoji} className="message-reaction-chip" aria-label={`${emoji}, ${senders.length} ${senders.length === 1 ? "reaction" : "reactions"} from ${names}`} data-own={mine || undefined} title={names}>{emoji} <span>{senders.length}</span></span>;
     })}
     {open && <div className="message-reaction-picker" role="group" aria-label="Choose a reaction" onPointerDown={event => event.stopPropagation()} onContextMenu={event => event.stopPropagation()}>

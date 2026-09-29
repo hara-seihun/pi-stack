@@ -4,13 +4,13 @@ import { Composer } from "./Composer";
 import { ReplyComposer } from "./message-reply";
 import { useChatDrawing } from "./chat-drawing";
 import { ConversationView } from "./ConversationView";
-import { ChatMessageGroup, messagingMessageProps, messagingMessageSegment } from "./chat-message";
+import { MessagingChat } from "./messaging-chat";
 import { PasteTextDialog } from "./PasteTextDialog";
 import { DismissibleError } from "./dismissible-error";
 import { listenForFileDrops } from "./file-drop";
 import { messagingClient } from "./messaging-client";
 import type { MessagingHistoryCache } from "./messaging-history";
-import { beginHumanSend, draftFromHumanMessage, emptyHumanDraft, groupHumanMessages, mergeHumanMessages, requestFromHumanMessage, unconfirmedHumanSend, type HumanDraft } from "./messaging-state";
+import { beginHumanSend, draftFromHumanMessage, emptyHumanDraft, mergeHumanMessages, requestFromHumanMessage, unconfirmedHumanSend, type HumanDraft } from "./messaging-state";
 import "./messages.css";
 
 export function MessagingConversations({ selected, snapshot, history, onRead }: {
@@ -183,19 +183,15 @@ function MessagingConversationController({ conversation, backend, active, histor
   const ready = backend?.status === "ready";
   return <ConversationView active={active} label={`Messages with ${conversation.title}`} drawing={drawing} editImages={!!backend?.capabilities.attachments} transcript={<div className="transcript messaging-transcript">
         {!loaded && !messages.length && !error && !historyError && <div className="conversation-skeleton" role="status" aria-label="Loading conversation"><span /><span /><span /></div>}
-        {loaded && !messages.length && <p className="muted">No messages yet</p>}
-        {groupHumanMessages(messages).reverse().map(group => {
-          const { kind, label, avatar } = messagingMessageProps(group[0], conversation.backendId);
-          return <ChatMessageGroup key={group[0].id} newestFirstDom kind={kind} label={label} avatar={avatar} checking={group.some(message => pendingChecks.includes(message.id))} segments={group.map(message => messagingMessageSegment(message, {
-            onReply: target => save({ ...currentDraft.current, reply: target }),
-            onCheck: () => void checkRequest(message),
-            onRetry: () => {
-              if (currentDraft.current.text || currentDraft.current.attachments.length) { setError("Keep or send your current draft before restoring the failed message."); return; }
-              save(draftFromHumanMessage(message));
-            },
-          }))} />;
-        })}
-        {before !== null && <button type="button" disabled={olderLoading} onClick={() => void older()}>{olderLoading ? "Loading…" : "Older messages"}</button>}
+        {loaded && !messages.length && <p className="chat-empty">No messages yet</p>}
+        <MessagingChat messages={messages} backendId={conversation.backendId} group={conversation.kind === "group"} checking={pendingChecks}
+          onReply={(_message, target) => save({ ...currentDraft.current, reply: target })}
+          onCheck={message => void checkRequest(message)}
+          onRetry={message => {
+            if (currentDraft.current.text || currentDraft.current.attachments.length) { setError("Keep or send your current draft before restoring the failed message."); return; }
+            save(draftFromHumanMessage(message));
+          }} />
+        {before !== null && <button type="button" className="chat-older" disabled={olderLoading} onClick={() => void older()}>{olderLoading ? "Loading…" : "Older messages"}</button>}
       </div>}>
     {fileDrag && <div className="file-drop-overlay" role="status">Drop files to attach to {conversation.title}</div>}
     {!ready && <p className="messaging-notice" role="status">{backend?.detail || "This messaging service is unavailable. Open the chat picker to check its configuration."}</p>}

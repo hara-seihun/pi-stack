@@ -38,4 +38,4 @@ The common message renderer shows reaction badges and actor names. React in its 
 
 ## Focused checks
 
-Run `bun test apps/remote/server/reactions.test.ts apps/remote/server/message-context.test.ts apps/remote/server/reaction-tools.test.ts apps/remote/server/context-mirror.test.ts apps/remote/server/messaging/service.test.ts apps/remote/server/messaging/signal.test.ts apps/remote/server/slack-reactions.test.ts apps/remote/web/chat-message.test.tsx`. These use local fixtures, not real Slack or Signal recipients.
+Run `bun test apps/remote/server/reactions.test.ts apps/remote/server/message-context.test.ts apps/remote/server/reaction-tools.test.ts apps/remote/server/context-mirror.test.ts apps/remote/server/messaging/service.test.ts apps/remote/server/messaging/signal.test.ts apps/remote/server/slack-reactions.test.ts apps/remote/web/chat-message.test.tsx apps/remote/web/messaging-chat.test.tsx`. These use local fixtures, not real Slack or Signal recipients.
