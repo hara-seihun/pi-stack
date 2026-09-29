@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { policy, stallReason, runnable, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
+import { policy, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
 
 const config = loadPublicationConfig();
@@ -1872,6 +1872,15 @@ function failStalled(requestId, reason) {
   updateFailure(request, reason, log, false);
 }
 
+function failUnclaimed(requestId, observationJson) {
+  const queue = allRequests();
+  if (queue.some(request => recoveryNeeded(request) || request.status === "running")) return;
+  const request = queue.find(request => runnable(request));
+  if (request?.requestId !== requestId) return;
+  const reason = queueStallReason(request, JSON.parse(observationJson));
+  if (reason) failStalled(requestId, reason);
+}
+
 function watchdog() {
   ensureState();
   const activatedAt = existsSync(repairPolicyPath) ? JSON.parse(readFileSync(repairPolicyPath, "utf8")).activatedAt : new Date().toISOString();
@@ -1889,14 +1898,15 @@ function watchdog() {
   const waiting = queue.find(request => runnable(request));
   const custodyOwners = queue.filter(recoveryNeeded);
   idle.blockedBy = custodyOwners.map(request => request.requestId);
+  delete idle.since;
   if (waiting && custodyOwners.length === 0 && !queue.some(request => request.status === "running")) {
-    idle.since ??= new Date().toISOString();
-    if (Date.now() - Date.parse(idle.since) > policy.betweenStepsMs) {
-      checked("systemctl", ["--user", "stop", "pi-stack-publication.service"], { timeoutSeconds: 20 });
-      locked("worker", "fail-stalled", [waiting.requestId, "Queue made no progress for 90s; worker never claimed a request"]);
-      delete idle.since;
+    idle.queue = observeQueueProgress(waiting, idle.queue);
+    if (queueStallReason(waiting, idle.queue)) {
+      // A queued census can own the worker lock without entering running. Never stop it
+      // from an unlocked snapshot; recheck progress only after acquiring that lock.
+      if (locked("worker", "fail-unclaimed", [waiting.requestId, JSON.stringify(idle.queue)], true)) delete idle.queue;
     }
-  } else { delete idle.since; idle.wakeFailures = 0; }
+  } else { delete idle.queue; idle.wakeFailures = 0; }
   atomicWrite(idlePath, JSON.stringify(idle));
   const repairs = allRequests().map(request => readRepair(request.requestId)).filter(Boolean);
   let busy = false;
@@ -2152,6 +2162,7 @@ function main() {
   if (operation === "_watchdog" && args.length === 0) return watchdog();
   if (operation === "_drain" && args.length === 0) return drain();
   if (operation === "_fail-stalled" && args.length === 2) return failStalled(...args);
+  if (operation === "_fail-unclaimed" && args.length === 2) return failUnclaimed(...args);
   if (operation === "acknowledge-issues" && args.length === 0) return locked("worker", "acknowledge-issues");
   if (operation === "_acknowledge-issues" && args.length === 0) return acknowledgeIssues();
   if (operation === "issues" && args.length === 0) {
