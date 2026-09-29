@@ -29,9 +29,13 @@ fi
 # Activation restarts Pi Remote, which ends every live Meet room: the meeting bot stays
 # in the call with no voice, canvas or agent (a release at 06:40Z on 2026-09-29 cut a
 # live Meet test mid-brief). Defer instead; the publication owner probes this exit 75
-# without consuming deployment attempts. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
+# without consuming deployment attempts. A census that cannot answer is not an empty
+# host, so it defers too. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
 if (( services )) && [[ ${PI_STACK_ALLOW_LIVE_MEETING_RESTART:-0} != 1 ]]; then
-  live_rooms=$(pi_stack_live_meeting_rooms)
+  if ! live_rooms=$(pi_stack_live_meeting_rooms); then
+    echo "meeting census unavailable on this host: see the census error above" >&2
+    exit 75
+  fi
   if [[ -n $live_rooms ]]; then
     echo "live meeting rooms on this host ($live_rooms); deploying now would end them" >&2
     exit 75

@@ -924,7 +924,7 @@ export function deployTarget(request, target, logPath) {
     : runLogged(request, `deploy-${target.id}`, "env", [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 180, logPath);
   const tail = result.status === 75 ? logTail(logPath, start) : "";
   if (/^another Pi stack deployment owns \/[^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy" };
-  if (/^live meeting rooms on this host \([^\r\n]+\); deploying now would end them$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
+  if (/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
   return result;
 }
 
@@ -953,14 +953,31 @@ export function requeueBusyHost(request, target, logPath, liveMeeting = false) {
   deliverNotice(request);
 }
 
+/** Live meetings on a target, as census words; empty when none. Throws when the census cannot answer. */
+export function censusTarget(target) {
+  const script = readFileSync(join(dirname(self), "meeting-census"), "utf8");
+  return target.sshHost
+    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s"], { input: script, timeoutSeconds: 45 })
+    : runCapture("bash", ["-s"], { input: script, timeoutSeconds: 45 });
+}
+
+/** Before the first host deploys, a live meeting on any target holds the whole release. */
+export function liveMeetingTarget(request) {
+  if (targets.some(target => request.hosts?.[target.id]?.status === "passed")) return null;
+  for (const target of targets) {
+    let rooms;
+    try { rooms = censusTarget(target); } catch (error) { rooms = `census unavailable: ${error.message}`; }
+    if (rooms) return { target, rooms };
+  }
+  return null;
+}
+
 export function refreshMeetingWait(request) {
   const target = targets.find(target => target.id === request.waiting.host);
   if (!target) throw new Error(`Unknown meeting-wait host: ${request.waiting.host}`);
-  const script = readFileSync(join(dirname(self), "meeting-census"), "utf8");
-  const rooms = target.sshHost
-    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s"], { input: script, timeoutSeconds: 20 })
-    : runCapture("bash", ["-s"], { input: script, timeoutSeconds: 20 });
+  const rooms = censusTarget(target);
   request.waiting.probe = { at: new Date().toISOString(), rooms };
+  delete request.waiting.probeFailingSince;
   if (rooms) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
   writeRequest(request);
   return !rooms;
@@ -1682,6 +1699,14 @@ export function processRequest(request) {
       }
       if (!result.ok) throw new Error(result.stderr.trim() || `main integration exited ${result.status}`);
 
+      // Any live Kenan meeting on either host holds the release before anything restarts;
+      // each host's deploy/host still checks its own rooms right before activation.
+      const busy = liveMeetingTarget(request);
+      if (busy) {
+        appendLog(logPath, `[${new Date().toISOString()}] live meetings on ${busy.target.id}: ${busy.rooms}\n`);
+        requeueBusyHost(request, busy.target, logPath, true);
+        return;
+      }
       for (const target of targets) {
         if (request.hosts?.[target.id]?.status === "passed") continue;
         if (request.bootstrap?.hosts?.[target.id]?.state === "sealed") {
@@ -2069,7 +2094,17 @@ function drain() {
       try {
         if (!refreshMeetingWait(request)) continue;
       } catch (error) {
-        updateFailure(request, `Meeting wait probe failed: ${error.message}`, request.waiting.log);
+        // A census that cannot answer means unknown meetings, not an idle host: keep waiting,
+        // and fail only when the census itself has stayed broken past its own budget.
+        const since = request.waiting.probeFailingSince ?? new Date().toISOString();
+        if (Date.now() - Date.parse(since) > policy.meetingProbeFailureLimitMs) {
+          updateFailure(request, `Meeting wait probe failed: ${error.message}`, request.waiting.log);
+          continue;
+        }
+        request.waiting.probeFailingSince = since;
+        request.waiting.probe = { at: new Date().toISOString(), error: error.message };
+        request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
+        writeRequest(request);
         continue;
       }
     }
