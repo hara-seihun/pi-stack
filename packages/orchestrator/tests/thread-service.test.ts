@@ -9,6 +9,7 @@ import type { OpenPiSession, PiCommand, PiEvent, PiSession, PiSessionOptions, Re
 import { ThreadService } from "../src/threads/service.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
 import { threadTools } from "../src/threads/pi-tools.js";
+import { createThreadClient, threadHttp } from "../src/threads/http.js";
 
 const roots: string[] = [];
 const services: ThreadService[] = [];
@@ -1124,4 +1125,24 @@ it("passes a raw thread to its Pi session as --raw and rejects incompatible raw 
   expect(await service.spawn({ requestId: "raw-repair", cwd: directory, metadata: { raw: true, execution: "root-repair" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
   expect(service.importThread({ id: "imported-raw", title: "Raw", cwd: directory, sessionFile: join(directory, "imported-raw.jsonl"), settings: { model: "openai-codex/gpt-6-sol", thinkingLevel: "high", speed: "standard" }, metadata: { raw: "yes" } }))
     .toMatchObject({ ok: false, error: { code: "invalid_request" } });
+});
+
+describe("thread inspection", () => {
+  it("omits an idle thread's context when the caller already holds its revision, through a directory over HTTP", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "inspected", cwd: directory }));
+    writeFileSync(thread.sessionFile, [
+      { type: "session", version: 3, id: thread.id, cwd: directory, timestamp: new Date().toISOString() },
+      { type: "message", id: "m1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "hello", timestamp: 1 } },
+    ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const owner = new ThreadDirectory({ id: "owner", api: service });
+    const client = createThreadClient("http://owner/v1/threads", (async (url: RequestInfo | URL, init?: RequestInit) => (await threadHttp(owner, new Request(url, init)))!) as typeof fetch);
+    const full = value(await client.inspect(thread.id));
+    expect(full.context).toMatchObject({ source: "native-history", messages: [{ role: "user", content: "hello" }] });
+    const held = value(await client.inspect(thread.id, { contextRevision: full.thread.revision }));
+    expect(held.context).toBeUndefined();
+    expect(held.thread.revision).toBe(full.thread.revision);
+    expect(held.pending).toEqual(full.pending);
+    expect(value(await client.inspect(thread.id, { contextRevision: full.thread.revision - 1 })).context).toMatchObject({ source: "native-history" });
+  });
 });

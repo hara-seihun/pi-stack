@@ -41,7 +41,8 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
     const result = await requestContext.run({ deadline, signal }, () =>
       operation === "await" ? api.await(fields as Parameters<ThreadApi["await"]>[0], signal)
       : operation === "settlements" ? api.settlements(fields.after, fields.limit)
-      : operation === "inspect" || operation === "questions" ? api[operation](fields.threadId)
+      : operation === "inspect" ? api.inspect(fields.threadId, Number.isSafeInteger(fields.contextRevision) ? { contextRevision: fields.contextRevision } : undefined)
+      : operation === "questions" ? api.questions(fields.threadId)
       : operation === "command" ? api.command(fields.threadId, fields.command)
       : (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input));
     return Response.json(result);
@@ -99,7 +100,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     ask: input => call("ask", input), questions: threadId => call("questions", { threadId }), answer: input => call("answer", input),
     spawn: input => call("spawn", input), send: input => call("send", input), list: input => call("list", input),
     read: input => call("read", input), control: input => call("control", input),
-    inspect: threadId => call("inspect", { threadId }), command: (threadId, command) => call("command", { threadId, command }),
+    inspect: (threadId, inspection) => call("inspect", { threadId, ...(inspection?.contextRevision === undefined ? {} : { contextRevision: inspection.contextRevision }) }), command: (threadId, command) => call("command", { threadId, command }),
     settlements: (after, limit) => call("settlements", { after, limit }),
     await: (input, signal) => call("await", input, signal),
   };

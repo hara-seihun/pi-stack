@@ -76,6 +76,8 @@ interface AppState {
   sessions: Session[];
   /** Threads opened from the picker or a notification before a delta carries them. */
   discovered: Session[];
+  /** Every fleet thread, carried only while the Workers screen shows "All". */
+  fleet: Session[];
   archivedTotal: number;
   dashboard: Dashboard | null;
   bootstrap: Bootstrap | null;
@@ -93,7 +95,7 @@ interface AppState {
 
 const initialState: AppState = {
   selectedChatId: null, messaging: { version: 0, backends: [], conversations: [], calls: [] },
-  sessions: [], discovered: [], archivedTotal: 0, dashboard: null, bootstrap: null,
+  sessions: [], discovered: [], fleet: [], archivedTotal: 0, dashboard: null, bootstrap: null,
   transcript: null, images: null,
   attachments: [], slashCommands: [], offline: "", ownerErrors: [], syncing: true, threadSyncing: true,
   loadingEarlier: false, earlierError: "",
@@ -482,6 +484,7 @@ function RemoteApp() {
           break;
         }
         case "dashboard": patch({ dashboard: event.dashboard }); finishSection("machine"); break;
+        case "workers": patch({ fleet: event.sessions }); break;
         case "transcript": {
           const previous = stateRef.current.transcript;
           const transcript = applyTranscriptEvent(previous, event);
@@ -557,12 +560,15 @@ function RemoteApp() {
       viewing: visible && !messagingActive && !!aiId,
       thinking: false,
       dashboard: route.tab === "machine",
+      workers: route.tab === "workers" && workersFilter === "all",
       transcriptFrom: aiId === held.session ? held.transcriptFrom ?? null : cache.thread(aiId ?? "")?.transcript?.items[0]?.seq ?? null,
     };
-    const same = (held.session ?? null) === next.session && !!held.viewing === next.viewing && !!held.dashboard === next.dashboard && !held.thinking;
+    const same = (held.session ?? null) === next.session && !!held.viewing === next.viewing && !!held.dashboard === next.dashboard && !!held.workers === next.workers && !held.thinking;
     if (same) return;
+    // A list nobody refreshes would show settled fleet threads as they were.
+    if (!next.workers && held.workers) patch({ fleet: [] });
     client.update(next);
-  }, [aiId, messagingActive, route.tab, visible]);
+  }, [aiId, messagingActive, route.tab, visible, workersFilter]);
 
   const showEarlier = useCallback(() => {
     const id = selectedAiId(stateRef.current);
@@ -798,7 +804,11 @@ function RemoteApp() {
   const listedRows = useMemo(() => inboxRows(state.sessions, threadStarts, state.messaging), [state.sessions, threadStarts, state.messaging]);
   useEffect(() => { setClosing(current => reconcileCloses(current, listedRows.map(row => row.chat.id))); }, [listedRows]);
   const rows = useMemo(() => hideClosing(listedRows, closing), [listedRows, closing]);
-  const knownSessions = useMemo(() => [...state.sessions, ...state.discovered.filter(discovered => !state.sessions.some(session => session.id === discovered.id))], [state.sessions, state.discovered]);
+  const knownSessions = useMemo(() => {
+    const present = new Set(state.sessions.map(session => session.id));
+    const extra = [...state.fleet, ...state.discovered].filter(session => !present.has(session.id) && (present.add(session.id), true));
+    return extra.length ? [...state.sessions, ...extra] : state.sessions;
+  }, [state.sessions, state.fleet, state.discovered]);
   const selected = knownSessions.find((session) => session.id === aiId) ?? null;
   const ancestors = useMemo(() => {
     const chain: Session[] = [];

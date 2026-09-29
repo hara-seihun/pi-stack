@@ -30,10 +30,9 @@ function fixture() {
   return { directory, repo, bin, env, executable, commit, run, close: () => rmSync(directory, { recursive: true, force: true }) };
 }
 
-function preparationFixture(writeLoadState = "loaded") {
+function preparationFixture() {
   const f = fixture();
-  f.executable(join(f.bin, "systemctl"), `[[ "$*" == "show pi-stack-write.service -p LoadState --value" ]] || exit 64
-printf '%s\\n' '${writeLoadState}'`);
+  f.executable(join(f.bin, "systemctl"), 'echo "preparation must delegate host discovery to its components" >&2; exit 64');
   writeFileSync(join(f.repo, "deploy/lib"), `${readFileSync(join(root, "deploy/lib"), "utf8")}\npi_stack_prepare_builds() { test "\${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-}" = 1 || return 64; printf 'builds\\n' >> "$TRACE"; return "\${BUILD_EXIT:-0}"; }\n`);
   for (const name of ["runtime", "transcription", "write-engine", "host"]) {
     f.executable(join(f.repo, "deploy", name), `root=$(cd "$(dirname "$0")/.." && pwd)
@@ -49,20 +48,50 @@ exit "\${${name.toUpperCase().replaceAll("-", "_")}_EXIT:-0}"`);
   return f;
 }
 
-for (const writeLoadState of ["loaded", "not-found"]) test(`preparation uses the caller deadline with Write ${writeLoadState}; standalone components keep theirs`, () => {
-  const f = preparationFixture(writeLoadState);
+test("preparation uses the caller deadline for every child; standalone components keep theirs", () => {
+  const f = preparationFixture();
   try {
     const prepared = f.run("prepare");
     assert.equal(prepared.status, 0, prepared.stderr);
     assert.equal(prepared.stderr, "");
-    const expected = ["builds", "runtime", "transcription"];
-    if (writeLoadState === "loaded") expected.push("write-engine");
-    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), expected);
+    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["builds", "runtime", "transcription", "write-engine"]);
     for (const name of ["host", "runtime", "transcription", "write-engine"]) {
       const deployed = f.run(name);
       assert.equal(deployed.status, 124, deployed.stderr);
     }
     assert.equal(readFileSync(f.env.TRACE, "utf8").match(/deadline --signal=TERM --kill-after=2s 50s /g).length, 4);
+  } finally { f.close(); }
+});
+
+for (const writeLoadState of ["loaded", "not-found"]) test(`Write owns host discovery during preparation with its unit ${writeLoadState}`, () => {
+  const f = preparationFixture();
+  try {
+    copyFileSync(join(root, "deploy/write-engine"), join(f.repo, "deploy/write-engine"));
+    f.executable(join(f.bin, "systemctl"), `[[ "$*" == "show pi-stack-write.service -p LoadState --value" ]] || exit 64
+printf 'discovery\\n' >> "$TRACE"
+printf '%s\\n' '${writeLoadState}'`);
+    f.executable(join(f.bin, "uv"), 'printf "uv\\n" >> "$TRACE"; exit 23');
+    f.executable(join(f.bin, "curl"), 'echo "fixture must not download weights" >&2; exit 64');
+    const source = join(f.repo, "apps/write/engine");
+    mkdirSync(source, { recursive: true });
+    for (const file of ["requirements.lock", "model.json", "server.py"]) writeFileSync(join(source, file), "\n");
+    f.commit();
+    const destination = join(f.directory, "write-engine");
+    const result = f.run("prepare", { PI_STACK_WRITE_ENGINE_DEST: destination, PI_STACK_WRITE_ENGINE_FORCE: "0" });
+    const calls = readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort();
+    if (writeLoadState === "loaded") {
+      assert.equal(result.status, 1, result.stderr);
+      assert.deepEqual(calls, ["builds", "discovery", "runtime", "transcription", "uv"]);
+      assert.match(result.stderr, /write-engine exited 23/);
+      assert.doesNotMatch(result.stdout, /prepared Pi stack/);
+    } else {
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, "");
+      assert.deepEqual(calls, ["builds", "discovery", "runtime", "transcription"]);
+      assert.match(result.stdout, /nothing to prepare/);
+      assert.equal(existsSync(join(f.directory, ".pi-write")), false);
+    }
+    assert.equal(existsSync(destination), false);
   } finally { f.close(); }
 });
 

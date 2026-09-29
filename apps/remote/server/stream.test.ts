@@ -45,6 +45,7 @@ describe("resource subscriptions", () => {
     expect(readSubscription({ session: "abc", viewing: true, thinking: "yes", notificationsAfter: 12, eventsAfter: -1, nonsense: 1 }))
       .toEqual({ session: "abc", viewing: true, notificationsAfter: 12 });
     expect(readSubscription({ session: null, notificationsAfter: null })).toEqual({ session: null, notificationsAfter: null });
+    expect(readSubscription({ workers: true, dashboard: "yes" })).toEqual({ workers: true });
     expect(readSubscription({ have: { "live:a": "r1" }, want: ["live:a", "live:a"] })).toEqual({ have: { "live:a": "r1" }, want: ["live:a"] });
     expect(readSubscription({ want: Array(129).fill("state"), have: { a: 5 } })).toEqual({});
     expect(mergeSubscription({ session: "a", thinking: true }, { session: "b" })).toEqual({ session: "b", thinking: true });

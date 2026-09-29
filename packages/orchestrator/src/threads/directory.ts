@@ -1,5 +1,5 @@
 import { validateThreadAwait } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
@@ -99,9 +99,9 @@ export class ThreadDirectory implements ThreadApi {
     }
     return root.api.control({ threadId, action: "restore", descendants: false, resume });
   }
-  async inspect(threadId: string): Promise<Result<ThreadInspection>> {
+  async inspect(threadId: string, options?: InspectOptions): Promise<Result<ThreadInspection>> {
     const owner = await this.owner(threadId);
-    return owner.ok ? owner.value.api.inspect(threadId) : owner;
+    return owner.ok ? owner.value.api.inspect(threadId, options) : owner;
   }
   async command(threadId: string, command: PiCommand): Promise<Result<unknown>> {
     const owner = await this.owner(threadId);

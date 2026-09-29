@@ -46,6 +46,7 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
+import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { ResourceCache } from "../shared/resource-cache";
@@ -343,9 +344,12 @@ async function refreshThreadInspection(id: string, fresh = false) {
   return operation;
 }
 async function inspectThread(id: string, local: boolean) {
-  const result = await directory.inspect(id);
+  const held = peerInspections.get(id);
+  const result = await directory.inspect(id, held?.context ? { contextRevision: held.thread.revision } : undefined);
   if (!result.ok) throw new Error(result.error.message);
-  const inspection = result.value;
+  // An owner that finds this revision already held omits the context instead of rereading the thread's whole history.
+  const inspection = !result.value.context && held?.context && result.value.thread.revision === held.thread.revision ? { ...result.value, context: held.context } : result.value;
+  if (inspection.context === held?.context && held && inspectedContexts.has(held)) inspectedContexts.set(inspection, inspectedContexts.get(held)!);
   const changed = !local && (peerThreads.get(id)?.revision !== inspection.thread.revision
     || JSON.stringify(peerInspections.get(id)?.pending) !== JSON.stringify(inspection.pending));
   if (!local) peerThreads.set(id, inspection.thread);
@@ -529,6 +533,8 @@ const contextCacheLimits = { entries: 32, bytes: 64 * 1024 * 1024 };
 const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheLimits);
 const displayContexts = new ResourceCache<{ sourceHash: string; document: string; hash: string; images: Map<string, ContextImage> }>(contextCacheLimits);
 const inspectedContexts = new WeakMap<ThreadInspection, StoredContext | null>();
+/** Projections too large for `displayContexts`, kept only while a client has that thread open; reprojecting one costs seconds. */
+const openDisplayContexts = new Map<string, NonNullable<ReturnType<typeof displayContexts.get>>>();
 
 /** The newest user and assistant messages of this thread, from the context the
  * agent actually holds. Naming and Voice both want to read the conversation,
@@ -572,7 +578,7 @@ function streamedThinkingByMessage(sessionId: string): Map<string, string> {
 }
 
 function displayContext(sessionId: string, sourceHash: string, sourceDocument: string) {
-  const cached = displayContexts.get(sessionId);
+  const cached = displayContexts.get(sessionId) ?? openDisplayContexts.get(sessionId);
   if (cached?.sourceHash === sourceHash) return cached;
   const progress = liveProjections.get(sessionId)?.toolProgress;
   if (progress?.size) {
@@ -587,7 +593,10 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     return API.sessionImage.path({ sessionId, hash });
   }, liveProjections.get(sessionId)?.toolProgress.values(), responseMetricsByMessage(sessionId));
   const projected = { sourceHash, document, hash: sha256(document), images };
-  displayContexts.set(sessionId, projected, document.length * 2 + [...images.values()].reduce((bytes, image) => bytes + image.data.length * 2, 0));
+  openDisplayContexts.delete(sessionId);
+  releaseOpenDisplayContexts();
+  if (!displayContexts.set(sessionId, projected, document.length * 2 + [...images.values()].reduce((bytes, image) => bytes + image.data.length * 2, 0))
+    && sessionSubscribers(sessionId).length) openDisplayContexts.set(sessionId, projected);
   return projected;
 }
 
@@ -605,8 +614,13 @@ function cacheStoredContext(sessionId: string, stored: { capturedAt: number; doc
 }
 
 /** The display projection of this session is stale; rebuild and push it. */
+function releaseOpenDisplayContexts() {
+  for (const id of openDisplayContexts.keys()) if (!sessionSubscribers(id).length) openDisplayContexts.delete(id);
+}
+
 function invalidateDisplayContext(sessionId: string) {
   displayContexts.delete(sessionId);
+  openDisplayContexts.delete(sessionId);
   signalTranscript(sessionId);
 }
 
@@ -1175,9 +1189,10 @@ function pushBootstrap(): void {
 
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
-  const sessions = selected ? stateSnapshot.sessions.map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session) : stateSnapshot.sessions;
+  const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
+    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
+  if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
 
 let messagingVersion = -1;
@@ -1288,6 +1303,7 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
   const revision = stream.revision;
   const sessionId = stream.subscription.session ?? null;
   const changedSession = (before.session ?? null) !== sessionId;
+  if (changedSession) releaseOpenDisplayContexts();
   if (sessionId && stream.subscription.viewing) markSessionViewed(sessionId);
   if (sessionId) {
     const captured = storedContext(sessionId);
@@ -1321,6 +1337,7 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
 function closeStream(stream: ClientStream): void {
   streams.delete(stream.id);
   stream.close();
+  releaseOpenDisplayContexts();
 }
 
 function contentText(content: unknown): string {
@@ -1827,6 +1844,7 @@ const server = Bun.serve<SocketData>({
           }
           const reactions = piReactions.set(target, emoji, actor, remove);
           displayContexts.delete(target.sessionId);
+          openDisplayContexts.delete(target.sessionId);
           signalTranscript(target.sessionId);
           return { ok: true, value: reactions };
         },
