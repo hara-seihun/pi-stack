@@ -317,11 +317,14 @@ async function refreshPeers() {
     const changed = peerError !== null || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
     peerError = null;
     observeError(db, "peer:fleet", null);
+    const updated = [...next.values()].filter(thread => peerThreads.get(thread.id)?.revision !== thread.revision);
+    for (const thread of updated) if (!peerThreads.has(thread.id)) ensureThreadView(db, thread.id);
     peerThreads.clear();
     peerChildren.clear();
     for (const thread of next.values()) if (thread.parentId) peerChildren.set(thread.parentId, true);
-    for (const [id, thread] of next) { peerThreads.set(id, thread); ensureThreadView(db, id); }
-    for (const thread of next.values()) noteModelRecency(thread);
+    for (const [id, thread] of next) peerThreads.set(id, thread);
+    const lookup = cachedThreadLookup(next, id => threads.get(id) ?? null);
+    for (const thread of updated) noteModelRecency(thread, lookup);
     if (changed) signalSync();
   })().catch(cause => {
     const message = cause instanceof Error ? cause.message : String(cause);
@@ -767,6 +770,15 @@ function voiceInstructions(row: any): string {
 }
 
 type ThreadLookup = (id: string) => Thread | null;
+function cachedThreadLookup(known: ReadonlyMap<string, Thread>, read: ThreadLookup): ThreadLookup {
+  const missing = new Map<string, Thread | null>();
+  return id => {
+    const thread = known.get(id);
+    if (thread) return thread;
+    if (!missing.has(id)) missing.set(id, read(id));
+    return missing.get(id)!;
+  };
+}
 const liveThread: ThreadLookup = id => threads.get(id) ?? peerThreads.get(id) ?? null;
 /** A worker's placement is inherited: the nearest ancestor that set each key wins. */
 function remotePlacement(thread: Thread, lookup: ThreadLookup = liveThread): Record<string, unknown> {
@@ -797,9 +809,10 @@ function threadTable(options: { archived?: boolean } = {}) {
   for (const thread of local) byId.set(thread.id, thread);
   for (const thread of peerThreads.values()) byId.set(thread.id, thread);
   // An active worker's parent may itself be archived; placement still comes from it.
-  const lookup: ThreadLookup = id => byId.get(id) ?? threads.get(id) ?? null;
+  const lookup = cachedThreadLookup(byId, id => threads.get(id) ?? null);
   const views = new Map((threadViewRows.all() as ThreadView[]).map(view => [view.id, view]));
-  const all = [...local, ...peerThreads.values()];
+  const peers = [...peerThreads.values()].filter(thread => options.archived !== false || !thread.metadata?.archived);
+  const all = [...local, ...peers];
   return { local, all, lookup, rows: () => all.map(thread => threadRow(thread, lookup, views.get(thread.id) ?? null)) };
 }
 function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: ThreadView | null = threadViewRow.get(thread.id) as ThreadView | null): any {
@@ -1093,7 +1106,9 @@ function supervisorState(): SupervisorState {
 function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archived: false })): Session[] {
   const parents = new Set(local.map(thread => thread.parentId));
   const runningParents = runningChildParents(local, peerThreads.values());
-  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false));
+  const localIds = new Set(local.map(thread => thread.id));
+  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
+    localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
 }
 function pendingMessages(id: string) {
   return threads.get(id) ? threads.pending(id) : peerInspections.get(id)?.pending ?? [];
@@ -1117,13 +1132,13 @@ function publicSession(row: any,
   hasChildren = threads.snapshot({ archived: false }).some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id)),
   hasRunningChildren = runningChildParents(threads.snapshot({ archived: false }), peerThreads.values()).has(row.id),
   queued = true,
+  origin: Session["origin"] = threads.get(row.id) ? "person" : "fleet",
 ): Session {
-  const pending = pendingMessages(row.id);
   const live = liveProjections.get(row.id);
   return {
     id: row.id, parentId: row.parentId,
     hasChildren,
-    origin: threads.get(row.id) ? "person" : "fleet",
+    origin,
     model: row.settings.model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
@@ -1323,8 +1338,10 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
       },
     );
   }
-  projectState();
-  sendState(stream);
+  if (!sessionId) {
+    projectState();
+    sendState(stream);
+  }
   pushMessaging(stream);
   stream.publish({ type: "bootstrap", bootstrap: bootstrap() });
   if (patch.notificationsAfter !== undefined) pushNotifications(stream);

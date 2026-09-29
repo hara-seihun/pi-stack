@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test as nodeTest } from "node:test";
-import { workspaceTesting } from "./workspace.mjs";
+import { main, workspaceTesting } from "./workspace.mjs";
 
 const [shardIndex = 0, shardCount = 1] = (process.env.AGENT_WORKSPACE_TEST_SHARD ?? "0/1")
   .split("/").map(Number);
@@ -489,7 +489,7 @@ test("migrates a registry created before workspace groups", () => {
   }
 });
 
-test("initialized registry reads do not acquire the SQLite writer lock", () => {
+test("initialized registry reads do not acquire the SQLite writer lock", (t) => {
   const f = fixture();
   let database;
   try {
@@ -498,9 +498,12 @@ test("initialized registry reads do not acquire the SQLite writer lock", () => {
     database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
     database.exec("BEGIN IMMEDIATE");
     database.prepare("UPDATE workspace SET detail='uncommitted writer' WHERE id=?").run(created.id);
-    const output = execFileSync(entry, ["status", "--json"], {
-      env: { ...process.env, ...f.env }, encoding: "utf8", timeout: 1500,
-    });
+    // A second connection must succeed while the writer stays held. Process
+    // startup speed is unrelated to whether the read acquires a writer lock.
+    let output = "";
+    const write = t.mock.method(process.stdout, "write", chunk => { output += chunk; return true; });
+    try { main(["status", "--json"], f.env.PI_WORKSPACE_STATE); }
+    finally { write.mock.restore(); }
     const [observed] = JSON.parse(output);
     assert.equal(observed.id, created.id);
     assert.equal(observed.detail, "creation completed");

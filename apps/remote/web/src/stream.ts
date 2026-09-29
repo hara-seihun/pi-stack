@@ -114,6 +114,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   let failures = 0;
   let generation = 0;
   let posting: Promise<void> = Promise.resolve();
+  let postingSelection: { selectionId: string | undefined } | null = null;
   let sentSubscription = "";
   const declaration = (): StreamSubscription => {
     const want = streamWants(subscription);
@@ -220,6 +221,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     if (retry) { clearTimeout(retry); retry = null; }
     controller?.abort();
     posting = Promise.resolve();
+    postingSelection = null;
     const mine = ++generation;
     void connect(mine).then(
       () => {}, // Returns only when a newer connection replaced this one or the client stopped.
@@ -242,6 +244,8 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       const next = declaration();
       const encoded = JSON.stringify(next);
       if (encoded === sentSubscription) return;
+      const request = { selectionId: next.selectionId };
+      postingSelection = request;
       try {
         const response = await send(API.streamUpdate.path({ streamId: id }), {
           method: "POST",
@@ -258,6 +262,8 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
         if (stopped || streamId !== id || generation !== mine) return;
         setStatus("offline", error instanceof Error ? error.message : String(error));
         open();
+      } finally {
+        if (postingSelection === request) postingSelection = null;
       }
     });
   }
@@ -306,7 +312,12 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
         const held = replica.get(resource);
         if (held && isStreamSnapshot(resource, held.value)) options.onEvent(held.value);
       }
-      if (streamId) post();
+      if (previousSession !== subscription.session && postingSelection?.selectionId !== undefined
+        && postingSelection.selectionId !== subscription.selectionId) {
+        // A superseded selection POST can stall indefinitely. Replace its stream rather
+        // than race two updates against the same server-side subscription.
+        open();
+      } else if (streamId) post();
     },
     remember(change) { subscription = { ...subscription, ...change }; },
     reconnect() { failures = 0; open(); },

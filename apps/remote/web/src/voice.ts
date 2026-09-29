@@ -142,7 +142,9 @@ import { createStreamClient } from "./stream";
         if (!configResponse.ok || !config.enabled) throw new Error(config.error || "The PiStack Voice API service is unavailable");
         await this.primeCursor();
         this.setState("connecting", this.meetingContext ? "Setting agent thinking to its lowest level…" : "Setting agent thinking to medium…");
-        await this.setVoiceThinking();
+        // Lower thinking is a latency preference, not a precondition: a refusal must not keep Voice closed
+        // while someone is waiting for an answer.
+        await this.setVoiceThinking().catch((error) => this.onNotice(error instanceof Error ? error.message : String(error)));
         if (generation !== this.generation) return;
         const microphone = this.input ? new MediaStream(this.input.getAudioTracks().map((track) => track.clone())) : await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: { ideal: 1 } },

@@ -19,9 +19,6 @@ export default defineConfig({
   build: {
     outDir: resolve(import.meta.dirname, "web/dist"),
     emptyOutDir: true,
-    // `rollupOptions` is Vite 8's alias for `rolldownOptions`, and the only
-    // spelling Vite 7 understands: web/app-path.test.ts builds this config with
-    // the Vite that vitest pulls into the repo root, not the app's own Vite 8.
     rollupOptions: {
       input: {
         index: resolve(import.meta.dirname, "web/index.html"),
