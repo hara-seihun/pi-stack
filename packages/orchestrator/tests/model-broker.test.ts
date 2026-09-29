@@ -78,6 +78,29 @@ test("Ultrafast replaces default affinity with the sole entitled granted account
   expect(t.catalogs.sort()).toEqual(["owner-account", "shared-account"]);
   expect(f.store.activeLeases()).toHaveLength(0);
   expect(f.store.account("owner-only")?.cooldownUntil).toBeUndefined();
+  const { dispatches } = await (await fetch(`${f.url}/v1/dispatches`)).json();
+  expect(dispatches).toHaveLength(2);
+  expect(dispatches[1]).toMatchObject({ id: response.headers.get("x-pi-broker-dispatch-id"), principal: "sybil",
+    accountId: "owner-only", model: "gpt-6-astra", serviceTier: "ultrafast", httpStatus: 200, outcome: "completed" });
+  expect(Object.keys(dispatches[1]).sort()).toEqual(["accountId", "at", "httpStatus", "id", "model", "outcome", "principal", "requestId", "serviceTier", "updatedAt"]);
+  expect(JSON.stringify(dispatches)).not.toMatch(/fixture-refresh|signature|hello|owner-cookie|Bearer/);
+});
+
+test("dispatch evidence is bounded, principal-local and distinguishes refusal from incomplete transport", async () => {
+  let status = 429;
+  const f = await fixture(async () => status === 429 ? new Response("rate limited", { status }) : new Response("data: {}\n\n"));
+  f.store.setControl("broker-dispatches:kenan", JSON.stringify([{ id: "private-other-principal" }]));
+  f.store.setControl("broker-dispatches:sybil", JSON.stringify(Array.from({ length: 128 }, (_, at) => ({ id: `seed-${at}`, at }))));
+  await (await f.post(body())).text();
+  let receipts = (await (await fetch(`${f.url}/v1/dispatches`)).json()).dispatches;
+  expect(receipts).toHaveLength(128);
+  expect(receipts[0].id).toBe("seed-1");
+  expect(receipts.at(-1)).toMatchObject({ outcome: "rejected", httpStatus: 429 });
+  status = 200;
+  await (await f.post(body())).text();
+  receipts = (await (await fetch(`${f.url}/v1/dispatches`)).json()).dispatches;
+  expect(receipts.at(-1)).toMatchObject({ outcome: "indeterminate", httpStatus: 200 });
+  expect(JSON.stringify(receipts)).not.toContain("private-other-principal");
 });
 
 test("Ultrafast never probes or selects an entitled account outside the principal grant", async () => {

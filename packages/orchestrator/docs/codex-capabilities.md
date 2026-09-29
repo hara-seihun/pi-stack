@@ -38,6 +38,14 @@ The memory cache TTL is 60 seconds (`CODEX_CAPABILITY_TTL_MS`). Discovery single
 
 `Store.control("codex-capabilities:ACCOUNT")` holds only `{at,status:"observed",models:{MODEL:[TIER_IDS]}}` or `{at,status:"error",error:SANITIZED_CODE}`. Persisted observations survive restart for diagnostics but are never reused to authorize a cold process. Error observations do not erase the distinction between unknown/error and an observed false value. Successful refresh replaces previous error evidence.
 
+## Dispatch receipts
+
+Each broker listener serves `GET /v1/dispatches` with only its principal's latest 128 Codex dispatch receipts, retained under `broker-dispatches:PRINCIPAL` in the owning ledger. Receipts contain `id`, `requestId`, `principal`, `accountId`, `model`, `serviceTier`, `at`, `updatedAt`, `httpStatus` when received, and `outcome`. No prompts, credentials, provider response bodies or token counts are saved. The model/tier are read from the final serialized outgoing HTTP body immediately before transport. Each credential-repair attempt has a distinct receipt.
+
+The broker returns `x-pi-broker-dispatch-id` for exact response correlation. `id` is the broker lease ID plus attempt number; `requestId` is the actual outgoing `x-client-request-id`, SHA-256 of `principal + "\\0" +` the incoming `prompt_cache_key` (otherwise session-id/session_id/x-claude-code-session-id). Read the receipts before a trial and retain the newly created records after it; the account-specific benchmark listener isolates them from other principals.
+
+`dispatched` records intent at the send boundary, `accepted` records successful HTTP headers, and `completed`, `incomplete` or `failed` records a native terminal SSE event. An HTTP refusal is `rejected`. Cancellation or a connection ending without a native terminal event records `cancelled` or `indeterminate`, never completed. These receipts prove the account and tier sent, not the provider's internal hardware routing or a measured speedup.
+
 ## Operator status and refresh
 
 `GET /v1/status` exposes `codexCapabilities`, one record per local Codex account:
