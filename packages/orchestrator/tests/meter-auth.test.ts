@@ -145,7 +145,8 @@ it("retains failed refresh credentials, reports the blocker, and spaces attempts
     await daemon.reconcile();
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(fetch).not.toHaveBeenCalled();
-    expect(JSON.parse(readFileSync(path, "utf8")).anthropic).toEqual(expired);
+    expect(JSON.parse(readFileSync(path, "utf8")).anthropic).toMatchObject({ ...expired, piCredentialState: { state: "refresh-required" } });
+    expect(auth.has("anthropic")).toBe(false);
   } finally {
     store.close(); rmSync(root, { recursive: true });
   }

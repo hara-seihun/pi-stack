@@ -316,7 +316,12 @@ export class CodexMeterSampler {
         );
         // The repaired token is what the rest of this pass reads with; the
         // rejected one would only earn a second refusal.
-        return { windows: await fetchCodexUsage(repaired.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now), access: repaired.access };
+        try {
+          return { windows: await fetchCodexUsage(repaired.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now), access: repaired.access };
+        } catch (error) {
+          if (error instanceof CodexUnauthorizedError) await this.auth.reject(accountId, repaired.access, AbortSignal.timeout(this.requestTimeoutMs));
+          throw error;
+        }
       } catch (error) {
         throw new Error(`${thrown.message}; after shared OAuth repair: ${String(error)}`);
       }

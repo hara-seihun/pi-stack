@@ -115,7 +115,7 @@ test.each(["repaired", "still-rejected", "usage-healthy", "usage-failed"])("brok
   const f = await fixture(transport);
   const response = await f.post(body());
   expect(response.status).toBe(kind === "repaired" ? 200 : 404);
-  expect(probe).toHaveBeenCalledOnce();
+  expect(probe).toHaveBeenCalledTimes(kind === "still-rejected" ? 2 : 1);
   expect(probe.mock.calls[0][0]).toBe(f.token);
   expect(refresh).toHaveBeenCalledTimes(kind.startsWith("usage-") ? 0 : 1);
   expect(transport).toHaveBeenCalledTimes(kind.startsWith("usage-") ? 1 : 2);
@@ -125,6 +125,38 @@ test.each(["repaired", "still-rejected", "usage-healthy", "usage-failed"])("brok
     expect(response.headers.get("x-request-id")).toBe("inference-rejection");
   } else await response.text();
   expect(f.store.activeLeases()).toHaveLength(0);
+  if (kind === "still-rejected") {
+    expect((await f.post(body())).status).toBe(503);
+    expect(transport).toHaveBeenCalledTimes(2);
+  }
+});
+
+test.each(["repaired", "still-rejected", "transport", "stream-initial", "stream-second"])("broker recognizes body/stream invalidation and fences repeat rejection without replaying accepted streams: %s", async kind => {
+  const invalidated = "Your authentication token has been invalidated. Please try signing in again.";
+  const refresh = vi.spyOn(SharedOAuthAuth.prototype, "refreshRejected").mockImplementation(async function(this: SharedOAuthAuth, account, _rejected, signal) {
+    const current = await this.credential(account, signal);
+    const fresh = { ...current, access: `${current.access}-fresh` };
+    await withSharedAuth(this.path, signal, (auth, save) => { auth[account] = fresh; save(); });
+    return fresh;
+  });
+  let calls = 0;
+  const transport = vi.fn(async () => {
+    calls++;
+    if (kind === "stream-initial" || calls === 2 && kind === "stream-second") return new Response(`data: ${JSON.stringify({ type: "error", error: { message: invalidated } })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+    return calls === 1 || kind === "still-rejected"
+      ? Response.json({ error: { message: invalidated } }, { status: 403 })
+      : kind === "transport" ? new Response("upstream unavailable", { status: 503 }) : sse({});
+  });
+  const f = await fixture(transport);
+  const response = await f.post(body()); await response.text();
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(transport).toHaveBeenCalledTimes(kind === "stream-initial" ? 1 : 2);
+  const auth = new SharedOAuthAuth({ path: join(f.root, "auth.json"), providerId: "openai-codex", refresh: async c => c, toAuth: async c => ({ apiKey: c.access }) });
+  expect(auth.has("shared")).toBe(kind !== "still-rejected" && kind !== "stream-second");
+  if (kind === "still-rejected" || kind === "stream-second") {
+    expect((await f.post(body())).status).toBe(503);
+    expect(transport).toHaveBeenCalledTimes(2);
+  }
 });
 
 test("fleet, transcripts, credentials, ungranted models and provider-resource references never reach upstream", async () => {

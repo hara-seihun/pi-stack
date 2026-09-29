@@ -130,10 +130,56 @@ provider streams capture the token actually submitted, so a concurrent meter
 refresh makes the shared lock return the replacement rather than rotate it again.
 Interactive diagnostics persist as `credential-repair` session entries. A
 successful repair queues the existing same-account continuation only after
-settlement; a failed repair never queues another turn. The broker preserves the
-upstream error body and request ID, and returns URL-encoded repair diagnostics
-in `x-pi-credential-repair`. Neither path changes account affinity or spends a
+settlement; a failed repair never retries the rejected credential. Ordinary
+interactive sessions can continue on an eligible sibling when shared credential
+state excludes the failed account. Assigned sessions retain their admission pin.
+The broker preserves the upstream error body and request ID, and returns
+URL-encoded repair diagnostics in `x-pi-credential-repair`. No repair spends a
 usage reset.
+
+### Credential rejection recovery
+
+On September 29, 2026, GMKtec account `openai-codex-8` returned `Your authentication
+token has been invalidated. Please try signing in again.` on an ordinary request.
+The classification omitted invalidated and revoked tokens, so routing never
+attempted shared repair. Explicit `account refresh` succeeded at 19:30:54 UTC,
+and a pinned `openai-codex-8/gpt-6.1-sol` request answered `OK`.
+
+Invalidated, revoked and expired token rejects share the credential vocabulary
+across ordinary and assigned routing, nested provider operations, the broker,
+native completions and the provider meters. Each consumer permits one shared
+compare-and-swap refresh and no second refresh of a freshly rejected token.
+Broker and completion HTTP error bodies are inspected as well as status, so an
+explicit token rejection in a 403 is repairable without treating every 403 as an
+authentication failure. Completion replay is restricted to pre-execution HTTP
+auth rejection; accepted-stream loss remains indeterminate and is never replayed.
+Ambiguous inference 404 still needs the fixed usage endpoint's corroboration,
+including before quarantining a fresh token rejected with 404. Explicit stream
+error events also repair shared custody for subsequent callers (or quarantine a
+second rejected token), but neither broker nor completion replays a stream already
+accepted by the provider.
+
+The account's shared `auth.json` OAuth entry owns `piCredentialState`. No rejected
+token values are copied to a second store. A known-bad or expired access token
+is marked `refresh-required` before refreshing, so process death or failed
+refresh transport cannot admit it again. A transport failure retains the grant
+and schedules another refresh after sixty seconds; the next due meter poll
+attempts recovery, while routing and fleet/completion admission exclude it.
+Transport failure during proactive refresh of a still-live token does not mark
+it rejected. Network failures without any credential rejection never trigger
+OAuth repair.
+
+Definitive refresh-grant refusal (`invalid_grant`, invalidated/reused refresh
+tokens or 401), an unchanged rejected access token, identity mismatch, or a second
+corroborated fresh-token rejection marks `login-required`. That state survives
+restarts and cooldown expiry; new admissions and automatic credential resolution
+refuse it. Meters report the credential failure without spending another refresh.
+`pi-orchestrator account login ALIAS` or importing a replacement credential clears
+it. An explicit `pi-orchestrator account refresh ALIAS` can retry a quarantined
+grant; successful refresh clears the state, failed refresh retains the appropriate
+state. `account enable` and rate-limit cooldown expiry do not clear it. Shared-lock
+compare-and-swap ensures late rejections of a superseded token do not quarantine
+the replacement.
 
 Randomized/early usage resets and their exploitation statistics are covered
 in [openai-reset-statistics.md](openai-reset-statistics.md).

@@ -1,4 +1,8 @@
 import { zstdDecompressSync } from "node:zlib";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SharedOAuthAuth, withSharedAuth } from "../src/auth/shared-oauth.js";
 import { expect, it, vi } from "vitest";
 import type { CompletionInput, CompletionFetch } from "../src/completion-contract.js";
 import type { Run } from "../src/domain.js";
@@ -81,6 +85,33 @@ it("marks accepted stream loss indeterminate and never retries provider dispatch
 it("refuses to invent token usage when a terminal provider response omits it", async () => {
   const transport = async () => new Response(events(true, false));
   expect(await executeCompletion(input, run, options(transport))).toMatchObject({ state: "failed", error: { code: "missing-provider-evidence" } });
+});
+
+it.each(["repaired", "rejected", "stream-loss", "stream-initial", "stream-second"])("completion repairs only pre-execution auth rejection and preserves uncertainty: %s", async kind => {
+  const root = mkdtempSync(join(tmpdir(), "completion-auth-")), path = join(root, "auth.json");
+  writeFileSync(path, JSON.stringify({ [run.accountId!]: { type: "oauth", access: token, refresh: "grant", expires: Date.now() + 3_600_000, accountId: "test-account" } }));
+  const fresh = token + "-fresh";
+  const refresh = vi.spyOn(SharedOAuthAuth.prototype, "refreshRejected").mockImplementation(async function(this: SharedOAuthAuth, alias, access, signal) {
+    expect(access).toBe(token);
+    const credential = { ...await this.credential(alias, signal), access: fresh };
+    await withSharedAuth(this.path, signal, (auth, save) => { auth[alias] = credential; save(); });
+    return credential;
+  });
+  let calls = 0;
+  const transport = vi.fn(async (_url: unknown, init?: RequestInit) => {
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${calls ? fresh : token}`);
+    calls++;
+    if (kind === "stream-initial" || calls === 2 && kind === "stream-second") return new Response(event("error", { code: "invalid_token", message: "Your authentication token has been invalidated. Please try signing in again." }));
+    if (calls === 1 || kind === "rejected") return Response.json({ error: { message: "Your authentication token has been invalidated. Please try signing in again." } }, { status: 403 });
+    return new Response(events(kind !== "stream-loss"));
+  });
+  try {
+    expect((await executeCompletion(input, run, options(transport, { resolveAuth: undefined, authPath: path }))).state).toBe(kind === "repaired" ? "completed" : kind === "rejected" ? "failed" : "indeterminate");
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(transport).toHaveBeenCalledTimes(kind === "stream-initial" ? 1 : 2);
+    const auth = new SharedOAuthAuth({ path, providerId: "openai-codex", refresh: async c => c, toAuth: async c => ({ apiKey: c.access }) });
+    expect(auth.has(run.accountId!)).toBe(kind !== "rejected" && kind !== "stream-second");
+  } finally { refresh.mockRestore(); rmSync(root, { recursive: true }); }
 });
 
 it("distinguishes the bounded provider deadline from explicit caller cancellation", async () => {
