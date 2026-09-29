@@ -1,4 +1,11 @@
 import { spawn } from "node:child_process";
+import { availableParallelism } from "node:os";
+
+export function checkParallelism(env = process.env) {
+  const budget = Number(env.PI_STACK_CHECK_CONCURRENCY ?? Math.min(4, availableParallelism()));
+  if (!Number.isSafeInteger(budget) || budget < 1) throw new Error("PI_STACK_CHECK_CONCURRENCY must be a positive integer");
+  return budget;
+}
 
 export function runJob([name, command, args, options = {}], write = (text) => process.stdout.write(text)) {
   const { timeoutMs = 120_000, drainTimeoutMs = 250, ...spawnOptions } = options;
@@ -46,8 +53,20 @@ export function runJob([name, command, args, options = {}], write = (text) => pr
   });
 }
 
-export async function runJobs(jobs) {
-  const results = await Promise.all(jobs.map(job => runJob(job)));
+export async function runJobs(jobs, { concurrency = checkParallelism(), write } = {}) {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error("concurrency must be a positive integer");
+  const workers = Math.min(concurrency, jobs.length);
+  const childBudget = Math.max(1, Math.floor(concurrency / Math.max(1, workers)));
+  const results = new Array(jobs.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: workers }, async () => {
+    while (next < jobs.length) {
+      const index = next++;
+      const [name, command, args, options = {}] = jobs[index];
+      const env = { ...process.env, ...options.env, PI_STACK_CHECK_CONCURRENCY: String(childBudget) };
+      results[index] = await runJob([name, command, args, { ...options, env }], write);
+    }
+  }));
   if (results.some(result => result.code !== 0)) process.exitCode = 1;
   return results;
 }

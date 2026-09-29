@@ -21,4 +21,6 @@ const jobs = [
   ["session readers", "npm", ["test", "--workspace=@hara-seihun/read-condensed-session"]],
 ];
 
-await runJobs(jobs);
+await runJobs(jobs.map(([name, command, args, ...options]) => [
+  name, command, args[0] === "--test" ? ["scripts/test-node.mjs", ...args.slice(1)] : args, ...options,
+]));

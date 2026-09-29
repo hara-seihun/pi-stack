@@ -19,7 +19,7 @@
     ]
   },
   "scripts": {
-    "test": "node --test *.test.mjs extensions/*/*.test.mjs"
+    "test": "node ../../scripts/test-node.mjs *.test.mjs extensions/*/*.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0",

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { runJob } from "./run-jobs.mjs";
+import { checkParallelism, runJob, runJobs } from "./run-jobs.mjs";
 
 test("job output is visible before the process finishes", async () => {
   let complete = false;
@@ -29,6 +30,55 @@ test("an exited job with inherited descendant pipes fails instead of hanging", a
     try { process.kill(Number(readFileSync(pidFile, "utf8")), "SIGKILL"); } catch {}
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the pool bounds concurrency, shares its budget, and drains all jobs after a failure", async () => {
+  let active = 0;
+  let peak = 0;
+  const output = [];
+  const exitCode = process.exitCode;
+  try {
+    const jobs = Array.from({ length: 5 }, (_, index) => [
+      `pool-${index}`, process.execPath,
+      ["-e", `console.log('BUDGET=' + process.env.PI_STACK_CHECK_CONCURRENCY + ':' + process.env.MARKER); setTimeout(() => process.exit(${index === 0 ? 1 : 0}), 50)`],
+      { env: { MARKER: "preserved" } },
+    ]);
+    const results = await runJobs(jobs, { concurrency: 2, write(text) {
+      output.push(text);
+      if (text.includes(": started =====")) peak = Math.max(peak, ++active);
+      if (/: (passed|failed) \(/.test(text)) active--;
+    } });
+    assert.equal(peak, 2);
+    assert.equal(active, 0);
+    assert.deepEqual(results.map(result => result.name), jobs.map(job => job[0]));
+    assert.deepEqual(results.map(result => result.code), [1, 0, 0, 0, 0]);
+    assert.equal(output.join("").match(/BUDGET=1:preserved/g)?.length, 5);
+    assert.equal(process.exitCode, 1);
+  } finally { process.exitCode = exitCode; }
+});
+
+test("the Node test driver expands file patterns and propagates failures without dropping later files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-node-tests-"));
+  try {
+    writeFileSync(join(root, "a.test.mjs"), "import test from 'node:test'; test('deliberate failure', () => { throw new Error('fixture failure'); });");
+    writeFileSync(join(root, "b.test.mjs"), "import test from 'node:test'; test('later file', () => console.log('LATER_FILE_RAN'));");
+    let output = "";
+    const result = await runJob(["node driver", process.execPath, [fileURLToPath(new URL("./test-node.mjs", import.meta.url)), "*.test.mjs"], {
+      cwd: root, env: { ...process.env, PI_STACK_CHECK_CONCURRENCY: "1" },
+    }], text => { output += text; });
+    assert.equal(result.code, 1, output);
+    assert.match(output, /fixture failure/);
+    assert.match(output, /LATER_FILE_RAN/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("check budgets reject invalid settings and permit an empty queue", async () => {
+  assert.equal(checkParallelism({ PI_STACK_CHECK_CONCURRENCY: "2" }), 2);
+  for (const value of ["0", "-1", "1.5", "garbage", ""]) {
+    assert.throws(() => checkParallelism({ PI_STACK_CHECK_CONCURRENCY: value }), /positive integer/);
+  }
+  await assert.rejects(runJobs([], { concurrency: 0 }), /positive integer/);
+  assert.deepEqual(await runJobs([], { concurrency: 1 }), []);
 });
 
 test("a running job has a bounded deadline", async () => {
