@@ -100,6 +100,60 @@ test("reconnect aborts pending subscription posts and never lets an old post blo
   expect(posts[1].signal.aborted).toBe(true);
 });
 
+test("only the current opening's acknowledged revisions finish refresh, including unchanged caches and reconnects", async () => {
+  const publisher = new ReconcilePublisher();
+  const cached = { type: "transcript" as const, sessionId: "a", generation: "g", total: 0, items: [] };
+  const have = {
+    "transcript:a": publisher.publish("transcript:a", cached),
+    "live:a": publisher.publish("live:a", { type: "live", sessionId: "a", text: "" }),
+    state: publisher.publish("state", { type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] }),
+  };
+  const selections: Array<{ sessionId: string | null; ready: boolean }> = [];
+  const calls: any[] = [];
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const emit = (event: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+  const client = createStreamClient({
+    subscription: { session: "a" }, listen: false, onEvent: () => {}, onStatus: () => {},
+    onSelectionStatus: status => selections.push(status),
+    fetch: async (path, init) => {
+      calls.push(JSON.parse(String(init.body)));
+      if (path !== "/v1/stream") return new Response(null, { status: 204 });
+      return new Response(new ReadableStream({ start(controller) { wire = controller; controller.enqueue(new TextEncoder().encode(hello)); } }));
+    },
+  });
+  client.restore(cached);
+  try {
+    client.start(); await settle();
+    const first = calls[0].selectionId;
+    for (const resource of ["state", "live:a"]) emit({ type: "reconcile", ...publisher.reconcile(resource, null) });
+    await settle();
+    expect(selections).toEqual([{ sessionId: "a", ready: false }]);
+    const ready = (selectionId: string, revisions = have) => emit({ type: "selection-ready", sessionId: "a", selectionId, have: revisions });
+    ready(first, { ...have, "transcript:a": "not-applied" }); await settle();
+    expect(selections.at(-1)?.ready).toBe(false);
+    ready(first); await settle();
+    expect(selections.at(-1)?.ready).toBe(true);
+
+    client.update({ session: "b" }); await settle();
+    client.update({ session: "a" }); await settle();
+    const revisit = calls.at(-1).selectionId;
+    expect(revisit).not.toBe(first);
+    ready(first); await settle();
+    expect(selections.at(-1)).toEqual({ sessionId: "a", ready: false });
+    client.update({ thinking: true }); await settle();
+    expect(calls.at(-1).selectionId).toBe(revisit);
+    ready(revisit); await settle();
+    expect(selections.at(-1)?.ready).toBe(true);
+
+    client.reconnect(); await settle();
+    expect(selections.at(-1)?.ready).toBe(false);
+    ready(revisit); await settle();
+    expect(selections.at(-1)?.ready).toBe(false);
+    ready(calls.at(-1).selectionId); await settle();
+    expect(selections.at(-1)?.ready).toBe(true);
+  } finally { client.stop(); }
+});
+
 test("selection changed before hello posts the latest subscription rather than reconnecting", async () => {
   const calls: Array<{ path: string; body: any }> = [];
   let resolve!: (value: Response) => void;

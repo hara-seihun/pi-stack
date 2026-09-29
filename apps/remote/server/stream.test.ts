@@ -79,6 +79,42 @@ test("events and comments are framed, writes after close are dropped", () => {
   expect(chunks).toHaveLength(3);
 });
 
+test("selection readiness waits for inspection and survives unrelated declarations, even with unchanged resources", async () => {
+  const { stream, chunks, frames } = recordingStream();
+  stream.declare(readSubscription({ session: "a", selectionId: "opening-a" }));
+  const publish = () => {
+    stream.publish({ type: "transcript", sessionId: "a", generation: "g", total: 0, items: [] });
+    stream.publish({ type: "live", sessionId: "a", text: "" });
+    stream.publish({ type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] });
+  };
+  publish();
+  let complete!: () => void;
+  const inspection = new Promise<void>(resolve => { complete = resolve; });
+  const ready = stream.synchronizeSelection(() => inspection, publish);
+  stream.declare({ thinking: true, notificationsAfter: 1 });
+  expect(chunks.some(chunk => chunk.startsWith("event: selection-ready"))).toBe(false);
+  complete(); await ready;
+  expect(frames()).toHaveLength(3);
+  const acknowledgement = JSON.parse(chunks.at(-1)!.split("data: ")[1]);
+  expect(acknowledgement).toMatchObject({ type: "selection-ready", sessionId: "a", selectionId: "opening-a" });
+  expect(Object.keys(acknowledgement.have).sort()).toEqual(["live:a", "state", "transcript:a"]);
+});
+
+test("departed selections and inspection failures cannot acknowledge a fresh view", async () => {
+  const { stream, chunks } = recordingStream();
+  stream.declare({ session: "a", selectionId: "first" });
+  let complete!: () => void;
+  const pending = stream.synchronizeSelection(() => new Promise<void>(resolve => { complete = resolve; }), () => { throw new Error("stale publication"); });
+  stream.declare({ session: "b", selectionId: "second" });
+  stream.declare({ session: "a", selectionId: "third" });
+  complete(); await pending;
+  expect(chunks).toHaveLength(0);
+  await stream.synchronizeSelection(() => Promise.reject(new Error("owner unavailable")), () => {});
+  expect(chunks).toHaveLength(1);
+  expect(chunks[0]).toContain("Could not refresh thread: owner unavailable");
+  expect(chunks[0]).not.toContain("selection-ready");
+});
+
 test("failed sinks cannot advance the connection", () => {
   const stream = new ClientStream({ write() { throw new Error("closed socket"); }, close() {} });
   stream.publish({ type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] });

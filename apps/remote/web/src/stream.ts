@@ -68,7 +68,7 @@ export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null
   try { value = JSON.parse(frame.data); } catch { return null; }
   if (!value || typeof value !== "object") return null;
   if (typeof value.type !== "string" && frame.event) value.type = frame.event;
-  return ["hello", "reconcile", "notifications", "events", "error"].includes(value.type) ? value as StreamWireEvent : null;
+  return ["hello", "reconcile", "selection-ready", "notifications", "events", "error"].includes(value.type) ? value as StreamWireEvent : null;
 }
 
 const SESSION_SCOPED = new Set(["transcript", "live", "images", "questions", "events"]);
@@ -93,6 +93,7 @@ export interface StreamClientOptions {
   subscription: StreamSubscription;
   onEvent(event: StreamEvent): void;
   onStatus(status: StreamStatus): void;
+  onSelectionStatus?(status: { sessionId: string | null; ready: boolean }): void;
   /** Voice and Meet bring their own authorized transport. */
   fetch?: (path: string, init: RequestInit) => Promise<Response>;
   /** Reconnect on `online`, `pageshow`, `focus` and visibility. */
@@ -121,6 +122,11 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     return { ...subscription, have, want };
   };
 
+  const beginSelection = () => {
+    subscription = { ...subscription, selectionId: crypto.randomUUID() };
+    options.onSelectionStatus?.({ sessionId: subscription.session ?? null, ready: false });
+  };
+
   const setStatus = (next: StreamState, error = "") => {
     state = next;
     options.onStatus({ state: next, error });
@@ -136,6 +142,13 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       streamId = event.streamId;
       options.onEvent(event);
       if (JSON.stringify(declaration()) !== sentSubscription) post();
+      return;
+    }
+    if (event.type === "selection-ready") {
+      if (event.sessionId !== subscription.session || event.selectionId !== subscription.selectionId) return;
+      const have = replica.have();
+      if (["state", `transcript:${event.sessionId}`, `live:${event.sessionId}`].some(resource => !event.have[resource] || have[resource] !== event.have[resource])) return;
+      options.onSelectionStatus?.({ sessionId: event.sessionId, ready: true });
       return;
     }
     if (event.type === "reconcile") {
@@ -159,6 +172,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     const active = new AbortController();
     controller = active;
     streamId = "";
+    beginSelection();
     setStatus("connecting");
     const initial = declaration();
     sentSubscription = JSON.stringify(initial);
@@ -283,7 +297,9 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     },
     update(change) {
       const previous = streamWants(subscription);
+      const previousSession = subscription.session;
       subscription = { ...subscription, ...change };
+      if (previousSession !== subscription.session) beginSelection();
       if (stopped) return;
       for (const resource of streamWants(subscription)) {
         if (previous.includes(resource)) continue;
