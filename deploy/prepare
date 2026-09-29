@@ -31,7 +31,12 @@ builds_pid=$!
 runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
-"$root/deploy/write-engine" &
+# Only a host that declares the Write engine unit fetches its 1.2 GB model.
+if [[ $(systemctl show pi-stack-write.service -p LoadState --value 2>/dev/null) == loaded ]]; then
+  "$root/deploy/write-engine" &
+else
+  true &
+fi
 write_engine_pid=$!
 failed=0
 for job in "builds:$builds_pid" "runtime:$runtime_pid" "transcription:$transcription_pid" "write-engine:$write_engine_pid"; do

@@ -25,8 +25,11 @@ fi
 if (( services )); then
   pi_stack_check_person_configs
   "$root/deploy/voice" --check
-  "$root/deploy/write-service" --check
 fi
+# Write needs its host-declared engine unit and a CPU able to stream Nemotron;
+# a host without the unit keeps Remote working and reports Write unavailable.
+write=0
+if (( services )) && "$root/deploy/write-service" --check 2>/dev/null; then write=1; fi
 
 fleet=$(pi_stack_fleet_user)
 mapfile -t users < <(pi_stack_users)
@@ -47,8 +50,14 @@ builds_pid=$!
 runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
-"$root/deploy/write-engine" --select &
-write_pid=$!
+if (( write )); then
+  "$root/deploy/write-engine" --select &
+  write_pid=$!
+else
+  echo 'Pi Stack Write: no pi-stack-write.service on this host; skipping the engine' >&2
+  true &
+  write_pid=$!
+fi
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1
 wait "$runtime_pid" || preparation_failed=1
@@ -177,7 +186,7 @@ mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-bro
 if (( ${#brokers[@]} )); then
   pi_stack_as_root systemctl restart "${brokers[@]}" || activation_failed=1
 fi
-if ! "$root/deploy/write-service" --activate || ! "$root/deploy/voice" --activate; then
+if { (( write )) && ! "$root/deploy/write-service" --activate; } || ! "$root/deploy/voice" --activate; then
   activation_failed=1
 elif [[ $previous_remote != "$expected" ]]; then
   activate_remote "$expected" || activation_failed=1
