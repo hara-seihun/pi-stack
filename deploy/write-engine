@@ -15,15 +15,24 @@ source_dir="$root/apps/write/engine"
 # their converter, so neither a source change nor a dependency change refetches
 # the weights. A download also reuses any already verified copy of a pinned file.
 mapfile -t sources < <(cd "$source_dir" && find . -name '*.py' ! -name 'test_*' | LC_ALL=C sort)
+gpu_enabled=${PI_STACK_WRITE_GPU_ENABLED:-auto}
+if [[ $gpu_enabled == auto ]]; then
+  gpu_enabled=0
+  [[ -f /etc/pi-stack/write-gpu ]] && gpu_enabled=1
+fi
+[[ $gpu_enabled == 0 || $gpu_enabled == 1 ]] || { echo 'invalid PI_STACK_WRITE_GPU_ENABLED' >&2; exit 64; }
 venv_key=$(sha256sum "$source_dir/requirements.lock" | cut -d' ' -f1)
+gpu_key=$(cat "$source_dir/requirements-gpu.lock" "$source_dir/gpu-model.json" | sha256sum | cut -d' ' -f1)
 weights_key=$(cat "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha256sum | cut -d' ' -f1)
-environment_key=$(printf '%s\n%s\n' "$venv_key" "$weights_key" | sha256sum | cut -d' ' -f1)
+environment_key=$(printf '%s\n%s\n%s\n' "$venv_key" "$weights_key" "$gpu_enabled:$gpu_key" | sha256sum | cut -d' ' -f1)
 cleanup_manifest="$source_dir/cleanup/model.json"
 cleanup_key=$(sha256sum "$cleanup_manifest" | cut -d' ' -f1)
 key=$( { echo "$environment_key"; echo "$cleanup_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
 base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
 store="$(dirname "$base")/.pi-write"
 environment="$store/venv-$venv_key"
+gpu_environment="$store/gpu-venv-$gpu_key"
+gpu_weights="$store/gpu-weights-$(sha256sum "$source_dir/gpu-model.json" | cut -d' ' -f1)"
 weights="$store/weights-$weights_key"
 cleanup_model="$store/cleanup-$cleanup_key"
 tree="$store/$key"
@@ -88,10 +97,43 @@ PY
   chmod -R a+rX "$cleanup_model"
   touch "$cleanup_model/ready"
 fi
+if [[ $gpu_enabled == 1 && ! -f "$gpu_environment/ready" ]]; then
+  command -v uv >/dev/null || { echo 'PiStack Write GPU requires uv' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$gpu_environment"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$gpu_environment"
+  export UV_PYTHON_INSTALL_DIR="$gpu_environment/python"
+  [[ -x "$gpu_environment/venv/bin/python" ]] || uv venv --managed-python --python 3.12 "$gpu_environment/venv"
+  uv pip sync --python "$gpu_environment/venv/bin/python" --require-hashes \
+    --index https://download.pytorch.org/whl/rocm7.2 \
+    --default-index https://pypi.org/simple --index-strategy unsafe-best-match \
+    "$source_dir/requirements-gpu.lock"
+  chmod -R a+rX "$gpu_environment"
+  touch "$gpu_environment/ready"
+fi
+if [[ $gpu_enabled == 1 && ! -f "$gpu_weights/ready" ]]; then
+  pi_stack_as_root install -d -m 0755 "$gpu_weights"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$gpu_weights"
+  "$environment/venv/bin/python" - "$source_dir/gpu-model.json" > "$gpu_weights/files.tsv" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+for path,digest in m['files'].items():
+    print(path,m['repository'],m['revision'],digest,sep='\t')
+PY
+  while IFS=$'\t' read -r file repository revision digest; do
+    fetch "https://huggingface.co/$repository/resolve/$revision/$file" "$digest" "$gpu_weights/$file"
+  done < "$gpu_weights/files.tsv"
+  chmod -R a+rX "$gpu_weights"
+  touch "$gpu_weights/ready"
+fi
 if [[ ! -f "$tree/ready" ]]; then
   pi_stack_as_root install -d -m 0755 "$tree"
   pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
-  ln -sfn "$environment/venv" "$tree/venv"
+  if [[ $gpu_enabled == 1 ]]; then
+    ln -sfn "$gpu_environment/venv" "$tree/venv"
+    ln -sfn "$gpu_weights" "$tree/gpu-model"
+  else
+    ln -sfn "$environment/venv" "$tree/venv"
+  fi
   ln -sfn "$weights" "$tree/model"
   ln -sfn "$cleanup_model" "$tree/cleanup-model"
   for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
@@ -109,10 +151,14 @@ echo "PiStack Write engine ready: $key"
 # still use, and which rollback selects), with everything they link to. Remove
 # every other store entry, so model and dependency changes do not accumulate.
 keep=()
+# The GPU tree links the superset ROCm venv, but preparation also uses this
+# small CPU environment for model conversion and manifest parsing. Retain it
+# so each source-only release does not re-fetch its managed Python runtime.
+[[ $gpu_enabled == 0 ]] || keep+=("$environment")
 for selected in "$tree" "$previous"; do
   [[ -n $selected && -d $selected ]] || continue
   keep+=("$(readlink -f "$selected")")
-  for link in "$selected"/venv "$selected"/model "$selected"/cleanup-model; do
+  for link in "$selected"/venv "$selected"/model "$selected"/gpu-model "$selected"/cleanup-model; do
     [[ -L $link ]] || continue
     target=$(readlink -f "$link")
     while [[ $(dirname "$target") != "$store" && $target != / ]]; do target=$(dirname "$target"); done
