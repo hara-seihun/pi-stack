@@ -55,7 +55,8 @@ printf '%s\\n' '{"host":"${host}","selectedCommit":"${selected}","checkoutCommit
   const proof = JSON.parse(readFileSync(failed.releaseAncestry.proof, "utf8"));
   assert.deepEqual(proof.hosts.map(host => host.ok), [true, false]);
   assert.doesNotMatch(readFileSync(join(root, "git"), "utf8"), /push/);
-  assert.doesNotMatch(readFileSync(join(root, "host-scripts"), "utf8"), /sudo|pi-orchestrator pause/);
+  assert.doesNotMatch(readFileSync(join(root, "host-scripts"), "utf8"), /systemctl (start|stop|restart|kill)|fleet_cli pause/);
+  assert.deepEqual(Object.values(failed.reservations).map(host => host.state), ["released", "released"]);
   assert.doesNotMatch(readFileSync(join(root, "ssh"), "utf8"), /pi-stack-release /);
 });
 
@@ -106,6 +107,7 @@ printf '%s\\n' '{"selectedCommit":"${base}","checkoutCommit":"${base}","runtimes
   assert.equal(queued.checks, undefined);
   assert.equal(queued.mainMovements[0].integrationSha, integration);
   assert.deepEqual(queued.failures, []);
+  assert.deepEqual(Object.values(queued.reservations).map(host => host.state), ["released", "released"]);
   assert.doesNotMatch(readFileSync(join(root, "git"), "utf8"), /push/);
   assert.doesNotMatch(readFileSync(join(root, "hosts"), "utf8"), /machine\/pi-stack-release /);
   rmSync(join(root, "bin/bash"));
