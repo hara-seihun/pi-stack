@@ -63,6 +63,13 @@ const json = (res: ServerResponse, status: number, error: string) => {
   res.end(JSON.stringify({ error: { message: error, type: "model_broker_error" } }));
 };
 
+interface DispatchReceipt {
+  id: string; requestId: string; principal: string; accountId: string; model: string;
+  serviceTier: string; at: number; updatedAt: number; httpStatus?: number;
+  outcome: "dispatched" | "accepted" | "rejected" | "completed" | "incomplete" | "failed" | "cancelled" | "indeterminate";
+}
+const dispatchKey = (principal: string) => `broker-dispatches:${principal}`;
+
 export type BrokerTransport = (url: string, init: RequestInit) => Promise<Response>;
 export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTransport = fetch) {
   const store = Store.open(config.ledgerPath);
@@ -85,9 +92,21 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
   const sticky = new Map<string, string>();
   const shutdown = new AbortController();
   const servers: Server[] = [];
+  const dispatches = (principal: string): DispatchReceipt[] => JSON.parse(store.control(dispatchKey(principal)) ?? "[]");
+  const saveDispatch = (receipt: DispatchReceipt) => {
+    receipt.updatedAt = Date.now();
+    store.setControl(dispatchKey(receipt.principal), JSON.stringify([
+      ...dispatches(receipt.principal).filter(previous => previous.id !== receipt.id), receipt,
+    ].sort((a, b) => a.at - b.at).slice(-128)));
+  };
 
   const request = async (listener: BrokerListener, req: IncomingMessage, res: ServerResponse) => {
     const grant = grants.get(listener.principal)!;
+    if (req.method === "GET" && req.url === "/v1/dispatches") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ dispatches: dispatches(listener.principal) }));
+      return;
+    }
     if (req.url?.startsWith("/v1/voice/")) {
       const count = inflight.get(listener.principal) ?? 0;
       if (count >= listener.maxInFlight) { json(res, 503, "Your shared request limit is full"); return; }
@@ -149,6 +168,8 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
     const disconnected = () => { if (!res.writableFinished) cancel.abort(); };
     res.on("close", disconnected);
     let lease: string | undefined;
+    let dispatchReceipt: DispatchReceipt | undefined;
+    let dispatchAttempt = 0;
     let usageReceipt: { accountId: string; model: string; tokens: Record<UsageComponent, number> } | undefined;
     let timer: ReturnType<typeof setInterval> | undefined;
     try {
@@ -220,7 +241,21 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       };
       authorize();
       let startedAt = 0;
-      const send = () => (startedAt = Date.now(), transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: family === "anthropic" ? Uint8Array.from(requestBytes) : JSON.stringify(body), signal, redirect: "error" }));
+      const send = async () => {
+        startedAt = Date.now();
+        const outgoingBody = family === "anthropic" ? Uint8Array.from(requestBytes) : JSON.stringify(body);
+        if (family === "openai-codex") {
+          const wire = JSON.parse(outgoingBody as string);
+          dispatchReceipt = { id: `${lease}:${++dispatchAttempt}`, requestId: headers.get("x-client-request-id")!,
+            principal: listener.principal, accountId: account.id, model: wire.model,
+            serviceTier: typeof wire.service_tier === "string" ? wire.service_tier : "auto",
+            at: startedAt, updatedAt: startedAt, outcome: "dispatched" };
+          saveDispatch(dispatchReceipt);
+        }
+        const response = await transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: outgoingBody, signal, redirect: "error" });
+        if (dispatchReceipt) { dispatchReceipt.httpStatus = response.status; dispatchReceipt.outcome = response.ok ? "accepted" : "rejected"; saveDispatch(dispatchReceipt); }
+        return response;
+      };
       let response = await send();
       let repaired = false, streamRejection: string | undefined;
       if (!response.ok && credential.apiKey) {
@@ -244,7 +279,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       for (const { meterId, reading } of anthropicMeterReadings(Object.fromEntries(response.headers), Date.now())) {
         store.recordMeter(account.id, meterId, reading.usedPercent, reading.resetAt, reading.at);
       }
-      const outgoing: Record<string, string> = {};
+      const outgoing: Record<string, string> = dispatchReceipt ? { "x-pi-broker-dispatch-id": dispatchReceipt.id } : {};
       for (const key of ["content-type", "retry-after", "x-request-id"]) {
         const value = response.headers.get(key);
         if (value) outgoing[key] = value;
@@ -253,6 +288,10 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       const parser = createParser({ onEvent(event) {
         let value: any;
         try { value = JSON.parse(event.data); } catch { return; }
+        if (dispatchReceipt && ["response.completed", "response.incomplete", "response.failed"].includes(value.type)) {
+          dispatchReceipt.outcome = value.type.slice("response.".length) as "completed" | "incomplete" | "failed";
+          saveDispatch(dispatchReceipt);
+        }
         const failure = value.error ?? value.response?.error ?? (value.type === "error" ? value : undefined);
         if (failure) {
           const detail = `${failure.code ?? ""} ${failure.message ?? ""}`;
@@ -282,6 +321,10 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       if (!signal.aborted) console.error(`Model broker request failed for ${listener.principal}: ${error instanceof Error ? error.name : "unknown error"}`);
       json(res, signal.aborted ? 499 : 502, signal.aborted ? "Model request cancelled" : "Model broker request failed; inspect the broker service and account authentication");
     } finally {
+      if (dispatchReceipt && ["dispatched", "accepted"].includes(dispatchReceipt.outcome)) {
+        dispatchReceipt.outcome = signal.aborted ? "cancelled" : "indeterminate";
+        saveDispatch(dispatchReceipt);
+      }
       clearInterval(timer);
       if (lease && usageReceipt) for (const [component, tokens] of Object.entries(usageReceipt.tokens)) {
         if (tokens > 0) store.recordUsage({ accountId: usageReceipt.accountId, hour: Math.floor(Date.now() / 3_600_000) * 3_600_000, source: "interactive", runId: lease, model: usageReceipt.model, component: component as UsageComponent, tokens });
