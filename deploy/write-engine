@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+[[ $# == 0 || ( $# == 1 && $1 == --select ) ]] || { echo 'usage: deploy/write-engine [--select]' >&2; exit 64; }
+mode=${1:-prepare}
+# Only a host that declares the engine unit fetches its 1.2 GB model.
+if [[ $mode == prepare && ${PI_STACK_WRITE_ENGINE_FORCE:-0} != 1 ]] && [[ $(systemctl show pi-stack-write.service -p LoadState --value 2>/dev/null) != loaded ]]; then
+  echo 'Pi Stack Write: no pi-stack-write.service on this host; nothing to prepare'
+  exit 0
+fi
+source_dir="$root/apps/write/engine"
+# The venv and 1.2 GB of weights are keyed only by the lock and model pins, so
+# a source change reinstalls a few Python files instead of refetching them.
+mapfile -t sources < <(cd "$source_dir" && find . -name '*.py' ! -name 'test_*' | LC_ALL=C sort)
+environment_key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" | sha256sum | cut -d' ' -f1)
+key=$( { echo "$environment_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
+base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
+store="$(dirname "$base")/.pi-write"
+environment="$store/environment-$environment_key"
+tree="$store/$key"
+if [[ ! -f "$tree/ready" && $mode == --select ]]; then
+  echo "PiStack Write engine is not prepared at $tree; run deploy/prepare first" >&2
+  exit 66
+fi
+if [[ ! -f "$environment/ready" ]]; then
+  command -v uv >/dev/null && command -v curl >/dev/null || { echo 'PiStack Write requires uv and curl' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$store" "$environment"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$environment"
+  # uv's managed interpreter normally lives in the installing user's home, which
+  # the service's dynamic user cannot read; keep it inside the shared tree.
+  export UV_PYTHON_INSTALL_DIR="$environment/python"
+  [[ -x "$environment/venv/bin/python" ]] || uv venv --managed-python --python 3.12 "$environment/venv"
+  uv pip sync --python "$environment/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
+  "$environment/venv/bin/python" - "$source_dir/model.json" > "$environment/model-files.tsv" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+for path,digest in m['files'].items():
+    print(path, path, m['repository'], m['revision'], digest, sep='\t')
+print('shared/'+m['tokenizer_file'],m['tokenizer_file'],m['tokenizer_repository'],m['tokenizer_revision'],m['tokenizer_sha256'],sep='\t')
+PY
+  while IFS=$'\t' read -r file source_file repository revision digest; do
+    destination="$environment/model/$file"
+    install -d "$(dirname "$destination")"
+    if [[ ! -f "$destination" ]] || [[ $(sha256sum "$destination" | cut -d' ' -f1) != "$digest" ]]; then
+      curl -fL --retry 3 -C - "https://huggingface.co/$repository/resolve/$revision/$source_file" -o "$destination.part"
+      echo "$digest  $destination.part" | sha256sum --check --status
+      mv "$destination.part" "$destination"
+    fi
+  done < "$environment/model-files.tsv"
+  chmod -R a+rX "$environment"
+  touch "$environment/ready"
+fi
+if [[ ! -f "$tree/ready" ]]; then
+  pi_stack_as_root install -d -m 0755 "$tree"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
+  ln -sfn "$environment/venv" "$tree/venv"
+  ln -sfn "$environment/model" "$tree/model"
+  for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
+  chmod -R a+rX "$tree"
+  touch "$tree/ready"
+fi
+[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
+next="$base.next.$$"
+trap 'pi_stack_as_root rm -f "$next"' EXIT
+pi_stack_as_root ln -s "$tree" "$next"
+pi_stack_as_root mv -Tf "$next" "$base"
+echo "PiStack Write engine ready: $key"

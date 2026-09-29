@@ -156,7 +156,7 @@ test("unbounded preparation owns the deadline for component children", () => {
     copyFileSync(join(root, "deploy", "prepare"), join(deploy, "prepare"));
     chmodSync(join(deploy, "prepare"), 0o755);
     writeFileSync(join(deploy, "lib"), `pi_stack_acquire_deploy_lock() { test -z "\${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-}"; }\npi_stack_prepare_builds() { test "\${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-}" = 1; printf 'builds\\n' >> "$TRACE"; }\n`);
-    for (const component of ["runtime", "transcription"]) {
+    for (const component of ["runtime", "transcription", "write-engine"]) {
       writeFileSync(join(deploy, component), `#!/bin/sh\ntest "\${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-}" = 1\nprintf '${component}\\n' >> "$TRACE"\n`, { mode: 0o755 });
     }
     assert.equal(spawnSync("git", ["init", "-q", repository]).status, 0);
@@ -164,7 +164,7 @@ test("unbounded preparation owns the deadline for component children", () => {
     assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"]).status, 0);
     const result = spawnSync(join(deploy, "prepare"), [], { encoding: "utf8", env: { ...process.env, TRACE: trace } });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(readFileSync(trace, "utf8").trim().split("\n").sort(), ["builds", "runtime", "transcription"]);
+    assert.deepEqual(readFileSync(trace, "utf8").trim().split("\n").sort(), ["builds", "runtime", "transcription", "write-engine"]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

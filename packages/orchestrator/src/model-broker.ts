@@ -19,6 +19,7 @@ import { repairProviderCredential } from "./auth/provider-rejection.js";
 import { BROKER_ROUTES, validateBrokerBody, type BrokerFamily } from "./model-broker-contract.js";
 import { anthropicMeterReadings } from "./extension/usage-logger.js";
 import { forwardVoiceRequest } from "./voice-broker.js";
+import { attachWriteBroker } from "./write-broker.js";
 
 export interface BrokerListener {
   principal: string;
@@ -279,6 +280,12 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
             active.add(work);
             void work.finally(() => active.delete(work));
           });
+          attachWriteBroker(server, shutdown.signal, () => {
+            const count = inflight.get(listener.principal) ?? 0;
+            if (count >= listener.maxInFlight) return false;
+            inflight.set(listener.principal, count + 1);
+            return true;
+          }, () => inflight.set(listener.principal, Math.max(0, (inflight.get(listener.principal) ?? 1) - 1)));
           servers.push(server);
           await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(listener.port, "127.0.0.1", resolve); });
         }

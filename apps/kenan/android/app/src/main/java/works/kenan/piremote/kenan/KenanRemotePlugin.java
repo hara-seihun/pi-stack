@@ -24,7 +24,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @CapacitorPlugin(name = "KenanRemote", permissions = {
-    @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS })
+    @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS }),
+    @Permission(alias = "microphone", strings = { Manifest.permission.RECORD_AUDIO })
 })
 public final class KenanRemotePlugin extends Plugin {
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
@@ -47,6 +48,7 @@ public final class KenanRemotePlugin extends Plugin {
     public void syncSession(PluginCall call) {
         try {
             if (NotificationIdentity.replace(getContext(), call.getString("user", ""), call.getString("session", ""))) {
+                getContext().getSharedPreferences("write-settings", 0).edit().remove("environment").apply();
                 for (String key : new String[] { "environment", "sessionId", "user" }) getActivity().getIntent().removeExtra(key);
                 if (NotificationIdentity.get(getContext()).current() != null
                     && getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)) {
@@ -55,6 +57,75 @@ public final class KenanRemotePlugin extends Plugin {
             }
             call.resolve();
         } catch (IllegalArgumentException failure) { call.reject(failure.getMessage(), failure); }
+    }
+
+    @PluginMethod
+    public void writeStatus(PluginCall call) {
+        android.view.accessibility.AccessibilityManager manager =
+            (android.view.accessibility.AccessibilityManager) getContext().getSystemService(android.content.Context.ACCESSIBILITY_SERVICE);
+        boolean accessibility = false;
+        for (android.accessibilityservice.AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(
+            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
+            if (info.getResolveInfo().serviceInfo.packageName.equals(getContext().getPackageName())
+                && info.getResolveInfo().serviceInfo.name.equals(WriteAccessibilityService.class.getName())) accessibility = true;
+        }
+        call.resolve(new JSObject()
+            .put("microphone", getPermissionState("microphone") == PermissionState.GRANTED)
+            .put("notification", Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED)
+            .put("overlay", Settings.canDrawOverlays(getContext()))
+            .put("accessibility", accessibility)
+            .put("battery", ((android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE))
+                .isIgnoringBatteryOptimizations(getContext().getPackageName()))
+            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true)));
+    }
+
+    @PluginMethod
+    public void writeSetup(PluginCall call) {
+        String step = call.getString("step", "");
+        switch (step) {
+            case "microphone" -> {
+                if (getPermissionState("microphone") == PermissionState.GRANTED) call.resolve();
+                else requestPermissionForAlias("microphone", call, "writeMicrophonePermission");
+            }
+            case "notification" -> {
+                if (Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED) call.resolve();
+                else requestPermissionForAlias("notifications", call, "writeMicrophonePermission");
+            }
+            case "overlay" -> {
+                getContext().startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getContext().getPackageName())).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                call.resolve();
+            }
+            case "accessibility" -> {
+                getContext().startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                call.resolve();
+            }
+            case "battery" -> {
+                getContext().startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                call.resolve();
+            }
+            case "keyboard" -> {
+                boolean required = Boolean.TRUE.equals(call.getBoolean("required", true));
+                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", required).apply();
+                call.resolve();
+            }
+            default -> call.reject("Unknown Write setup step");
+        }
+    }
+
+    @PermissionCallback
+    private void writeMicrophonePermission(PluginCall call) { call.resolve(); }
+
+    @PluginMethod
+    public void writeEnvironment(PluginCall call) {
+        String user = call.getString("user", "");
+        String environment = call.getString("environment", "");
+        RemoteSession.Identity identity = NotificationIdentity.get(getContext()).current();
+        if (identity == null || !identity.user.equals(user) || environment.isBlank()) {
+            call.reject("Write environment needs an authenticated selection"); return;
+        }
+        getContext().getSharedPreferences("write-settings", 0).edit().putString("environment", environment).apply();
+        call.resolve();
     }
 
     @PluginMethod

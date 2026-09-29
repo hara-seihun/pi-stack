@@ -26,6 +26,10 @@ if (( services )); then
   pi_stack_check_person_configs
   "$root/deploy/voice" --check
 fi
+# Write needs its host-declared engine unit and a CPU able to stream Nemotron;
+# a host without the unit keeps Remote working and reports Write unavailable.
+write=0
+if (( services )) && "$root/deploy/write-service" --check 2>/dev/null; then write=1; fi
 
 fleet=$(pi_stack_fleet_user)
 mapfile -t users < <(pi_stack_users)
@@ -38,16 +42,27 @@ fi
 
 # Builds share checkout dependencies, not output directories. Prepare them
 # together while the independent production runtime and transcription install.
+# The Write engine's 1.2 GB model is fetched by deploy/prepare, outside this
+# deadline; here it is only selected, and a missing preparation fails loudly.
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
+if (( write )); then
+  "$root/deploy/write-engine" --select &
+  write_pid=$!
+else
+  echo 'Pi Stack Write: no pi-stack-write.service on this host; skipping the engine' >&2
+  true &
+  write_pid=$!
+fi
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1
 wait "$runtime_pid" || preparation_failed=1
 wait "$transcription_pid" || preparation_failed=1
+wait "$write_pid" || preparation_failed=1
 (( preparation_failed == 0 )) || exit 1
 
 expected=$(git -C "$root" rev-parse HEAD)
@@ -171,7 +186,7 @@ mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-bro
 if (( ${#brokers[@]} )); then
   pi_stack_as_root systemctl restart "${brokers[@]}" || activation_failed=1
 fi
-if ! "$root/deploy/voice" --activate; then
+if { (( write )) && ! "$root/deploy/write-service" --activate; } || ! "$root/deploy/voice" --activate; then
   activation_failed=1
 elif [[ $previous_remote != "$expected" ]]; then
   activate_remote "$expected" || activation_failed=1

@@ -1,0 +1,20 @@
+[Unit]
+Description=Pi Stack Write local streaming speech engine
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/srv/pi/write-engine/server.py
+
+[Service]
+Type=simple
+User=kenan
+Group=users
+Environment=PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/srv/pi/write-engine/venv/bin/python /srv/pi/write-engine/server.py --model /srv/pi/write-engine/model --host 127.0.0.1 --port 8797
+Restart=on-failure
+RestartSec=1
+TimeoutStartSec=30
+TimeoutStopSec=10
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

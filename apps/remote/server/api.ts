@@ -33,6 +33,7 @@ function route(method: string, template: string): Route {
 export const API = Object.freeze({
   unlock: route("POST", "/v1/unlock"), health: route("GET", "/v1/health"), environment: route("GET", "/v1/environment"), environments: route("GET", "/v1/environments"),
   notifications: route("GET", "/v1/notifications"),
+  writeStream: route("GET", "/v1/write/stream"), writeDictionary: route("GET", "/v1/write/dictionary"), updateWriteDictionary: route("PUT", "/v1/write/dictionary"), writeLearn: route("POST", "/v1/write/learn"), writeUndo: route("POST", "/v1/write/undo"),
   messageReaction: route("POST", "/v1/messages/reactions"),
   sessionReaction: route("POST", "/v1/sessions/:sessionId/reactions"),
   messaging: route("GET", "/v1/messaging"),
