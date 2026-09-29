@@ -6,4 +6,6 @@ A single bounded source-constrained pass handles fillers, direct repetition, exp
 
 A session revisits its unfinished sentence on each update; completed source sentences outside the 12-word lookbehind are finalized. Partials can change, while `finish` only receives and processes the final tail plus unfinished sentence. Treat ASR timestamps and confidence as supplementary; a recognizer returning `conf=None, alts=[]` is supported. The product does not instantiate or reload a model per dictation.
 
+A measured five-branch resident Qwen3-0.6B GGUF edit-lattice scorer did not improve on this pass: held-out DisfluencySpeech token errors rose from 977 to 988/5,228, with p95 full-utterance scoring 113 ms and p95 3–8-word-tail scoring 63 ms when four punctuation branches were active. It is not installed on the product path; the experiment's C++/Python sources and reproducible receipts live under `/home/kenan/work/pi-stack-write/cleanup/scorer_probe/`. This result does not exclude a shared-prefix KV implementation with better proposals.
+
 Evaluation data, benchmark script and measured limitations are in `/home/kenan/work/pi-stack-write/cleanup/REPORT.md`. Run the contract regressions from the Pi Stack root with `python -m unittest apps.write.engine.cleanup.test_cleanup -q`.
