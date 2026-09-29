@@ -17,6 +17,9 @@ export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
+  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean }>;
+  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean }): Promise<void>;
+  writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
   haptic?(options: { kind: string }): Promise<void>;
   keepAwake?(options: { enabled: boolean }): Promise<void>;
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
@@ -54,6 +57,9 @@ export const remote: RemoteBridge = !nativePlatform
     : {
         getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
         syncSession: (options) => capacitor.nativePromise("KenanRemote", "syncSession", options),
+        writeStatus: () => capacitor.nativePromise("KenanRemote", "writeStatus", {}),
+        writeSetup: (options) => capacitor.nativePromise("KenanRemote", "writeSetup", options),
+        writeEnvironment: (options) => capacitor.nativePromise("KenanRemote", "writeEnvironment", options),
         haptic: (options) => capacitor.nativePromise("KenanRemote", "haptic", options),
         keepAwake: (options) => capacitor.nativePromise("KenanRemote", "keepAwake", options),
         notifications: (options) => capacitor.nativePromise("KenanRemote", "notifications", options),
@@ -207,6 +213,10 @@ async function verifiedState(selected: Endpoint, endpoints: Endpoint[]): Promise
   const health = await response.json();
   if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
   if (health.environmentId !== selected.id) throw new Error(`${selected.name} environment identity mismatch`);
+  if (nativePlatform && remote.writeEnvironment) {
+    await nativeSessionReady();
+    if (revision === generation) await remote.writeEnvironment({ user: auth.user, environment: selected.id });
+  }
   return { ...selected, environments: endpoints };
 }
 
