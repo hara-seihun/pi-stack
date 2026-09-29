@@ -441,12 +441,12 @@ function updateBlocked(request, censuses, logPath) {
   deliverNotice(request);
 }
 
-function logTail(path) {
+function logTail(path, start = 0) {
   if (!existsSync(path)) return "";
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
-    const buffer = Buffer.alloc(Math.min(size, 8000));
+    const buffer = Buffer.alloc(Math.min(Math.max(0, size - start), 8000));
     readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
     return buffer.toString("utf8");
   } finally { closeSync(fd); }
@@ -859,6 +859,40 @@ export function publishIntegration(request, logPath) {
   request.step = "integrated";
   writeRequest(request);
   return { ok: true, status: 0, stdout: "", stderr: "" };
+}
+
+export function deployTarget(request, target, logPath) {
+  const fd = openSync(logPath, "a", 0o600);
+  const start = fstatSync(fd).size;
+  closeSync(fd);
+  const result = target.sshHost
+    ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, target.releaseCommand, request.integrationSha], 240, logPath)
+    : runLogged(request, `deploy-${target.id}`, target.releaseCommand, [request.integrationSha], 180, logPath);
+  if (result.status === 75 && /^another Pi stack deployment owns \/[^\r\n]+$/m.test(logTail(logPath, start))) {
+    return { ...result, kind: "host-lock-busy" };
+  }
+  return result;
+}
+
+export function requeueBusyHost(request, target, logPath) {
+  const progress = request.progress;
+  for (const host of targets) {
+    restoreCustody(request, host.id, host.sshHost);
+    restoreMaintenance(request, host.id, host.sshHost);
+  }
+  request.progress = progress;
+  request.status = "queued";
+  request.step = "waiting-for-host-deployment-lock";
+  request.blockedSince ??= new Date().toISOString();
+  request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
+  request.waiting = {
+    kind: "host-lock", host: target.id, at: new Date().toISOString(), log: logPath,
+    reason: `${target.id} has an active Pi Stack deployment. The publication owner will resume after the host lock is released, within its existing attempt and wait budgets.`,
+  };
+  (request.hostLockWaits ??= []).push({ ...request.waiting, attempt: request.attempt, progress });
+  writeRequest(request);
+  appendLog(logPath, `[${new Date().toISOString()}] ${request.waiting.reason}\n`);
+  deliverNotice(request);
 }
 
 export function requeueMovedIntegration(request, remoteMain, logPath) {
@@ -1528,7 +1562,7 @@ export function processRequest(request) {
         }
         sealed.push(target);
       }
-      if (request.waiting) {
+      if (request.waiting && request.waiting.kind !== "host-lock") {
         request.gateWait = { ...request.waiting, blockedSince: request.blockedSince, resumedAt: new Date().toISOString() };
         delete request.waiting;
         delete request.blockedSince;
@@ -1552,15 +1586,22 @@ export function processRequest(request) {
           request.bootstrap.hosts[target.id].state = "deploying";
           writeRequest(request);
         }
-        result = target.sshHost
-          ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, target.releaseCommand, request.integrationSha], 240, logPath)
-          : runLogged(request, `deploy-${target.id}`, target.releaseCommand, [request.integrationSha], 180, logPath);
+        result = deployTarget(request, target, logPath);
+        if (result.kind === "host-lock-busy") {
+          requeueBusyHost(request, target, logPath);
+          return;
+        }
         if (!result.ok) throw new Error(`${target.id} release wrapper exited ${result.status}`);
         const proof = verifyTarget(target, request.integrationSha);
         const proofPath = join(requestProofRoot, `${target.id}.json`);
         atomicWrite(proofPath, `${JSON.stringify(proof, null, 2)}\n`);
         request.hosts ??= {};
         request.hosts[target.id] = { status: "passed", proof: proofPath, sha256: sha256(proofPath) };
+        if (request.waiting?.kind === "host-lock" && request.waiting.host === target.id) {
+          delete request.waiting;
+          delete request.blockedSince;
+          delete request.nextAttemptAt;
+        }
         writeRequest(request);
         releaseCustody(request, target.id);
       }
