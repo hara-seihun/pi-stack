@@ -15,10 +15,13 @@ source_dir="$root/apps/write/engine"
 # a source change reinstalls a few Python files instead of refetching them.
 mapfile -t sources < <(cd "$source_dir" && find . -name '*.py' ! -name 'test_*' | LC_ALL=C sort)
 environment_key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" | sha256sum | cut -d' ' -f1)
-key=$( { echo "$environment_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
+cleanup_manifest="$source_dir/cleanup/model.json"
+cleanup_key=$(sha256sum "$cleanup_manifest" | cut -d' ' -f1)
+key=$( { echo "$environment_key"; echo "$cleanup_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
 base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
 store="$(dirname "$base")/.pi-write"
 environment="$store/environment-$environment_key"
+cleanup_model="$store/cleanup-$cleanup_key"
 tree="$store/$key"
 if [[ ! -f "$tree/ready" && $mode == --select ]]; then
   echo "PiStack Write engine is not prepared at $tree; run deploy/prepare first" >&2
@@ -52,16 +55,38 @@ PY
   chmod -R a+rX "$environment"
   touch "$environment/ready"
 fi
+if [[ ! -f "$cleanup_model/ready" ]]; then
+  command -v curl >/dev/null || { echo 'PiStack Write cleanup requires curl' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$cleanup_model"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$cleanup_model"
+  "$environment/venv/bin/python" - "$cleanup_manifest" > "$cleanup_model/files.tsv" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+for name,digest in m['files'].items():
+    print(name,m['release'].rstrip('/')+'/'+name,digest,sep='\t')
+PY
+  while IFS=$'\t' read -r file url digest; do
+    destination="$cleanup_model/$file"
+    if [[ ! -f "$destination" ]] || [[ $(sha256sum "$destination" | cut -d' ' -f1) != "$digest" ]]; then
+      curl -fL --retry 3 -C - "$url" -o "$destination.part"
+      echo "$digest  $destination.part" | sha256sum --check --status
+      mv "$destination.part" "$destination"
+    fi
+  done < "$cleanup_model/files.tsv"
+  chmod -R a+rX "$cleanup_model"
+  touch "$cleanup_model/ready"
+fi
 if [[ ! -f "$tree/ready" ]]; then
   pi_stack_as_root install -d -m 0755 "$tree"
   pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
   ln -sfn "$environment/venv" "$tree/venv"
   ln -sfn "$environment/model" "$tree/model"
+  ln -sfn "$cleanup_model" "$tree/cleanup-model"
   for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
   chmod -R a+rX "$tree"
   touch "$tree/ready"
 fi
-[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
+[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" && -f "$tree/cleanup-model/joint-f32.onnx" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
 next="$base.next.$$"
 trap 'pi_stack_as_root rm -f "$next"' EXIT
 pi_stack_as_root ln -s "$tree" "$next"

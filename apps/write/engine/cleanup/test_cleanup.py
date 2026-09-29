@@ -38,6 +38,15 @@ class CleanupTest(unittest.TestCase):
         session.update(['Send'])
         self.assertEqual(session.finish(['uh', 'notes']), result)
 
+    def test_tagger_threshold_and_content_guard(self):
+        class Tagger:
+            deletion_threshold = .925
+            def predict(self, words):
+                return [(1, .93) for _ in words]
+        result = clean('not 25 Sybil uh'.split(), {'words':['Sybil']}, tagger=Tagger())
+        self.assertEqual(result['text'], 'Not 25 Sybil.')
+        self.assertEqual([e['at'] for e in result['edits'] if e['kind']=='delete'], [[3,4]])
+
     def test_commands_are_format_edits(self):
         words = 'tasks colon bullet point review code bullet point send notes'.split()
         self.assertEqual(clean(words)['text'], 'Tasks:\n- Review code\n- Send notes.')
