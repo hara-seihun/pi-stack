@@ -8,6 +8,33 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
 
+// Publication's concurrent checks killed a healthy resume probe at four seconds
+// in PUB-b4ae0b36ccdf417eab77fed2. These guards bound hangs, not startup latency.
+const fixtureTimeout = 12_000;
+const fixtureTestTimeout = fixtureTimeout + 3_000;
+async function runFixture(args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }, timeout = fixtureTimeout) {
+  const pending = promisify(execFile)(process.execPath, args, {
+    ...options,
+    env: { ...options.env, NODE_COMPILE_CACHE: join(buildRoot, 'node-compile-cache') },
+    timeout,
+  });
+  pending.child.stdin!.end();
+  try {
+    return await pending;
+  } catch (error) {
+    const failure = error as Error & { code?: string | number; signal?: string; killed?: boolean; stdout?: string; stderr?: string };
+    throw new Error(`Routing fixture failed: ${JSON.stringify({ args, timeout, code: failure.code, signal: failure.signal, killed: failure.killed })}\n${failure.stdout ?? ''}${failure.stderr ?? ''}`, { cause: error });
+  }
+}
+
+test('fixture guard reports nonzero exits and kills hangs without masking either', async () => {
+  const options = { cwd: buildRoot, env: process.env };
+  await expect(runFixture(['-e', "console.error('assertion detail');process.exit(23)"], options))
+    .rejects.toMatchObject({ message: expect.stringContaining('assertion detail'), cause: { code: 23 } });
+  await expect(runFixture(['-e', 'setInterval(() => {}, 60000)'], options, 100))
+    .rejects.toMatchObject({ message: expect.stringContaining('"killed":true'), cause: { signal: 'SIGTERM', killed: true } });
+}, fixtureTestTimeout);
+
 test.each(['remote', 'remote-physical', 'fleet', 'fleet-reserved', 'fresh-astra', 'fresh-sol', 'fresh-luna'])('binds pooled credentials and keeps the pinned model: %s', async kind => {
   const fresh = kind.startsWith('fresh-');
   const selectedModel = fresh ? `gpt-6-${kind.slice(6)}` : 'gpt-6-luna';
@@ -65,10 +92,10 @@ console.log('model pin held');
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: kind.startsWith('fleet') ? '1' : '0', PI_OFFLINE: '1' };
   for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
   try {
-    const result = await promisify(execFile)(process.execPath, [fixture], { cwd: root, env, timeout: 4000 });
+    const result = await runFixture([fixture], { cwd: root, env });
     expect(result.stdout).toContain('model pin held');
   } finally { await rm(root, { recursive: true, force: true }); }
-}, 6000);
+}, fixtureTestTimeout);
 
 test.each(['explicit', 'family', 'resume', 'reserved', 'cooldown', 'missing-credential'])('fresh ordinary startup honors eligible explicit naming alias: %s', async kind => {
   const root=await mkdtemp(join(tmpdir(),'pi-naming-account-')),fixture=join(root,'fixture.mjs');
@@ -109,9 +136,9 @@ console.log('fresh naming account selected');
 `);
   const env={...process.env,HOME:root,PI_CODING_AGENT_DIR:join(root,'agent'),PI_ORCHESTRATOR_LEDGER:join(root,'ledger.sqlite3'),PI_ORCHESTRATOR_AUTH:join(root,'auth.json'),PI_ORCHESTRATOR_ASSIGNED:'0',PI_OFFLINE:'1'};
   for(const key of Object.keys(env))if(/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key))delete env[key as keyof typeof env];
-  try{const result=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:4000});expect(result.stdout).toContain('fresh naming account selected');}
+  try{const result=await runFixture([fixture],{cwd:root,env});expect(result.stdout).toContain('fresh naming account selected');}
   finally{await rm(root,{recursive:true,force:true});}
-},6000);
+},fixtureTestTimeout);
 
 test('native history cannot overwrite an explicit thread model and thinking selection', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-explicit-model-'));
@@ -153,9 +180,9 @@ console.log('explicit thread model retained');
 `);
   const env={...process.env,HOME:root,PI_CODING_AGENT_DIR:join(root,'agent'),PI_ORCHESTRATOR_LEDGER:join(root,'ledger.sqlite3'),PI_ORCHESTRATOR_AUTH:join(root,'auth.json'),PI_ORCHESTRATOR_ASSIGNED:'0',PI_OFFLINE:'1'};
   for(const key of Object.keys(env))if(/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key))delete env[key as keyof typeof env];
-  try {const result=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:5000});expect(result.stdout).toContain('explicit thread model retained');}
+  try {const result=await runFixture([fixture],{cwd:root,env});expect(result.stdout).toContain('explicit thread model retained');}
   finally {await rm(root,{recursive:true,force:true});}
-},7000);
+},fixtureTestTimeout);
 
 test('binds child accounts before prompting and resolves canonical model commands', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-child-startup-'));
@@ -212,9 +239,9 @@ console.log('all child accounts bound');
 `);
   const env={...process.env,HOME:root,PI_CODING_AGENT_DIR:join(root,'agent'),PI_ORCHESTRATOR_LEDGER:join(root,'ledger.sqlite3'),PI_ORCHESTRATOR_AUTH:join(root,'auth.json'),PI_ORCHESTRATOR_ASSIGNED:'0',PI_OFFLINE:'1'};
   for(const key of Object.keys(env))if(/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key))delete env[key as keyof typeof env];
-  try {const result=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:5000});expect(result.stdout).toContain('all child accounts bound');}
+  try {const result=await runFixture([fixture],{cwd:root,env});expect(result.stdout).toContain('all child accounts bound');}
   finally {await rm(root,{recursive:true,force:true});}
-},7000);
+},fixtureTestTimeout);
 
 test('config-only broker discovery supports native model changes with stale availability and plain CLI', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-broker-startup-'));
@@ -281,25 +308,23 @@ export default function(pi){pi.on('input',async(_event,ctx)=>{
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1' };
   for(const key of Object.keys(env))if(/^PI_ORCHESTRATOR_|^PI_MODEL_BROKER_URL$|^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|_API_KEY$/.test(key))delete env[key];
   try {
-    const native=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:5000});
+    const native=await runFixture([fixture],{cwd:root,env});
     expect(native.stdout).toContain('config-only native broker ready');
-    const pending=promisify(execFile)(process.execPath,[cli,'--extension',routing,'--extension',probe,'--provider','openai-codex','--model','gpt-6-luna','-p','--no-session','fixture'],{cwd:root,env,timeout:5000});
-    pending.child.stdin!.end();
-    const ordinary=await pending;
+    const ordinary=await runFixture([cli,'--extension',routing,'--extension',probe,'--provider','openai-codex','--model','gpt-6-luna','-p','--no-session','fixture'],{cwd:root,env});
     expect(ordinary.stdout + ordinary.stderr).toContain('config-only CLI broker ready');
     expect(ordinary.stderr).not.toContain('Extension error');
   } finally {await rm(root,{recursive:true,force:true});}
-},12000);
+},2 * fixtureTestTimeout);
 
 test('activity leases release retained idle children without releasing their active parent or sibling', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-routing-activity-'));
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: '0', PI_OFFLINE: '1', TEST_SDK: sdk, TEST_AI: ai, TEST_STORE: join(buildRoot, 'compiled/store.js'), TEST_ROUTING: routing };
   for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
   try {
-    const result = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./fixtures/routing-activity.mjs', import.meta.url))], { cwd: root, env, timeout: 4000 });
+    const result = await runFixture([fileURLToPath(new URL('./fixtures/routing-activity.mjs', import.meta.url))], { cwd: root, env });
     expect(result.stdout).toContain('activity leases released; retained idle child kept affinity');
   } finally { await rm(root, { recursive: true, force: true }); }
-}, 6000);
+}, fixtureTestTimeout);
 
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'pi-routing-build-'));
@@ -336,13 +361,11 @@ export default function(pi) {
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_ASSIGNED: assigned, PI_SKIP_VERSION_CHECK: '1' };
   for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$/.test(key)) delete env[key as keyof typeof env];
   try {
-    const pending = promisify(execFile)(process.execPath, [cli, '--print', '--no-session', '--no-tools', '--no-extensions', '--no-context-files', '--no-skills', '--no-prompt-templates', '--no-approve', '--model', 'openai-codex/gpt-6-astra', '-e', routing, '-e', fixture, 'handled locally'], { cwd: root, env, timeout: 4000 });
-    pending.child.stdin!.end();
-    const result = await pending;
+    const result = await runFixture([cli, '--print', '--no-session', '--no-tools', '--no-extensions', '--no-context-files', '--no-skills', '--no-prompt-templates', '--no-approve', '--model', 'openai-codex/gpt-6-astra', '-e', routing, '-e', fixture, 'handled locally'], { cwd: root, env });
     expect(result.stdout + result.stderr).toContain('provider-resource-closed');
     expect(result.stderr).not.toContain('Extension error');
   } finally { await rm(root, { recursive: true, force: true }); }
-}, 6000);
+}, fixtureTestTimeout);
 
 test.each(['anthropic', 'openai-codex'])('restores saved thinking with late provider registration and account replacement: %s', async family => {
   const root = await mkdtemp(join(tmpdir(), 'pi-routing-thinking-'));
@@ -402,8 +425,8 @@ console.log('saved thinking restored');
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: '0', PI_OFFLINE: '1' };
   for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_THREAD_EXPLICIT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
   try {
-    const result = await promisify(execFile)(process.execPath, [fixture], { cwd: root, env, timeout: 4000 });
+    const result = await runFixture([fixture], { cwd: root, env });
     expect(result.stdout).toContain('saved thinking restored');
   } finally { await rm(root, { recursive: true, force: true }); }
-}, 6000);
+}, fixtureTestTimeout);
 

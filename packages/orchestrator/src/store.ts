@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { admissionThinking, type ModelCandidate } from "./catalog.js";
+import { admissionThinking, quotaScopeCovers, type ModelCandidate } from "./catalog.js";
 import type { CompletionInput } from "./completion-contract.js";
 import { dirname, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -119,6 +119,33 @@ function adoptLaneColumns(db: DatabaseSync): void {
   db.exec("DELETE FROM control WHERE key GLOB 'lane-admission:*' OR key GLOB 'lane-repair:*'");
 }
 
+/**
+ * What the machine knew when it cooled an account: the cooldown it wrote, when
+ * the refusal was observed, and the models refused while that hold stood. A
+ * model-less refusal adds nothing to `models`, so any later success clears it.
+ */
+export interface CooldownEvidence { until: number; at: number; models: string[] }
+/** A provider-accepted request that can reconcile an earlier cooldown. */
+export interface ProviderSuccess { model: string; startedAt: number; source: string; now?: number }
+const COOLDOWN_EVIDENCE = (id: string) => `cooldown-evidence:${id}`;
+const COOLDOWN_RECOVERY = (id: string) => `cooldown-recovery:${id}`;
+
+/**
+ * Cooldowns written without evidence — by a release predating it, or by a
+ * process still running one — have no known refusal time. Date them now, so
+ * only a request that starts after this point can lift them.
+ */
+function adoptCooldownEvidence(db: DatabaseSync, now = Date.now()): void {
+  const rows = db.prepare(`SELECT a.id,a.cooldown_until until,c.value evidence FROM account a
+    LEFT JOIN control c ON c.key='cooldown-evidence:'||a.id WHERE a.cooldown_until>?`).all(now) as { id: string; until: number; evidence: string | null }[];
+  for (const row of rows) {
+    const evidence = row.evidence ? JSON.parse(row.evidence) as CooldownEvidence : undefined;
+    if (evidence?.until === row.until) continue;
+    db.prepare("INSERT INTO control(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(COOLDOWN_EVIDENCE(row.id), JSON.stringify({ until: row.until, at: now, models: evidence?.models ?? [] } satisfies CooldownEvidence));
+  }
+}
+
 /** Opens the ledger file itself, before anything knows which schema it holds. */
 export function openLedgerDatabase(path: string): DatabaseSync {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -141,6 +168,7 @@ export class Store {
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
     db.exec("DROP TABLE IF EXISTS live_state");
     adoptLaneColumns(db);
+    adoptCooldownEvidence(db);
     // Frozen subscription dollars per list-price dollar, one row per provider-hour. See person-usage.ts.
     db.exec("CREATE TABLE IF NOT EXISTS usage_rate (provider TEXT NOT NULL, hour INTEGER NOT NULL, rate REAL NOT NULL, PRIMARY KEY(provider,hour)) STRICT");
     // A reset weekly meter rounded to 0% used to freeze a zero rate despite
@@ -204,9 +232,58 @@ export class Store {
       ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,label=COALESCE(excluded.label,account.label),enabled=excluded.enabled,concurrency=excluded.concurrency`)
       .run(input.id,input.provider,input.label??null,input.enabled===false?0:1,input.concurrency??1,Date.now());
   }
-  setCooldown(id: string, until?: number): void { this.db.prepare("UPDATE account SET cooldown_until=? WHERE id=?").run(until??null,id); }
+  /**
+   * Cool an account after a refusal observed at `failure.at` (default now) for
+   * `failure.model`, a model ID in the account's provider family. Refusals
+   * while a hold stands accumulate their models and move the refusal time
+   * forward, so an earlier success can never lift a later refusal.
+   */
+  setCooldown(id: string, until?: number, failure: { model?: string; at?: number } = {}): void {
+    this.transaction(()=>{
+      const at=failure.at??Date.now();
+      const previous=this.db.prepare("SELECT cooldown_until FROM account WHERE id=?").get(id) as {cooldown_until:number|null}|undefined;
+      this.db.prepare("UPDATE account SET cooldown_until=? WHERE id=?").run(until??null,id);
+      if(until==null||until<=at){this.db.prepare("DELETE FROM control WHERE key=?").run(COOLDOWN_EVIDENCE(id));return;}
+      const prior=this.cooldownEvidence(id),standing=(previous?.cooldown_until??0)>at;
+      const models=[...new Set([...(standing?prior?.models??[]:[]),...(failure.model?[failure.model]:[])])];
+      this.setControl(COOLDOWN_EVIDENCE(id),JSON.stringify({until,at:Math.max(at,standing?prior?.at??0:0),models} satisfies CooldownEvidence));
+    });
+  }
+  cooldownEvidence(id: string): CooldownEvidence | undefined {
+    const raw=this.control(COOLDOWN_EVIDENCE(id));return raw?JSON.parse(raw):undefined;
+  }
+  /**
+   * A provider accepted a request on this account, so a cooldown inferred from
+   * an earlier refusal no longer describes it. Lifts the hold only when the
+   * request started after the latest recorded refusal and passed through every
+   * quota the refused models draw on; the account row is compared-and-swapped
+   * so a refusal recorded concurrently survives. Returns whether it cleared.
+   *
+   * September 29, 2026: three Anthropic accounts cooled for a day on monthly
+   * spend refusals, an interactive Opus request then succeeded on `anthropic`
+   * at 14:56, and fleet workers stayed refused until the next day.
+   */
+  recordProviderSuccess(id: string, success: ProviderSuccess): boolean {
+    if(!Number.isFinite(success.startedAt)||!success.model)return false;
+    return this.transaction(()=>{
+      const now=success.now??Date.now();
+      const row=this.db.prepare("SELECT provider,cooldown_until FROM account WHERE id=?").get(id) as {provider:string;cooldown_until:number|null}|undefined;
+      if(!row||row.cooldown_until==null||row.cooldown_until<=now)return false;
+      const evidence=this.cooldownEvidence(id);
+      if(!evidence||evidence.until!==row.cooldown_until||success.startedAt<=evidence.at)return false;
+      if(!evidence.models.every(model=>quotaScopeCovers(row.provider,success.model,model)))return false;
+      const cleared=this.db.prepare("UPDATE account SET cooldown_until=NULL WHERE id=? AND cooldown_until=?").run(id,row.cooldown_until);
+      if(Number(cleared.changes)!==1)return false;
+      this.db.prepare("DELETE FROM control WHERE key=?").run(COOLDOWN_EVIDENCE(id));
+      this.setControl(COOLDOWN_RECOVERY(id),JSON.stringify({clearedAt:now,cooldown:evidence,success:{model:success.model,startedAt:success.startedAt,source:success.source}}));
+      return true;
+    });
+  }
   setAccountEnabled(id:string,enabled:boolean):void{this.db.prepare("UPDATE account SET enabled=? WHERE id=?").run(enabled?1:0,id);}
-  removeAccount(id: string): void { this.db.prepare("DELETE FROM account WHERE id=?").run(id); }
+  removeAccount(id: string): void {
+    this.db.prepare("DELETE FROM account WHERE id=?").run(id);
+    this.db.prepare("DELETE FROM control WHERE key IN (?,?)").run(COOLDOWN_EVIDENCE(id),COOLDOWN_RECOVERY(id));
+  }
 
   recordMeter(accountId:string,meterId:string,usedPercent:number,resetAt:number|undefined,observedAt=Date.now()): void {
     this.db.prepare("INSERT OR IGNORE INTO meter VALUES(?,?,?,?,?)").run(accountId,meterId,observedAt,usedPercent,resetAt??null);

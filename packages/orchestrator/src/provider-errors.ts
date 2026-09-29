@@ -7,6 +7,16 @@
  * ever going to clear — and each answer has exactly one implementation.
  */
 
+/**
+ * An assistant message the provider actually answered. Pi stamps `timestamp`
+ * when it creates the message, before sending the request, so it orders the
+ * request against refusals recorded by other consumers.
+ */
+export function providerAccepted(message: Record<string, any> | undefined): boolean {
+  return message?.role === "assistant" && typeof message.model === "string" && Number.isFinite(message.timestamp)
+    && ["stop", "toolUse", "length"].includes(message.stopReason);
+}
+
 const RATE_LIMIT_PATTERNS = [
   /usage.?limit/i,
   /rate.?limit/i,

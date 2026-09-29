@@ -207,7 +207,8 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
         for (const [key, value] of Object.entries(credential.headers ?? {})) if (typeof value === "string") headers.set(key, value);
       };
       authorize();
-      const send = () => transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: family === "anthropic" ? Uint8Array.from(requestBytes) : JSON.stringify(body), signal, redirect: "error" });
+      let startedAt = 0;
+      const send = () => (startedAt = Date.now(), transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: family === "anthropic" ? Uint8Array.from(requestBytes) : JSON.stringify(body), signal, redirect: "error" }));
       let response = await send();
       if ((response.status === 401 || family === "openai-codex" && response.status === 404) && credential.apiKey) {
         const repair = await repairProviderCredential(shared, account.id, `HTTP ${response.status}`,
@@ -220,7 +221,9 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
           response = await send();
         }
       }
-      if (response.status === 429) store.setCooldown(account.id, Math.max(account.cooldownUntil ?? 0, Date.now() + 60_000));
+      if (response.status === 429) store.setCooldown(account.id, Math.max(account.cooldownUntil ?? 0, Date.now() + 60_000), { model: body.model });
+      // The provider admitted this request past its quota checks; a stream that fails later is not a quota refusal.
+      else if (response.ok) store.recordProviderSuccess(account.id, { model: body.model, startedAt, source: "model-broker" });
       for (const { meterId, reading } of anthropicMeterReadings(Object.fromEntries(response.headers), Date.now())) {
         store.recordMeter(account.id, meterId, reading.usedPercent, reading.resetAt, reading.at);
       }

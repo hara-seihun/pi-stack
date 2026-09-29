@@ -166,16 +166,17 @@ test("foreground broker requests admit while fleet account and machine session s
   expect(transport).toHaveBeenCalledOnce();
 });
 
-test("broker probes a cooling granted account when no uncooling account exists", async () => {
+test("broker probes a cooling granted account when no uncooling account exists, and its answer lifts the stale hold", async () => {
   const transport = vi.fn(async () => sse({}));
   const f = await fixture(transport);
   const cooldown = Date.now() + 24 * 60 * 60_000;
-  f.store.setCooldown("shared", cooldown);
+  f.store.setCooldown("shared", cooldown, { model: "gpt-6-luna", at: Date.now() - 1_000 });
   const response = await f.post(body());
   expect(response.status).toBe(200);
   await response.text();
   expect(transport).toHaveBeenCalledOnce();
-  expect(f.store.account("shared")?.cooldownUntil).toBe(cooldown);
+  expect(f.store.account("shared")?.cooldownUntil).toBeUndefined();
+  expect(JSON.parse(f.store.control("cooldown-recovery:shared")!).success).toMatchObject({ model: "gpt-6-luna", source: "model-broker" });
   f.store.recordMeter("shared", "codex-7d", 100, cooldown, Date.now());
   expect((await f.post(body())).status).toBe(503);
   expect(transport).toHaveBeenCalledOnce();
@@ -189,6 +190,7 @@ test("a broker 429 does not shorten a longer account cooldown", async () => {
   expect(response.status).toBe(429);
   await response.text();
   expect(f.store.account("shared")?.cooldownUntil).toBe(cooldown);
+  expect(f.store.cooldownEvidence("shared")?.models).toEqual(["gpt-6-luna"]);
 });
 
 test("the principal request ceiling survives busy fleets and keeps its error through native Codex", async () => {

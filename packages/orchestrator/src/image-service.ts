@@ -137,10 +137,13 @@ export async function generateImageWithSharedAccount(input: SharedImageInput, op
     if (!auth.ok) result = auth;
     else {
       phase = "storage";
+      // Image models have their own allowance, so their refusals and successes only reconcile each other.
+      const scope = `image:${input.model ?? "default"}`, startedAt = Date.now();
       const response = await requestImage({ ...input, images: inputs.value }, auth.value, signal);
       result = response.ok ? { ...response, accountId: account.id } : response;
-      if (!result.ok && result.error.kind === "http" && result.error.status === 429) {
-        store.setCooldown(account.id, Date.now() + (result.error.retryAfterMs ?? 60_000));
+      if (result.ok) store.recordProviderSuccess(account.id, { model: scope, startedAt, source: "image" });
+      else if (result.error.kind === "http" && result.error.status === 429) {
+        store.setCooldown(account.id, Date.now() + (result.error.retryAfterMs ?? 60_000), { model: scope });
       }
     }
   } catch (error) {
