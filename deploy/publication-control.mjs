@@ -30,6 +30,12 @@ export function runnable(request, now = Date.now()) {
   return request.status === "queued" && now >= Date.parse(request.nextAttemptAt ?? request.updatedAt ?? 0);
 }
 
+export function progressBudgetExhausted(request, now = Date.now()) {
+  if (request.waiting?.kind === "live-meeting") return false;
+  return (request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
+    || !!request.blockedSince && now - Date.parse(request.blockedSince) > policy.blockedLimitMs;
+}
+
 export function repairId(requestId) { return `REPAIR-${requestId}`; }
 export function repairUnit(requestId) { return `pi-stack-publication-repair@${requestId}.service`; }
 

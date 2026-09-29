@@ -127,7 +127,7 @@ test("a genuinely busy host lock requeues the same integration, while unrelated 
       const request = ${JSON.stringify(request)};
       const target = { id: "converge", sshHost: null, releaseCommand: ${JSON.stringify(release)} };
       const result = deployTarget(request, target, ${JSON.stringify(log)});
-      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)});
+      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)}, result.liveMeeting === true);
       console.log(JSON.stringify({ result, request }));
     `], { encoding: "utf8", timeout: 5000, env: { ...process.env,
       PI_STACK_PUBLICATION_STATE: f.root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(f.root, f.source) } });
@@ -146,6 +146,12 @@ test("a genuinely busy host lock requeues the same integration, while unrelated 
   const meeting = run("live meeting rooms on this host (kenan:1); deploying now would end them");
   assert.equal(meeting.result.kind, "host-lock-busy");
   assert.equal(meeting.request.status, "queued");
+  assert.equal(meeting.request.waiting.kind, "live-meeting");
+  assert.equal(meeting.request.step, "waiting-for-live-meetings");
+  assert.equal(meeting.request.blockedSince, undefined);
+  assert.equal(meeting.request.attempt, 1);
+  assert.deepEqual(meeting.request.hosts, request.hosts);
+  assert.equal(meeting.request.integrationSha, f.commit);
   const unrelated = run("release checkout failed for another reason");
   assert.equal(unrelated.result.kind, undefined);
   assert.equal(unrelated.request.status, "running");

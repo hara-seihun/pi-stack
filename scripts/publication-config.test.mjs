@@ -37,6 +37,20 @@ test("installation renders host-owned paths and target IDs stay explicit", t => 
   assert.match(readFileSync(join(unitRoot, "pi-stack-publication.path"), "utf8"), new RegExp(`PathChanged=${stateRoot}/wake`));
   assert.doesNotMatch(readFileSync(join(unitRoot, "pi-stack-publication.service"), "utf8"), /@PUBLICATION_/);
   assert.match(readFileSync(join(root, "owner", "publication-config.mjs"), "utf8"), /loadPublicationConfig/);
+  writeFileSync(join(bin, "systemctl"), "#!/bin/sh\necho 'code-only install must not touch services' >&2\nexit 91\n", { mode: 0o700 });
+  const unit = join(unitRoot, "pi-stack-publication.service");
+  writeFileSync(unit, "retain host unit\n");
+  writeFileSync(commandPath, "retain active owner\n");
+  const options = { encoding: "utf8", timeout: 5000,
+    env: { ...process.env, PI_STACK_PUBLICATION_CONFIG: configPath, PATH: `${bin}:${process.env.PATH}` } };
+  const busy = spawnSync("flock", [join(stateRoot, "worker.lock"), process.execPath, command.pathname, "install", "--code-only"], options);
+  assert.notEqual(busy.status, 0);
+  assert.equal(readFileSync(commandPath, "utf8"), "retain active owner\n");
+  const codeOnly = spawnSync(process.execPath, [command.pathname, "install", "--code-only"], options);
+  assert.equal(codeOnly.status, 0, codeOnly.stderr);
+  assert.equal(readFileSync(unit, "utf8"), "retain host unit\n");
+  assert.equal(readFileSync(commandPath, "utf8"), readFileSync(command, "utf8"));
+  assert.equal(readFileSync(join(root, "owner", "meeting-census"), "utf8"), readFileSync(new URL("../deploy/meeting-census", import.meta.url), "utf8"));
   config.targets.push({ ...config.targets[0], id: "beta", sshHost: "remote", androidTransferRoot: join(root, "transfer") });
   writeFileSync(configPath, JSON.stringify(config));
   for (const [executable, id] of [["bash", "alpha"], ["ssh", "beta"]]) {

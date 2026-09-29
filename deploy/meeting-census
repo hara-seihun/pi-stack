@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Read-only restart admission, shared by deployment and its durable wait owner.
+set -euo pipefail
+become=()
+[[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]] || become=(sudo -n)
+dir=${PI_REMOTE_PERSONS_DIR:-/var/lib/pi-remote/persons}
+[[ -d $dir ]] || exit 0
+live=()
+for file in "$dir"/*.json; do
+  [[ -f $file ]] || continue
+  user=$("${become[@]}" jq -er '.user | select(type == "string")' "$file")
+  [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ && $file == "$dir/$user.json" ]] || { echo "invalid person identity in $file" >&2; exit 1; }
+  port=$("${become[@]}" jq -er '.port | select(type == "number" and . > 0 and . < 65536)' "$file")
+  if response=$("${become[@]}" curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/meet" 2>&1); then
+    count=$(jq -er '.rooms | arrays | length' <<< "$response")
+  else
+    status=$?
+    [[ $status == 7 ]] || { echo "cannot census $user (curl $status): $response" >&2; exit 1; }
+    states=$("${become[@]}" systemctl show "pi-remote@$user.service" "pi-remote-dev-supervisor@$user.service" -p ActiveState --value)
+    [[ -n $states ]] || { echo "cannot determine supervisor state for $user" >&2; exit 1; }
+    for state in $states; do
+      case "$state" in
+        inactive|failed) ;;
+        *) echo "cannot census $user ($state): $response" >&2; exit 1 ;;
+      esac
+    done
+    continue
+  fi
+  (( count == 0 )) || live+=("$user:$count")
+done
+printf '%s\n' "${live[*]}"
