@@ -39,13 +39,15 @@ fi
 
 # Builds share checkout dependencies, not output directories. Prepare them
 # together while the independent production runtime and transcription install.
+# The Write engine's 1.2 GB model is fetched by deploy/prepare, outside this
+# deadline; here it is only selected, and a missing preparation fails loudly.
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
-"$root/deploy/write-engine" &
+"$root/deploy/write-engine" --select &
 write_pid=$!
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1

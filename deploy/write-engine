@@ -6,20 +6,26 @@ pi_stack_enter_deployment "$0" "$root" "$@"
 [[ $# == 0 || ( $# == 1 && $1 == --select ) ]] || { echo 'usage: deploy/write-engine [--select]' >&2; exit 64; }
 mode=${1:-prepare}
 source_dir="$root/apps/write/engine"
-key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" "$source_dir/server.py" "$source_dir/cleanup/__init__.py" "$source_dir/nemotron.py" | sha256sum | cut -d' ' -f1)
+# The venv and 1.2 GB of weights are keyed only by the lock and model pins, so
+# a source change reinstalls a few Python files instead of refetching them.
+mapfile -t sources < <(cd "$source_dir" && find . -name '*.py' ! -name 'test_*' | LC_ALL=C sort)
+environment_key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" | sha256sum | cut -d' ' -f1)
+key=$( { echo "$environment_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
 base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
-tree="$(dirname "$base")/.pi-write/$key"
+store="$(dirname "$base")/.pi-write"
+environment="$store/environment-$environment_key"
+tree="$store/$key"
 if [[ ! -f "$tree/ready" && $mode == --select ]]; then
   echo "PiStack Write engine is not prepared at $tree; run deploy/prepare first" >&2
   exit 66
 fi
-if [[ ! -f "$tree/ready" ]]; then
+if [[ ! -f "$environment/ready" ]]; then
   command -v uv >/dev/null && command -v curl >/dev/null || { echo 'PiStack Write requires uv and curl' >&2; exit 1; }
-  pi_stack_as_root install -d -m 0755 "$(dirname "$tree")" "$tree"
-  pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
-  uv venv --python 3.12 "$tree/venv"
-  uv pip sync --python "$tree/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
-  "$tree/venv/bin/python" - "$source_dir/model.json" > "$tree/model-files.tsv" <<'PY'
+  pi_stack_as_root install -d -m 0755 "$store" "$environment"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$environment"
+  [[ -x "$environment/venv/bin/python" ]] || uv venv --python 3.12 "$environment/venv"
+  uv pip sync --python "$environment/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
+  "$environment/venv/bin/python" - "$source_dir/model.json" > "$environment/model-files.tsv" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]))
 for path,digest in m['files'].items():
@@ -27,17 +33,23 @@ for path,digest in m['files'].items():
 print('shared/'+m['tokenizer_file'],m['tokenizer_file'],m['tokenizer_repository'],m['tokenizer_revision'],m['tokenizer_sha256'],sep='\t')
 PY
   while IFS=$'\t' read -r file source_file repository revision digest; do
-    destination="$tree/model/$file"
+    destination="$environment/model/$file"
     install -d "$(dirname "$destination")"
     if [[ ! -f "$destination" ]] || [[ $(sha256sum "$destination" | cut -d' ' -f1) != "$digest" ]]; then
       curl -fL --retry 3 -C - "https://huggingface.co/$repository/resolve/$revision/$source_file" -o "$destination.part"
       echo "$digest  $destination.part" | sha256sum --check --status
       mv "$destination.part" "$destination"
     fi
-  done < "$tree/model-files.tsv"
-  install -m 0644 "$source_dir/server.py" "$source_dir/nemotron.py" "$tree/"
-  install -d -m 0755 "$tree/cleanup"
-  install -m 0644 "$source_dir/cleanup/__init__.py" "$tree/cleanup/__init__.py"
+  done < "$environment/model-files.tsv"
+  chmod -R a+rX "$environment"
+  touch "$environment/ready"
+fi
+if [[ ! -f "$tree/ready" ]]; then
+  pi_stack_as_root install -d -m 0755 "$tree"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
+  ln -sfn "$environment/venv" "$tree/venv"
+  ln -sfn "$environment/model" "$tree/model"
+  for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
   chmod -R a+rX "$tree"
   touch "$tree/ready"
 fi
