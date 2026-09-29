@@ -113,7 +113,7 @@ for (const remoteHost of [undefined, "converge-kenan"]) {
   });
 }
 
-test("a genuinely busy host lock requeues the same integration, while unrelated exit 75 remains a failure", t => {
+test("host lock, meeting and native-source waits retain the integration, while unrelated exit 75 remains a failure", t => {
   const f = fixture(t);
   const release = join(f.root, "release");
   const log = join(f.root, "deployment.log");
@@ -127,7 +127,7 @@ test("a genuinely busy host lock requeues the same integration, while unrelated 
       const request = ${JSON.stringify(request)};
       const target = { id: "converge", sshHost: null, releaseCommand: ${JSON.stringify(release)} };
       const result = deployTarget(request, target, ${JSON.stringify(log)});
-      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)}, result.liveMeeting === true);
+      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)}, result.liveMeeting ? "live-meeting" : result.nativePrerequisite ? "native-source" : "host-lock");
       console.log(JSON.stringify({ result, request }));
     `], { encoding: "utf8", timeout: 5000, env: { ...process.env,
       PI_STACK_PUBLICATION_STATE: f.root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(f.root, f.source) } });
@@ -138,6 +138,9 @@ test("a genuinely busy host lock requeues the same integration, while unrelated 
   assert.equal(busy.result.kind, "host-lock-busy");
   assert.equal(busy.request.status, "queued");
   assert.equal(busy.request.waiting.host, "converge");
+  assert.equal(busy.request.waiting.kind, "host-lock");
+  assert.equal(busy.request.step, "waiting-for-host-deployment-lock");
+  assert.ok(busy.request.blockedSince);
   assert.equal(busy.request.attempt, 1);
   assert.deepEqual(busy.request.hosts, request.hosts);
   assert.equal(busy.request.integrationSha, f.commit);
@@ -152,6 +155,15 @@ test("a genuinely busy host lock requeues the same integration, while unrelated 
   assert.equal(meeting.request.attempt, 1);
   assert.deepEqual(meeting.request.hosts, request.hosts);
   assert.equal(meeting.request.integrationSha, f.commit);
+  const native = run(`native source prerequisite meeting-runtime requires ${"a".repeat(40)} before Pi Stack ${f.commit}; selected ${"b".repeat(40)}`);
+  assert.equal(native.result.kind, "host-lock-busy");
+  assert.equal(native.request.status, "queued");
+  assert.equal(native.request.waiting.kind, "native-source");
+  assert.equal(native.request.step, "waiting-for-native-source");
+  assert.equal(native.request.blockedSince, undefined);
+  assert.equal(native.request.attempt, 1);
+  assert.deepEqual(native.request.hosts, request.hosts);
+  assert.equal(native.request.integrationSha, f.commit);
   const unrelated = run("release checkout failed for another reason");
   assert.equal(unrelated.result.kind, undefined);
   assert.equal(unrelated.request.status, "running");
