@@ -8,6 +8,7 @@ import { listPersons, publicPerson, type Person } from "./persons";
 import { configuredEnvironments, personEnvironments, publicEnvironments } from "./environments";
 import { RouterSessions } from "./router-sessions";
 import { proxyFetch } from "./proxy-fetch";
+import { proxyWebsocket, type ProxySocketData } from "./proxy-websocket";
 import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
@@ -133,8 +134,6 @@ async function forget(person: Person): Promise<{ ok: boolean; message: string }>
 }
 
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate", "te", "trailer"]);
-const WEBSOCKET_BACKPRESSURE_LIMIT = 64 * 1024;
-const WEBSOCKET_MAX_MESSAGE_BYTES = 1024 * 1024;
 
 type RequestIdentity = {
   authenticated: { user: string; signal: AbortSignal } | null;
@@ -166,13 +165,6 @@ function upstreamCredential(environment: string): string {
   upstreamCredentials.set(environment, credential);
   return credential;
 }
-
-type ProxySocketData = {
-  signal: AbortSignal;
-  upstream: WebSocket;
-  abort?: () => void;
-  closed: boolean;
-};
 
 function requestIdentity(req: Request, url: URL): RequestIdentity {
   const names = assertedNames(req, url);
@@ -212,22 +204,6 @@ function websocketUrl(origin: string, url: URL): string {
   target.searchParams.delete("user");
   target.searchParams.delete("session");
   return target.href;
-}
-
-function canSendCloseCode(code: number): boolean {
-  return (code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code <= 4999);
-}
-
-function closeBrowser(socket: Bun.ServerWebSocket<ProxySocketData>, code: number, reason: string): void {
-  if (socket.readyState >= WebSocket.CLOSING) return;
-  if (canSendCloseCode(code)) socket.close(code, reason);
-  else socket.terminate();
-}
-
-function closeUpstream(socket: WebSocket | undefined, code: number, reason: string): void {
-  if (!socket || socket.readyState >= WebSocket.CLOSING) return;
-  if (canSendCloseCode(code)) socket.close(code, reason);
-  else (socket as WebSocket & { terminate(): void }).terminate();
 }
 
 async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal): Promise<WebSocket | null> {
@@ -459,48 +435,6 @@ Bun.serve<ProxySocketData>({
     response.headers.set("referrer-policy", "no-referrer");
     return withCors(response);
   },
-  websocket: {
-    perMessageDeflate: false,
-    maxPayloadLength: WEBSOCKET_MAX_MESSAGE_BYTES,
-    backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,
-    closeOnBackpressureLimit: false,
-    open(socket) {
-      const { upstream, signal } = socket.data;
-      if (signal.aborted) {
-        closeUpstream(upstream, 1008, "Session ended");
-        closeBrowser(socket, 1008, "Session ended");
-        return;
-      }
-      const abort = () => {
-        closeUpstream(upstream, 1008, "Session ended");
-        closeBrowser(socket, 1008, "Session ended");
-      };
-      socket.data.abort = abort;
-      signal.addEventListener("abort", abort, { once: true });
-      upstream.addEventListener("message", (event) => {
-        if (socket.readyState !== WebSocket.OPEN || socket.getBufferedAmount() >= WEBSOCKET_BACKPRESSURE_LIMIT) return;
-        const message = event.data;
-        if (typeof message === "string" || message instanceof ArrayBuffer) socket.send(message, false);
-      });
-      upstream.addEventListener("close", (event) => {
-        socket.data.closed = true;
-        signal.removeEventListener("abort", abort);
-        closeBrowser(socket, event.code, event.reason);
-      });
-      upstream.addEventListener("error", () => {
-        if (!socket.data.closed) closeBrowser(socket, 1011, "Upstream WebSocket failed");
-      });
-    },
-    message(socket, message) {
-      const upstream = socket.data.upstream;
-      if (upstream.readyState !== WebSocket.OPEN || upstream.bufferedAmount >= WEBSOCKET_BACKPRESSURE_LIMIT) return;
-      upstream.send(message);
-    },
-    close(socket, code, reason) {
-      socket.data.closed = true;
-      if (socket.data.abort) socket.data.signal.removeEventListener("abort", socket.data.abort);
-      closeUpstream(socket.data.upstream, code, reason);
-    },
-  },
+  websocket: proxyWebsocket,
 });
 console.log(`pi-remote router ${VERSION} on http://${HOST}:${PORT} for ${PEOPLE.map((p) => p.user).join(", ")}`);
