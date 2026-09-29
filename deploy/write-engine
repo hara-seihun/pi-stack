@@ -125,6 +125,8 @@ for selected in "$tree" "$previous"; do
     keep+=("$target")
   done
 done
+# A running engine (or anything else) that maps files from an entry keeps it.
+while read -r used; do keep+=("$used"); done < <(pi_stack_as_root sh -c 'cat /proc/[0-9]*/maps 2>/dev/null' | grep -o "$store/[^/ ]*" | sort -u)
 for entry in "$store"/*; do
   [[ -e $entry ]] || continue
   printf '%s\n' "${keep[@]}" | grep -qxF "$(readlink -f "$entry")" && continue
