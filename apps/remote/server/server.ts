@@ -826,7 +826,7 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
     initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
     initial_provider: model?.provider ?? "", initial_thinking: thread.settings.thinkingLevel,
     meeting_id: meta.meetingId ?? null, profile_id: meta.profileId ?? "home",
-    service_tier: thread.settings.speed === "priority" ? "priority" : "default",
+    service_tier: thread.settings.speed === "standard" ? "default" : thread.settings.speed,
     bash_timeout_seconds: meta.bashTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS,
     archived_at: meta.archived ? meta.archivedAt ?? new Date(thread.updatedAt).toISOString() : null,
     idle_unread: view?.idle_unread ?? 0, named_at_message_count: view?.named_at_message_count ?? 0,

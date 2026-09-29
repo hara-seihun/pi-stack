@@ -244,7 +244,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             return;
           }
           if (command.type === "set_speed") {
-            const updated = updateThreadSpeed(env, command.speed);
+            const updated = updateThreadSpeed(env, command.speed, runtime.session.model);
             if (!updated.ok) { response(false, updated.error); return; }
             response(true, undefined, { speed: updated.value });
             return;

@@ -13,6 +13,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, prepareWithDrainWait, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
 import { fetchAccountFromPeer, resolveFetchPeer, resolvePeerHost } from "./auth/account-peers.js";
 import { isAccountReservation } from "./admission-reservation.js";
+import { isSpeed, SPEEDS } from "./threads/speed.js";
 
 export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
@@ -83,7 +84,7 @@ function scheduleStart(value:string|undefined):number|undefined{
 function threadSettings(named:Map<string,string>):SettingsOverrides|undefined{
   const model=named.get("model"),thinkingLevel=named.get("thinking"),speed=named.get("speed");
   if(thinkingLevel&&!isThinkingLevel(thinkingLevel))throw new Error(`Invalid --thinking level; use ${THINKING_LEVELS.join(", ")}`);
-  if(speed&&speed!=="standard"&&speed!=="priority")throw new Error("--speed must be standard or priority");
+  if(speed&&!isSpeed(speed))throw new Error(`--speed must be ${SPEEDS.join(", ")}`);
   if(!model&&!thinkingLevel&&!speed)return undefined;
   return{...(model?{model}:{}),...(thinkingLevel?{thinkingLevel:thinkingLevel as SettingsOverrides["thinkingLevel"]}:{}),...(speed?{speed:speed as SettingsOverrides["speed"]}:{})};
 }
@@ -135,7 +136,7 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="schedule"){
     const [action,...tail]=rest;
     if(action===undefined||action==="help"||action==="--help"){
-      console.log("usage: pi-orchestrator schedule list | create --prompt TEXT --every DURATION [--start now|ISO] [--cwd PATH] [--model MODEL] [--thinking LEVEL] [--speed standard|priority] [--background] [--id ID] [--title TITLE] | show ID | pause ID | resume ID | remove ID --yes");
+      console.log("usage: pi-orchestrator schedule list | create --prompt TEXT --every DURATION [--start now|ISO] [--cwd PATH] [--model MODEL] [--thinking LEVEL] [--speed standard|priority|ultrafast] [--background] [--id ID] [--title TITLE] | show ID | pause ID | resume ID | remove ID --yes");
       return;
     }
     const {named,positional}=flags(tail);

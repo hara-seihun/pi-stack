@@ -129,6 +129,15 @@ it("applies validated speed changes to this session's provider requests", async 
   expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "priority" });
   expect(await f.command("set_speed", { speed: "turbo" })).toMatchObject({ success: false, error: "Invalid thread speed: turbo" });
   expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "priority" });
+  expect(await f.command("set_speed", { speed: "ultrafast" })).toMatchObject({ success: false, error: "Ultrafast speed requires OpenAI Codex Astra" });
+  f.native.agent.state.model = f.native.modelRuntime.getModel("openai-codex", "gpt-6-astra")!;
+  expect(await f.command("set_speed", { speed: "ultrafast" })).toMatchObject({ success: true, data: { speed: "ultrafast" } });
+  expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "ultrafast" });
+  const other = await fixture(undefined, undefined, { PI_THREAD_SPEED: "standard" });
+  other.native.agent.state.model = f.native.agent.state.model;
+  expect(await other.native.extensionRunner.emitBeforeProviderRequest({})).toMatchObject({ service_tier: "default" });
+  expect(await f.command("set_speed", { speed: "standard" })).toMatchObject({ success: true });
+  expect(await providerPayload()).toMatchObject({ service_tier: "default" });
   expect(process.env.PI_THREAD_SPEED).toBe(processSpeed);
 }, 3000);
 
