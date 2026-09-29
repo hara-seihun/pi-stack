@@ -192,7 +192,8 @@ export interface ThreadApi {
   await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>>;
 }
 
-export type PiEvent = Record<string, unknown> & { type: string };
+/** `emittedAt`: epoch ms when the Pi process produced the event, set by the thread owner. */
+export type PiEvent = Record<string, unknown> & { type: string; emittedAt?: number };
 export type PiCommand = Record<string, unknown> & { type: string; id?: string };
 export interface PiSession {
   command(command: PiCommand): Promise<void>;

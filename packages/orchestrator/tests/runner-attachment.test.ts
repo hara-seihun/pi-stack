@@ -137,7 +137,7 @@ it("delivers multi-megabyte and multi-line output across arbitrary chunk boundar
   const big = "é".repeat(12 * 1024 * 1024) + "✓";
   const lines = [
     { type: "output", sequence: 1, line: JSON.stringify({ type: "message_update", text: big }) },
-    { type: "output", sequence: 2, line: JSON.stringify({ type: "agent_end" }) },
+    { type: "output", sequence: 2, at: 1_790_000_000_123, line: JSON.stringify({ type: "agent_end" }) },
     { type: "output", sequence: 3, line: JSON.stringify({ type: "turn_end" }) },
   ].map(value => `${JSON.stringify(value)}\n`).join("");
   const bytes = Buffer.from(lines);
@@ -156,5 +156,6 @@ it("delivers multi-megabyte and multi-line output across arbitrary chunk boundar
   expect(performance.now() - began).toBeLessThan(400);
   expect((events[0] as { text?: string }).text).toBe(big);
   expect(events.slice(1).map(event => event.type)).toEqual(["agent_end", "turn_end"]);
+  expect(events[1]!.emittedAt).toBe(1_790_000_000_123);
   void connection;
 });
