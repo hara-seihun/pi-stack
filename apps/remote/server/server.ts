@@ -328,14 +328,14 @@ async function refreshPeers() {
   return peerRefresh;
 }
 const inspectingThreads = new Map<string, Promise<void>>();
-async function refreshThreadInspection(id: string) {
+async function refreshThreadInspection(id: string, fresh = false) {
+  const pending = inspectingThreads.get(id);
+  if (pending) return pending;
   const local = threads.get(id);
   if (local && !peerInspections.has(id) && storedContext(id)) return;
   const known = peerInspections.get(id);
   const listed = peerThreads.get(id);
-  if (!local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
-  const pending = inspectingThreads.get(id);
-  if (pending) return pending;
+  if (!fresh && !local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
   const operation = inspectThread(id, Boolean(local)).finally(() => inspectingThreads.delete(id));
   inspectingThreads.set(id, operation);
   return operation;
@@ -1294,16 +1294,16 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     sendImages(stream);
     void sendQuestions(stream);
     sendEvents(stream);
-    if (sessionRow.get(sessionId) && (changedSession || !captured)) {
-      void refreshThreadInspection(sessionId).then(() => {
-        if (stream.closed || stream.revision !== revision) return;
+    const fresh = changedSession || before.selectionId !== stream.subscription.selectionId;
+    void stream.synchronizeSelection(
+      () => sessionRow.get(sessionId) ? refreshThreadInspection(sessionId, fresh) : Promise.resolve(),
+      () => {
         refreshTranscript(sessionId);
         sendLive(stream);
-      }, cause => {
-        if (stream.closed || stream.revision !== revision) return;
-        stream.send({ type: "error", message: `Could not refresh thread: ${cause instanceof Error ? cause.message : String(cause)}` });
-      });
-    } else if (!captured) refreshTranscript(sessionId);
+        projectState();
+        sendState(stream);
+      },
+    );
   }
   projectState();
   sendState(stream);

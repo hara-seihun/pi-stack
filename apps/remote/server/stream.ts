@@ -32,6 +32,8 @@ export function readSubscription(body: unknown): Partial<StreamSubscription> {
     if (session !== undefined) subscription.session = session;
     else if (input.session === undefined) subscription.session = null;
   }
+  const selectionId = optionalString(input.selectionId);
+  if (selectionId) subscription.selectionId = selectionId;
   for (const flag of ["viewing", "thinking", "dashboard"] as const) {
     if (typeof input[flag] === "boolean") subscription[flag] = input[flag] as boolean;
   }
@@ -95,6 +97,24 @@ export class ClientStream {
     }
     const frame = this.publisher.reconcile(resource, this.held.get(resource) ?? null);
     if (frame && this.send({ type: "reconcile", ...frame })) this.held.set(resource, frame.revision);
+  }
+
+  async synchronizeSelection(refresh: () => Promise<void>, publish: () => void): Promise<void> {
+    const { session, selectionId } = this.subscription;
+    if (!session) return;
+    const current = () => !this.closed && this.subscription.session === session && this.subscription.selectionId === selectionId;
+    try {
+      await refresh();
+      if (!current()) return;
+      publish();
+      if (!selectionId) return;
+      const resources = ["state", `transcript:${session}`, `live:${session}`];
+      if (resources.some(resource => !this.held.has(resource))) return;
+      this.send({ type: "selection-ready", sessionId: session, selectionId,
+        have: Object.fromEntries(resources.map(resource => [resource, this.held.get(resource)!])) });
+    } catch (cause) {
+      if (current()) this.send({ type: "error", message: `Could not refresh thread: ${cause instanceof Error ? cause.message : String(cause)}` });
+    }
   }
 
   send(event: StreamWireEvent): boolean {

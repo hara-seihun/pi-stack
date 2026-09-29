@@ -86,6 +86,7 @@ interface AppState {
   offline: string;
   ownerErrors: { id: string; owner: string; message: string }[];
   syncing: boolean;
+  threadSyncing: boolean;
   loadingEarlier: boolean;
   earlierError: string;
 }
@@ -94,7 +95,7 @@ const initialState: AppState = {
   selectedChatId: null, messaging: { version: 0, backends: [], conversations: [], calls: [] },
   sessions: [], discovered: [], archivedTotal: 0, dashboard: null, bootstrap: null,
   transcript: null, images: null,
-  attachments: [], slashCommands: [], offline: "", ownerErrors: [], syncing: true,
+  attachments: [], slashCommands: [], offline: "", ownerErrors: [], syncing: true, threadSyncing: true,
   loadingEarlier: false, earlierError: "",
 };
 
@@ -353,7 +354,7 @@ function RemoteApp() {
     liveText.reset();
     const remembered = cache.thread(id);
     patch((current) => ({
-      selectedChatId: `ai:${id}`, transcript: remembered?.transcript ?? null, images: remembered?.images ?? null, slashCommands: [], syncing: true,
+      selectedChatId: `ai:${id}`, transcript: remembered?.transcript ?? null, images: remembered?.images ?? null, slashCommands: [], syncing: true, threadSyncing: true,
       loadingEarlier: false, earlierError: "",
       discovered: discovered && ![...current.sessions, ...current.discovered].some(session => session.id === discovered.id)
         ? [...current.discovered, discovered] : current.discovered,
@@ -517,6 +518,9 @@ function RemoteApp() {
         transcriptFrom: cache.thread(routeThreadId(opening) ?? "")?.transcript?.items[0]?.seq ?? null,
       },
       onEvent: handle,
+      onSelectionStatus: ({ sessionId, ready }) => {
+        if (sessionId === selectedAiId(stateRef.current)) patch({ threadSyncing: !ready });
+      },
       onStatus: (status) => {
         if (status.state !== "open") carrying.current = false;
         if (status.state === "offline") {
@@ -869,7 +873,7 @@ function RemoteApp() {
   </div>;
 
   const conversation = selected && !messagingActive
-    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} pending={pending} home={home} prompt={prompt}
+    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
         onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? pendingQuestions.questions : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}

@@ -427,6 +427,8 @@ export interface TranscriptPage {
 export interface StreamSubscription {
   /** Thread whose transcript, live output and images this stream carries. */
   session?: string | null;
+  /** Client identity for this opening; changes on selection and reconnection. */
+  selectionId?: string;
   /** True only while the person can see that conversation. */
   viewing?: boolean;
   /** Earliest transcript seq the selected thread has loaded; null requests the latest 60. */
@@ -462,6 +464,7 @@ export type StreamEvent =
   | { type: "hello"; epoch: string; streamId: string; bootstrap: Bootstrap }
   | ({ type: "reconcile" } & ReconcileFrame)
   | StreamSnapshot
+  | { type: "selection-ready"; sessionId: string; selectionId: string; have: Record<string, string> }
   | { type: "notifications"; feed: IdleNotificationFeed }
   | { type: "events"; sessionId: string; events: SessionEvent[] }
   | { type: "error"; message: string };
