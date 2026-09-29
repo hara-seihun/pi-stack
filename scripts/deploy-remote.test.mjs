@@ -8,7 +8,7 @@ import { test } from "node:test";
 const root = resolve(import.meta.dirname, "..");
 const releaseResources = [
   "deploy/lib", "deploy/release-checkout", "deploy/smoke", "skills/livedev/SKILL.md", "server/voice/delegation-policy.md",
-  "server/meet/asr/worker.py", "server/meet/asr/model.json", "server/meet/asr/requirements.lock",
+  "server/meet/transcriber.ts", "server/write.ts",
   "web/dist/index.html", "web/dist/meet.html", "web/dist/meet-adapter.js", "web/dist/voice.html", "web/dist/kenan.png",
   "shared/state.ts", "shared/value.ts",
 ];

@@ -259,7 +259,7 @@ export class MeetServer {
       return json({ ok: true });
     }
     if (parts[3] === "transcript" && parts[4] === "audio" && req.method === "POST") {
-      if (!this.transcriber.available()) return fail("PiStack transcription is not installed on this host", 503);
+      if (!this.transcriber.available()) return fail("PiStack Write recognition is not installed on this host", 503);
       const speakerId = url.searchParams.get("speaker") || member.participant.id;
       const speaker = room.speakers.get(speakerId);
       if (!speaker || (speakerId !== member.participant.id && !member.participant.host)) return fail("Unknown microphone source", 403);
