@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare everything deploy/host would otherwise build inside its 50-second
 # deadline: checkout dependencies, the Orchestrator and Remote builds, the
-# production runtime tree and the transcription runtime. Every step is
+# production runtime tree, transcription runtime and Write engine. Every step is
 # idempotent and receipt-cached, so deploy/host then reuses the results and
 # spends its whole budget on publishing, activation and smoke checks.
 #
@@ -31,8 +31,10 @@ builds_pid=$!
 runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
+"$root/deploy/write-engine" &
+write_engine_pid=$!
 failed=0
-for job in "builds:$builds_pid" "runtime:$runtime_pid" "transcription:$transcription_pid"; do
+for job in "builds:$builds_pid" "runtime:$runtime_pid" "transcription:$transcription_pid" "write-engine:$write_engine_pid"; do
   if wait "${job#*:}"; then continue; else status=$?; fi
   printf 'Pi stack preparation %s exited %s\n' "${job%%:*}" "$status" >&2
   failed=1

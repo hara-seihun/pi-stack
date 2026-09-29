@@ -1,0 +1,17 @@
+{
+  "repository": "shameez/nemotron-speech-streaming-en-0.6b-onnx-160ms",
+  "revision": "eff6999e7ec84e94c754c20a0f87646ae2a3984f",
+  "files": {
+    "config.json": "40a85205115065f4e1bb4aa80d74d89c2aaa72d2d861b3f65402235d6678c980",
+    "fp16/encoder_model.onnx": "55b38a49f8b3166ec4e95ef83a921bf113c8c744707e930de891af4f667fe4cb",
+    "fp16/encoder_model.onnx.data": "38fd73af691ace7770ec5709ef53494d65b464dbbc7916e2c98c5b1277c53a55",
+    "fp16/decoder_model.onnx": "416756db1f964f366b258c5288ab4cbd23f268aad08c115e67f16fdc080e495a",
+    "fp16/decoder_model.onnx.data": "21f2b240995bdbaee5deee59e2662627cb755bbb5a54e0d12024b245877e1cd3",
+    "shared/filterbank.bin": "219cf29e906c3a1485963959bfe708f410cda746592ffe9b6800acf78436b1a5",
+    "shared/tokens.txt": "022a31dbf806b6454399afb47b07f9d8b857894132ab1a91a7db94ce77738027"
+  },
+  "tokenizer_repository": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "tokenizer_revision": "ebe59e5a817142986528bbbee5dba8db7b38ed50",
+  "tokenizer_file": "tokenizer.json",
+  "tokenizer_sha256": "60dc0361763fa3cd62df60f34fca3e61134676a939967853931db5f3869b2db2"
+}
