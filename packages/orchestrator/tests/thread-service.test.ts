@@ -134,7 +134,7 @@ it("rejects nonexistent built-in models before creating a thread or saving setti
   expect(service.snapshot()).toEqual([]);
   const thread = value(await service.spawn({ requestId: "invalid", cwd: directory, settings: { model: "sol" } }));
   expect(await service.control({ threadId: thread.id, action: "settings", settings })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  expect(service.get(thread.id)!.settings.model).toBe("openai-codex/gpt-6-sol");
+  expect(service.get(thread.id)!.settings.model).toBe("openai-codex/gpt-6.1-sol");
   expect(sessions).toEqual([]);
 });
 
@@ -152,7 +152,7 @@ it("repairs only invalid undispatched model snapshots and retains their provenan
     expect(service.pending(thread.id)).toEqual(pending);
     const settings = (id: string) => JSON.parse((db.prepare("SELECT settings FROM thread_work WHERE id=?").get(id) as { settings: string }).settings);
     expect(settings("initial")).toEqual({ model: "openai-codex/gpt-6-astra", thinkingLevel: "low", speed: "priority" });
-    expect(settings("valid").model).toBe("openai-codex/gpt-6-sol");
+    expect(settings("valid").model).toBe("openai-codex/gpt-6.1-sol");
     expect(repaired.metadata?.modelSettingsRepairs).toEqual([{ workId: "initial", previousModel: "openai-codex/missing-model", model: "openai-codex/gpt-6-astra", time: expect.any(Number) }]);
     const repeated = value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
     expect(repeated.metadata?.modelSettingsRepairs).toEqual(repaired.metadata?.modelSettingsRepairs);
@@ -735,7 +735,7 @@ describe("ThreadService", () => {
     value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
     await waitFor(() => sessions.length === 2 && sessions.every(session => session.commands.some(command => command.type === "prompt")));
 
-    expect(defaultChild.settings).toEqual({ model: "openai-codex/gpt-6-sol", thinkingLevel: "high", speed: "standard" });
+    expect(defaultChild.settings).toEqual({ model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" });
     expect(lunaChild.settings).toEqual({ model: "openai-codex/gpt-6-luna", thinkingLevel: "max", speed: "standard" });
     expect([defaultChild.admission, lunaChild.admission]).toEqual(["force", "force"]);
     expect(defaultChild.metadata).toMatchObject({ meetingId: "room", profileId: "personal" });
@@ -743,7 +743,7 @@ describe("ThreadService", () => {
     expect(new Set(sessions.map(session => session.options.sessionFile)).size).toBe(2);
     expect(sessions.map(session => session.options.env.PI_THREAD_REQUIRE_SESSION)).toEqual(["0", "0"]);
     expect(sessions.map(session => session.options.args)).toEqual(expect.arrayContaining([
-      ["--provider", "openai-codex", "--model", "gpt-6-sol", "--thinking", "high", "--name", defaultChild.title],
+      ["--provider", "openai-codex", "--model", "gpt-6.1-sol", "--thinking", "high", "--name", defaultChild.title],
       ["--provider", "openai-codex", "--model", "gpt-6-luna", "--thinking", "max", "--name", lunaChild.title],
     ]));
 

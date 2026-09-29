@@ -71,7 +71,7 @@ const DAY = 24 * HOUR;
 export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   models: [
     { id: "astra", provider: "openai-codex", model: "gpt-6-astra", thinking: "high", label: "ASTRA", aliases: ["astra"], icon: "⭐", accent: "#5a6673", meterClass: "astra" },
-    { id: "sol", provider: "openai-codex", model: "gpt-6-sol", thinking: "high", label: "SOL", aliases: ["sol"], icon: "☀️", accent: "#5a6673", meterClass: "sol" },
+    { id: "sol", provider: "openai-codex", model: "gpt-6.1-sol", thinking: "high", label: "SOL", aliases: ["sol"], icon: "☀️", accent: "#5a6673", meterClass: "sol" },
     { id: "luna", provider: "openai-codex", model: "gpt-6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "🌙", accent: "#5a6673", meterClass: "luna" },
     { id: "opus", provider: "anthropic", model: "claude-opus-5-5", thinking: "high", label: "OPUS", aliases: ["opus"], icon: customModelConfig.providers.anthropic.models.find(model => model.id === "claude-opus-5-5")!.icon, accent: "#d9663d", meterClass: "opus" },
     { id: "fable", provider: "anthropic", model: "claude-fable-5-1", thinking: "high", label: "FABLE", aliases: ["fable"], icon: customModelConfig.providers.anthropic.models.find(model => model.id === "claude-fable-5-1")!.icon, accent: "#e6a23c", meterClass: "fable" },

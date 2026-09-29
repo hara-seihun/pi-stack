@@ -5,6 +5,8 @@ import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { catalogModel } from '../src/catalog.js';
+import customModelConfig from '../src/models.json' with { type: 'json' };
 
 let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
 
@@ -37,7 +39,8 @@ test('fixture guard reports nonzero exits and kills hangs without masking either
 
 test.each(['remote', 'remote-physical', 'fleet', 'fleet-reserved', 'fresh-astra', 'fresh-sol', 'fresh-luna'])('binds pooled credentials and keeps the pinned model: %s', async kind => {
   const fresh = kind.startsWith('fresh-');
-  const selectedModel = fresh ? `gpt-6-${kind.slice(6)}` : 'gpt-6-luna';
+  const selectedModel = catalogModel(fresh ? kind.slice(6) : 'luna')!.model;
+  const alternateModel = catalogModel(kind === 'fresh-sol' ? 'luna' : 'sol')!.model;
   const root = await mkdtemp(join(tmpdir(), 'pi-pinned-model-'));
   const fixture = join(root, 'fixture.mjs');
   await writeFile(fixture, `
@@ -49,6 +52,7 @@ import { Store } from ${JSON.stringify(join(buildRoot, 'compiled/store.js'))};
 const root=process.env.HOME,dir=join(root,'agent'),account='openai-codex-2';
 mkdirSync(dir);
 writeFileSync(join(dir,'auth.json'),'{}');
+writeFileSync(join(dir,'models.json'),${JSON.stringify(JSON.stringify(customModelConfig))});
 const credential={type:'oauth',access:'test',refresh:'test',expires:Date.now()+3600000};
 writeFileSync(join(root,'auth.json'),JSON.stringify({[account]:credential,'openai-codex-3':credential}));
 const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);
@@ -71,7 +75,9 @@ const settingsManager=SettingsManager.inMemory();
 const modelRuntime=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:join(dir,'models.json')});
 const resourceLoader=new DefaultResourceLoader({cwd:root,agentDir:dir,settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,noPromptTemplates:true,noThemes:true,additionalExtensionPaths:[${JSON.stringify(routing)}]});
 await resourceLoader.reload();
-const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager,...(${fresh}?{model:modelRuntime.getModel('openai-codex',${JSON.stringify(selectedModel)}),thinkingLevel:'medium'}:{})});
+const selected=modelRuntime.getModel('openai-codex',${JSON.stringify(selectedModel)});
+assert.ok(selected,'selected catalog model must be loaded before session creation');
+const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager,...(${fresh}?{model:selected,thinkingLevel:'medium'}:{})});
 const errors=[];
 try {
   await session.bindExtensions({mode:'print',onError:error=>errors.push(error)});
@@ -79,7 +85,7 @@ try {
   assert.equal(session.model.id,${JSON.stringify(selectedModel)});
   assert.equal(session.model.provider,account);
   if(${fresh})assert.equal(session.thinkingLevel,'medium');
-  await session.setModel(session.modelRuntime.getModel(account,${JSON.stringify(selectedModel === 'gpt-6-sol' ? 'gpt-6-luna' : 'gpt-6-sol')}));
+  await session.setModel(session.modelRuntime.getModel(account,${JSON.stringify(alternateModel)}));
   assert.equal(session.model.id,${JSON.stringify(selectedModel)});
   assert.equal(session.model.provider,account);
   await session.setModel(session.modelRuntime.getModel('openai-codex-3',${JSON.stringify(selectedModel)}));
@@ -210,11 +216,11 @@ try {
     sessions.push(session);
     assert.equal((await state(session)).provider,'openai-codex-10','child '+child);
   }
-  await sessions[0].command({type:'set_model',id:'canonical',provider:'openai-codex',modelId:'gpt-6-sol'});
+  await sessions[0].command({type:'set_model',id:'canonical',provider:'openai-codex',modelId:${JSON.stringify(catalogModel('sol')!.model)}});
   const reply=events.find(event=>event.id==='canonical');
   assert.equal(reply?.success,true,JSON.stringify(reply));
   assert.equal((await state(sessions[0])).provider,'openai-codex-10');
-  assert.equal((await state(sessions[0])).model,'gpt-6-sol');
+  assert.equal((await state(sessions[0])).model,${JSON.stringify(catalogModel('sol')!.model)});
   assert.equal((await state(sessions[0])).thinkingLevel,'high');
   accounts.forEach((account,index)=>store.setCooldown(account,Date.now()+600000+index*1000));
   const cooling=await open(5);
@@ -277,17 +283,17 @@ try {
     assert.equal((await snapshot(session)).model.provider,'openai-codex');
     assert.equal((await snapshot(session)).model.id,'gpt-6-astra');
     assert.equal((await snapshot(session)).thinkingLevel,'high');
-    await session.command({type:'set_model',id:'select-'+id,provider:'openai-codex-10',modelId:'gpt-6-sol'});
+    await session.command({type:'set_model',id:'select-'+id,provider:'openai-codex-10',modelId:${JSON.stringify(catalogModel('sol')!.model)}});
     const reply=events.find(event=>event.id==='select-'+id);
     assert.equal(reply?.success,true,JSON.stringify(reply));
     assert.equal((await snapshot(session)).model.provider,'openai-codex');
-    assert.equal((await snapshot(session)).model.id,'gpt-6-sol');
+    assert.equal((await snapshot(session)).model.id,${JSON.stringify(catalogModel('sol')!.model)});
     refuseAuth=true;
     await session.command({type:'set_model',id:'refused-'+id,provider:'openai-codex',modelId:'gpt-6-luna'});
     const refused=events.find(event=>event.id==='refused-'+id);
     assert.equal(refused?.success,false,JSON.stringify(refused));
     assert.match(refused?.error??'',/No API key/);
-    assert.equal((await snapshot(session)).model.id,'gpt-6-sol');
+    assert.equal((await snapshot(session)).model.id,${JSON.stringify(catalogModel('sol')!.model)});
     refuseAuth=false;
   }
 } finally {for(const session of sessions)await session.close();}

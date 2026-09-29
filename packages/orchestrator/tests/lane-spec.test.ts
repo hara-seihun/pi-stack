@@ -69,8 +69,8 @@ it("gives every lane worker the declared thinking level, before and after a daem
     const spawned = await admit(daemon);
     expect(spawned.map(entry => entry.lane)).toEqual(["bonsai", "plain", "bonsai"]);
     expect(spawned.filter(entry => entry.lane === "bonsai").map(entry => entry.settings)).toEqual([
-      { model: "openai-codex/gpt-6-sol", thinkingLevel: "max" },
-      { model: "openai-codex/gpt-6-sol", thinkingLevel: "max" },
+      { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "max" },
+      { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "max" },
     ]);
     expect(spawned.find(entry => entry.lane === "plain")?.settings).toEqual({ model: "openai-codex/gpt-6-astra" });
   } finally {
@@ -80,7 +80,7 @@ it("gives every lane worker the declared thinking level, before and after a daem
 
   const restarted = new Daemon(store, config) as any;
   try {
-    expect((await admit(restarted))[0]?.settings).toEqual({ model: "openai-codex/gpt-6-sol", thinkingLevel: "max" });
+    expect((await admit(restarted))[0]?.settings).toEqual({ model: "openai-codex/gpt-6.1-sol", thinkingLevel: "max" });
   } finally {
     await restarted.threads.close();
     await restarted.schedules.close();
