@@ -8,7 +8,7 @@ import { NotificationControl } from "../../notification-control";
 import { WriteSetup } from "../../write-setup";
 import { MachineScreen, type MachineScreenProps } from "./MachineScreen";
 
-export type MachineTabProps = Omit<MachineScreenProps, "environment" | "notifications" | "appUpdate" | "clientRevision">;
+export type MachineTabProps = Omit<MachineScreenProps, "environment" | "notifications" | "write" | "appUpdate" | "clientRevision">;
 
 export function MachineTab(screen: MachineTabProps) {
   return <MachineScreen {...screen}
