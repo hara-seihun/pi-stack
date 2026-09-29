@@ -1,0 +1,3 @@
+-r requirements.in
+transformers==5.16.1
+torch==2.14.0+rocm7.2

@@ -16,7 +16,7 @@ function fixture() {
   mkdirSync(join(repo, "deploy"), { recursive: true });
   mkdirSync(bin);
   for (const name of ["lib", "release-checkout", "prepare", "runtime", "retain"]) copyFileSync(join(root, "deploy", name), join(repo, "deploy", name));
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp"), PI_STACK_RUNTIME_DEST: join(directory, "srv/runtime"), PI_STACK_DEPENDENCIES_ROOT: join(directory, "srv/dependencies") };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", PI_STACK_WRITE_GPU_ENABLED: "0", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp"), PI_STACK_RUNTIME_DEST: join(directory, "srv/runtime"), PI_STACK_DEPENDENCIES_ROOT: join(directory, "srv/dependencies") };
   mkdirSync(env.TMPDIR);
   function executable(path, source) { writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${source}\n`, { mode: 0o755 }); }
   function commit() {
@@ -111,6 +111,8 @@ test("Write resumes both model downloads, reuses pinned copies, and keeps weight
     const payload = join(f.directory, "payload");
     writeFileSync(payload, bytes);
     writeFileSync(join(source, "requirements.lock"), "first dependencies\n");
+    writeFileSync(join(source, "requirements-gpu.lock"), "GPU dependencies\n");
+    writeFileSync(join(source, "gpu-model.json"), '{}\n');
     writeFileSync(join(source, "server.py"), "# fixture\n");
     writeFileSync(join(source, "convert_fp32.py"), 'import os\nwith open(os.environ["TRACE"], "a") as f: f.write("convert\\n")\n');
     writeFileSync(join(source, "model.json"), JSON.stringify({

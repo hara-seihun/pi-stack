@@ -156,27 +156,39 @@ class Engine:
                     # holds the cleaned final; otherwise let at most the one live
                     # step already running complete, then take over the stream.
                     decoder_task.cancel()
+                    waited_at = advanced_at = tail_at = cleaned_at = began
                     if hit:
                         result, final = speculative[1], speculative[2]
                     else:
                         if live_step is not None and not live_step.done():
                             await live_step
+                        waited_at = time.perf_counter()
                         await advance()
+                        advanced_at = time.perf_counter()
                         # No speculation covers the tail (✓ while still speaking):
                         # 100 ms of silence padding instead of 200 keeps this to
                         # two encoder steps (+0.7 WER points on the last words).
                         async with self.slots:
                             result = await asyncio.to_thread(stream.finish, self.IMMEDIATE_PADDING)
+                        tail_at = time.perf_counter()
                         if clean_step is not None and not clean_step.done():
                             await clean_step
                         final = await asyncio.to_thread(cleaner.finish, result['words'][cleaned[0]:])
+                        cleaned_at = time.perf_counter()
                     elapsed = (time.perf_counter() - began)*1000
                     await socket.send(json.dumps({'type': 'final', 'text': final['text'], 'raw': result['text'], 'edits': final['edits'], 'words': result['words'], 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit}}))
                     steps = sorted(stream.timings) or [0.0]
-                    LOG.info('write dictation audio=%s audioSeconds=%.3f connectionSeconds=%.3f lastAudioToFinishMs=%s behindSeconds=%.3f stepP50Ms=%.1f stepMaxMs=%.1f flushMs=%.2f speculative=%s',
+                    stages = getattr(stream, 'stage_timings', ())
+                    gpu_wait = max((s['gpuWaitMs'] for s in stages), default=0)
+                    gpu_encode = max((s['gpuEncodeMs'] for s in stages), default=0)
+                    joint = max((s['jointMs'] for s in stages), default=0)
+                    LOG.info('write dictation audio=%s audioSeconds=%.3f connectionSeconds=%.3f lastAudioToFinishMs=%s behindSeconds=%.3f stepP50Ms=%.1f stepMaxMs=%.1f flushMs=%.2f speculative=%s finishWaitMs=%.1f finishAdvanceMs=%.1f finishTailMs=%.1f finishCleanMs=%.1f gpuWaitMaxMs=%.1f gpuEncodeMaxMs=%.1f jointMaxMs=%.1f',
                              state['format'], received/16000, (time.perf_counter()-connected_at),
                              'none' if gap is None else f'{(began-gap)*1000:.2f}', behind,
-                             steps[len(steps)//2], steps[-1], elapsed, hit)
+                             steps[len(steps)//2], steps[-1], elapsed, hit,
+                             (waited_at-began)*1000, (advanced_at-waited_at)*1000,
+                             (tail_at-advanced_at)*1000, (cleaned_at-tail_at)*1000,
+                             gpu_wait, gpu_encode, joint)
                     return
                 else:
                     raise ValueError('invalid command sequence')
