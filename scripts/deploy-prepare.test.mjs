@@ -34,7 +34,7 @@ function preparationFixture() {
   const f = fixture();
   f.executable(join(f.bin, "systemctl"), 'echo "preparation must delegate host discovery to its components" >&2; exit 64');
   writeFileSync(join(f.repo, "deploy/lib"), `${readFileSync(join(root, "deploy/lib"), "utf8")}\npi_stack_prepare_builds() { test "\${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-}" = 1 || return 64; printf 'builds\\n' >> "$TRACE"; return "\${BUILD_EXIT:-0}"; }\n`);
-  for (const name of ["runtime", "transcription", "write-engine", "host"]) {
+  for (const name of ["runtime", "write-engine", "host"]) {
     f.executable(join(f.repo, "deploy", name), `root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
@@ -54,12 +54,12 @@ test("preparation uses the caller deadline for every child; standalone component
     const prepared = f.run("prepare");
     assert.equal(prepared.status, 0, prepared.stderr);
     assert.equal(prepared.stderr, "");
-    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["builds", "runtime", "transcription", "write-engine"]);
-    for (const name of ["host", "runtime", "transcription", "write-engine"]) {
+    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["builds", "runtime", "write-engine"]);
+    for (const name of ["host", "runtime", "write-engine"]) {
       const deployed = f.run(name);
       assert.equal(deployed.status, 124, deployed.stderr);
     }
-    assert.equal(readFileSync(f.env.TRACE, "utf8").match(/deadline --signal=TERM --kill-after=2s 50s /g).length, 4);
+    assert.equal(readFileSync(f.env.TRACE, "utf8").match(/deadline --signal=TERM --kill-after=2s 50s /g).length, 3);
   } finally { f.close(); }
 });
 
@@ -85,13 +85,13 @@ printf '%s\\n' '${writeLoadState}'`);
     const calls = readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort();
     if (writeLoadState === "loaded") {
       assert.equal(result.status, 1, result.stderr);
-      assert.deepEqual(calls, ["builds", "discovery", "runtime", "transcription", "uv"]);
+      assert.deepEqual(calls, ["builds", "discovery", "runtime", "uv"]);
       assert.match(result.stderr, /write-engine exited 23/);
       assert.doesNotMatch(result.stdout, /prepared Pi stack/);
     } else {
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stderr, "");
-      assert.deepEqual(calls, ["builds", "discovery", "runtime", "transcription"]);
+      assert.deepEqual(calls, ["builds", "discovery", "runtime"]);
       assert.match(result.stdout, /nothing to prepare/);
       assert.equal(existsSync(join(f.directory, ".pi-write")), false);
     }
@@ -102,11 +102,10 @@ printf '%s\\n' '${writeLoadState}'`);
 test("preparation reports each failed child and never reports success", () => {
   const f = preparationFixture();
   try {
-    const result = f.run("prepare", { RUNTIME_EXIT: "23", TRANSCRIPTION_EXIT: "7", WRITE_ENGINE_EXIT: "11", BUILD_EXIT: "9" });
+    const result = f.run("prepare", { RUNTIME_EXIT: "23", WRITE_ENGINE_EXIT: "11", BUILD_EXIT: "9" });
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /builds exited 9/);
     assert.match(result.stderr, /runtime exited 23/);
-    assert.match(result.stderr, /transcription exited 7/);
     assert.match(result.stderr, /write-engine exited 11/);
     assert.doesNotMatch(result.stdout, /prepared Pi stack/);
   } finally { f.close(); }
