@@ -194,7 +194,7 @@ function installFrom(sourceRoot) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "release-checkout"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -427,6 +427,7 @@ function runCapture(command, args, options = {}) {
 }
 
 function updateBlocked(request, censuses, logPath) {
+  for (const target of targets) restoreReservation(request, target);
   request.status = "queued";
   request.step = "waiting-for-pre-contract-runtime-gate";
   request.blockedSince ??= new Date().toISOString();
@@ -605,8 +606,7 @@ function deriveIssues() {
   }
   const resolved = [], issues = [];
   for (const request of requests) {
-    const custody = Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
-      || Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state));
+    const custody = outstandingHostCustody(request);
     const cancelled = request.failure?.reason === "cancelled";
     if ((request.status !== "failed" || cancelled) && !(custody && ["failed", "published"].includes(request.status))) continue;
     const proof = custody ? null : resolution(request);
@@ -861,13 +861,59 @@ export function publishIntegration(request, logPath) {
   return { ok: true, status: 0, stdout: "", stderr: "" };
 }
 
+export const publicationReservationScript = readFileSync(join(dirname(self), "release-checkout"), "utf8") + String.raw`
+set -euo pipefail
+pi_stack_acquire_host_lock
+reservation="\${PI_STACK_HOST_LOCK_PATH:-/srv/pi/.pi-stack-deploy.lock}.publication"
+operation=$1
+request=$2
+commit=$3
+become=()
+[[ $EUID == 0 ]] || become=(sudo -n)
+if [[ -e $reservation ]]; then
+  jq -e --arg request "$request" --arg commit "$commit" \
+    '.requestId == $request and .integrationSha == $commit' "$reservation" >/dev/null || {
+    echo "host reservation belongs to another publication: $(<"$reservation")" >&2; exit 75;
+  }
+fi
+case "$operation" in
+  reserve)
+    jq -nc --arg request "$request" --arg commit "$commit" '{requestId:$request,integrationSha:$commit}' \
+      | "\${become[@]}" tee "$reservation.next" >/dev/null
+    "\${become[@]}" chmod 644 "$reservation.next"
+    "\${become[@]}" mv -f "$reservation.next" "$reservation"
+    ;;
+  release) "\${become[@]}" rm -f "$reservation" ;;
+  *) exit 64 ;;
+esac
+`.replaceAll("\\${", "${");
+
+export function reserveTarget(request, target, logPath) {
+  request.reservations ??= {};
+  request.reservations[target.id] = { state: "restore-required", integrationSha: request.integrationSha };
+  writeRequest(request);
+  const args = ["reserve", request.requestId, request.integrationSha];
+  return target.sshHost
+    ? runLogged(request, `reserve-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "bash", "-s", "--", ...args], 45, logPath, { input: publicationReservationScript })
+    : runLogged(request, `reserve-${target.id}`, "bash", ["-s", "--", ...args], 45, logPath, { input: publicationReservationScript });
+}
+
+export function restoreReservation(request, target) {
+  const reservation = request.reservations?.[target.id];
+  if (!custodyNeedsRestore(reservation)) return;
+  runHostScript(publicationReservationScript, target.sshHost,
+    ["release", request.requestId, reservation.integrationSha], 45);
+  reservation.state = "released";
+  writeRequest(request);
+}
+
 export function deployTarget(request, target, logPath) {
   const fd = openSync(logPath, "a", 0o600);
   const start = fstatSync(fd).size;
   closeSync(fd);
   const result = target.sshHost
-    ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, target.releaseCommand, request.integrationSha], 240, logPath)
-    : runLogged(request, `deploy-${target.id}`, target.releaseCommand, [request.integrationSha], 180, logPath);
+    ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "env", `PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 240, logPath)
+    : runLogged(request, `deploy-${target.id}`, "env", [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 180, logPath);
   const tail = result.status === 75 ? logTail(logPath, start) : "";
   if (/^another Pi stack deployment owns \/[^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy" };
   if (/^live meeting rooms on this host \([^\r\n]+\); deploying now would end them$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
@@ -879,6 +925,7 @@ export function requeueBusyHost(request, target, logPath, liveMeeting = false) {
   for (const host of targets) {
     restoreCustody(request, host.id, host.sshHost);
     restoreMaintenance(request, host.id, host.sshHost);
+    restoreReservation(request, host);
   }
   request.progress = progress;
   request.status = "queued";
@@ -904,6 +951,7 @@ export function requeueMovedIntegration(request, remoteMain, logPath) {
   for (const target of targets) {
     restoreCustody(request, target.id, target.sshHost);
     restoreMaintenance(request, target.id, target.sshHost);
+    restoreReservation(request, target);
   }
   const fields = ["baseSha", "integrationSha", "checks", "android", "hosts", "integratedAt", "releaseAncestry", "contractGate"];
   const integration = Object.fromEntries(fields.filter(key => request[key] !== undefined).map(key => [key, request[key]]));
@@ -932,7 +980,7 @@ fleet_user=$(jq -er '.fleetUser | select(type == "string" and length > 0)' "$hos
 services=$("$service_check" "$fleet_user" "$environment" --json)
 voice=$(pi_stack_as_root curl -fsS --max-time 3 "$voice_url" | jq -r .releaseCommit)
 [[ $remote == "$expected" && $orchestrator == "$expected" && $voice == "$expected" ]] || {
-  echo 'deployed commit markers do not match integration' >&2; exit 1;
+  printf '%s: deployed commit markers do not match integration: expected=%s remote=%s orchestrator=%s voice=%s\n' "$host" "$expected" "$remote" "$orchestrator" "$voice" >&2; exit 1;
 }
 for unit in "$@"; do
   systemctl is-active --quiet "$unit" || { echo "$unit is not active" >&2; exit 1; }
@@ -958,6 +1006,10 @@ jq -n --arg host "$host" --arg expected "$expected" --arg remote "$remote" --arg
 `;
 
 export function verifyTarget(target, expected) {
+  if (activeRequest) {
+    activeRequest.step = `verify-${target.id}`;
+    writeRequest(activeRequest);
+  }
   return JSON.parse(runHostScript(hostProofScript, target.sshHost,
     [expected, target.id, target.environmentId, target.hostConfig, target.voiceStatusUrl,
       target.checkServicesCommand, ...target.requiredUnits], 60));
@@ -1354,6 +1406,18 @@ function custodyNeedsRestore(host) {
   return host && ["restore-required", "sealed", "deploying"].includes(host.state);
 }
 
+export function outstandingHostCustody(request) {
+  return Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
+    || Object.values(request.reservations ?? {}).some(custodyNeedsRestore)
+    || Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state));
+}
+
+function recoveryNeeded(request) {
+  return Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
+    || Object.values(request.reservations ?? {}).some(custodyNeedsRestore)
+    || ["failed", "published"].includes(request.status) && outstandingHostCustody(request);
+}
+
 function restoreCustody(request, hostKey, remoteHost) {
   const host = request.bootstrap?.hosts?.[hostKey];
   if (!custodyNeedsRestore(host)) return;
@@ -1453,16 +1517,19 @@ function recordContractActivation(request) {
   }, null, 2)}\n`);
 }
 
-function recoverOutstandingCustody(request, status = request.status) {
+export function recoverOutstandingCustody(request, status = request.status) {
   for (const { id: hostKey, sshHost: remoteHost } of targets) {
     const restoringSeal = custodyNeedsRestore(request.bootstrap?.hosts?.[hostKey]);
     const terminal = ["failed", "published"].includes(status) || existsSync(cancellationPath(request.requestId));
     const maintenance = request.maintenance?.hosts?.[hostKey];
     const restoringMaintenance = terminal && maintenance && !["restored", "released"].includes(maintenance.state);
-    if (!restoringSeal && !restoringMaintenance) continue;
+    const target = targets.find(target => target.id === hostKey);
+    const restoringReservation = custodyNeedsRestore(request.reservations?.[hostKey]);
+    if (!restoringSeal && !restoringMaintenance && !restoringReservation) continue;
     try {
       restoreCustody(request, hostKey, remoteHost);
       if (terminal) restoreMaintenance(request, hostKey, remoteHost);
+      restoreReservation(request, target);
       delete request.recoveryFailure;
       writeRequest(request);
     } catch (error) {
@@ -1516,6 +1583,12 @@ export function processRequest(request) {
     if (!request.contract && activatedContract()) throw new Error("Refusing to remove the activated thread execution contract");
     writeRequest(request);
     const requestProofRoot = join(proofRoot, request.requestId);
+    request.step = "reserve-publication-hosts";
+    writeRequest(request);
+    for (const target of targets) {
+      result = reserveTarget(request, target, logPath);
+      if (!result.ok) throw new Error(`${target.id} publication reservation exited ${result.status}`);
+    }
     const deploymentsPassed = targets.every(target => request.hosts?.[target.id]?.status === "passed");
     if (!deploymentsPassed) {
       request.step = "inspect-release-ancestry";
@@ -1628,6 +1701,7 @@ export function processRequest(request) {
     const ownerSource = checked("git", ["-C", checkout, "rev-parse", "HEAD"]);
     if (ownerSource !== request.integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${request.integrationSha}`);
     installFrom(checkout);
+    for (const target of targets) restoreReservation(request, target);
 
     request.status = "published";
     request.step = "complete";
@@ -1649,6 +1723,7 @@ export function processRequest(request) {
       try {
         restoreCustody(request, hostKey, remoteHost);
         restoreMaintenance(request, hostKey, remoteHost);
+        restoreReservation(request, targets.find(target => target.id === hostKey));
       }
       catch (restoreError) { restorationFailures.push(`${hostKey}: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`); }
     }
@@ -1741,7 +1816,7 @@ function watchdog() {
   const idlePath = join(stateRoot, "worker-watch.json");
   const idle = existsSync(idlePath) ? JSON.parse(readFileSync(idlePath, "utf8")) : {};
   const waiting = queue.find(request => runnable(request));
-  const custodyOwners = queue.filter(request => Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore));
+  const custodyOwners = queue.filter(recoveryNeeded);
   idle.blockedBy = custodyOwners.map(request => request.requestId);
   if (waiting && custodyOwners.length === 0 && !queue.some(request => request.status === "running")) {
     idle.since ??= new Date().toISOString();
@@ -1806,9 +1881,9 @@ function watchdog() {
   // This wake is independent of the worker and also closes enqueue's start/exit race.
   const current = allRequests();
   const recoveryBlocked = current.some(request => (request.recoveryAttempts ?? 0) >= policy.maxAttempts
-    && Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore));
+    && recoveryNeeded(request));
   if (!recoveryBlocked && current.some(request => runnable(request) || request.status === "running"
-    || Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore))) {
+    || recoveryNeeded(request))) {
     const wake = commandResult("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"], { timeoutSeconds: 5 });
     idle.wakeFailures = wake.ok ? 0 : (idle.wakeFailures ?? 0) + 1;
     idle.wakeError = wake.ok ? undefined : wake.stderr;
@@ -1935,7 +2010,7 @@ function drain() {
     const requests = allRequests();
     let restorationBlocked = false;
     for (const request of requests) {
-      if (!Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore) && !(["failed", "published"].includes(request.status) && Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state)))) continue;
+      if (!recoveryNeeded(request)) continue;
       if ((request.recoveryAttempts ?? 0) >= policy.maxAttempts) { restorationBlocked = true; continue; }
       request.recoveryAttempts = (request.recoveryAttempts ?? 0) + 1;
       const previousStatus = request.status;

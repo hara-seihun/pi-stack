@@ -24,6 +24,7 @@ pi_stack_enforce_deploy_deadline() {
 pi_stack_acquire_deploy_lock() {
   local root=$1 lock
   pi_stack_acquire_host_lock || return
+  pi_stack_check_publication_reservation "$(git -C "$root" rev-parse HEAD)" || return
   if [[ ${PI_STACK_DEPLOY_LOCK_HELD:-0} == 1 ]]; then
     return
   fi
@@ -47,6 +48,7 @@ pi_stack_enter_deployment() {
     export GIT_CONFIG_COUNT=$((config_count + 1)) PI_STACK_GIT_CHECKOUT="$root"
   fi
   pi_stack_acquire_host_lock || exit $?
+  pi_stack_check_publication_reservation "$(git -C "$root" rev-parse HEAD)" || exit $?
   if [[ ${PI_STACK_DEPLOY_LOCK_HELD:-0} == 1 ]]; then
     # A child of a deployment that already holds the lock and checked the tree.
     return
@@ -255,6 +257,7 @@ pi_stack_run_as() {
   if [[ $EUID == 0 ]]; then become=(runuser -u "$user" --); else become=(sudo -n -u "$user"); fi
   "${become[@]}" env HOME="$(pi_stack_home "$user")" \
     PI_STACK_HOST_LOCK_HELD=1 PI_STACK_DEPLOY_LOCK_HELD=1 PI_STACK_DEPLOY_DEADLINE_ACTIVE=1 PI_STACK_COMMIT="$(pi_stack_commit)" \
+    PI_STACK_PUBLICATION_REQUEST="${PI_STACK_PUBLICATION_REQUEST:-}" \
     PI_STACK_DEPENDENCIES_READY="${PI_STACK_DEPENDENCIES_READY:-}" \
     PI_STACK_HOST_FILE="$(pi_stack_host_file)" PI_REMOTE_PERSONS_DIR="$(pi_stack_persons_dir)" \
     PI_STACK_DEPLOY_NO_SUDO="${PI_STACK_DEPLOY_NO_SUDO:-0}" "$@"

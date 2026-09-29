@@ -23,6 +23,17 @@ pi_stack_acquire_host_lock() {
   export PI_STACK_HOST_LOCK_FD PI_STACK_HOST_LOCK_HELD=1
 }
 
+# Checked under the host lock, before selecting source or publishing components.
+pi_stack_check_publication_reservation() {
+  local commit=$1 reservation="${PI_STACK_HOST_LOCK_PATH:-/srv/pi/.pi-stack-deploy.lock}.publication"
+  [[ -e $reservation ]] || return 0
+  if ! jq -e --arg request "${PI_STACK_PUBLICATION_REQUEST:-}" --arg commit "$commit" \
+    '.requestId == $request and .integrationSha == $commit' "$reservation" >/dev/null; then
+    echo "Pi stack publication reserves this host: $(<"$reservation"); submit source to its owner" >&2
+    return 75
+  fi
+}
+
 # Sourced by the host wrapper, which keeps these locks through activation and proof.
 pi_stack_select_release_checkout() {
   local state=$1 repository=$2 requested=$3 live_marker=$4 allow_rollback=${5:-0}
@@ -55,6 +66,7 @@ pi_stack_select_release_checkout() {
   }
   git -C "$stack" fetch --quiet origin || return
   commit=$(git -C "$stack" rev-parse --verify "${requested}^{commit}") || return
+  pi_stack_check_publication_reservation "$commit" || return
   previous=$(git -C "$stack" rev-parse --verify HEAD 2>/dev/null) || previous=
   baseline=
   if [[ -f "$live_marker" ]]; then

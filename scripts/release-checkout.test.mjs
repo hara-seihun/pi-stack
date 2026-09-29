@@ -85,6 +85,22 @@ test("selection recovers interrupted initialization and refuses an incorrect ori
   assert.match(result.stderr, /origin differs/);
 });
 
+test("a reserved publication prevents another wrapper from selecting source between host deployments", t => {
+  const f = fixture(t);
+  assert.equal(f.select(f.first).status, 0);
+  const requestId = "PUB-0123456789abcdef01234567";
+  writeFileSync(`${f.hostLock}.publication`, JSON.stringify({ requestId, integrationSha: f.second }));
+  const blocked = f.select(f.second);
+  assert.equal(blocked.status, 75, blocked.stderr);
+  assert.equal(git(join(f.state, "repository"), "rev-parse", "HEAD"), f.first);
+  f.env.PI_STACK_PUBLICATION_REQUEST = requestId;
+  assert.equal(f.select(f.first).status, 75, "the reservation also binds its owner's source");
+  assert.equal(f.select(f.second).status, 0);
+  delete f.env.PI_STACK_PUBLICATION_REQUEST;
+  rmSync(`${f.hostLock}.publication`);
+  assert.equal(f.select(f.second).status, 0);
+});
+
 test("the wrapper retains the checkout lock until its proof finishes", async (t) => {
   const f = fixture(t);
   const child = spawn("bash", ["-c", `${selectScript}; read -r release_lock`, ...f.args(f.first).slice(2)], {
