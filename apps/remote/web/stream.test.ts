@@ -67,7 +67,7 @@ test("a missing patch base requests a full resource without retaining its revisi
   expect(calls[1].body.have).toEqual({});
 });
 
-test("reconnect aborts pending subscription posts and never lets an old post block or alter the new connection", async () => {
+test("a new selection replaces a stream whose obsolete subscription post is still pending", async () => {
   const posts: Array<{ body: any; signal: AbortSignal }> = [];
   const statuses: string[] = [];
   let connects = 0;
@@ -88,8 +88,8 @@ test("reconnect aborts pending subscription posts and never lets an old post blo
   client.update({ session: "b" }); await settle();
   expect(posts[0].body.session).toBe("b");
   expect(posts[0].signal.aborted).toBe(false);
-  client.update({ session: "c" });
-  client.reconnect(); await settle();
+  client.update({ session: "c" }); await settle();
+  expect(connects).toBe(2);
   expect(posts[0].signal.aborted).toBe(true);
   client.update({ session: "d" }); await settle();
   expect(posts).toHaveLength(2);
