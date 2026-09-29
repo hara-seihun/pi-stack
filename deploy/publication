@@ -194,7 +194,7 @@ function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "release-checkout", "meeting-census"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -925,10 +925,11 @@ export function deployTarget(request, target, logPath) {
   const tail = result.status === 75 ? logTail(logPath, start) : "";
   if (/^another Pi stack deployment owns \/[^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy" };
   if (/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
+  if (/^native source prerequisite [^\r\n]+ requires [0-9a-f]{40} before Pi Stack [0-9a-f]{40}; selected [0-9a-f]{40}$/m.test(tail)) return { ...result, kind: "host-lock-busy", nativePrerequisite: true };
   return result;
 }
 
-export function requeueBusyHost(request, target, logPath, liveMeeting = false) {
+export function requeueBusyHost(request, target, logPath, waitKind = "host-lock") {
   const progress = request.progress;
   for (const host of targets) {
     restoreCustody(request, host.id, host.sshHost);
@@ -937,15 +938,17 @@ export function requeueBusyHost(request, target, logPath, liveMeeting = false) {
   }
   request.progress = progress;
   request.status = "queued";
-  request.step = liveMeeting ? "waiting-for-live-meetings" : "waiting-for-host-deployment-lock";
-  if (liveMeeting) delete request.blockedSince;
+  request.step = waitKind === "live-meeting" ? "waiting-for-live-meetings" : waitKind === "native-source" ? "waiting-for-native-source" : "waiting-for-host-deployment-lock";
+  if (waitKind !== "host-lock") delete request.blockedSince;
   else request.blockedSince ??= new Date().toISOString();
   request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
   request.waiting = {
-    kind: liveMeeting ? "live-meeting" : "host-lock", host: target.id, at: new Date().toISOString(), log: logPath,
-    reason: liveMeeting
+    kind: waitKind, host: target.id, at: new Date().toISOString(), log: logPath,
+    reason: waitKind === "live-meeting"
       ? `${target.id} has live meeting rooms that a Pi Remote restart would end. The publication owner will probe without deploying and resume this attempt once they close.`
-      : `${target.id} has an active Pi Stack deployment. The publication owner will resume after the host lock is released, within its existing attempt and wait budgets.`,
+      : waitKind === "native-source"
+        ? `${target.id} requires a newer native selected source before this Pi Stack release. The publication owner will probe without deploying and resume this attempt once that source is serving.`
+        : `${target.id} has an active Pi Stack deployment. The publication owner will resume after the host lock is released, within its existing attempt and wait budgets.`,
   };
   (request.hostLockWaits ??= []).push({ ...request.waiting, attempt: request.attempt, progress });
   writeRequest(request);
@@ -981,6 +984,24 @@ export function refreshMeetingWait(request) {
   if (rooms) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
   writeRequest(request);
   return !rooms;
+}
+
+export function refreshNativeSourceWait(request) {
+  const target = targets.find(target => target.id === request.waiting.host);
+  if (!target) throw new Error(`Unknown native-source-wait host: ${request.waiting.host}`);
+  const script = readFileSync(join(dirname(self), "native-prerequisites"), "utf8");
+  const args = [target.hostConfig, target.releaseRepository, request.integrationSha];
+  const command = target.sshHost ? "ssh" : "bash";
+  const commandArgs = target.sshHost
+    ? ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s", "--", ...args]
+    : ["-s", "--", ...args];
+  const result = commandResult(command, commandArgs, { input: script, timeoutSeconds: 45 });
+  if (!result.ok && result.status !== 75) throw new Error(result.stderr.trim() || `native prerequisite probe exited ${result.status}`);
+  request.waiting.probe = { at: new Date().toISOString(), selected: result.status === 75 ? result.stderr.trim() : "ready" };
+  delete request.waiting.probeFailingSince;
+  if (result.status === 75) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
+  writeRequest(request);
+  return result.ok;
 }
 
 export function requeueMovedIntegration(request, remoteMain, logPath) {
@@ -1704,7 +1725,7 @@ export function processRequest(request) {
       const busy = liveMeetingTarget(request);
       if (busy) {
         appendLog(logPath, `[${new Date().toISOString()}] live meetings on ${busy.target.id}: ${busy.rooms}\n`);
-        requeueBusyHost(request, busy.target, logPath, true);
+        requeueBusyHost(request, busy.target, logPath, "live-meeting");
         return;
       }
       for (const target of targets) {
@@ -1715,7 +1736,7 @@ export function processRequest(request) {
         }
         result = deployTarget(request, target, logPath);
         if (result.kind === "host-lock-busy") {
-          requeueBusyHost(request, target, logPath, result.liveMeeting === true);
+          requeueBusyHost(request, target, logPath, result.liveMeeting ? "live-meeting" : result.nativePrerequisite ? "native-source" : "host-lock");
           return;
         }
         if (!result.ok) throw new Error(`${target.id} release wrapper exited ${result.status}`);
@@ -2090,9 +2111,9 @@ function drain() {
       failStalled(request.requestId, "Publication worker interrupted; retained host custody has been recovered. Repair required before retry.");
       continue;
     }
-    if (request.waiting?.kind === "live-meeting") {
+    if (["live-meeting", "native-source"].includes(request.waiting?.kind)) {
       try {
-        if (!refreshMeetingWait(request)) continue;
+        if (!(request.waiting.kind === "live-meeting" ? refreshMeetingWait(request) : refreshNativeSourceWait(request))) continue;
       } catch (error) {
         // A census that cannot answer means unknown meetings, not an idle host: keep waiting,
         // and fail only when the census itself has stayed broken past its own budget.

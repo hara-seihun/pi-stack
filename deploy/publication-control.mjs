@@ -33,7 +33,7 @@ export function runnable(request, now = Date.now()) {
 }
 
 export function progressBudgetExhausted(request, now = Date.now()) {
-  if (request.waiting?.kind === "live-meeting") return false;
+  if (["live-meeting", "native-source"].includes(request.waiting?.kind)) return false;
   return (request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
     || !!request.blockedSince && now - Date.parse(request.blockedSince) > policy.blockedLimitMs;
 }
