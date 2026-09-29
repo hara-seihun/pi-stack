@@ -34,7 +34,7 @@ export function readSubscription(body: unknown): Partial<StreamSubscription> {
   }
   const selectionId = optionalString(input.selectionId);
   if (selectionId) subscription.selectionId = selectionId;
-  for (const flag of ["viewing", "thinking", "dashboard"] as const) {
+  for (const flag of ["viewing", "thinking", "dashboard", "workers"] as const) {
     if (typeof input[flag] === "boolean") subscription[flag] = input[flag] as boolean;
   }
   for (const field of ["notificationsAfter", "eventsAfter", "transcriptFrom"] as const) {

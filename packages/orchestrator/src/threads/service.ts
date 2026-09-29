@@ -13,7 +13,7 @@ import { RAW_ARGUMENT } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
 export interface ThreadAdmission { env?: Record<string, string | undefined>; settings?: ThreadSettings; release(): void | Promise<void> }
@@ -208,9 +208,11 @@ export class ThreadService implements ThreadApi {
     const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,id DESC LIMIT 1").get(id) as Json | undefined;
     return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
   }
-  async inspect(id: string): Promise<Result<ThreadInspection>> {
+  async inspect(id: string, options: InspectOptions = {}): Promise<Result<ThreadInspection>> {
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
     const projection = this.projections.get(id);
+    // Reading an idle thread's native history costs its whole file; a caller already holding this revision's context needs none of it.
+    if (!this.execution(id) && options.contextRevision === thread.revision) return good({ thread, pending: this.pending(id), ...(projection ? { live: projection.live } : {}) });
     try {
       const context = this.execution(id) && projection?.context ? projection.context : { source: "native-history", systemPrompt: "", tools: [], messages: readThreadHistory(thread.sessionFile).flatMap(entry => entry.type === "message" ? [entry.message] : entry.type === "custom_message" ? [{ role: "custom", content: entry.content, customType: entry.customType, details: entry.details }] : []) };
       return good({ thread, pending: this.pending(id), context, ...(projection ? { live: projection.live } : {}) });

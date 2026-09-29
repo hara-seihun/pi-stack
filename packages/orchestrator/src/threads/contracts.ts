@@ -156,6 +156,7 @@ export function validateThreadAwait(input: AwaitThreads): Result<void> {
   }
   return { ok: true, value: undefined };
 }
+export interface InspectOptions { contextRevision?: number }
 export interface ThreadInspection {
   thread: Thread;
   pending: ThreadMessage[];
@@ -182,7 +183,8 @@ export interface ThreadApi {
   list(input?: ThreadList): Promise<Result<ThreadPage>>;
   read(input: ThreadRead): Promise<Result<ThreadHistory>>;
   control(input: ThreadControl): Promise<Result<Thread>>;
-  inspect(threadId: string): Promise<Result<ThreadInspection>>;
+  /** `contextRevision`: the thread revision whose context the caller already holds; an idle thread at that revision omits `context`. */
+  inspect(threadId: string, options?: InspectOptions): Promise<Result<ThreadInspection>>;
   command(threadId: string, command: PiCommand): Promise<Result<unknown>>;
   settlements(after?: number, limit?: number): Result<ThreadSettlements> | Promise<Result<ThreadSettlements>>;
   await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>>;
