@@ -160,6 +160,7 @@ test("explicit cancellation retires an absent creation without changing grouped 
       "--group", "paired", "--min-free-gib", "0", "--json"];
     const pending = JSON.parse(run([...args, "--name", "failed"], f.env));
     const peer = JSON.parse(run([...args, "--name", "peer"], f.env));
+    const beforePeer = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env)).records[0];
     const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
     database.prepare("UPDATE workspace SET state='creating', source_commit=NULL, lease_expires_at=0 WHERE id=?").run(pending.id);
     database.close();
@@ -171,7 +172,7 @@ test("explicit cancellation retires an absent creation without changing grouped 
     assert.equal(cancelled.state, "released");
     assert.equal(cancelled.sourceCommit, null);
     const [unchanged] = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env)).records;
-    assert.deepEqual(unchanged, peer);
+    assert.deepEqual(unchanged, beforePeer);
     const recovered = JSON.parse(run([...args, "--name", "failed", "--ref", peer.sourceCommit], f.env));
     assert.notEqual(recovered.id, pending.id);
     assert.equal(recovered.state, "active");
