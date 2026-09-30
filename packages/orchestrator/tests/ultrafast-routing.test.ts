@@ -72,7 +72,7 @@ function routingHarness(f: ReturnType<typeof fixture>, account: string) {
   vi.stubEnv("PI_ORCHESTRATOR_ACCOUNT_ID", undefined);
   const events = new Map<string, ((event: any, ctx: any) => any)[]>();
   const ctx = { model: { ...astra, provider: account }, ui: { notify: vi.fn() },
-    modelRegistry: { refresh: vi.fn(async () => {}) }, sessionManager: { getSessionId: () => "ultrafast-test" } };
+    modelRegistry: { refresh: vi.fn(async () => {}) }, sessionManager: { getSessionId: () => "ultrafast-test", getBranch: () => [] } };
   const pi = {
     on(name: string, handler: (event: any, ctx: any) => any) { events.set(name, [...(events.get(name) ?? []), handler]); },
     registerProvider(_provider: Provider) {}, registerTool() {}, events: { on: () => () => {} },
@@ -233,6 +233,35 @@ test("the final wire guard preserves Ultrafast for an entitled account", async (
     { apiKey: f.tokens.get(entitled), transport: "sse", maxRetries: 0, onPayload: payload => ({ ...(payload as object), service_tier: "ultrafast" }), fetch: inference as unknown as typeof fetch }).result();
   expect(result.errorMessage).toBeUndefined();
   expect(inference).toHaveBeenCalledOnce();
+});
+
+test("startup refuses an unavailable requested tier rather than retaining another model", async () => {
+  const f = fixture();
+  f.grants.clear();
+  const h = routingHarness(f, "openai-codex");
+  await expect(h.emit("session_start")).rejects.toThrow("No eligible pooled account");
+  expect(h.ctx.model.id).toBe(astra.id);
+  expect(h.pi.setModel).not.toHaveBeenCalled();
+});
+
+test.each(["session_start", "before_agent_start"])("%s refuses Cerebras Ultrafast before account selection", async event => {
+  const f = fixture();
+  const h = routingHarness(f, "cerebras");
+  h.ctx.model.id = "gpt-oss-120b";
+  await expect(h.emit(event)).rejects.toThrow("Ultrafast speed requires OpenAI Codex Astra");
+  expect(f.catalogs).not.toHaveBeenCalled();
+  expect(h.pi.setModel).not.toHaveBeenCalled();
+});
+
+test("explicit Cerebras standard startup remains on the requested provider", async () => {
+  const f = fixture();
+  const h = routingHarness(f, "cerebras");
+  vi.stubEnv("PI_THREAD_SPEED", "standard");
+  h.ctx.model.id = "gpt-oss-120b";
+  await h.emit("session_start");
+  expect(h.ctx.model.provider).toBe("cerebras");
+  expect(f.catalogs).not.toHaveBeenCalled();
+  expect(h.pi.setModel).not.toHaveBeenCalled();
 });
 
 test("direct rate-limit failover does not move Ultrafast onto an unentitled sibling", async () => {

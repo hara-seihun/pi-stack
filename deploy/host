@@ -136,12 +136,13 @@ if (( ! services )); then
   exit 0
 fi
 
-# The browser doctor opens a disposable session against the already selected
-# runtime and the account's just-reconciled settings; it touches no service, so
-# it runs alongside activation. A failure rolls the release back like a failed
-# smoke check.
-doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-browser-doctor.XXXXXXXX")
-pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs" >"$doctor_log" 2>&1 &
+# Disposable browser and model-admission checks use the selected runtime and
+# touch no service, so they run alongside activation. Failures reject acceptance.
+doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-runtime-doctors.XXXXXXXX")
+(
+  pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs"
+  pi_stack_run_as "${fleet:-${users[0]}}" node "$runtime/node_modules/.bin/pi-model-selection-doctor"
+) >"$doctor_log" 2>&1 &
 doctor_pid=$!
 
 # Every enabled or running person's daemon restarts on release; live workers keep the
@@ -221,10 +222,10 @@ if (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
 doctor_failed=0
 wait "$doctor_pid" || doctor_failed=1
 cat "$doctor_log"; rm -f "$doctor_log"
-(( doctor_failed == 0 )) || echo 'browser doctor failed' >&2
+(( doctor_failed == 0 )) || echo 'runtime doctor failed' >&2
 if (( smoke_failed || doctor_failed )); then
     if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
-      echo "activation, smoke or browser check failed; returning Pi Remote to $previous_remote" >&2
+      echo "activation, smoke or runtime doctor failed; returning Pi Remote to $previous_remote" >&2
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
       pi_stack_as_root ln -s "$previous_remote_release" "$candidate"
       pi_stack_as_root mv -Tf "$candidate" "$remote"
