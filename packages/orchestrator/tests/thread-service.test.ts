@@ -336,7 +336,10 @@ it("retains native failure causes in settlement receipts without treating cancel
   }
 });
 
-it("preserves the running account and model when future settings change", async () => {
+it.each([
+  { model: "anthropic/claude-fable-5-1", speed: "standard" as const },
+  { model: "openai-codex/gpt-6.1-sol", speed: "priority" as const },
+])("preserves the running account and model when future settings change to $model at $speed", async ({ model, speed }) => {
   const f = fixture();
   await f.service.start();
   const thread = value(await f.service.spawn({ requestId: "settings-attribution", cwd: f.directory, message: "active" }));
@@ -348,9 +351,16 @@ it("preserves the running account and model when future settings change", async 
     const active = () => JSON.parse((db.prepare("SELECT settings FROM thread_execution WHERE thread_id=?").get(thread.id) as { settings: string }).settings);
     expect(active()).toMatchObject({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low" });
     const count = f.sessions[0].commands.length;
-    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { model: "fable" } }));
-    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "high", speed: "priority" } }));
-    expect(f.service.get(thread.id)!.settings).toEqual({ model: "anthropic/claude-fable-5-1", thinkingLevel: "high", speed: "priority" });
+    const beforeRejected = f.service.get(thread.id);
+    expect(await f.service.control({ threadId: thread.id, action: "settings", settings: { model: "fable", thinkingLevel: "high", speed: "priority" } })).toMatchObject({
+      ok: false, error: { code: "invalid_request", message: "Priority speed is unavailable for anthropic/claude-fable-5-1" },
+    });
+    expect(f.service.get(thread.id)).toEqual(beforeRejected);
+    expect(active()).toEqual({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low", speed: "standard" });
+    expect(f.sessions[0].commands).toHaveLength(count);
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { model } }));
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "high", speed } }));
+    expect(f.service.get(thread.id)!.settings).toEqual({ model, thinkingLevel: "high", speed });
     expect(active()).toEqual({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low", speed: "standard" });
     expect(f.sessions[0].commands).toHaveLength(count);
   } finally { db.close(); }
