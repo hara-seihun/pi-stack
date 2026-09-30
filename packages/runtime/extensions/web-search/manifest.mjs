@@ -1,9 +1,10 @@
 // Which search backend this host uses. The tool is the same everywhere; the backend behind it is a
 // plugin, so a host can change search providers without changing the agent-facing tool.
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Backends shipped with the stack, by id. */
 export const BUILT_IN_BACKENDS = {
@@ -70,7 +71,12 @@ export async function loadManifest(environment = process.env) {
  * backend object, or a factory taking `{ options, environment }` and returning one.
  */
 export async function loadBackend(selection, context = {}) {
-  const imported = await import(selection.module);
+  const moduleUrl = new URL(selection.module);
+  if (moduleUrl.protocol === "file:") {
+    const source = await readFile(fileURLToPath(moduleUrl));
+    moduleUrl.searchParams.set("source", createHash("sha256").update(source).digest("hex"));
+  }
+  const imported = await import(moduleUrl.href);
   const exported = imported.default ?? imported.backend;
   if (!exported) throw new Error(`backend ${selection.id} exports no default backend`);
   const backend = typeof exported === "function" ? await exported({ options: selection.options, environment: context.environment ?? process.env }) : exported;

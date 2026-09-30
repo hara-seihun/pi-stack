@@ -170,7 +170,7 @@ test("the extension registers web_search with a prompt snippet and runs a search
     assert.equal(tools.length, 1);
     const [tool] = tools;
     assert.equal(tool.name, "web_search");
-    assert.match(tool.promptSnippet, /^web_search: search the live web through Exa/);
+    assert.match(tool.promptSnippet, /host's current search provider/);
     assert.match(tool.description, /Reach for this first/);
     const updates = [];
     const result = await tool.execute("call-1", { query: "nixos" }, undefined, (update) => updates.push(update));
@@ -183,6 +183,42 @@ test("the extension registers web_search with a prompt snippet and runs a search
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
+    }
+  }
+});
+
+test("a long-lived tool adopts provider, options, defaults and source changes without reloading", async () => {
+  const directory = await workspace();
+  const manifestPath = join(directory, "web-search.json");
+  const module = join(directory, "host.mjs");
+  const writeBackend = (label) => writeFile(module, `export default ({ options }) => ({
+    id: options.id, label: ${JSON.stringify(label)},
+    async search(request) { return { results: [{ title: options.id + ':' + request.numResults, url: 'https://example.com', snippet: options.note }] }; }
+  });`);
+  const writeManifest = (id, defaultResults) => writeFile(manifestPath, JSON.stringify({ version: 1, backend: { id, module, options: { id, note: id } }, defaultResults }));
+  const previous = { PI_STACK_WEB_SEARCH: process.env.PI_STACK_WEB_SEARCH, PI_STACK_WEB_SEARCH_QUIET: process.env.PI_STACK_WEB_SEARCH_QUIET };
+  process.env.PI_STACK_WEB_SEARCH = manifestPath;
+  process.env.PI_STACK_WEB_SEARCH_QUIET = "1";
+  try {
+    await writeBackend("First"); await writeManifest("first", 2);
+    let tool; await webSearch({ registerTool: (registered) => { tool = registered; } });
+    assert.equal((await tool.execute("1", { query: "q" })).details.backend, "first");
+    await writeManifest("second", 3);
+    const second = await tool.execute("2", { query: "q" });
+    assert.equal(second.details.backend, "second"); assert.equal(second.details.results[0].title, "second:3");
+    await writeBackend("Updated");
+    const updates = [];
+    await tool.execute("3", { query: "q", numResults: 5 }, undefined, (u) => updates.push(u));
+    assert.equal(updates[0].content[0].text, "Searching Updated…");
+    await writeFile(manifestPath, JSON.stringify({ version: 1, backend: "none" }));
+    await assert.rejects(tool.execute("4", { query: "q" }), /disabled by the host/);
+    await writeFile(manifestPath, "bad JSON");
+    await assert.rejects(tool.execute("5", { query: "q" }), /JSON/);
+    await writeManifest("recovered", 4);
+    assert.equal((await tool.execute("6", { query: "q" })).details.backend, "recovered");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
   }
 });
