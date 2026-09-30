@@ -25,7 +25,9 @@ Results come back as a numbered list of title, URL, date, author and excerpt, wi
 - An object supplies a host backend: `{ "id": "house", "module": "/opt/house/search.mjs", "options": { "endpoint": "http://localhost:9000" } }`. The module path must be absolute, or a URL.
 - No manifest file means the `exa` backend, so a new account gets web search without configuration.
 
-A manifest error, a backend that fails to import, or a backend reporting itself unavailable leaves the tool unregistered and logs one line to stderr. A session never starts with a tool that cannot run. `PI_STACK_WEB_SEARCH_QUIET=1` silences that line.
+A manifest error, a backend that fails to import, or a backend reporting itself unavailable at startup leaves the tool unregistered and logs one line to stderr. `PI_STACK_WEB_SEARCH_QUIET=1` silences that line.
+
+An already registered tool rereads the host manifest and checks its current backend on every call. Provider selection, options and default result counts change without a session reload. Local backend entry modules are imported by source-content hash, so replacing an entry module also takes effect. Changes to its imported dependencies belong in an immutable new module/release path. An in-flight search completes with its own selected backend; the next call adopts the new one. Disabled, malformed or unavailable current configuration fails explicitly, never falling back to a previously loaded provider. The prompt stays provider-neutral; result details identify the provider used.
 
 ## Backend contract
 
@@ -45,7 +47,7 @@ export default {
 };
 ```
 
-`status()` runs once at session start and decides whether the tool exists at all. `search()` receives the tool parameters with `numResults` already defaulted and `text` always boolean. `notes` are appended to the rendered output; `usage` and `requestId` are carried into `details`. Throwing from `search()` returns the message to the agent, so transport refusals should be raised verbatim rather than translated.
+`status()` runs at session start to decide whether the tool exists, then before every call using the current selection. `search()` receives the tool parameters with `numResults` already defaulted and `text` always boolean. `notes` are appended to the rendered output; `usage` and `requestId` are carried into `details`. Throwing from `search()` returns the message to the agent, so transport refusals should be raised verbatim rather than translated.
 
 ## Exa backend
 
