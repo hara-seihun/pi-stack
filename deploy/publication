@@ -37,6 +37,7 @@ const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContr
 const self = fileURLToPath(import.meta.url);
 const repairRoot = join(stateRoot, "repairs");
 const repairPolicyPath = join(stateRoot, "repair-policy.json");
+const ownerSourceRef = "refs/pi-stack-publication/owner-source";
 let activeRequest;
 let activeLog;
 let trackingCommand = false;
@@ -190,6 +191,26 @@ function validateSha(value) {
   if (!/^[a-f0-9]{40}$/.test(value)) throw new Error(`invalid source SHA: ${value}`);
 }
 
+export function checkOwnerSource(sourceRoot, sourceSha) {
+  if (!existsSync(join(checkout, ".git"))) return;
+  const retained = checked("git", ["-C", checkout, "for-each-ref", "--format=%(objectname)", ownerSourceRef]);
+  if (!retained) return;
+  if (resolve(sourceRoot) !== resolve(checkout)) {
+    checked("git", ["-C", sourceRoot, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", checkout, ownerSourceRef]);
+  }
+  if (!commandResult("git", ["-C", sourceRoot, "merge-base", "--is-ancestor", retained, sourceSha]).ok) {
+    throw new Error(`Publication source ${sourceSha} omits bootstrapped owner source ${retained}; merge the retained ${ownerSourceRef} from ${checkout} before publication or owner installation`);
+  }
+}
+
+function retainOwnerSource(sourceRoot, sourceSha) {
+  if (!existsSync(join(checkout, ".git"))) throw new Error("Code-only repair requires an initialized publication repository for source custody");
+  if (checked("git", ["-C", sourceRoot, "status", "--porcelain", "--untracked-files=all", "--", "deploy"])) {
+    throw new Error("Commit deployment source before installing a code-only owner repair");
+  }
+  checked("git", ["-C", checkout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", sourceRoot, `${sourceSha}:${ownerSourceRef}`]);
+}
+
 function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
@@ -198,7 +219,10 @@ function installFrom(sourceRoot, activate = true) {
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
+  const sourceSha = checked("git", ["-C", sourceRoot, "rev-parse", "HEAD^{commit}"]);
+  checkOwnerSource(sourceRoot, sourceSha);
   ensureState();
+  if (!activate) retainOwnerSource(sourceRoot, sourceSha);
   mkdirSync(dirname(installedCommand), { recursive: true, mode: 0o750 });
   mkdirSync(userUnitRoot, { recursive: true, mode: 0o700 });
   for (const name of modules) atomicWrite(join(dirname(installedCommand), name), readFileSync(join(sourceRoot, "deploy", name)), 0o644);
@@ -224,6 +248,7 @@ function install(activate = true) {
 export function adoptPublicationOwner(sourceRoot, integrationSha) {
   const ownerSource = checked("git", ["-C", sourceRoot, "rev-parse", "HEAD"]);
   if (ownerSource !== integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${integrationSha}`);
+  checkOwnerSource(sourceRoot, integrationSha);
   // The candidate owns its installation layout; the running worker already holds the lock.
   checked(process.execPath, [join(sourceRoot, "deploy/publication"), "install"], { timeoutSeconds: 90 });
 }
@@ -755,6 +780,7 @@ function createIntegration(request, logPath) {
     if (!result.ok) return result;
   }
   const integrationSha = runCapture("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"]);
+  checkOwnerSource(checkout, integrationSha);
   const localProperties = config.androidProperties;
   if (!existsSync(localProperties)) return { ok: false, status: 1, stderr: `missing host-owned Android configuration: ${localProperties}` };
   mkdirSync(join(checkout, "apps/kenan/android"), { recursive: true });
@@ -1651,6 +1677,7 @@ export function processRequest(request) {
       if (!result.ok) throw new Error(result.stderr.trim() || `${request.step} exited ${result.status}`);
     }
 
+    checkOwnerSource(checkout, request.integrationSha);
     prepareAndroidArtifact(request, logPath);
     request.step = "inspect-thread-execution-contract";
     writeRequest(request);

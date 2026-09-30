@@ -46,6 +46,8 @@ test("installation renders host-owned paths and target IDs stay explicit", t => 
   const busy = spawnSync("flock", [join(stateRoot, "worker.lock"), process.execPath, command.pathname, "install", "--code-only"], options);
   assert.notEqual(busy.status, 0);
   assert.equal(readFileSync(commandPath, "utf8"), "retain active owner\n");
+  const initialized = spawnSync("git", ["init", "--quiet", join(stateRoot, "repository")], options);
+  assert.equal(initialized.status, 0, initialized.stderr);
   const codeOnly = spawnSync(process.execPath, [command.pathname, "install", "--code-only"], options);
   assert.equal(codeOnly.status, 0, codeOnly.stderr);
   assert.equal(readFileSync(unit, "utf8"), "retain host unit\n");
