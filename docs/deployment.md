@@ -133,7 +133,7 @@ pi-agent-browser-doctor \
   --session-file /absolute/path/to/settled-session.jsonl
 ```
 
-The [doctor](../packages/runtime/browser-doctor.mjs) checks both extension-loading phases, native registration, an interactive snapshot, screenshot and cleanup. Its saved-session probe copies a settled JSONL to a temporary directory rather than modifying the canonical session or ledger. A failed probe retains its files for diagnosis. Retain old runtime trees until their loading processes exit. `PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js node --test packages/runtime/extensions/browser/browser.test.mjs` tests release switching against the deployed SDK.
+The [doctor](../packages/runtime/browser-doctor.mjs) checks both extension-loading phases, native registration, an interactive snapshot, screenshot, exact-byte download, and cleanup. It also selects static and dynamically injected cross-origin iframes by CSS, fills and reads back their inputs, and checks selected-frame evaluation using disposable loopback origins (`127.0.0.1` and `localhost`). Its saved-session probe copies a settled JSONL to a temporary directory rather than modifying the canonical session or ledger. A failed probe retains its files for diagnosis. Retain old runtime trees until their loading processes exit. `PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js node --test packages/runtime/extensions/browser/browser.test.mjs` tests release switching against the deployed SDK.
 
 ## Checks and Android updates
 
