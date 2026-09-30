@@ -1897,8 +1897,13 @@ const server = Bun.serve<SocketData>({
         if (thread && thread.metadata?.mode !== MEETING_MODE) {
           const moded = await directory.control({ threadId: sessionId, action: "update", metadata: { mode: MEETING_MODE } });
           if (!moded.ok) throw new Error(`The external meeting's thread could not become live: ${moded.error.message}`);
-          const fast = await directory.control({ threadId: sessionId, action: "settings", settings: { speed: THREAD_MODES[MEETING_MODE].conversation.settings.speed } });
-          if (!fast.ok) throw new Error(`The external meeting's thread could not take priority speed: ${fast.error.message}`);
+        }
+        // Every start brings the thread to the mode's speed, so a recurring meeting follows a mode change.
+        // A thread moved off Astra keeps its own speed rather than failing the join.
+        const { speed } = THREAD_MODES[MEETING_MODE].conversation.settings;
+        if (thread && thread.settings.speed !== speed) {
+          const fast = await directory.control({ threadId: sessionId, action: "settings", settings: { speed } });
+          if (!fast.ok) console.warn(`[meet] external meeting thread ${sessionId} kept ${thread.settings.speed} speed: ${fast.error.message}`);
         }
         return;
       }
