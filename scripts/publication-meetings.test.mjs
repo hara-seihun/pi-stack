@@ -183,6 +183,7 @@ test("cancellation ends a meeting wait without probing or deploying", t => {
   const request = JSON.parse(readFileSync(join(f.state, "requests", `${id}.json`), "utf8"));
   assert.equal(request.status, "failed");
   assert.match(request.failure.message, /Publication cancelled/);
+  assert.equal(existsSync(join(f.state, "repairs", id, "receipt.json")), false, "cancellation is not a repairable defect");
   assert.equal(existsSync(f.env.PROBE_LOG), false);
   assert.equal(existsSync(f.env.GIT_LOG), false);
 });

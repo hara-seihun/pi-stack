@@ -14,12 +14,25 @@ export interface InstalledApp { revision: string; versionCode: number; applicati
 export interface AppUpdateCheck { update: AppUpdate | null; installed: InstalledApp }
 export interface AppUpdateInstall { status: "installer-opened" | "reloading"; revision?: string }
 export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
+export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "writeSettings" | "deviceAdmin";
+export interface PhoneStatus {
+  enabled: boolean;
+  connected: boolean;
+  deviceId: string;
+  name: string;
+  environment: string;
+  error?: string | { code: string; message: string } | null;
+  capabilities: Record<string, boolean | string | number | null>;
+}
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
   writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean }>;
   writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean }): Promise<void>;
   writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
+  phoneStatus?(): Promise<PhoneStatus>;
+  phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
+  phoneSetup?(options: { step: PhoneSetupStep }): Promise<void>;
   haptic?(options: { kind: string }): Promise<void>;
   keepAwake?(options: { enabled: boolean }): Promise<void>;
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
@@ -60,6 +73,9 @@ export const remote: RemoteBridge = !nativePlatform
         writeStatus: () => capacitor.nativePromise("KenanRemote", "writeStatus", {}),
         writeSetup: (options) => capacitor.nativePromise("KenanRemote", "writeSetup", options),
         writeEnvironment: (options) => capacitor.nativePromise("KenanRemote", "writeEnvironment", options),
+        phoneStatus: () => capacitor.nativePromise("KenanRemote", "phoneStatus", {}),
+        phoneConfigure: (options) => capacitor.nativePromise("KenanRemote", "phoneConfigure", options),
+        phoneSetup: (options) => capacitor.nativePromise("KenanRemote", "phoneSetup", options),
         haptic: (options) => capacitor.nativePromise("KenanRemote", "haptic", options),
         keepAwake: (options) => capacitor.nativePromise("KenanRemote", "keepAwake", options),
         notifications: (options) => capacitor.nativePromise("KenanRemote", "notifications", options),

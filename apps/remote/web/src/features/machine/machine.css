@@ -248,6 +248,14 @@
 .machine-errors span { display: grid; gap: var(--space-1); }
 .machine-errors strong { font-size: var(--text-sm); }
 
+.phone-control { overflow-wrap: anywhere; }
+.phone-control label { display: grid; gap: var(--space-2); }
+.phone-control input { min-width: 0; width: 100%; }
+.phone-control pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+.phone-control details { margin: var(--space-3) 0; }
+.phone-control summary { cursor: pointer; }
+.phone-control p:has(> button) { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
 @media (min-width: 900px) {
   .machine-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

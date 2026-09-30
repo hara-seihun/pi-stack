@@ -206,11 +206,11 @@ function websocketUrl(origin: string, url: URL): string {
   return target.href;
 }
 
-async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal): Promise<WebSocket | null> {
+async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal, environment?: string): Promise<WebSocket | null> {
   const WebSocketClient = WebSocket as typeof WebSocket & { new(url: string, options: Bun.WebSocketOptions): WebSocket };
   const upstream = new WebSocketClient(target, {
     protocols,
-    headers: { "x-pi-remote-user": user },
+    headers: { "x-pi-remote-user": user, ...(environment ? { [UPSTREAM_CREDENTIAL_HEADER]: upstreamCredential(environment) } : {}) },
     perMessageDeflate: false,
   });
   upstream.binaryType = "arraybuffer";
@@ -255,11 +255,11 @@ async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySo
   if ("error" in destination) return destination.error;
   if (authenticated.signal.aborted) return locked(person.user);
   const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map(value => value.trim()).filter(Boolean);
-  const upstream = await openUpstream(websocketUrl(destination.origin, destination.target), protocols, person.user, authenticated.signal);
+  const upstream = await openUpstream(websocketUrl(destination.origin, destination.target), protocols, person.user, authenticated.signal, destination.upstream);
   if (!upstream) return Response.json({ error: authenticated.signal.aborted ? "Session ended" : "Supervisor WebSocket unreachable" }, { status: authenticated.signal.aborted ? 423 : 502 });
   const upgraded = server.upgrade(req, {
     ...(upstream.protocol ? { headers: { "sec-websocket-protocol": upstream.protocol } } : {}),
-    data: { upstream, signal: authenticated.signal, closed: false },
+    data: { phone: destination.target.pathname === "/v1/phones/connect", upstream, signal: authenticated.signal, closed: false },
   });
   if (!upgraded) upstream.close(1011, "Browser upgrade failed");
   return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });

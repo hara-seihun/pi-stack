@@ -349,6 +349,101 @@ test("watchdog stops a bounded stall and launches one independent repair", t => 
   assert.equal(systemctl.filter(line => line === `--user start --no-block ${repair.unit}`).length, 1);
 });
 
+test("cancelled failures never acquire a repair owner, including watchdog adoption", t => {
+  const f = repairFixture(t);
+  rmSync(join(f.root, "repairs"), { recursive: true });
+  writeJson(f.requestPath, { ...f.request, failure: { ...f.request.failure, reason: "cancelled" } });
+  writeJson(join(f.root, "repair-policy.json"), { activatedAt: "2026-01-01T00:00:00.000Z" });
+  const requestBefore = readFileSync(f.requestPath, "utf8");
+  const result = runPublication(f.root, f.bin, "watchdog", f.environment);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(f.repairPath), false);
+  assert.equal(readFileSync(f.requestPath, "utf8"), requestBefore);
+  assert.notEqual(runPublication(f.root, f.bin, "repair", f.environment).status, 0);
+});
+
+for (const status of ["pending", "launching", "running", "submitting", "ready-to-retry"]) {
+  test(`watchdog retains but blocks ${status} repair work for a cancelled publication`, t => {
+    const f = repairFixture(t, status);
+    writeFileSync(join(f.root, "requests", `${requestId}.cancel`), "cancelled\n");
+    const result = runPublication(f.root, f.bin, "watchdog", f.environment);
+    assert.equal(result.status, 0, result.stderr);
+    const repair = JSON.parse(readFileSync(f.repairPath, "utf8"));
+    assert.equal(repair.status, "blocked");
+    assert.match(repair.summary, /cancelled/);
+    assert.deepEqual(repair.failure, f.repair.failure);
+    assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), f.request);
+    assert.doesNotMatch(readFileSync(f.environment.SYSTEMCTL_LOG, "utf8"), /start --no-block pi-stack-publication-repair@/);
+    assert.equal(existsSync(f.environment.PUBLICATION_SUBMIT_LOG), false);
+    assert.equal(existsSync(f.environment.PI_STUB_LOG), false);
+  });
+}
+
+test("watchdog lets an active cancelled repair retain its work without another launch", t => {
+  const f = repairFixture(t, "running");
+  writeFileSync(join(f.root, "requests", `${requestId}.cancel`), "cancelled\n");
+  const before = readFileSync(f.repairPath, "utf8");
+  const result = runPublication(f.root, f.bin, "watchdog", { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "active" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(f.repairPath, "utf8"), before);
+  assert.doesNotMatch(readFileSync(f.environment.SYSTEMCTL_LOG, "utf8"), /(?:start --no-block|stop) pi-stack-publication-repair@/);
+  assert.equal(existsSync(f.environment.PUBLICATION_SUBMIT_LOG), false);
+});
+
+test("repair launch rechecks cancellation before creating a workspace or calling a model", t => {
+  const f = repairFixture(t);
+  writeFileSync(join(f.root, "requests", `${requestId}.cancel`), "cancelled\n");
+  const result = runPublication(f.root, f.bin, "repair-run", f.environment);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(f.repairPath, "utf8")).status, "blocked");
+  assert.equal(existsSync(f.environment.AGENT_WORKSPACE_LOG), false);
+  assert.equal(existsSync(f.environment.PI_STUB_LOG), false);
+});
+
+for (const status of ["source-fixed", "infrastructure-fixed"]) {
+  test(`a saved ${status} result cannot revive a cancelled publication`, t => {
+    const f = repairFixture(t, "blocked");
+    writeJson(f.requestPath, { ...f.request, failure: { ...f.request.failure, reason: "cancelled" } });
+    const before = readFileSync(f.requestPath, "utf8");
+    const evidence = join(f.root, "focused-proof.json");
+    writeJson(evidence, { passed: true });
+    writeJson(f.repairPath, { ...f.repair, workspace: f.workspace });
+    writeJson(f.repair.result, { status, sourceSha: f.repairedSha, summary: "useful retained repair", evidence });
+    const result = runPublication(f.root, f.bin, "repair-result", f.environment);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Publication cancelled/);
+    assert.equal(readFileSync(f.requestPath, "utf8"), before);
+    assert.equal(existsSync(f.environment.PUBLICATION_SUBMIT_LOG), false);
+    assert.equal(existsSync(f.environment.AGENT_WORKSPACE_LOG), false);
+    assert.equal(existsSync(f.repair.result), true);
+    assert.equal(existsSync(evidence), true);
+  });
+}
+
+test("repair submission, enqueue and retry reject cancellation at their own entry points", t => {
+  const f = repairFixture(t, "ready-to-retry");
+  writeFileSync(join(f.root, "requests", `${requestId}.cancel`), "cancelled\n");
+  assert.equal(run("git", ["remote", "add", "origin", "https://github.com/hara-seihun/pi-stack.git"], { cwd: f.workspace }).status, 0);
+  const before = readFileSync(f.requestPath, "utf8");
+  const successor = "PUB-fedcba9876543210fedcba98";
+  const operations = [
+    ["submit", f.repairedSha, "--repair-of", requestId],
+    ["enqueue", successor, f.repairedSha, `refs/heads/pi-stack-publications/${successor}`, "null", requestId],
+    ["_retry", requestId],
+  ];
+  for (const args of operations) {
+    const result = run(process.execPath, [publication, ...args], { cwd: f.workspace, env: {
+      ...process.env, ...f.environment, PATH: `${f.bin}:${process.env.PATH}`,
+      PI_STACK_PUBLICATION_STATE: f.root, PI_STACK_PUBLICATION_COMMAND: join(f.bin, "publication-submit"),
+    } });
+    assert.notEqual(result.status, 0, args[0]);
+    assert.match(result.stderr, /Publication cancelled/, args[0]);
+  }
+  assert.equal(readFileSync(f.requestPath, "utf8"), before);
+  assert.equal(existsSync(join(f.root, "requests", `${successor}.json`)), false);
+  assert.equal(existsSync(f.environment.SYSTEMCTL_LOG), false);
+});
+
 test("repair-result completes an interrupted repair once without launching another agent", t => {
   const f = repairFixture(t, "blocked");
   const summary = "service exited without a terminal receipt";

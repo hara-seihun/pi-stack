@@ -56,12 +56,17 @@ function person(user: string, encrypted: boolean, remoteAccess: string[]) {
 
 beforeAll(async () => {
   for (const directory of [persons, bin, units, keys]) mkdirSync(directory, { recursive: true });
-  const remote = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+  const remote = Bun.serve<{ user: string; upstream: string; session: string | null }>({ hostname: "127.0.0.1", port: 0, fetch(req, httpServer) {
     remoteCalls++;
     const url = new URL(req.url);
+    if (url.pathname === "/v1/phones/connect" && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      const upstream = req.headers.get("x-pi-remote-upstream");
+      if (!upstream || upstream !== readFileSync(join(root, "upstream-credentials", "lab"), "utf8")) return new Response("Missing router proof", { status: 403 });
+      return httpServer.upgrade(req, { data: { user: req.headers.get("x-pi-remote-user")!, upstream, session: req.headers.get("x-pi-remote-session") } }) ? undefined : new Response("Upgrade failed", { status: 400 });
+    }
     if (url.pathname === "/v1/redirect") return Response.redirect("https://example.org");
     return Response.json({ path: url.pathname, query: url.search, user: req.headers.get("x-pi-remote-user"), session: req.headers.get("x-pi-remote-session"), authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie"), referer: req.headers.get("referer"), upstream: req.headers.get("x-pi-remote-upstream") });
-  } });
+  }, websocket: { maxPayloadLength: 16 * 1024 * 1024, message(socket, message) { socket.send(JSON.stringify({ ...socket.data, bytes: typeof message === "string" ? message.length : message.byteLength, payload: "x".repeat(2 * 1024 * 1024) })); } } });
   supervisors.push(remote);
   writeFileSync(join(root, "host.json"), JSON.stringify({ environments: [
     { id: "desk", name: "Desk", icon: "home" },
@@ -131,8 +136,9 @@ async function waitFor<T>(read: () => T | undefined, message: string): Promise<T
   throw new Error(message);
 }
 
-function openWebSocket(path: string): Promise<WebSocket> {
-  const socket = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+function openWebSocket(path: string, headers?: Record<string, string>): Promise<WebSocket> {
+  const Client = WebSocket as typeof WebSocket & { new(url: string, options: Bun.WebSocketOptions): WebSocket };
+  const socket = headers ? new Client(`ws://127.0.0.1:${port}${path}`, { headers }) : new WebSocket(`ws://127.0.0.1:${port}${path}`);
   return new Promise((resolve, reject) => {
     socket.addEventListener("open", () => resolve(socket), { once: true });
     socket.addEventListener("error", () => reject(new Error(`WebSocket failed to open: ${path}`)), { once: true });
@@ -302,6 +308,19 @@ test("WebSocket proxy authorizes before upstream and moves bytes both ways", asy
   await expectWebSocketRefused(`/v1/ws-test/echo?session=${session}&user=kenan`);
   await Bun.sleep(20);
   expect(websocketConnections.length).toBe(opened);
+});
+
+test("remote phone WebSocket carries router proof, strips session and forwards binary-sized frames", async () => {
+  await expectWebSocketRefused("/v1/remotes/lab/v1/phones/connect?user=kenan");
+  const session = await token("kenan");
+  const socket = await openWebSocket("/v1/remotes/lab/v1/phones/connect", { "x-pi-remote-session": session, "x-pi-remote-user": "kenan", "x-pi-remote-upstream": "forged" });
+  const received = new Promise<any>(resolve => socket.addEventListener("message", event => resolve(JSON.parse(event.data)), { once: true }));
+  socket.send("x".repeat(2 * 1024 * 1024));
+  const frame = await received;
+  expect(frame.user).toBe("kenan"); expect(frame.session).toBeNull();
+  expect(frame.upstream).toBe(readFileSync(join(root, "upstream-credentials", "lab"), "utf8"));
+  expect(frame.bytes).toBe(2 * 1024 * 1024); expect(frame.payload.length).toBe(2 * 1024 * 1024);
+  socket.close();
 });
 
 test("WebSocket proxy propagates close codes in both directions", async () => {

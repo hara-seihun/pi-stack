@@ -36,6 +36,8 @@ import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles } from "./thread-context-files";
 import { API } from "./api";
+import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
+import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
 import { idleNotifications } from "./notifications";
@@ -1799,7 +1801,8 @@ const meet = new MeetServer((id) => {
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
-type SocketData = AudioSocketData | WriteSocketData;
+type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
+const phones = new PhoneBroker();
 const writeEndpoint = writeEngineEndpoint();
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({
@@ -1819,6 +1822,17 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (url.pathname === "/v1/phones" || url.pathname.startsWith("/v1/phones/")) {
+      const connecting = !!API.phoneConnect.match(req.method, url.pathname);
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1, connecting)) return error("Phone access requires this person's authorized router or local caller", 403);
+      if (connecting) {
+        if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return error("WebSocket upgrade required", 400);
+        return httpServer.upgrade(req, { data: { kind: "phone" } }) ? undefined : error("WebSocket upgrade failed", 400);
+      }
+      httpServer.timeout(req, 65);
+      return await phones.handle(req) ?? error("Not found", 404);
+    }
     if (API.writeStream.match(req.method, url.pathname) && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
       return httpServer.upgrade(req, { data: { kind: "write", started: false, finished: false } })
         ? undefined : error("WebSocket upgrade failed", 400);
@@ -2543,10 +2557,13 @@ const server = Bun.serve<SocketData>({
   },
   websocket: {
     perMessageDeflate: false,
-    maxPayloadLength: AUDIO_SOCKET_BACKPRESSURE_BYTES,
-    backpressureLimit: AUDIO_SOCKET_BACKPRESSURE_BYTES,
+    maxPayloadLength: PHONE_MAX_FRAME_BYTES,
+    backpressureLimit: PHONE_MAX_FRAME_BYTES,
+    idleTimeout: 45,
+    sendPings: true,
     closeOnBackpressureLimit: false,
     open(socket) {
+      if (socket.data.kind === "phone") { socket.data.connection = phones.open({ send: frame => socket.send(frame), close: (code, reason) => socket.close(code, reason) }); return; }
       if (socket.data.kind === "write") { socket.data.receive = connectWrite(socket as Bun.ServerWebSocket<WriteSocketData>, writeEndpoint, writeDictionary); return; }
       const audio = openCallAudio(socket.data.callId);
       if (!audio) {
@@ -2564,6 +2581,7 @@ const server = Bun.serve<SocketData>({
       }
     },
     message(socket, message) {
+      if (socket.data.kind === "phone") { if (socket.data.connection) phones.receive(socket.data.connection, message); return; }
       if (socket.data.kind === "write") {
         const write = socket as Bun.ServerWebSocket<WriteSocketData>;
         write.data.receive?.(message);
@@ -2574,6 +2592,7 @@ const server = Bun.serve<SocketData>({
       socket.data.audio?.receive(frame);
     },
     close(socket) {
+      if (socket.data.kind === "phone") { if (socket.data.connection) phones.disconnected(socket.data.connection); return; }
       if (socket.data.kind === "write") {
         const write = socket as Bun.ServerWebSocket<WriteSocketData>;
         if (!write.data.finished && write.data.upstream?.readyState === WebSocket.OPEN) write.data.upstream.send(JSON.stringify({ type: "cancel" }));
@@ -2675,6 +2694,7 @@ async function closeImageGeneration() {
 const supervisorRelease = new SupervisorRelease({
   suspend() {
     shuttingDown = true;
+    phones.stop();
     stopSupervisorTimers();
     unsubscribeThreads();
     threads.suspend();

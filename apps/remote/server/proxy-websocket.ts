@@ -1,7 +1,9 @@
+import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
+
 const WEBSOCKET_BACKPRESSURE_LIMIT = 64 * 1024;
-const WEBSOCKET_MAX_MESSAGE_BYTES = 1024 * 1024;
 
 export type ProxySocketData = {
+  phone: boolean;
   signal: AbortSignal;
   upstream: WebSocket;
   abort?: () => void;
@@ -26,9 +28,11 @@ function closeUpstream(socket: WebSocket | undefined, code: number, reason: stri
 
 export const proxyWebsocket = {
   perMessageDeflate: false,
-  maxPayloadLength: WEBSOCKET_MAX_MESSAGE_BYTES,
-  backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,
+  maxPayloadLength: PHONE_MAX_FRAME_BYTES,
+  backpressureLimit: PHONE_MAX_FRAME_BYTES,
   closeOnBackpressureLimit: false,
+  idleTimeout: 45,
+  sendPings: true,
   open(socket) {
     const { upstream, signal } = socket.data;
     if (signal.aborted) {
@@ -43,9 +47,23 @@ export const proxyWebsocket = {
     socket.data.abort = abort;
     signal.addEventListener("abort", abort, { once: true });
     upstream.addEventListener("message", (event) => {
-      if (socket.readyState !== WebSocket.OPEN || socket.getBufferedAmount() >= WEBSOCKET_BACKPRESSURE_LIMIT) return;
+      if (socket.readyState !== WebSocket.OPEN) return;
+      const limit = socket.data.phone ? PHONE_MAX_FRAME_BYTES : WEBSOCKET_BACKPRESSURE_LIMIT;
+      if (socket.getBufferedAmount() >= limit) {
+        if (socket.data.phone) {
+          closeUpstream(upstream, 1011, "Phone backpressure exceeded");
+          closeBrowser(socket, 1011, "Phone backpressure exceeded");
+        }
+        return;
+      }
       const message = event.data;
-      if (typeof message === "string" || message instanceof ArrayBuffer) socket.send(message, false);
+      if (typeof message === "string" || message instanceof ArrayBuffer) {
+        const sent = socket.send(message, false);
+        if (sent === 0 && socket.data.phone) {
+          closeUpstream(upstream, 1011, "Phone forwarding failed");
+          closeBrowser(socket, 1011, "Phone forwarding failed");
+        }
+      }
     });
     upstream.addEventListener("close", (event) => {
       socket.data.closed = true;
@@ -58,7 +76,15 @@ export const proxyWebsocket = {
   },
   message(socket, message) {
     const upstream = socket.data.upstream;
-    if (upstream.readyState !== WebSocket.OPEN || upstream.bufferedAmount >= WEBSOCKET_BACKPRESSURE_LIMIT) return;
+    if (upstream.readyState !== WebSocket.OPEN) return;
+    const limit = socket.data.phone ? PHONE_MAX_FRAME_BYTES : WEBSOCKET_BACKPRESSURE_LIMIT;
+    if (upstream.bufferedAmount >= limit) {
+      if (socket.data.phone) {
+        closeUpstream(upstream, 1011, "Phone backpressure exceeded");
+        closeBrowser(socket, 1011, "Phone backpressure exceeded");
+      }
+      return;
+    }
     upstream.send(message);
   },
   close(socket, code, reason) {

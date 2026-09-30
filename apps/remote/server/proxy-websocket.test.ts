@@ -1,5 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { proxyWebsocket, type ProxySocketData } from "./proxy-websocket";
+import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 
 function peer() {
   return Object.assign(new EventTarget(), {
@@ -17,7 +18,7 @@ function peer() {
 test.each(["browser", "upstream"] as const)("WebSocket proxy drops at a stalled %s and resumes without replay", (direction) => {
   const upstream = peer();
   const browser = Object.assign(peer(), {
-    data: { upstream: upstream as unknown as WebSocket, signal: new AbortController().signal, closed: false },
+    data: { phone: false, upstream: upstream as unknown as WebSocket, signal: new AbortController().signal, closed: false },
   });
   const socket = browser as unknown as Bun.ServerWebSocket<ProxySocketData>;
   proxyWebsocket.open(socket);
@@ -30,7 +31,6 @@ test.each(["browser", "upstream"] as const)("WebSocket proxy drops at a stalled 
     } else proxyWebsocket.message(socket, message);
   };
 
-  expect(proxyWebsocket.backpressureLimit).toBe(65_536);
   expect(proxyWebsocket.closeOnBackpressureLimit).toBe(false);
   for (const message of ["text", Buffer.from([1, 2, 3])]) {
     target.send.mockClear();
@@ -59,4 +59,48 @@ test.each(["browser", "upstream"] as const)("WebSocket proxy drops at a stalled 
     deliver("not open");
   }
   expect(target.send).not.toHaveBeenCalled();
+});
+
+test.each(["browser", "upstream"] as const)("phone proxy forwards beyond audio pressure and closes both peers at stalled %s", (direction) => {
+  const upstream = peer();
+  const browser = Object.assign(peer(), {
+    data: { phone: true, upstream: upstream as unknown as WebSocket, signal: new AbortController().signal, closed: false },
+  });
+  const socket = browser as unknown as Bun.ServerWebSocket<ProxySocketData>;
+  proxyWebsocket.open(socket);
+  const target = direction === "browser" ? browser : upstream;
+  const deliver = () => {
+    if (direction === "browser") upstream.dispatchEvent(new MessageEvent("message", { data: "result" }));
+    else proxyWebsocket.message(socket, "command");
+  };
+
+  expect(proxyWebsocket.backpressureLimit).toBe(PHONE_MAX_FRAME_BYTES);
+  for (const queued of [65_536, PHONE_MAX_FRAME_BYTES - 1]) {
+    target.bufferedAmount = queued;
+    deliver();
+  }
+  expect(target.send).toHaveBeenCalledTimes(2);
+  expect(browser.close).not.toHaveBeenCalled();
+  expect(upstream.close).not.toHaveBeenCalled();
+
+  target.bufferedAmount = PHONE_MAX_FRAME_BYTES;
+  deliver();
+  expect(target.send).toHaveBeenCalledTimes(2);
+  expect(browser.close).toHaveBeenCalledWith(1011, "Phone backpressure exceeded");
+  expect(upstream.close).toHaveBeenCalledWith(1011, "Phone backpressure exceeded");
+});
+
+test.each([0, -1])("phone proxy distinguishes failed send (%i) from queued delivery", (sent) => {
+  const upstream = peer();
+  const browser = Object.assign(peer(), {
+    data: { phone: true, upstream: upstream as unknown as WebSocket, signal: new AbortController().signal, closed: false },
+  });
+  browser.send.mockReturnValue(sent);
+  proxyWebsocket.open(browser as unknown as Bun.ServerWebSocket<ProxySocketData>);
+  upstream.dispatchEvent(new MessageEvent("message", { data: "result" }));
+  expect(browser.send).toHaveBeenCalledWith("result", false);
+  for (const target of [browser, upstream]) {
+    if (sent === 0) expect(target.close).toHaveBeenCalledWith(1011, "Phone forwarding failed");
+    else expect(target.close).not.toHaveBeenCalled();
+  }
 });
