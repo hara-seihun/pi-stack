@@ -55,7 +55,7 @@ import java.util.function.BooleanSupplier;
 
 public final class PhoneData {
     public static final int MAX_FILE_BYTES = 1024 * 1024;
-    private static final String COMMANDS = "|device.info|apps.list|files.list|files.read|files.write|files.mkdir|files.delete|contacts.list|contacts.insert|calendar.list|calendar.events|calendar.insert|location.get|sms.list|sms.send|calls.list|call.dial|usage.query|settings.get|settings.put|device.lock|device.reboot|device.wipe|apps.suspend|permissions.grant|";
+    private static final String COMMANDS = "|device.info|apps.list|files.list|files.read|files.write|files.mkdir|files.delete|contacts.list|contacts.get|contacts.insert|calendar.list|calendar.events|calendar.instances|calendar.insert|location.get|sms.list|sms.send|calls.list|call.dial|usage.query|settings.get|settings.put|device.lock|device.reboot|device.wipe|apps.suspend|permissions.grant|";
     private final Context context;
     private final JSONObject args;
     private final long deadline;
@@ -112,9 +112,11 @@ public final class PhoneData {
             case "files.mkdir": return filesMkdir();
             case "files.delete": return filesDelete();
             case "contacts.list": return contactsList();
+            case "contacts.get": return contactDetails();
             case "contacts.insert": return contactsInsert();
             case "calendar.list": return calendars();
             case "calendar.events": return events();
+            case "calendar.instances": return instances();
             case "calendar.insert": return calendarInsert();
             case "location.get": return location();
             case "sms.list": return smsList();
@@ -364,6 +366,15 @@ public final class PhoneData {
             "display_name ASC, _id ASC");
     }
 
+    private JSONObject contactDetails() throws Exception {
+        require(Manifest.permission.READ_CONTACTS);
+        long id = number("contactId", -1, 1, Long.MAX_VALUE);
+        if (id < 1) throw new JSONException("contactId is required");
+        return query(ContactsContract.Data.CONTENT_URI,
+            new String[]{"_id", "contact_id", "mimetype", "data1", "data2", "data3"},
+            "contact_id=?", new String[]{Long.toString(id)}, "mimetype ASC, _id ASC");
+    }
+
     private JSONObject contactsInsert() throws Exception {
         require(Manifest.permission.WRITE_CONTACTS);
         String name = text("name");
@@ -405,6 +416,23 @@ public final class PhoneData {
         return query(CalendarContract.Events.CONTENT_URI,
             new String[]{"_id", "calendar_id", "title", "description", "eventLocation", "dtstart", "dtend", "eventTimezone", "allDay", "rrule"},
             clauses.isEmpty() ? null : String.join(" AND ", clauses), values.toArray(new String[0]), "dtstart ASC, _id ASC");
+    }
+
+    private JSONObject instances() throws Exception {
+        require(Manifest.permission.READ_CALENDAR);
+        long start = number("start", -1, 0, Long.MAX_VALUE);
+        long end = number("end", -1, 1, Long.MAX_VALUE);
+        if (start < 0 || end <= start || end - start > 366L * 86400000) {
+            throw new JSONException("start/end Unix ms required; range must be positive and at most 366 days");
+        }
+        Uri.Builder builder = CalendarContract.Instances.CONTENT_URI.buildUpon();
+        android.content.ContentUris.appendId(builder, start);
+        android.content.ContentUris.appendId(builder, end);
+        return query(builder.build(),
+            new String[]{"event_id", "calendar_id", "title", "description", "eventLocation", "begin", "end", "allDay"},
+            args.has("calendarId") ? "calendar_id=?" : null,
+            args.has("calendarId") ? new String[]{Long.toString(number("calendarId", -1, 1, Long.MAX_VALUE))} : null,
+            "begin ASC, event_id ASC");
     }
 
     private JSONObject calendarInsert() throws Exception {
