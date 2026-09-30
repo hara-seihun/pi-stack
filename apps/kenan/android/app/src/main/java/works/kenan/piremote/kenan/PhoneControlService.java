@@ -118,6 +118,7 @@ public final class PhoneControlService extends Service {
                 .put("microphone", ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("cameraCapture", false).put("microphoneCapture", false).put("clipboardRead", false)
                 .put("deviceLocked", ((android.app.KeyguardManager) context.getSystemService(KEYGUARD_SERVICE)).isDeviceLocked())
+                .put("deviceLocked", ((android.app.KeyguardManager) context.getSystemService(KEYGUARD_SERVICE)).isDeviceLocked())
                 .put("transport", "outbound-websocket").put("requiresAdb", false).put("requiresWifi", false);
             return caps;
         } catch (Exception defect) { throw new IllegalStateException(defect); }

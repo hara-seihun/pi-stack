@@ -41,10 +41,6 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     private void clearNodes() { for (AccessibilityNodeInfo node : nodes.values()) node.recycle(); nodes.clear(); }
     void dispatch(String command, JSONObject args, Consumer<PhoneResult> done) {
         try {
-            if ((command.equals("ui.tap") || command.equals("ui.swipe") || command.equals("ui.text") || command.equals("ui.action"))
-                && ((android.app.KeyguardManager) getSystemService(KEYGUARD_SERVICE)).isDeviceLocked()) {
-                done.accept(PhoneResult.error("device_locked", "Authenticated unlock must happen on the phone")); return;
-            }
             switch (command) {
                 case "ui.tree" -> {
                     clearNodes(); snapshot++; remainingText = 500000; truncated = false;
@@ -80,7 +76,6 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                     boolean owned = id.isEmpty();
                     try {
                         if (node == null || !node.refresh()) { done.accept(PhoneResult.error("stale_node", "Read ui.tree again or focus an editable field")); return; }
-                        if (node.isPassword()) { done.accept(PhoneResult.error("protected_content", "Password fields are not exposed or editable")); return; }
                         Bundle bundle = new Bundle();
                         int action;
                         if (command.equals("ui.text")) {
