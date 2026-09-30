@@ -156,11 +156,12 @@ try {
   const ownerName = `doctor-host-${randomUUID()}`;
   const attachedName = `doctor-attach-${randomUUID()}`;
   const owner = (args) => command(["--session", ownerName, ...args]);
-  const attached = (args) => command(["--session", attachedName, ...args]);
+  let cdpUrl;
+  const attached = (args) => command(["--session", attachedName, ...(cdpUrl ? ["--cdp", cdpUrl] : []), ...args]);
   try {
     await owner(["open", url]);
-    const cdp = await owner(["get", "cdp-url"]);
-    await attached(["--cdp", cdp.cdpUrl, "get", "url"]);
+    cdpUrl = (await owner(["get", "cdp-url"])).cdpUrl;
+    await attached(["get", "url"]);
     await attached(["frame", "iframe[title='Secure payment input frame']"]);
     await attached(["snapshot", "-i"]);
     await attached(["fill", "#frame-input", frameValue]);
