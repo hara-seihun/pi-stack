@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { listPersons, publicPerson, type Person } from "./persons";
 import { configuredEnvironments, personEnvironments, publicEnvironments } from "./environments";
 import { RouterSessions } from "./router-sessions";
+import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { proxyFetch } from "./proxy-fetch";
 import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
@@ -134,7 +135,7 @@ async function forget(person: Person): Promise<{ ok: boolean; message: string }>
 
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate", "te", "trailer"]);
 const WEBSOCKET_BACKPRESSURE_LIMIT = 64 * 1024;
-const WEBSOCKET_MAX_MESSAGE_BYTES = 1024 * 1024;
+const WEBSOCKET_MAX_MESSAGE_BYTES = PHONE_MAX_FRAME_BYTES;
 
 type RequestIdentity = {
   authenticated: { user: string; signal: AbortSignal } | null;
@@ -168,6 +169,7 @@ function upstreamCredential(environment: string): string {
 }
 
 type ProxySocketData = {
+  phone: boolean;
   signal: AbortSignal;
   upstream: WebSocket;
   abort?: () => void;
@@ -230,11 +232,11 @@ function closeUpstream(socket: WebSocket | undefined, code: number, reason: stri
   else (socket as WebSocket & { terminate(): void }).terminate();
 }
 
-async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal): Promise<WebSocket | null> {
+async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal, environment?: string): Promise<WebSocket | null> {
   const WebSocketClient = WebSocket as typeof WebSocket & { new(url: string, options: Bun.WebSocketOptions): WebSocket };
   const upstream = new WebSocketClient(target, {
     protocols,
-    headers: { "x-pi-remote-user": user },
+    headers: { "x-pi-remote-user": user, ...(environment ? { [UPSTREAM_CREDENTIAL_HEADER]: upstreamCredential(environment) } : {}) },
     perMessageDeflate: false,
   });
   upstream.binaryType = "arraybuffer";
@@ -279,11 +281,11 @@ async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySo
   if ("error" in destination) return destination.error;
   if (authenticated.signal.aborted) return locked(person.user);
   const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map(value => value.trim()).filter(Boolean);
-  const upstream = await openUpstream(websocketUrl(destination.origin, destination.target), protocols, person.user, authenticated.signal);
+  const upstream = await openUpstream(websocketUrl(destination.origin, destination.target), protocols, person.user, authenticated.signal, destination.upstream);
   if (!upstream) return Response.json({ error: authenticated.signal.aborted ? "Session ended" : "Supervisor WebSocket unreachable" }, { status: authenticated.signal.aborted ? 423 : 502 });
   const upgraded = server.upgrade(req, {
     ...(upstream.protocol ? { headers: { "sec-websocket-protocol": upstream.protocol } } : {}),
-    data: { upstream, signal: authenticated.signal, closed: false },
+    data: { phone: destination.target.pathname === "/v1/phones/connect", upstream, signal: authenticated.signal, closed: false },
   });
   if (!upgraded) upstream.close(1011, "Browser upgrade failed");
   return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
@@ -462,8 +464,10 @@ Bun.serve<ProxySocketData>({
   websocket: {
     perMessageDeflate: false,
     maxPayloadLength: WEBSOCKET_MAX_MESSAGE_BYTES,
-    backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,
+    backpressureLimit: PHONE_MAX_FRAME_BYTES,
     closeOnBackpressureLimit: false,
+    idleTimeout: 45,
+    sendPings: true,
     open(socket) {
       const { upstream, signal } = socket.data;
       if (signal.aborted) {
@@ -478,9 +482,17 @@ Bun.serve<ProxySocketData>({
       socket.data.abort = abort;
       signal.addEventListener("abort", abort, { once: true });
       upstream.addEventListener("message", (event) => {
-        if (socket.readyState !== WebSocket.OPEN || socket.getBufferedAmount() >= WEBSOCKET_BACKPRESSURE_LIMIT) return;
+        if (socket.readyState !== WebSocket.OPEN) return;
+        const limit = socket.data.phone ? PHONE_MAX_FRAME_BYTES : WEBSOCKET_BACKPRESSURE_LIMIT;
+        if (socket.getBufferedAmount() >= limit) {
+          if (socket.data.phone) { closeUpstream(upstream, 1011, "Phone backpressure exceeded"); closeBrowser(socket, 1011, "Phone backpressure exceeded"); }
+          return;
+        }
         const message = event.data;
-        if (typeof message === "string" || message instanceof ArrayBuffer) socket.send(message, false);
+        if (typeof message === "string" || message instanceof ArrayBuffer) {
+          const sent = socket.send(message, false);
+          if (sent === 0 && socket.data.phone) { closeUpstream(upstream, 1011, "Phone forwarding failed"); closeBrowser(socket, 1011, "Phone forwarding failed"); }
+        }
       });
       upstream.addEventListener("close", (event) => {
         socket.data.closed = true;
@@ -493,7 +505,12 @@ Bun.serve<ProxySocketData>({
     },
     message(socket, message) {
       const upstream = socket.data.upstream;
-      if (upstream.readyState !== WebSocket.OPEN || upstream.bufferedAmount >= WEBSOCKET_BACKPRESSURE_LIMIT) return;
+      if (upstream.readyState !== WebSocket.OPEN) return;
+      const limit = socket.data.phone ? PHONE_MAX_FRAME_BYTES : WEBSOCKET_BACKPRESSURE_LIMIT;
+      if (upstream.bufferedAmount >= limit) {
+        if (socket.data.phone) { closeUpstream(upstream, 1011, "Phone backpressure exceeded"); closeBrowser(socket, 1011, "Phone backpressure exceeded"); }
+        return;
+      }
       upstream.send(message);
     },
     close(socket, code, reason) {
