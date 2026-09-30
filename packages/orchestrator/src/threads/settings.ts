@@ -1,7 +1,7 @@
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { isSupportedModel, nativeModels, nativeProviders } from "../models.js";
 import { threadMode } from "./modes.js";
-import { isSpeed, modelSpeedModes } from "./speed.js";
+import { isSpeed, requestedSpeedError } from "./speed.js";
 import { isThinkingLevel, type Result, type SettingsOverrides, type Thread, type ThreadSettings } from "./contracts.js";
 
 export function resolveSpawnSettings(input: SettingsOverrides | undefined, parent: Thread | null, requestedMode?: unknown): Result<ThreadSettings> {
@@ -41,6 +41,7 @@ export function resolveThreadSettings(input: SettingsOverrides = {}, current?: T
   const thinkingLevel = input.thinkingLevel ?? (!changed ? current?.thinkingLevel : undefined) ?? (model?.id === "luna" ? "max" : "high");
   const speed = input.speed ?? (!changed ? current?.speed : undefined) ?? "standard";
   if (!isThinkingLevel(thinkingLevel) || !isSpeed(speed)) return { ok: false, error: { code: "invalid_request", message: "Invalid thinking level or provider speed" } };
-  if (speed === "ultrafast" && !modelSpeedModes(family, modelId ?? "").includes(speed)) return { ok: false, error: { code: "invalid_request", message: "Ultrafast speed requires OpenAI Codex Astra" } };
+  const speedError = requestedSpeedError({ provider: family, id: modelId ?? "" }, speed);
+  if (speedError) return { ok: false, error: { code: "invalid_request", message: speedError } };
   return { ok: true, value: { model: canonical, thinkingLevel, speed } };
 }
