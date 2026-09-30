@@ -171,7 +171,7 @@ describe("live mode", () => {
   it("declares the conversation, gives workers the cheap priority profile and live admission, and keeps the mode", async () => {
     const { root, service } = fixture();
     const conversation = value(await service.spawn({ requestId: "meeting", cwd: root, metadata: { mode: "live" } }));
-    expect(conversation).toMatchObject({ admission: "live", settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "low", speed: "priority" } });
+    expect(conversation).toMatchObject({ admission: "live", settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "low", speed: "ultrafast" } });
     const worker = value(await service.spawn({ requestId: "worker", cwd: root, parentId: conversation.id }));
     expect(worker).toMatchObject({ admission: "live", metadata: { mode: "live" }, settings: { model: "openai-codex/gpt-6-luna", thinkingLevel: "medium", speed: "priority" } });
     const sol = value(await service.spawn({ requestId: "synthesis", cwd: root, parentId: conversation.id, settings: { model: "sol" } }));
