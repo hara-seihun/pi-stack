@@ -1,0 +1,834 @@
+diff --git a/packages/coding-agent/docs/extensions.md b/packages/coding-agent/docs/extensions.md
+index 9a3d06454..7780ac634 100644
+--- a/packages/coding-agent/docs/extensions.md
++++ b/packages/coding-agent/docs/extensions.md
+@@ -198,7 +198,7 @@ Keep tool and event behavior independent from rendering so non-interactive modes
+ 
+ ### Errors and cleanup
+ 
+-Pi reports handler errors and continues where possible. A `tool_call` handler failure blocks the tool as a fail-safe; a tool execution failure becomes an error result for the model.
++Pi reports notification-handler errors and continues where possible. Admission failures from `session_start`, `model_select`, `session_before_*`, `before_agent_start`, `before_provider_request`, and `before_provider_headers` propagate to the caller and stop that operation; they never authorize a substitute model or an unguarded request. Provider registrations loaded by extension factories are applied before model selection in both CLI and SDK startup. A `tool_call` handler failure blocks the tool as a fail-safe; a tool execution failure becomes an error result for the model.
+ 
+ Release resources in `session_shutdown` even when normal operation attempted cleanup.
+ Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
+diff --git a/packages/coding-agent/docs/models.md b/packages/coding-agent/docs/models.md
+index 1561ca091..af2764029 100644
+--- a/packages/coding-agent/docs/models.md
++++ b/packages/coding-agent/docs/models.md
+@@ -32,7 +32,9 @@ Run `/thinking` to select the thinking level for the current model. Press `Ctrl+
+ 
+ `Ctrl+P` cycles through available models. Use `/scoped-models` to control that cycle and save the selection, or configure model patterns through [Settings](settings.md#model-cycling).
+ 
+-A session records model and thinking-level changes. Resuming the session restores them without changing defaults for new sessions.
++A session records model and thinking-level changes. Resuming the session restores them without changing defaults for new sessions. A requested or configured model is authoritative: if it is missing, startup fails instead of choosing another provider. Authentication is resolved after routing extensions bind the selected provider; an unavailable route stays a visible failure.
++
++Set `"explicitOnly": true` on a provider in `models.json` to retain it in the manual catalog while excluding it from automatic startup selection and scoped-model startup. Such a provider requires `--model provider/id`, an explicit SDK `model`, a manual selection, or an already-saved manual session selection. Saving it as a global startup default does not opt it into automatic selection. Unknown model IDs must be added to `models.json` instead of borrowing another model's metadata.
+ 
+ ## Connect local models
+ 
+diff --git a/packages/coding-agent/src/core/agent-session-services.ts b/packages/coding-agent/src/core/agent-session-services.ts
+index 531f51d61..b087da566 100644
+--- a/packages/coding-agent/src/core/agent-session-services.ts
++++ b/packages/coding-agent/src/core/agent-session-services.ts
+@@ -3,6 +3,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+ import type { Model } from "@earendil-works/pi-ai";
+ import { getAgentDir } from "../config.ts";
+ import { resolvePath } from "../utils/paths.ts";
++import { applyExtensionProviders } from "./extension-providers.ts";
+ import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+ import { ModelRuntime } from "./model-runtime.ts";
+ import {
+@@ -154,32 +155,7 @@ export async function createAgentSessionServices(
+ 	await resourceLoader.reload(options.resourceLoaderReloadOptions);
+ 
+ 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+-	const extensionsResult = resourceLoader.getExtensions();
+-	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
+-		try {
+-			modelRuntime.registerProvider(name, config);
+-		} catch (error) {
+-			const message = error instanceof Error ? error.message : String(error);
+-			diagnostics.push({
+-				type: "error",
+-				message: `Extension "${extensionPath}" error: ${message}`,
+-			});
+-		}
+-	}
+-	extensionsResult.runtime.pendingProviderRegistrations = [];
+-	for (const { provider, extensionPath } of extensionsResult.runtime.pendingNativeProviderRegistrations) {
+-		try {
+-			modelRuntime.registerNativeProvider(provider);
+-		} catch (error) {
+-			const message = error instanceof Error ? error.message : String(error);
+-			diagnostics.push({
+-				type: "error",
+-				message: `Extension "${extensionPath}" error: ${message}`,
+-			});
+-		}
+-	}
+-	extensionsResult.runtime.pendingNativeProviderRegistrations = [];
+-	await modelRuntime.refresh({ allowNetwork: false });
++	await applyExtensionProviders(resourceLoader.getExtensions().runtime, modelRuntime);
+ 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
+ 
+ 	return {
+diff --git a/packages/coding-agent/src/core/extension-providers.ts b/packages/coding-agent/src/core/extension-providers.ts
+new file mode 100644
+index 000000000..05dcabdf7
+--- /dev/null
++++ b/packages/coding-agent/src/core/extension-providers.ts
+@@ -0,0 +1,12 @@
++import type { ExtensionRuntime } from "./extensions/types.ts";
++import type { ModelRuntime } from "./model-runtime.ts";
++
++/** Model selection must see providers loaded by extensions, in CLI and SDK alike. */
++export async function applyExtensionProviders(runtime: ExtensionRuntime, models: ModelRuntime): Promise<void> {
++	if (!runtime.pendingProviderRegistrations.length && !runtime.pendingNativeProviderRegistrations.length) return;
++	for (const { name, config } of runtime.pendingProviderRegistrations) models.registerProvider(name, config);
++	for (const { provider } of runtime.pendingNativeProviderRegistrations) models.registerNativeProvider(provider);
++	runtime.pendingProviderRegistrations = [];
++	runtime.pendingNativeProviderRegistrations = [];
++	await models.refresh({ allowNetwork: false });
++}
+diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
+index b0e99f8ff..278624e0b 100644
+--- a/packages/coding-agent/src/core/extensions/runner.ts
++++ b/packages/coding-agent/src/core/extensions/runner.ts
+@@ -1009,6 +1009,13 @@ export class ExtensionRunner {
+ 						error: message,
+ 						stack,
+ 					});
++					if (
++						event.type === "session_start" ||
++						event.type === "model_select" ||
++						this.isSessionBeforeEvent(event)
++					) {
++						throw err;
++					}
+ 				}
+ 			}
+ 		}
+@@ -1274,6 +1281,7 @@ export class ExtensionRunner {
+ 						error: message,
+ 						stack,
+ 					});
++					throw err;
+ 				}
+ 			}
+ 		}
+@@ -1302,6 +1310,7 @@ export class ExtensionRunner {
+ 						error: message,
+ 						stack,
+ 					});
++					throw err;
+ 				}
+ 			}
+ 		}
+@@ -1356,6 +1365,7 @@ export class ExtensionRunner {
+ 						error: message,
+ 						stack,
+ 					});
++					throw err;
+ 				}
+ 			}
+ 		}
+diff --git a/packages/coding-agent/src/core/model-config.ts b/packages/coding-agent/src/core/model-config.ts
+index e0df3473b..816025d09 100644
+--- a/packages/coding-agent/src/core/model-config.ts
++++ b/packages/coding-agent/src/core/model-config.ts
+@@ -227,6 +227,7 @@ const ModelOverrideSchema = Type.Object({
+ });
+ 
+ const ProviderConfigSchema = Type.Object({
++	explicitOnly: Type.Optional(Type.Boolean()),
+ 	name: Type.Optional(Type.String({ minLength: 1 })),
+ 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
+ 	apiKey: Type.Optional(Type.String({ minLength: 1 })),
+diff --git a/packages/coding-agent/src/core/model-resolver.ts b/packages/coding-agent/src/core/model-resolver.ts
+index 44f22ad8f..8082b1891 100644
+--- a/packages/coding-agent/src/core/model-resolver.ts
++++ b/packages/coding-agent/src/core/model-resolver.ts
+@@ -172,22 +172,6 @@ export interface ParsedModelResult {
+ 	warning: string | undefined;
+ }
+ 
+-function buildFallbackModel(provider: string, modelId: string, availableModels: Model<Api>[]): Model<Api> | undefined {
+-	const providerModels = availableModels.filter((m) => m.provider === provider);
+-	if (providerModels.length === 0) return undefined;
+-
+-	const defaultId = defaultModelPerProvider[provider as KnownProvider];
+-	const baseModel = defaultId
+-		? (providerModels.find((m) => m.id === defaultId) ?? providerModels[0])
+-		: providerModels[0];
+-
+-	return {
+-		...baseModel,
+-		id: modelId,
+-		name: modelId,
+-	};
+-}
+-
+ /**
+  * Parse a pattern to extract model and thinking level.
+  * Handles models with colons in their IDs (e.g., OpenRouter's :exacto suffix).
+@@ -409,7 +393,7 @@ export function resolveCliModel(options: {
+ 	cliThinking?: ThinkingLevel;
+ 	modelRuntime: ModelRuntime;
+ }): ResolveCliModelResult {
+-	const { cliProvider, cliModel, cliThinking, modelRuntime } = options;
++	const { cliProvider, cliModel, modelRuntime } = options;
+ 
+ 	if (!cliModel) {
+ 		return { model: undefined, warning: undefined, error: undefined };
+@@ -447,7 +431,6 @@ export function resolveCliModel(options: {
+ 	// (e.g. "zai/glm-5" should resolve to provider=zai, model=glm-5, not to a
+ 	// vercel-ai-gateway model with id "zai/glm-5").
+ 	let pattern = cliModel;
+-	let inferredProvider = false;
+ 
+ 	if (!provider) {
+ 		const slashIndex = cliModel.indexOf("/");
+@@ -457,7 +440,6 @@ export function resolveCliModel(options: {
+ 			if (canonical) {
+ 				provider = canonical;
+ 				pattern = cliModel.substring(slashIndex + 1);
+-				inferredProvider = true;
+ 			}
+ 		}
+ 	}
+@@ -517,85 +499,9 @@ export function resolveCliModel(options: {
+ 	});
+ 
+ 	if (model) {
+-		// If provider inference matched an unauthenticated provider/model pair, prefer
+-		// one exact raw model-id match that is authenticated. This keeps
+-		// "provider/model" syntax preferred when usable, but handles models whose
+-		// literal id starts with a known provider name (for example
+-		// commandcode model id "xiaomi/mimo-v2.5-pro").
+-		if (inferredProvider) {
+-			const rawExactMatches = availableModels.filter(
+-				(m) => m.id.toLowerCase() === cliModel.toLowerCase() && !modelsAreEqual(m, model),
+-			);
+-			if (rawExactMatches.length > 0 && !modelRuntime.hasConfiguredAuth(model.provider)) {
+-				const authenticatedRawMatches = rawExactMatches.filter((m) => modelRuntime.hasConfiguredAuth(m.provider));
+-				if (authenticatedRawMatches.length === 1) {
+-					return {
+-						model: authenticatedRawMatches[0],
+-						thinkingLevel: undefined,
+-						warning: undefined,
+-						error: undefined,
+-					};
+-				}
+-			}
+-		}
+ 		return { model, thinkingLevel, warning, error: undefined };
+ 	}
+ 
+-	// If we inferred a provider from the slash but found no match within that provider,
+-	// fall back to matching the full input as a raw model id across all models.
+-	// This handles OpenRouter-style IDs like "openai/gpt-4o:extended" where "openai"
+-	// looks like a provider but the full string is actually a model id on openrouter.
+-	if (inferredProvider) {
+-		const lower = cliModel.toLowerCase();
+-		const exact = availableModels.find(
+-			(m) => m.id.toLowerCase() === lower || `${m.provider}/${m.id}`.toLowerCase() === lower,
+-		);
+-		if (exact) {
+-			return { model: exact, warning: undefined, thinkingLevel: undefined, error: undefined };
+-		}
+-		// Also try parseModelPattern on the full input against all models
+-		const fallback = parseModelPattern(cliModel, availableModels, {
+-			allowInvalidThinkingLevelFallback: false,
+-		});
+-		if (fallback.model) {
+-			return {
+-				model: fallback.model,
+-				thinkingLevel: fallback.thinkingLevel,
+-				warning: fallback.warning,
+-				error: undefined,
+-			};
+-		}
+-	}
+-
+-	if (provider) {
+-		// Parse thinking level suffix from the pattern before building the fallback model,
+-		// but only when --thinking is not explicitly provided.
+-		// e.g. "zai-org/GLM-5.1-FP8:high" → modelId="zai-org/GLM-5.1-FP8", fallbackThinking="high"
+-		let fallbackPattern = pattern;
+-		let fallbackThinking: ThinkingLevel | undefined;
+-		if (!cliThinking) {
+-			const lastColon = pattern.lastIndexOf(":");
+-			if (lastColon !== -1) {
+-				const suffix = pattern.substring(lastColon + 1);
+-				if (isValidThinkingLevel(suffix)) {
+-					fallbackPattern = pattern.substring(0, lastColon);
+-					fallbackThinking = suffix;
+-				}
+-			}
+-		}
+-
+-		const fallbackModel = buildFallbackModel(provider, fallbackPattern, availableModels);
+-		if (fallbackModel) {
+-			const requestedThinking = cliThinking ?? fallbackThinking;
+-			const model =
+-				requestedThinking && requestedThinking !== "off" ? { ...fallbackModel, reasoning: true } : fallbackModel;
+-			const fallbackWarning = warning
+-				? `${warning} Model "${fallbackPattern}" not found for provider "${provider}". Using custom model id.`
+-				: `Model "${fallbackPattern}" not found for provider "${provider}". Using custom model id.`;
+-			return { model, thinkingLevel: fallbackThinking, warning: fallbackWarning, error: undefined };
+-		}
+-	}
+-
+ 	const display = provider ? `${provider}/${pattern}` : cliModel;
+ 	return {
+ 		model: undefined,
+@@ -646,15 +552,14 @@ export async function findInitialModel(options: {
+ 	let thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL;
+ 
+ 	// 1. CLI args take priority
+-	if (cliProvider && cliModel) {
++	if (cliModel) {
+ 		const resolved = resolveCliModel({
+ 			cliProvider,
+ 			cliModel,
+ 			modelRuntime,
+ 		});
+ 		if (resolved.error) {
+-			console.error(chalk.red(resolved.error));
+-			process.exit(1);
++			throw new Error(resolved.error);
+ 		}
+ 		if (resolved.model) {
+ 			return { model: resolved.model, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+@@ -662,8 +567,9 @@ export async function findInitialModel(options: {
+ 	}
+ 
+ 	// 2. Use first model from scoped models (skip if continuing/resuming)
+-	if (scopedModels.length > 0 && !isContinuing) {
+-		const scopedModel = scopedModels[0];
++	const automaticScope = scopedModels.filter(({ model }) => !modelRuntime.isExplicitOnly(model.provider));
++	if (automaticScope.length > 0 && !isContinuing) {
++		const scopedModel = automaticScope[0];
+ 		const perModel = modelThinkingLevels?.[`${scopedModel.model.provider}/${scopedModel.model.id}`];
+ 		return {
+ 			model: scopedModel.model,
+@@ -672,10 +578,14 @@ export async function findInitialModel(options: {
+ 		};
+ 	}
+ 
+-	// 3. Try saved default from settings if auth is configured.
++	// Credential admission happens after routing extensions bind the selected family.
+ 	if (defaultProvider && defaultModelId) {
+ 		const found = modelRuntime.getModel(defaultProvider, defaultModelId);
+-		if (found && modelRuntime.hasConfiguredAuth(found.provider)) {
++		if (!found) throw new Error(`Configured model ${defaultProvider}/${defaultModelId} not found`);
++		if (modelRuntime.isExplicitOnly(defaultProvider)) {
++			throw new Error(`Provider ${defaultProvider} requires explicit model selection`);
++		}
++		if (found) {
+ 			model = found;
+ 			const perModel = modelThinkingLevels?.[`${defaultProvider}/${defaultModelId}`];
+ 			if (perModel) {
+@@ -687,8 +597,10 @@ export async function findInitialModel(options: {
+ 		}
+ 	}
+ 
+-	// 4. Try first available model with valid API key
+-	const availableModels = [...modelRuntime.getAvailableSnapshot()];
++	// 4. Try first available automatic model with valid API key
++	const availableModels = modelRuntime
++		.getAvailableSnapshot()
++		.filter((model) => !modelRuntime.isExplicitOnly(model.provider));
+ 
+ 	if (availableModels.length > 0) {
+ 		// Try to find a default model from known providers
+@@ -709,75 +621,23 @@ export async function findInitialModel(options: {
+ }
+ 
+ /**
+- * Restore model from session, with fallback to available models
++ * Restore the requested session model without substituting another provider.
+  */
+ export async function restoreModelFromSession(
+ 	savedProvider: string,
+ 	savedModelId: string,
+-	currentModel: Model<Api> | undefined,
++	_currentModel: Model<Api> | undefined,
+ 	shouldPrintMessages: boolean,
+ 	modelRuntime: ModelRuntime,
+ ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
+ 	const restoredModel = modelRuntime.getModel(savedProvider, savedModelId);
+ 
+-	// Check if restored model exists and still has auth configured
+-	const hasConfiguredAuth = restoredModel ? modelRuntime.hasConfiguredAuth(restoredModel.provider) : false;
+-
+-	if (restoredModel && hasConfiguredAuth) {
++	if (restoredModel) {
+ 		if (shouldPrintMessages) {
+ 			console.log(chalk.dim(`Restored model: ${savedProvider}/${savedModelId}`));
+ 		}
+ 		return { model: restoredModel, fallbackMessage: undefined };
+ 	}
+ 
+-	// Model not found or no API key - fall back
+-	const reason = !restoredModel ? "model no longer exists" : "no auth configured";
+-
+-	if (shouldPrintMessages) {
+-		console.error(chalk.yellow(`Warning: Could not restore model ${savedProvider}/${savedModelId} (${reason}).`));
+-	}
+-
+-	// If we already have a model, use it as fallback
+-	if (currentModel) {
+-		if (shouldPrintMessages) {
+-			console.log(chalk.dim(`Falling back to: ${currentModel.provider}/${currentModel.id}`));
+-		}
+-		return {
+-			model: currentModel,
+-			fallbackMessage: `Could not restore model ${savedProvider}/${savedModelId} (${reason}). Using ${currentModel.provider}/${currentModel.id}.`,
+-		};
+-	}
+-
+-	// Try to find any available model
+-	const availableModels = [...modelRuntime.getAvailableSnapshot()];
+-
+-	if (availableModels.length > 0) {
+-		// Try to find a default model from known providers
+-		let fallbackModel: Model<Api> | undefined;
+-		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
+-			const defaultId = defaultModelPerProvider[provider];
+-			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
+-			if (match) {
+-				fallbackModel = match;
+-				break;
+-			}
+-		}
+-
+-		// If no default found, use first available
+-		if (!fallbackModel) {
+-			fallbackModel = availableModels[0];
+-		}
+-
+-		if (shouldPrintMessages) {
+-			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));
+-		}
+-
+-		return {
+-			model: fallbackModel,
+-			fallbackMessage: `Could not restore model ${savedProvider}/${savedModelId} (${reason}). Using ${fallbackModel.provider}/${fallbackModel.id}.`,
+-		};
+-	}
+-
+-	// No models available
+-	return { model: undefined, fallbackMessage: undefined };
++	throw new Error(`Saved model ${savedProvider}/${savedModelId} not found`);
+ }
+diff --git a/packages/coding-agent/src/core/model-runtime.ts b/packages/coding-agent/src/core/model-runtime.ts
+index 6a992a742..5c6a7bcde 100644
+--- a/packages/coding-agent/src/core/model-runtime.ts
++++ b/packages/coding-agent/src/core/model-runtime.ts
+@@ -424,6 +424,11 @@ export class ModelRuntime implements Models {
+ 		return this.snapshot.available;
+ 	}
+ 
++	/** Keep manual selections available while excluding providers from automatic selection. */
++	isExplicitOnly(providerId: string): boolean {
++		return this.config.getProvider(providerId)?.explicitOnly === true;
++	}
++
+ 	getError(): string | undefined {
+ 		const errors: string[] = [];
+ 		const configError = this.config.getError();
+diff --git a/packages/coding-agent/src/core/sdk.ts b/packages/coding-agent/src/core/sdk.ts
+index 03f68c812..d6f3c550c 100644
+--- a/packages/coding-agent/src/core/sdk.ts
++++ b/packages/coding-agent/src/core/sdk.ts
+@@ -8,6 +8,7 @@ import { AgentSession } from "./agent-session.ts";
+ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+ import { CacheWarmer } from "./cache-warmer.ts";
+ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
++import { applyExtensionProviders } from "./extension-providers.ts";
+ import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+ import { convertToLlm } from "./messages.ts";
+ import { findInitialModel } from "./model-resolver.ts";
+@@ -190,6 +191,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		time("resourceLoader.reload");
+ 	}
+ 
++	await applyExtensionProviders(resourceLoader.getExtensions().runtime, modelRuntime);
++
+ 	// Check if session has existing data to restore
+ 	const existingSession = sessionManager.buildSessionContext();
+ 	const hasExistingSession = existingSession.messages.length > 0;
+@@ -201,12 +204,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 	// If session has data, try to restore model from it
+ 	if (!model && hasExistingSession && existingSession.model) {
+ 		const restoredModel = modelRuntime.getModel(existingSession.model.provider, existingSession.model.modelId);
+-		if (restoredModel && modelRuntime.hasConfiguredAuth(restoredModel.provider)) {
+-			model = restoredModel;
+-		}
+-		if (!model) {
+-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
++		if (!restoredModel) {
++			throw new Error(`Saved model ${existingSession.model.provider}/${existingSession.model.modelId} not found`);
+ 		}
++		model = restoredModel;
+ 	}
+ 
+ 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
+@@ -223,8 +224,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		model = result.model;
+ 		if (!model) {
+ 			modelFallbackMessage = formatNoModelsAvailableMessage();
+-		} else if (modelFallbackMessage) {
+-			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+ 		}
+ 	}
+ 
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 195a1127e..d307856d8 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -6,7 +6,7 @@
+  */
+ 
+ import { createInterface } from "node:readline";
+-import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
++import type { ImageContent } from "@earendil-works/pi-ai";
+ import { setCapabilityOverrides } from "@earendil-works/pi-tui";
+ import chalk from "chalk";
+ import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
+@@ -489,25 +489,11 @@ function buildSessionOptions(
+ 		}
+ 	}
+ 
+-	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
+-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
+-		const savedProvider = settingsManager.getDefaultProvider();
+-		const savedModelId = settingsManager.getDefaultModel();
+-		const savedModel = savedProvider && savedModelId ? modelRuntime.getModel(savedProvider, savedModelId) : undefined;
+-		const savedInScope = savedModel ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel)) : undefined;
+-
+-		if (savedInScope) {
+-			options.model = savedInScope.model;
+-			// Use thinking level from scoped model config if explicitly set
+-			if (!parsed.thinking && savedInScope.thinkingLevel) {
+-				options.thinkingLevel = savedInScope.thinkingLevel;
+-			}
+-		} else {
+-			options.model = scopedModels[0].model;
+-			// Use thinking level from first scoped model if explicitly set
+-			if (!parsed.thinking && scopedModels[0].thinkingLevel) {
+-				options.thinkingLevel = scopedModels[0].thinkingLevel;
+-			}
++	const automaticModels = scopedModels.filter(({ model }) => !modelRuntime.isExplicitOnly(model.provider));
++	if (!options.model && automaticModels.length > 0 && !hasExistingSession && !settingsManager.getDefaultModel()) {
++		options.model = automaticModels[0].model;
++		if (!parsed.thinking && automaticModels[0].thinkingLevel) {
++			options.thinkingLevel = automaticModels[0].thinkingLevel;
+ 		}
+ 	}
+ 
+@@ -806,6 +792,9 @@ export async function main(args: string[], options?: MainOptions) {
+ 			settingsManager,
+ 		);
+ 		diagnostics.push(...sessionOptionDiagnostics);
++		if (parsed.help || parsed.listModels !== undefined) {
++			sessionOptions.model ??= modelRuntime.getModels()[0];
++		}
+ 
+ 		if (parsed.apiKey) {
+ 			if (!sessionOptions.model) {
+diff --git a/packages/coding-agent/test/extensions-runner.test.ts b/packages/coding-agent/test/extensions-runner.test.ts
+index 2660fb4df..69074411d 100644
+--- a/packages/coding-agent/test/extensions-runner.test.ts
++++ b/packages/coding-agent/test/extensions-runner.test.ts
+@@ -599,6 +599,34 @@ describe("ExtensionRunner", () => {
+ 	});
+ 
+ 	describe("error handling", () => {
++		it.each([
++			"session_start",
++			"model_select",
++			"session_before_compact",
++			"before_agent_start",
++			"before_provider_request",
++		])("propagates %s admission failures", async (event) => {
++			const runtime = createExtensionRuntime();
++			const extension = await loadExtensionFromFactory(
++				(pi) => {
++					pi.on(event as "session_start", () => {
++						throw new Error("Requested route unavailable");
++					});
++				},
++				tempDir,
++				createEventBus(),
++				runtime,
++			);
++			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
++			const dispatch =
++				event === "before_agent_start"
++					? runner.emitBeforeAgentStart("hello", undefined, { cwd: tempDir })
++					: event === "before_provider_request"
++						? runner.emitBeforeProviderRequest({})
++						: runner.emit({ type: event } as Parameters<typeof runner.emit>[0]);
++			await expect(dispatch).rejects.toThrow("Requested route unavailable");
++		});
++
+ 		it("calls error listeners when handler throws", async () => {
+ 			const extCode = `
+ 				export default function(pi) {
+@@ -1377,7 +1405,7 @@ describe("ExtensionRunner", () => {
+ 			expect(headers["User-Agent"]).toBe("kimchi/1.0");
+ 		});
+ 
+-		it("isolates a throwing handler and still applies the others", async () => {
++		it("refuses the request when a header admission handler throws", async () => {
+ 			const throwing = `
+ 				export default function(pi) {
+ 					pi.on("before_provider_headers", () => {
+@@ -1400,10 +1428,9 @@ describe("ExtensionRunner", () => {
+ 			const errors: Array<{ event: string; error: string }> = [];
+ 			runner.onError((err) => errors.push(err));
+ 
+-			const headers = await runner.emitBeforeProviderHeaders({ "User-Agent": "x" });
+-
+-			expect(headers["X-Good"]).toBe("yes");
+-			expect(headers["User-Agent"]).toBe("x");
++			const headers = { "User-Agent": "x" };
++			await expect(runner.emitBeforeProviderHeaders(headers)).rejects.toThrow("header handler boom");
++			expect(headers).toEqual({ "User-Agent": "x" });
+ 			expect(errors).toHaveLength(1);
+ 			expect(errors[0].event).toBe("before_provider_headers");
+ 			expect(errors[0].error).toContain("header handler boom");
+diff --git a/packages/coding-agent/test/model-resolver.test.ts b/packages/coding-agent/test/model-resolver.test.ts
+index ebed94c33..d6c404b67 100644
+--- a/packages/coding-agent/test/model-resolver.test.ts
++++ b/packages/coding-agent/test/model-resolver.test.ts
+@@ -365,7 +365,7 @@ describe("resolveCliModel", () => {
+ 		expect(result.thinkingLevel).toBe("high");
+ 	});
+ 
+-	test("prefers exact model id match over provider inference (OpenRouter-style ids)", () => {
++	test("does not substitute OpenRouter when an inferred provider lacks the model", () => {
+ 		const registry = {
+ 			getModels: () => allModels,
+ 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+@@ -375,9 +375,8 @@ describe("resolveCliModel", () => {
+ 			modelRuntime: registry,
+ 		});
+ 
+-		expect(result.error).toBeUndefined();
+-		expect(result.model?.provider).toBe("openrouter");
+-		expect(result.model?.id).toBe("openai/gpt-4o:extended");
++		expect(result.error).toContain("not found");
++		expect(result.model).toBeUndefined();
+ 	});
+ 
+ 	test("does not strip invalid :suffix as thinking level in --model (treat as raw id)", () => {
+@@ -391,12 +390,11 @@ describe("resolveCliModel", () => {
+ 			modelRuntime: registry,
+ 		});
+ 
+-		expect(result.error).toBeUndefined();
+-		expect(result.model?.provider).toBe("openai");
+-		expect(result.model?.id).toBe("gpt-4o:extended");
++		expect(result.error).toContain("not found");
++		expect(result.model).toBeUndefined();
+ 	});
+ 
+-	test("allows custom model ids for explicit providers without double prefixing", () => {
++	test("requires unknown custom model ids to be registered", () => {
+ 		const registry = {
+ 			getModels: () => allModels,
+ 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+@@ -407,9 +405,8 @@ describe("resolveCliModel", () => {
+ 			modelRuntime: registry,
+ 		});
+ 
+-		expect(result.error).toBeUndefined();
+-		expect(result.model?.provider).toBe("openrouter");
+-		expect(result.model?.id).toBe("openai/ghost-model");
++		expect(result.error).toContain("not found");
++		expect(result.model).toBeUndefined();
+ 	});
+ 
+ 	test("returns a clear error when there are no models", () => {
+@@ -527,7 +524,7 @@ describe("resolveCliModel", () => {
+ 		expect(result.model?.id).toBe("glm-5");
+ 	});
+ 
+-	test("prefers an authenticated exact raw model id over an unauthenticated inferred provider", () => {
++	test("preserves the named provider even without configured auth", () => {
+ 		const commandcodeModel: Model<"anthropic-messages"> = {
+ 			id: "xiaomi/mimo-v2.5-pro",
+ 			name: "Xiaomi MiMo via Commandcode",
+@@ -563,8 +560,8 @@ describe("resolveCliModel", () => {
+ 		});
+ 
+ 		expect(result.error).toBeUndefined();
+-		expect(result.model?.provider).toBe("commandcode");
+-		expect(result.model?.id).toBe("xiaomi/mimo-v2.5-pro");
++		expect(result.model?.provider).toBe("xiaomi");
++		expect(result.model?.id).toBe("mimo-v2.5-pro");
+ 	});
+ 
+ 	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
+@@ -582,16 +579,15 @@ describe("resolveCliModel", () => {
+ 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+ 	});
+ 
+-	describe("custom model fallback with :thinking suffix (#5552)", () => {
+-		// Models for a provider that has registered models but the specific model ID
+-		// is not in the registry (triggers buildFallbackModel path).
++	describe("registered custom model with :thinking suffix (#5552)", () => {
+ 		const neuralwattModel: Model<"anthropic-messages"> = {
+-			id: "some-base-model",
+-			name: "Some Base Model",
++			id: "zai-org/GLM-5.1-FP8",
++			name: "GLM 5.1",
++
+ 			api: "anthropic-messages",
+ 			provider: "neuralwatt",
+ 			baseUrl: "https://api.neuralwatt.com",
+-			reasoning: false,
++			reasoning: true,
+ 			input: ["text"],
+ 			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+ 			contextWindow: 128000,
+@@ -600,7 +596,7 @@ describe("resolveCliModel", () => {
+ 
+ 		const modelsWithNeuralwatt = [...allModels, neuralwattModel];
+ 
+-		test("strips :thinking suffix from custom model id in fallback path", () => {
++		test("strips :thinking suffix from a registered custom model id", () => {
+ 			const registry = {
+ 				getModels: () => modelsWithNeuralwatt,
+ 			} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+@@ -618,7 +614,7 @@ describe("resolveCliModel", () => {
+ 			expect(result.thinkingLevel).toBe("high");
+ 		});
+ 
+-		test("custom model without thinking suffix works normally in fallback path", () => {
++		test("registered custom model without thinking suffix works", () => {
+ 			const registry = {
+ 				getModels: () => modelsWithNeuralwatt,
+ 			} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+@@ -634,7 +630,7 @@ describe("resolveCliModel", () => {
+ 			expect(result.thinkingLevel).toBeUndefined();
+ 		});
+ 
+-		test("all valid thinking levels work in fallback path", () => {
++		test("all valid thinking levels work for registered custom models", () => {
+ 			const registry = {
+ 				getModels: () => modelsWithNeuralwatt,
+ 			} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+@@ -651,7 +647,7 @@ describe("resolveCliModel", () => {
+ 			}
+ 		});
+ 
+-		test("invalid thinking suffix on custom model is treated as part of model id", () => {
++		test("unknown suffix on a custom model fails", () => {
+ 			const registry = {
+ 				getModels: () => modelsWithNeuralwatt,
+ 			} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+@@ -661,11 +657,8 @@ describe("resolveCliModel", () => {
+ 				modelRuntime: registry,
+ 			});
+ 
+-			expect(result.error).toBeUndefined();
+-			expect(result.model?.provider).toBe("neuralwatt");
+-			// Invalid suffix stays in the id (it's not a thinking level)
+-			expect(result.model?.id).toBe("zai-org/GLM-5.1-FP8:banana");
+-			expect(result.thinkingLevel).toBeUndefined();
++			expect(result.error).toContain("not found");
++			expect(result.model).toBeUndefined();
+ 		});
+ 
+ 		test("explicit --provider with custom model:thinking strips suffix correctly", () => {
+@@ -685,7 +678,7 @@ describe("resolveCliModel", () => {
+ 			expect(result.thinkingLevel).toBe("high");
+ 		});
+ 
+-		test("with explicit --thinking, :suffix is kept as part of model id", () => {
++		test("registered custom model shorthand still resolves with explicit --thinking", () => {
+ 			const registry = {
+ 				getModels: () => modelsWithNeuralwatt,
+ 			} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+@@ -698,9 +691,8 @@ describe("resolveCliModel", () => {
+ 
+ 			expect(result.error).toBeUndefined();
+ 			expect(result.model?.provider).toBe("neuralwatt");
+-			// :high is kept as part of the model id since --thinking was explicit
+-			expect(result.model?.id).toBe("zai-org/GLM-5.1-FP8:high");
+-			expect(result.thinkingLevel).toBeUndefined();
++			expect(result.model?.id).toBe("zai-org/GLM-5.1-FP8");
++			expect(result.thinkingLevel).toBe("high");
+ 		});
+ 	});
+ });
+@@ -742,21 +734,20 @@ describe("default model selection", () => {
+ 		expect(defaultModelPerProvider["qwen-token-plan-individual"]).toBe("qwen3.8-max");
+ 	});
+ 
+-	test("findInitialModel accepts explicit provider custom model ids", async () => {
++	test("findInitialModel refuses an unknown explicit model", async () => {
+ 		const registry = {
+ 			getModels: () => allModels,
+ 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+ 
+-		const result = await findInitialModel({
+-			cliProvider: "openrouter",
+-			cliModel: "openrouter/openai/ghost-model",
+-			scopedModels: [],
+-			isContinuing: false,
+-			modelRuntime: registry,
+-		});
+-
+-		expect(result.model?.provider).toBe("openrouter");
+-		expect(result.model?.id).toBe("openai/ghost-model");
++		await expect(
++			findInitialModel({
++				cliProvider: "openrouter",
++				cliModel: "openrouter/openai/ghost-model",
++				scopedModels: [],
++				isContinuing: false,
++				modelRuntime: registry,
++			}),
++		).rejects.toThrow("not found");
+ 	});
+ 
+ 	test("findInitialModel selects ai-gateway default when available", async () => {
+@@ -775,6 +766,7 @@ describe("default model selection", () => {
+ 
+ 		const registry = {
+ 			getAvailableSnapshot: () => [aiGatewayModel],
++			isExplicitOnly: () => false,
+ 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+ 
+ 		const result = await findInitialModel({
+@@ -787,7 +779,7 @@ describe("default model selection", () => {
+ 		expect(result.model?.id).toBe("anthropic/claude-opus-4-6");
+ 	});
+ 
+-	test("findInitialModel ignores an unauthenticated saved default", async () => {
++	test("findInitialModel retains the requested default before credential routing", async () => {
+ 		const savedDeepSeekModel: Model<"anthropic-messages"> = {
+ 			id: "deepseek-v4-flash",
+ 			name: "DeepSeek V4 Flash",
+@@ -812,6 +804,7 @@ describe("default model selection", () => {
+ 					: undefined,
+ 			hasConfiguredAuth: (provider: string) => provider === "spark-two",
+ 			getAvailableSnapshot: () => [localDeepSeekModel],
++			isExplicitOnly: () => false,
+ 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+ 
+ 		const result = await findInitialModel({
+@@ -822,7 +815,7 @@ describe("default model selection", () => {
+ 			modelRuntime: registry,
+ 		});
+ 
+-		expect(result.model?.provider).toBe("spark-two");
++		expect(result.model?.provider).toBe("deepseek");
+ 		expect(result.model?.id).toBe("deepseek-v4-flash");
+ 	});
+ 

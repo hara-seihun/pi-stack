@@ -15,9 +15,11 @@ let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
 const fixtureTimeout = 12_000;
 const fixtureTestTimeout = fixtureTimeout + 3_000;
 async function runFixture(args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }, timeout = fixtureTimeout) {
+  const env: NodeJS.ProcessEnv = { ...options.env, NODE_COMPILE_CACHE: join(buildRoot, 'node-compile-cache') };
+  for (const key of ['PI_ORCHESTRATOR_ACCOUNT_ID', 'PI_THREAD_SPEED', 'PI_CODEX_ULTRAFAST_BROKER_URL', 'PI_THREAD_EXPLICIT_MODEL']) delete env[key];
   const pending = promisify(execFile)(process.execPath, args, {
     ...options,
-    env: { ...options.env, NODE_COMPILE_CACHE: join(buildRoot, 'node-compile-cache') },
+    env,
     timeout,
   });
   pending.child.stdin!.end();
@@ -364,7 +366,7 @@ export default function(pi) {
   });
 }
 `);
-  const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_ASSIGNED: assigned, PI_SKIP_VERSION_CHECK: '1' };
+  const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_ASSIGNED: assigned, PI_MODEL_BROKER_URL: 'http://127.0.0.1:2461', PI_SKIP_VERSION_CHECK: '1' };
   for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$/.test(key)) delete env[key as keyof typeof env];
   try {
     const result = await runFixture([cli, '--print', '--no-session', '--no-tools', '--no-extensions', '--no-context-files', '--no-skills', '--no-prompt-templates', '--no-approve', '--model', 'openai-codex/gpt-6-astra', '-e', routing, '-e', fixture, 'handled locally'], { cwd: root, env });
@@ -373,7 +375,7 @@ export default function(pi) {
   } finally { await rm(root, { recursive: true, force: true }); }
 }, fixtureTestTimeout);
 
-test.each(['anthropic', 'openai-codex'])('restores saved thinking with late provider registration and account replacement: %s', async family => {
+test.each(['anthropic', 'openai-codex'])('restores known saved selections before routing and refuses unavailable saved accounts: %s', async family => {
   const root = await mkdtemp(join(tmpdir(), 'pi-routing-thinking-'));
   const fixture = join(root, 'fixture.mjs');
   await writeFile(fixture, `
@@ -402,9 +404,13 @@ for (const account of [family + '-2', family + '-99']) {
     const modelRuntime = await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:join(dir,'models.json')});
     const resourceLoader = new DefaultResourceLoader({cwd:root,agentDir:dir,settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,noPromptTemplates:true,noThemes:true,additionalExtensionPaths:[${JSON.stringify(routing)}]});
     await resourceLoader.reload();
+    if(account.endsWith('-99')) {
+      await assert.rejects(createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:sm}), /Saved model .* not found/);
+      continue;
+    }
     const {session} = await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:sm});
-    assert.equal(session.model.reasoning, false);
-    assert.equal(session.thinkingLevel, 'off');
+    assert.equal(session.model.reasoning, true);
+    assert.equal(session.thinkingLevel, thinking);
     const errors = [];
     try {
       await session.bindExtensions({mode:'print',onError:e=>errors.push(e)});

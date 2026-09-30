@@ -144,6 +144,9 @@ it("applies validated speed changes to this session's provider requests", async 
   const providerPayload = () => f.native.extensionRunner.emitBeforeProviderRequest({ request: "fixture" });
 
   expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "default" });
+  expect(await f.command("set_speed", { speed: "priority" })).toMatchObject({ success: false, error: expect.stringContaining("Priority speed is unavailable") });
+  expect(await providerPayload()).toMatchObject({ service_tier: "default" });
+  f.native.agent.state.model = f.native.modelRuntime.getModel("openai-codex", "gpt-6-sol")!;
   expect(await f.command("set_speed", { speed: "priority" })).toMatchObject({ success: true, data: { speed: "priority" } });
   expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "priority" });
   expect(await f.command("set_speed", { speed: "turbo" })).toMatchObject({ success: false, error: "Invalid thread speed: turbo" });

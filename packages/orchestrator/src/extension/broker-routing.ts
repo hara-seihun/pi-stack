@@ -4,6 +4,7 @@ import { brokerProvider, BROKER_ROUTES } from "../model-broker-contract.js";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { installImageGeneration } from "./image-generation.js";
 import { Store } from "../store.js";
+import { requestedSpeedError } from "../threads/speed.js";
 
 export function installBrokerRouting(pi: ExtensionAPI, url: string, families: Provider[], ledgerPath: string, env: NodeJS.ProcessEnv): void {
   const providers = families.filter(family => family.id in BROKER_ROUTES).map(family => brokerProvider(family, url));
@@ -13,8 +14,14 @@ export function installBrokerRouting(pi: ExtensionAPI, url: string, families: Pr
   pi.on("session_shutdown", (_event, ctx) => { cleanupSessionResources(ctx.sessionManager.getSessionId()); store.close(); });
   const requestedPin = env.PI_SUBAGENT_MODEL;
   const pin = ORCHESTRATOR_CATALOG.models.find(model => model.id === requestedPin || model.model === requestedPin);
+  const checkSpeed = (model: { provider: string; id: string } | undefined) => {
+    const error = requestedSpeedError(model, env.PI_THREAD_SPEED ?? "standard");
+    if (error) throw new Error(error);
+  };
   const select = async (ctx: ExtensionContext) => {
+    if (requestedPin && !pin) throw new Error(`Unknown subagent model pin ${requestedPin}`);
     const selected = ctx.model;
+    checkSpeed(pin ? { provider: pin.provider, id: pin.model } : selected);
     if (!selected && !pin) return;
     const family = pin?.provider ?? selected!.provider.replace(/-\d+$/u, "");
     if (!pin && !(family in BROKER_ROUTES)) return;
@@ -27,13 +34,9 @@ export function installBrokerRouting(pi: ExtensionAPI, url: string, families: Pr
     pi.setThinkingLevel(thinking);
   };
   pi.on("session_start", async (_event, ctx) => select(ctx));
-  if (requestedPin) {
-    pi.on("before_agent_start", async (_event, ctx) => {
-      if (!pin) throw new Error(`Unknown subagent model pin ${requestedPin}`);
-      await select(ctx);
-    });
-    pi.on("before_provider_request", (_event, ctx) => {
-      if (!pin || ctx.model?.provider !== pin.provider || ctx.model.id !== pin.model) throw new Error(`This agent is pinned to ${requestedPin}`);
-    });
-  }
+  pi.on("before_agent_start", async (_event, ctx) => select(ctx));
+  pi.on("before_provider_request", (_event, ctx) => {
+    checkSpeed(ctx.model);
+    if (requestedPin && (!pin || ctx.model?.provider !== pin.provider || ctx.model.id !== pin.model)) throw new Error(`This agent is pinned to ${requestedPin}`);
+  });
 }

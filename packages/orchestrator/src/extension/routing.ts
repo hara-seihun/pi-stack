@@ -20,6 +20,7 @@ import { BROKER_ROUTES, modelBrokerUrl } from "../model-broker-contract.js";
 import { installBrokerRouting } from "./broker-routing.js";
 import { codexTierExclusions, requireCodexTier } from "../auth/codex-capabilities.js";
 import { withCodexTierGuard } from "../auth/codex-tier-provider.js";
+import { requestedSpeedError } from "../threads/speed.js";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
@@ -31,6 +32,8 @@ export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{retu
 
 export async function resolveSessionModel(models:readonly Model<any>[],provider:string,modelId:string,env:NodeJS.ProcessEnv=process.env):
   Promise<{ok:true;model:Model<any>}|{ok:false;error:string}> {
+  const speedError=requestedSpeedError({provider,id:modelId},env.PI_THREAD_SPEED??"standard");
+  if(speedError)return {ok:false,error:speedError};
   if(modelBrokerUrl(env) && baseProvider(provider) in BROKER_ROUTES){
     const model=models.find(model=>model.id===modelId&&model.provider===baseProvider(provider));
     return model?{ok:true,model}:{ok:false,error:`Model not found through model broker: ${provider}/${modelId}`};
@@ -189,12 +192,21 @@ export default function routing(pi:ExtensionAPI):void{
   const compactEnded=(_event:unknown,ctx:ExtensionContext)=>{compacting=false;reconcileLease(ctx);};
   pi.on("session_compact",compactEnded);
   pi.on("session_compact_failed",compactEnded);
+  const requireSpeed=(ctx:ExtensionContext)=>{
+    const error=requestedSpeedError(ctx.model,environment.PI_THREAD_SPEED??"standard");
+    if(error)throw new Error(error);
+  };
   const bindCurrent=async(ctx:ExtensionContext)=>{
+    requireSpeed(ctx);
+    if(!ctx.model||!POOLED_FAMILIES.has(familyOf(ctx.model.provider)))return;
     const explicit=ctx.model?.provider&&/-\d+$/.test(ctx.model.provider)?store.account(ctx.model.provider):undefined;
     const retain=explicit&&allowsAccountUse(explicit,"interactive")
       &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id);
     const tierAllowed=retain&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(explicit.provider),explicit.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
-    if(!retain||!tierAllowed){const bound=await bind(ctx);if(!bound&&environment.PI_THREAD_SPEED==="ultrafast")throw new Error("No eligible account advertises Astra ultrafast");}
+    if(!retain||!tierAllowed){
+      const bound=await bind(ctx);
+      if(!bound)throw new Error(`No eligible pooled account for ${ctx.model.provider}/${ctx.model.id}${environment.PI_THREAD_SPEED==="ultrafast"?" advertising ultrafast":""}`);
+    }
   };
   pi.on("session_start",async(_event,ctx)=>{
     const branch=ctx.sessionManager.getBranch(),history=branch.some((entry)=>entry.type==="message"&&entry.message.role==="assistant");
@@ -214,14 +226,17 @@ export default function routing(pi:ExtensionAPI):void{
           thinking=pi.getThinkingLevel();
         }
         if(!(saved&&account&&allowsAccountUse(account,"interactive")&&await select(ctx,saved,thinking))){
-          await bind(ctx,undefined,{family,modelId:selected.modelId,thinking});
+          if(!POOLED_FAMILIES.has(family))await bindCurrent(ctx);
+          else if(!await bind(ctx,undefined,{family,modelId:selected.modelId,thinking}))throw new Error(`Saved model ${family}/${selected.modelId} has no eligible pooled account`);
         }
       }
     }
     else await bindCurrent(ctx);
+    requireSpeed(ctx);
     reconcileLease(ctx);
   });
   pi.on("before_agent_start",async(_event,ctx)=>{
+    requireSpeed(ctx);
     const current=store.account(ctx.model?.provider??"");
     const tierAllowed=current&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(current.provider),current.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
     if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&!allowsAccountUse(current,"interactive")||!tierAllowed)){
