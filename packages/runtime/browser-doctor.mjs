@@ -146,8 +146,34 @@ try {
   assert.equal(result.details.data.downloadVerified, true, "the native download artifact must be verified");
   assert.equal(readFileSync(downloadPath, "utf8"), downloadContent, "the native download must preserve file bytes");
   assert.equal(result.details.scriptSession.cleanup, "closed", "the probe browser must be closed");
+  // A second native session attaches after the first page's OOPIF already exists.
+  // Initial auto-attach events must survive BrowserManager -> daemon handoff.
+  const command = async (args) => {
+    const answer = await tools[0].execute(randomUUID(), { args }, AbortSignal.timeout(10000));
+    assert.equal(answer.details.resultCategory, "success", JSON.stringify(answer));
+    return answer.details.data;
+  };
+  const ownerName = `doctor-host-${randomUUID()}`;
+  const attachedName = `doctor-attach-${randomUUID()}`;
+  const owner = (args) => command(["--session", ownerName, ...args]);
+  const attached = (args) => command(["--session", attachedName, ...args]);
+  try {
+    await owner(["open", url]);
+    const cdp = await owner(["get", "cdp-url"]);
+    await attached(["--cdp", cdp.cdpUrl, "get", "url"]);
+    await attached(["frame", "iframe[title='Secure payment input frame']"]);
+    await attached(["snapshot", "-i"]);
+    await attached(["fill", "#frame-input", frameValue]);
+    const value = await attached(["get", "value", "#frame-input"]);
+    const realm = await attached(["eval", "location.hostname"]);
+    assert.equal(value.value, frameValue, "remote existing-frame fill must reach the input");
+    assert.equal(realm.result, "localhost", "remote existing-frame eval must reach the child realm");
+  } finally {
+    try { await attached(["close"]); }
+    finally { await owner(["close"]); }
+  }
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, frameEval: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, frameEval: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
