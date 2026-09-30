@@ -13,7 +13,7 @@ const additional: readonly Grant[] = [
   ["allFiles", "Read and write shared files"],
   ["contacts", "Read and update contacts"],
   ["calendar", "Read and update calendar events"],
-  ["location", "Read precise location"],
+  ["location", "Read location"],
   ["backgroundLocation", "Read location while Kenan is in the background"],
   ["sms", "Read and send SMS"],
   ["callLog", "Read call history"],
@@ -86,7 +86,7 @@ export function PhoneSetup() {
     <p>Let your agent operate this phone over Tailscale, including mobile data. Approve access once here; commands do not need a new acceptance dialog each time.</p>
     <p role="status">{status ? status.enabled ? status.connected ? "Connected" : "Enabled · reconnecting" : "Phone control is off" : "Loading phone capabilities…"}
       {status?.environment && ` · ${status.environment}`}</p>
-    {status?.error && <p role="alert">{status.error}</p>}
+    {status?.error && <p role="alert">{typeof status.error === "string" ? status.error : status.error.message}</p>}
     <label>Phone name <input type="text" maxLength={80} disabled={busy} value={name} placeholder={status?.name || "My phone"}
       onChange={event => setName(event.target.value)} /></label>
     <p><button type="button" disabled={busy || !status || !auth.session} onClick={() => void configure(!status?.enabled)}>

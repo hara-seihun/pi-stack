@@ -21,7 +21,7 @@ export interface PhoneStatus {
   deviceId: string;
   name: string;
   environment: string;
-  error?: string;
+  error?: string | { code: string; message: string } | null;
   capabilities: Record<string, boolean | string | number | null>;
 }
 interface RemoteBridge {

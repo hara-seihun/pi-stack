@@ -14,7 +14,7 @@ Pi Remote owns an unattended Android control connection. The Kenan Android app i
 
 ## Native bridge / setup UI contract
 
-`KenanRemote.phoneStatus()` returns `{enabled,connected,deviceId,name,environment,error,capabilities}`. `capabilities` uses booleans for `accessibility`, `screenshots`, `notificationAccess`, `notifications`, `battery`, `allFiles`, `contacts`, `calendar`, `location`, `backgroundLocation`, `sms`, `callLog`, `phone`, `camera`, `microphone`, `usage`, `writeSettings`, `secureSettings`, `deviceOwner`, `deviceAdmin` (plus other informational fields if needed).
+`KenanRemote.phoneStatus()` returns `{enabled,connected,deviceId,name,environment,error,capabilities}`, with `error:null` or `{code,message}`. `capabilities` uses booleans for `accessibility`, `screenshots`, `notificationAccess`, `notifications`, `battery`, `allFiles`, `contacts`, `calendar`, `location`, `backgroundLocation`, `sms`, `callLog`, `phone`, `camera`, `microphone`, `usage`, `writeSettings`, `secureSettings`, `deviceOwner`, `deviceAdmin` (plus other informational fields if needed).
 
 `phoneConfigure({enabled,user,environment,name?})` persists the explicit local user's enable/disable choice and chosen permitted environment; enabling requires the mirrored identity to match `user`. Session logout/change terminates the connection and fences stale commands from the previous identity. Explicit enablement remains bound to the consenting owner user, not one token: reauthentication by that same owner resumes the saved choice and environment without setup again. A different person cannot inherit that choice and needs their own explicit enablement.
 
