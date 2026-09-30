@@ -1877,7 +1877,7 @@ function maintainCommand(database, args) {
 }
 
 function statusCommand(database, args) {
-  assertOnly(args, ["root", "json", "path", "owner"]);
+  assertOnly(args, ["root", "json", "path", "owner", "limit", "after"]);
   const root = one(args, "root");
   const pathFilter = one(args, "path");
   const ownerFilter = one(args, "owner");
@@ -1896,24 +1896,50 @@ function statusCommand(database, args) {
     parameters.push(ownerFilter);
   }
   const where = predicates.length > 0 ? ` WHERE ${predicates.join(" AND ")}` : "";
-  const records = database.prepare(`SELECT * FROM workspace${where} ORDER BY root, path`)
-    .all(...parameters).map(rowToRecord);
+  const limitText = one(args, "limit") ?? "100";
+  if (!/^[1-9][0-9]*$/.test(limitText) || Number(limitText) > 500) fail("--limit must be an integer from 1 to 500");
+  const limit = Number(limitText);
+  const after = one(args, "after");
+  const matched = database.prepare(`SELECT count(*) AS count FROM workspace${where}`).get(...parameters).count;
+  const pagePredicates = [...predicates], pageParameters = [...parameters];
+  if (after !== undefined && after !== "start") {
+    let cursor;
+    try { cursor = JSON.parse(Buffer.from(after, "base64url").toString("utf8")); } catch { fail("invalid --after status cursor"); }
+    if (!Array.isArray(cursor) || cursor.length !== 3 || cursor.some(value => typeof value !== "string")) fail("invalid --after status cursor");
+    pagePredicates.push("(root, path, id) > (?, ?, ?)");
+    pageParameters.push(...cursor);
+  }
+  const pageWhere = pagePredicates.length ? ` WHERE ${pagePredicates.join(" AND ")}` : "";
+  // Cache declarations and pending creation payloads belong to lifecycle operations, not pool status.
+  const rows = database.prepare(`SELECT id, path, root, kind, mode, owner, repository, source_commit, checkout_type,
+    length(cache_paths) AS cache_bytes, length(creation_request) AS creation_bytes,
+    created_at, updated_at, lease_expires_at, state, detail, group_id
+    FROM workspace${pageWhere} ORDER BY root, path, id LIMIT ?`).all(...pageParameters, limit + 1);
+  const hasMore = rows.length > limit;
+  const records = rows.slice(0, limit).map(row => {
+    const { cachePaths, ...record } = rowToRecord({ ...row, cache_paths: "[]", creation_request: "null" });
+    delete record.creation;
+    return { ...record, cacheDeclarationBytes: row.cache_bytes, creationRequestBytes: row.creation_bytes };
+  });
+  const last = rows[Math.min(rows.length, limit) - 1];
+  const nextAfter = hasMore && last ? Buffer.from(JSON.stringify([last.root, last.path, last.id])).toString("base64url") : null;
   if (bool(args, "json")) {
-    print(records, true);
+    print({ records, matched, limit, nextAfter }, true);
     return;
   }
   const filtered = pathFilter !== undefined || ownerFilter !== undefined;
-  const total = !filtered ? records.length : root === undefined
+  const total = !filtered ? matched : root === undefined
     ? database.prepare("SELECT count(*) AS count FROM workspace").get().count
     : database.prepare("SELECT count(*) AS count FROM workspace WHERE root = ?").get(path.resolve(root)).count;
-  if (filtered && records.length === 0) {
+  if (filtered && matched === 0) {
     process.stdout.write(`no registered workspace matches that filter; ${total} record(s) are known, and a checkout absent from all of them was never registered\n`);
     return;
   }
   const summary = new Map();
   for (const record of records) summary.set(record.state, (summary.get(record.state) ?? 0) + 1);
   const scope = filtered ? ` (filtered from ${total})` : "";
-  process.stdout.write(`${records.length} registered workspace(s)${scope}: ${[...summary].map(([state, count]) => `${state}=${count}`).join(" ")}\n`);
+  process.stdout.write(`${records.length} of ${matched} registered workspace(s)${scope} on this page: ${[...summary].map(([state, count]) => `${state}=${count}`).join(" ")}\n`);
+  if (nextAfter) process.stdout.write(`more records: agent-workspace status --after ${nextAfter} (repeat the same filters)\n`);
   if (filtered) {
     for (const record of records) {
       process.stdout.write(`${record.path}\n  state ${record.state}: ${record.detail}\n  owner ${record.owner ?? "(none)"}  mode ${record.mode}  present-on-disk ${existsSync(record.path)}\n`);
@@ -1934,7 +1960,7 @@ function help() {
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
-  agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--json]
+  agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
   agent-workspace list ...                    alias for status
 
 The registry defaults to ${DEFAULT_STATE}. Set PI_WORKSPACE_STATE to move it.

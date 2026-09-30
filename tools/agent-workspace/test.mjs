@@ -100,7 +100,7 @@ for (const stage of ["clone", "checkout"]) test(`creation resumes after interrup
     const args = ["create", "--root", f.workspaces, "--name", "resumable", "--repo", f.source,
       "--owner", "original-owner", "--min-free-gib", "0", "--json"];
     assert.throws(() => run(args, interruptCreation(f, stage)));
-    const [pending] = JSON.parse(run(["status", "--json"], f.env));
+    const [pending] = JSON.parse(run(["status", "--json"], f.env)).records;
     assert.equal(pending.state, "creating");
     assert.equal(pending.owner, "original-owner");
     const [inspection] = JSON.parse(run(["reconcile", "--execute", "--reap-expired", "--json"], f.env));
@@ -125,7 +125,7 @@ test("source preparation interruption leaves no destination reservation", () => 
     const args = ["create", "--root", f.workspaces, "--name", "preparing", "--repo", f.source,
       "--min-free-gib", "0", "--json"];
     assert.throws(() => run(args, interruptCreation(f, "config")));
-    assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)), []);
+    assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)).records, []);
     assert.equal(existsSync(path.join(f.workspaces, "preparing")), false);
     assert.equal(JSON.parse(run(args, f.env)).state, "active");
   } finally { f.close(); }
@@ -142,7 +142,7 @@ test("invalid sources never reserve a destination and corrected sources resolve 
         "--min-free-gib", "0", "--json"];
       for (const ref of ["no-such-ref", "012345678", ...(repository === f.source ? ["not-a-commit"] : [])]) {
         assert.throws(() => run([...args, "--ref", ref], f.env));
-        assert.equal(JSON.parse(run(["status", "--json"], f.env)).some(row => row.state === "creating"), false);
+        assert.equal(JSON.parse(run(["status", "--json"], f.env)).records.some(row => row.state === "creating"), false);
         assert.equal(existsSync(path.join(f.workspaces, "validated")), false);
       }
       const created = JSON.parse(run([...args, "--ref", commit.slice(0, 9)], f.env));
@@ -170,7 +170,7 @@ test("explicit cancellation retires an absent creation without changing grouped 
     const cancelled = JSON.parse(run(["cancel-creation", "--id", pending.id, "--json"], f.env));
     assert.equal(cancelled.state, "released");
     assert.equal(cancelled.sourceCommit, null);
-    const [unchanged] = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env));
+    const [unchanged] = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env)).records;
     assert.deepEqual(unchanged, peer);
     const recovered = JSON.parse(run([...args, "--name", "failed", "--ref", peer.sourceCommit], f.env));
     assert.notEqual(recovered.id, pending.id);
@@ -483,7 +483,7 @@ test("migrates a registry created before workspace groups", () => {
     )`);
     database.close();
     const status = run(["status", "--json"], { PI_WORKSPACE_STATE: state });
-    assert.deepEqual(JSON.parse(status), []);
+    assert.deepEqual(JSON.parse(status).records, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -504,7 +504,7 @@ test("initialized registry reads do not acquire the SQLite writer lock", (t) => 
     const write = t.mock.method(process.stdout, "write", chunk => { output += chunk; return true; });
     try { main(["status", "--json"], f.env.PI_WORKSPACE_STATE); }
     finally { write.mock.restore(); }
-    const [observed] = JSON.parse(output);
+    const [observed] = JSON.parse(output).records;
     assert.equal(observed.id, created.id);
     assert.equal(observed.detail, "creation completed");
     database.exec("ROLLBACK");
@@ -520,7 +520,7 @@ test("forty cold registry clients initialize one WAL schema without contention f
   const f = fixture();
   try {
     const results = await Promise.all(Array.from({ length: 40 }, () => runAsync(["status", "--json"], f.env)));
-    for (const result of results) assert.deepEqual(JSON.parse(result), []);
+    for (const result of results) assert.deepEqual(JSON.parse(result).records, []);
     const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
     assert.equal(database.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
     assert.equal(database.prepare("PRAGMA user_version").get().user_version, 1);
@@ -545,7 +545,7 @@ test("forty concurrent create and heartbeat clients share registry writes", asyn
       assert.equal(record.state, "active");
       assert.equal(record.sourceCommit, commit);
     }
-    assert.equal(JSON.parse(run(["status", "--json"], f.env)).length, 40);
+    assert.equal(JSON.parse(run(["status", "--json"], f.env)).records.length, 40);
   } finally { f.close(); }
 });
 
@@ -1152,7 +1152,7 @@ test("existing registration adopts one requested group and rejects a conflicting
     assert.throws(() => run([
       "register", "--path", workspace, "--group", "task-two", "--lease-seconds", "0", "--json",
     ], f.env), /already belongs to group task-one; requested task-two/);
-    const retained = JSON.parse(run(["status", "--path", workspace, "--json"], f.env))[0];
+    const retained = JSON.parse(run(["status", "--path", workspace, "--json"], f.env)).records[0];
     assert.equal(retained.groupId, "task-one");
 
     const replaced = JSON.parse(run([
@@ -1434,7 +1434,7 @@ test("status filters in SQL before decoding unrelated records and preserves lite
     ];
     for (const row of rows) insert.run(...row);
     database.close();
-    const ids = (args, cwd) => JSON.parse(run(["status", ...args, "--json"], f.env, cwd)).map(row => row.id);
+    const ids = (args, cwd) => JSON.parse(run(["status", ...args, "--json"], f.env, cwd)).records.map(row => row.id);
     assert.deepEqual(ids(["--path", "_%'雪"]), ["three", "one"]);
     assert.deepEqual(ids(["--root", f.workspaces, "--path", "_%'雪"]), ["one"]);
     assert.deepEqual(ids(["--owner", "Owner_%'"]), ["one"]);
@@ -1443,7 +1443,42 @@ test("status filters in SQL before decoding unrelated records and preserves lite
     assert.deepEqual(ids(["--path", "./Case_%'雪"], f.workspaces), ["one"]);
     assert.match(run(["status", "--root", f.workspaces, "--path", "Case"], f.env), /filtered from 2/);
     assert.match(run(["list", "--path", "missing"], f.env), /4 record\(s\) are known/);
-    assert.throws(() => run(["status", "--path", "unrelated", "--json"], f.env), /JSON/);
+    assert.equal(JSON.parse(run(["status", "--path", "unrelated", "--json"], f.env)).records.length, 1);
+  } finally { f.close(); }
+});
+
+test("status pages retained history without decoding or serializing oversized lifecycle payloads", () => {
+  const f = fixture();
+  try {
+    run(["status", "--json"], f.env);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const insert = database.prepare(`INSERT INTO workspace
+      (id,path,root,kind,mode,owner,checkout_type,cache_paths,created_at,updated_at,lease_expires_at,state,detail)
+      VALUES (?,?,?,'agent','writer','paged-owner','clone',?,1,1,0,'released','retained history')`);
+    const payload = JSON.stringify(["generated/" + "x".repeat(65536)]);
+    database.exec("BEGIN");
+    for (let index = 0; index < 205; index++) insert.run(String(index).padStart(3, "0"), path.join(f.workspaces, String(index).padStart(3, "0")), f.workspaces, payload);
+    database.exec("COMMIT");
+    const before = database.prepare("SELECT count(*) AS count, sum(length(cache_paths)) AS bytes FROM workspace").get();
+    let after = "start";
+    const ids = [];
+    do {
+      const output = run(["list", "--owner", "paged-owner", "--after", after, "--json"], f.env);
+      assert.ok(output.length < 100000);
+      const page = JSON.parse(output);
+      assert.equal(page.matched, 205);
+      assert.ok(page.records.length <= 100);
+      assert.ok(page.records.every(record => record.cachePaths === undefined && record.cacheDeclarationBytes === payload.length));
+      ids.push(...page.records.map(record => record.id));
+      after = page.nextAfter;
+    } while (after !== null);
+    assert.equal(ids.length, 205);
+    assert.equal(new Set(ids).size, 205);
+    assert.deepEqual(database.prepare("SELECT count(*) AS count, sum(length(cache_paths)) AS bytes FROM workspace").get(), before);
+    assert.equal(JSON.parse(run(["status", "--limit", "1", "--path", "000", "--json"], f.env)).records.length, 1);
+    assert.throws(() => run(["status", "--limit", "501", "--json"], f.env), /--limit/);
+    assert.throws(() => run(["status", "--after", "invalid", "--json"], f.env), /cursor/);
+    database.close();
   } finally { f.close(); }
 });
 
@@ -1464,7 +1499,8 @@ test("status, list and dry-run reconciliation leave disposal to executing lifecy
       ["reconcile"],
       ["reconcile", "--execute=false"],
     ]) {
-      assert.deepEqual(JSON.parse(run([...args, "--json"], env)), []);
+      const result = JSON.parse(run([...args, "--json"], env));
+      assert.deepEqual(args[0] === "reconcile" ? result : result.records, []);
       assert.equal(readFileSync(retained, "utf8"), "pending lifecycle cleanup");
     }
     assert.throws(() => run(["reconcile", "--execute", "--json"], env), /disposal subprocess attempted/);
