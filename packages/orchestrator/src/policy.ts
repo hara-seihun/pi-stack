@@ -3,6 +3,12 @@ import { admissionThinking, catalogMeter, type ModelCandidate } from "./catalog.
 import { reservationMatchesRun } from "./admission-reservation.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
 import type { Store } from "./store.js";
+import { sharedCredentialRejection } from "./auth/shared-oauth.js";
+
+function credentialRefusal(cfg: OrchestratorConfig, alias: string): string | undefined {
+  const state = sharedCredentialRejection(cfg.authPath, alias);
+  return state?.state === "login-required" ? "shared OAuth credential requires login" : state ? "shared OAuth credential awaiting refresh" : undefined;
+}
 
 export type Assignment = ModelCandidate & { readonly accountId:string; readonly meterAt?:number; };
 export interface Refusal { readonly accountId:string; readonly reason:string; }
@@ -20,6 +26,8 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   const meterAt=meters.length?Math.max(...meters.map((m)=>Number(m.observed_at))):undefined;
   const stop=(reason:string):Capacity=>({sessions:0,spent,meterAt,reason});
   if(!allowsAccountUse(account,"fleet"))return stop(account.enabled?"reserved for voice":"disabled");
+  const credential = credentialRefusal(cfg, accountId);
+  if(credential)return stop(credential);
   if(account.reservation&&!reservationMatchesRun(store,account.reservation,runId))return stop(`reserved capacity: ${account.reservation.reason}`);
   if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
   if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
@@ -72,7 +80,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   return{sessions:boosted,spent,meterAt,reason:multiplier===1?reason:`${sessions} base × ${multiplier} = ${boosted} sessions; ${reason}`};
 }
 
-export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user"):{assignment?:Assignment;refusals:Refusal[]}{
+export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user",excludedAccounts:ReadonlySet<string>=new Set()):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
@@ -83,6 +91,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
+      if(excludedAccounts.has(account.id)){refusals.push({accountId:account.id,reason:"requested service tier unavailable"});continue;}
       const capacity=accountCapacity(store,account.id,budget,cfg,now,runId);
       const active=store.activeSessionLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
@@ -120,10 +129,11 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){
-      const meters=store.latestMeters(account.id);
+      const meters=store.latestMeters(account.id),credential=credentialRefusal(cfg,account.id);
       const reason=principal!==undefined&&!grant?`no live model broker grant for ${principal}`
         :grant&&(!grant.accounts.includes(account.id)||!grant.models.includes(`${candidate.provider}/${candidate.model}`))?"account or model not shared with completion owner"
         :!allowsAccountUse(account,"fleet")?"account unavailable"
+        :credential?credential
         :account.reservation&&!reservationMatchesRun(store,account.reservation,runId)?"reserved for another completion queue"
         :account.cooldownUntil&&account.cooldownUntil>now?"account cooling down"
         :!meters.length||meters.some(meter=>now-meter.observed_at>cfg.meterMaxAgeMs||meter.observed_at>now+60_000)?"missing or stale provider quota"

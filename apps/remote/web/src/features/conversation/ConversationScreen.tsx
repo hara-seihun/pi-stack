@@ -38,13 +38,14 @@ export function ConversationHeader({ title, status, onBack, onOpenInspector, tra
   </header>;
 }
 
-export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, images, offline, syncing = false, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
+export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, autoCollapse = true, images, offline, syncing = false, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
   session: Session;
   ancestors: Session[];
   entries: ContextEntry[];
   liveText: string;
   liveThinking: string;
   thinkingActive: boolean;
+  autoCollapse?: boolean;
   earlierAvailable: boolean;
   loadingEarlier: boolean;
   earlierError: string;
@@ -112,7 +113,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
       trailing={<>{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {ancestors.length > 0 && <nav className="ancestry" aria-label="Parent threads">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <ConversationView key={session.id} active label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
-      <Transcript entries={entries} liveThinking={liveThinking} thinkingActive={thinkingActive} sessionId={session.id} home={home} images={images}
+      <Transcript entries={entries} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
         earlierAvailable={earlierAvailable} loadingEarlier={loadingEarlier} earlierError={earlierError} onShowEarlier={onShowEarlier} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
       {liveText && <div className="live-answer"><ChatMessage kind="assistant" label={AGENT_NAME} avatar={agentAvatar()} text={liveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
     </InlineImagesContext.Provider>}>

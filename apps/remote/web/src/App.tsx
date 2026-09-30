@@ -189,6 +189,16 @@ const LiveConversation = memo(function LiveConversation({ live, ...props }: { li
 
 function RemoteApp() {
   const person = useRef(window.PiRemotePerson.get()).current;
+  const autoCollapseKey = appStorageKey(`pi-remote-auto-collapse:${person}`);
+  const [autoCollapse, setAutoCollapse] = useState(() => localStorage.getItem(autoCollapseKey) !== "false");
+  const updateAutoCollapse = useCallback((enabled: boolean) => {
+    try {
+      localStorage.setItem(autoCollapseKey, String(enabled));
+      setAutoCollapse(enabled);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not save auto-collapse preference");
+    }
+  }, [autoCollapseKey]);
   const { state, stateRef, patch } = useStableState();
   const layout = useLayout();
   const route = useRoute();
@@ -558,17 +568,17 @@ function RemoteApp() {
     const next = {
       session: aiId,
       viewing: visible && !messagingActive && !!aiId,
-      thinking: false,
+      thinking: !autoCollapse && visible && !messagingActive && !!aiId,
       dashboard: route.tab === "machine",
       workers: route.tab === "workers" && workersFilter === "all",
       transcriptFrom: aiId === held.session ? held.transcriptFrom ?? null : cache.thread(aiId ?? "")?.transcript?.items[0]?.seq ?? null,
     };
-    const same = (held.session ?? null) === next.session && !!held.viewing === next.viewing && !!held.dashboard === next.dashboard && !!held.workers === next.workers && !held.thinking;
+    const same = (held.session ?? null) === next.session && !!held.viewing === next.viewing && !!held.dashboard === next.dashboard && !!held.workers === next.workers && !!held.thinking === next.thinking;
     if (same) return;
     // A list nobody refreshes would show settled fleet threads as they were.
     if (!next.workers && held.workers) patch({ fleet: [] });
     client.update(next);
-  }, [aiId, messagingActive, route.tab, visible, workersFilter]);
+  }, [aiId, autoCollapse, messagingActive, route.tab, visible, workersFilter]);
 
   const showEarlier = useCallback(() => {
     const id = selectedAiId(stateRef.current);
@@ -592,9 +602,10 @@ function RemoteApp() {
   }, [cache, patch, stateRef]);
 
   const thinkingOpen = useCallback((open: boolean) => {
+    if (!autoCollapse) return;
     stream.current?.update({ thinking: open });
     if (!open) liveText.clearThinking();
-  }, [liveText]);
+  }, [autoCollapse, liveText]);
 
   // Start the renderer before opening a thread; the stream supplies its window.
   const prefetchThread = useCallback((_id: string) => {
@@ -884,7 +895,7 @@ function RemoteApp() {
 
   const conversation = selected && !messagingActive
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
-        earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen}
+        earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
         onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? pendingQuestions.questions : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
@@ -925,7 +936,7 @@ function RemoteApp() {
         {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} debug={debugTools} /></Suspense>}
+        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} debug={debugTools} /></Suspense>}
         {selected && !messagingActive && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
         {!messagingActive && pasteSessionId && <Suspense fallback={null}><PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} /></Suspense>}
       </>} />

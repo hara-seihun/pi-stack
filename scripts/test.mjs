@@ -12,6 +12,7 @@ const jobs = [
   ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs", "scripts/deploy-voice.test.mjs", "scripts/write-service.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
+  ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
   ["agent workspace", "npm", ["test", "--workspace=@hara-seihun/agent-workspace"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
   ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],

@@ -33,9 +33,12 @@ interface Window {
       meetingContext?(): string;
       handoffContext?(): Promise<void>;
       outputMuted?: boolean;
+      /** The caller owns playback of onOutput's track; Voice must not create a second audible sink. */
+      externalPlayback?: boolean;
       onVoiceControl?(state: import("../../server/meet/protocol").MeetVoiceControl): void;
       onFragment?(fragment: { id: string; role: "user" | "assistant"; text: string; voiceSessionId: string; startMs: number; endMs: number; startedAt: number }): void;
       onPlayback?(state: "playing" | "blocked" | "muted" | "stopped"): void;
+      onAudioDiagnostic?(data: unknown): void;
       onState(state: string, detail?: string): void;
       onNotice(message: string): void;
       onTranscript?(role: string, text: string): void;

@@ -62,6 +62,8 @@ export interface ThreadDestination {
   defaultModel: string;
   /** The model receives only the conversation: no system prompt, tools, extensions, skills or instruction files. */
   raw?: boolean;
+  /** Raw context with only read/write/edit/bash inside a per-thread Linux workspace. */
+  sandbox?: boolean;
   /** Folder inside the destination's workspace whose top-level Markdown files the picker offers as optional thread context. */
   contextDir?: string;
 }
@@ -73,6 +75,7 @@ export function defaultThreadDestinations(personalWorkspaceId?: string): ThreadD
     ]),
     { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home" },
     { id: "raw", label: "RAW", icon: "raw", accent: "#8b949e", workspaceId: "home", raw: true },
+    { id: "sandbox", label: "SANDBOX", icon: "raw", accent: "#d29922", workspaceId: "home", raw: true, sandbox: true },
   ];
   return destinations.map(destination => ({
     ...destination,

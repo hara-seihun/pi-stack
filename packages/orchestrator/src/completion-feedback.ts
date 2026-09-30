@@ -16,14 +16,14 @@ export function completionFeedbackRefusal(store: Store, accountId: string, now: 
   const active = activeCompletions(store, accountId);
   if (active >= feedback.limit) return `provider feedback window ${active}/${feedback.limit}`;
 }
-export function recordCompletionRejection(store: Store, accountId: string, now: number, retryAfterMs?: number, observed = activeCompletions(store, accountId)): number {
+export function recordCompletionRejection(store: Store, accountId: string, now: number, retryAfterMs?: number, observed = activeCompletions(store, accountId), model?: string): number {
   const previous = read(store, accountId), sameWave = !!previous && previous.blockedUntil > now;
   const rejections = sameWave ? previous.rejections : (previous?.rejections ?? 0) + 1;
   const limit = sameWave ? previous.limit : Math.max(1, Math.floor(Math.min(previous?.limit ?? observed, observed) / 2));
   const delay = Math.max(1000, retryAfterMs ?? Math.min(60_000, 1000 * 2 ** Math.min(rejections - 1, 6)));
   const blockedUntil = Math.max(previous?.blockedUntil ?? 0, now + delay);
   store.setControl(key(accountId), JSON.stringify({ limit, blockedUntil, rejections, successes: 0 } satisfies Feedback));
-  store.setCooldown(accountId, Math.max(store.account(accountId)?.cooldownUntil ?? 0, blockedUntil));
+  store.setCooldown(accountId, Math.max(store.account(accountId)?.cooldownUntil ?? 0, blockedUntil), { model, at: now });
   return blockedUntil;
 }
 export function recordCompletionSuccess(store: Store, accountId: string, now: number): void {

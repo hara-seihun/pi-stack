@@ -4,10 +4,14 @@ import type { MeetSnapshot, MeetVoiceWake } from "../../../server/meet/protocol"
  * GPT-Live bills every second a session is open, muted or not. A meeting with
  * a platform transcript therefore keeps Voice closed until Kenan is unmuted or
  * someone says his name, and closes it again once he has been muted and quiet
- * for a minute, or unmuted with nothing to do for three.
+ * for a minute, or unmuted with nothing to do for eight. Unmuting is a person asking
+ * Kenan to take part: in the Sprint Demos rehearsal on 2026-09-29 a three-minute
+ * bound closed Voice while the room watched his sizzle video, and the next request
+ * ("Kenan, …", heard by Recall as "Kevin") was missed. Eight minutes costs at most
+ * $0.25 more per unmute, and stays inside the ten-minute work hold.
  */
 export const VOICE_MUTED_LINGER_MS = 60_000;
-export const VOICE_UNMUTED_IDLE_MS = 3 * 60_000;
+export const VOICE_UNMUTED_IDLE_MS = 8 * 60_000;
 /** A failed open is retried no sooner than this while Voice is still wanted. */
 export const VOICE_RETRY_MS = 15_000;
 /** A mention finalized this soon after Voice went live was probably spoken before it could hear. */

@@ -7,13 +7,14 @@ import { finalText, readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 import { threadMode } from "./modes.js";
+import { SPEEDS } from "./speed.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
 const settings = Type.Object({
   model: Type.Optional(Type.String()),
   thinkingLevel: Type.Optional(Type.Union(THINKING_LEVELS.map(value => Type.Literal(value)))),
-  speed: Type.Optional(Type.Union([Type.Literal("standard"), Type.Literal("priority")])),
+  speed: Type.Optional(Type.Union(SPEEDS.map(value => Type.Literal(value)), { description: "Ultrafast is available for Astra only." })),
 });
 function result(value: Result<unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value, isError: !value.ok };

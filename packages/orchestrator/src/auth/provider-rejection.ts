@@ -8,6 +8,29 @@ export function isCodexNotFoundError(message: string, model: Pick<Model<any>, "a
   return model.baseUrl !== undefined && /^https:\/\/chatgpt\.com\/backend-api(?:\/codex(?:\/responses)?)?\/*$/.test(model.baseUrl);
 }
 
+export async function providerResponseFailure(response: Response): Promise<string> {
+  if (response.ok) return "";
+  let detail: string;
+  try { detail = (await response.clone().text()).slice(0, 2000); }
+  catch { detail = "error response body unavailable"; }
+  return `HTTP ${response.status}: ${detail}`;
+}
+
+/** A second rejection exhausts the repair budget, not another refresh grant. */
+export async function quarantineProviderCredential(
+  auth: SharedOAuthAuth, account: string, message: string, codexNotFound: boolean,
+  signal: AbortSignal, access?: string, usage = fetchCodexUsage,
+): Promise<void> {
+  if (!access || (!isRejectedTokenError(message) && !codexNotFound)) return;
+  if (!isRejectedTokenError(message)) {
+    const current = await auth.credential(account, signal, 0);
+    if (typeof current.accountId !== "string" || !current.accountId) return;
+    try { await usage(access, current.accountId, undefined, 10_000, Date.now(), signal); return; }
+    catch (error) { if (!(error instanceof CodexUnauthorizedError)) return; }
+  }
+  await auth.reject(account, access, signal);
+}
+
 export type CredentialRepair =
   | { outcome: "repaired"; detail: string }
   | { outcome: "not-rejected"; detail: string }
@@ -26,6 +49,10 @@ export async function repairProviderCredential(
   if (!isRejectedTokenError(message) && !codexNotFound) return { outcome: "not-rejected", detail: message };
   let detail = message;
   try {
+    if (isRejectedTokenError(message) && rejectedAccessToken) {
+      await auth.refreshRejected(account, rejectedAccessToken, signal);
+      return { outcome: "repaired", detail };
+    }
     const current = await auth.credential(account, signal, 0);
     const rejected = rejectedAccessToken ?? current.access;
     if (codexNotFound && !isRejectedTokenError(message)) {

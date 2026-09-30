@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { listPersons, publicPerson, type Person } from "./persons";
 import { configuredEnvironments, personEnvironments, publicEnvironments } from "./environments";
 import { RouterSessions } from "./router-sessions";
-import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { proxyFetch } from "./proxy-fetch";
+import { proxyWebsocket, type ProxySocketData } from "./proxy-websocket";
 import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
@@ -134,8 +134,6 @@ async function forget(person: Person): Promise<{ ok: boolean; message: string }>
 }
 
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate", "te", "trailer"]);
-const WEBSOCKET_BACKPRESSURE_LIMIT = 64 * 1024;
-const WEBSOCKET_MAX_MESSAGE_BYTES = PHONE_MAX_FRAME_BYTES;
 
 type RequestIdentity = {
   authenticated: { user: string; signal: AbortSignal } | null;
@@ -167,14 +165,6 @@ function upstreamCredential(environment: string): string {
   upstreamCredentials.set(environment, credential);
   return credential;
 }
-
-type ProxySocketData = {
-  phone: boolean;
-  signal: AbortSignal;
-  upstream: WebSocket;
-  abort?: () => void;
-  closed: boolean;
-};
 
 function requestIdentity(req: Request, url: URL): RequestIdentity {
   const names = assertedNames(req, url);
@@ -214,22 +204,6 @@ function websocketUrl(origin: string, url: URL): string {
   target.searchParams.delete("user");
   target.searchParams.delete("session");
   return target.href;
-}
-
-function canSendCloseCode(code: number): boolean {
-  return (code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code <= 4999);
-}
-
-function closeBrowser(socket: Bun.ServerWebSocket<ProxySocketData>, code: number, reason: string): void {
-  if (socket.readyState >= WebSocket.CLOSING) return;
-  if (canSendCloseCode(code)) socket.close(code, reason);
-  else socket.terminate();
-}
-
-function closeUpstream(socket: WebSocket | undefined, code: number, reason: string): void {
-  if (!socket || socket.readyState >= WebSocket.CLOSING) return;
-  if (canSendCloseCode(code)) socket.close(code, reason);
-  else (socket as WebSocket & { terminate(): void }).terminate();
 }
 
 async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal, environment?: string): Promise<WebSocket | null> {
@@ -461,63 +435,6 @@ Bun.serve<ProxySocketData>({
     response.headers.set("referrer-policy", "no-referrer");
     return withCors(response);
   },
-  websocket: {
-    perMessageDeflate: false,
-    maxPayloadLength: WEBSOCKET_MAX_MESSAGE_BYTES,
-    backpressureLimit: PHONE_MAX_FRAME_BYTES,
-    closeOnBackpressureLimit: false,
-    idleTimeout: 45,
-    sendPings: true,
-    open(socket) {
-      const { upstream, signal } = socket.data;
-      if (signal.aborted) {
-        closeUpstream(upstream, 1008, "Session ended");
-        closeBrowser(socket, 1008, "Session ended");
-        return;
-      }
-      const abort = () => {
-        closeUpstream(upstream, 1008, "Session ended");
-        closeBrowser(socket, 1008, "Session ended");
-      };
-      socket.data.abort = abort;
-      signal.addEventListener("abort", abort, { once: true });
-      upstream.addEventListener("message", (event) => {
-        if (socket.readyState !== WebSocket.OPEN) return;
-        const limit = socket.data.phone ? PHONE_MAX_FRAME_BYTES : WEBSOCKET_BACKPRESSURE_LIMIT;
-        if (socket.getBufferedAmount() >= limit) {
-          if (socket.data.phone) { closeUpstream(upstream, 1011, "Phone backpressure exceeded"); closeBrowser(socket, 1011, "Phone backpressure exceeded"); }
-          return;
-        }
-        const message = event.data;
-        if (typeof message === "string" || message instanceof ArrayBuffer) {
-          const sent = socket.send(message, false);
-          if (sent === 0 && socket.data.phone) { closeUpstream(upstream, 1011, "Phone forwarding failed"); closeBrowser(socket, 1011, "Phone forwarding failed"); }
-        }
-      });
-      upstream.addEventListener("close", (event) => {
-        socket.data.closed = true;
-        signal.removeEventListener("abort", abort);
-        closeBrowser(socket, event.code, event.reason);
-      });
-      upstream.addEventListener("error", () => {
-        if (!socket.data.closed) closeBrowser(socket, 1011, "Upstream WebSocket failed");
-      });
-    },
-    message(socket, message) {
-      const upstream = socket.data.upstream;
-      if (upstream.readyState !== WebSocket.OPEN) return;
-      const limit = socket.data.phone ? PHONE_MAX_FRAME_BYTES : WEBSOCKET_BACKPRESSURE_LIMIT;
-      if (upstream.bufferedAmount >= limit) {
-        if (socket.data.phone) { closeUpstream(upstream, 1011, "Phone backpressure exceeded"); closeBrowser(socket, 1011, "Phone backpressure exceeded"); }
-        return;
-      }
-      upstream.send(message);
-    },
-    close(socket, code, reason) {
-      socket.data.closed = true;
-      if (socket.data.abort) socket.data.signal.removeEventListener("abort", socket.data.abort);
-      closeUpstream(socket.data.upstream, code, reason);
-    },
-  },
+  websocket: proxyWebsocket,
 });
 console.log(`pi-remote router ${VERSION} on http://${HOST}:${PORT} for ${PEOPLE.map((p) => p.user).join(", ")}`);

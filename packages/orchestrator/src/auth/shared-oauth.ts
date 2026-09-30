@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import type { ModelAuth, OAuthAuth, OAuthCredential, Provider } from "@earendil-works/pi-ai";
 import { acquireDirectoryLock } from "./directory-lock.js";
 import { aliasProvider } from "./provider-alias.js";
+import { isDefinitiveCredentialRejection } from "../provider-errors.js";
 const TOKEN_MIN_LIFETIME_MS = 5 * 60_000;
 
 type RefreshCredential = (credential: OAuthCredential, signal: AbortSignal) => Promise<OAuthCredential>;
@@ -50,6 +51,29 @@ export function oauthCredential(value: unknown): OAuthCredential | undefined {
     typeof raw.expires !== "number" || !Number.isFinite(raw.expires)
   ) return undefined;
   return raw as OAuthCredential;
+}
+
+export interface CredentialRejection {
+  state: "refresh-required" | "login-required";
+  rejectedAt: number;
+  retryAt?: number;
+}
+
+function rejection(credential: OAuthCredential): CredentialRejection | undefined {
+  const state = record(credential.piCredentialState);
+  return state?.state === "refresh-required" || state?.state === "login-required"
+    ? state as unknown as CredentialRejection : undefined;
+}
+
+export function sharedCredentialRejection(path: string, alias: string): CredentialRejection | undefined {
+  const credential = oauthCredential(readAuth(path)[alias]);
+  return credential && rejection(credential);
+}
+
+function unavailable(alias: string, state: CredentialRejection): Error {
+  return new Error(state.state === "login-required"
+    ? `${alias} shared OAuth credential requires login: use pi-orchestrator account login ${alias}, import a replacement, or explicitly account refresh ${alias}`
+    : `${alias} shared OAuth credential awaiting refresh until ${state.retryAt}`);
 }
 
 function readAuth(path: string): Record<string, unknown> {
@@ -154,7 +178,65 @@ export class SharedOAuthAuth {
   }
 
   has(alias: string): boolean {
+    const credential = oauthCredential(readAuth(this.#path)[alias]);
+    return credential !== undefined && rejection(credential) === undefined;
+  }
+
+  hasCredential(alias: string): boolean {
     return oauthCredential(readAuth(this.#path)[alias]) !== undefined;
+  }
+
+  rejection(alias: string): CredentialRejection | undefined {
+    return sharedCredentialRejection(this.#path, alias);
+  }
+
+  async #refreshLocked(auth: Record<string, unknown>, alias: string, current: OAuthCredential, signal: AbortSignal, rejected = false): Promise<OAuthCredential> {
+    const clean = { ...current };
+    delete clean.piCredentialState;
+    // Persist before the network call: process death must not make a known-bad token admissible.
+    // A transport failure during proactive refresh does not reject a still-live access token.
+    if (rejected || current.expires <= this.#now()) {
+      auth[alias] = { ...clean, piCredentialState: { state: "refresh-required", rejectedAt: this.#now(), retryAt: this.#now() + 60_000 } };
+      writeAuth(this.#path, auth);
+    }
+    try {
+      const refreshed = oauthCredential(await this.#refresh(clean, signal));
+      if (refreshed === undefined) throw new Error(`${this.#providerId} OAuth refresh for ${alias} returned an invalid credential`);
+      const oldIdentity = this.#identity?.(current);
+      if (oldIdentity !== undefined && this.#identity?.(refreshed) !== oldIdentity) throw new Error(`${this.#providerId} OAuth refresh for ${alias} changed account identity`);
+      if (rejected && refreshed.access === current.access) throw new Error("OAuth refresh returned the rejected token");
+      delete refreshed.piCredentialState;
+      auth[alias] = refreshed;
+      writeAuth(this.#path, auth);
+      return refreshed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isDefinitiveCredentialRejection(message) || /returned an invalid credential|changed account identity|returned the rejected token/i.test(message)) {
+        auth[alias] = { ...clean, piCredentialState: { state: "login-required", rejectedAt: this.#now() } };
+        writeAuth(this.#path, auth);
+      }
+      throw error;
+    }
+  }
+
+  async reject(alias: string, access: string, signal: AbortSignal): Promise<void> {
+    const release = await acquireLock(this.#path, signal);
+    try {
+      const auth = readAuth(this.#path), current = oauthCredential(auth[alias]);
+      if (!current || current.access !== access) return;
+      auth[alias] = { ...current, piCredentialState: { state: "login-required", rejectedAt: this.#now() } };
+      writeAuth(this.#path, auth);
+    } finally { release(); }
+  }
+
+  /** Explicit operator recovery can retry even a quarantined refresh grant. */
+  async refresh(alias: string, signal: AbortSignal): Promise<OAuthCredential> {
+    const release = await acquireLock(this.#path, signal);
+    try {
+      const auth = readAuth(this.#path), current = oauthCredential(auth[alias]);
+      if (!current) throw new Error(`${alias} has no shared ${this.#providerId} OAuth credential`);
+      return await this.#refreshLocked(auth, alias, current, signal, rejection(current) !== undefined);
+    } finally { release(); }
   }
 
   async credential(
@@ -167,17 +249,10 @@ export class SharedOAuthAuth {
       const auth = readAuth(this.#path);
       const current = oauthCredential(auth[alias]);
       if (current === undefined) throw new Error(`${alias} has no shared ${this.#providerId} OAuth credential`);
-      if (current.expires > this.#now() + minLifetimeMs) return current;
-      const refreshed = oauthCredential(await this.#refresh(current, signal));
-      if (refreshed === undefined) throw new Error(`${this.#providerId} OAuth refresh for ${alias} returned an invalid credential`);
-      const oldIdentity = this.#identity?.(current);
-      const newIdentity = this.#identity?.(refreshed);
-      if (oldIdentity !== undefined && newIdentity !== oldIdentity) {
-        throw new Error(`${this.#providerId} OAuth refresh for ${alias} changed account identity`);
-      }
-      auth[alias] = refreshed;
-      writeAuth(this.#path, auth);
-      return refreshed;
+      const state = rejection(current);
+      if (state && (state.state === "login-required" || (state.retryAt ?? 0) > this.#now())) throw unavailable(alias, state);
+      if (!state && current.expires > this.#now() + minLifetimeMs) return current;
+      return await this.#refreshLocked(auth, alias, current, signal, state !== undefined);
     } finally {
       release();
     }
@@ -215,17 +290,10 @@ export class SharedOAuthAuth {
       const auth = readAuth(this.#path);
       const current = oauthCredential(auth[alias]);
       if (current === undefined) throw new Error(`${alias} has no shared ${this.#providerId} OAuth credential`);
-      if (current.access !== rejectedAccessToken) return current;
-      const refreshed = oauthCredential(await this.#refresh(current, signal));
-      if (refreshed === undefined) throw new Error(`${this.#providerId} OAuth refresh for ${alias} returned an invalid credential`);
-      const oldIdentity = this.#identity?.(current);
-      const newIdentity = this.#identity?.(refreshed);
-      if (oldIdentity !== undefined && newIdentity !== oldIdentity) {
-        throw new Error(`${this.#providerId} OAuth refresh for ${alias} changed account identity`);
-      }
-      auth[alias] = refreshed;
-      writeAuth(this.#path, auth);
-      return refreshed;
+      const state = rejection(current);
+      if (state && (state.state === "login-required" || (state.retryAt ?? 0) > this.#now())) throw unavailable(alias, state);
+      if (!state && current.access !== rejectedAccessToken) return current;
+      return await this.#refreshLocked(auth, alias, current, signal, true);
     } finally {
       release();
     }

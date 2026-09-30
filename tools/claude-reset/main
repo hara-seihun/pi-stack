@@ -1,15 +1,16 @@
 #!/usr/bin/env node
-// Collects Claude's banked reset balance through an existing authenticated Kernel profile.
+// Collects Claude's banked reset balance and quota through an authenticated Kernel profile.
 // Every HTTP request in this tool is GET; it never redeems a grant.
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 const API = "https://claude.ai/api";
 const LEDGER = process.env.PI_ORCHESTRATOR_LEDGER ?? "/var/lib/pi-orchestrator/ledger.sqlite3";
 const STORE = process.env.PI_ORCHESTRATOR_STORE ?? "/srv/pi/pi-orchestrator/dist/store.js";
 const HELP = `Usage: claude-reset [collect|status] [--config FILE] [--account ID] [--dry-run] [--json]
 
-collect (default) reads Claude's banked resets and records successful readings.
+collect (default) reads Claude's banked resets and quota and records successful readings.
 status shows last-known ledger readings without opening a browser.
 --dry-run reads Claude but does not change the ledger.
 Configuration is a JSON object mapping orchestrator account IDs to existing Kernel profile names.
@@ -89,7 +90,7 @@ function credits(value) {
   return { available, ...(nextExpiresAt === undefined ? {} : { nextExpiresAt }) };
 }
 
-function observe(profile, expectedEmail) {
+function observe(profile, expectedEmail, parseAnthropicUsage) {
   const started = JSON.parse(command("kernel-browser", ["start", profile]));
   const session = started.session_id;
   if (typeof session !== "string" || !/^[a-zA-Z0-9]+$/.test(session)) throw new Error("Kernel start returned no valid session ID");
@@ -101,7 +102,11 @@ function observe(profile, expectedEmail) {
     const identity = emailFrom(get(session, "/account"));
     if (!identity) throw new Error("Claude web identity has no email");
     if (identity !== expectedEmail.trim().toLowerCase()) throw new Error(`Claude web identity ${identity} does not match ledger label ${expectedEmail}`);
-    result = credits(get(session, `/organizations/${orgId}/usage?cedar_ember=1&skip_spend=1`));
+    const usage = get(session, `/organizations/${orgId}/usage?cedar_ember=1&skip_spend=1`);
+    const balance = credits(usage);
+    const { buckets, unmappedScopes } = parseAnthropicUsage(usage);
+    if (!buckets.length) throw new Error("usage response has no readable quota limits");
+    result = { reading: { at: Date.now(), ...balance }, meters: buckets, unmappedScopes };
   } catch (error) {
     failure = error;
   } finally {
@@ -115,7 +120,11 @@ function observe(profile, expectedEmail) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { console.log(HELP); return; }
-  const { Store } = await import(STORE);
+  const storeUrl = pathToFileURL(STORE);
+  const { Store } = await import(storeUrl.href);
+  const parseAnthropicUsage = options.command === "collect"
+    ? (await import(new URL("./meters-anthropic.js", storeUrl).href)).parseAnthropicUsage
+    : undefined;
   const ledger = Store.open(LEDGER);
   const results = [];
   try {
@@ -130,9 +139,18 @@ async function main() {
         continue;
       }
       try {
-        const reading = { at: Date.now(), ...observe(profile, account.label) };
-        if (!options.dryRun) ledger.recordResetCredits(accountId, reading);
-        results.push({ accountId, outcome: options.dryRun ? "would-record" : "recorded", reading });
+        const { reading, meters, unmappedScopes } = observe(profile, account.label, parseAnthropicUsage);
+        if (!options.dryRun) ledger.transaction(() => {
+          ledger.recordResetCredits(accountId, reading);
+          for (const { meterId, usedPercent, resetAt } of meters) {
+            ledger.recordReading(accountId, meterId, {
+              at: reading.at,
+              usedPercent: Math.round(Math.max(0, Math.min(100, usedPercent))),
+              resetAt,
+            });
+          }
+        });
+        results.push({ accountId, outcome: options.dryRun ? "would-record" : "recorded", reading, meters, unmappedScopes });
       } catch (error) {
         results.push({ accountId, outcome: "error", reason: error.message, lastKnown: ledger.resetCredits(accountId) ?? null });
       }

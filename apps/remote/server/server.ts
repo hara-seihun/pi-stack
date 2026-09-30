@@ -441,7 +441,7 @@ const inlineImages = new InlineImages(db, join(DATA, "inline-images"), async (in
   } catch (cause) {
     return { ok: false, error: { message: cause instanceof Error ? cause.message : String(cause) } };
   }
-}, signalSync, 2, ownsSupervisorLease);
+}, signalSync, 2, ownsSupervisorLease, id => liveThread(id)?.metadata?.sandbox !== true);
 
 /** Live event streams by id, the only thing a client keeps open. */
 const streams = new Map<string, ClientStream>();
@@ -828,7 +828,7 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
     initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
     initial_provider: model?.provider ?? "", initial_thinking: thread.settings.thinkingLevel,
     meeting_id: meta.meetingId ?? null, profile_id: meta.profileId ?? "home",
-    service_tier: thread.settings.speed === "priority" ? "priority" : "default",
+    service_tier: thread.settings.speed === "standard" ? "default" : thread.settings.speed,
     bash_timeout_seconds: meta.bashTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS,
     archived_at: meta.archived ? meta.archivedAt ?? new Date(thread.updatedAt).toISOString() : null,
     idle_unread: view?.idle_unread ?? 0, named_at_message_count: view?.named_at_message_count ?? 0,
@@ -1769,6 +1769,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
   const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId, createdBy,
     cwd: admitted.value.cwd, message, settings: { model, ...settings },
     metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode } : {}), ...(destination.raw ? { raw: true } : {}),
+      ...(destination.sandbox ? { sandbox: true } : {}),
       ...(contextFiles.length ? { contextFiles } : {}) },
   }));
   ensureThreadView(db, thread.id);
@@ -1910,8 +1911,13 @@ const server = Bun.serve<SocketData>({
         if (thread && thread.metadata?.mode !== MEETING_MODE) {
           const moded = await directory.control({ threadId: sessionId, action: "update", metadata: { mode: MEETING_MODE } });
           if (!moded.ok) throw new Error(`The external meeting's thread could not become live: ${moded.error.message}`);
-          const fast = await directory.control({ threadId: sessionId, action: "settings", settings: { speed: THREAD_MODES[MEETING_MODE].conversation.settings.speed } });
-          if (!fast.ok) throw new Error(`The external meeting's thread could not take priority speed: ${fast.error.message}`);
+        }
+        // Every start brings the thread to the mode's speed, so a recurring meeting follows a mode change.
+        // A thread moved off Astra keeps its own speed rather than failing the join.
+        const { speed } = THREAD_MODES[MEETING_MODE].conversation.settings;
+        if (thread && thread.settings.speed !== speed) {
+          const fast = await directory.control({ threadId: sessionId, action: "settings", settings: { speed } });
+          if (!fast.ok) console.warn(`[meet] external meeting thread ${sessionId} kept ${thread.settings.speed} speed: ${fast.error.message}`);
         }
         return;
       }

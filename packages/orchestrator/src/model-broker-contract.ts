@@ -9,7 +9,9 @@ export const BROKER_ROUTES = {
 export type BrokerFamily = keyof typeof BROKER_ROUTES;
 
 export function modelBrokerUrl(env: NodeJS.ProcessEnv = process.env, configPath?: string): string | undefined {
-  const value = env[BROKER_ENV] ?? loadConfig(configPath, undefined, env).modelBrokerUrl;
+  const config = loadConfig(configPath, undefined, env);
+  const value = env.PI_THREAD_SPEED === "ultrafast" && config.ultrafastModelBrokerUrl
+    ? config.ultrafastModelBrokerUrl : env[BROKER_ENV] ?? config.modelBrokerUrl;
   if (value === undefined) return undefined;
   const url = new URL(value);
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {

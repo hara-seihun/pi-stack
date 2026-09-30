@@ -15,6 +15,7 @@ import { createSharedImageGenerationService } from "../src/image-service.js";
 import { loadConfig, modelBrokerUrl as publicModelBrokerUrl } from "../src/api.js";
 import * as codexUsage from "../src/meters-codex.js";
 import { SharedOAuthAuth, withSharedAuth } from "../src/auth/shared-oauth.js";
+import { CODEX_CAPABILITY_TTL_MS } from "../src/auth/codex-capabilities.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -32,7 +33,8 @@ async function fixture(transport: BrokerTransport) {
   const token = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "shared-account" } })).toString("base64url")}.signature`;
   for (const id of ["shared", "owner-only"]) store.upsertAccount({ id, provider: "openai-codex", enabled: true });
   store.upsertAccount({ id: "anthropic-shared", provider: "anthropic", enabled: true });
-  writeFileSync(authPath, JSON.stringify(Object.fromEntries(["shared", "owner-only", "anthropic-shared"].map(id => [id, { type: "oauth", access: token, refresh: "fixture-refresh", accountId: "shared-account", expires: Date.now() + 3600000 }]))));
+  const ownerToken = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "owner-account" } })).toString("base64url")}.signature`;
+  writeFileSync(authPath, JSON.stringify(Object.fromEntries(["shared", "owner-only", "anthropic-shared"].map(id => [id, { type: "oauth", access: id === "owner-only" ? ownerToken : token, refresh: "fixture-refresh", accountId: id === "owner-only" ? "owner-account" : "shared-account", expires: Date.now() + 3600000 }]))));
   const broker = createModelBroker({ ledgerPath, authPath, listeners: [{ principal: "sybil", port: 0, accounts: ["shared", "anthropic-shared"], models: ["openai-codex/gpt-6-luna", `anthropic/${anthropicModel.id}`], maxInFlight: 2 }] }, transport);
   cleanup.push(() => broker.close());
   const [port] = await broker.listen();
@@ -41,6 +43,154 @@ async function fixture(transport: BrokerTransport) {
   const post = (data: unknown, path = "/backend-api/codex/responses") => fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer attacker", "chatgpt-account-id": "owner-only", cookie: "owner-cookie", session_id: "kenan-session" }, body: JSON.stringify(data) });
   return { root, store, token, post, url, regrant };
 }
+
+const astraBody = (tier?: string) => ({ ...body(), model: "gpt-6-astra", ...(tier ? { service_tier: tier } : {}) });
+function tierTransport(entitled: Set<string>) {
+  const catalogs: string[] = [];
+  const requests: { account: string; tier: string | undefined }[] = [];
+  const transport = vi.fn(async (url: string, init: RequestInit) => {
+    const account = new Headers(init.headers).get("chatgpt-account-id")!;
+    if (init.method === "GET") {
+      expect(new URL(url).pathname).toBe("/backend-api/codex/models");
+      catalogs.push(account);
+      return Response.json({ models: [{ slug: "gpt-6-astra", service_tiers: [{ id: "priority" }, ...(entitled.has(account) ? [{ id: "ultrafast" }] : [])] }] });
+    }
+    expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    requests.push({ account, tier: JSON.parse(String(init.body)).service_tier });
+    return sse({});
+  });
+  return { transport, catalogs, requests };
+}
+
+test("Ultrafast replaces default affinity with the sole entitled granted account", async () => {
+  const t = tierTransport(new Set(["owner-account"]));
+  const f = await fixture(t.transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
+  await (await f.post(astraBody())).text();
+  expect(t.catalogs).toEqual([]);
+  f.regrant(["shared", "owner-only"], ["openai-codex/gpt-6-astra"]);
+  // Cooling remains an ordering preference, not permission to use an unentitled sibling.
+  f.store.setCooldown("owner-only", Date.now() + 60_000, { model: "gpt-6-astra" });
+  const response = await f.post(astraBody("ultrafast"));
+  expect(response.status).toBe(200);
+  await response.text();
+  expect(t.requests).toEqual([{ account: "shared-account", tier: undefined }, { account: "owner-account", tier: "ultrafast" }]);
+  expect(t.catalogs.sort()).toEqual(["owner-account", "shared-account"]);
+  expect(f.store.activeLeases()).toHaveLength(0);
+  expect(f.store.account("owner-only")?.cooldownUntil).toBeUndefined();
+  const { dispatches } = await (await fetch(`${f.url}/v1/dispatches`)).json();
+  expect(dispatches).toHaveLength(2);
+  expect(dispatches[1]).toMatchObject({ id: response.headers.get("x-pi-broker-dispatch-id"), principal: "sybil",
+    accountId: "owner-only", model: "gpt-6-astra", serviceTier: "ultrafast", httpStatus: 200, outcome: "completed" });
+  expect(Object.keys(dispatches[1]).sort()).toEqual(["accountId", "at", "httpStatus", "id", "model", "outcome", "principal", "requestId", "serviceTier", "updatedAt"]);
+  expect(JSON.stringify(dispatches)).not.toMatch(/fixture-refresh|signature|hello|owner-cookie|Bearer/);
+});
+
+test("dispatch evidence is bounded, principal-local and distinguishes refusal from incomplete transport", async () => {
+  let status = 429;
+  const f = await fixture(async () => status === 429 ? new Response("rate limited", { status }) : new Response("data: {}\n\n"));
+  f.store.setControl("broker-dispatches:kenan", JSON.stringify([{ id: "private-other-principal" }]));
+  f.store.setControl("broker-dispatches:sybil", JSON.stringify(Array.from({ length: 128 }, (_, at) => ({ id: `seed-${at}`, at }))));
+  await (await f.post(body())).text();
+  let receipts = (await (await fetch(`${f.url}/v1/dispatches`)).json()).dispatches;
+  expect(receipts).toHaveLength(128);
+  expect(receipts[0].id).toBe("seed-1");
+  expect(receipts.at(-1)).toMatchObject({ outcome: "rejected", httpStatus: 429 });
+  status = 200;
+  await (await f.post(body())).text();
+  receipts = (await (await fetch(`${f.url}/v1/dispatches`)).json()).dispatches;
+  expect(receipts.at(-1)).toMatchObject({ outcome: "indeterminate", httpStatus: 200 });
+  expect(JSON.stringify(receipts)).not.toContain("private-other-principal");
+});
+
+test("Ultrafast never probes or selects an entitled account outside the principal grant", async () => {
+  const t = tierTransport(new Set(["owner-account"]));
+  const f = await fixture(t.transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
+  const response = await f.post(astraBody("ultrafast"));
+  expect(response.status).toBe(503);
+  expect((await response.json()).error.message).toMatch(/Ultrafast.*no slower tier/i);
+  expect(t.catalogs).toEqual(["shared-account"]);
+  expect(t.requests).toEqual([]);
+  expect(f.store.activeLeases()).toHaveLength(0);
+});
+
+test("a stale default affinity cannot bypass Ultrafast refusal", async () => {
+  const t = tierTransport(new Set());
+  const f = await fixture(t.transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
+  await (await f.post(astraBody())).text();
+  const response = await f.post(astraBody("ultrafast"));
+  expect(response.status).toBe(503);
+  expect((await response.json()).error.message).toContain("no slower tier was used");
+  expect(t.requests).toEqual([{ account: "shared-account", tier: undefined }]);
+});
+
+test("Ultrafast notices a live account upgrade after catalog freshness expires", async () => {
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const entitled = new Set<string>();
+  const t = tierTransport(entitled);
+  const f = await fixture(t.transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
+  expect((await f.post(astraBody("ultrafast"))).status).toBe(503);
+  entitled.add("shared-account");
+  expect((await f.post(astraBody("ultrafast"))).status).toBe(503);
+  expect(t.catalogs).toHaveLength(1);
+  now += CODEX_CAPABILITY_TTL_MS + 1;
+  const response = await f.post(astraBody("ultrafast"));
+  expect(response.status).toBe(200);
+  await response.text();
+  expect(t.catalogs).toHaveLength(2);
+  expect(t.requests).toEqual([{ account: "shared-account", tier: "ultrafast" }]);
+});
+
+test.each(["unavailable", "transport-failure"])("Ultrafast refuses a %s capability catalog without trying inference", async failure => {
+  const transport = vi.fn(async (_url: string, init: RequestInit) => {
+    expect(init.method).toBe("GET");
+    if (failure === "transport-failure") throw new Error("catalog unavailable");
+    return new Response("unavailable", { status: 503 });
+  });
+  const f = await fixture(transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
+  const response = await f.post(astraBody("ultrafast"));
+  expect(response.status).toBe(503);
+  expect((await response.json()).error.message).toContain("no slower tier was used");
+  expect(transport).toHaveBeenCalledOnce();
+  expect(f.store.activeLeases()).toHaveLength(0);
+});
+
+test.each(["disabled", "reserved", "voice", "quota"])("Ultrafast entitlement does not bypass an account's %s exclusion", async exclusion => {
+  const t = tierTransport(new Set(["shared-account"]));
+  const f = await fixture(t.transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
+  if (exclusion === "disabled") f.store.setAccountEnabled("shared", false);
+  if (exclusion === "reserved") f.store.setControl("account-reservation:shared", JSON.stringify({ metadata: { purpose: "batch" }, reason: "batch reservation" }));
+  if (exclusion === "voice") f.store.setControl("account-use:shared", "voice");
+  if (exclusion === "quota") f.store.recordMeter("shared", "codex-7d", 100, Date.now() + 60_000, Date.now());
+  expect((await f.post(astraBody("ultrafast"))).status).toBe(503);
+  expect(t.requests).toEqual([]);
+  expect(t.catalogs).toEqual([]);
+});
+
+test.each([undefined, "default", "priority"])("Codex tier %s does not need an Ultrafast entitlement catalog", async tier => {
+  const t = tierTransport(new Set());
+  const f = await fixture(t.transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
+  const response = await f.post(astraBody(tier));
+  expect(response.status).toBe(200);
+  await response.text();
+  expect(t.catalogs).toEqual([]);
+  expect(t.requests).toEqual([{ account: "shared-account", tier }]);
+});
+
+test("Ultrafast rejects non-Astra Codex and Anthropic requests before provider calls", async () => {
+  const transport = vi.fn(async () => sse({}));
+  const f = await fixture(transport);
+  expect((await f.post({ ...body(), service_tier: "ultrafast" })).status).toBe(400);
+  expect((await f.post({ model: anthropicModel.id, stream: true, messages: [], service_tier: "ultrafast" }, "/v1/messages")).status).toBe(400);
+  expect(transport).not.toHaveBeenCalled();
+});
 
 test("the person listener routes Voice without opening provider credentials", async () => {
   const transport = vi.fn(async (url: string, init: RequestInit) => {
@@ -115,7 +265,7 @@ test.each(["repaired", "still-rejected", "usage-healthy", "usage-failed"])("brok
   const f = await fixture(transport);
   const response = await f.post(body());
   expect(response.status).toBe(kind === "repaired" ? 200 : 404);
-  expect(probe).toHaveBeenCalledOnce();
+  expect(probe).toHaveBeenCalledTimes(kind === "still-rejected" ? 2 : 1);
   expect(probe.mock.calls[0][0]).toBe(f.token);
   expect(refresh).toHaveBeenCalledTimes(kind.startsWith("usage-") ? 0 : 1);
   expect(transport).toHaveBeenCalledTimes(kind.startsWith("usage-") ? 1 : 2);
@@ -125,6 +275,38 @@ test.each(["repaired", "still-rejected", "usage-healthy", "usage-failed"])("brok
     expect(response.headers.get("x-request-id")).toBe("inference-rejection");
   } else await response.text();
   expect(f.store.activeLeases()).toHaveLength(0);
+  if (kind === "still-rejected") {
+    expect((await f.post(body())).status).toBe(503);
+    expect(transport).toHaveBeenCalledTimes(2);
+  }
+});
+
+test.each(["repaired", "still-rejected", "transport", "stream-initial", "stream-second"])("broker recognizes body/stream invalidation and fences repeat rejection without replaying accepted streams: %s", async kind => {
+  const invalidated = "Your authentication token has been invalidated. Please try signing in again.";
+  const refresh = vi.spyOn(SharedOAuthAuth.prototype, "refreshRejected").mockImplementation(async function(this: SharedOAuthAuth, account, _rejected, signal) {
+    const current = await this.credential(account, signal);
+    const fresh = { ...current, access: `${current.access}-fresh` };
+    await withSharedAuth(this.path, signal, (auth, save) => { auth[account] = fresh; save(); });
+    return fresh;
+  });
+  let calls = 0;
+  const transport = vi.fn(async () => {
+    calls++;
+    if (kind === "stream-initial" || calls === 2 && kind === "stream-second") return new Response(`data: ${JSON.stringify({ type: "error", error: { message: invalidated } })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+    return calls === 1 || kind === "still-rejected"
+      ? Response.json({ error: { message: invalidated } }, { status: 403 })
+      : kind === "transport" ? new Response("upstream unavailable", { status: 503 }) : sse({});
+  });
+  const f = await fixture(transport);
+  const response = await f.post(body()); await response.text();
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(transport).toHaveBeenCalledTimes(kind === "stream-initial" ? 1 : 2);
+  const auth = new SharedOAuthAuth({ path: join(f.root, "auth.json"), providerId: "openai-codex", refresh: async c => c, toAuth: async c => ({ apiKey: c.access }) });
+  expect(auth.has("shared")).toBe(kind !== "still-rejected" && kind !== "stream-second");
+  if (kind === "still-rejected" || kind === "stream-second") {
+    expect((await f.post(body())).status).toBe(503);
+    expect(transport).toHaveBeenCalledTimes(2);
+  }
 });
 
 test("fleet, transcripts, credentials, ungranted models and provider-resource references never reach upstream", async () => {
@@ -166,16 +348,17 @@ test("foreground broker requests admit while fleet account and machine session s
   expect(transport).toHaveBeenCalledOnce();
 });
 
-test("broker probes a cooling granted account when no uncooling account exists", async () => {
+test("broker probes a cooling granted account when no uncooling account exists, and its answer lifts the stale hold", async () => {
   const transport = vi.fn(async () => sse({}));
   const f = await fixture(transport);
   const cooldown = Date.now() + 24 * 60 * 60_000;
-  f.store.setCooldown("shared", cooldown);
+  f.store.setCooldown("shared", cooldown, { model: "gpt-6-luna", at: Date.now() - 1_000 });
   const response = await f.post(body());
   expect(response.status).toBe(200);
   await response.text();
   expect(transport).toHaveBeenCalledOnce();
-  expect(f.store.account("shared")?.cooldownUntil).toBe(cooldown);
+  expect(f.store.account("shared")?.cooldownUntil).toBeUndefined();
+  expect(JSON.parse(f.store.control("cooldown-recovery:shared")!).success).toMatchObject({ model: "gpt-6-luna", source: "model-broker" });
   f.store.recordMeter("shared", "codex-7d", 100, cooldown, Date.now());
   expect((await f.post(body())).status).toBe(503);
   expect(transport).toHaveBeenCalledOnce();
@@ -189,6 +372,7 @@ test("a broker 429 does not shorten a longer account cooldown", async () => {
   expect(response.status).toBe(429);
   await response.text();
   expect(f.store.account("shared")?.cooldownUntil).toBe(cooldown);
+  expect(f.store.cooldownEvidence("shared")?.models).toEqual(["gpt-6-luna"]);
 });
 
 test("the principal request ceiling survives busy fleets and keeps its error through native Codex", async () => {
