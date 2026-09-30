@@ -18,6 +18,13 @@ test.each(["openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.6-luna", "anthropic/c
   expect(resolveThreadSettings({ model })).toMatchObject({ ok: true, value: { model } });
 });
 
+test.each(["cerebras/gpt-oss-120b", "cerebras/qwen-3.8-27b"])("Cerebras %s admits standard only, never silently ignores requested speed", model => {
+  expect(resolveThreadSettings({ model, speed: "standard" })).toMatchObject({ ok: true, value: { model, speed: "standard" } });
+  for (const speed of ["priority", "ultrafast"] as const) {
+    expect(resolveThreadSettings({ model, speed })).toMatchObject({ ok: false, error: { code: "invalid_request", message: expect.stringContaining("speed") } });
+  }
+});
+
 test("missing-model startup is a configuration error, account admission and transport are not", () => {
   expect(isModelConfigurationError("Error: Model not found: openai-codex/gpt-6-sol")).toBe(true);
   expect(isModelConfigurationError("Model not found through model broker: openai-codex/gpt-6-sol")).toBe(true);
