@@ -37,6 +37,7 @@ const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContr
 const self = fileURLToPath(import.meta.url);
 const repairRoot = join(stateRoot, "repairs");
 const repairPolicyPath = join(stateRoot, "repair-policy.json");
+const ownerSourceRef = "refs/pi-stack-publication/owner-source";
 let activeRequest;
 let activeLog;
 let trackingCommand = false;
@@ -190,6 +191,26 @@ function validateSha(value) {
   if (!/^[a-f0-9]{40}$/.test(value)) throw new Error(`invalid source SHA: ${value}`);
 }
 
+export function checkOwnerSource(sourceRoot, sourceSha) {
+  if (!existsSync(join(checkout, ".git"))) return;
+  const retained = checked("git", ["-C", checkout, "for-each-ref", "--format=%(objectname)", ownerSourceRef]);
+  if (!retained) return;
+  if (resolve(sourceRoot) !== resolve(checkout)) {
+    checked("git", ["-C", sourceRoot, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", checkout, ownerSourceRef]);
+  }
+  if (!commandResult("git", ["-C", sourceRoot, "merge-base", "--is-ancestor", retained, sourceSha]).ok) {
+    throw new Error(`Publication source ${sourceSha} omits bootstrapped owner source ${retained}; merge the retained ${ownerSourceRef} from ${checkout} before publication or owner installation`);
+  }
+}
+
+function retainOwnerSource(sourceRoot, sourceSha) {
+  if (!existsSync(join(checkout, ".git"))) throw new Error("Code-only repair requires an initialized publication repository for source custody");
+  if (checked("git", ["-C", sourceRoot, "status", "--porcelain", "--untracked-files=all", "--", "deploy"])) {
+    throw new Error("Commit deployment source before installing a code-only owner repair");
+  }
+  checked("git", ["-C", checkout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", sourceRoot, `${sourceSha}:${ownerSourceRef}`]);
+}
+
 function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
@@ -198,7 +219,10 @@ function installFrom(sourceRoot, activate = true) {
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
+  const sourceSha = checked("git", ["-C", sourceRoot, "rev-parse", "HEAD^{commit}"]);
+  checkOwnerSource(sourceRoot, sourceSha);
   ensureState();
+  if (!activate) retainOwnerSource(sourceRoot, sourceSha);
   mkdirSync(dirname(installedCommand), { recursive: true, mode: 0o750 });
   mkdirSync(userUnitRoot, { recursive: true, mode: 0o700 });
   for (const name of modules) atomicWrite(join(dirname(installedCommand), name), readFileSync(join(sourceRoot, "deploy", name)), 0o644);
@@ -224,6 +248,7 @@ function install(activate = true) {
 export function adoptPublicationOwner(sourceRoot, integrationSha) {
   const ownerSource = checked("git", ["-C", sourceRoot, "rev-parse", "HEAD"]);
   if (ownerSource !== integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${integrationSha}`);
+  checkOwnerSource(sourceRoot, integrationSha);
   // The candidate owns its installation layout; the running worker already holds the lock.
   checked(process.execPath, [join(sourceRoot, "deploy/publication"), "install"], { timeoutSeconds: 90 });
 }
@@ -258,6 +283,7 @@ function submit(sourceArgument, repairedRequestId) {
   if (repairedRequestId) {
     validateRequestId(repairedRequestId);
     repaired = readRequest(repairedRequestId);
+    checkCancellation(repaired);
     const repair = readRepair(repairedRequestId);
     if (repair?.outcome?.status !== "source-fixed" || repair.outcome.sourceSha !== sourceSha)
       throw new Error("Repaired submission requires its dedicated owner's source-fixed outcome and matching commit");
@@ -304,6 +330,10 @@ function submit(sourceArgument, repairedRequestId) {
 function enqueue(requestId, sourceSha, sourceRef, reporterJson, repairedRequestId) {
   validateRequestId(requestId);
   validateSha(sourceSha);
+  if (repairedRequestId) {
+    validateRequestId(repairedRequestId);
+    checkCancellation(readRequest(repairedRequestId));
+  }
   if (sourceRef !== `refs/heads/pi-stack-publications/${requestId}`) throw new Error("source ref does not match request id");
   ensureState();
   const loadState = checked("systemctl", ["--user", "show", "pi-stack-publication.service", "-p", "LoadState", "--value"]);
@@ -361,6 +391,7 @@ function inspect(requestId) {
 function retry(requestId) {
   validateRequestId(requestId);
   const request = readRequest(requestId);
+  checkCancellation(request);
   const repair = readRepair(requestId);
   if (request.repairedRetry?.repairId === repair?.id) return;
   if (request.status !== "failed" || request.repairedRetry || repair?.outcome?.status !== "infrastructure-fixed")
@@ -390,8 +421,12 @@ function cancel(requestId) {
   process.stdout.write(`${JSON.stringify({ requestId, status: "cancellation-requested", receipt: cancellationPath(requestId) })}\n`);
 }
 
+function isCancelled(request) {
+  return request.failure?.reason === "cancelled" || existsSync(cancellationPath(request.requestId));
+}
+
 function checkCancellation(request) {
-  if (existsSync(cancellationPath(request.requestId))) throw new Error("Publication cancelled; any completed host release remains selected");
+  if (isCancelled(request)) throw new Error("Publication cancelled; any completed host release remains selected");
 }
 
 function appendLog(path, text) {
@@ -745,6 +780,7 @@ function createIntegration(request, logPath) {
     if (!result.ok) return result;
   }
   const integrationSha = runCapture("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"]);
+  checkOwnerSource(checkout, integrationSha);
   const localProperties = config.androidProperties;
   if (!existsSync(localProperties)) return { ok: false, status: 1, stderr: `missing host-owned Android configuration: ${localProperties}` };
   mkdirSync(join(checkout, "apps/kenan/android"), { recursive: true });
@@ -1641,6 +1677,7 @@ export function processRequest(request) {
       if (!result.ok) throw new Error(result.stderr.trim() || `${request.step} exited ${result.status}`);
     }
 
+    checkOwnerSource(checkout, request.integrationSha);
     prepareAndroidArtifact(request, logPath);
     request.step = "inspect-thread-execution-contract";
     writeRequest(request);
@@ -1839,7 +1876,7 @@ function writeRepair(repair) {
 }
 
 function ensureRepair(request) {
-  if (readRepair(request.requestId)) return;
+  if (isCancelled(request) || readRepair(request.requestId)) return;
   const directory = join(repairRoot, request.requestId);
   const exhausted = (request.repairDepth ?? 0) >= policy.maxRepairDepth;
   writeRepair({ id: repairId(request.requestId), requestId: request.requestId, sourceSha: request.sourceSha,
@@ -1853,7 +1890,7 @@ function ensureRepair(request) {
 function requestRepair(requestId) {
   validateRequestId(requestId);
   const request = readRequest(requestId);
-  if (request.status !== "failed" || request.failure?.reason === "cancelled") throw new Error("Only repairable failed requests need repair adoption");
+  if (request.status !== "failed" || isCancelled(request)) throw new Error("Only repairable failed requests need repair adoption");
   ensureRepair(request);
   checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-watchdog.service"]);
   process.stdout.write(`${JSON.stringify(readRepair(requestId))}\n`);
@@ -1911,6 +1948,14 @@ function watchdog() {
   const repairs = allRequests().map(request => readRepair(request.requestId)).filter(Boolean);
   let busy = false;
   for (const repair of repairs) {
+    if (isCancelled(readRequest(repair.requestId)) && ["pending", "launching", "running", "submitting", "ready-to-retry"].includes(repair.status)) {
+      if (serviceBusy(repair.unit)) { busy = true; continue; }
+      repair.status = "blocked";
+      repair.summary = "Publication cancelled; retained repair work cannot authorize a successor or retry";
+      repair.finishedAt = new Date().toISOString();
+      writeRepair(repair);
+      continue;
+    }
     if (repair.status === "submitted" && repair.successor) {
       const successor = readRequest(repair.successor.requestId);
       if (repair.successor.status !== successor.status) {
@@ -1989,6 +2034,7 @@ function repairRun(requestId) {
   repair.startedAt = new Date().toISOString();
   writeRepair(repair);
   try {
+    checkCancellation(request);
     try {
       const workspace = JSON.parse(checked("agent-workspace", ["create", "--root", config.repairWorkspaceRoot,
         "--name", `publication-repair-${requestId}`, "--repo", checkout, "--owner", repair.id, "--mode", "writer", "--json"], { timeoutSeconds: 45 }));
@@ -2027,6 +2073,7 @@ function acceptRepairResult(repair) {
   if (!existsSync(repair.result)) throw new Error(`Repair agent returned without ${repair.result}`);
   const outcome = JSON.parse(readFileSync(repair.result, "utf8"));
   if (!["source-fixed", "infrastructure-fixed", "blocked"].includes(outcome.status) || !outcome.summary?.trim()) throw new Error("Repair result needs a status and cause/repair summary");
+  if (outcome.status !== "blocked") checkCancellation(readRequest(repair.requestId));
   if (outcome.status !== "blocked" && (!outcome.evidence || !existsSync(outcome.evidence))) throw new Error("Repair result needs an existing focused proof receipt");
   if (outcome.status === "source-fixed") {
     validateSha(outcome.sourceSha);
