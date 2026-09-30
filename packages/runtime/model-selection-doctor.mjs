@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export async function modelSelectionDoctor(runtimeEntry = process.env.PI_TEST_RUNTIME_ENTRY ?? import.meta.resolve("@earendil-works/pi-coding-agent")) {
@@ -131,7 +131,7 @@ export async function modelSelectionDoctor(runtimeEntry = process.env.PI_TEST_RU
   }
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+if (process.argv[1] && pathToFileURL(await realpath(process.argv[1])).href === import.meta.url) {
   try { console.log(JSON.stringify(await modelSelectionDoctor())); }
   catch (error) { console.error(error); process.exitCode = 1; }
 }

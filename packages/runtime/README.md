@@ -87,6 +87,8 @@ A provider can declare `"explicitOnly": true` in `models.json`. It remains avail
 
 [`model-selection-doctor.mjs`](model-selection-doctor.mjs), installed as `pi-model-selection-doctor`, checks the actual SDK and bundled CLI against a disposable loopback inference server. All refused default/saved/unknown model and hook-error cases require zero inference requests; only the explicitly selected explicit-only provider completes a mock request. It also checks the manual catalog and extension-registration order. [`deploy/host`](../../deploy/host) runs it against the selected immutable runtime alongside the browser doctor before accepting a release. Run it directly on an installed host, or select a candidate with `PI_TEST_RUNTIME_ENTRY=file:///path/to/dist/index.js`. No real provider credentials, sessions or paid tokens are used.
 
+The installed entrypoint resolves the account and runtime symlink chain before deciding whether to run. Its regression test stages that installed layout and requires both a nonempty success receipt and a nonzero exit for a missing runtime. Deployment fixtures exercise each doctor's rejection and Remote restoration independently; adding a runtime command also requires the onboarding fixture to provide and check its account link.
+
 ## Development
 
 ```sh
