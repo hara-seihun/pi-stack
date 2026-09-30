@@ -18,6 +18,7 @@ export interface TranscriptProps {
   liveThinking?: string;
   /** The thread is thinking now, so the live step exists before any text does. */
   thinkingActive?: boolean;
+  autoCollapse?: boolean;
   sessionId: string;
   home: string;
   images: ReadonlyMap<string, InlineImage> | null;
@@ -281,7 +282,7 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
 
 const CONTEXT_WINDOW_SIZE = 60;
 
-export function Transcript({ entries, liveThinking, thinkingActive, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
+export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
   const items = useMemo(() => buildTranscript(entries, liveThinking, thinkingActive), [entries, liveThinking, thinkingActive]);
   const newest = Math.max(0, items.length - CONTEXT_WINDOW_SIZE);
   const [start, setStart] = useState(newest);
@@ -305,9 +306,11 @@ export function Transcript({ entries, liveThinking, thinkingActive, sessionId, h
         {loadingEarlier ? "Loading earlier…" : `Show ${start > 0 ? Math.min(CONTEXT_WINDOW_SIZE, start) : CONTEXT_WINDOW_SIZE} earlier`}
       </button>}
       {earlierError && <p className="context-earlier-error" role="status">{earlierError}</p>}
-      {visible.map((item, index) => item.kind === "work"
-        ? <WorkCard key={`${sessionId}:${item.key}`} item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />
-        : <MessageEntry key={item.entry.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />)}
+      {visible.flatMap((item, index) => item.kind === "work"
+        ? autoCollapse
+          ? [<WorkCard key={`${sessionId}:${item.key}`} item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />]
+          : item.entries.map(entry => <Step key={`${sessionId}:${entry.key}`} entry={entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />)
+        : [<MessageEntry key={item.entry.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />])}
     </div>
   </InlineImagesContext.Provider>;
 }

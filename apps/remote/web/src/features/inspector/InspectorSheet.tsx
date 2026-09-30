@@ -23,11 +23,13 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   return <div className="inspector-row"><dt>{label}</dt><dd>{children}</dd></div>;
 }
 
-export function InspectorSheet({ session, sessions, open, pending, onClose, onOpenThread, onArchive, onRestore, debug }: {
+export function InspectorSheet({ session, sessions, open, pending, autoCollapse, onAutoCollapseChange, onClose, onOpenThread, onArchive, onRestore, debug }: {
   session: Session;
   sessions: Session[];
   open: boolean;
   pending: boolean;
+  autoCollapse: boolean;
+  onAutoCollapseChange(enabled: boolean): void;
   onClose(): void;
   onOpenThread(session: Session): void;
   onArchive(): void;
@@ -158,6 +160,11 @@ export function InspectorSheet({ session, sessions, open, pending, onClose, onOp
       {debug && <section className="inspector-section"><h3>Debug</h3>{debug}</section>}
     </div>}
     {tab === "settings" && <div className="inspector-panel">
+      <section className="inspector-section">
+        <h3>Display</h3>
+        <label className="inspector-display-toggle"><input type="checkbox" checked={autoCollapse} onChange={event => onAutoCollapseChange(event.currentTarget.checked)} /> Auto-collapse work and thoughts</label>
+        <p className="muted inspector-hint">Turn off to stream every thought and tool step openly, without grouping them into work cards. Applies to all chats on this device.</p>
+      </section>
       <DismissibleError message={loadFailure} resetKey={attempt} />
       {loadFailure && <button type="button" disabled={Boolean(saving)} onClick={() => retry(value => value + 1)}>Retry loading settings</button>}
       <DismissibleError message={saveFailure} />
