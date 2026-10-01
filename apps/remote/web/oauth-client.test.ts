@@ -36,8 +36,9 @@ if (!process.env.PI_OAUTH_CLIENT_CASE) {
     const pathname = new URL(request.url).pathname;
     expect(pathname.startsWith(`${prefix}/v1/`)).toBe(true);
     const path = pathname.slice(prefix.length);
-    if (path === "/v1/environment" && init?.credentials === "omit") {
-      expect(request.headers.has("x-pi-remote-session")).toBe(false);
+    if (path === "/v1/environment" && !request.headers.has("x-pi-remote-session")) {
+      expect(init?.credentials).toBe("same-origin");
+      expect(init?.redirect).toBe("error");
       expect(request.headers.has("x-pi-remote-user")).toBe(false);
       return Response.json({ environment: { authentication: { type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with company" }, persons: [] } });
     }
@@ -81,6 +82,8 @@ if (!process.env.PI_OAUTH_CLIENT_CASE) {
     expect((await window.KenanRemote!.getState()).id).toBe("company");
     expect(window.KenanRemote!.resolveApiUrl("/v1/files?path=report")).toBe(`${prefix}/v1/files?path=report&session=oauth-session`);
     await fetch("/v1/environment");
+    await native.fetchPersonChooser();
+    expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
     expect(auth.authentication?.type).toBe("oidc");
     expect(() => window.PiRemotePerson.set("previous")).toThrow("signed-in account");
     const { SignInDialog } = await import("./src/SignInDialog");
