@@ -226,10 +226,12 @@ export class Daemon {
 
   private async fillCapacity():Promise<void>{
     if(this.store.control("launches")==="paused")return;
-    const failed=new Set<string>();
-    for(let slot=0;slot<this.config.maxConcurrentSessions;slot++){
-      if(this.threads.snapshot().filter(thread=>thread.state==="running").length>=this.config.maxConcurrentSessions)break;
-      const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id));
+    const failed=new Set<string>(),admittedForced=new Set<string>();
+    let backgroundAdmissions=0;
+    while(true){
+      const atBackgroundCeiling=backgroundAdmissions>=this.config.maxConcurrentSessions||this.threads.snapshot().filter(thread=>thread.state==="running").length>=this.config.maxConcurrentSessions;
+      const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id)
+        &&(lane.admission==="background"&&!lane.repair?!atBackgroundCeiling:!admittedForced.has(lane.id)));
       lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||this.share(a)-this.share(b)||a.id.localeCompare(b.id));
       let admitted=false;
       for(const lane of lanes){
@@ -244,6 +246,8 @@ export class Daemon {
             metadata:{source:"lane",laneId:lane.id,execution:lane.repair?"root-repair":"user"}});
           if(!spawned.ok)throw new Error(spawned.error.message);
           if(lane.repair||this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(lane.repair?this.repairReadiness.get(lane.id)!.at:this.readinessAt));
+          if(lane.admission==="background"&&!lane.repair)backgroundAdmissions++;
+          else admittedForced.add(lane.id);
           this.store.setControl(`refusal:${key}`,"");
         }catch(error){failed.add(key);this.store.setControl(`refusal:${key}`,String(error));continue;}
         admitted=true;break;

@@ -10,7 +10,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
 
-/** Children are forced; live consulting keeps its own class so it passes the ceilings force still respects. */
+/** Children bypass background pacing; live consulting retains its mode's admission class. */
 function admissionClass(thread: Thread): Thread["admission"] {
   return thread.admission === "live" ? "live" : thread.parentId ? "force" : thread.admission;
 }
@@ -66,7 +66,7 @@ export class Fleet {
       if (!recovering) {
         if (this.store.control("launches") === "paused") return { ok: false, error: { code: "unavailable", message: "emergency halt" } };
         if (this.store.control("ordinary-launches") === "paused") return { ok: false, error: { code: "unavailable", message: "ordinary work paused" } };
-        if (thread.admission !== "live" && this.brokerExecutions.size >= this.config.maxConcurrentSessions) return { ok: false, error: { code: "unavailable", message: "machine session ceiling" } };
+        if (admissionClass(thread) === "background" && this.brokerExecutions.size >= this.config.maxConcurrentSessions) return { ok: false, error: { code: "unavailable", message: "machine session ceiling" } };
         this.store.setControl(key, thread.id);
       }
       this.brokerExecutions.set(thread.id, executionId);

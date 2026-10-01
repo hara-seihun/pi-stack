@@ -8,16 +8,16 @@ const thread: Thread = { id: "thread", parentId: null, title: "work", cwd: "/tmp
   settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" }, admission: "force",
   state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 
-it("leases executions without creating fleet runs and enforces account capacity", async () => {
+it("leases executions without creating fleet runs and retains background account pacing", async () => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
   const fleet = new Fleet(store, loadConfig("/missing"));
   try {
-    const first = await fleet.admit(thread, thread.settings, false, "execution-one");
+    const first = await fleet.admit({ ...thread, admission: "background" }, thread.settings, false, "execution-one");
     expect(first.ok).toBe(true);
     expect(store.runs()).toEqual([]);
     expect(store.activeSessionLeases().map(lease => lease.id)).toEqual(["thread:execution-one"]);
-    expect((await fleet.admit({ ...thread, id: "other" }, thread.settings, false, "execution-two")).ok).toBe(false);
+    expect((await fleet.admit({ ...thread, id: "other", admission: "background" }, thread.settings, false, "execution-two")).ok).toBe(false);
     if (!first.ok) throw new Error(first.error.message);
     await first.value.release();
     expect(store.activeSessionLeases()).toEqual([]);
@@ -181,24 +181,24 @@ it("cools a thread's account for the limit class the provider named", async () =
   } finally { store.close(); }
 });
 
-it("admits live consulting past the account and machine ceilings the fleet waits behind, but not past exhausted quota", async () => {
+it.each(["force", "live"] as const)("admits %s past background account and machine ceilings, but not exhausted quota", async admission => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
   const fleet = new Fleet(store, { ...loadConfig("/missing"), maxConcurrentSessions: 1 });
   try {
     const busy = await fleet.admit(thread, thread.settings, false, "fleet-work");
     expect(busy.ok).toBe(true);
-    expect((await fleet.admit({ ...thread, id: "queued", parentId: "parent" }, thread.settings, false, "queued-work")).ok).toBe(false);
-    const live = await fleet.admit({ ...thread, id: "live", parentId: "meeting", admission: "live" }, thread.settings, false, "live-work");
-    expect(live).toMatchObject({ ok: true, value: { env: { PI_THREAD_ADMISSION: "live" } } });
+    expect((await fleet.admit({ ...thread, id: "queued", admission: "background" }, thread.settings, false, "queued-work")).ok).toBe(false);
+    const live = await fleet.admit({ ...thread, id: "live", parentId: "meeting", admission }, thread.settings, false, "live-work");
+    expect(live).toMatchObject({ ok: true, value: { env: { PI_THREAD_ADMISSION: admission } } });
     if (live.ok) await live.value.release();
     store.recordMeter("a", "weekly", 100, Date.now() + 1000);
-    expect((await fleet.admit({ ...thread, id: "live-2", admission: "live" }, thread.settings, false, "live-exhausted")).ok).toBe(false);
+    expect((await fleet.admit({ ...thread, id: "live-2", admission }, thread.settings, false, "live-exhausted")).ok).toBe(false);
     if (busy.ok) await busy.value.release();
   } finally { store.close(); }
 });
 
-it("sends live consulting to the least loaded account rather than the least spent one", async () => {
+it.each(["force", "live"] as const)("sends %s to the least loaded account rather than the least spent one", async admission => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "busy", provider: "openai-codex", concurrency: 4 });
   store.upsertAccount({ id: "quiet", provider: "openai-codex", concurrency: 4 });
@@ -208,7 +208,7 @@ it("sends live consulting to the least loaded account rather than the least spen
   try {
     const fleetWork = await fleet.admit(thread, thread.settings, false, "fleet-work");
     expect(fleetWork).toMatchObject({ ok: true, value: { env: { PI_ORCHESTRATOR_ACCOUNT_ID: "busy" } } });
-    const live = await fleet.admit({ ...thread, id: "live", admission: "live" }, thread.settings, false, "live-work");
+    const live = await fleet.admit({ ...thread, id: "live", admission }, thread.settings, false, "live-work");
     expect(live).toMatchObject({ ok: true, value: { env: { PI_ORCHESTRATOR_ACCOUNT_ID: "quiet" } } });
   } finally { store.close(); }
 });

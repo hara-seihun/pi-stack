@@ -17,7 +17,7 @@ export interface Capacity { readonly sessions:number; readonly spent:number; rea
 const HOUR=3_600_000;
 const HISTORY=6*HOUR;
 
-/** A ceiling for all consumers of one account, not a desired worker count. */
+/** Account availability and background pacing, not a desired worker count. */
 export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),runId?:string):Capacity{
   const account=store.account(accountId)!;
   const multiplier=Number(store.control(`boost:${account.provider}`)??"1");
@@ -32,7 +32,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
   if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
   if(budget==="live")return{sessions:Number.POSITIVE_INFINITY,spent,meterAt,reason:"live consulting"};
-  if(budget==="force")return{sessions:account.concurrency,spent,meterAt,reason:"urgent spend"};
+  if(budget==="force")return{sessions:Number.POSITIVE_INFINITY,spent,meterAt,reason:"urgent spend"};
   if(!Number.isFinite(multiplier)||multiplier<=0)return stop("background launches halted");
   if(!meters.length){
     const probed=store.db.prepare("SELECT 1 FROM lease WHERE account_id=? AND kind='fleet' LIMIT 1").get(accountId);
@@ -85,8 +85,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   if(repair&&store.control("repair-owner")&&store.control("repair-owner")!==runId)return{refusals:[{accountId:"*",reason:"repair already owned"}]};
-  // Live consulting has people waiting on the answer, so it is admitted past the session ceilings the fleet queues behind.
-  if(budget!=="live"&&store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
+  if(budget==="background"&&store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
@@ -102,9 +101,8 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
     if(choices.length)break;
   }
   const load=(accountId:string)=>store.activeSessionLeases(accountId,120_000,now).length;
-  // Live consulting passes the concurrency ceiling, so it goes where the fewest sessions already run: in the
-  // fvz meeting every thread shared one account the fleet had filled and hit provider faults.
-  choices.sort((a,b)=>budget==="live"?load(a.accountId)-load(b.accountId)||a.spent-b.spent||a.accountId.localeCompare(b.accountId)
+  // Unpaced admissions spread load first: concentrating live consulting on the least-spent account caused provider faults.
+  choices.sort((a,b)=>budget!=="background"?load(a.accountId)-load(b.accountId)||a.spent-b.spent||a.accountId.localeCompare(b.accountId)
     :a.spent-b.spent||load(a.accountId)-load(b.accountId)||a.accountId.localeCompare(b.accountId));
   return{assignment:choices[0],refusals};
 }
