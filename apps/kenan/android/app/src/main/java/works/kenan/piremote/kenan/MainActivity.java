@@ -27,6 +27,7 @@ public class MainActivity extends BridgeActivity {
         WebBundles.Installed bundle = new WebBundles(this).activate();
         if (bundle != null) bridgeBuilder.setServerPath(new ServerPath(ServerPath.PathType.BASE_PATH, bundle.directory.getPath()));
         super.onCreate(savedInstanceState);
+        android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(bridge.getWebView(), true);
         bridge.addWebViewListener(new WebViewListener() {
             @Override public void onPageStarted(WebView webView) { ThreadNotifications.pageStarting(); }
         });

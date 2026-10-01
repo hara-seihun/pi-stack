@@ -65,7 +65,7 @@ beforeAll(async () => {
       return httpServer.upgrade(req, { data: { user: req.headers.get("x-pi-remote-user")!, upstream, session: req.headers.get("x-pi-remote-session") } }) ? undefined : new Response("Upgrade failed", { status: 400 });
     }
     if (url.pathname === "/v1/redirect") return Response.redirect("https://example.org");
-    return Response.json({ path: url.pathname, query: url.search, user: req.headers.get("x-pi-remote-user"), session: req.headers.get("x-pi-remote-session"), authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie"), referer: req.headers.get("referer"), upstream: req.headers.get("x-pi-remote-upstream") });
+    return Response.json({ path: url.pathname, query: url.search, user: req.headers.get("x-pi-remote-user"), session: req.headers.get("x-pi-remote-session"), authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie"), accessToken: req.headers.get("cf-access-token"), accessAssertion: req.headers.get("cf-access-jwt-assertion"), referer: req.headers.get("referer"), upstream: req.headers.get("x-pi-remote-upstream") });
   }, websocket: { maxPayloadLength: 16 * 1024 * 1024, message(socket, message) { socket.send(JSON.stringify({ ...socket.data, bytes: typeof message === "string" ? message.length : message.byteLength, payload: "x".repeat(2 * 1024 * 1024) })); } } });
   supervisors.push(remote);
   writeFileSync(join(root, "host.json"), JSON.stringify({ environments: [
@@ -278,13 +278,13 @@ test("immutable bytes cache only under an authenticated session-scoped resource 
 test("remote requests, notifications and downloads share authorization without forwarding credentials", async () => {
   const owner = await token("kenan");
   for (const path of ["/v1/sessions", "/v1/notifications", "/v1/sessions/thread/files"]) {
-    const response = await fetch(`${base}/v1/remotes/lab${path}?session=${owner}&user=kenan&path=%2Ftmp%2Fa`, { headers: { authorization: "Bearer private", cookie: "secret=value", referer: `${base}/v1/file?session=${owner}`, "x-pi-remote-upstream": "forged" } });
+    const response = await fetch(`${base}/v1/remotes/lab${path}?session=${owner}&user=kenan&path=%2Ftmp%2Fa`, { headers: { authorization: "Bearer private", cookie: "secret=value", "cf-access-token": "ingress-token", "cf-access-jwt-assertion": "ingress-assertion", referer: `${base}/v1/file?session=${owner}`, "x-pi-remote-upstream": "forged" } });
     expect(response.status).toBe(200);
     // The upstream supervisor learns the person from this router's own credential, never the browser's.
     const upstream = readFileSync(join(root, "upstream-credentials", "lab"), "utf8");
     expect(upstream).toMatch(/^[0-9a-f]{64}$/);
     expect(statSync(join(root, "upstream-credentials", "lab")).mode & 0o777).toBe(0o600);
-    expect(await response.json()).toEqual({ path, query: "?path=%2Ftmp%2Fa", user: "kenan", session: null, authorization: null, cookie: null, referer: null, upstream });
+    expect(await response.json()).toEqual({ path, query: "?path=%2Ftmp%2Fa", user: "kenan", session: null, authorization: null, cookie: null, accessToken: null, accessAssertion: null, referer: null, upstream });
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   }
   expect((await request("/v1/remotes/lab/v1/redirect", owner)).status).toBe(502);

@@ -27,7 +27,9 @@ final class WriteConnection {
     }
 
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
-        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build();
+        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
+        .followRedirects(false).followSslRedirects(false)
+        .addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
     private final RemoteSession state;
     private final RemoteSession.Identity identity;
@@ -44,9 +46,9 @@ final class WriteConnection {
     }
 
     private String endpoint() throws IOException {
-        JSONObject response = RemoteTransport.get(BuildConfig.ROUTER_URL + "/v1/environments", identity);
+        JSONObject response = RemoteTransport.get(RouterConnection.routerUrl() + "/v1/environments", identity);
         List<RemoteEnvironment.Endpoint> endpoints;
-        try { endpoints = RemoteEnvironment.parse(BuildConfig.ROUTER_URL, response); }
+        try { endpoints = RemoteEnvironment.parse(RouterConnection.routerUrl(), response); }
         catch (JSONException | IllegalArgumentException error) { throw new IOException("Invalid environment list", error); }
         String chosen = context.getSharedPreferences("write-settings", 0).getString("environment", "");
         for (RemoteEnvironment.Endpoint candidate : endpoints) if (candidate.id.equals(chosen)) return candidate.baseUrl;
@@ -90,8 +92,10 @@ final class WriteConnection {
                             } catch (JSONException error) { events.failed("Invalid dictation response"); }
                         }
                         @Override public void onFailure(WebSocket webSocket, Throwable error, Response response) {
-                            if (valid() && !terminal) events.failed(response != null && response.code() == 423 ? "Session expired. Open Kenan to unlock." :
-                                "Write server unreachable: " + error.getMessage());
+                            if (valid() && !terminal) events.failed(response != null && RouterConnection.publicUrl(response.request().url().toString()) && RouterConnection.rejected(response.code())
+                                ? "Email sign-in expired. Open Kenan to sign in again."
+                                : response != null && response.code() == 423 ? "Session expired. Open Kenan to unlock."
+                                : "Write server unreachable: " + error.getMessage());
                         }
                         @Override public void onClosed(WebSocket webSocket, int code, String reason) {
                             if (valid() && !terminal) events.failed("Dictation connection closed before final text: " + reason);

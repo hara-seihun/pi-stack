@@ -18,7 +18,8 @@ final class PhoneConnection {
         void closed(PhoneConnection connection, String code, String message);
     }
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder().connectTimeout(7, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS).pingInterval(25, TimeUnit.SECONDS).build();
+        .readTimeout(0, TimeUnit.SECONDS).pingInterval(25, TimeUnit.SECONDS)
+        .followRedirects(false).followSslRedirects(false).addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
     private final RemoteSession.Identity identity;
     private final String environment;
@@ -32,9 +33,9 @@ final class PhoneConnection {
     void connect() {
         if (!valid()) return;
         try {
-            JSONObject permitted = RemoteTransport.get(BuildConfig.ROUTER_URL + "/v1/environments", identity);
+            JSONObject permitted = RemoteTransport.get(RouterConnection.routerUrl() + "/v1/environments", identity);
             String base = null;
-            for (RemoteEnvironment.Endpoint candidate : RemoteEnvironment.parse(BuildConfig.ROUTER_URL, permitted)) {
+            for (RemoteEnvironment.Endpoint candidate : RemoteEnvironment.parse(RouterConnection.routerUrl(), permitted)) {
                 if (candidate.id.equals(environment)) base = candidate.baseUrl;
             }
             if (base == null) { fail("permission_denied", "Chosen environment is no longer permitted"); return; }
@@ -58,6 +59,9 @@ final class PhoneConnection {
                     }
                     @Override public void onFailure(WebSocket ws, Throwable error, Response response) {
                         int status = response == null ? 0 : response.code();
+                        if (response != null && RouterConnection.publicUrl(response.request().url().toString()) && RouterConnection.rejected(status)) {
+                            fail("public_sign_in_required", "Email sign-in expired. Open Kenan to sign in again"); return;
+                        }
                         fail(status == 401 || status == 403 || status == 423 ? "session_expired" : "disconnected",
                             status == 401 || status == 403 || status == 423 ? "Open Kenan to unlock again" : "Phone connection unavailable: " + error.getMessage());
                     }
@@ -65,7 +69,8 @@ final class PhoneConnection {
                     @Override public void onClosed(WebSocket ws, int code, String reason) { fail("disconnected", "Phone connection closed: " + reason); }
                 });
             }
-        } catch (RemoteTransport.AccessDenied denied) { fail("session_expired", denied.getMessage()); }
+        } catch (RemoteTransport.PublicSignInRequired denied) { fail("public_sign_in_required", denied.getMessage()); }
+        catch (RemoteTransport.AccessDenied denied) { fail("session_expired", denied.getMessage()); }
         catch (Exception failure) { fail("disconnected", "Phone discovery failed: " + failure.getMessage()); }
     }
     boolean valid() { return !cancelled && NotificationIdentity.get(context).isCurrent(identity) && authorized.getAsBoolean(); }

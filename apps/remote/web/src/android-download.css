@@ -1,0 +1,22 @@
+.android-download {
+  position: fixed;
+  top: max(8px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  padding: 8px 12px;
+  border: 1px solid var(--border, #353b46);
+  border-radius: 12px;
+  background: var(--panel, #171b22);
+  color: var(--text, #eef0f4);
+  box-shadow: 0 4px 16px #0005;
+  font-size: 13px;
+}
+.android-download button { padding: 6px 10px; }
+.android-download small { flex-basis: 100%; }

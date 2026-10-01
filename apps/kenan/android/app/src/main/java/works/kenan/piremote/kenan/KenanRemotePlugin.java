@@ -50,7 +50,26 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PluginMethod
     public void getState(PluginCall call) {
-        call.resolve(new JSObject().put("routerUrl", BuildConfig.ROUTER_URL));
+        updateExecutor.execute(() -> {
+            try {
+                RouterConnection.select();
+                if (!RouterConnection.publicUrl(RouterConnection.routerUrl())) { resolveConnection(call); return; }
+                String token = RouterConnection.token();
+                int status = token.isEmpty() ? 302 : RouterConnection.accessStatus(token);
+                if (status == 200) {
+                    getActivity().runOnUiThread(() -> AccessSignIn.embeddedCookie(() -> resolveConnection(call)));
+                } else if (RouterConnection.rejected(status)) {
+                    RouterConnection.accept("");
+                    getActivity().runOnUiThread(() -> AccessSignIn.open(getActivity(), updateExecutor,
+                        () -> resolveConnection(call), call::reject));
+                } else call.reject("Kenan sign-in check returned HTTP " + status + ". Retry when the connection is restored.");
+            } catch (java.io.IOException failure) { call.reject("Could not reach Kenan. Check your connection and retry.", failure); }
+        });
+    }
+
+    private void resolveConnection(PluginCall call) {
+        call.resolve(new JSObject().put("routerUrl", RouterConnection.routerUrl())
+            .put("accessToken", RouterConnection.publicUrl(RouterConnection.routerUrl()) ? RouterConnection.token() : ""));
     }
 
     @PluginMethod
@@ -159,8 +178,8 @@ public final class KenanRemotePlugin extends Plugin {
         updateExecutor.execute(() -> {
             try {
                 boolean permitted = false;
-                for (RemoteEnvironment.Endpoint endpoint : RemoteEnvironment.parse(BuildConfig.ROUTER_URL,
-                    RemoteTransport.get(BuildConfig.ROUTER_URL + "/v1/environments", identity))) {
+                for (RemoteEnvironment.Endpoint endpoint : RemoteEnvironment.parse(RouterConnection.routerUrl(),
+                    RemoteTransport.get(RouterConnection.routerUrl() + "/v1/environments", identity))) {
                     if (endpoint.id.equals(environment)) permitted = true;
                 }
                 synchronized (state) {

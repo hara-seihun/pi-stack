@@ -13,6 +13,15 @@ if (!(routerUri.scheme in ['http', 'https']) || !routerUri.host || routerUri.use
     || routerUri.rawPath.tokenize('/').any { it == '.' || it == '..' }) {
     throw new GradleException('piRemoteRouterUrl must be a credential-free HTTP(S) URL with an optional plain directory prefix, without a query or fragment')
 }
+def publicRouterUrl = remote.getProperty('piRemotePublicRouterUrl', '').trim().replaceAll('/+$', '')
+if (!publicRouterUrl.isEmpty()) {
+    def publicUri = new URI(publicRouterUrl)
+    if (publicUri.scheme != 'https' || !publicUri.host || publicUri.userInfo || publicUri.query || publicUri.fragment
+        || !(publicUri.rawPath ==~ /(?:\/[A-Za-z0-9_~.-]+)*/) || publicUri.normalize() != publicUri
+        || publicUri.rawPath.tokenize('/').any { it == '.' || it == '..' }) {
+        throw new GradleException('piRemotePublicRouterUrl must be a credential-free HTTPS router URL')
+    }
+}
 def javaString = { value -> '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"' }
 def packageConfig = new JsonSlurper().parse(rootProject.file('../package.json'))
 def releaseInfoJson = providers.exec {
@@ -34,6 +43,7 @@ android {
         versionName versionNameValue
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "String", "ROUTER_URL", javaString(routerUrl)
+        buildConfigField "String", "PUBLIC_ROUTER_URL", javaString(publicRouterUrl)
         buildConfigField "String", "RELEASE_REVISION", javaString(releaseInfo.revision)
         buildConfigField "String", "SHELL_ID", javaString(releaseInfo.shellId)
         aaptOptions {

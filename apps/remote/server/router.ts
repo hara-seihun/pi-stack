@@ -269,7 +269,7 @@ async function proxy(person: Person, origin: string, req: Request, url: URL, sig
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {
-    if (HOP_BY_HOP.has(name) || ["host", "cookie", "authorization", "forwarded", "referer"].includes(name) || name.startsWith("x-forwarded-") || name.startsWith("x-pi-remote-")) headers.delete(name);
+    if (HOP_BY_HOP.has(name) || ["host", "cookie", "authorization", "forwarded", "referer", "cf-access-token", "cf-access-jwt-assertion", "cf-access-authenticated-user-email"].includes(name) || name.startsWith("x-forwarded-") || name.startsWith("x-pi-remote-")) headers.delete(name);
   }
   headers.set("x-pi-remote-user", person.user);
   if (upstream) headers.set(UPSTREAM_CREDENTIAL_HEADER, upstreamCredential(upstream));

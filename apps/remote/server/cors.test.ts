@@ -7,12 +7,15 @@ describe("Pi Remote CORS", () => {
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost");
     expect(response.headers.get("access-control-allow-headers")).toContain("x-pi-remote-user");
+    expect(response.headers.get("access-control-allow-headers")).toContain("cf-access-token");
+    expect(response.headers.get("access-control-allow-credentials")).toBe("true");
   });
 
   it("makes router-owned API responses visible to the Android WebView", async () => {
     const response = withCors(Response.json({ error: "Say who you are" }, { status: 423 }));
     expect(response.status).toBe(423);
     expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost");
+    expect(response.headers.get("access-control-allow-credentials")).toBe("true");
     expect(await response.json()).toEqual({ error: "Say who you are" });
   });
 });

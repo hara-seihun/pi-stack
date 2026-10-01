@@ -6,7 +6,7 @@ function storage() {
 }
 
 if (!process.env.PI_ROUTER_TEST_CASE) {
-  test.each(["browser-root", "browser-prefix", "android-root", "android-prefix"])("router transport and auth at %s", (scenario) => {
+  test.each(["browser-root", "browser-prefix", "android-root", "android-prefix", "android-public"])("router transport and auth at %s", (scenario) => {
     const result = Bun.spawnSync([process.execPath, "test", import.meta.path], {
       env: { ...process.env, PI_ROUTER_TEST_CASE: scenario }, stdout: "pipe", stderr: "pipe",
     });
@@ -28,8 +28,14 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
   let issued = 0;
   let wrongCloud = false;
   const synced: Array<{ user: string; session: string }> = [];
+  const publicIngress = process.env.PI_ROUTER_TEST_CASE === "android-public";
+  let accessVersion = 1;
+  let rejectAccess = false;
   const bridge = {
-    getState: async () => ({ routerUrl: bootstrap }),
+    getState: async () => {
+      if (rejectAccess) { rejectAccess = false; accessVersion++; }
+      return { routerUrl: bootstrap, ...(publicIngress ? { accessToken: `cf-token-${accessVersion}` } : {}) };
+    },
     syncSession: async (identity: { user: string; session: string }) => {
       if (Boolean(identity.user) !== Boolean(identity.session)) throw new Error("Native rejects incomplete identity");
       synced.push(identity);
@@ -46,6 +52,13 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     calls.push(call);
     if (path.endsWith("/v1/diagnostics/requests") && body.requests[0].state === "settled") reportResolve?.(call);
     if (new URL(request.url).origin !== "https://router.test") return json({ external: true });
+    if (publicIngress) {
+      expect(request.headers.get("cf-access-token")).toBe(`cf-token-${accessVersion}`);
+      expect(request.credentials).toBe("include");
+      expect(request.redirect).toBe("manual");
+      if (rejectAccess) return json({ error: "Access token expired" }, 403);
+    }
+    if (path === "/v1/app-update") return json({ release: { fileName: "current.apk" } });
     if (path === "/v1/environment" && !request.headers.has("x-pi-remote-session")) return json({ persons: [{ user: "sybil", requiresUnlock: true }, { user: "guest", requiresUnlock: false }] });
     if (path === "/v1/auth/session") return json({ error: "Account sign-in is not configured" }, 404);
     const hint = request.headers.get("x-pi-remote-user");
@@ -114,6 +127,15 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     await native.fetchPersonChooser();
     expect(calls.at(-1)!.path).toBe("/v1/environment");
     expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
+    await fetch("/v1/app-update");
+    expect(calls.at(-1)!.path).toBe("/v1/app-update");
+    expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
+    if (publicIngress) {
+      rejectAccess = true;
+      await fetch("/v1/app-update");
+      expect(accessVersion).toBe(2);
+      expect(window.PiRemotePerson.session()).toBe("token-1");
+    }
     await fetch(`${bootstrap}/v1/lock-status`);
     expect(calls.at(-1)!.path).toBe("/v1/lock-status");
     sessions.clear();
@@ -129,6 +151,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     await fetch("https://outside.example/v1/files");
     expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
     expect(calls.at(-1)!.headers.has("x-pi-remote-user")).toBe(false);
+    expect(calls.at(-1)!.headers.has("cf-access-token")).toBe(false);
     expect(window.PiRemotePerson.href("https://outside.example/v1/files")).toBe("https://outside.example/v1/files");
     window.PiRemotePerson.set("guest");
     await native.nativeSessionReady();

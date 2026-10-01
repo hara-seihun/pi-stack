@@ -31,6 +31,7 @@ import { MessagingHistoryCache } from "./messaging-history";
 import { MessagingConversations } from "./Messages";
 import { MessagingCallProvider, SignalCallButton } from "./messaging-call";
 import { RequestIndicator } from "./RequestIndicator";
+import { AndroidDownloadPrompt } from "./android-download";
 import { beginSectionLoad } from "./in-flight";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
 import { shouldUndoClose, UndoCloses } from "./undo-closes";
@@ -174,7 +175,7 @@ export default function App() {
     window.addEventListener("pi-auth", authChanged);
     return () => { window.removeEventListener("pi-person", changed); window.removeEventListener("pi-auth", authChanged); };
   }, []);
-  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><RemoteApp key={`${person}:${lockGeneration}`} /></>;
+  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><AndroidDownloadPrompt /><RemoteApp key={`${person}:${lockGeneration}`} /></>;
 }
 
 /**

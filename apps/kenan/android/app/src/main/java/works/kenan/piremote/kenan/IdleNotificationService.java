@@ -70,8 +70,8 @@ public final class IdleNotificationService extends Service {
                 if (!current(identity)) return;
                 endpoints = discovered != null && System.currentTimeMillis() - discoveredAt < DISCOVERY_MS ? discovered : null;
             }
-            if (endpoints == null) endpoints = RemoteEnvironment.parse(BuildConfig.ROUTER_URL,
-                RemoteTransport.get(BuildConfig.ROUTER_URL + "/v1/environments", identity));
+            if (endpoints == null) endpoints = RemoteEnvironment.parse(RouterConnection.routerUrl(),
+                RemoteTransport.get(RouterConnection.routerUrl() + "/v1/environments", identity));
             synchronized (state) {
                 if (!current(identity)) return;
                 discovered = endpoints;

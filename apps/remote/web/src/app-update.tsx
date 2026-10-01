@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { deadline } from "./abortable";
 import { DismissibleError } from "./dismissible-error";
-import { nativePlatform, remote, type AppUpdate, type AppUpdateCheck } from "./native";
+import { bootstrapUrl, nativePlatform, remote, type AppUpdate, type AppUpdateCheck } from "./native";
 
 type Availability =
   | { status: "checking" }
@@ -21,7 +21,7 @@ function checkForUpdate() {
   if (activeCheck) return activeCheck;
   if (!remote.checkAppUpdate) return Promise.reject(new Error("App update checks are unavailable"));
 
-  const promise = deadline(remote.checkAppUpdate(), 30_000, "App update check").finally(() => {
+  const promise = bootstrapUrl().then(() => deadline(remote.checkAppUpdate!(), 30_000, "App update check")).finally(() => {
     if (activeCheck === promise) activeCheck = null;
   });
   activeCheck = promise;
