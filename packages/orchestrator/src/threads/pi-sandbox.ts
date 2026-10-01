@@ -8,6 +8,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { startSandboxEgress } from "./pi-sandbox-egress.js";
+import type { SandboxPolicy } from "./pi-raw.js";
 import { sandboxBashWorker, sandboxFileWorker } from "./pi-sandbox-worker.js";
 
 export const SANDBOX_WORKSPACE = "/workspace";
@@ -18,6 +19,7 @@ export interface SandboxRuntime {
   path: string[];
   mounts: { source: string; destination: string }[];
   storePaths?: string[];
+  gatewayRoot?: string;
 }
 
 const storeRoot = /^\/nix\/store\/[a-z0-9]{32}-[^/]+$/;
@@ -123,11 +125,23 @@ async function runSandbox(runtime: SandboxRuntime, workspace: string, command: s
 }
 
 /** Only the workspace and explicitly selected public runtime are mounted. No host execution fallback. */
-export async function createSandboxTools(workspace: string): Promise<ToolDefinition[]> {
+export async function createSandboxTools(workspace: string, policy: SandboxPolicy = { profile: "public" }): Promise<ToolDefinition[]> {
   const root = await realpath(workspace);
   if (!(await stat(root)).isDirectory() || root === "/") throw new Error("Sandbox workspace must be a dedicated directory");
   if (process.platform !== "linux") throw new Error("Sandbox tools require Linux namespace isolation");
   const runtime = await loadRuntime();
+  if (policy.profile === "benchmark") {
+    if (!cleanAbsolute(runtime.gatewayRoot)) throw new Error("Benchmark sandbox requires a host gatewayRoot in the runtime manifest");
+    const gatewayRoot = await realpath(runtime.gatewayRoot);
+    const socket = await realpath(policy.gatewaySocket);
+    if (gatewayRoot === "/" || !socket.startsWith(`${gatewayRoot}/`) || socket.startsWith(`${root}/`)
+      || gatewayRoot === root || gatewayRoot.startsWith(`${root}/`) || !(await stat(socket)).isSocket()) {
+      throw new Error("Benchmark gateway must be a host-owned socket beneath gatewayRoot and outside the sandbox workspace");
+    }
+    policy = { profile: "benchmark", gatewaySocket: socket };
+  } else if (policy.profile !== "public") {
+    throw new Error("Unknown sandbox egress profile");
+  }
   const probe = await runSandbox(runtime, root, [runtime.node, "--eval", "require('node:child_process').execFileSync(process.argv[1],['--noprofile','--norc','-c','true']);process.stdout.write('sandbox-ready')", runtime.shell]);
   if (probe.exitCode !== 0 || probe.stdout.toString() !== "sandbox-ready") {
     throw new Error(`Sandbox isolation/runtime probe failed: ${probe.stderr.toString()}`);
@@ -153,7 +167,7 @@ export async function createSandboxTools(workspace: string): Promise<ToolDefinit
     defineTool(createBashToolDefinition(SANDBOX_WORKSPACE, {
       exposeSessionEnvironment: false,
       operations: { exec: async (command, _cwd, options) => {
-        const egress = await startSandboxEgress();
+        const egress = await startSandboxEgress(policy);
         if (!egress.ok) throw new Error(`Sandbox public egress unavailable: ${egress.error.message}`);
         try {
           const response = await runSandbox(runtime, root, [runtime.node, "--eval", sandboxBashWorker], {
@@ -170,7 +184,7 @@ export async function createSandboxTools(workspace: string): Promise<ToolDefinit
   return tools.map(tool => ({
     ...tool,
     description: tool.description + (tool.name === "bash"
-      ? " Sandbox cwd and home: /workspace. Only this workspace is persistent and writable; /tmp is private temporary storage. Runtime files are read-only. Install npm packages locally or use npm install -g (prefix /workspace/.local); Python: python3 -m venv .venv or pip install --user (user base /workspace/.local). Public HTTP/HTTPS downloads use HTTP_PROXY/HTTPS_PROXY through a bounded proxy; localhost, LAN, tailnet, host addresses and direct networking are unavailable. No host credentials or environment are inherited. Commands default to a 55-second timeout; an explicit timeout may extend to 1800 seconds. Large output is saved under /workspace/.pi-output-*.log."
+      ? (policy.profile === "benchmark" ? " Benchmark network policy: only HTTP requests to http://research.gateway through HTTP_PROXY are allowed; CONNECT, general Internet, package downloads and DNS are unavailable. Host gateway owns policy, credentials and budgets. " : " Public HTTP/HTTPS downloads use HTTP_PROXY/HTTPS_PROXY through a bounded proxy. ") + " Sandbox cwd and home: /workspace. Only this workspace is persistent and writable; /tmp is private temporary storage. Runtime files are read-only. Install npm packages locally or use npm install -g (prefix /workspace/.local); Python: python3 -m venv .venv or pip install --user (user base /workspace/.local). Localhost, LAN, tailnet, host addresses and direct networking are unavailable. No host credentials or environment are inherited. Commands default to a 55-second timeout; an explicit timeout may extend to 1800 seconds. Large output is saved under /workspace/.pi-output-*.log."
       : " Paths are relative to /workspace; absolute paths and symlinks must stay inside /workspace. ~/ refers to /workspace."),
     execute: (id, input, signal, onUpdate, context) => signals.run(signal, () => tool.execute(id,
       input !== null && typeof input === "object" && "path" in input && typeof input.path === "string" && (input.path === "~" || input.path.startsWith("~/"))

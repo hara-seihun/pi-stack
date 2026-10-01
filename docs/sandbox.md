@@ -18,6 +18,20 @@ The read-only base runtime is the necessary exception to “only its folder”: 
 
 [Package downloads](../packages/orchestrator/docs/sandbox-egress.md) use HTTP/HTTPS proxy variables inside the private network namespace. The host-side proxy accepts public destinations, resolves and pins addresses, and rejects loopback, private LAN, link-local, Tailscale, metadata and local host addresses. It supplies no credentials. Tools that ignore HTTP proxy settings have no direct network route. This permits user-space package installation without making the host's service APIs another tool surface.
 
+## Benchmark egress profile
+
+Evaluation harnesses select the immutable boundary when creating a thread:
+
+```json
+{"raw":true,"sandbox":true,"sandboxProfile":"benchmark","sandboxGateway":{"socketPath":"/host/private/research-gateways/CASE.sock"}}
+```
+
+The host runtime manifest declares `gatewayRoot`, an absolute host-owned directory. The gateway socket must resolve beneath that root and outside the workspace; missing configuration, unknown profiles and invalid sockets fail closed. The harness creates one private Unix HTTP socket per case. Requests to `http://research.gateway/PATH` through the namespace's `HTTP_PROXY` become ordinary origin-form HTTP requests to that socket. No other authority (including explicit ports), CONNECT, direct network route, DNS or package downloads is available. The gateway socket itself is not mounted inside the namespace. A redirect cannot expand the allow-list.
+
+The case gateway owns provider keys, cutoff, budgets and audit state outside the workspace. Its socket fixes case identity: requests and edited client scripts cannot supply a different policy. Keep the gateway alive while a case can resume, and remove its socket only after the thread is stopped or cannot resume. The model provider and Orchestrator control traffic run on the host, never through the sandbox network. Ordinary sandboxes without a profile retain public downloads.
+
+Run `runBenchmarkSandboxAcceptance()` from the same module as the ordinary acceptance below for a real namespace proof of HTTPS/provider/HTTP/direct-IP/DNS denial, key/socket absence and search/read forwarding to a host-policy fixture. The fixture does not prove any research provider or real point-in-time implementation: those belong to the harness acceptance.
+
 ## Host configuration
 
 Hosts provide Bubblewrap and a reviewed runtime manifest at `/etc/pi-stack/sandbox-runtime.json`; `PI_SANDBOX_RUNTIME_CONFIG` can select a fixture manifest. The manifest and mounted runtime files are trusted host configuration, not workspace content. Missing configuration or unavailable isolation fails before a model turn; there is no unsandboxed fallback. See `packages/orchestrator/src/threads/pi-sandbox.ts` for the validated manifest contract. NixOS hosts expose only selected runtime closures, not the whole Nix store. Other Linux hosts declare explicit read-only runtime mounts.

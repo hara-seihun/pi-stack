@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createSandboxTools } from "./pi-sandbox.js";
 
@@ -55,6 +56,52 @@ export async function runSandboxAcceptance(): Promise<{ ok: true; tools: string[
   } finally {
     if (previous === undefined) delete process.env[sentinel];
     else process.env[sentinel] = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+/** Real namespace/proxy proof. The fixture gateway fixes policy on the host; real provider acceptance belongs to the harness. */
+export async function runBenchmarkSandboxAcceptance(): Promise<{ ok: true; assertions: string[]; elapsedMs: number }> {
+  const started = Date.now();
+  const root = await mkdtemp(join(tmpdir(), "pi-benchmark-acceptance-"));
+  const previousConfig = process.env.PI_SANDBOX_RUNTIME_CONFIG;
+  const assertions: string[] = [];
+  const gateway = createServer((incoming, outgoing) => {
+    incoming.resume();
+    outgoing.setHeader("Content-Type", "application/json");
+    outgoing.end(JSON.stringify({ asOf: "2024-01-01", command: incoming.url, content: "pre-cutoff fixture" }));
+  });
+  try {
+    const workspace = join(root, "workspace"), gatewayRoot = join(root, "gateways");
+    await mkdir(workspace); await mkdir(gatewayRoot);
+    const socketPath = join(gatewayRoot, "case.sock");
+    await new Promise<void>(resolve => gateway.listen(socketPath, resolve));
+    const runtime = JSON.parse(await readFile(previousConfig ?? "/etc/pi-stack/sandbox-runtime.json", "utf8"));
+    const config = join(root, "runtime.json");
+    await writeFile(config, JSON.stringify({ ...runtime, gatewayRoot }));
+    process.env.PI_SANDBOX_RUNTIME_CONFIG = config;
+    const tools = await createSandboxTools(workspace, { profile: "benchmark", gatewaySocket: socketPath });
+    const bash = tools.find(tool => tool.name === "bash")!;
+    const checks: [string, string][] = [
+      ["live HTTPS denied", "! curl -fsS --max-time 2 https://example.com"],
+      ["Parallel denied", "! curl -fsS --max-time 2 https://api.parallel.ai/v1/search"],
+      ["Exa denied", "! curl -fsS --max-time 2 https://api.exa.ai/search"],
+      ["HTTP denied", "test \"$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' http://example.com)\" = 403"],
+      ["direct IP route absent", "! curl --noproxy '*' -fsS --max-time 2 http://1.1.1.1"],
+      ["arbitrary DNS unavailable", "python3 -c 'import socket; socket.setdefaulttimeout(2);\ntry: socket.getaddrinfo(\"example.com\",443)\nexcept OSError: print(\"dns-denied\")\nelse: raise SystemExit(1)'"],
+      ["no workspace keys or host gateway socket", `test ! -e /workspace/.config/web-keys.json && test ! -e '${socketPath}' && test -z \"\${PARALLEL_API_KEY-}\${EXA_API_KEY-}\"`],
+      ["gateway search and read, cutoff cannot be overridden", "python3 -c 'import json,urllib.request;\nfor op in [\"search\",\"read\"]:\n r=urllib.request.Request(\"http://research.gateway/\"+op,data=json.dumps({\"asOf\":\"2099-01-01\"}).encode(),headers={\"Content-Type\":\"application/json\"}); v=json.load(urllib.request.urlopen(r)); assert v[\"asOf\"]==\"2024-01-01\" and v[\"command\"]==\"/\"+op'"],
+    ];
+    for (const [name, command] of checks) {
+      const result = await bash.execute("benchmark-proof", { command: `${command} && printf '\\nbenchmark-check-ok\\n'`, timeout: 5 }, undefined, undefined, { cwd: root } as ExtensionContext);
+      if (!JSON.stringify(result).includes("benchmark-check-ok")) throw new Error(`Benchmark sandbox acceptance failed: ${name}: ${JSON.stringify(result)}`);
+      assertions.push(name);
+    }
+    return { ok: true, assertions, elapsedMs: Date.now() - started };
+  } finally {
+    if (previousConfig === undefined) delete process.env.PI_SANDBOX_RUNTIME_CONFIG;
+    else process.env.PI_SANDBOX_RUNTIME_CONFIG = previousConfig;
+    if (gateway.listening) await new Promise<void>(resolve => gateway.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 }

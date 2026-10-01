@@ -1,12 +1,49 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Resolver } from "node:dns/promises";
 import { connect } from "node:net";
-import { stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { createServer, request } from "node:http";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { isPublicSandboxAddress, parseSandboxProxyTarget, resolveSandboxAddress, startSandboxEgress } from "../src/threads/pi-sandbox-egress.js";
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("sandbox public-download egress", () => {
+  it("benchmark exposes only the gateway without resolving denied hosts or opening CONNECT", async () => {
+    const root = await mkdtemp(join(tmpdir(), "benchmark-proxy-"));
+    const socketPath = join(root, "gateway.sock");
+    const gateway = createServer((req, res) => { res.end(JSON.stringify({ path: req.url, method: req.method, asOf: "2024-01-01" })); });
+    await new Promise<void>(resolve => gateway.listen(socketPath, resolve));
+    const dns = vi.spyOn(Resolver.prototype, "resolve4");
+    const started = await startSandboxEgress({ profile: "benchmark", gatewaySocket: socketPath });
+    if (!started.ok) throw new Error(started.error.message);
+    const call = (method: string, path: string) => new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = request({ socketPath: started.value.socketPath, method, path, agent: false }, res => {
+        let body = "";
+        res.on("data", chunk => body += chunk.toString());
+        res.on("end", () => resolve({ status: res.statusCode!, body }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    try {
+      expect(await call("POST", "http://research.gateway/search")).toEqual({ status: 200, body: JSON.stringify({ path: "/search", method: "POST", asOf: "2024-01-01" }) });
+      for (const host of ["example.com", "api.parallel.ai", "api.exa.ai", "dns.google", "127.0.0.1", "research.gateway.evil", "research.gateway:80"])
+        expect((await call("GET", `http://${host}/`)).status, host).toBe(403);
+      const connectResponse = await new Promise<string>((resolve, reject) => {
+        const s = connect(started.value.socketPath, () => s.end("CONNECT research.gateway:443 HTTP/1.1\r\nHost: research.gateway:443\r\n\r\n"));
+        let response = "";
+        s.on("data", chunk => response += chunk.toString()); s.on("end", () => resolve(response)); s.on("error", reject);
+      });
+      expect(connectResponse).toContain("403 Forbidden");
+      expect(dns).not.toHaveBeenCalled();
+    } finally {
+      await started.value.close();
+      await new Promise<void>(resolve => gateway.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("excludes private, metadata, translated, reserved and host addresses", () => {
     for (const address of [
       "0.0.0.0", "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254",

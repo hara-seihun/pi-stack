@@ -106,7 +106,9 @@ function forwardHeaders(headers: IncomingHttpHeaders, authority?: string): Incom
   return { ...Object.fromEntries(Object.entries(headers).filter(([key]) => !excluded.has(key.toLowerCase()))), ...(authority ? { host: authority } : {}), connection: "close" };
 }
 
-export async function startSandboxEgress(): Promise<Result<SandboxEgress>> {
+export type SandboxEgressPolicy = { profile: "public" } | { profile: "benchmark"; gatewaySocket: string };
+
+export async function startSandboxEgress(policy: SandboxEgressPolicy = { profile: "public" }): Promise<Result<SandboxEgress>> {
   let directory: string | undefined;
   const sockets = new Set<Socket>();
   const requests = new WeakSet<Socket>();
@@ -126,12 +128,18 @@ export async function startSandboxEgress(): Promise<Result<SandboxEgress>> {
     };
     if (!parsed.ok) { reject(403, parsed.error.message); return; }
     if (resolvers.size >= MAX_CONNECTIONS) { reject(503, "Too many concurrent requests"); return; }
-    const operation = resolveSandboxAddress(parsed.value.hostname).then(address => {
+    if (policy.profile === "benchmark" && parsed.value.authority !== "research.gateway") {
+      reject(403, "This profile allows only http://research.gateway"); return;
+    }
+    const operation = (policy.profile === "benchmark"
+      ? Promise.resolve({ ok: true, value: { address: "", family: 4 } } as const)
+      : resolveSandboxAddress(parsed.value.hostname)).then(address => {
       if (closed || incoming.socket.destroyed) return;
       if (!address.ok) { reject(address.error.code === "egress-denied" ? 403 : 502, address.error.message); return; }
       const target = parsed.value;
       const upstream = request({
-        hostname: address.value.address, family: address.value.family, port: target.port,
+        ...(policy.profile === "benchmark" ? { socketPath: policy.gatewaySocket }
+          : { hostname: address.value.address, family: address.value.family, port: target.port }),
         path: target.path, method: incoming.method, headers: forwardHeaders(incoming.headers, target.authority),
         agent: false,
       }, response => {
@@ -160,6 +168,7 @@ export async function startSandboxEgress(): Promise<Result<SandboxEgress>> {
     const reject = (status: number, message: string) => {
       if (!socket.destroyed) socket.end(`HTTP/1.1 ${status} ${status === 403 ? "Forbidden" : "Bad Gateway"}\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSandbox egress: ${message}\n`);
     };
+    if (policy.profile === "benchmark") { reject(403, "CONNECT is disabled for this profile"); return; }
     const parsed = parseSandboxProxyTarget("CONNECT", incoming.url ?? "");
     if (!parsed.ok) { reject(403, parsed.error.message); return; }
     if (resolvers.size >= MAX_CONNECTIONS) { reject(503, "Too many concurrent requests"); return; }
