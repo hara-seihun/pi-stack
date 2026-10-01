@@ -10,7 +10,7 @@ Pi Stack ships code, reference units and examples. A deployment supplies its own
 | Repository, publication identity, deployment targets and paths | `/etc/pi-stack/publication.json`, starting from [the example](../config/publication.example.json) |
 | Person identity, encrypted folder, workspace paths, models and grants | `/var/lib/pi-remote/persons/USER.json`, managed by `pi-remote person` |
 | Development checkout, executable path and allowed browser hostnames | `/etc/pi-stack/dev-remote-USER.env`, starting from [the example](../apps/remote/dev-remote.env.example) |
-| Android bootstrap router URL and local SDK path | ignored `apps/kenan/android/local.properties`, starting from [the example](../apps/kenan/android/local.properties.example) |
+| Android private/public bootstrap router URLs and local SDK path | ignored `apps/kenan/android/local.properties`, starting from [the example](../apps/kenan/android/local.properties.example) |
 | Model-provider credentials | the host's Orchestrator account store and broker configuration |
 | Voice API credential | host-provisioned systemd credential, described in [deployment](deployment.md) |
 | Router sign-in, tunnel identities, local model endpoints and TURN settings | host-owned service configuration |

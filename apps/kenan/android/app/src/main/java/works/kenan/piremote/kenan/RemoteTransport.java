@@ -13,6 +13,10 @@ final class RemoteTransport {
         AccessDenied() { super("Session no longer has access. Open Kenan to unlock again."); }
     }
 
+    static final class PublicSignInRequired extends IOException {
+        PublicSignInRequired() { super("Email sign-in expired. Open Kenan to sign in again."); }
+    }
+
     static JSONObject get(String url, RemoteSession.Identity identity) throws IOException {
         if (identity == null) throw new AccessDenied();
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
@@ -22,8 +26,10 @@ final class RemoteTransport {
         connection.setUseCaches(false);
         connection.setRequestProperty("x-pi-remote-user", identity.user);
         connection.setRequestProperty("x-pi-remote-session", identity.session);
+        String credential = RouterConnection.authorize(connection);
         try {
             int status = connection.getResponseCode();
+            if (RouterConnection.reject(url, status, credential)) throw new PublicSignInRequired();
             if (status == 401 || status == 403 || status == 423) throw new AccessDenied();
             if (status != 200) throw new IOException("Router returned HTTP " + status);
             try (InputStream stream = connection.getInputStream()) {

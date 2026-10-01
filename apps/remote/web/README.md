@@ -12,9 +12,13 @@ Browser person selection, folder keys, sessions, endpoint selection, drafts, tra
 
 Android still loads its bundled root-relative pages and uses its configured bootstrap URL, which may itself include a mount prefix. API URLs returned by the router remain relative to that bootstrap. Meet invitations use the bootstrap frontend, not the selected remote API prefix.
 
+## Android browser download
+
+Android phone browsers show a small dismissible **Get Kenan for Android** prompt, including before folder unlock. Download reads the current same-origin `/v1/app-update` manifest and navigates to `/v1/app-update/<release.fileName>` under the browser mount, retaining ingress cookies. It never uses a selected remote environment or a baked-in APK filename. Dismissal persists per browser mount. The installed app, iPhones and desktop browsers show no APK prompt; an Android APK cannot be installed on iOS.
+
 ## Account sign-in
 
-An OAuth-enabled router advertises `environment.authentication` in the public chooser as `{ type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with Google" }`, with an empty person list. The client retains this host setting when authenticated environment responses omit it. The chooser request omits cookies, session headers and person hints.
+An OAuth-enabled router advertises `environment.authentication` in the public chooser as `{ type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with Google" }`, with an empty person list. The client retains this host setting when authenticated environment responses omit it. The chooser request omits folder-session headers and person hints, but retains same-origin browser cookies so ingress sign-in remains effective.
 
 Before using a saved session or asking for a key, browser bootstrap calls `GET /v1/auth/session` directly through `browserFetch` with `credentials: "same-origin"`. A successful `{ ok: true, user, session }` response replaces the selected person and enters the existing router-session and endpoint-discovery flow. A 423 opens account sign-in; a 404 means key-based authentication only when the public chooser did not advertise OAuth. Network errors, malformed sessions and unexpected statuses stay visible and can be retried. OAuth hosts never try saved keys or empty-key unlocks.
 
@@ -24,7 +28,7 @@ On these hosts the environment picker contains only authorized environments. The
 
 ## Native bridge
 
-`KenanRemote.getState()` returns `{ routerUrl: string }`, the credential-free bootstrap URL. There is no native endpoint selection, preparation, or SSH setup.
+`KenanRemote.getState()` returns `{ routerUrl: string, accessToken?: string }`. The shell selects reachable private ingress or its configured public ingress and, for the latter, owns Cloudflare Access email-code sign-in. The client keeps the Access token only in memory, scopes `cf-access-token` to that bootstrap's API paths, and renews a rejected token through native validation/sign-in before replay. Background transports share the shell's selected ingress and credential. This does not replace folder authentication or permitted-environment discovery. See [Kenan sign-in](../../kenan/README.md#email-sign-in-outside-the-private-network). There is no native environment selection, preparation, or SSH setup.
 
 `syncSession({ user, session })` replaces the native notification monitor's authorization. `session` is the opaque router token. Clearing auth sends `{ user: "", session: "" }` and stops monitoring. The monitor discovers allowed endpoints at bootstrap using this session. Every poll carries `x-pi-remote-session`; `x-pi-remote-user` is only a hint. A 423 response stops monitoring until the web client supplies renewed authorization. `notifications({ request })` checks or requests notification permission.
 

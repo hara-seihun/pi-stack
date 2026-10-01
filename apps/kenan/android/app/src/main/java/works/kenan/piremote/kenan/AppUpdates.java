@@ -256,7 +256,7 @@ final class AppUpdates {
     }
 
     static long transfer(String path, OutputStream output, long limit, int timeout) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) new URL(BuildConfig.ROUTER_URL + path).openConnection();
+        HttpURLConnection connection = (HttpURLConnection) new URL(RouterConnection.routerUrl() + path).openConnection();
         long deadline = SystemClock.elapsedRealtime() + timeout;
         connection.setConnectTimeout(7_000);
         connection.setReadTimeout(7_000);
@@ -264,8 +264,10 @@ final class AppUpdates {
         connection.setUseCaches(false);
         connection.setRequestProperty("Accept-Encoding", "identity");
         connection.setRequestProperty("Cache-Control", "no-cache");
+        String credential = RouterConnection.authorize(connection);
         try {
             int status = connection.getResponseCode();
+            if (RouterConnection.reject(connection.getURL().toString(), status, credential)) throw new RemoteTransport.PublicSignInRequired();
             if (status != 200) throw new IOException("Android update request returned HTTP " + status + ". Retry; if it persists, ask for the update service to be repaired.");
             long declared = connection.getContentLengthLong();
             if (declared > limit) throw new IOException("The server sent an oversized Android update. Ask for the release to be republished.");

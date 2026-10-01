@@ -15,7 +15,7 @@ export interface AppUpdateCheck { update: AppUpdate | null; installed: Installed
 export interface AppUpdateInstall { status: "installer-opened" | "reloading"; revision?: string }
 export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
 interface RemoteBridge {
-  getState(options?: object): Promise<{ routerUrl: string }>;
+  getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
   writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean }>;
   writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean }): Promise<void>;
@@ -33,7 +33,30 @@ interface RemoteBridge {
 
 const capacitor = window.Capacitor;
 export const nativePlatform = capacitor?.isNativePlatform?.() === true;
-export const browserFetch = window.fetch.bind(window);
+const rawFetch = window.fetch.bind(window);
+export async function browserFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+  if (!nativePlatform || !accessToken || !routerApiPath(url.href, new URL(bootstrap, location.href).href, [new URL(bootstrap, location.href).pathname.replace(/\/$/, "")])) return rawFetch(input, init);
+  const credential = accessToken;
+  const send = () => {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    headers.set("cf-access-token", accessToken);
+    return rawFetch(input instanceof Request ? input.clone() : input, { ...init, headers, credentials: "include", redirect: "manual" });
+  };
+  try {
+    const response = await send();
+    if (response.type !== "opaqueredirect" && ![301, 302, 303, 307, 308, 401, 403].includes(response.status)) return response;
+    await refreshAccess();
+    return credential !== accessToken ? send() : response;
+  } catch (error) {
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    if (signal?.aborted || !(error instanceof TypeError)) throw error;
+    // Access redirects can be reported as CORS failures; validate natively before asking for sign-in.
+    await refreshAccess();
+    if (credential === accessToken) throw error;
+    return send();
+  }
+}
 const timingClientId = (() => {
   if (crypto.randomUUID) return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -90,6 +113,18 @@ window.addEventListener("pi-person", syncNativeSession);
 syncNativeSession();
 
 let bootstrap = "";
+let accessToken = "";
+let accessRefresh: Promise<void> | null = null;
+function refreshAccess(): Promise<void> {
+  accessRefresh ??= remote.getState().then(state => {
+    accessToken = state.accessToken || "";
+  }).finally(() => { accessRefresh = null; });
+  return accessRefresh;
+}
+window.addEventListener("pi-app-foreground", () => {
+  if (nativePlatform && accessToken) void refreshAccess().catch(error =>
+    window.dispatchEvent(new CustomEvent("pi-native-auth-error", { detail: String(error) })));
+});
 let bootstrapPromise: Promise<string> | null = null;
 let environments: Endpoint[] | null = null;
 let discovery: Promise<Endpoint[]> | null = null;
@@ -111,9 +146,10 @@ window.addEventListener("pi-person", () => {
 });
 
 export async function bootstrapUrl() {
-  bootstrapPromise ??= deadline(remote.getState(), 10_000, "Bootstrap connection").then(state => {
+  bootstrapPromise ??= (nativePlatform ? remote.getState() : deadline(remote.getState(), 10_000, "Bootstrap connection")).then(state => {
     if (typeof state.routerUrl !== "string") throw new Error("Native bridge did not supply a bootstrap URL");
     bootstrap = state.routerUrl.replace(/\/$/, "");
+    accessToken = state.accessToken || "";
     return bootstrap;
   }).catch(error => { bootstrapPromise = null; throw error; });
   return bootstrapPromise;
@@ -121,7 +157,7 @@ export async function bootstrapUrl() {
 
 export async function fetchPersonChooser(): Promise<Response> {
   const response = await browserFetch(`${await bootstrapUrl()}${API.environment.path()}`, {
-    cache: "no-store", redirect: "error", credentials: "omit", headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000),
+    cache: "no-store", redirect: "error", credentials: "same-origin", headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000),
   });
   if (response.ok) {
     const result = await response.clone().json();
@@ -260,7 +296,8 @@ window.fetch = async (input, init) => {
     const root = await bootstrapUrl();
     const operation = rootPath(path, root);
     const pathname = new URL(operation, location.href).pathname;
-    const publicRoute = (pathname === API.environment.path() && !auth.session) || pathname === API.unlock.path();
+    const publicRoute = (pathname === API.environment.path() && !auth.session) || pathname === API.unlock.path()
+      || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
     const rootRoute = publicRoute || pathname === API.environments.path() || pathname === "/v1/lock" || pathname === "/v1/lock-status";
     const selected = rootRoute || !auth.session ? null : await getState();
     const target = rootRoute ? `${root}${operation}` : explicitTarget(path, root) ?? `${selected?.baseUrl ?? root}${operation}`;
