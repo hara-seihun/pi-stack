@@ -39,7 +39,7 @@ function fixture(t) {
   const adopt = (expected = sha) => run("flock", ["--nonblock", join(state, "worker.lock"), process.execPath, "--input-type=module", "-e",
     `import { adoptPublicationOwner } from ${JSON.stringify(pathToFileURL(installed).href)};
      adoptPublicationOwner(${JSON.stringify(source)}, ${JSON.stringify(expected)});`]);
-  return { root, source, candidate, installed, units, env, adopt };
+  return { root, source, candidate, installed, units, state, env, adopt, checked, run, sha };
 }
 
 test("an installed owner adopts the checked candidate's changed dependency layout under its worker lock", t => {
@@ -51,6 +51,45 @@ test("an installed owner adopts the checked candidate's changed dependency layou
   assert.equal(readFileSync(join(f.root, "owner/room-census"), "utf8"), readFileSync(join(f.source, "deploy/room-census"), "utf8"));
   assert.match(readFileSync(join(f.units, "pi-stack-publication.service"), "utf8"), new RegExp(`ExecStart=${f.installed} drain`));
   assert.equal(readFileSync(f.env.SYSTEMCTL_LOG, "utf8").split("daemon-reload").length - 1, 2);
+});
+
+test("code-only repairs retain source and cannot be overwritten by unrelated owner adoption", t => {
+  const f = fixture(t);
+  const repository = join(f.state, "repository");
+  f.checked("git", ["init", "--quiet", repository]);
+  writeFileSync(join(f.source, "deploy/repair-proof"), "cancellation is terminal\n");
+  f.checked("git", ["-C", f.source, "add", "."]);
+  f.checked("git", ["-C", f.source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-qm", "Bootstrap owner repair"]);
+  const repairSha = f.checked("git", ["-C", f.source, "rev-parse", "HEAD"]);
+  const services = readFileSync(f.env.SYSTEMCTL_LOG, "utf8");
+  f.checked(process.execPath, [f.candidate, "install", "--code-only"]);
+  const ownerRef = "refs/pi-stack-publication/owner-source";
+  assert.equal(f.checked("git", ["-C", repository, "rev-parse", ownerRef]), repairSha);
+  assert.equal(readFileSync(f.env.SYSTEMCTL_LOG, "utf8"), services);
+  const owner = readFileSync(f.installed, "utf8");
+  f.checked("git", ["-C", f.source, "checkout", "--quiet", "--detach", f.sha]);
+  // Even a candidate installer without the new guard must never execute.
+  writeFileSync(f.candidate, 'throw new Error("unguarded candidate executed");\n');
+  const rejected = f.adopt();
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /omits bootstrapped owner source/);
+  assert.doesNotMatch(rejected.stderr, /unguarded candidate executed/);
+  assert.equal(readFileSync(f.installed, "utf8"), owner);
+  assert.equal(readFileSync(f.env.SYSTEMCTL_LOG, "utf8"), services);
+  f.checked("git", ["-C", f.source, "restore", "deploy/publication"]);
+  const direct = f.run(process.execPath, [f.candidate, "install"]);
+  assert.notEqual(direct.status, 0);
+  assert.match(direct.stderr, /omits bootstrapped owner source/);
+  f.checked("git", ["-C", f.source, "checkout", "--quiet", "--detach", repairSha]);
+  const adopted = f.adopt(repairSha);
+  assert.equal(adopted.status, 0, adopted.stderr);
+  assert.equal(f.checked("git", ["-C", repository, "rev-parse", ownerRef]), repairSha);
+  writeFileSync(join(f.source, "deploy/repair-proof"), "uncommitted repair\n");
+  const dirty = f.run(process.execPath, [f.candidate, "install", "--code-only"]);
+  assert.notEqual(dirty.status, 0);
+  assert.match(dirty.stderr, /Commit deployment source/);
+  assert.equal(f.checked("git", ["-C", repository, "rev-parse", ownerRef]), repairSha);
+  assert.equal(readFileSync(f.installed, "utf8"), owner);
 });
 
 test("adoption rejects the wrong source identity and missing candidate dependencies without replacing the owner", t => {

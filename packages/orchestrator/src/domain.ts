@@ -118,6 +118,7 @@ export interface PeerHost {
 
 export interface OrchestratorConfig {
   readonly modelBrokerUrl?: string;
+  readonly ultrafastModelBrokerUrl?: string;
   readonly port?: number;
   readonly listenHost?: string;
   readonly peers: Readonly<Record<string, PeerHost>>;

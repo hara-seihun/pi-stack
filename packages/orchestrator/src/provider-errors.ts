@@ -7,6 +7,16 @@
  * ever going to clear — and each answer has exactly one implementation.
  */
 
+/**
+ * An assistant message the provider actually answered. Pi stamps `timestamp`
+ * when it creates the message, before sending the request, so it orders the
+ * request against refusals recorded by other consumers.
+ */
+export function providerAccepted(message: Record<string, any> | undefined): boolean {
+  return message?.role === "assistant" && typeof message.model === "string" && Number.isFinite(message.timestamp)
+    && ["stop", "toolUse", "length"].includes(message.stopReason);
+}
+
 const RATE_LIMIT_PATTERNS = [
   /usage.?limit/i,
   /rate.?limit/i,
@@ -79,7 +89,11 @@ export function rateLimitCooldownMs(
   return throttleCooldownMs;
 }
 
+const TOKEN_LIFECYCLE_REJECTION = /\btoken\b.{0,40}\b(invalidated|revoked|expired)\b|\b(invalidated|revoked|expired)\b.{0,40}\btoken\b/i;
+
 const CREDENTIAL_PATTERNS = [
+  TOKEN_LIFECYCLE_REJECTION,
+  /shared OAuth credential (requires login|awaiting refresh)/i,
   /no api key found/i,
   /has no shared codex oauth credential/i,
   /oauth refresh failed/i,
@@ -100,15 +114,21 @@ const CREDENTIAL_PATTERNS = [
  * and a refresh that already failed — refreshing again answers neither.
  */
 const REJECTED_TOKEN_PATTERNS = [
+  TOKEN_LIFECYCLE_REJECTION,
+  /token_(invalidated|revoked|expired)/i,
   /\b401\b/,
   /unauthorized/i,
-  /invalid[_ ]?(token|grant)/i,
+  /invalid[_ ]?(token|grant)|refresh_token_(reused|invalidated|expired)|grant.{0,30}revoked/i,
   /(authentication |access |bearer )?token (is |has )?expired|expired (authentication |access |bearer )?token/i,
 ];
 
+export function isDefinitiveCredentialRejection(message: string): boolean {
+  return REJECTED_TOKEN_PATTERNS.some((p) => p.test(message));
+}
+
 export function isRejectedTokenError(message: string): boolean {
   if (/oauth refresh failed/i.test(message)) return false;
-  return REJECTED_TOKEN_PATTERNS.some((p) => p.test(message));
+  return isDefinitiveCredentialRejection(message);
 }
 
 /**
@@ -156,7 +176,7 @@ export function isModelConfigurationError(message: string): boolean {
  * Codex credential shadowed shared custody).
  */
 export function isCredentialError(message: string): boolean {
-  return CREDENTIAL_PATTERNS.some((p) => p.test(message));
+  return isDefinitiveCredentialRejection(message) || CREDENTIAL_PATTERNS.some((p) => p.test(message));
 }
 
 /** Long enough that a broken account stops eating waves, short enough that a

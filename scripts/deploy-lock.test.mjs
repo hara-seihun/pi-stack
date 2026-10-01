@@ -216,7 +216,7 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));chmodSync(join(deploy, "host"), 0o755);
-    for (const name of ["release-checkout", "meeting-census"]) copyFileSync(join(root, "deploy", name), join(deploy, name));
+    for (const name of ["release-checkout", "meeting-census", "native-prerequisites"]) copyFileSync(join(root, "deploy", name), join(deploy, name));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice"; touch "$release/server/voice/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
@@ -228,6 +228,11 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\ncat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\" > \"$SUPERVISOR_COMMIT\"\n");chmodSync(join(remoteApp,"activate"),0o755);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps","packages"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
     const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));
+    const doctorBin = join(destinations.PI_STACK_RUNTIME_DEST, "node_modules/.bin");
+    function installModelDoctor() {
+      mkdirSync(doctorBin, { recursive: true });
+      writeFileSync(join(doctorBin, "pi-model-selection-doctor"), "process.exit(Number(process.env.MODEL_SMOKE_EXIT ?? 0));\n");
+    }
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
     const personsDir = join(directory, "persons");
@@ -329,6 +334,7 @@ exit 64
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed preparation cannot activate services");
     rmSync(env.VOICE_TRACE, { force: true });
     rmSync(personReadTrace);
+    installModelDoctor();
     const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env,cwd:directory});assert.equal(first.status,0,first.stderr);
     assert.doesNotMatch(first.stderr, /fatal: not a git repository/, "preflight resolves the source commit independently of caller cwd");
     assert.deepEqual(readFileSync(personReadTrace, "utf8").trim().split("\n"), ["alice", "guest-person"], "preflight reads both unlocked and locked people through their own accounts");
@@ -367,16 +373,22 @@ exit 64
     const voiceFailure=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,VOICE_CHECK_EXIT:"1"}});
     assert.notEqual(voiceFailure.status,0);
     assert.equal(existsSync(systemctlTrace),false,"Voice preflight blocks service activation");
-    // The browser doctor runs alongside activation against the already selected runtime; its failure fails the release.
-    const browserFailure=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,BROWSER_SMOKE_EXIT:"1"}});
-    assert.notEqual(browserFailure.status,0);
-    assert.match(browserFailure.stderr,/browser doctor failed/);
+    for (const failure of [{ BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
+      const doctorFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ...failure } });
+      assert.notEqual(doctorFailure.status, 0);
+      assert.match(doctorFailure.stderr, /runtime doctor failed/);
+    }
+    rmSync(join(doctorBin, "pi-model-selection-doctor"));
+    const missingDoctor = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env });
+    assert.notEqual(missingDoctor.status, 0);
+    assert.match(missingDoctor.stderr, /runtime doctor failed/);
+    installModelDoctor();
     rmSync(systemctlTrace,{force:true});
 
     // A release the clients cannot use goes back to the previous Pi Remote.
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
     writeFileSync(join(repository,"release"),"broken\n");assert.equal(spawnSync("git",["-C",repository,"add","release"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","broken"]).status,0);
-    for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }]) {
+    for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }, { BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
       rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});
       const broken=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,...failure}});assert.notEqual(broken.status,0);
       assert.match(broken.stderr,/returning Pi Remote to/);

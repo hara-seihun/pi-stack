@@ -43,8 +43,14 @@ export function loadConfig(
   };
   const modelBrokerUrl = env.PI_MODEL_BROKER_URL ?? local.modelBrokerUrl;
   if (modelBrokerUrl !== undefined && typeof modelBrokerUrl !== "string") throw new Error("modelBrokerUrl must be a string");
+  const ultrafastModelBrokerUrl = env.PI_CODEX_ULTRAFAST_BROKER_URL ?? local.ultrafastModelBrokerUrl;
+  if (ultrafastModelBrokerUrl !== undefined) {
+    if (typeof ultrafastModelBrokerUrl !== "string") throw new Error("ultrafastModelBrokerUrl must be a string");
+    const url = new URL(ultrafastModelBrokerUrl);
+    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error("ultrafastModelBrokerUrl must be http://127.0.0.1:PORT");
+  }
   return {
-    modelBrokerUrl,
+    modelBrokerUrl, ultrafastModelBrokerUrl,
     port: parsePort(env.PI_ORCHESTRATOR_PORT ?? local.port),
     listenHost: env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
     peers: parsePeerHosts(local.peers),

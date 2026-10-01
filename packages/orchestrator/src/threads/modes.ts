@@ -6,8 +6,9 @@ import type { Admission, SettingsOverrides } from "./contracts.js";
  *
  * `live` is live consulting: a conversation with people waiting on the other end, such as a meeting.
  * Its conversation thread only dispatches, so it stays free to answer; its workers do the work.
- * Both run at priority provider speed and are admitted ahead of the fleet's ceilings. Nothing else
- * gets priority, so the extra spend is bounded by live conversations.
+ * The conversation runs Astra at Ultrafast, so it needs an account advertising that tier; its
+ * workers run at priority. Both are admitted ahead of the fleet's ceilings. Nothing else gets these
+ * speeds by default, so the extra spend is bounded by live conversations.
  */
 export interface ThreadMode {
   readonly admission: Admission;
@@ -26,7 +27,7 @@ export const THREAD_MODES = {
   live: {
     admission: "live",
     conversation: {
-      settings: { model: "astra", thinkingLevel: "low", speed: "priority" },
+      settings: { model: "astra", thinkingLevel: "low", speed: "ultrafast" },
       tools: ["bash", "read", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control",
         "meet_room", "meet_voice", "meet_share_screen", "meet_stop_sharing", "message_react"],
       bashTimeoutSeconds: 10,

@@ -7,7 +7,8 @@ export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 export const isThinkingLevel = (value: unknown): value is ThinkingLevel => THINKING_LEVELS.some(level => level === value);
-export type Speed = "standard" | "priority";
+import type { Speed } from "./speed.js";
+export type { Speed } from "./speed.js";
 /** `live` is never requested directly; it comes from a thread mode (see modes.ts). */
 export type Admission = "force" | "background" | "live";
 export const THREAD_STATES = ["idle", "running"] as const;

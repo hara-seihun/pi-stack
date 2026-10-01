@@ -291,7 +291,7 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
-  models: Array<{ id: string; name?: string; provider: string; common?: boolean }>;
+  models: Array<{ id: string; name?: string; provider: string; common?: boolean; thinkingLevels?: string[]; speedModes: string[] }>;
   model: { id: string; provider: string } | null;
   thinkingLevels: string[];
   thinkingLevel: string | null;

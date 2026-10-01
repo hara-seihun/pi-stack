@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Host-declared ordering between a Pi Stack source and another locally selected release.
+# Usage: native-prerequisites HOST_FILE PI_REPOSITORY PI_COMMIT
+set -euo pipefail
+host=$1 repository=$2 candidate=$3
+[[ -f $host ]] || { echo "missing host file $host" >&2; exit 1; }
+[[ $candidate =~ ^[0-9a-f]{40}$ ]] || { echo "invalid Pi Stack commit" >&2; exit 1; }
+jq -e '(.releasePrerequisites // []) | type == "array" and all(.[]; (.name | type == "string") and (.piStackSource | type == "string") and (.nativeSource | type == "string") and (.statusSocket | type == "string") and (.nativeRepository | type == "string"))' "$host" >/dev/null || {
+  echo "invalid releasePrerequisites in $host" >&2; exit 1;
+}
+while IFS=$'\t' read -r name pi_source native_source socket native_repository; do
+  [[ -n $name ]] || continue
+  [[ $pi_source =~ ^[0-9a-f]{40}$ && $native_source =~ ^[0-9a-f]{40}$ && $socket == /* && $native_repository == /* ]] || {
+    echo "invalid native release prerequisite $name in $host" >&2; exit 1;
+  }
+  git -C "$repository" cat-file -e "$candidate^{commit}" || { echo "Pi Stack candidate is absent from $repository" >&2; exit 1; }
+  git -C "$repository" cat-file -e "$pi_source^{commit}" || { echo "Pi Stack prerequisite source is absent from $repository" >&2; exit 1; }
+  if ! git -C "$repository" merge-base --is-ancestor "$pi_source" "$candidate"; then continue; fi
+  status=$(curl -fsS --max-time 3 --unix-socket "$socket" http://localhost/status) || {
+    echo "cannot read selected native source $name at $socket" >&2; exit 1;
+  }
+  selected=$(jq -er '.source.commit | select(type == "string" and test("^[0-9a-f]{40}$"))' <<< "$status") || {
+    echo "native source $name has no selected commit" >&2; exit 1;
+  }
+  git -C "$native_repository" cat-file -e "$selected^{commit}" || { echo "selected native source $selected is absent from $native_repository" >&2; exit 1; }
+  git -C "$native_repository" cat-file -e "$native_source^{commit}" || { echo "native prerequisite $native_source is absent from $native_repository" >&2; exit 1; }
+  if ! git -C "$native_repository" merge-base --is-ancestor "$native_source" "$selected"; then
+    echo "native source prerequisite $name requires $native_source before Pi Stack $candidate; selected $selected" >&2
+    exit 75
+  fi
+done < <(jq -er '.releasePrerequisites // [] | if type == "array" then .[] | [.name,.piStackSource,.nativeSource,.statusSocket,.nativeRepository] | @tsv else error("releasePrerequisites must be an array") end' "$host")

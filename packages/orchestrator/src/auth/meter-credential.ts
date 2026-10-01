@@ -7,7 +7,7 @@ export type MeterCredential =
 
 export async function meterCredential(auth: SharedOAuthAuth, accountId: string, timeoutMs: number): Promise<MeterCredential> {
   try {
-    if (!auth.has(accountId)) return { ok: false, outcome: "no-credential" };
+    if (!auth.hasCredential(accountId)) return { ok: false, outcome: "no-credential" };
     const credential = await auth.credential(accountId, AbortSignal.timeout(timeoutMs));
     return { ok: true, credential };
   } catch (error) {

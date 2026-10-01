@@ -134,7 +134,7 @@ it("rejects nonexistent built-in models before creating a thread or saving setti
   expect(service.snapshot()).toEqual([]);
   const thread = value(await service.spawn({ requestId: "invalid", cwd: directory, settings: { model: "sol" } }));
   expect(await service.control({ threadId: thread.id, action: "settings", settings })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  expect(service.get(thread.id)!.settings.model).toBe("openai-codex/gpt-6-sol");
+  expect(service.get(thread.id)!.settings.model).toBe("openai-codex/gpt-6.1-sol");
   expect(sessions).toEqual([]);
 });
 
@@ -152,7 +152,7 @@ it("repairs only invalid undispatched model snapshots and retains their provenan
     expect(service.pending(thread.id)).toEqual(pending);
     const settings = (id: string) => JSON.parse((db.prepare("SELECT settings FROM thread_work WHERE id=?").get(id) as { settings: string }).settings);
     expect(settings("initial")).toEqual({ model: "openai-codex/gpt-6-astra", thinkingLevel: "low", speed: "priority" });
-    expect(settings("valid").model).toBe("openai-codex/gpt-6-sol");
+    expect(settings("valid").model).toBe("openai-codex/gpt-6.1-sol");
     expect(repaired.metadata?.modelSettingsRepairs).toEqual([{ workId: "initial", previousModel: "openai-codex/missing-model", model: "openai-codex/gpt-6-astra", time: expect.any(Number) }]);
     const repeated = value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
     expect(repeated.metadata?.modelSettingsRepairs).toEqual(repaired.metadata?.modelSettingsRepairs);
@@ -336,7 +336,10 @@ it("retains native failure causes in settlement receipts without treating cancel
   }
 });
 
-it("preserves the running account and model when future settings change", async () => {
+it.each([
+  { model: "anthropic/claude-fable-5-1", speed: "standard" as const },
+  { model: "openai-codex/gpt-6.1-sol", speed: "priority" as const },
+])("preserves the running account and model when future settings change to $model at $speed", async ({ model, speed }) => {
   const f = fixture();
   await f.service.start();
   const thread = value(await f.service.spawn({ requestId: "settings-attribution", cwd: f.directory, message: "active" }));
@@ -348,9 +351,16 @@ it("preserves the running account and model when future settings change", async 
     const active = () => JSON.parse((db.prepare("SELECT settings FROM thread_execution WHERE thread_id=?").get(thread.id) as { settings: string }).settings);
     expect(active()).toMatchObject({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low" });
     const count = f.sessions[0].commands.length;
-    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { model: "fable" } }));
-    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "high", speed: "priority" } }));
-    expect(f.service.get(thread.id)!.settings).toEqual({ model: "anthropic/claude-fable-5-1", thinkingLevel: "high", speed: "priority" });
+    const beforeRejected = f.service.get(thread.id);
+    expect(await f.service.control({ threadId: thread.id, action: "settings", settings: { model: "fable", thinkingLevel: "high", speed: "priority" } })).toMatchObject({
+      ok: false, error: { code: "invalid_request", message: "Priority speed is unavailable for anthropic/claude-fable-5-1" },
+    });
+    expect(f.service.get(thread.id)).toEqual(beforeRejected);
+    expect(active()).toEqual({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low", speed: "standard" });
+    expect(f.sessions[0].commands).toHaveLength(count);
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { model } }));
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "high", speed } }));
+    expect(f.service.get(thread.id)!.settings).toEqual({ model, thinkingLevel: "high", speed });
     expect(active()).toEqual({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low", speed: "standard" });
     expect(f.sessions[0].commands).toHaveLength(count);
   } finally { db.close(); }
@@ -735,7 +745,7 @@ describe("ThreadService", () => {
     value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
     await waitFor(() => sessions.length === 2 && sessions.every(session => session.commands.some(command => command.type === "prompt")));
 
-    expect(defaultChild.settings).toEqual({ model: "openai-codex/gpt-6-sol", thinkingLevel: "high", speed: "standard" });
+    expect(defaultChild.settings).toEqual({ model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" });
     expect(lunaChild.settings).toEqual({ model: "openai-codex/gpt-6-luna", thinkingLevel: "max", speed: "standard" });
     expect([defaultChild.admission, lunaChild.admission]).toEqual(["force", "force"]);
     expect(defaultChild.metadata).toMatchObject({ meetingId: "room", profileId: "personal" });
@@ -743,7 +753,7 @@ describe("ThreadService", () => {
     expect(new Set(sessions.map(session => session.options.sessionFile)).size).toBe(2);
     expect(sessions.map(session => session.options.env.PI_THREAD_REQUIRE_SESSION)).toEqual(["0", "0"]);
     expect(sessions.map(session => session.options.args)).toEqual(expect.arrayContaining([
-      ["--provider", "openai-codex", "--model", "gpt-6-sol", "--thinking", "high", "--name", defaultChild.title],
+      ["--provider", "openai-codex", "--model", "gpt-6.1-sol", "--thinking", "high", "--name", defaultChild.title],
       ["--provider", "openai-codex", "--model", "gpt-6-luna", "--thinking", "max", "--name", lunaChild.title],
     ]));
 
@@ -1147,6 +1157,27 @@ it("passes a raw thread to its Pi session as --raw and rejects incompatible raw 
   expect(await service.spawn({ requestId: "raw-repair", cwd: directory, metadata: { raw: true, execution: "root-repair" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
   expect(service.importThread({ id: "imported-raw", title: "Raw", cwd: directory, sessionFile: join(directory, "imported-raw.jsonl"), settings: { model: "openai-codex/gpt-6-sol", thinkingLevel: "high", speed: "standard" }, metadata: { raw: "yes" } }))
     .toMatchObject({ ok: false, error: { code: "invalid_request" } });
+});
+
+it("allocates separate workspaces, launches sandbox sessions, and refuses boundary changes", async () => {
+  const { service, directory, sessions } = fixture();
+  await service.start();
+  const sandbox = value(await service.spawn({ requestId: "sandbox", cwd: directory, message: "hello", metadata: { raw: true, sandbox: true } }));
+  await waitFor(() => sessions.length === 1);
+  expect(sandbox.cwd).toBe(join(directory, "sessions", "sandboxes", sandbox.id));
+  expect(sessions[0]!.options).toMatchObject({ cwd: sandbox.cwd, env: { PI_THREAD_CAN_SPAWN: "0" } });
+  expect(sessions[0]!.options.args).toEqual(expect.arrayContaining(["--raw", "--sandbox"]));
+  const second = value(await service.spawn({ requestId: "second-sandbox", cwd: directory, metadata: { raw: true, sandbox: true } }));
+  expect(second.cwd).not.toBe(sandbox.cwd);
+  for (const metadata of [{ sandbox: false }, { raw: false }, { mode: "live" }, { execution: "root-repair" }]) {
+    expect(service.update(sandbox.id, { metadata })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  }
+  expect(await service.spawn({ requestId: "sandbox-child", parentId: sandbox.id, cwd: directory })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  for (const metadata of [{ sandbox: true }, { raw: true, sandbox: "yes" }, { raw: true, sandbox: true, context: { tools: [] } }]) {
+    expect(await service.spawn({ requestId: JSON.stringify(metadata), cwd: directory, metadata })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  }
+  expect(service.importThread({ id: "escape-sandbox", title: "Escape", cwd: directory, sessionFile: join(directory, "native.jsonl"), settings: sandbox.settings,
+    metadata: { raw: true, sandbox: true } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
 });
 
 describe("thread inspection", () => {

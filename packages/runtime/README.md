@@ -77,6 +77,18 @@ The packages contain no host identities, credential values, deployment paths, or
 
 Thinking defaults initialize sessions without a saved or explicit thinking level. Once set, the session's level survives model changes, account routing, and resume. Global and per-model startup defaults do not overwrite it. Explicit thinking selections and scoped-model levels still apply, and Pi clamps unsupported levels to the selected model's capabilities. The [Pi source package](../../vendor/pi/README.md) owns this behavior for both the SDK and bundled CLI/RPC.
 
+## Model selection and admission
+
+The [Pi source patch](../../vendor/pi/model-selection.patch) preserves requested, configured and saved model identity instead of falling through to another authenticated provider. Models registered by extensions are available before SDK startup selection. Missing requested models fail visibly; request-time authentication may bind a pooled family to an eligible account, but never changes its model or provider family.
+
+A provider can declare `"explicitOnly": true` in `models.json`. It remains available in the manual picker, `--list-models`, explicit CLI/SDK selection, and a session saved after manual selection. Automatic startup and scoped startup exclude it, and using it as a global default fails with an explicit-selection instruction. September 30, 2026: enabling Cerebras exposed upstream selection skipping the requested Codex family because its credentials belong to numbered pooled accounts, then silently choosing Cerebras. The requested Ultrafast route failed in `session_start`, but upstream only logged that error and still dispatched Cerebras inference. Both halves are repaired.
+
+`session_start`, `model_select`, `session_before_*`, `before_agent_start`, `before_provider_request` and `before_provider_headers` failures now stop their operation. Orchestrator validates requested speed before provider-specific hooks, so a Cerebras request cannot silently ignore Ultrafast or Priority. A missing pooled account remains an admission failure at ordinary startup too.
+
+[`model-selection-doctor.mjs`](model-selection-doctor.mjs), installed as `pi-model-selection-doctor`, checks the actual SDK and bundled CLI against a disposable loopback inference server. All refused default/saved/unknown model and hook-error cases require zero inference requests; only the explicitly selected explicit-only provider completes a mock request. It also checks the manual catalog and extension-registration order. [`deploy/host`](../../deploy/host) runs it against the selected immutable runtime alongside the browser doctor before accepting a release. Run it directly on an installed host, or select a candidate with `PI_TEST_RUNTIME_ENTRY=file:///path/to/dist/index.js`. No real provider credentials, sessions or paid tokens are used.
+
+The installed entrypoint resolves the account and runtime symlink chain before deciding whether to run. Its regression test stages that installed layout and requires both a nonempty success receipt and a nonzero exit for a missing runtime. Deployment fixtures exercise each doctor's rejection and Remote restoration independently; adding a runtime command also requires the onboarding fixture to provide and check its account link.
+
 ## Development
 
 ```sh

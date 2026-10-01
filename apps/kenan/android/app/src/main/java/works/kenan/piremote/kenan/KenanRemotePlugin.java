@@ -25,7 +25,15 @@ import java.util.concurrent.Executors;
 
 @CapacitorPlugin(name = "KenanRemote", permissions = {
     @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS }),
-    @Permission(alias = "microphone", strings = { Manifest.permission.RECORD_AUDIO })
+    @Permission(alias = "microphone", strings = { Manifest.permission.RECORD_AUDIO }),
+    @Permission(alias = "camera", strings = { Manifest.permission.CAMERA }),
+    @Permission(alias = "contacts", strings = { Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS }),
+    @Permission(alias = "calendar", strings = { Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR }),
+    @Permission(alias = "location", strings = { Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION }),
+    @Permission(alias = "backgroundLocation", strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }),
+    @Permission(alias = "sms", strings = { Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS }),
+    @Permission(alias = "callLog", strings = { Manifest.permission.READ_CALL_LOG }),
+    @Permission(alias = "phone", strings = { Manifest.permission.CALL_PHONE })
 })
 public final class KenanRemotePlugin extends Plugin {
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
@@ -37,6 +45,7 @@ public final class KenanRemotePlugin extends Plugin {
     public void load() {
         appUpdates = new AppUpdates(getContext().getApplicationContext());
         webBundles = new WebBundles(getContext().getApplicationContext());
+        PhoneControlService.start(getContext());
     }
 
     @PluginMethod
@@ -146,6 +155,95 @@ public final class KenanRemotePlugin extends Plugin {
         getContext().getSharedPreferences("write-settings", 0).edit().putString("environment", environment).apply();
         call.resolve();
     }
+
+    @PluginMethod
+    public void phoneStatus(PluginCall call) {
+        try { call.resolve(JSObject.fromJSONObject(PhoneControlService.status(getContext()))); }
+        catch (org.json.JSONException failure) { call.reject("Could not read phone status", "internal_error", failure); }
+    }
+
+    @PluginMethod
+    public void phoneConfigure(PluginCall call) {
+        if (!Boolean.TRUE.equals(call.getBoolean("enabled", false))) {
+            PhoneControlService.disable(getContext()); phoneStatus(call); return;
+        }
+        RemoteSession state = NotificationIdentity.get(getContext());
+        RemoteSession.Identity identity = state.current();
+        String user = call.getString("user", "");
+        String environment = call.getString("environment", "");
+        String name = call.getString("name", PhoneControlService.settings(getContext()).getString("name", Build.MODEL));
+        if (identity == null || !identity.user.equals(user) || environment.isBlank() || name.isBlank() || name.length() > 256) {
+            call.reject("Phone control needs a matching authenticated person, permitted environment and name", "invalid_args"); return;
+        }
+        updateExecutor.execute(() -> {
+            try {
+                boolean permitted = false;
+                for (RemoteEnvironment.Endpoint endpoint : RemoteEnvironment.parse(BuildConfig.ROUTER_URL,
+                    RemoteTransport.get(BuildConfig.ROUTER_URL + "/v1/environments", identity))) {
+                    if (endpoint.id.equals(environment)) permitted = true;
+                }
+                synchronized (state) {
+                    if (!state.isCurrent(identity)) { call.reject("Session changed before enabling phone control", "session_expired"); return; }
+                    if (!permitted) { call.reject("Environment is not permitted for this session", "permission_denied"); return; }
+                    PhoneControlService.settings(getContext()).edit().putBoolean("enabled", true).putString("user", user)
+                        .putString("environment", environment).putString("name", name).apply();
+                    PhoneControlService.start(getContext());
+                    phoneStatus(call);
+                }
+            } catch (RemoteTransport.AccessDenied denied) {
+                synchronized (state) { if (state.isCurrent(identity)) NotificationIdentity.replace(getContext(), "", ""); }
+                call.reject(denied.getMessage(), "session_expired");
+            } catch (Exception failure) { call.reject("Could not enable phone control: " + failure.getMessage(), "disconnected", failure); }
+        });
+    }
+
+    @PluginMethod
+    public void phoneSetup(PluginCall call) {
+        String step = call.getString("step", "");
+        try {
+            switch (step) {
+                case "contacts", "calendar", "location", "backgroundLocation", "sms", "callLog", "phone", "camera", "microphone", "notifications" -> {
+                    if (step.equals("notifications") && Build.VERSION.SDK_INT < 33
+                        || step.equals("backgroundLocation") && Build.VERSION.SDK_INT < 29) { phoneStatus(call); return; }
+                    if (step.equals("backgroundLocation")) {
+                        boolean locationGranted = androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_COARSE_LOCATION)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED
+                            || androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_FINE_LOCATION)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                        if (!locationGranted) { call.reject("Approve location before background location", "permission_denied"); return; }
+                        if (Build.VERSION.SDK_INT >= 30 && getPermissionState("backgroundLocation") != PermissionState.GRANTED) {
+                            openPhoneSettings(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                            call.resolve(new JSObject().put("opened", true).put("message", "Choose Permissions → Location → Allow all the time")); return;
+                        }
+                    }
+                    if (getPermissionState(step) == PermissionState.GRANTED) phoneStatus(call);
+                    else requestPermissionForAlias(step, call, "phonePermission");
+                    return;
+                }
+                case "accessibility" -> openPhoneSettings(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                case "notificationAccess" -> openPhoneSettings(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+                case "battery" -> openPhoneSettings(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getContext().getPackageName())));
+                case "allFiles" -> {
+                    if (Build.VERSION.SDK_INT < 30) { call.reject("All-files access requires Android 11 or newer; app-owned files remain available", "unsupported"); return; }
+                    openPhoneSettings(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getContext().getPackageName())));
+                }
+                case "usage" -> openPhoneSettings(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                case "writeSettings" -> openPhoneSettings(new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                case "deviceAdmin" -> openPhoneSettings(new Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                    .putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, new android.content.ComponentName(getContext(), PhoneAdminReceiver.class))
+                    .putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Optional remote screen locking. Factory reset requires separate Device Owner provisioning, not this grant."));
+                case "deviceOwner" -> { call.reject("Device Owner requires separate Android enterprise provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
+                case "secureSettings" -> { call.reject("Secure settings requires an optional shell grant or system provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
+                default -> { call.reject("Unknown phone setup step", "invalid_args"); return; }
+            }
+            call.resolve(new JSObject().put("opened", true));
+        } catch (Exception failure) { call.reject("Could not open phone setup: " + failure.getMessage(), "unavailable", failure); }
+    }
+
+    private void openPhoneSettings(Intent intent) { getActivity().startActivity(intent); }
+    @PermissionCallback
+    private void phonePermission(PluginCall call) { PhoneControlService.refresh(); phoneStatus(call); }
 
     @PluginMethod
     public void checkAppUpdate(PluginCall call) {
@@ -347,6 +445,9 @@ public final class KenanRemotePlugin extends Plugin {
         }
         call.resolve(target);
     }
+
+    @Override
+    protected void handleOnResume() { PhoneControlService.start(getContext()); PhoneControlService.refresh(); }
 
     @Override
     protected void handleOnDestroy() {

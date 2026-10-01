@@ -6,10 +6,11 @@ import type { ThreadModelMetadata } from "pi-orchestrator/api";
 test("built-in and newly registered destinations default to Astra and expose each OpenAI model", () => {
   const home = defaultThreadDestinations();
   const personal = defaultThreadDestinations("private-workspace");
-  expect(home.map(destination => destination.id)).toEqual(["home", "raw"]);
-  expect(personal.map(destination => destination.workspaceId)).toEqual(["private-workspace", "home", "home"]);
+  expect(home.map(destination => destination.id)).toEqual(["home", "raw", "sandbox"]);
+  expect(personal.map(destination => destination.workspaceId)).toEqual(["private-workspace", "home", "home", "home"]);
   expect(personal.slice(1)).toEqual(home);
-  expect(home.map(destination => destination.raw)).toEqual([undefined, true]);
+  expect(home.map(destination => destination.raw)).toEqual([undefined, true, true]);
+  expect(home.map(destination => destination.sandbox)).toEqual([undefined, undefined, true]);
   for (const destination of [...home, ...personal]) {
     expect(destination.defaultModel).toBe("astra");
     expect(destination.thinkingLevel).toBe("high");

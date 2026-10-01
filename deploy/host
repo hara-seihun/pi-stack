@@ -29,13 +29,22 @@ fi
 # Activation restarts Pi Remote, which ends every live Meet room: the meeting bot stays
 # in the call with no voice, canvas or agent (a release at 06:40Z on 2026-09-29 cut a
 # live Meet test mid-brief). Defer instead; the publication owner probes this exit 75
-# without consuming deployment attempts. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
+# without consuming deployment attempts. A census that cannot answer is not an empty
+# host, so it defers too. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
 if (( services )) && [[ ${PI_STACK_ALLOW_LIVE_MEETING_RESTART:-0} != 1 ]]; then
-  live_rooms=$(pi_stack_live_meeting_rooms)
+  if ! live_rooms=$(pi_stack_live_meeting_rooms); then
+    echo "meeting census unavailable on this host: see the census error above" >&2
+    exit 75
+  fi
   if [[ -n $live_rooms ]]; then
     echo "live meeting rooms on this host ($live_rooms); deploying now would end them" >&2
     exit 75
   fi
+fi
+# The host declares which native selected sources this Pi Stack commit depends on.
+# Check after the meeting census and before any build or service change.
+if (( services )); then
+  "$root/deploy/native-prerequisites" "$PI_STACK_HOST_FILE" "$root" "$(git -C "$root" rev-parse HEAD)"
 fi
 # Write needs its host-declared engine unit and a CPU able to stream Nemotron;
 # a host without the unit keeps Remote working and reports Write unavailable.
@@ -127,12 +136,13 @@ if (( ! services )); then
   exit 0
 fi
 
-# The browser doctor opens a disposable session against the already selected
-# runtime and the account's just-reconciled settings; it touches no service, so
-# it runs alongside activation. A failure rolls the release back like a failed
-# smoke check.
-doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-browser-doctor.XXXXXXXX")
-pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs" >"$doctor_log" 2>&1 &
+# Disposable browser and model-admission checks use the selected runtime and
+# touch no service, so they run alongside activation. Failures reject acceptance.
+doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-runtime-doctors.XXXXXXXX")
+(
+  pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs"
+  pi_stack_run_as "${fleet:-${users[0]}}" node "$runtime/node_modules/.bin/pi-model-selection-doctor"
+) >"$doctor_log" 2>&1 &
 doctor_pid=$!
 
 # Every enabled or running person's daemon restarts on release; live workers keep the
@@ -212,10 +222,10 @@ if (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
 doctor_failed=0
 wait "$doctor_pid" || doctor_failed=1
 cat "$doctor_log"; rm -f "$doctor_log"
-(( doctor_failed == 0 )) || echo 'browser doctor failed' >&2
+(( doctor_failed == 0 )) || echo 'runtime doctor failed' >&2
 if (( smoke_failed || doctor_failed )); then
     if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
-      echo "activation, smoke or browser check failed; returning Pi Remote to $previous_remote" >&2
+      echo "activation, smoke or runtime doctor failed; returning Pi Remote to $previous_remote" >&2
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
       pi_stack_as_root ln -s "$previous_remote_release" "$candidate"
       pi_stack_as_root mv -Tf "$candidate" "$remote"

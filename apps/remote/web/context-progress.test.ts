@@ -7,6 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import events from "../server/fixtures/tool-progress.json";
 import type { TranscriptItemHead } from "../server/protocol";
 
+globalThis.location ??= new URL("https://router.test/") as unknown as Location;
+
 const browser: Record<string, any> = { atob: (value: string) => Buffer.from(value, "base64").toString("binary") };
 browser.window = browser;
 createContext(browser);

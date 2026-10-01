@@ -56,7 +56,7 @@ printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
 pi_stack_publish_release "$root" "$stage/release" "$dest" tools
 fi
 
-# Every Pi account gets every command, plus the Pi Remote person CLI, through
+# Every Pi account gets every command, plus the Pi Remote person and phone CLIs, through
 # ~/.local/bin. Links this deployment no longer declares are removed.
 # One privileged shell per account: a sudo round trip per link made this the
 # slowest part of an unchanged release on Converge.
@@ -66,6 +66,7 @@ reconcile_links() {
   expected=$({
     jq -r --arg dest "$dest" '.tools[] | .id as $tool | .commands[] | [.name, "\($dest)/\($tool)/\(.entry)"] | @tsv' "$manifest"
     printf 'pi-remote\t%s/server/pi-remote\n' "$remote"
+    printf 'pi-phone\t%s/server/pi-phone\n' "$remote"
   })
   pi_stack_as_root env PI_STACK_TOOL_LINKS="$expected" bash -s -- "$home" "$owner" "$group" "$dest" "$remote" <<'ROOT'
 set -euo pipefail

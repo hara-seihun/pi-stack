@@ -24,6 +24,7 @@ final class NotificationIdentity {
             context.getSharedPreferences("idle-notifications", Context.MODE_PRIVATE).edit().clear().apply();
             ThreadNotifications.clear(context);
             WriteAccessibilityService.sessionChanged();
+            PhoneControlService.sessionChanged(context);
             return true;
         }
     }

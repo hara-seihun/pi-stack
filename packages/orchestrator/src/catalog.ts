@@ -71,7 +71,7 @@ const DAY = 24 * HOUR;
 export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   models: [
     { id: "astra", provider: "openai-codex", model: "gpt-6-astra", thinking: "high", label: "ASTRA", aliases: ["astra"], icon: "⭐", accent: "#5a6673", meterClass: "astra" },
-    { id: "sol", provider: "openai-codex", model: "gpt-6-sol", thinking: "high", label: "SOL", aliases: ["sol"], icon: "☀️", accent: "#5a6673", meterClass: "sol" },
+    { id: "sol", provider: "openai-codex", model: "gpt-6.1-sol", thinking: "high", label: "SOL", aliases: ["sol"], icon: "☀️", accent: "#5a6673", meterClass: "sol" },
     { id: "luna", provider: "openai-codex", model: "gpt-6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "🌙", accent: "#5a6673", meterClass: "luna" },
     { id: "opus", provider: "anthropic", model: "claude-opus-5-5", thinking: "high", label: "OPUS", aliases: ["opus"], icon: customModelConfig.providers.anthropic.models.find(model => model.id === "claude-opus-5-5")!.icon, accent: "#d9663d", meterClass: "opus" },
     { id: "fable", provider: "anthropic", model: "claude-fable-5-1", thinking: "high", label: "FABLE", aliases: ["fable"], icon: customModelConfig.providers.anthropic.models.find(model => model.id === "claude-fable-5-1")!.icon, accent: "#e6a23c", meterClass: "fable" },
@@ -120,6 +120,22 @@ export function modelDrainsMeter(provider: string, model: string, meterId: strin
   if (!candidate) return true;
   const meterClass = candidate.meterClass ?? "default";
   return meter.drainedBy.some(key => key.startsWith(`${meterClass}:`) || key.startsWith("default:"));
+}
+
+/**
+ * Whether a request for `served` passed through every provider quota a request
+ * for `refused` draws on, so its success shows the refusal's limit is no longer
+ * in force. A Fable request covers Opus (Fable also drains its own weekly
+ * meter), but an Opus success says nothing about Fable's separate allowance.
+ * Models the catalog does not describe, such as image models, only cover
+ * themselves.
+ */
+export function quotaScopeCovers(provider: string, served: string, refused: string): boolean {
+  if (served === refused) return true;
+  const known = (model: string) => ORCHESTRATOR_CATALOG.models.some(item => item.provider === provider && item.model === model);
+  if (!known(served) || !known(refused)) return false;
+  return ORCHESTRATOR_CATALOG.meters.filter(meter => meter.provider === provider)
+    .every(meter => !modelDrainsMeter(provider, refused, meter.id) || modelDrainsMeter(provider, served, meter.id));
 }
 
 export function catalogAgentType(raw: string): { key: string; label: string } {

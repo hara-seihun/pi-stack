@@ -76,10 +76,12 @@ import { createStreamClient } from "./stream";
       this.sessionId = options.sessionId;
       this.input = options.input;
       this.onOutput = options.onOutput;
+      this.externalPlayback = options.externalPlayback ?? false;
       this.meetingContext = options.meetingContext;
       this.handoffContext = options.handoffContext;
       this.onFragment = options.onFragment;
       this.onPlayback = options.onPlayback || (() => {});
+      this.onAudioDiagnostic = options.onAudioDiagnostic;
       this.controlledOutput = options.outputMuted !== undefined;
       this.outputMuted = options.outputMuted ?? false;
       this.onVoiceControl = options.onVoiceControl;
@@ -107,6 +109,8 @@ import { createStreamClient } from "./stream";
       this.liveTextValue = "";
       this.voiceId = null;
       this.usageTimer = null;
+      this.audioStatsTimer = null;
+      this.modelAudioTiming = { count: 0, characters: 0, lastAt: 0, maxGapMs: 0, minChunkMs: Infinity, maxChunkMs: 0 };
       this.delegations = [];
       this.threadWorking = false;
       this.eventCounts = {};
@@ -131,6 +135,7 @@ import { createStreamClient } from "./stream";
       this.transcript = []; this.seenEvents.clear(); this.usageSeconds = 0;
       this.sentTranscriptCursor = 0; this.delegationQueue = Promise.resolve();
       this.eventCounts = {}; this.delegationsSubmitted = 0;
+      this.modelAudioTiming = { count: 0, characters: 0, lastAt: 0, maxGapMs: 0, minChunkMs: Infinity, maxChunkMs: 0 };
       this.lastDelegationError = null; this.lastProtocolError = null;
       this.sessionOrigin = Date.now();
       const generation = ++this.generation;
@@ -158,9 +163,20 @@ import { createStreamClient } from "./stream";
         peer.addEventListener("track", (event) => {
           if (generation !== this.generation) return;
           if (event.track.kind !== "audio") return;
+          if (this.externalPlayback) {
+            const receiver = event.receiver;
+            if ("jitterBufferTarget" in receiver) {
+              try {
+                receiver.jitterBufferTarget = 80;
+                this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetMs: receiver.jitterBufferTarget });
+              } catch (error) {
+                this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetError: String(error) });
+              }
+            } else this.onAudioDiagnostic?.({ stage: "receiver", jitterBufferTargetUnavailable: true });
+          }
           const stream = new MediaStream([event.track]);
           const speaker = this.speaker || new Audio();
-          speaker.muted = this.outputMuted;
+          speaker.muted = this.outputMuted || this.externalPlayback;
           speaker.autoplay = true;
           speaker.setAttribute("playsinline", "");
           speaker.onplaying = () => this.onPlayback(speaker.muted ? "muted" : "playing");
@@ -199,6 +215,27 @@ import { createStreamClient } from "./stream";
         if (generation !== this.generation) { await this.closeRemote(voiceId); return; }
         this.voiceId = voiceId;
         this.usageTimer = setInterval(() => void this.reportUsage(), 30_000);
+        if (this.onAudioDiagnostic) this.audioStatsTimer = setInterval(() => {
+          const timing = this.modelAudioTiming;
+          this.onAudioDiagnostic({ stage: "model-transcript", at: performance.now(),
+            count: timing.count, characters: timing.characters, maxGapMs: Math.round(timing.maxGapMs),
+            minChunkMs: Number.isFinite(timing.minChunkMs) ? timing.minChunkMs : null,
+            maxChunkMs: timing.maxChunkMs });
+          this.modelAudioTiming = { count: 0, characters: 0, lastAt: 0, maxGapMs: 0, minChunkMs: Infinity, maxChunkMs: 0 };
+          void peer.getStats().then((stats) => {
+            if (peer !== this.peer) return;
+            for (const report of stats.values()) if (report.type === "inbound-rtp" && report.kind === "audio") {
+              this.onAudioDiagnostic({ stage: "webrtc", at: performance.now(), packetsReceived: report.packetsReceived,
+                packetsLost: report.packetsLost, bytesReceived: report.bytesReceived,
+                jitterMs: Math.round((report.jitter || 0) * 1000),
+                jitterBufferDelayMs: Math.round((report.jitterBufferDelay || 0) * 1000),
+                jitterBufferTargetDelayMs: Number.isFinite(report.jitterBufferTargetDelay) ? Math.round(report.jitterBufferTargetDelay * 1000) : null,
+                jitterBufferMinimumDelayMs: Number.isFinite(report.jitterBufferMinimumDelay) ? Math.round(report.jitterBufferMinimumDelay * 1000) : null,
+                jitterBufferEmittedCount: report.jitterBufferEmittedCount, concealedSamples: report.concealedSamples,
+                silentConcealedSamples: report.silentConcealedSamples, concealmentEvents: report.concealmentEvents });
+            }
+          }).catch((error) => this.onAudioDiagnostic({ stage: "webrtc", error: String(error) }));
+        }, 5_000);
         await peer.setRemoteDescription({ type: "answer", sdp: connection.transport.sdp });
         await waitForChannel(channel);
         if (this.startupError) throw new Error(this.startupError);
@@ -236,6 +273,8 @@ import { createStreamClient } from "./stream";
       this.stream = null;
       if (this.usageTimer) clearInterval(this.usageTimer);
       this.usageTimer = null;
+      if (this.audioStatsTimer) clearInterval(this.audioStatsTimer);
+      this.audioStatsTimer = null;
       this.delegations.length = 0;
       this.resetMessage();
       const voiceId = this.voiceId;
@@ -301,6 +340,10 @@ import { createStreamClient } from "./stream";
     async resumePlayback() {
       if (this.suspended || !this.speaker) return;
       if (!this.controlledOutput) this.outputMuted = false;
+      if (this.externalPlayback) {
+        this.onPlayback(this.outputMuted ? "muted" : "playing");
+        return;
+      }
       this.speaker.muted = this.outputMuted;
       this.speaker.volume = 1;
       try {
@@ -315,7 +358,7 @@ import { createStreamClient } from "./stream";
     setOutputMuted(muted) {
       if (this.outputMuted === muted) return;
       this.outputMuted = muted;
-      if (this.speaker) this.speaker.muted = muted;
+      if (this.speaker) this.speaker.muted = muted || this.externalPlayback;
       if (muted) this.onPlayback("muted");
       else void this.resumePlayback();
       if (this.started && this.meetingContext) this.appendContext(
@@ -370,6 +413,17 @@ import { createStreamClient } from "./stream";
         const role = event.type === "session.input_transcript.delta" ? "user" : "assistant";
         const fragment = { id: event.event_id, role, text: event.delta, startMs: event.start_ms, endMs: event.end_ms };
         this.transcript.push(fragment);
+        if (role === "assistant" && this.onAudioDiagnostic) {
+          const timing = this.modelAudioTiming;
+          const now = performance.now();
+          timing.maxGapMs = Math.max(timing.maxGapMs, timing.lastAt ? now - timing.lastAt : 0);
+          timing.lastAt = now;
+          timing.count++;
+          timing.characters += event.delta.length;
+          const duration = event.end_ms - event.start_ms;
+          timing.minChunkMs = Math.min(timing.minChunkMs, duration);
+          timing.maxChunkMs = Math.max(timing.maxChunkMs, duration);
+        }
         this.onTranscript(role, event.delta);
         this.onFragment?.({ id: event.event_id, role, text: event.delta,
           voiceSessionId: this.voiceId, startMs: event.start_ms, endMs: event.end_ms,

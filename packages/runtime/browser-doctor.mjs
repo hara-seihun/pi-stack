@@ -38,6 +38,7 @@ const title = `pi-browser-${randomUUID()}`;
 const downloadContent = `browser-download-${randomUUID()}\n`;
 const downloadPath = join(directory, "browser-download.txt");
 const screenshotPath = join(directory, "browser-screenshot.png");
+const frameValue = `frame-fill-${randomUUID()}`;
 const server = createServer((req, res) => {
   if (req.url === "/download") {
     res.writeHead(200, {
@@ -48,7 +49,11 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { "content-type": "text/html" });
-  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button><a href="/download" download>Download probe</a>`);
+  if (req.url === "/frame") {
+    res.end('<title>Frame probe</title><label>Frame input<input id="frame-input"></label>');
+    return;
+  }
+  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button><a href="/download" download>Download probe</a><iframe title="Secure payment input frame" src="http://localhost:${server.address().port}/frame"></iframe>`);
 });
 let session;
 let accepted = false;
@@ -96,7 +101,31 @@ try {
       if (!downloadRef) throw new Error("Download probe ref missing");
       const download = await browser({ args: ["download", "@" + downloadRef, ${JSON.stringify(downloadPath)}] });
       if (!download.ok) throw new Error(download.error);
+      const probeFrame = async (selector) => {
+        const frame = await browser({ args: ["frame", selector] });
+        if (!frame.ok) throw new Error(frame.error);
+        const frameSnapshot = await browser({ args: ["snapshot", "-i"] });
+        if (!frameSnapshot.ok) throw new Error(frameSnapshot.error);
+        const fill = await browser({ args: ["fill", "#frame-input", ${JSON.stringify(frameValue)}] });
+        if (!fill.ok) throw new Error(fill.error);
+        const value = await browser({ args: ["get", "value", "#frame-input"] });
+        if (!value.ok) throw new Error(value.error);
+        const realm = await browser({ args: ["eval", "location.hostname"] });
+        if (!realm.ok) throw new Error(realm.error);
+        return { value: value.data.value, realm: realm.data.result };
+      };
+      const frame = await probeFrame("iframe[title='Secure payment input frame']");
+      const main = await browser({ args: ["frame", "main"] });
+      if (!main.ok) throw new Error(main.error);
+      // Payment widgets are also injected after the initial target attach.
+      const inject = await browser({ args: ["eval", "new Promise(resolve => { const f = document.createElement('iframe'); f.id = 'dynamic-frame'; f.src = 'http://localhost:${server.address().port}/frame'; f.onload = () => resolve(true); document.body.append(f); })"] });
+      if (!inject.ok) throw new Error(inject.error);
+      const dynamic = await probeFrame("#dynamic-frame");
       emit({
+        frameValue: frame.value,
+        frameRealm: frame.realm,
+        dynamicFrameValue: dynamic.value,
+        dynamicFrameRealm: dynamic.realm,
         title: title.data.title,
         refs: Object.keys(snapshot.data.refs).length,
         screenshotVerified: screenshot.details.artifactVerification.verified,
@@ -106,6 +135,10 @@ try {
     timeoutMs: 20000,
   }, AbortSignal.timeout(25000));
   assert.equal(result.details.resultCategory, "success", JSON.stringify(result));
+  assert.equal(result.details.data.frameValue, frameValue, "cross-origin frame fill must reach the input");
+  assert.equal(result.details.data.frameRealm, "localhost", "eval must run in the selected frame");
+  assert.equal(result.details.data.dynamicFrameValue, frameValue, "dynamically injected cross-origin frame fill must reach the input");
+  assert.equal(result.details.data.dynamicFrameRealm, "localhost", "eval must run in the dynamically injected frame");
   assert.equal(result.details.data.title, title);
   assert.ok(result.details.data.refs >= 3);
   assert.equal(result.details.data.screenshotVerified, true, "the native screenshot artifact must be verified");
@@ -113,8 +146,35 @@ try {
   assert.equal(result.details.data.downloadVerified, true, "the native download artifact must be verified");
   assert.equal(readFileSync(downloadPath, "utf8"), downloadContent, "the native download must preserve file bytes");
   assert.equal(result.details.scriptSession.cleanup, "closed", "the probe browser must be closed");
+  // A second native session attaches after the first page's OOPIF already exists.
+  // Initial auto-attach events must survive BrowserManager -> daemon handoff.
+  const command = async (args) => {
+    const answer = await tools[0].execute(randomUUID(), { args }, AbortSignal.timeout(10000));
+    assert.equal(answer.details.resultCategory, "success", JSON.stringify(answer));
+    return answer.details.data;
+  };
+  const ownerName = `doctor-host-${randomUUID()}`;
+  const attachedName = `doctor-attach-${randomUUID()}`;
+  const owner = (args) => command(["--session", ownerName, ...args]);
+  let cdpUrl;
+  const attached = (args) => command(["--session", attachedName, ...(cdpUrl ? ["--cdp", cdpUrl] : []), ...args]);
+  try {
+    await owner(["open", url]);
+    cdpUrl = (await owner(["get", "cdp-url"])).cdpUrl;
+    await attached(["get", "url"]);
+    await attached(["frame", "iframe[title='Secure payment input frame']"]);
+    await attached(["snapshot", "-i"]);
+    await attached(["fill", "#frame-input", frameValue]);
+    const value = await attached(["get", "value", "#frame-input"]);
+    const realm = await attached(["eval", "location.hostname"]);
+    assert.equal(value.value, frameValue, "remote existing-frame fill must reach the input");
+    assert.equal(realm.result, "localhost", "remote existing-frame eval must reach the child realm");
+  } finally {
+    try { await attached(["close"]); }
+    finally { await owner(["close"]); }
+  }
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, frameEval: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

@@ -24,17 +24,16 @@ export default async function webSearch(pi) {
     return;
   }
 
-  const defaultResults = manifest.defaultResults;
   pi.registerTool({
     name: "web_search",
     label: "Web search",
-    parameters: searchParameters(defaultResults),
-    promptSnippet: `web_search: search the live web through ${backend.label} and get ranked results with page excerpts.`,
+    parameters: searchParameters(manifest.defaultResults),
+    promptSnippet: "web_search: search the live web through the host's current search provider and get ranked results with page excerpts.",
     promptGuidelines: [
       "Use web_search to find pages and check current facts; it is cheaper and faster than opening a browser to search. Follow up with the browser or a fetch when you need the full page or an authenticated view.",
     ],
     description: [
-      `Search the live web through ${backend.label}${backend.summary ? ` (${backend.summary})` : ""}. Returns ranked results with title, URL, publication date and an excerpt, optionally the extracted page text.`,
+      "Search the live web through the host's current search provider. Returns ranked results with title, URL, publication date and an excerpt, optionally the extracted page text.",
       "Reach for this first when you need to find pages or check something current. It answers in one call, without a browser session. Use the browser afterwards for a full page, an interactive site or anything needing a signed-in profile, and fetch a known URL directly instead of searching for it.",
       "Write the query the way you would describe the page you want. Narrow with domains, a publication date floor or a category rather than by repeating the search.",
     ].join("\n\n"),
@@ -42,22 +41,27 @@ export default async function webSearch(pi) {
     async execute(_id, params, signal, onUpdate) {
       const query = params.query?.trim();
       if (!query) throw new Error("query cannot be blank");
+      const currentManifest = await loadManifest(environment);
+      if (!currentManifest.backend) throw new Error("Web search is disabled by the host");
+      const currentBackend = await loadBackend(currentManifest.backend, { environment });
+      const currentStatus = await currentBackend.status({ options: currentBackend.options, environment });
+      if (!currentStatus?.available) throw new Error(`${currentBackend.id} unavailable: ${currentStatus?.reason ?? "no reason given"}`);
       const request = {
         query,
-        numResults: params.numResults ?? defaultResults,
+        numResults: params.numResults ?? currentManifest.defaultResults,
         category: params.category,
         includeDomains: params.includeDomains,
         excludeDomains: params.excludeDomains,
         startPublishedDate: params.startPublishedDate,
         text: params.text === true,
       };
-      onUpdate?.({ content: [{ type: "text", text: `Searching ${backend.label}…` }], details: {} });
-      const response = await backend.search(request, { options: backend.options, environment, signal });
+      onUpdate?.({ content: [{ type: "text", text: `Searching ${currentBackend.label}…` }], details: {} });
+      const response = await currentBackend.search(request, { options: currentBackend.options, environment, signal });
       const results = Array.isArray(response?.results) ? response.results : [];
       return {
-        content: [{ type: "text", text: formatResults(query, results, response?.notes, backend.label) }],
+        content: [{ type: "text", text: formatResults(query, results, response?.notes, currentBackend.label) }],
         details: {
-          backend: backend.id,
+          backend: currentBackend.id,
           query,
           results: results.map(({ title, url, publishedDate, author, score }) => ({ title, url, publishedDate, author, score })),
           ...(response?.usage ? { usage: response.usage } : {}),

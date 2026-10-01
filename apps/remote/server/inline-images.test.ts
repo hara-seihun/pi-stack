@@ -15,13 +15,13 @@ function deferred() {
   const promise = new Promise<void>(done => { resolve = done; });
   return { promise, resolve };
 }
-async function fixture(generate: InlineImageGenerator, concurrency = 2) {
+async function fixture(generate: InlineImageGenerator, concurrency = 2, acceptsThread = (_id: string) => true) {
   const root = await mkdtemp(join(tmpdir(), "pi-inline-images-"));
   const db = new Database(join(root, "state.sqlite3"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE thread_views(id TEXT PRIMARY KEY); INSERT INTO thread_views VALUES('thread'),('other');");
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
-  const service = new InlineImages(db, join(root, "images"), generate, changed, concurrency);
+  const service = new InlineImages(db, join(root, "images"), generate, changed, concurrency, () => true, acceptsThread);
   cleanup.push(async () => { await service.close(); db.close(); await rm(root, { recursive: true, force: true }); });
   const until = (condition: () => boolean) => new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => { listeners.delete(check); reject(new Error("Image service did not settle")); }, 1500);
@@ -31,6 +31,15 @@ async function fixture(generate: InlineImageGenerator, concurrency = 2) {
   });
   return { root, db, service, until, changed };
 }
+
+test("sandbox replies cannot submit image generation through inline tags or context replay", async () => {
+  const f = await fixture(async () => { throw new Error("sandbox must not invoke an image provider"); }, 2, id => id !== "thread");
+  await f.service.start();
+  const tag = '<pi-remote-image id="escape" prompt="draw" />';
+  f.service.accept("thread", "message", tag);
+  f.service.acceptContext("thread", JSON.stringify({ messages: [{ role: "assistant", content: tag }] }));
+  expect(f.service.snapshot("thread").images).toEqual([]);
+});
 
 test("shared parser excludes examples, escaped tags and raw code; decodes multiline attributes", () => {
   const tag = '<pi-remote-image id="example" prompt="Example" />';

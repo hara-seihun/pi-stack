@@ -50,7 +50,7 @@ it("runs only the latest missed occurrence and never overlaps its previous threa
   });
   const schedules = new ScheduleService({ databasePath: database(), threads: fake.api, now: () => now });
   expect(await schedules.create({ id: "digest", prompt: "Write the digest", cwd: "/work", intervalMs: 10_000, startAt: 0, settings: { model: "sol" } }))
-    .toMatchObject({ ok: true, value: { nextRunAt: 0, settings: { model: "openai-codex/gpt-6-sol" } } });
+    .toMatchObject({ ok: true, value: { nextRunAt: 0, settings: { model: "openai-codex/gpt-6.1-sol" } } });
 
   await schedules.reconcile();
   expect(accepted).toHaveLength(1);

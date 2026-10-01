@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import type { OrchestratorConfig } from "./domain.js";
 import { assign, commitMeterAdmission } from "./policy.js";
-import { isCredentialError, isRateLimitError, rateLimitCooldownMs } from "./provider-errors.js";
+import { isCredentialError, isRateLimitError, providerAccepted, rateLimitCooldownMs } from "./provider-errors.js";
 import type { Store } from "./store.js";
 import type { PiEvent, Result, Thread, ThreadSettings } from "./threads/contracts.js";
 import type { ThreadAdmission } from "./threads/service.js";
 import { BROKER_ROUTES } from "./model-broker-contract.js";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { providerOAuth } from "./auth/shared-oauth.js";
+import { codexTierExclusions } from "./auth/codex-capabilities.js";
 
 /** Children are forced; live consulting keeps its own class so it passes the ceilings force still respects. */
 function admissionClass(thread: Thread): Thread["admission"] {
@@ -20,17 +23,22 @@ export class Fleet {
 
   async admit(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string): Promise<Result<ThreadAdmission>> {
     const rootRepair = thread.metadata?.execution === "root-repair";
-    if (this.config.modelBrokerUrl) return this.admitBroker(thread, settings, recovering, executionId);
+    const brokerUrl = settings.speed === "ultrafast" ? this.config.ultrafastModelBrokerUrl ?? this.config.modelBrokerUrl : this.config.modelBrokerUrl;
+    if (brokerUrl) return this.admitBroker(thread, settings, recovering, executionId, brokerUrl);
     if (rootRepair && thread.metadata?.context) return { ok: false, error: { code: "invalid_request", message: "Root repair cannot use an isolated application context" } };
     const slash = settings.model.indexOf("/");
     const candidate = { provider: settings.model.slice(0, slash), model: settings.model.slice(slash + 1), thinking: settings.thinkingLevel };
+    const codex = settings.speed === "ultrafast" ? builtinProviders().find(provider => provider.id === candidate.provider && provider.id === "openai-codex") : undefined;
+    const excluded = codex ? await codexTierExclusions(this.store, providerOAuth(codex, this.config.authPath), candidate.model, settings.speed, new Set()) : new Set<string>();
+    if (settings.speed === "ultrafast" && !codex) return { ok: false, error: { code: "invalid_request", message: "Ultrafast speed requires OpenAI Codex Astra" } };
     return this.store.transaction(() => {
       const leaseId = `thread:${executionId}`;
       const held = recovering ? this.store.db.prepare("SELECT account_id FROM lease WHERE id=? AND run_id=?").get(leaseId, thread.id) as { account_id: string } | undefined : undefined;
       if (recovering && !held) return { ok: false, error: { code: "unavailable", message: `Execution ${executionId} has no recorded account lease` } };
+      if (held && excluded.has(held.account_id)) return { ok: false, error: { code: "unavailable", message: `Recorded account ${held.account_id} does not currently advertise ${settings.speed} for ${candidate.model}` } };
       const selected = held ? { assignment: { ...candidate, accountId: held.account_id }, refusals: [] }
         : assign(this.store, "thread", admissionClass(thread),
-          { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user");
+          { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user", excluded);
       if (!selected.assignment) return { ok: false, error: { code: "unavailable", message: selected.refusals.map(item => `${item.accountId}: ${item.reason}`).join("; ") } };
       const assignment = selected.assignment;
       this.store.createLease(leaseId, assignment.accountId, "fleet", thread.id);
@@ -46,7 +54,7 @@ export class Fleet {
     });
   }
 
-  private admitBroker(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string): Result<ThreadAdmission> {
+  private admitBroker(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string, brokerUrl: string): Result<ThreadAdmission> {
     if (thread.metadata?.execution === "root-repair") return { ok: false, error: { code: "invalid_request", message: "Root repair is unavailable when this daemon uses a model broker" } };
     const slash = settings.model.indexOf("/");
     const provider = slash > 0 ? settings.model.slice(0, slash) : "";
@@ -63,7 +71,7 @@ export class Fleet {
       }
       this.brokerExecutions.set(thread.id, executionId);
       return { ok: true, value: {
-        env: { PI_MODEL_BROKER_URL: this.config.modelBrokerUrl, PI_THREAD_USAGE: "service", PI_THREAD_ADMISSION: admissionClass(thread) },
+        env: { PI_MODEL_BROKER_URL: brokerUrl, PI_THREAD_USAGE: "service", PI_THREAD_ADMISSION: admissionClass(thread) },
         release: () => this.releaseBroker(thread.id, executionId),
       } };
     });
@@ -84,11 +92,11 @@ export class Fleet {
 
   event(threadId: string, event: PiEvent): void {
     if (event.type === "thread_settled") {
-      if (this.config.modelBrokerUrl) this.releaseBroker(threadId, String(event.executionId));
+      if (this.brokerExecutions.has(threadId)) this.releaseBroker(threadId, String(event.executionId));
       else this.release(threadId, String(event.executionId));
       return;
     }
-    if (this.config.modelBrokerUrl) return;
+    if (this.brokerExecutions.has(threadId)) return;
     if (event.type !== "message_end") return;
     const lease = this.leases.get(threadId), message = event.message as Record<string, any> | undefined;
     if (!lease || message?.role !== "assistant") return;
@@ -97,8 +105,10 @@ export class Fleet {
     // spend ceiling must not be retried after thirty minutes (September 24, 2026:
     // one throttle cooled the only healthy Anthropic account while three workers
     // kept being admitted onto one at its monthly limit, and all three failed).
-    if (message.stopReason === "error" && isRateLimitError(failure)) this.store.setCooldown(lease.accountId, Date.now() + rateLimitCooldownMs(failure));
-    else if (message.stopReason === "error" && isCredentialError(failure)) this.store.setCooldown(lease.accountId, Date.now() + 30 * 60_000);
+    const model = typeof message.model === "string" ? message.model : undefined;
+    if (message.stopReason === "error" && isRateLimitError(failure)) this.store.setCooldown(lease.accountId, Date.now() + rateLimitCooldownMs(failure), { model });
+    else if (message.stopReason === "error" && isCredentialError(failure)) this.store.setCooldown(lease.accountId, Date.now() + 30 * 60_000, { model });
+    else if (providerAccepted(message)) this.store.recordProviderSuccess(lease.accountId, { model: model!, startedAt: Number(message.timestamp), source: "fleet" });
     if (!message.usage) return;
     const receipt = `thread-usage:${threadId}:${createHash("sha256").update(JSON.stringify(message)).digest("hex")}`;
     this.store.transaction(() => {
