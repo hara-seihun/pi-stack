@@ -21,8 +21,10 @@ if [[ $gpu_enabled == auto ]]; then
   [[ -f /etc/pi-stack/write-gpu ]] && gpu_enabled=1
 fi
 [[ $gpu_enabled == 0 || $gpu_enabled == 1 ]] || { echo 'invalid PI_STACK_WRITE_GPU_ENABLED' >&2; exit 64; }
-venv_key=$(sha256sum "$source_dir/requirements.lock" | cut -d' ' -f1)
-gpu_key=$(cat "$source_dir/requirements-gpu.lock" "$source_dir/gpu-model.json" | sha256sum | cut -d' ' -f1)
+# Public service runtimes must not share inodes with an installer's private uv cache.
+# The format key rebuilds previously hardlinked environments without refetching weights.
+venv_key=$( { printf 'public-copy-v1\n'; cat "$source_dir/requirements.lock"; } | sha256sum | cut -d' ' -f1)
+gpu_key=$( { printf 'public-copy-v1\n'; cat "$source_dir/requirements-gpu.lock" "$source_dir/gpu-model.json"; } | sha256sum | cut -d' ' -f1)
 weights_key=$(cat "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha256sum | cut -d' ' -f1)
 environment_key=$(printf '%s\n%s\n%s\n' "$venv_key" "$weights_key" "$gpu_enabled:$gpu_key" | sha256sum | cut -d' ' -f1)
 cleanup_manifest="$source_dir/cleanup/model.json"
@@ -58,7 +60,7 @@ if [[ ! -f "$environment/ready" ]]; then
   # the service's dynamic user cannot read; keep it inside the shared tree.
   export UV_PYTHON_INSTALL_DIR="$environment/python"
   [[ -x "$environment/venv/bin/python" ]] || uv venv --managed-python --python 3.12 "$environment/venv"
-  uv pip sync --python "$environment/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
+  uv pip sync --link-mode copy --python "$environment/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
   chmod -R a+rX "$environment"
   touch "$environment/ready"
 fi
@@ -103,7 +105,7 @@ if [[ $gpu_enabled == 1 && ! -f "$gpu_environment/ready" ]]; then
   pi_stack_as_root chown "$(id -u):$(id -g)" "$gpu_environment"
   export UV_PYTHON_INSTALL_DIR="$gpu_environment/python"
   [[ -x "$gpu_environment/venv/bin/python" ]] || uv venv --managed-python --python 3.12 "$gpu_environment/venv"
-  uv pip sync --python "$gpu_environment/venv/bin/python" --require-hashes \
+  uv pip sync --link-mode copy --python "$gpu_environment/venv/bin/python" --require-hashes \
     --index https://download.pytorch.org/whl/rocm7.2 \
     --default-index https://pypi.org/simple --index-strategy unsafe-best-match \
     "$source_dir/requirements-gpu.lock"
