@@ -1169,15 +1169,29 @@ it("allocates separate workspaces, launches sandbox sessions, and refuses bounda
   expect(sessions[0]!.options.args).toEqual(expect.arrayContaining(["--raw", "--sandbox"]));
   const second = value(await service.spawn({ requestId: "second-sandbox", cwd: directory, metadata: { raw: true, sandbox: true } }));
   expect(second.cwd).not.toBe(sandbox.cwd);
-  for (const metadata of [{ sandbox: false }, { raw: false }, { mode: "live" }, { execution: "root-repair" }]) {
+  for (const metadata of [{ sandbox: false }, { raw: false }, { sandboxProfile: "benchmark" }, { sandboxGateway: { socketPath: "/host.sock" } }, { mode: "live" }, { execution: "root-repair" }]) {
     expect(service.update(sandbox.id, { metadata })).toMatchObject({ ok: false, error: { code: "conflict" } });
   }
   expect(await service.spawn({ requestId: "sandbox-child", parentId: sandbox.id, cwd: directory })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  for (const metadata of [{ sandbox: true }, { raw: true, sandbox: "yes" }, { raw: true, sandbox: true, context: { tools: [] } }]) {
+  for (const metadata of [{ sandboxProfile: "benchmark" }, { sandbox: true }, { raw: true, sandbox: "yes" }, { raw: true, sandbox: true, context: { tools: [] } },
+    { raw: true, sandbox: true, sandboxProfile: "unknown" }, { raw: true, sandbox: true, sandboxProfile: "benchmark" },
+    { raw: true, sandbox: true, sandboxProfile: "benchmark", sandboxGateway: { socketPath: "relative.sock" } }]) {
     expect(await service.spawn({ requestId: JSON.stringify(metadata), cwd: directory, metadata })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
   }
   expect(service.importThread({ id: "escape-sandbox", title: "Escape", cwd: directory, sessionFile: join(directory, "native.jsonl"), settings: sandbox.settings,
     metadata: { raw: true, sandbox: true } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+});
+
+it("passes the immutable benchmark gateway policy to its runner without granting host tools", async () => {
+  const { service, directory, sessions } = fixture();
+  await service.start();
+  const metadata = { raw: true, sandbox: true, sandboxProfile: "benchmark", sandboxGateway: { socketPath: "/host/gateways/case.sock" } };
+  const thread = value(await service.spawn({ requestId: "benchmark", cwd: directory, message: "hello", metadata }));
+  await waitFor(() => sessions.length === 1);
+  const args = sessions[0]!.options.args;
+  expect(JSON.parse(args[args.indexOf("--sandbox-policy") + 1]!)).toEqual({ profile: "benchmark", gatewaySocket: metadata.sandboxGateway.socketPath });
+  for (const patch of [{ sandboxProfile: null }, { sandboxGateway: { socketPath: "/other.sock" } }])
+    expect(service.update(thread.id, { metadata: patch })).toMatchObject({ ok: false, error: { code: "conflict" } });
 });
 
 describe("thread inspection", () => {

@@ -12,7 +12,7 @@ import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
-import { isRawSession, rawModelContext, SANDBOX_ARGUMENT } from "./pi-raw.js";
+import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, resolveSessionModel } from "../extension/routing.js";
 import usageLogger from "../extension/usage-logger.js";
@@ -41,7 +41,9 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     const agentDir = env.PI_CODING_AGENT_DIR ?? getAgentDir();
     const raw = isRawSession(options.args);
     const sandbox = options.args.includes(SANDBOX_ARGUMENT);
-    const sandboxTools = sandbox ? await createSandboxTools(options.cwd) : undefined;
+    const policyArgument = argument(options.args, SANDBOX_POLICY_ARGUMENT);
+    const sandboxTools = sandbox ? await createSandboxTools(options.cwd,
+      policyArgument ? JSON.parse(policyArgument) as SandboxPolicy : { profile: "public" }) : undefined;
     if (raw && options.args.includes("--orchestrator-context")) throw new Error("Raw Pi sessions cannot carry an isolated application context");
     if (options.args.includes("--orchestrator-context") && process.env.HOME !== join(options.cwd, ".home")) throw new Error("Isolated Pi sessions require their application runner environment");
     if (!existsSync(options.sessionFile)) {
