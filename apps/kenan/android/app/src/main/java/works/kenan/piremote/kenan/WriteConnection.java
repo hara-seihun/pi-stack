@@ -29,15 +29,7 @@ final class WriteConnection {
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
         .connectTimeout(7, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false)
-        .addInterceptor(chain -> {
-            Request request = chain.request();
-            if (RouterConnection.publicUrl(request.url().toString()) && !RouterConnection.token().isEmpty()) {
-                request = request.newBuilder().header("cf-access-token", RouterConnection.token()).build();
-            }
-            Response response = chain.proceed(request);
-            RouterConnection.reject(request.url().toString(), response.code(), request.header("cf-access-token") == null ? "" : request.header("cf-access-token"));
-            return response;
-        }).build();
+        .addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
     private final RemoteSession state;
     private final RemoteSession.Identity identity;

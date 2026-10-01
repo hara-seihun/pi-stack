@@ -80,6 +80,17 @@ public final class RouterConnection extends Application {
         return credential;
     }
 
+    static okhttp3.Interceptor interceptor() {
+        return chain -> {
+            okhttp3.Request request = chain.request();
+            String credential = publicUrl(request.url().toString()) ? token() : "";
+            if (!credential.isEmpty()) request = request.newBuilder().header("cf-access-token", credential).build();
+            okhttp3.Response response = chain.proceed(request);
+            reject(request.url().toString(), response.code(), credential);
+            return response;
+        };
+    }
+
     static boolean reject(String url, int status, String credential) {
         if (!publicUrl(url) || !rejected(status)) return false;
         if (token().equals(credential)) accept("");

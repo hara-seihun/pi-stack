@@ -178,8 +178,8 @@ public final class KenanRemotePlugin extends Plugin {
         updateExecutor.execute(() -> {
             try {
                 boolean permitted = false;
-                for (RemoteEnvironment.Endpoint endpoint : RemoteEnvironment.parse(BuildConfig.ROUTER_URL,
-                    RemoteTransport.get(BuildConfig.ROUTER_URL + "/v1/environments", identity))) {
+                for (RemoteEnvironment.Endpoint endpoint : RemoteEnvironment.parse(RouterConnection.routerUrl(),
+                    RemoteTransport.get(RouterConnection.routerUrl() + "/v1/environments", identity))) {
                     if (endpoint.id.equals(environment)) permitted = true;
                 }
                 synchronized (state) {
