@@ -54,7 +54,7 @@ db.commit()`, ledger, join(releases, "orchestrator", commit("orchestrator", 1)),
   };
   const run = (args = [], extra = {}) => spawnSync(join(repo, "deploy", "retain"), args, { env: { ...env, ...extra }, encoding: "utf8", timeout: 20000 });
   const left = (component) => readdirSync(join(releases, component)).sort();
-  return { directory, releases, dependencies, run, left, close: () => rmSync(directory, { recursive: true, force: true }) };
+  return { directory, releases, dependencies, ledger, run, left, close: () => rmSync(directory, { recursive: true, force: true }) };
 }
 
 test("retention keeps the selected release, the newest others, and every release still in use", async () => {
@@ -84,6 +84,43 @@ test("retention keeps the selected release, the newest others, and every release
     holder.kill();
     f.close();
   }
+});
+
+function retiredLedger(f, states) {
+  const result = spawnSync('python3', ['-c', `import sqlite3,sys,json
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("DROP TABLE run")
+    db.execute("CREATE TABLE run (id INTEGER PRIMARY KEY, state TEXT)")
+    db.executemany("INSERT INTO run(state) VALUES (?)", [(s,) for s in json.loads(sys.argv[2])])
+    db.execute("CREATE TABLE historical_usage (cost INTEGER)")
+    db.execute("INSERT INTO historical_usage VALUES (49)")`, f.ledger, JSON.stringify(states)], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+for (const states of [[], ['done']]) test(`retention accepts old-schema ledgers without active work: ${JSON.stringify(states)}`, () => {
+  const f = fixture();
+  try {
+    retiredLedger(f, states);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(f.left('runtime').length, 3);
+    const history = spawnSync('python3', ['-c', 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT cost FROM historical_usage").fetchone()[0])', f.ledger], { encoding: 'utf8' });
+    assert.equal(history.stdout.trim(), '49');
+  } finally { f.close(); }
+});
+
+for (const state of ['queued', 'starting', 'running']) test(`retention refuses unresolved old-schema ${state} runs before removing anything`, () => {
+  const f = fixture();
+  try {
+    retiredLedger(f, [state]);
+    const result = f.run();
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unfinished runs have no release_path.*nothing removed/);
+    assert.equal(f.left('runtime').length, 10);
+    assert.equal(f.left('remote').length, 10);
+    assert.equal(f.left('orchestrator').length, 10);
+    assert.equal(readdirSync(f.dependencies).length, 4);
+  } finally { f.close(); }
 });
 
 test("retention refuses to judge releases through an unreadable ledger and leaves another root's dependencies alone", () => {
