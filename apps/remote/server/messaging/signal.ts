@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { copyFile, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendReply, MessagingCallSupport, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
 import type { MessagingBackendConfig, MessagingCallState, MessagingCapabilities, MessagingLink, MessagingResult } from "./protocol";
@@ -638,31 +638,45 @@ class SignalPlugin implements MessagingPlugin {
     const rpc = this.rpc;
     if (!this.ready || !rpc) return failure("unconfigured", "Signal is not connected to a linked account");
     const attachments: string[] = [];
+    let stage: string | undefined;
     try {
-      for (const attachment of message.attachments) {
-        const bytes = await readFile(attachment.path);
-        attachments.push(`data:${attachment.mimeType};filename=${encodeURIComponent(attachment.name)};base64,${bytes.toString("base64")}`);
+      try {
+        if (message.attachments.length) stage = await mkdtemp(join(this.context!.dataDir, "outgoing-"));
+        for (const [index, attachment] of message.attachments.entries()) {
+          const directory = join(stage!, String(index));
+          await mkdir(directory, { mode: 0o700 });
+          const name = basename(attachment.name);
+          if (!name || name === "." || name === "..") return failure("attachment", "Signal attachment has an invalid filename");
+          const path = join(directory, name);
+          await copyFile(attachment.path, path);
+          attachments.push(path);
+        }
+      } catch (error) { return failure("attachment", detail(error)); }
+      if (this.closing) return failure("closed", "Signal profile closed before sending");
+      const result = await rpc.call("send", {
+        account: this.account,
+        ...(conversation.kind === "group" ? { groupId: conversation.id.replace(/^group:/, "") } : { recipient: [conversation.id] }),
+        message: message.text,
+        attachments,
+        ...(message.reply ? { quoteTimestamp: message.reply.timestamp, quoteAuthor: message.reply.author === "You" ? this.account : message.reply.author, quoteMessage: message.reply.text } : {}),
+      });
+      if (!result.ok) return result;
+      const value = object(result.value);
+      const timestamp = value.timestamp;
+      if (typeof timestamp !== "number" || !Number.isSafeInteger(timestamp)) return failure("unknown", "Signal send returned no valid timestamp; do not retry automatically");
+      const results = list(value.results).map(object);
+      if (results.some(item => item.type !== "SUCCESS")) {
+        const summary = deliverySummary(results);
+        if (!results.every(item => rejectionTypes.has(text(item.type)))) return failure("unknown", `Signal reported incomplete delivery (${summary}); some recipients may have received the message. Do not retry automatically.`);
+        return failure("delivery", `Signal rejected delivery: ${summary}`);
       }
-    } catch (error) { return failure("attachment", detail(error)); }
-    if (this.closing) return failure("closed", "Signal profile closed before sending");
-    const result = await rpc.call("send", {
-      account: this.account,
-      ...(conversation.kind === "group" ? { groupId: conversation.id.replace(/^group:/, "") } : { recipient: [conversation.id] }),
-      message: message.text,
-      attachments,
-      ...(message.reply ? { quoteTimestamp: message.reply.timestamp, quoteAuthor: message.reply.author === "You" ? this.account : message.reply.author, quoteMessage: message.reply.text } : {}),
-    });
-    if (!result.ok) return result;
-    const value = object(result.value);
-    const timestamp = value.timestamp;
-    if (typeof timestamp !== "number" || !Number.isSafeInteger(timestamp)) return failure("unknown", "Signal send returned no valid timestamp; do not retry automatically");
-    const results = list(value.results).map(object);
-    if (results.some(item => item.type !== "SUCCESS")) {
-      const summary = deliverySummary(results);
-      if (!results.every(item => rejectionTypes.has(text(item.type)))) return failure("unknown", `Signal reported incomplete delivery (${summary}); some recipients may have received the message. Do not retry automatically.`);
-      return failure("delivery", `Signal rejected delivery: ${summary}`);
+      return success({ externalId: this.sentId(timestamp), timestamp });
+    } finally {
+      if (stage) {
+        try { await rm(stage, { recursive: true, force: true }); }
+        catch (error) { this.context?.status("error", `Signal outgoing attachment cleanup failed: ${detail(error)}`); }
+      }
     }
-    return success({ externalId: this.sentId(timestamp), timestamp });
   }
 
   async react(conversation: BackendConversation, target: { author: string; timestamp: number }, emoji: string, remove: boolean): Promise<MessagingResult<{ timestamp: number; sender: string }>> {
@@ -761,14 +775,17 @@ class SignalPlugin implements MessagingPlugin {
       for (let index = 0; index < attached.length; index++) {
         const attachment = object(attached[index]);
         const attachmentId = text(attachment.id);
-        const response = await this.rpc!.call("getAttachment", { account: this.account, id: attachmentId, ...(groupId ? { groupId } : { recipient: destination }) });
-        if (!response.ok) { this.context?.status("error", response.error.message); return; }
-        const encoded = object(response.value).data;
-        if (typeof encoded !== "string") { this.context?.status("error", "Signal attachment response has no data"); return; }
-        const bytes = Buffer.from(encoded, "base64");
+        // signal-cli downloads before notifying; its attachment id is the stored
+        // filename, including its extension. Keep bytes off the JSON-RPC pipe.
+        if (!attachmentId || basename(attachmentId) !== attachmentId || attachmentId === "." || attachmentId === ".." || attachmentId.includes("\\\\")) {
+          this.context?.status("error", "Signal attachment has an invalid local file id"); return;
+        }
+        const source = join(this.context!.dataDir, "signal-cli", "attachments", attachmentId);
+        const info = await lstat(source);
+        if (!info.isFile()) { this.context?.status("error", "Signal attachment must be a local regular file"); return; }
         const path = join(stage!, String(index));
-        await writeFile(path, bytes, { mode: 0o600 });
-        attachments.push({ path, name: text(attachment.filename) || attachmentId, mimeType: text(attachment.contentType) || "application/octet-stream", size: bytes.length });
+        await copyFile(source, path);
+        attachments.push({ path, name: text(attachment.filename) || attachmentId, mimeType: text(attachment.contentType) || "application/octet-stream", size: info.size });
       }
       await this.context!.message({
         id: outgoing ? this.sentId(timestamp) : `${this.account}:${sender}:${timestamp}`,
