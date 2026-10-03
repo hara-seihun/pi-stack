@@ -26,6 +26,8 @@ Without a hardware-bound boot secret, custody starts sealed. The first successfu
 
 The custody master is wrapped independently by each enrolled person's key. Reboot testing must discard volatile custody state and prove that a wrong key fails and that a nonadministrator's correct key recovers every known folder. A process restart alone is not a host reboot or a FUSE/mount-namespace proof. Root's private shared-memory store lives inside its custody-owned encrypted mount, never a plaintext fallback.
 
+A fixed privileged launcher joins custody's actual mount namespace and drops to `pi-kenan` before executing root, memory or journal code. It pins systemd credentials in sealed memory descriptors across that join. `JoinsNamespaceOf` is not used as a substitute: it does not share mount namespaces.
+
 ## Fixture staging
 
 From the integration checkout:
@@ -47,7 +49,10 @@ Native acceptance creates fresh fixed SDK root sessions with synthetic Alice/Bob
 bun scripts/one-kenan-memory-acceptance.ts --models --model sol
 bun scripts/one-kenan-memory-acceptance.ts --models --model opus
 bun scripts/one-kenan-rooms-acceptance.ts
+bun scripts/one-kenan-consent-acceptance.ts --model sol
+bun scripts/one-kenan-consent-acceptance.ts --model opus
 bun scripts/one-kenan-closure-acceptance.ts
+sudo deploy/one-kenan-namespace-rehearse
 sudo deploy/one-kenan-fuse-rehearse
 sudo deploy/one-kenan-rehearse
 ```
@@ -63,9 +68,10 @@ Integrated staging must prove:
 - an action from Alice's thread is answerable to Bob through `ask_kenan`;
 - root withholds an obviously private item and refuses to acknowledge existence when existence would reveal its content;
 - boundary accountability records every root reply, including refusals, and “what have you told people about me” answers from that record;
+- Bob asks about Alice's borderline item, Alice receives an actual private asynchronous question identifying Bob and the intended disclosure, Alice agrees, and a fresh root judgment delivers the chosen answer to Bob's original thread after a consent-manager restart;
 - Bob cannot list or inspect the root session through context, history, item, image, file, stream, export or collaboration paths;
 - all own-person and room work remains fully transparent, and one room works from both member clients;
-- first-login custody recovery after losing volatile state, unchanged per-person login, and wrong-key refusal;
+- first-login custody recovery after losing volatile state, unchanged per-person login, wrong-key refusal, and a runtime that joins before custody mounts seeing the later FUSE mount;
 - unchanged flag-off tests and rollback retaining thread history, folder contents and encrypted shared state.
 
 ## Exact cutover and rollback
