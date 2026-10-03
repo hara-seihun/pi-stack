@@ -36,7 +36,7 @@ This is available only with host `oneKenan: true`. The person registry mark is a
 configuration, not a client preference. Root sessions and keys remain in the root runtime's private
 store; never symlink or mount that store into a person-visible directory.
 
-`PI_KENAN_CONFIG` (default `/etc/pi-stack/one-kenan.json`) may set `rootPort` (default `19886`) and
+`PI_KENAN_CONFIG` (default `/etc/pi-stack/one-kenan.json`) may set `rootPort` (default `18821`) and
 `rootAdminCapabilityFile` (default `/var/lib/pi-kenan/root-admin-capability`). The router's
 `PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE` overrides that file path. The capability is 32 random bytes
 encoded as 64 hex characters. Provision it readable only by the root router and Root Kenan service,

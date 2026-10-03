@@ -7,7 +7,7 @@ export function rootDebugConfig(env: NodeJS.ProcessEnv = process.env): RootDebug
   if (!existsSync(host) || JSON.parse(readFileSync(host, "utf8")).oneKenan !== true) return null;
   const configPath = env.PI_KENAN_CONFIG ?? "/etc/pi-stack/one-kenan.json";
   const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
-  const port = Number(config.rootPort ?? 19886);
+  const port = Number(config.rootPort ?? 18821);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error("Invalid root Kenan debug port");
   return { port, adminCapabilityFile: env.PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE ?? config.rootAdminCapabilityFile ?? "/var/lib/pi-kenan/root-admin-capability" };
 }
