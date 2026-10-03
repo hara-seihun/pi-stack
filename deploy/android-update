@@ -168,6 +168,8 @@ async function verify(expectedPath) {
 try {
   const [operation, argument, ...extra] = process.argv.slice(2);
   if (!argument || extra.length || !["prepare", "install", "install-locked", "verify"].includes(operation)) throw new Error("usage: deploy/android-update prepare OUTPUT_DIRECTORY | install ARTIFACT_DIRECTORY | verify MANIFEST_PATH");
+  // Published releases are public downloads read by unprivileged mirrors; the caller's umask must not narrow them.
+  process.umask(0o022);
   const result = operation === "prepare" ? prepare(resolve(argument)) : operation === "install" ? install(resolve(argument)) : operation === "install-locked" ? installLocked(resolve(argument)) : await verify(resolve(argument));
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
