@@ -31,7 +31,7 @@ belong in the plan; custody generates random credentials into root-only files. E
   "roomsBrokerPort": 2481,
   "root": {
     "provider": "openai-codex",
-    "model": "gpt-6-luna",
+    "model": "gpt-6.1-sol",
     "thinkingLevel": "high",
     "promptFile": "/etc/pi-stack/kenan-root.md"
   },

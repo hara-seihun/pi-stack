@@ -41,7 +41,20 @@ The foreground harness owns a real router and real Remote supervisors on loopbac
 
 `proof.json` records checks; `logs/` holds process output. Flag-off checks cover independent login, wrong-key refusal, session/person mismatch, separate thread visibility and thread durability across process replacement. This baseline makes no provider call.
 
-The real-model acceptance driver executes the actual memory extension tools with synthetic Alice/Bob items on pooled Sol and Opus. Provider credentials remain in their existing owner-held resolver; they are not written into fixture keys, prompts, logs or reports. Only synthetic prompts and tool results enter these turns.
+Native acceptance creates fresh fixed SDK root sessions with synthetic Alice/Bob memory, the actual memory service, actual journaled mail sender with mocked SMTP, and the real router/supervisors. Run:
+
+```sh
+bun scripts/one-kenan-memory-acceptance.ts --models --model sol
+bun scripts/one-kenan-memory-acceptance.ts --models --model opus
+bun scripts/one-kenan-rooms-acceptance.ts
+bun scripts/one-kenan-closure-acceptance.ts
+sudo deploy/one-kenan-fuse-rehearse
+sudo deploy/one-kenan-rehearse
+```
+
+Provider credentials remain in their existing owner-held resolver; they are not written into fixture keys, prompts, logs or reports. A separate fixture broker uses an isolated metadata ledger, accounts its synthetic usage normally, and never replaces live broker grants. Only synthetic prompts and tool results enter these turns. Rooms run under an existing unprivileged fixture UID with a copy of public source artifacts; no ACL is added to the private writer checkout. The privileged router uses only fixture paths and a fixture service-manager shim.
+
+The closure proof installs production dependencies outside the checkout and initializes Sol and Opus from the exact deployed root/Orchestrator/memory graph. It makes no model call. FUSE proof uses two fixture UIDs and a private mount namespace; transaction proof separately uses stubbed fixture units and firewall commands.
 
 ## Acceptance and rollback
 
@@ -55,4 +68,20 @@ Integrated staging must prove:
 - first-login custody recovery after losing volatile state, unchanged per-person login, and wrong-key refusal;
 - unchanged flag-off tests and rollback retaining thread history, folder contents and encrypted shared state.
 
-The cutover and rollback entrypoint is `deploy/one-kenan`; its exact commands and revised integrated proof are completed with the identity/custody slice before publication. Do not substitute a manual flag edit: custody, service readiness, additive ACL state and rollback custody are part of the operation.
+## Exact cutover and rollback
+
+After publication is deployed on the host, provision the root-owned plan described in [deployment](one-kenan-deployment.md). From the selected release checkout on kenan-server:
+
+```sh
+cd /home/kenan/.local/state/pi-stack-release/repository
+sudo deploy/one-kenan prepare --config /etc/pi-stack/one-kenan-plan.json --state /var/lib/pi-kenan-deploy
+# Run only after Hara says go:
+sudo deploy/one-kenan cutover --authorize-cutover --config /etc/pi-stack/one-kenan-plan.json --state /var/lib/pi-kenan-deploy
+sudo deploy/one-kenan status --config /etc/pi-stack/one-kenan-plan.json --state /var/lib/pi-kenan-deploy
+# Exact rollback of that same transaction:
+sudo deploy/one-kenan rollback --authorize-cutover --config /etc/pi-stack/one-kenan-plan.json --state /var/lib/pi-kenan-deploy
+```
+
+Use the same plan and state directory throughout. These commands never restart or stop the existing router, person supervisors or ordinary broker. Router room, custody and admin-debug admission reconcile the host switch/configuration dynamically; existing person sessions load memory lazily at tool execution. A custody/memory outage returns an unavailable tool result without disabling ordinary work.
+
+Rollback restores original host/config/ACL bytes, stops only additive services, removes only their UID-gate table and broker grants, and retains encrypted memory, room history, ciphertext, credentials and transaction evidence. Failure to stop an additive listener retains its gates for repair, rather than exposing it. Do not substitute a manual flag edit: custody, additive ACL state, service readiness and rollback custody are part of the operation. Preparation and publication do not authorize activation.
