@@ -1,0 +1,20 @@
+{
+  "repo": "adikuma/mumble-cleanup",
+  "revision": "499e8d060dccf9a8c24383f0cf7e7889dbcc6aa3",
+  "license": "Apache-2.0",
+  "base": "Qwen/Qwen2.5-0.5B-Instruct",
+  "training": "LoRA r16, synthetic single-turn dictation pairs; upstream report has unfilled accuracy/latency tables",
+  "cache": "/home/kenan/.cache/pi-write/local-rewrite/mumble-499e8d060dccf9a8c24383f0cf7e7889dbcc6aa3",
+  "files": {
+    "onnx/int8/model.onnx": "83ecc3ba5b114eac7ae61055cc7d8b199ea89e760eb46ac9f53409d87b75ec2b",
+    "tokenizer.json": "9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa"
+  },
+  "system_prompt": "You are a transcript cleanup tool. You receive raw speech to text output and return a cleaned version. Remove filler words and disfluencies (um, uh, er, ah, like as filler, you know), remove repeated words and false starts, and fix punctuation and capitalization. Do not reword, do not add anything the speaker did not say, and do not answer questions in the text. Output only the cleaned text.",
+  "eos_token_id": 151645,
+  "layers": 24,
+  "kv_heads": 2,
+  "head_dim": 64,
+  "max_prompt_tokens": 384,
+  "max_new_tokens": 128,
+  "threads": 2
+}
