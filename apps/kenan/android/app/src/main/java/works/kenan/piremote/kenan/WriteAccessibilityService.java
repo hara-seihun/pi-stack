@@ -36,6 +36,16 @@ public final class WriteAccessibilityService extends AccessibilityService {
             if (active == service) { service.dismissal.clear(); service.cancel(); service.hide(); service.refresh(); }
         });
     }
+    static void settingsChanged() {
+        WriteAccessibilityService service = active;
+        if (service == null) return;
+        Runnable update = () -> { if (active == service) service.refresh(); };
+        if (Looper.myLooper() == Looper.getMainLooper()) update.run();
+        else service.main.post(update);
+    }
+    private boolean overlayEnabled() {
+        return getSharedPreferences("write-settings", 0).getBoolean("overlayEnabled", true);
+    }
     private static final String CHANNEL = "write-recording";
     private static final int NOTIFICATION = 224;
     private static final int MAX_AUDIO_BYTES = 2_000_000;
@@ -69,6 +79,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
 
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         if (destroyed) return;
+        if (!overlayEnabled()) { refresh(); return; }
         SharedOverlay.write(this);
         if (dismissal.active() && event.getEventType() == AccessibilityEvent.TYPE_VIEW_FOCUSED
             && isApplicationWindow(event.getWindowId())) {
@@ -139,6 +150,12 @@ public final class WriteAccessibilityService extends AccessibilityService {
 
     private void refresh() {
         if (active != this || destroyed) return;
+        if (!overlayEnabled()) {
+            if (busy() || clipboardReady) cancel();
+            hide();
+            return;
+        }
+        if (busy()) { SharedOverlay.refresh(); return; }
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
         boolean allowed = identity != null && Settings.canDrawOverlays(this)
             && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
@@ -172,7 +189,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         shown = false;
         if (busy()) failed("Overlay window is no longer available");
     }
-    boolean visible() { return shown; }
+    boolean visible() { return shown && overlayEnabled(); }
     boolean busy() { return recording || connecting || finishing; }
     boolean canDismiss() { return !busy(); }
     void dismiss() {
@@ -187,6 +204,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         SharedOverlay.refresh();
     }
     void tapped() {
+        if (!overlayEnabled()) { refresh(); return; }
         if (finishing) return;
         if (recording) { finish(); return; }
         if (clipboardReady && target != null && eligible(target)
@@ -347,6 +365,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         idle();
     }
     private void completed(String text) {
+        if (!overlayEnabled()) { refresh(); return; }
         if (!finishing && !recording) return;
         retireAttempt();
         finishing = false; connecting = false;

@@ -14,7 +14,7 @@ export interface InstalledApp { revision: string; versionCode: number; applicati
 export interface AppUpdateCheck { update: AppUpdate | null; installed: InstalledApp }
 export interface AppUpdateInstall { status: "installer-opened" | "reloading"; revision?: string }
 export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
-export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "writeSettings" | "deviceAdmin";
+export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "overlay" | "writeSettings" | "deviceAdmin";
 export interface PhoneStatus {
   enabled: boolean;
   connected: boolean;
@@ -29,12 +29,12 @@ export interface PhoneStatus {
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
-  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean }>;
-  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean }): Promise<void>;
+  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean; overlayEnabled?: boolean }>;
+  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean } | { step: "enabled"; enabled: boolean }): Promise<void>;
   writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
-  phoneSetup?(options: { step: PhoneSetupStep }): Promise<void>;
+  phoneSetup?(options: { step: PhoneSetupStep; instruction?: string }): Promise<PhoneStatus>;
   phoneOverlay?(options: { visible: boolean }): Promise<PhoneStatus>;
   haptic?(options: { kind: string }): Promise<void>;
   keepAwake?(options: { enabled: boolean }): Promise<void>;

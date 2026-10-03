@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
 import { isRunContext } from "../isolated-context-contract.js";
-import { isModelConfigurationError, isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
+import { isCompactionFailure, isModelConfigurationError, isRateLimitError, isTransientFailure, transientRetryAt } from "../provider-errors.js";
 import { POOLED_ACCOUNT_WAIT, pooledRetryAvailability } from "../extension/routing.js";
 import { modelBrokerUrl } from "../model-broker-contract.js";
 import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
@@ -850,6 +850,8 @@ export class ThreadService implements ThreadApi {
     const recoveredExecution = recovering ? this.execution(id) : undefined;
     const providerWait = recoveredExecution && thread.metadata?.providerWait as Json | undefined;
     if(providerWait?.broker && Date.now()<providerWait.retryAt)throw new AdmissionWait("Waiting for model-broker capacity retry");
+    const failure=String(providerWait?.failure??"");
+    if(providerWait && (!isRateLimitError(failure)||isCompactionFailure(failure)) && Date.now()<providerWait.retryAt)throw new AdmissionWait("Waiting to retry a transient provider failure");
     if(providerWait && !this.options.admit){
       const env={...process.env,...this.options.environment?.(thread)};
       const ready=modelBrokerUrl(env)||!/^(?:anthropic|openai-codex)(?:-\d+)?\//.test(settings.model)?{available:Date.now()>=providerWait.retryAt,retryAt:providerWait.retryAt}:pooledRetryAvailability(settings.model,env);
@@ -906,13 +908,13 @@ export class ThreadService implements ThreadApi {
         const accepted = new Set<string>(state.acceptedWorkIds ?? []), completed = new Set<string>(state.completedWorkIds ?? []);
         const works = this.sql("SELECT * FROM thread_work WHERE execution_id=? AND status!='done' ORDER BY ordinal").all(execution.id) as Json[];
         const last = state.lastAssistantMessage;
-        const capacityFailure = last?.stopReason === "error" && (isRateLimitError(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
+        const capacityFailure = last?.stopReason === "error" && (isTransientFailure(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
         if (!runtime.busy && completed.has(execution.work_id) && (!providerWait || !capacityFailure)) {
           await this.finish(id, runtime, last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete", last ?? null);
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
           await this.rpc(runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null, ...(providerWait ? { resumeProviderWait: true } : {}) });
-          if(providerWait)this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait') WHERE id=?").run(id);
+          if(providerWait)this.sql("UPDATE thread SET metadata=json_set(json_remove(metadata,'$.providerWait','$.admissionWait'),'$.providerRetry',json(?)) WHERE id=?").run(JSON.stringify({executionId:providerWait.executionId,attempts:providerWait.attempts??1}),id);
           this.sql("UPDATE thread_work SET landed_at=COALESCE(landed_at,?) WHERE id=?").run(Date.now(), work.id);
           runtime.busy = true;
         }
@@ -1082,8 +1084,9 @@ export class ThreadService implements ThreadApi {
     this.changed(id);
   }
   private async waitForProvider(id:string,runtime:Runtime|undefined,execution:Json,failure:string):Promise<void>{
-    const prior=this.get(id)?.metadata?.providerWait as Json|undefined;
-    const wait={executionId:execution.id,workId:execution.work_id,failure,since:prior?.since??Date.now(),retryAt:Date.now()+rateLimitCooldownMs(failure),broker:runtime?.broker??prior?.broker??false};
+    const metadata=this.get(id)?.metadata, prior=metadata?.providerWait as Json|undefined, retried=metadata?.providerRetry as Json|undefined;
+    const attempts=(prior?.executionId===execution.id?prior!.attempts??1:retried?.executionId===execution.id?retried!.attempts??1:0)+1;
+    const wait={executionId:execution.id,workId:execution.work_id,failure,attempts,since:prior?.since??Date.now(),retryAt:transientRetryAt(failure,attempts),broker:runtime?.broker??prior?.broker??false};
     this.sql("UPDATE thread SET state='running',metadata=json_set(metadata,'$.providerWait',json(?)) WHERE id=?").run(JSON.stringify(wait),id);
     this.admissionWait(id,{code:"unavailable",message:`Accepted work is waiting for provider capacity: ${failure}`});
     if(runtime){
@@ -1099,14 +1102,14 @@ export class ThreadService implements ThreadApi {
     if (this.suspended || this.closed) return;
     const failure=error??finalMessage?.errorMessage??"";
     const execution = this.execution(id); if (!execution || runtime && runtime.executionId !== execution.id) { if (runtime) runtime.busy = false; return; }
-    if(outcome==="failed"&&!this.row(id)?.held&&(isRateLimitError(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
+    if(outcome==="failed"&&!this.row(id)?.held&&(isTransientFailure(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
       await this.waitForProvider(id,runtime,execution,failure);return;
     }
     const thread = this.get(id)!, workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
     this.transaction(() => {
       this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, Date.now(), execution.id);
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
-      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait') WHERE id=?").run(id);
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait','$.providerRetry') WHERE id=?").run(id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
       if (thread.metadata?.ephemeral && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
         this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);

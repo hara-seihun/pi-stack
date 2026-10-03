@@ -38,6 +38,7 @@ import java.util.concurrent.Executors;
 public final class KenanRemotePlugin extends Plugin {
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean installingUpdate = new AtomicBoolean();
+    private final AtomicBoolean requestingPhoneAccess = new AtomicBoolean();
     private AppUpdates appUpdates;
     private WebBundles webBundles;
 
@@ -104,7 +105,8 @@ public final class KenanRemotePlugin extends Plugin {
             .put("accessibility", accessibility)
             .put("battery", ((android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE))
                 .isIgnoringBatteryOptimizations(getContext().getPackageName()))
-            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true)));
+            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true))
+            .put("overlayEnabled", getContext().getSharedPreferences("write-settings", 0).getBoolean("overlayEnabled", true)));
     }
 
     @PluginMethod
@@ -132,9 +134,17 @@ public final class KenanRemotePlugin extends Plugin {
                 getContext().startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                 call.resolve();
             }
+            case "enabled" -> {
+                Object enabled = call.getData().opt("enabled");
+                if (!(enabled instanceof Boolean)) { call.reject("Write enabled must be a boolean"); return; }
+                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("overlayEnabled", (Boolean) enabled).apply();
+                WriteAccessibilityService.settingsChanged();
+                call.resolve();
+            }
             case "keyboard" -> {
                 boolean required = Boolean.TRUE.equals(call.getBoolean("required", true));
                 getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", required).apply();
+                WriteAccessibilityService.settingsChanged();
                 call.resolve();
             }
             default -> call.reject("Unknown Write setup step");
@@ -209,50 +219,80 @@ public final class KenanRemotePlugin extends Plugin {
     @PluginMethod
     public void phoneSetup(PluginCall call) {
         String step = call.getString("step", "");
+        if (!requestingPhoneAccess.compareAndSet(false, true)) {
+            call.reject("Return from the current phone access request first", "busy"); return;
+        }
         try {
+            if (PhoneControlService.capabilities(getContext()).optBoolean(step)) {
+                finishPhoneAccess(call); return;
+            }
             switch (step) {
                 case "contacts", "calendar", "location", "backgroundLocation", "sms", "callLog", "phone", "camera", "microphone", "notifications" -> {
-                    if (step.equals("notifications") && Build.VERSION.SDK_INT < 33
-                        || step.equals("backgroundLocation") && Build.VERSION.SDK_INT < 29) { phoneStatus(call); return; }
+                    if (step.equals("notifications") && Build.VERSION.SDK_INT < 33) {
+                        openPhoneSettings(call, new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName())); return;
+                    }
+                    if (step.equals("backgroundLocation") && Build.VERSION.SDK_INT < 29) { finishPhoneAccess(call); return; }
                     if (step.equals("backgroundLocation")) {
                         boolean locationGranted = androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_COARSE_LOCATION)
                             == android.content.pm.PackageManager.PERMISSION_GRANTED
                             || androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_FINE_LOCATION)
                             == android.content.pm.PackageManager.PERMISSION_GRANTED;
-                        if (!locationGranted) { call.reject("Approve location before background location", "permission_denied"); return; }
+                        if (!locationGranted) { requestingPhoneAccess.set(false); call.reject("Approve location before background location", "permission_denied"); return; }
                         if (Build.VERSION.SDK_INT >= 30 && getPermissionState("backgroundLocation") != PermissionState.GRANTED) {
-                            openPhoneSettings(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                            call.resolve(new JSObject().put("opened", true).put("message", "Choose Permissions → Location → Allow all the time")); return;
+                            openPhoneSettings(call, new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName()))); return;
                         }
                     }
-                    if (getPermissionState(step) == PermissionState.GRANTED) phoneStatus(call);
-                    else requestPermissionForAlias(step, call, "phonePermission");
+                    if (getPermissionState(step) == PermissionState.GRANTED
+                        || getPermissionState(step) == PermissionState.DENIED) {
+                        openPhoneSettings(call, new Intent(step.equals("notifications") ? Settings.ACTION_APP_NOTIFICATION_SETTINGS : Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            step.equals("notifications") ? null : Uri.parse("package:" + getContext().getPackageName()))
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName()));
+                    } else requestPermissionForAlias(step, call, "phonePermission");
                     return;
                 }
-                case "accessibility" -> openPhoneSettings(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                case "notificationAccess" -> openPhoneSettings(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
-                case "battery" -> openPhoneSettings(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                case "accessibility" -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .putExtra(Intent.EXTRA_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneAccessibilityService.class).flattenToString()));
+                case "notificationAccess" -> openPhoneSettings(call, new Intent(Build.VERSION.SDK_INT >= 30 ? Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS : Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneNotificationService.class).flattenToString()));
+                case "overlay" -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getContext().getPackageName())));
+                case "battery" -> openPhoneSettings(call, new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                     Uri.parse("package:" + getContext().getPackageName())));
                 case "allFiles" -> {
-                    if (Build.VERSION.SDK_INT < 30) { call.reject("All-files access requires Android 11 or newer; app-owned files remain available", "unsupported"); return; }
-                    openPhoneSettings(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getContext().getPackageName())));
+                    if (Build.VERSION.SDK_INT < 30) { requestingPhoneAccess.set(false); call.reject("All-files access requires Android 11 or newer; app-owned files remain available", "unsupported"); return; }
+                    openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getContext().getPackageName())));
                 }
-                case "usage" -> openPhoneSettings(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                case "writeSettings" -> openPhoneSettings(new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                case "deviceAdmin" -> openPhoneSettings(new Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                case "usage" -> openPhoneSettings(call, new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                case "writeSettings" -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                case "deviceAdmin" -> openPhoneSettings(call, new Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
                     .putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, new android.content.ComponentName(getContext(), PhoneAdminReceiver.class))
                     .putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Optional remote screen locking. Factory reset requires separate Device Owner provisioning, not this grant."));
-                case "deviceOwner" -> { call.reject("Device Owner requires separate Android enterprise provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
-                case "secureSettings" -> { call.reject("Secure settings requires an optional shell grant or system provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
-                default -> { call.reject("Unknown phone setup step", "invalid_args"); return; }
+                case "deviceOwner" -> { requestingPhoneAccess.set(false); call.reject("Device Owner requires separate Android enterprise provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
+                case "secureSettings" -> { requestingPhoneAccess.set(false); call.reject("Secure settings requires an optional shell grant or system provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
+                default -> { requestingPhoneAccess.set(false); call.reject("Unknown phone setup step", "invalid_args"); }
             }
-            call.resolve(new JSObject().put("opened", true));
-        } catch (Exception failure) { call.reject("Could not open phone setup: " + failure.getMessage(), "unavailable", failure); }
+        } catch (Exception failure) { requestingPhoneAccess.set(false); call.reject("Could not open phone setup: " + failure.getMessage(), "unavailable", failure); }
     }
 
-    private void openPhoneSettings(Intent intent) { getActivity().startActivity(intent); }
+    private void openPhoneSettings(PluginCall call, Intent intent) {
+        startActivityForResult(call, intent, "phoneSettingsReturned");
+        String instruction = call.getString("instruction", "");
+        if (!instruction.isBlank()) android.widget.Toast.makeText(getContext(),
+            instruction.substring(0, Math.min(instruction.length(), 240)), android.widget.Toast.LENGTH_LONG).show();
+    }
+    @ActivityCallback
+    private void phoneSettingsReturned(PluginCall call, ActivityResult result) {
+        if (call != null) finishPhoneAccess(call);
+        else requestingPhoneAccess.set(false);
+    }
+    private void finishPhoneAccess(PluginCall call) {
+        requestingPhoneAccess.set(false);
+        PhoneControlService.refresh();
+        phoneStatus(call);
+    }
     @PermissionCallback
-    private void phonePermission(PluginCall call) { PhoneControlService.refresh(); phoneStatus(call); }
+    private void phonePermission(PluginCall call) { finishPhoneAccess(call); }
 
     @PluginMethod
     public void checkAppUpdate(PluginCall call) {

@@ -13,6 +13,7 @@ const steps = [
 export function WriteSetup() {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
   useEffect(() => {
     if (!nativePlatform) return;
     const refresh = () => void remote.writeStatus!().then(setStatus).catch(err => setError(String(err)));
@@ -22,20 +23,27 @@ export function WriteSetup() {
     return () => { window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, []);
   if (!nativePlatform) return null;
-  const setup = async (step: typeof steps[number][0] | "keyboard", required?: boolean) => {
+  const setup = async (options: Parameters<NonNullable<typeof remote.writeSetup>>[0]) => {
+    setPending(true);
     try {
       setError("");
-      await remote.writeSetup!({ step, required });
+      await remote.writeSetup!(options);
       setStatus(await remote.writeStatus!());
     } catch (err) { setError(String(err)); }
+    finally { setPending(false); }
   };
   return <div className="notification-control">
+    <label><input type="checkbox" checked={status?.overlayEnabled ?? false}
+      disabled={pending || typeof status?.overlayEnabled !== "boolean"}
+      onChange={event => void setup({ step: "enabled", enabled: event.target.checked })} /> Show Write overlay</label>
+    <p>Turning it off cancels active overlay dictation. Composer dictation and the Kenan overlay stay available.</p>
+    {status && typeof status.overlayEnabled !== "boolean" && <p>Update the Android app to control the Write overlay.</p>}
     <p>Speak into any editable field. Tap the floating ✦, then ✓ to insert or ✗ to cancel. Hold ✦ to talk. Password, number and phone fields are excluded.</p>
     {steps.map(([step, label]) => <p key={step}>
-      {status?.[step] ? `✓ ${label}` : <button type="button" onClick={() => void setup(step)}>{label}</button>}
+      {status?.[step] ? `✓ ${label}` : <button type="button" disabled={pending || !status} onClick={() => void setup({ step })}>{label}</button>}
     </p>)}
-    <label><input type="checkbox" checked={status?.keyboardRequired ?? true}
-      onChange={event => void setup("keyboard", event.target.checked)} /> Show only while the keyboard is open</label>
+    <label><input type="checkbox" checked={status?.keyboardRequired ?? true} disabled={pending || !status}
+      onChange={event => void setup({ step: "keyboard", required: event.target.checked })} /> Show only while the keyboard is open</label>
     {error && <p role="alert">{error}</p>}
   </div>;
 }
