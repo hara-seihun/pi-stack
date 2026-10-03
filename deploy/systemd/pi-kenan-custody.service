@@ -1,16 +1,14 @@
 [Unit]
-Description=Kenan key custody and shared encrypted folders
+Description=Fixed Kenan key custody and owner-mounted encrypted folders
 After=network-online.target
 
 [Service]
 Type=simple
-User=@EXECUTION_USER@
-Group=@EXECUTION_USER@
+User=root
+Group=root
 EnvironmentFile=@KENAN_ENV_FILE@
 RuntimeDirectory=pi-kenan
 RuntimeDirectoryMode=0700
-StateDirectory=pi-kenan
-StateDirectoryMode=0700
 PrivateMounts=yes
 ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
 ExecStart=@BUN@ @REMOTE_ROOT@/server/one-kenan-custody.ts
