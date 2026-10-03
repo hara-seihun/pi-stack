@@ -29,7 +29,9 @@ weights_key=$(cat "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha25
 environment_key=$(printf '%s\n%s\n%s\n' "$venv_key" "$weights_key" "$gpu_enabled:$gpu_key" | sha256sum | cut -d' ' -f1)
 cleanup_manifest="$source_dir/cleanup/model.json"
 cleanup_key=$(sha256sum "$cleanup_manifest" | cut -d' ' -f1)
-key=$( { echo "$environment_key"; echo "$cleanup_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
+punctuation_manifest="$source_dir/punctuation-model.json"
+punctuation_key=$(sha256sum "$punctuation_manifest" | cut -d' ' -f1)
+key=$( { echo "$environment_key"; echo "$cleanup_key"; echo "$punctuation_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
 base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
 store="$(dirname "$base")/.pi-write"
 environment="$store/venv-$venv_key"
@@ -37,6 +39,7 @@ gpu_environment="$store/gpu-venv-$gpu_key"
 gpu_weights="$store/gpu-weights-$(sha256sum "$source_dir/gpu-model.json" | cut -d' ' -f1)"
 weights="$store/weights-$weights_key"
 cleanup_model="$store/cleanup-$cleanup_key"
+punctuation_model="$store/punctuation-$punctuation_key"
 tree="$store/$key"
 if [[ ! -f "$tree/ready" && $mode == --select ]]; then
   echo "PiStack Write engine is not prepared at $tree; run deploy/prepare first" >&2
@@ -99,6 +102,34 @@ PY
   chmod -R a+rX "$cleanup_model"
   touch "$cleanup_model/ready"
 fi
+if [[ ! -f "$punctuation_model/ready" ]]; then
+  command -v curl >/dev/null || { echo 'PiStack Write punctuation requires curl' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$punctuation_model"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$punctuation_model"
+  "$environment/venv/bin/python" - "$punctuation_manifest" > "$punctuation_model/files.tsv" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+for name,digest in m['files'].items():
+    print(name,'https://huggingface.co/'+m['repository']+'/resolve/'+m['revision']+'/'+name,digest,sep='\t')
+PY
+  while IFS=$'\t' read -r file url digest; do
+    pi_stack_download_artifact "$url" "$punctuation_model/$file" "$digest"
+  done < "$punctuation_model/files.tsv"
+  chmod -R a+rX "$punctuation_model"
+  touch "$punctuation_model/ready"
+fi
+# A readiness stamp is not proof that the mandatory assets still match their pins.
+"$environment/venv/bin/python" - "$punctuation_manifest" "$punctuation_model" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+manifest=json.load(open(sys.argv[1]))
+for name,digest in manifest['files'].items():
+    path=Path(sys.argv[2])/name
+    with path.open('rb') as asset:
+        actual=hashlib.file_digest(asset,'sha256').hexdigest()
+    if actual != digest:
+        raise SystemExit('PiStack Write punctuation checksum mismatch: '+str(path))
+PY
 if [[ $gpu_enabled == 1 && ! -f "$gpu_environment/ready" ]]; then
   command -v uv >/dev/null || { echo 'PiStack Write GPU requires uv' >&2; exit 1; }
   pi_stack_as_root install -d -m 0755 "$gpu_environment"
@@ -138,11 +169,12 @@ if [[ ! -f "$tree/ready" ]]; then
   fi
   ln -sfn "$weights" "$tree/model"
   ln -sfn "$cleanup_model" "$tree/cleanup-model"
+  ln -sfn "$punctuation_model" "$tree/punctuation-model"
   for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
   chmod -R a+rX "$tree"
   touch "$tree/ready"
 fi
-[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" && -f "$tree/cleanup-model/joint-f32.onnx" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
+[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" && -f "$tree/cleanup-model/joint-f32.onnx" && $(readlink -f "$tree/punctuation-model") == "$punctuation_model" && -f "$tree/punctuation-model/punct_cap_seg_en.onnx" && -f "$tree/punctuation-model/spe_32k_lc_en.model" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
 next="$base.next.$$"
 trap 'pi_stack_as_root rm -f "$next"' EXIT
 previous=$(readlink -f "$base" 2>/dev/null || true)
@@ -160,7 +192,7 @@ keep=()
 for selected in "$tree" "$previous"; do
   [[ -n $selected && -d $selected ]] || continue
   keep+=("$(readlink -f "$selected")")
-  for link in "$selected"/venv "$selected"/model "$selected"/gpu-model "$selected"/cleanup-model; do
+  for link in "$selected"/venv "$selected"/model "$selected"/gpu-model "$selected"/cleanup-model "$selected"/punctuation-model; do
     [[ -L $link ]] || continue
     target=$(readlink -f "$link")
     while [[ $(dirname "$target") != "$store" && $target != / ]]; do target=$(dirname "$target"); done

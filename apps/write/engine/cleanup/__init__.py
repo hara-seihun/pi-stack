@@ -43,6 +43,10 @@ class WordTagger(Protocol):
     def predict(self, words: Sequence[str]) -> Sequence[tuple[int, float]]: ...
 
 
+class Punctuator(Protocol):
+    def punctuate(self, tokens: Sequence[str]) -> Sequence[str]: ...
+
+
 @dataclass(frozen=True)
 class _Token:
     text: str
@@ -120,7 +124,8 @@ def _format(tokens: list[_Token], context: str) -> tuple[str, list[dict]]:
 def clean(words: Sequence[Mapping[str, Any] | str],
           dictionary: Mapping[str, Any] | None = None,
           context: str = "",
-          tagger: WordTagger | None = None) -> dict[str, Any]:
+          tagger: WordTagger | None = None,
+          punctuator: Punctuator | None = None) -> dict[str, Any]:
     """Clean committed ASR words; edits use half-open source word indices.
 
     Alternatives are accepted only when they match a dictionary word and the
@@ -231,6 +236,17 @@ def clean(words: Sequence[Mapping[str, Any] | str],
         kept.append(token); j += 1
     kept, replacements = _replace_dictionary(kept, dictionary)
     edits.extend(replacements)
+    if punctuator and kept:
+        punctuated = punctuator.punctuate([token.text for token in kept])
+        if len(punctuated) != len(kept):
+            raise ValueError('punctuator must return one output per source token')
+        restored = []
+        for token, text in zip(kept, punctuated):
+            if text != token.text:
+                edits.append({'kind': 'format', 'from': token.text, 'to': text,
+                              'at': [token.start, token.end]})
+            restored.append(_Token(text, token.start, token.end))
+        kept = restored
     text, formatting = _format(kept, context)
     edits.extend(formatting)
     edits.sort(key=lambda edit: (edit["at"][0], edit["at"][1], edit["kind"]))
@@ -246,11 +262,13 @@ class IncrementalCleaner:
     A client must treat partial text as provisional until final.
     """
     def __init__(self, dictionary: Mapping[str, Any] | None = None, context: str = "",
-                 lookbehind: int = 12, tagger: WordTagger | None = None):
+                 lookbehind: int = 12, tagger: WordTagger | None = None,
+                 punctuator: Punctuator | None = None):
         self.dictionary = dictionary or {}
         self.context = context
         self.lookbehind = lookbehind
         self.tagger = tagger
+        self.punctuator = punctuator
         self._prefix = ""
         self._pending: list[Mapping[str, Any] | str] = []
         self._consumed = 0
@@ -263,19 +281,22 @@ class IncrementalCleaner:
             n = max((i+1 for i, item in enumerate(self._pending[:limit])
                      if _word(item).rstrip().endswith(tuple(_END))), default=0)
             if n:
-                stable = clean(self._pending[:n], self.dictionary, self.context + self._prefix, self.tagger)
+                stable = clean(self._pending[:n], self.dictionary, self.context + self._prefix,
+                               self.tagger, self.punctuator)
                 self._prefix += stable["text"] + " "
                 self._edits.extend(_shift_edits(stable["edits"], self._consumed))
                 self._consumed += n
                 del self._pending[:n]
-        result = clean(self._pending, self.dictionary, self.context + self._prefix, self.tagger)
+        result = clean(self._pending, self.dictionary, self.context + self._prefix,
+                       self.tagger, self.punctuator)
         edits = self._edits + _shift_edits(result["edits"], self._consumed)
         edits.sort(key=lambda edit: (edit["at"][0], edit["at"][1], edit["kind"]))
         return {"text": self._prefix + result["text"], "edits": edits}
 
     def fork(self) -> "IncrementalCleaner":
         """An independent copy at this point, for speculative finals."""
-        duplicate = IncrementalCleaner(self.dictionary, self.context, self.lookbehind, self.tagger)
+        duplicate = IncrementalCleaner(self.dictionary, self.context, self.lookbehind,
+                                       self.tagger, self.punctuator)
         duplicate._prefix = self._prefix
         duplicate._pending = list(self._pending)
         duplicate._consumed = self._consumed

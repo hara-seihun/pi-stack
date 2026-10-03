@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 
 from cleanup import IncrementalCleaner
 from cleanup.tagger import JointOnnxTagger
+from cleanup.punctuation import OnnxPunctuator
 from nemotron import Nemotron
 from gpu_encoder import maybe_load
 from opus import OpusDecoder
@@ -37,7 +38,8 @@ class Engine:
     IMMEDIATE_PADDING = 1600
     GPU_RETRY_SECONDS = 20
 
-    def __init__(self, model_dir: Path, threads=4, streams=4, cleanup_dir: Path | None = None):
+    def __init__(self, model_dir: Path, threads=4, streams=4, cleanup_dir: Path | None = None,
+                 punctuation_dir: Path | None = None):
         self.model_dir = model_dir
         self.recognizer = Nemotron(model_dir, threads)
         # A separate two-thread ORT pool keeps the CPU shadow warm without
@@ -45,6 +47,7 @@ class Engine:
         self.cpu_recognizer = Nemotron(model_dir, threads=2, enable_gpu=False) if self.recognizer.gpu else None
         self.cpu_slots = asyncio.Semaphore(2)
         self.tagger = JointOnnxTagger(cleanup_dir) if cleanup_dir is not None else None
+        self.punctuator = OnnxPunctuator(punctuation_dir) if punctuation_dir is not None else None
         self.slots = asyncio.Semaphore(streams)
 
     async def promote_when_available(self):
@@ -216,12 +219,14 @@ class Engine:
                     opus_decoder = OpusDecoder() if state['format'] == 'opus' else None
                     remainder = [b'']
                     stream = self.recognizer.create_stream(dictionary)
-                    cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger)
+                    cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger,
+                                                 punctuator=self.punctuator)
                     decoder_task = asyncio.create_task(decode())
                     gpu = getattr(getattr(stream, 'model', None), 'gpu', None)
                     if getattr(self, 'cpu_recognizer', None) is not None and (gpu is None or self.cpu_shadow_needed(gpu)):
                         cpu_stream = self.cpu_recognizer.create_stream(dictionary)
-                        cpu_cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger)
+                        cpu_cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger,
+                                                         punctuator=self.punctuator)
                         cpu_task = asyncio.create_task(cpu_decode())
                 elif kind == 'cancel' and stream is not None:
                     return
@@ -355,9 +360,12 @@ async def main():
     parser.add_argument('--streams', type=int, default=4)
     parser.add_argument('--cleanup-model', type=Path,
                         default=Path(__file__).resolve().parent/'cleanup-model')
+    parser.add_argument('--punctuation-model', type=Path,
+                        default=Path(__file__).resolve().parent/'punctuation-model')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    engine = Engine(args.model, args.threads, args.streams, args.cleanup_model)
+    engine = Engine(args.model, args.threads, args.streams, args.cleanup_model,
+                    args.punctuation_model)
     asyncio.create_task(engine.promote_when_available())
     async with serve(engine.handle, args.host, args.port, max_size=4*1024*1024):
         LOG.info('Write ASR listening at %s:%d', args.host, args.port)
