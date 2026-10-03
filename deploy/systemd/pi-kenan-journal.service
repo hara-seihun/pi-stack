@@ -14,6 +14,6 @@ LoadCredential=kenan-memory-publisher:@PUBLISHER_TOKEN_FILE@
 PrivateMounts=yes
 ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
 ExecCondition=/usr/bin/mountpoint -q @KENAN_PRIVATE_DIR@
-ExecStart=@BUN@ @KENAN_MEMORY_SOURCE@/src/journal-cli.ts drain
+ExecStart=@BUN@ @KENAN_MEMORY_SOURCE@/src/journal-cli.ts drain --all
 TimeoutStartSec=30
 UMask=0077
