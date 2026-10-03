@@ -27,16 +27,15 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     private long snapshot;
     private int remainingText;
     private boolean truncated;
-    private KenanOverlay overlay;
     private String foregroundPackage;
     @Override protected void onServiceConnected() { current = this; ensureOverlay(); PhoneControlService.refresh(); }
     private KenanOverlay ensureOverlay() {
-        if (overlay == null) { overlay = new KenanOverlay(this); overlay.foreground(foregroundPackage); }
+        KenanOverlay overlay = SharedOverlay.phone(this);
+        overlay.foreground(foregroundPackage);
         return overlay;
     }
-    void overlayVisibility(boolean visible) { ensureOverlay().visibility(visible); }
-    void overlayAck(JSONObject frame) { if (overlay != null) overlay.ack(frame); }
-    void overlayDisconnected() { if (overlay != null) overlay.disconnected(); }
+    void overlayAck(JSONObject frame) { if (SharedOverlay.current() != null) SharedOverlay.current().ack(frame); }
+    void overlayDisconnected() { if (SharedOverlay.current() != null) SharedOverlay.current().disconnected(); }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         if (isOverlayWindow(event.getWindowId())) return;
         for (AccessibilityWindowInfo window : getWindows()) if (window.getId() == event.getWindowId()
@@ -45,7 +44,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
             CharSequence name = event.getPackageName();
             if (name != null && !getPackageName().contentEquals(name)) {
                 foregroundPackage = name.toString();
-                if (overlay != null) overlay.foreground(foregroundPackage);
+                if (SharedOverlay.current() != null) SharedOverlay.current().foreground(foregroundPackage);
             }
         }
         if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
@@ -59,11 +58,11 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     static void invalidate() {
         PhoneAccessibilityService active = current;
         if (active != null) new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-            active.clearNodes(); if (active.overlay != null) active.overlay.resetSession();
+            active.clearNodes(); if (SharedOverlay.current() != null) SharedOverlay.current().resetSession();
         });
     }
     @Override public void onInterrupt() { clearNodes(); closeOverlay(); }
-    private void closeOverlay() { if (overlay != null) { overlay.close(); overlay = null; } }
+    private void closeOverlay() { SharedOverlay.detach(this); }
     @Override public void onDestroy() { if (current == this) current = null; clearNodes(); closeOverlay(); PhoneControlService.refresh(); super.onDestroy(); }
 
     private void clearNodes() { for (AccessibilityNodeInfo node : nodes.values()) node.recycle(); nodes.clear(); }
@@ -98,7 +97,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                     long delay = tap && deadline - System.currentTimeMillis() > duration + 250 ? 200 : 0;
                     visual.moveToTarget(x, y, delay);
                     Runnable inject = () -> {
-                        if (overlay != visual || !authorized.getAsBoolean()) { done.accept(PhoneResult.error("disconnected", "Phone session changed before gesture")); return; }
+                        if (SharedOverlay.current() != visual || !authorized.getAsBoolean()) { done.accept(PhoneResult.error("disconnected", "Phone session changed before gesture")); return; }
                         if (System.currentTimeMillis() + duration >= deadline) { done.accept(PhoneResult.error("expired", "Gesture cannot finish before the command deadline")); return; }
                         visual.gesture(x, y, x2, y2, duration, tap);
                         try {
@@ -158,7 +157,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                     visual.suspendCapture();
                     android.view.Choreographer.getInstance().postFrameCallback(first ->
                         android.view.Choreographer.getInstance().postFrameCallback(second -> {
-                            if (!authorized.getAsBoolean() || overlay != visual || System.currentTimeMillis() >= deadline) {
+                            if (!authorized.getAsBoolean() || SharedOverlay.current() != visual || System.currentTimeMillis() >= deadline) {
                                 visual.restoreCapture(); done.accept(PhoneResult.error("expired", "Screenshot authorization or deadline expired")); return;
                             }
                             try { capture(result -> { visual.restoreCapture(); done.accept(result); }); }
