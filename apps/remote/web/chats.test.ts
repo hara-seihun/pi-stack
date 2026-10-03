@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { runningChildParents, threadActivity } from "../server/live-projection";
+import { ChatIcon } from "./src/chat-row";
 import { InboxRowView } from "./src/features/chats/Inbox";
 import type { Session } from "../server/protocol";
 import type { MessagingSnapshot } from "../server/messaging/protocol";
@@ -46,6 +47,24 @@ test("inbox ranks attention, then work, then quiet, mixing AI and human chats", 
   expect(currentChats([ai], [], messaging).map(item => item.id)).toEqual(["human:unread", "ai:same-id", "human:same-id"]);
 });
 
+test("rooms share inbox ranking and row controls, and closing excludes only that room", () => {
+  const rooms = [
+    { id: "shared", title: "Shared", members: [{ user: "kenan", displayName: "Hara" }], current: true, updatedAt: 10, unreadCount: 2 },
+    { id: "working", title: "Working room", members: [], state: "running" as const, updatedAt: 20 },
+    { id: "closed", title: "Closed room", members: [], current: false, unreadCount: 5 },
+    { id: "question", title: "Question", members: [], pendingQuestions: 1, updatedAt: 30 },
+  ];
+  const rows = inboxRows([session("busy", { state: "running", updatedAt: new Date(15).toISOString() })], [], messaging, rooms);
+  expect(rows.map(row => row.chat.id)).toEqual(["room:question", "room:shared", "human:unread", "room:working", "ai:busy", "human:same-id"]);
+  expect(rows.map(row => row.section)).toEqual(["attention", "attention", "attention", "working", "working", "quiet"]);
+  const room = rows.find(row => row.chat.id === "room:shared")!;
+  const markup = renderToStaticMarkup(createElement(InboxRowView, { row: room, selected: true, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
+  expect(markup).toContain('aria-current="true"');
+  expect(markup).toContain('class="inbox-close"');
+  expect(markup).toContain("2 unread");
+  expect(markup).toContain("Hara");
+});
+
 test("a Signal chat with a picture shows it in the inbox; one without keeps the service glyph", () => {
   const previous = globalThis.window;
   globalThis.window = { PiRemotePerson: { href: (path: string) => `${path}&session=s` }, KenanRemote: { resolveApiUrl: (path: string) => path } } as unknown as Window & typeof globalThis;
@@ -62,6 +81,15 @@ test("a Signal chat with a picture shows it in the inbox; one without keeps the 
     expect(render(without)).toContain('class="thread-provider"');
     expect(render(without)).not.toContain("chat-avatar");
   } finally { globalThis.window = previous; }
+});
+
+test("destination pictures retain their artwork when a thread has a colour", () => {
+  for (const icon of ["raw", "sandbox", "room"]) {
+    const markup = renderToStaticMarkup(createElement(ChatIcon, { icon, color: "#ff00ff" }));
+    expect(markup).toContain(`${icon}.svg`);
+    expect(markup).not.toContain("feFlood");
+  }
+  expect(renderToStaticMarkup(createElement(ChatIcon, { icon: "openai", color: "#ff00ff" }))).toContain("feFlood");
 });
 
 test("the last worker settling clears waiting status in the inbox", () => {
@@ -143,4 +171,7 @@ test("sync clears chats closed on another device but incoming reopen never takes
   expect(selectionAfterSync(null, closed, before)).toBeNull();
   expect(selectionAfterSync("ai:a", { ...closed, sessions: before.sessions }, before)).toBe("ai:a");
   expect(selectionAfterSync("ai:just-created", closed, before)).toBe("ai:just-created");
+  const rooms = [{ id: "shared", title: "Shared", members: [], current: true }];
+  expect(selectionAfterSync("room:shared", { ...before, rooms }, { ...before, rooms: [{ ...rooms[0]!, current: false }] })).toBeNull();
+  expect(selectionAfterSync(null, { ...before, rooms: [] }, { ...before, rooms })).toBeNull();
 });

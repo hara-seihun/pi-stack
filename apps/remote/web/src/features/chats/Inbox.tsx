@@ -26,11 +26,13 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
   const { chat, status } = row;
   const session = chat.kind === "ai" ? chat.session : null;
   const conversation = chat.kind === "human" ? chat.conversation : null;
+  const room = chat.kind === "room" ? chat.room : null;
+  const unread = conversation?.unread ?? room?.unreadCount ?? 0;
   const [color, setColor] = useState<ThreadColor | null>(session?.color ?? null);
   useEffect(() => setColor(session?.color ?? null), [session?.color]);
   const colour = useThreadColor({ id: session?.id, name: chat.title, color: session?.color, onPreview: setColor });
   const titleOnly = selected && compactSelected;
-  const showStatusLine = !titleOnly && Boolean(session || conversation?.unread || status);
+  const showStatusLine = !titleOnly && Boolean(session || room || unread || status);
   const closeTitle = chat.kind === "ai" ? `Close ${chat.title}: stops it and its workers, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
   return <div className={`inbox-row${selected ? " selected" : ""}${titleOnly ? " title-only" : ""}`} data-section={row.section} style={threadColorStyle(color)}>
     {/* The press starts before the tap lands: that is when this thread's
@@ -42,7 +44,9 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
         {showStatusLine && <span className="inbox-status-line">
           {/* Every state has a word, "Working" included: a row whose state was left
               to the section header read as "· Fable", a blank where the state goes. */}
-          {status ? <StatusPill status={status} compact /> : conversation?.unread ? <span className="inbox-unread">{conversation.unread} unread</span> : null}
+          {status ? <StatusPill status={status} compact /> : null}
+          {unread > 0 && <span className="inbox-unread">{unread} unread</span>}
+          {room && <span className="inbox-meta">{room.members.map(member => member.displayName).join(", ")}</span>}
           {session && <span className="inbox-meta">{modelShortName(session.model)}</span>}
           {place && <span className="inbox-meta">{place}</span>}
           {session && session.queuedMessages.length > 0 && !session.held && <span className="inbox-chip">{session.queuedMessages.length} queued</span>}
@@ -56,14 +60,13 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
 
 // Memoized with its rows and handlers: typing in the composer, a live frame or
 // a dashboard tick must not walk this list again.
-export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactSelected = false, error, picker, rooms, onOpen, onPrefetch, onClose, onSearchArchived, onSelectedVisibleChange }: {
+export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactSelected = false, error, picker, onOpen, onPrefetch, onClose, onSearchArchived, onSelectedVisibleChange }: {
   rows: InboxRow[];
   selectedId: ChatId | null;
   showPlace: boolean;
   compactSelected?: boolean;
   error: string;
   picker: ReactNode;
-  rooms?: ReactNode;
   onOpen(chat: Chat): void;
   onPrefetch?(chat: Chat): void;
   onClose(chat: Chat): void;
@@ -94,7 +97,6 @@ export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactS
     </header>
     <DismissibleError message={error} />
     <div className="inbox-list">
-      {rooms}
       {INBOX_SECTIONS.map(section => {
         const items = filtered.filter(row => row.section === section.id);
         if (!items.length) return null;

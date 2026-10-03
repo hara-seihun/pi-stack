@@ -1,5 +1,14 @@
 export interface RoomMember { user: string; displayName: string }
-export interface Room { id: string; title: string; members: RoomMember[] }
+export interface Room {
+  id: string;
+  title: string;
+  members: RoomMember[];
+  current?: boolean;
+  updatedAt?: number;
+  state?: "idle" | "running";
+  unreadCount?: number;
+  pendingQuestions?: number;
+}
 export interface RoomMessage { id: string; sender: RoomMember; text: string; time: number }
 export interface RoomWork { id: string; kind: string; text: string; name?: string }
 export interface RoomSnapshot { room: Room; state: "idle" | "running"; messages: RoomMessage[]; live: string; notificationId: string | null; questions?: import("pi-orchestrator/api").ThreadQuestion[]; work?: RoomWork[]; thinking?: string; context?: unknown }

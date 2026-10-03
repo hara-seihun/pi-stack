@@ -1,16 +1,15 @@
-.room-inbox { padding: .75rem; border-bottom: 1px solid var(--border, #555); }
-.room-inbox > header, .room-conversation > header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
-.room-inbox form, .room-conversation form:not(.room-composer) { padding: .75rem 0; }
-.room-row { display: block; width: 100%; text-align: left; padding: .75rem; margin-top: .4rem; }
-.room-row span { display: block; font-size: .8rem; opacity: .7; margin-top: .3rem; }
-.room-row.selected { outline: 1px solid currentColor; }
-.room-member-picker { display: flex; flex-wrap: wrap; gap: .75rem; margin: .5rem 0; }
-.room-conversation { height: 100%; min-height: 0; display: flex; flex-direction: column; padding: .75rem; gap: .5rem; }
-.room-conversation > header p { margin: .3rem 0; font-size: .8rem; }
-.room-history { overflow-y: auto; flex: 1; min-height: 0; }
-.room-history .message { white-space: pre-wrap; }
-.room-composer { display: flex; flex-wrap: wrap; gap: .5rem; }
-.room-composer textarea { flex: 1; min-width: 0; min-height: 4rem; resize: vertical; }
-.room-discretion { font-size: .75rem; opacity: .6; margin: 0; }
-.room-question { max-height: 40vh; overflow-y: auto; }
-.room-question label { display: block; margin: .5rem 0; }
+.room-creator, .room-creator form { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.room-creator > p { color: var(--danger); font-size: var(--text-sm); }
+.room-member-picker { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; margin: 0; padding: 0; border: 0; }
+.room-member-picker legend { margin-bottom: var(--space-2); color: var(--muted); font-size: var(--text-xs); font-weight: 600; }
+.room-member-picker label { display: flex; align-items: center; gap: var(--space-2); min-height: var(--touch); padding: var(--space-2) var(--space-3); border-radius: var(--radius-2); background: var(--surface-2); cursor: pointer; }
+.room-member-picker label:has(input:checked) { background: var(--surface-3); }
+.room-member-picker input[type="checkbox"] { flex: 0 0 auto; width: 18px; height: 18px; margin: 0; padding: 0; accent-color: var(--accent); }
+.room-details { flex: 0 0 auto; max-height: 40dvh; overflow: auto; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); background: var(--surface); font-size: var(--text-sm); }
+.room-details-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.room-details p { margin: var(--space-2) 0; }
+.room-add-members { padding: var(--space-2) 0; }
+.room-discretion { color: var(--muted); font-size: var(--text-xs); line-height: 1.5; }
+.room-context summary, .room-work > summary { min-height: var(--touch); padding: var(--space-2) 0; color: var(--muted); cursor: pointer; font-size: var(--text-sm); font-weight: 600; }
+.room-context pre { margin: var(--space-2) 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--text-xs)/1.5 var(--font-mono); }
+.room-retry { padding: var(--space-2); color: var(--muted); font-size: var(--text-xs); }

@@ -18,7 +18,7 @@ import { deliverIdleNotifications, readIdleCursor, takeNotificationTarget, retai
 import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
-import { useRooms, RoomInbox, RoomConversation } from "./rooms";
+import { useRooms, RoomConversation } from "./rooms";
 import { workerThreads, working } from "./thread-state";
 import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
@@ -629,13 +629,18 @@ function RemoteApp() {
       if (chat.session.archivedAt) await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: chat.session.id }), {});
       if (signal?.aborted) return;
       openChat(chat.id, { tab: chat.session.watchList ? "workers" : "chats" });
+    } else if (chat.kind === "room") {
+      if (chat.room.current === false) await api("POST", `/v1/rooms/${chat.room.id}/open`, {});
+      if (signal?.aborted) return;
+      openChat(chat.id, { tab: "chats" });
+      await roomDirectory.refresh();
     } else {
       if (!chat.conversation.current) await api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: chat.conversation.backendId, target: chat.conversation.externalId });
       if (signal?.aborted) return;
       openChat(chat.id, { tab: "chats" });
       kick();
     }
-  }, [kick, openChat, patch]);
+  }, [kick, openChat, patch, roomDirectory.refresh]);
   const closeChat = useCallback(async (chat: Chat) => {
     if (undoCloses.isBusy(chat.id)) return;
     setClosing(current => withClose(current, chat.id));
@@ -646,22 +651,25 @@ function RemoteApp() {
     }
     const result = await undoCloses.close(chat, () => chat.kind === "ai"
       ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id }))
+      : chat.kind === "room" ? api("POST", `/v1/rooms/${chat.room.id}/close`, {})
       : api(API.messagingClose.method, API.messagingClose.path({ conversationId: chat.conversation.id })));
     if (result?.ok && chat.kind === "ai") cache.forgetThread(chat.session.id);
     if (!result?.ok) {
       setClosing(current => withoutClose(current, chat.id));
       if (result) setChatError(result.error);
     }
+    if (chat.kind === "room") await roomDirectory.refresh();
     kick();
-  }, [cache, kick, liveText, patch, route, stateRef, undoCloses]);
+  }, [cache, kick, liveText, patch, route, stateRef, undoCloses, roomDirectory.refresh]);
   const undoClose = useCallback(async () => {
     const chat = undoCloses.snapshot().entries.at(-1)?.chat;
     const result = await undoCloses.undo(item => item.kind === "ai"
       ? api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: item.session.id }), { descendants: true, resume: true })
+      : item.kind === "room" ? api("POST", `/v1/rooms/${item.room.id}/open`, {})
       : api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: item.conversation.backendId, target: item.conversation.externalId }));
     if (result?.ok && chat) setClosing(current => withoutClose(current, chat.id));
-    if (result) kick();
-  }, [kick, undoCloses]);
+    if (result) { if (chat?.kind === "room") await roomDirectory.refresh(); kick(); }
+  }, [kick, undoCloses, roomDirectory.refresh]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!undoCloses.snapshot().entries.length || undoCloses.snapshot().restoring || !shouldUndoClose(event)) return;
@@ -821,7 +829,16 @@ function RemoteApp() {
   const dashboard = state.dashboard;
   const threadStarts = useMemo(() => state.bootstrap?.threadStarts ?? [], [state.bootstrap]);
   const home = state.bootstrap?.home ?? "/";
-  const listedRows = useMemo(() => inboxRows(state.sessions, threadStarts, state.messaging), [state.sessions, threadStarts, state.messaging]);
+  const previousRooms = useRef(roomDirectory.rooms);
+  useEffect(() => {
+    const previous = { sessions: [], messaging: stateRef.current.messaging, rooms: previousRooms.current };
+    previousRooms.current = roomDirectory.rooms;
+    if (routeChat?.startsWith("room:") && selectionAfterSync(routeChat, previous, { ...previous, rooms: roomDirectory.rooms }) !== routeChat) {
+      patch({ selectedChatId: null });
+      navigate(routeHome(route), { replace: true });
+    }
+  }, [roomDirectory.rooms, routeChat, route, patch, stateRef]);
+  const listedRows = useMemo(() => inboxRows(state.sessions, threadStarts, state.messaging, roomDirectory.rooms), [state.sessions, threadStarts, state.messaging, roomDirectory.rooms]);
   useEffect(() => { setClosing(current => reconcileCloses(current, listedRows.map(row => row.chat.id))); }, [listedRows]);
   const rows = useMemo(() => hideClosing(listedRows, closing), [listedRows, closing]);
   const knownSessions = useMemo(() => {
@@ -888,8 +905,8 @@ function RemoteApp() {
   const panel = "panel" in route ? route.panel : null;
   const showDetail = route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || !!routeChat;
 
-  const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} />,
-    [threadStarts, state.messaging, selectChat, openThreadId, kick]);
+  const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
+    [threadStarts, state.messaging, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
   const debugTools = <div className="inspector-debug">
     <button type="button" className={voiceState === "idle" ? "" : voiceState} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceState === "live" ? "Hang up voice" : voiceState === "connecting" ? "Connecting voice…" : "Start voice"}</button>
     {voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}
@@ -898,7 +915,7 @@ function RemoteApp() {
   </div>;
 
   const conversation = roomId
-    ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} onRefresh={roomDirectory.refresh} />
+    ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} showBack={layout === "phone"} showIdentity={showConversationIdentity} onRefresh={roomDirectory.refresh} />
     : selected && !messagingActive
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
@@ -912,7 +929,7 @@ function RemoteApp() {
         ? <section className="empty-state"><strong>Opening…</strong></section>
         : <section className="empty-state"><strong>{route.tab === "workers" ? "Choose a worker" : "Choose a chat"}</strong></section>;
 
-  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError} picker={picker} rooms={state.bootstrap?.rooms ? <RoomInbox rooms={roomDirectory.rooms} people={roomDirectory.people} selected={roomId} error={roomDirectory.error} onOpen={id => openChat(`room:${id}`)} onRefresh={roomDirectory.refresh} /> : undefined} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
+  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
     : route.tab === "workers" ? <Suspense fallback={<Loading label="Loading workers…" />}><WorkersTree sessions={workerSessions} selectedId={aiId} compactSelected={layout !== "phone"} filter={workersFilter} onFilter={setWorkersFilter} onOpen={openWorker} onPrefetch={prefetchSession} onSelectedVisibleChange={onSelectedVisibleChange} /></Suspense>
     : null;
 
