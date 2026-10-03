@@ -281,7 +281,7 @@ unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "thread
 ensureSupervisorSchema(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
-const fleetUrl = configuredOrchestratorThreadUrl();
+const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 const namingUrl = modelBrokerUrl() ?? fleetUrl;
 const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;

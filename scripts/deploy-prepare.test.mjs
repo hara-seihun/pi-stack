@@ -223,12 +223,13 @@ for (const signal of ["TERM", "INT", "HUP", "failure"]) {
       for (const dir of ["packages/runtime", "vendor/pi", "apps", "tools"]) mkdirSync(join(f.repo, dir), { recursive: true });
       for (const name of ["package.json", "package-lock.json", "vendor/pi/package.tgz"]) writeFileSync(join(f.repo, name), "{}\n");
       const runtimeSource = readFileSync(join(root, "deploy/runtime"), "utf8");
-      const hashInputs = runtimeSource.match(/sha256sum (.+)\n/)[1].split(" ");
+      const hashInputs = [...runtimeSource.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
       for (const name of hashInputs.filter((name) => name !== "package.json" && name !== "package-lock.json")) {
         mkdirSync(dirname(join(f.repo, name)), { recursive: true });
         writeFileSync(join(f.repo, name), "\n");
       }
-      f.executable(join(f.bin, "npm"), 'mkdir -p node_modules/.bin');
+      for (const name of ["kenan-memory", "kenan-root"]) mkdirSync(join(f.repo, "packages", name, "src"), { recursive: true });
+      f.executable(join(f.bin, "npm"), 'mkdir -p node_modules/.bin; printf "{}\\n" > node_modules/.package-lock.json');
       f.executable(join(f.bin, "node"), 'exit 0');
       f.executable(join(f.bin, "rsync"), `touch "\${@: -1}/partial"
 ${signal === "failure" ? "exit 23" : `kill -${signal} "$PPID"; exit 20`}`);

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -16,6 +16,7 @@ export class StagingStack {
   readonly tokens = new Map<FixturePerson, string>();
   readonly ports: Record<FixturePerson | "router", number>;
   readonly people: readonly FixturePerson[];
+  routerAsRoot = false;
   constructor(root = mkdtempSync(join(tmpdir(), "pi-one-kenan-")), port = 19880, includeAdministrator = false) {
     this.root = resolve(root);
     this.people = includeAdministrator ? [...fixturePeople, "admin"] : fixturePeople;
@@ -31,6 +32,7 @@ export class StagingStack {
     for (const name of ["persons", "keys", "units", "bin", "logs", "upstream-credentials", ...this.people])
       mkdirSync(join(this.root, name), { recursive: true, mode: 0o700 });
     writeFileSync(this.hostFile, JSON.stringify({ version: 1, environments: [{ id: "staging", name: "Fixture staging", icon: "home" }] }));
+    chmodSync(this.hostFile, 0o644);
     writeFileSync(join(this.root, "bin", "systemctl"), `#!/usr/bin/env bash
 set -euo pipefail
 root=${JSON.stringify(this.root)}
@@ -85,7 +87,11 @@ esac
   }
   spawn(name: string, file: string, user?: FixturePerson) {
     const log = Bun.file(join(this.root, "logs", `${name}.log`));
-    const child = Bun.spawn([process.execPath, file], { cwd: repository, env: this.environment(user), stdout: log, stderr: log });
+    const env = this.environment(user);
+    const command = name === "router" && this.routerAsRoot
+      ? ["sudo", "-n", "env", "-i", ...Object.entries(env).map(([key, value]) => `${key}=${value}`), process.execPath, file]
+      : [process.execPath, file];
+    const child = Bun.spawn(command, { cwd: repository, env, stdout: log, stderr: log });
     this.children.push({ name, child });
     return child;
   }

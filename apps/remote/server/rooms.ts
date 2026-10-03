@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Room, RoomMember, RoomSnapshot } from "../shared/rooms";
 
@@ -17,6 +17,8 @@ export class Rooms {
   constructor(path: string, private people: () => RoomMember[], private transport: Transport) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
+    // Keep the deployment's named root-reader ACL effective under the router's private umask.
+    chmodSync(path, 0o640);
     this.db.exec(`PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY,owner TEXT NOT NULL,creator TEXT NOT NULL,title TEXT NOT NULL,members TEXT NOT NULL,ready INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS deliveries(receipt TEXT NOT NULL,room TEXT NOT NULL,person TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,time INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(receipt,person));`);
@@ -24,6 +26,7 @@ export class Rooms {
     if (!columns.some(column => column.name === "creator")) {
       this.db.exec("ALTER TABLE rooms ADD COLUMN creator TEXT; UPDATE rooms SET creator=owner");
     }
+    for (const file of [`${path}-wal`, `${path}-shm`]) if (existsSync(file)) chmodSync(file, 0o640);
   }
   close() { this.db.close(); }
   private rows(): StoredRoom[] {
