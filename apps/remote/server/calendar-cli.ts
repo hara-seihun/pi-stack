@@ -4,7 +4,12 @@ export const CALENDAR_HELP = `usage: pi-calendar OPERATION [OPTIONS]
   list [--from ISO --to ISO]           Agenda (default: next 180 days)
   add --title TEXT --start ISO --end ISO --zone IANA [--location TEXT --notes TEXT --all-day]
   update ID [event options]            Change an owned event
-  delete ID                           Delete an owned event
+  delete ID [--scope occurrence|series --occurrence ISO]
+  get ID                              Get the original event / series
+  Event repeat: --repeat daily|weekly|none [--repeat-until YYYY-MM-DD|none]
+  Repeating base IDs need --scope series to update/delete the whole series.
+  Agenda occurrence IDs target only that occurrence; alternatively use
+  --scope occurrence --occurrence ORIGINAL_START with the base ID.
   zone IANA                           Set calendar display/default subscription zone
   feed                                Private subscription URL (treat as a secret)
   rotate-feed                         Revoke the old feed URL
@@ -25,14 +30,18 @@ export function calendarInvocation(argv: string[]): { ok: true; path: string; me
     if (key === "--all-day") { options.allDay = true; continue; }
     if (key === "--json") continue;
     if (!key.startsWith("--")) { positional.push(key); continue; }
-    if (!["title", "start", "end", "zone", "location", "notes", "from", "to", "url", "name"].includes(key.slice(2)) || !args[i + 1] || args[i + 1]!.startsWith("--")) return { ok: false, error: `Unknown or incomplete option ${key}` };
-    options[key.slice(2)] = args[++i]!;
+    if (!["title", "start", "end", "zone", "location", "notes", "from", "to", "url", "name", "repeat", "repeat-until", "scope", "occurrence"].includes(key.slice(2)) || !args[i + 1] || args[i + 1]!.startsWith("--")) return { ok: false, error: `Unknown or incomplete option ${key}` };
+    options[key === "--repeat-until" ? "repeatUntil" : key.slice(2)] = args[++i]!;
   }
+  const query = new URLSearchParams();
+  for (const key of ["scope", "occurrence"]) if (options[key]) { query.set(key, String(options[key])); delete options[key]; }
+  const scope = query.size ? `?${query}` : "";
   const base = "/v1/calendar";
+  if (op === "get" && positional.length === 1) return { ok: true, path: `${base}/events/${encodeURIComponent(positional[0]!)}`, method: "GET" };
   if (op === "list" && !positional.length) { const q = new URLSearchParams(); for (const key of ["from", "to"]) if (options[key]) q.set(key, String(options[key])); return { ok: true, path: `${base}?${q}`, method: "GET" }; }
   if (op === "add" && !positional.length) return { ok: true, path: `${base}/events`, method: "POST", body: options };
-  if (op === "update" && positional.length === 1) return { ok: true, path: `${base}/events/${encodeURIComponent(positional[0]!)}`, method: "PATCH", body: options };
-  if (["delete", "unsubscribe"].includes(op!) && positional.length === 1) return { ok: true, path: `${base}/${op === "delete" ? "events" : "subscriptions"}/${encodeURIComponent(positional[0]!)}`, method: "DELETE" };
+  if (op === "update" && positional.length === 1) return { ok: true, path: `${base}/events/${encodeURIComponent(positional[0]!)}${scope}`, method: "PATCH", body: options };
+  if (["delete", "unsubscribe"].includes(op!) && positional.length === 1) return { ok: true, path: `${base}/${op === "delete" ? "events" : "subscriptions"}/${encodeURIComponent(positional[0]!)}${scope}`, method: "DELETE" };
   if (op === "zone" && positional.length === 1) return { ok: true, path: `${base}/settings`, method: "PUT", body: { zone: positional[0] } };
   if (["feed", "rotate-feed", "refresh", "subscribe"].includes(op!) && !positional.length) return { ok: true, path: `${base}/${op === "subscribe" ? "subscriptions" : op === "rotate-feed" ? "feed" : op}`, method: op === "feed" ? "GET" : "POST", ...(op === "feed" ? {} : { body: op === "subscribe" ? options : {} }) };
   return { ok: false, error: "Invalid operation; run pi-calendar --help" };

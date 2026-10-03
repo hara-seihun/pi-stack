@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import ICAL from "ical.js";
 import { Temporal } from "@js-temporal/polyfill";
+import { tzlib_get_ical_block } from "timezones-ical-library";
+import { calendarOverlaps as overlaps, ownedOccurrences, ownedOccurrence, eventWallTime } from "./calendar-recurrence";
 
 import type { CalendarEvent, CalendarSubscription, CalendarSnapshot } from "./calendar-protocol";
 export type { CalendarEvent, CalendarSubscription, CalendarSnapshot } from "./calendar-protocol";
@@ -20,7 +22,7 @@ export function calendarTime(value: string, zone: string, allDay = false): Resul
 }
 export function calendarEvent(input: unknown, previous?: CalendarEvent): Result<CalendarEvent> {
   if (!object(input)) return bad("Expected an event object");
-  const v = { zone: "UTC", allDay: false, location: "", notes: "", ...previous, ...input };
+  const v: Record<string, unknown> = { zone: "UTC", allDay: false, location: "", notes: "", ...previous, ...input };
   if (typeof v.title !== "string" || !v.title.trim() || v.title.length > 500) return bad("Title is required (maximum 500 characters)");
   if (typeof v.zone !== "string" || !validZone(v.zone)) return bad("Use an IANA time zone, such as America/Los_Angeles");
   if (typeof v.allDay !== "boolean" || typeof v.start !== "string" || typeof v.end !== "string") return bad("Start, end and allDay must be valid event fields");
@@ -28,9 +30,18 @@ export function calendarEvent(input: unknown, previous?: CalendarEvent): Result<
   const start = calendarTime(v.start, v.zone, v.allDay), end = calendarTime(v.end, v.zone, v.allDay);
   if (!start.ok) return start; if (!end.ok) return end;
   if (v.allDay ? end.value <= start.value : Date.parse(end.value) <= Date.parse(start.value)) return bad("End must be after start; all-day end is the exclusive following date");
-  return { ok: true, value: { id: previous?.id ?? crypto.randomUUID(), title: v.title.trim(), start: start.value, end: end.value, zone: v.zone, allDay: v.allDay, location: v.location, notes: v.notes, updated: new Date().toISOString() } };
+  const repeat = v.repeat === "none" ? null : v.repeat ?? null;
+  if (repeat !== null && repeat !== "daily" && repeat !== "weekly") return bad("Repeat must be daily, weekly or none");
+  const repeatUntil = v.repeatUntil === "none" ? null : v.repeatUntil ?? null;
+  if (repeatUntil !== null) {
+    if (typeof repeatUntil !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(repeatUntil)) return bad("Repeat until must be a YYYY-MM-DD date or none");
+    try { Temporal.PlainDate.from(repeatUntil); } catch { return bad("Invalid repeat-until date"); }
+    const startDate = v.allDay ? start.value : Temporal.Instant.from(start.value).toZonedDateTimeISO(v.zone).toPlainDate().toString();
+    if (repeatUntil < startDate) return bad("Repeat until cannot precede the first event");
+  }
+  if (repeat && !v.allDay && !Array.isArray(tzlib_get_ical_block(v.zone))) return bad("This time zone has no iCalendar recurrence definition");
+  return { ok: true, value: { id: previous?.id ?? crypto.randomUUID(), title: v.title.trim(), start: start.value, end: end.value, zone: v.zone, allDay: v.allDay, location: v.location, notes: v.notes, updated: new Date().toISOString(), repeat, repeatUntil: repeat ? repeatUntil : null, ...(repeat && previous?.exceptions ? { exceptions: previous.exceptions } : {}) } };
 }
-const overlaps = (e: CalendarEvent, from: string, to: string) => e.allDay ? e.end > from.slice(0, 10) && e.start < to.slice(0, 10) : Date.parse(e.end) > Date.parse(from) && Date.parse(e.start) < Date.parse(to);
 function textProp(c: ICAL.Component, key: string): string { return String(c.getFirstPropertyValue(key) ?? ""); }
 export function importedEvents(body: string, subscription: Pick<CalendarSubscription, "id" | "name" | "zone">, from: string, to: string): CalendarEvent[] {
   const calendar = new ICAL.Component(ICAL.parse(body));
@@ -95,14 +106,44 @@ export function calendarICS(events: CalendarEvent[]): string {
   const calendar = new ICAL.Component(["vcalendar", [], []]);
   calendar.addPropertyWithValue("version", "2.0"); calendar.addPropertyWithValue("prodid", "-//Pi Stack//Personal Calendar//EN");
   calendar.addPropertyWithValue("x-wr-calname", "Kenan calendar");
+  const zones = new Map<string, string>();
+  const recurringTime = (component: ICAL.Component, name: string, event: CalendarEvent, value: string) => {
+    component.addPropertyWithValue(name, event.allDay ? ICAL.Time.fromDateString(value) : ICAL.Time.fromDateTimeString(eventWallTime(event, value)));
+    if (!event.allDay) component.getFirstProperty(name)!.setParameter("tzid", zones.get(event.zone)!);
+  };
+  for (const event of events.filter(e => e.repeat && !e.allDay)) {
+    if (zones.has(event.zone)) continue;
+    const block = tzlib_get_ical_block(event.zone);
+    if (!Array.isArray(block)) throw new Error("Missing recurrence time zone definition");
+    const component = new ICAL.Component(ICAL.parse(block[0]!));
+    zones.set(event.zone, textProp(component, "tzid")); calendar.addSubcomponent(component);
+  }
   for (const event of events) {
     const component = new ICAL.Component("vevent");
     component.addPropertyWithValue("uid", `${event.id}@pi-stack`);
     component.addPropertyWithValue("summary", event.title);
     component.addPropertyWithValue("dtstamp", ICAL.Time.fromJSDate(new Date(event.updated), true));
     component.addPropertyWithValue("last-modified", ICAL.Time.fromJSDate(new Date(event.updated), true));
-    component.addPropertyWithValue("dtstart", event.allDay ? ICAL.Time.fromDateString(event.start) : ICAL.Time.fromJSDate(new Date(event.start), true));
-    component.addPropertyWithValue("dtend", event.allDay ? ICAL.Time.fromDateString(event.end) : ICAL.Time.fromJSDate(new Date(event.end), true));
+    if (event.repeat) {
+      recurringTime(component, "dtstart", event, event.start); recurringTime(component, "dtend", event, event.end);
+      const until = event.repeatUntil ? event.allDay ? event.repeatUntil.replaceAll("-", "") : Temporal.PlainDate.from(event.repeatUntil).add({ days: 1 }).toZonedDateTime(event.zone).subtract({ seconds: 1 }).toInstant().toString().replaceAll(/[-:]/g, "") : null;
+      component.addPropertyWithValue("rrule", ICAL.Recur.fromString(`FREQ=${event.repeat.toUpperCase()}${until ? `;UNTIL=${until}` : ""}`));
+      for (const [original, replacement] of Object.entries(event.exceptions ?? {})) {
+        if (!ownedOccurrence(event, original)) continue;
+        if (!replacement) {
+          const exclusion = new ICAL.Property("exdate");
+          exclusion.setValue(event.allDay ? ICAL.Time.fromDateString(original) : ICAL.Time.fromDateTimeString(eventWallTime(event, original)));
+          if (!event.allDay) exclusion.setParameter("tzid", zones.get(event.zone)!);
+          component.addProperty(exclusion);
+        } else {
+          const exception = new ICAL.Component(new ICAL.Component(ICAL.parse(calendarICS([{ ...replacement, id: event.id, repeat: null }]))).getFirstSubcomponent("vevent")!.toJSON());
+          recurringTime(exception, "recurrence-id", event, original); calendar.addSubcomponent(exception);
+        }
+      }
+    } else {
+      component.addPropertyWithValue("dtstart", event.allDay ? ICAL.Time.fromDateString(event.start) : ICAL.Time.fromJSDate(new Date(event.start), true));
+      component.addPropertyWithValue("dtend", event.allDay ? ICAL.Time.fromDateString(event.end) : ICAL.Time.fromJSDate(new Date(event.end), true));
+    }
     component.addPropertyWithValue("location", event.location); component.addPropertyWithValue("description", event.notes);
     component.addPropertyWithValue("x-pi-timezone", event.zone);
     calendar.addSubcomponent(component);
@@ -119,7 +160,7 @@ export class CalendarStore {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = join(directory, "calendar.sqlite3");
     this.db = new Database(path, { create: true }); chmodSync(path, 0o600);
-    this.db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY, body TEXT NOT NULL, ics TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    this.db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY, body TEXT NOT NULL, ics TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS delete_undo(token TEXT PRIMARY KEY, before TEXT NOT NULL, after TEXT, expires INTEGER NOT NULL)");
   }
   start() { void this.refresh(); this.timer = setInterval(() => void this.refresh(), 15 * 60 * 1000); this.timer.unref(); }
   async close() { if (this.timer) clearInterval(this.timer); this.controller.abort(); await this.refreshing; this.db.close(); }
@@ -133,7 +174,7 @@ export class CalendarStore {
   }
   snapshot(from: string, to: string): CalendarSnapshot {
     const subscriptions = this.subscriptions();
-    const events = this.ownEvents().filter(e => overlaps(e, from, to));
+    const events = this.ownEvents().flatMap(e => ownedOccurrences(e, from, to));
     for (const subscription of subscriptions) {
       const row = this.db.query("SELECT ics FROM subscriptions WHERE id=?").get(subscription.id) as { ics: string | null };
       if (!row.ics) continue;
@@ -182,13 +223,57 @@ export class CalendarStore {
       if (!from.ok || !to.ok || Date.parse(to.value) <= Date.parse(from.value) || Date.parse(to.value) - Date.parse(from.value) > 2 * 366 * 86400000) return fail("Use a valid date range of at most two years");
       return Response.json(this.snapshot(from.value, to.value));
     }
-    if (path === "/events" && req.method === "POST" || path.startsWith("/events/") && req.method === "PATCH") {
-      const previous = path.startsWith("/events/") ? this.ownEvents().find(e => e.id === path.slice(8)) : undefined;
-      if (req.method === "PATCH" && !previous) return fail("Event not found (imported events are read-only)", 404);
-      const parsed = calendarEvent(input, previous); if (!parsed.ok) return fail(parsed.error);
-      this.db.query("INSERT OR REPLACE INTO events VALUES (?,?)").run(parsed.value.id, JSON.stringify(parsed.value)); return Response.json(parsed.value);
+    const save = (event: CalendarEvent) => this.db.query("INSERT OR REPLACE INTO events VALUES (?,?)").run(event.id, JSON.stringify(event));
+    const deleteWithUndo = (before: CalendarEvent, after?: CalendarEvent) => {
+      const token = crypto.randomUUID();
+      this.db.transaction(() => {
+        this.db.query("DELETE FROM delete_undo WHERE expires<?").run(Date.now());
+        this.db.query("INSERT INTO delete_undo VALUES (?,?,?,?)").run(token, JSON.stringify(before), after ? JSON.stringify(after) : null, Date.now() + 600000);
+        if (after) save(after); else this.db.query("DELETE FROM events WHERE id=?").run(before.id);
+      })();
+      return token;
+    };
+    if (path.startsWith("/undo/") && req.method === "POST") {
+      const undo = this.db.query("SELECT before, after, expires FROM delete_undo WHERE token=?").get(path.slice(6)) as { before: string; after: string | null; expires: number } | null;
+      if (!undo || undo.expires < Date.now()) return fail("Undo has expired", 404);
+      const before: CalendarEvent = JSON.parse(undo.before);
+      const current = this.db.query("SELECT body FROM events WHERE id=?").get(before.id) as { body: string } | null;
+      if ((current?.body ?? null) !== undo.after) return fail("The event changed after deletion; undo would overwrite those changes", 409);
+      this.db.transaction(() => { save(before); this.db.query("DELETE FROM delete_undo WHERE token=?").run(path.slice(6)); })();
+      return Response.json({ ok: true });
     }
-    if (path.startsWith("/events/") && req.method === "DELETE") { const r = this.db.query("DELETE FROM events WHERE id=?").run(path.slice(8)); return r.changes ? Response.json({ ok: true }) : fail("Event not found", 404); }
+    if (path === "/events" && req.method === "POST") {
+      const parsed = calendarEvent(input); if (!parsed.ok) return fail(parsed.error);
+      save(parsed.value); return Response.json(parsed.value);
+    }
+    if (path.startsWith("/events/")) {
+      const [id, occurrenceId] = decodeURIComponent(path.slice(8)).split("~");
+      const previous = this.ownEvents().find(e => e.id === id);
+      if (!previous) return fail("Event not found (imported events are read-only)", 404);
+      if (req.method === "GET") return Response.json(previous);
+      if (!["PATCH", "DELETE"].includes(req.method)) return fail("Not found", 404);
+      const scope = url.searchParams.get("scope") ?? (occurrenceId ? "occurrence" : null);
+      if (scope !== null && scope !== "occurrence" && scope !== "series") return fail("Scope must be occurrence or series");
+      if (previous.repeat && !scope) return fail("Repeating events require an explicit occurrence or series scope");
+      if (scope === "occurrence") {
+        const original = occurrenceId ?? url.searchParams.get("occurrence") ?? "";
+        const occurrence = ownedOccurrence(previous, original);
+        if (!occurrence) return fail("Occurrence not found", 404);
+        const existing = previous.exceptions?.[original];
+        if (existing === null && req.method === "DELETE") return fail("Occurrence already deleted", 404);
+        if (req.method === "PATCH" && !object(input)) return fail("Expected an event object");
+        const parsed = req.method === "PATCH" ? calendarEvent({ ...(object(input) ? input : {}), repeat: null, repeatUntil: null }, existing ?? occurrence) : null;
+        if (parsed && !parsed.ok) return fail(parsed.error);
+        if (parsed?.ok && parsed.value.allDay !== previous.allDay) return fail("Change all-day type on the whole series, not one occurrence");
+        const replacement = parsed?.ok ? parsed.value : null;
+        const after = { ...previous, updated: new Date().toISOString(), exceptions: { ...previous.exceptions, [original]: replacement } };
+        if (replacement) { save(after); return Response.json({ ...replacement, seriesId: id, occurrenceStart: original }); }
+        return Response.json({ ok: true, scope: "occurrence", undoToken: deleteWithUndo(previous, after) });
+      }
+      if (req.method === "DELETE") return Response.json({ ok: true, scope: "series", undoToken: deleteWithUndo(previous) });
+      const parsed = calendarEvent(input, previous); if (!parsed.ok) return fail(parsed.error);
+      save(parsed.value); return Response.json(parsed.value);
+    }
     if (path === "/settings" && req.method === "PUT") { if (!object(input) || typeof input.zone !== "string" || !validZone(input.zone)) return fail("Invalid time zone"); this.putSetting("zone", input.zone); return Response.json({ zone: input.zone }); }
     if (path === "/feed" && ["GET", "POST"].includes(req.method)) {
       if (req.method === "POST") this.putSetting("feed", randomBytes(32).toString("hex"));
