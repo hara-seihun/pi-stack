@@ -1,6 +1,8 @@
 package works.kenan.piremote.kenan;
 
 import static org.junit.Assert.*;
+import static org.robolectric.Shadows.shadowOf;
+import android.view.accessibility.AccessibilityNodeInfo;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -45,6 +47,51 @@ public class WriteAccessibilityServiceTest {
         packets.add(new byte[]{1, 2});
         set(service, "packets", packets);
         return service;
+    }
+    private AccessibilityNodeInfo editable(String text, boolean hint) {
+        AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain();
+        node.setEditable(true);
+        node.setEnabled(true);
+        node.setFocused(true);
+        node.setText(text);
+        node.setHintText("Type a message");
+        node.setShowingHintText(hint);
+        node.setTextSelection(text == null ? -1 : text.length(), text == null ? -1 : text.length());
+        return node;
+    }
+    private void assertInserted(AccessibilityNodeInfo node, String dictated, String expected) throws Exception {
+        WriteAccessibilityService service = withActiveSender();
+        set(service, "target", node);
+        set(service, "windowId", node.getWindowId());
+        shadowOf(node).setOnPerformActionListener((action, args) -> true);
+        call(service, "completed", dictated);
+        var actions = shadowOf(node).getPerformedActionsWithArgs();
+        assertEquals(AccessibilityNodeInfo.ACTION_SET_TEXT, (int) actions.get(0).first);
+        assertEquals(expected, actions.get(0).second.getCharSequence(
+            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE).toString());
+        assertEquals(expected.length(), actions.get(1).second.getInt(
+            AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT));
+        assertFalse((boolean) get(service, "clipboardReady"));
+    }
+    @Test public void hintIsNeitherDictationContextNorInsertedContent() throws Exception {
+        AccessibilityNodeInfo node = editable("Type a message", true);
+        assertEquals("", WriteAccessibilityService.fieldText(node));
+        assertInserted(node, "Hello there", "Hello there");
+    }
+    @Test public void typedTextMatchingHintRemainsRealContent() throws Exception {
+        AccessibilityNodeInfo node = editable("Type a message", false);
+        assertEquals("Type a message", WriteAccessibilityService.fieldText(node));
+        assertInserted(node, "please", "Type a message please");
+    }
+    @Test public void emptyFieldWithSeparateHintInsertsOnlyDictation() throws Exception {
+        AccessibilityNodeInfo node = editable(null, false);
+        assertEquals("", WriteAccessibilityService.fieldText(node));
+        assertInserted(node, "Hello", "Hello");
+    }
+    @Test @Config(sdk = 24) public void fieldTextSupportsAndroidBeforeHintFlag() {
+        AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain();
+        node.setText("Existing text");
+        assertEquals("Existing text", WriteAccessibilityService.fieldText(node));
     }
     @Test public void emptyResultFencesSenderBeforeClearingAudio() throws Exception {
         WriteAccessibilityService service = withActiveSender();
