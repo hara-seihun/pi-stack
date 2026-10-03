@@ -127,6 +127,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
     install -m 644 "$manifest" "$stage/$manifest"
   done < <(find apps packages tools -name node_modules -prune -o -name package.json -print)
   pi_stack_prepare_dependencies "$root"
+  node "$root/scripts/build-workspace.mjs" orchestrator
   npm run build --workspace=kenan-memory
   npm run build --workspace=kenan-root
   rsync -a packages/kenan-memory/src packages/kenan-memory/dist packages/kenan-memory/discretion.md packages/kenan-memory/person.md "$stage/packages/kenan-memory/"

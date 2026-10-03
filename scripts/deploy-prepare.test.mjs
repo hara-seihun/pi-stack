@@ -240,15 +240,33 @@ printf '206'`);
   } finally { f.close(); }
 });
 
-test("preparation reports each failed child and never reports success", () => {
+test("failed builds skip their dependent runtime while independent Write is still awaited", () => {
   const f = preparationFixture();
   try {
     const result = f.run("prepare", { RUNTIME_EXIT: "23", WRITE_ENGINE_EXIT: "11", BUILD_EXIT: "9" });
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /builds exited 9/);
-    assert.match(result.stderr, /runtime exited 23/);
+    assert.doesNotMatch(result.stderr, /runtime exited/);
+    assert.doesNotMatch(readFileSync(f.env.TRACE, "utf8"), /runtime/);
     assert.match(result.stderr, /write-engine exited 11/);
     assert.doesNotMatch(result.stdout, /prepared Pi stack/);
+    const runtimeFailure = f.run("prepare", { RUNTIME_EXIT: "23", WRITE_ENGINE_EXIT: "11" });
+    assert.equal(runtimeFailure.status, 1, runtimeFailure.stderr);
+    assert.match(runtimeFailure.stderr, /runtime exited 23/);
+    assert.match(runtimeFailure.stderr, /write-engine exited 11/);
+  } finally { f.close(); }
+});
+
+test("runtime consumes completed checkout declarations, never concurrent npm/build writes", () => {
+  const f = preparationFixture();
+  try {
+    writeFileSync(join(f.repo, "deploy/lib"), `${readFileSync(join(root, "deploy/lib"), "utf8")}\npi_stack_prepare_builds() { sleep 0.15; touch "$DECLARATIONS_READY"; printf 'builds\\n' >> "$TRACE"; }\n`);
+    f.executable(join(f.repo, "deploy/runtime"), 'test -f "$DECLARATIONS_READY"; printf "runtime\\n" >> "$TRACE"');
+    f.commit();
+    const result = f.run("prepare", { DECLARATIONS_READY: join(f.directory, "declarations-ready") });
+    assert.equal(result.status, 0, result.stderr);
+    const trace = readFileSync(f.env.TRACE, "utf8").trim().split("\n");
+    assert.ok(trace.indexOf("builds") < trace.indexOf("runtime"));
   } finally { f.close(); }
 });
 
