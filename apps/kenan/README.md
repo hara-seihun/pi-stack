@@ -34,6 +34,12 @@ The microphone is a 44dp translucent circle with a 50dp touch target. Tap once t
 
 For 20 seconds after insertion, edits to a word inside the inserted span are sent to the supervisor's learning endpoint. A successful dictionary update shows an Android notification with **Undo**. Only a word edit in the inserted span is learned; field text is not sent on ordinary focus events. Write uses the existing mirrored `RemoteSession` and router environment discovery, and the selected environment comes from the shared web client. The wire contract is [Pi Remote Write](../remote/docs/write.md). The native protocol adapter is `WriteConnection.java`.
 
+## Native crash diagnostics
+
+The application retains the most recent uncaught Java stack in its private `files/diagnostics/last-crash.txt`, with build revision, version and failing thread. It still delegates to Android's crash handler; diagnostics do not mask defects or suppress the system crash dialog. Startup also captures the last eight Android process-exit records (`process-exits.json`) and up to 200 entries from this app UID's crash-only log buffer (`android-crashes.txt`). Nothing is uploaded automatically. With the person's enabled phone-control connection, read these through `pi-phone files read /data/user/0/works.kenan.piremote.kenan/files/diagnostics/FILE --output /private/local/FILE`. These files overwrite their previous bounded snapshot; no chat or audio logging is added.
+
+Write attempt completion invalidates the audio sender before releasing its packet buffer. Microphone and codec cleanup completes before a terminal recorder callback; shutdown unblocks reads, connection terminal events close their transport once, and late callbacks cannot change the next attempt. Revoked overlay tokens and detached windows reset the overlay instead of escaping into Android's process crash handler. Service teardown cannot create a replacement window.
+
 ## Unattended phone control
 
 Open **Machine → Phone control** in the updated Android app, enable it for the unlocked person and current environment, and approve the one-time access you want. Enable the separate **Kenan phone control** accessibility service for app interaction and screenshots; Pi Stack Write keeps its own service. Notification-listener access supplies notification actions and replies. The capability card reports effective grants, so a restricted/denied permission is not represented as usable.

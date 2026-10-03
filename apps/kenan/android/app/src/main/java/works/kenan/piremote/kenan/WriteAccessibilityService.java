@@ -54,6 +54,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private WriteConnection connection;
     private boolean shown, recording, connecting, finishing, clipboardReady;
     private volatile boolean stopped;
+    private boolean destroyed;
     private volatile int sentPackets;
     private boolean backlog;
     private int waveLevel;
@@ -76,10 +77,11 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 if (eligible(source)) dismissal.hides(focused, true);
             }
         }
-        if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED && insertedField != null
-            && System.currentTimeMillis() < watchUntil && event.getWindowId() == windowId
-            && event.getSource() != null && insertedNode != null && event.getSource().equals(insertedNode)) {
-            String changed = event.getSource().getText() == null ? "" : event.getSource().getText().toString();
+        AccessibilityNodeInfo changedNode = event.getEventType() == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+            && insertedField != null && System.currentTimeMillis() < watchUntil && event.getWindowId() == windowId
+            ? event.getSource() : null;
+        if (changedNode != null && insertedNode != null && changedNode.equals(insertedNode)) {
+            String changed = changedNode.getText() == null ? "" : changedNode.getText().toString();
             WriteText.Correction correction = WriteText.changedWord(insertedField, changed, insertedStart, insertedEnd);
             if (correction != null && learnedIdentity != null) {
                 insertedField = null;
@@ -128,7 +130,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
 
     private void refresh() {
-        if (active != this) return;
+        if (active != this || destroyed) return;
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
         boolean allowed = identity != null && Settings.canDrawOverlays(this)
             && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
@@ -247,7 +249,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 });
             } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
             catch (java.io.IOException error) { main.post(() -> {
-                if (attempt == generation) failed(error.getMessage());
+                if (attempt == generation && !stream.ended()) failed(error.getMessage());
             }); }
         }, "write-opus-stream").start();
     }
@@ -306,13 +308,16 @@ public final class WriteAccessibilityService extends AccessibilityService {
         recorder = null;
         stopForeground(STOP_FOREGROUND_REMOVE);
     }
-    private void idle() {
+    private void retireAttempt() {
+        ++generation;
         stopRecorder();
         if (connection != null) connection.cancel();
         connection = null;
-        ++generation;
-        connecting = false; finishing = false; stopped = false; backlog = false; clipboardReady = false;
         synchronized (packetsLock) { packets.clear(); audioBytes = 0; packetsLock.notifyAll(); }
+    }
+    private void idle() {
+        retireAttempt();
+        connecting = false; finishing = false; stopped = false; backlog = false; clipboardReady = false;
         render(); refresh();
     }
     private void cancel() { idle(); }
@@ -324,7 +329,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
     private void completed(String text) {
         if (!finishing && !recording) return;
-        stopRecorder();
+        retireAttempt();
         finishing = false; connecting = false;
         if (text == null || text.isBlank()) { idle(); return; }
         AccessibilityNodeInfo node = target;
@@ -342,14 +347,13 @@ public final class WriteAccessibilityService extends AccessibilityService {
             insertedStart = result.start(); insertedEnd = result.end();
             watchUntil = System.currentTimeMillis() + 20_000;
             learnedIdentity = NotificationIdentity.get(this).current();
-            synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
             backlog = false; render(); refresh();
         } else fallback(text);
     }
     private void fallback(String text) {
         getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("Pi Stack Write", text));
         clipboardReady = true;
-        synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
+        backlog = false;
         Toast.makeText(this, "Write copied text. Tap the dot to paste.", Toast.LENGTH_LONG).show();
         render();
     }
@@ -357,6 +361,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); SharedOverlay.refresh(); }
     @Override public void onInterrupt() { cancel(); hide(); }
     @Override public void onDestroy() {
+        destroyed = true;
         if (active == this) active = null;
         cancel(); hide(); SharedOverlay.detach(this); super.onDestroy();
     }
