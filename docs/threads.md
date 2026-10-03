@@ -66,7 +66,7 @@ Every normal thread can maintain its person's [watch list](watch-list.md) with `
 
 ## Rooms
 
-With the host's `oneKenan` flag enabled, a fresh Remote conversation may be a [room](../apps/remote/docs/rooms.md). The router authenticates membership and stamps each actual speaker; the creator is the thread's custodian, not every message's speaker. `metadata.room.members` supplies the full audience to turn instructions, and notifications reach each member's own supervisor ledger. The public room API is separate from private supervisor context/stream access.
+With the host's `oneKenan` flag enabled, a fresh Remote conversation may be a [room](../apps/remote/docs/rooms.md). The router authenticates membership and stamps each actual speaker. A dedicated unprivileged `pi-rooms` supervisor is custodian; the creator is recorded separately. Room-local traces are transparent, and its only tools are `ask_kenan` and asynchronous public questions. Root receives the current full audience from a trusted directory lookup, never from request text. `metadata.room.members` supplies the full audience to turn instructions, and notifications reach each member's own supervisor ledger. The public room API is separate from private supervisor context/stream access.
 
 ## Relationships and notifications
 

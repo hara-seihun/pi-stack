@@ -3,7 +3,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Room, RoomMember, RoomSnapshot } from "../shared/rooms";
 
-interface StoredRoom extends Room { owner: string; ready: number }
+export const ROOM_CUSTODIAN = "pi-rooms";
+interface StoredRoom extends Room { owner: string; creator: string; ready: number }
 type Transport = (owner: string, actor: string, path: string, method: string, body?: unknown) => Promise<Response>;
 const fail = (error: string, status = 400) => Response.json({ error }, { status });
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
@@ -17,8 +18,12 @@ export class Rooms {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
     this.db.exec(`PRAGMA journal_mode=WAL;
-      CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY,owner TEXT NOT NULL,title TEXT NOT NULL,members TEXT NOT NULL,ready INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY,owner TEXT NOT NULL,creator TEXT NOT NULL,title TEXT NOT NULL,members TEXT NOT NULL,ready INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS deliveries(receipt TEXT NOT NULL,room TEXT NOT NULL,person TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,time INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(receipt,person));`);
+    const columns = this.db.query("PRAGMA table_info(rooms)").all() as { name: string }[];
+    if (!columns.some(column => column.name === "creator")) {
+      this.db.exec("ALTER TABLE rooms ADD COLUMN creator TEXT; UPDATE rooms SET creator=owner");
+    }
   }
   close() { this.db.close(); }
   private rows(): StoredRoom[] {
@@ -28,7 +33,8 @@ export class Rooms {
   private visible(room: StoredRoom): Room { return { id: room.id, title: room.title, members: room.members }; }
   private roster(users: unknown, actor: string): RoomMember[] | null {
     if (!Array.isArray(users) || users.some(user => typeof user !== "string") || users.length > 63) return null;
-    const ids = [...new Set([actor, ...users])];
+    const ids = [...new Set(users)];
+    if (!ids.includes(actor)) ids.unshift(actor);
     const people = this.people();
     const members = ids.map(user => people.find(person => person.user === user));
     return members.every(Boolean) ? members as RoomMember[] : null;
@@ -55,11 +61,12 @@ export class Rooms {
       const id = body.requestId;
       return this.serialized(id, async () => {
         let room = this.get(id);
-        if (room && (room.owner !== actor || room.title !== body.title.trim() || JSON.stringify(room.members) !== JSON.stringify(members))) return fail("Room requestId already used", 409);
+        if (room && (room.creator !== actor || room.title !== body.title.trim() || JSON.stringify(room.members) !== JSON.stringify(members))) return fail("Room requestId already used", 409);
         if (!room) {
-          this.db.query("INSERT INTO rooms(id,owner,title,members) VALUES(?,?,?,?)").run(id, actor, body.title.trim(), JSON.stringify(members));
+          this.db.query("INSERT INTO rooms(id,owner,creator,title,members) VALUES(?,?,?,?,?)").run(id, ROOM_CUSTODIAN, actor, body.title.trim(), JSON.stringify(members));
           room = this.get(id)!;
         }
+        if (room.owner !== ROOM_CUSTODIAN) return fail("This room needs custody migration into the unprivileged room runtime", 503);
         if (!room.ready) {
           const created = await this.transport(room.owner, actor, `/v1/room-owner/${id}`, "POST", { title: room.title, members });
           if (!created.ok) return created;
@@ -78,6 +85,7 @@ export class Rooms {
     return this.serialized(id, async () => {
       let room = this.get(id);
       if (!room?.ready || !room.members.some(member => member.user === actor)) return fail("Room not found", 404);
+      if (room.owner !== ROOM_CUSTODIAN) return fail("This room needs custody migration into the unprivileged room runtime", 503);
       if (!action && req.method === "GET") return this.transport(room.owner, actor, `/v1/room-owner/${id}`, "GET");
       if (action === "members" && req.method === "POST") {
         const members = this.roster([...room.members.map(member => member.user), ...(Array.isArray(body?.members) ? body.members : [null])], actor);
@@ -125,9 +133,9 @@ export class Rooms {
     if (this.busy) return;
     this.busy = true;
     try {
-      await Promise.all(this.rows().filter(room => room.ready).map(async room => {
+      await Promise.all(this.rows().filter(room => room.ready && room.owner === ROOM_CUSTODIAN).map(async room => {
         try {
-          const response = await this.transport(room.owner, room.owner, `/v1/room-owner/${room.id}`, "GET");
+          const response = await this.transport(room.owner, room.members[0]!.user, `/v1/room-owner/${room.id}`, "GET");
           if (!response.ok) { console.warn(`Room ${room.id}: HTTP ${response.status}`); return; }
           const snapshot = await response.json() as RoomSnapshot;
           if (snapshot.notificationId) this.notice(room, `room-reply:${room.id}:${snapshot.notificationId}`, "Kenan replied in the room");

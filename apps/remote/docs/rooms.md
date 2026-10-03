@@ -1,94 +1,124 @@
 # Rooms
 
-Implementation status: this is the initial room transport. The October 3 root-Kenan revision
-requires room execution to be unprivileged and room work transparent, with private requests going
-through root. That execution/delegation change remains integration work; this slice makes no
-privilege or mount changes.
-
-Rooms are several people from this host plus Kenan in one conversation. They are enabled only when
-`host.json` has `oneKenan: true`. With the flag absent, neither room stores nor room requests are
-created, and the existing inbox and transports are unchanged.
+Rooms are several people from this host plus an unprivileged Kenan in one conversation. They are
+enabled only when `host.json` has `oneKenan: true`. With the flag absent, neither room stores nor
+room requests are created; the existing inbox and transports are unchanged.
 
 The Rooms section in Chats is shared by the browser and Android web client. Any authenticated
-person can create a room and add registered people. A member can send, read the conversation,
-answer Kenan's questions, and stop his work. Adding someone shares the existing room conversation;
-the picker says so. Adding waits until the current turn is idle, so the audience cannot expand
-under an utterance already in progress. Removing members is not implemented.
+person can create a room and add registered people. Members can send, read the conversation and
+its thinking/work/context, answer Kenan's questions, and stop his turn. Adding someone shares the
+existing room conversation; the picker says so. Adding requires the room to be idle, so an audience
+cannot expand under an utterance already in progress. Removing members is not implemented.
 
 ## Custody and routing
 
-A room is always a **fresh** root thread, never a private thread made shared. Its native JSONL,
-Orchestrator state and context mirror currently live in the creating person's supervisor. No
-Personal context-picker files are selected. The router's host-owned directory maps its stable ID
-to that supervisor and member list. The public API never exposes this custody location.
+A room is always a **fresh** root conversation thread, never a private thread made shared. It lives
+in the dedicated `pi-rooms` supervisor, under its own unprivileged Unix account and state directory.
+It has no keys, private folder mounts or personal context files. The host router owns a directory
+mapping stable room IDs to the execution custodian and roster. The authenticated creator is recorded
+separately; the creator is not the room's execution identity. Changing the custody location later
+is a data migration, not a client API change or a copy into each member's private store.
 
-This is deliberately an indirection. The integrator may migrate the thread, transcript and room
-metadata into a Kenan-owned supervisor/store later without changing clients or the room ID.
-Moving it is a custody migration, not copying conversations to every member. Until then the owner
-supervisor must remain available; the integration's execution/custody choice must keep it available independently of the
-creator's signed-in devices. This slice does not change unit lifecycles or mounts.
+The initial implementation briefly used creator-supervisor custody in source, before the root-Kenan
+revision. If such a staged directory exists, its `creator` column is populated from the original
+owner without deleting anything. Those room rows require explicit custody migration before they
+can run; they never fall back to executing with the creator's private access. No real room data
+was created by this slice and no live services or mounts were changed.
 
-Every member reaches the router under their **own** authenticated session. The router checks
-membership and creates a narrow, trusted request to `/v1/room-owner/:id` on the room's supervisor.
-The header identifies the actual speaker, not the custodian. The owner verifies a local router
-person caller and independently checks `thread.metadata.room.members`. Requests cannot choose
-another owner's port or an arbitrary thread. Direct client access to the internal owner route,
-including through remote and WebSocket proxy paths, is rejected.
+Each member reaches the router under their **own** authenticated session. The router checks
+membership and creates a narrow trusted request to `/v1/room-owner/:id` on `pi-rooms`. The header
+identifies the actual speaker. The owner verifies a local router person caller and checks
+`thread.metadata.room.members` independently. Clients cannot choose another port or an arbitrary
+thread. Direct access to the internal owner route, including via remote and WebSocket proxy paths,
+is rejected. Per-person supervisors accept only the internal notification-delivery operation;
+they cannot create or execute rooms.
 
-The room API returns only human utterances, assistant text, pending public questions and live
-assistant text. It never forwards another person's inbox, bootstrap, raw context, thinking,
-tool calls/results, credentials or worker reports. Room traces remain confidential because they
-can contain someone else's private memory; [trace privacy](../../../docs/one-kenan.md) owns the
-broader protection of existing transcript/context routes in the initial design. The root-Kenan
-revision replaces hiding room traces with keeping private reads out of room execution altogether. Rooms currently render text; attachment,
-inline-file/image delivery and the ordinary thread inspector are not offered here.
+## Transparent room execution and root requests
 
-## Turn context and identity
+`PI_REMOTE_ROOMS_RUNTIME=1`, fixed custodian `PI_REMOTE_SENDER_ID=pi-rooms`, and a server-bound
+`PI_REMOTE_ROOM_ID=threadId` select the room execution boundary in `pi-session`. Missing or
+mismatched identity fails closed. Discovered extensions, skills, templates and instruction files
+are disabled. The exact initialized model-facing tool set is checked:
 
-`metadata.room = { id, members: [{ user, displayName }] }` is the authoritative audience.
-`threadInstructions` includes it on each turn, with the instruction to apply discretion to everyone
-present at once. `PI_REMOTE_ROOM_ID` identifies the setting to the shared memory tools; it does not
-replace the supervisor's custody identity or memory-session credential.
+- `ask_kenan`
+- `request_user_input_async`
 
-Incoming human text is wrapped by the owner in a `Room sender` label using the router-authenticated
-person. Context capture recognizes that label only for room sessions, records the actual sender in
-message identity, and supplies it to the model. A name in a person's body cannot change the outer
-sender. Question answers use a persisted owner-side speaker receipt and the same preparation path.
-Native transcripts retain this sender labeling across recovery and compaction. The public snapshot
-reads the native branch, including its pre-compaction messages, rather than treating the current
-model context as complete room history.
+There are no local file/shell tools, general thread discovery/history/messaging tools or direct
+memory tools. This also prevents one room from reading another room's files or history under the
+shared service UID. The client sees all room-local thinking, tool requests/results, notices and
+context. Root does file operations, actions and private-memory work; only his chosen reply comes
+back through `ask_kenan`. Root histories are not part of the room snapshot.
+
+`metadata.room = { id, members: [{ user, displayName }] }` is the audience. The runtime fetches turn
+instructions on every turn, so membership changes do not become stale process environment. Each
+incoming human message has an owner-generated `Room sender` label using the router-authenticated
+person. The private-chat identity path does not interpret this label. Question answers use a
+persisted speaker receipt and the same input preparation. A member's name in request text does not
+grant that member's individual authority to the collective room.
+
+Root memory admission uses the **current host directory**, not an audience claimed in a request:
+`roomAudienceResolver` in `server/room-audience.mjs` uses Node's read-only SQLite API and returns
+`{roomId,people}` only for the authenticated `pi-rooms` custodian and a ready matching room row.
+An unknown room token throws instead of downgrading to a private/person audience. The shared memory
+service wires it with `PI_KENAN_ROOM_AUDIENCE_MODULE`; root admission and finalization must use
+this callback. The source does not expose credentials or a client registration route.
+
+## Runtime configuration
+
+The service entrypoint is `bun /srv/pi/pi-remote/server/rooms-main.ts`. Deployment owns the
+`pi-rooms` account, models/broker configuration and service unit. The launcher refuses root and the
+administrator, checks the flag and fixed config user, and fixes its workspace/profile to room state.
+
+- `PI_REMOTE_CONFIG=/etc/pi-stack/rooms.json`: standard version-1 config, `user: "pi-rooms"`.
+- Home/state: `/var/lib/pi-rooms`; `PI_REMOTE_DATA` overrides state for staging.
+- `PI_AGENT_DIR=/var/lib/pi-rooms/agent`: model and broker settings, not a person's credential files.
+- Listener: `PI_REMOTE_PORT=18822`, loopback only; fixture may use another loopback port.
+- Router: `PI_REMOTE_ROOMS_OWNER_URL=http://127.0.0.1:18822`, a validated loopback HTTP origin.
+- Router directory: `PI_REMOTE_ROOMS_DB=/var/lib/pi-remote/one-kenan/rooms.sqlite3`.
+- Memory service: `PI_KENAN_ROOM_AUDIENCE_MODULE=/srv/pi/pi-remote/server/room-audience.mjs` and
+  the same `PI_REMOTE_ROOMS_DB`; its UID needs read/traverse on the directory, DB, WAL and SHM.
+- The memory auth registry provisions a supervisor capability for `pi-rooms`. Its token is loaded
+  privately by the service; persons never receive it. Session tokens bind the current room thread.
+
+There is no creator-private runtime fallback when the room service or root request channel is down.
 
 ## Notifications and persistence
 
-`PI_REMOTE_ROOMS_DB` overrides the default `/var/lib/pi-remote/one-kenan/rooms.sqlite3` for staging.
-The directory also owns a durable per-member notification outbox. Invitations, accepted human
-messages, questions and finished assistant replies become idempotent deliveries to each member's
-existing supervisor notification ledger. An unavailable member supervisor leaves delivery pending
-for retry. No new cursor scheme or Android native protocol is necessary. Notification targets are
-`room:UUID`; the shared client opens them as room routes and suppresses alerts for the visible room.
-The creator's ordinary native completion notifications are suppressed to avoid duplicate/wrong
-private-thread targets. Turning the flag off preserves the directory, outbox and conversation data.
+The router directory also owns a durable per-member notification outbox. Invitations, accepted
+human messages, questions and finished assistant replies become idempotent deliveries to each
+member's existing supervisor ledger. An unavailable member leaves delivery pending for retry.
+The existing cursor and Android native protocol are unchanged. Targets are `room:UUID`; the shared
+client opens room routes and suppresses notifications for the visible room. The ordinary native
+completion target is suppressed to avoid a duplicate private-thread target.
 
-The router reconciles room replies and notification deliveries every two seconds. The room inbox
-and open conversation refresh while the client is visible. These are narrow room requests, not a
-forwarded owner event stream. Member additions and sends serialize per room at the router.
+The router reconciles replies and delivery every two seconds. The room inbox and conversation
+refresh while the client is visible. These are narrow room requests, not another person's event
+stream. Member additions and sends serialize per room at the router. Turning the flag off preserves
+the directory, outbox and native histories. Snapshot history comes from the native branch, including
+pre-compaction messages, not only the current model context.
 
 ## API
 
-All public routes require the current host's authenticated router session:
+All public routes require this host's authenticated router session:
 
 - `GET /v1/rooms` → `{ rooms, people }`, filtered by membership; people is the host roster.
-- `POST /v1/rooms` with `{ requestId: UUID, title, members: [user] }` → `{ room }`. The creator
-  is included automatically. The request ID is the stable room/thread ID, and retries preserve it.
-- `GET /v1/rooms/:id` → `{ room, state, messages, live, questions, notificationId }`.
-- `POST /v1/rooms/:id/members` with `{ members: [user] }` adds people, only while idle.
+- `POST /v1/rooms` with `{ requestId: UUID, title, members: [user] }` → `{ room }`. Creator is
+  included automatically; the receipt is the stable room/thread ID, including on retries.
+- `GET /v1/rooms/:id` → `{ room, state, messages, live, questions, work, thinking, context, notificationId }`.
+- `POST /v1/rooms/:id/members` with `{ members: [user] }` adds people only while idle.
 - `POST /v1/rooms/:id/prompt` with `{ requestId: UUID, text }` queues an authenticated utterance.
-- `POST /v1/rooms/:id/questions/:questionId/answer` accepts the standard
-  `{ selectedSuggestionIds, text, dismissed? }` question answer from an authenticated member.
-- `POST /v1/rooms/:id/abort` with `{}` stops Kenan and his workers.
+- `POST /v1/rooms/:id/questions/:questionId/answer` with the standard
+  `{ selectedSuggestionIds, text, dismissed? }` accepts an authenticated public answer.
+- `POST /v1/rooms/:id/abort` with `{}` stops the room turn.
 
-Missing rooms and nonmembership both return 404 at the router. Unknown people or malformed inputs
-return 400; adding while running or a reused conflicting creation receipt returns 409.
+Nonmembership and missing rooms both return 404 at the router. Unknown people or malformed inputs
+return 400. Adding while running or a conflicting creation receipt returns 409. Rooms currently
+render text and full work/context; attachment/inline-file/image delivery and member removal remain
+outside this slice. Root may still act on files and describe the result.
 
-Focused proof: `bun test apps/remote/server/rooms.test.ts apps/remote/server/message-context.test.ts
-apps/remote/server/notifications.test.ts`. No live services, registry, keys or mounts are involved.
+Focused checks run without live services, registries, keys or mounts:
+
+```
+bun test apps/remote/server/rooms.test.ts apps/remote/server/message-context.test.ts apps/remote/server/notifications.test.ts
+npm test --workspace=pi-orchestrator -- tests/room-session.test.ts
+```

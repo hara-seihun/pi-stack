@@ -142,9 +142,14 @@ export function RoomConversation({ id, people, onBack, onRefresh }: { id: string
       label={message.sender.displayName} avatar={message.sender.user === "assistant" ? agentAvatar() : undefined} timestamp={message.time}
       text={message.text} contentFormat="literal" />)}
       {snapshot?.live && <ChatMessage kind="assistant" label="Kenan" avatar={agentAvatar()} text={snapshot.live} contentFormat="literal" />}
+      {(snapshot?.work?.length || snapshot?.thinking) ? <details className="room-work"><summary>Room thinking and work</summary>
+        {snapshot.work?.map(item => <details key={item.id}><summary>{item.kind}{item.name ? ` · ${item.name}` : ""}</summary><pre>{item.text}</pre></details>)}
+        {snapshot.thinking && <details open><summary>Thinking now</summary><pre>{snapshot.thinking}</pre></details>}
+      </details> : null}
+      {snapshot?.context != null && <details className="room-work"><summary>Room context</summary><pre>{JSON.stringify(snapshot.context, null, 2)}</pre></details>}
     </div>
     {snapshot?.questions?.map(question => <RoomQuestion key={question.id} question={question} roomId={id} onAnswered={load} />)}
-    <p className="room-discretion">Kenan keeps thinking and work traces private here because they can contain other people's confidences.</p>
+    <p className="room-discretion">Room thinking and work are visible to everyone here. Private work goes to root Kenan; only his chosen reply comes back.</p>
     {error && <p role="alert">{error}</p>}
     <form className="room-composer" onSubmit={event => { event.preventDefault(); void send(); }}>
       <textarea aria-label="Message the room" placeholder="Message the room" value={text} disabled={pending || !!receipt} onChange={event => setText(event.target.value)} />

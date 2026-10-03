@@ -13,7 +13,7 @@ import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
 import { networkStatus, readPrivateNetwork } from "./private-network";
-import { Rooms } from "./rooms";
+import { Rooms, ROOM_CUSTODIAN } from "./rooms";
 import { oneKenanEnabled } from "kenan-memory/config";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
@@ -47,8 +47,11 @@ const rooms = oneKenanEnabled() ? new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/
   () => PEOPLE.map(({ user, displayName }) => ({ user, displayName })),
   async (owner, actor, path, method, body) => {
     const person = byUser.get(owner);
-    if (!person) return Response.json({ error: "Room owner no longer registered" }, { status: 503 });
-    return proxy({ ...person, user: actor }, `http://127.0.0.1:${person.port}`,
+    const origin = owner === ROOM_CUSTODIAN ? process.env.PI_REMOTE_ROOMS_OWNER_URL ?? "http://127.0.0.1:18822" : person ? `http://127.0.0.1:${person.port}` : null;
+    if (!origin) return Response.json({ error: "Room owner no longer registered" }, { status: 503 });
+    const endpoint = new URL(origin);
+    if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.pathname !== "/" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Room runtime must be a local loopback HTTP origin");
+    return proxy({ port: person?.port ?? Number(endpoint.port), user: actor }, origin,
       new Request(`http://router${path}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) }),
       new URL(`http://router${path}`), AbortSignal.timeout(10_000));
   }) : null;
@@ -280,7 +283,7 @@ async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySo
   return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
 }
 
-async function proxy(person: Person, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
+async function proxy(person: Pick<Person, "user" | "port">, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {

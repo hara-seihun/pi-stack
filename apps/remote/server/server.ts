@@ -150,7 +150,7 @@ function assertContextMirrorLoadsLast() {
   }
 }
 
-assertContextMirrorLoadsLast();
+if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
@@ -1909,6 +1909,7 @@ const server = Bun.serve<SocketData>({
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);
+      if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
       const resolved = callers.resolve(caller);
       if ("error" in resolved || resolved.kind !== "person" || resolved.via !== "router") return error("Rooms require the authenticated local router", 403);
       return handleRoomOwner(req, {
@@ -1927,9 +1928,13 @@ const server = Bun.serve<SocketData>({
         send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
         history: async id => {
           const thread = threads.get(id)!;
-          const messages = readThreadHistory(thread.sessionFile).flatMap(entry => entry.type === "message"
-            ? [{ ...entry.message, identity: { id: `pi/${id}/${entry.id}` } }] : []);
-          return { messages, live: liveProjections.get(id)?.liveText ?? "", questions: unwrap(await directory.questions(id)) };
+          const messages = readThreadHistory(thread.sessionFile).map(entry => entry.type === "message"
+            ? { ...entry.message, identity: { id: `pi/${id}/${entry.id}` } }
+            : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
+          if (!storedContext(id)) await refreshThreadInspection(id);
+          const context = storedContext(id);
+          return { messages, live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+            context: context ? JSON.parse(context.document) : null, questions: unwrap(await directory.questions(id)) };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },
         answer: async (id, questionId, sender, body) => {

@@ -22,6 +22,7 @@ import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
 import { memoryExtension, MEMORY_TOOL_NAMES } from "../../../kenan-memory/dist/tools.js";
 import { prepareMemoryEnvironment } from "../../../kenan-memory/dist/session.js";
 import { oneKenanEnabled } from "../../../kenan-memory/dist/config.js";
+import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
 import { createThreadClient } from "./http.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
@@ -44,6 +45,10 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_") || key === EXPLICIT_THREAD_MODEL_ENV) delete env[key];
   delete env.PI_KENAN_MEMORY_PERSON;
   delete env.PI_KENAN_MEMORY_TOKEN;
+  if (options.env.PI_REMOTE_ROOM_ID === undefined) delete env.PI_REMOTE_ROOM_ID;
+  if (options.env.PI_REMOTE_ROOMS_RUNTIME === undefined) delete env.PI_REMOTE_ROOMS_RUNTIME;
+  const room = isRoomSession(env, options.threadId);
+  if (room && !oneKenanEnabled(env)) throw new Error("Room execution requires the oneKenan host flag");
   await prepareMemoryEnvironment(env, options.threadId);
   modeEnvironment(env);
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
@@ -76,7 +81,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       } })] : [];
       const isolated = await isolatedPiContext({ ...options, cwd, sessionFile: sessionManager.getSessionFile()! }, env, memoryFactories);
       // Pi Remote's context-mirror extension owns context capture when it is loaded; a raw session loads no packages, so the runner reports.
-      const contextOwner = !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
+      const contextOwner = !room && !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
       // Like the mirror, the runner also reports each finished reply. The `context` event fires only before a
       // model call, so without this a raw thread's context never held its final answer: the transcript kept it
       // as live text and the supervisor's response metrics, keyed to that message, had nothing to attach to.
@@ -97,7 +102,11 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       } };
       const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
         settingsManager: isolated?.settingsManager,
-        resourceLoaderOptions: isolated ? {
+        resourceLoaderOptions: room ? {
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
+          extensionFactories: [routing, usageLogger, threadSpeed, threadContext, ...memoryFactories, roomSessionInstructions(env)],
+        } : isolated ? {
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           extensionsOverride: () => isolated.resourceLoader.getExtensions(),
         } : raw ? {
@@ -119,8 +128,9 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
-        tools: sandboxTools ? [...sandboxTools.map(tool => tool.name), ...(memoryFactories.length ? MEMORY_TOOL_NAMES : [])]
-          : isolated?.tools ?? (raw ? (memoryFactories.length ? MEMORY_TOOL_NAMES : []) : undefined), customTools: sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env })]) });
+        tools: room ? ROOM_TOOLS : sandboxTools ? [...sandboxTools.map(tool => tool.name), ...(memoryFactories.length ? MEMORY_TOOL_NAMES : [])]
+          : isolated?.tools ?? (raw ? (memoryFactories.length ? MEMORY_TOOL_NAMES : []) : undefined), customTools: room ? threadTools({ ...options, cwd, env }).filter(tool => tool.name === "request_user_input_async") : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env })]) });
+      if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
       execution.bind(created.session);
       created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });

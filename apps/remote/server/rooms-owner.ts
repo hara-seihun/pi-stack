@@ -7,7 +7,7 @@ interface RoomOwner {
   create(id: string, title: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   update(id: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   send(id: string, requestId: string, text: string): Promise<void>;
-  history(id: string): Promise<{ messages: unknown[]; live: string; questions?: RoomSnapshot["questions"] }>;
+  history(id: string): Promise<{ messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown }>;
   stop?(id: string): Promise<void>;
   answer?(id: string, questionId: string, sender: NonNullable<ReturnType<typeof roomMembers>>[number], body: any): Promise<void>;
   notify(id: string, receiptId: string, title: string, body: string, time: number): void;
@@ -15,25 +15,34 @@ interface RoomOwner {
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
 const fail = (error: string, status = 400) => Response.json({ error }, { status });
 
-export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"] }): RoomSnapshot {
+export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown }): RoomSnapshot {
   const metadata = roomMetadata(thread.metadata?.room)!;
   const room: Room = { ...metadata, title: thread.title };
   const messages: RoomSnapshot["messages"] = [];
-  for (const value of source.messages) {
+  const work: NonNullable<RoomSnapshot["work"]> = [];
+  for (const [index, value] of source.messages.entries()) {
     if (!value || typeof value !== "object") continue;
     const message = value as Record<string, any>;
-    if (message.role !== "user" && message.role !== "assistant") continue;
+    const entryId = typeof message.identity?.id === "string" ? message.identity.id : `entry:${index}`;
+    if (message.role === "assistant" && Array.isArray(message.content)) for (const [blockIndex, block] of message.content.entries()) {
+      if (block?.type === "thinking") work.push({ id: `${entryId}:${blockIndex}`, kind: "thinking", text: String(block.thinking ?? "") });
+      if (block?.type === "toolCall") work.push({ id: `${entryId}:${blockIndex}`, kind: "toolCall", name: block.name, text: JSON.stringify(block.arguments, null, 2) ?? "" });
+    }
+    if (message.role === "toolResult") work.push({ id: entryId, kind: "toolResult", name: message.toolName, text: typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2) ?? "" });
+    if (message.role !== "user" && message.role !== "assistant") {
+      if (message.role !== "toolResult") work.push({ id: entryId, kind: "notice", text: JSON.stringify(message, null, 2) });
+      continue;
+    }
     const text = typeof message.content === "string" ? message.content : Array.isArray(message.content)
       ? message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string").map((block: any) => block.text).join("\n") : "";
     if (!text) continue;
     const input = message.role === "user" ? readRoomInput(text) : null;
-    // Agent inputs, private custom messages and compaction summaries aren't room utterances.
-    if (message.role === "user" && !input) continue;
+    if (message.role === "user" && !input) { work.push({ id: entryId, kind: "notice", text }); continue; }
     const time = Number(message.timestamp) || 0;
     const id = typeof message.identity?.id === "string" ? message.identity.id : `${message.role}:${time}:${messages.length}`;
     messages.push({ id, time, sender: input?.sender ?? { user: "assistant", displayName: "Kenan" }, text: input?.text ?? text });
   }
-  return { room, state: thread.state, messages, live: source.live, questions: source.questions ?? [],
+  return { room, state: thread.state, messages, live: source.live, questions: source.questions ?? [], work, thinking: source.thinking ?? "", context: source.context ?? null,
     notificationId: thread.state === "idle" ? messages.filter(message => message.sender.user === "assistant").at(-1)?.id ?? null : null };
 }
 

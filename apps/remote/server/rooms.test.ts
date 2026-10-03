@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Rooms } from "./rooms";
 import { oneKenanEnabled as roomsEnabled } from "kenan-memory/config";
 import { handleRoomOwner, publicRoomSnapshot } from "./rooms-owner";
+import { roomAudienceResolver } from "./room-audience.mjs";
 import { roomInput, roomInstructions, readRoomInput } from "../shared/rooms";
 import type { RoomMember } from "../shared/rooms";
 
@@ -54,7 +55,7 @@ test("two members discover and speak in one owned thread; a third can't enumerat
   expect(alice.rooms).toEqual(bob.rooms); expect(cara.rooms).toEqual([]);
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}`), "cara")).status).toBe(404);
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/prompt`, "POST", { requestId: crypto.randomUUID(), text: "Hello", sender: "alice", owner: "cara" }), "bob")).status).toBe(202);
-  expect(f.inputs[0]).toMatchObject({ owner: "alice", actor: "bob" });
+  expect(f.inputs[0]).toMatchObject({ owner: "pi-rooms", actor: "bob" });
   expect(readRoomInput(f.inputs[0]!.text)).toEqual({ sender: people[1], text: "Hello" });
   expect((await (await f.rooms.handle(request(`/v1/rooms/${f.id}`), "alice")).json()).messages[0].sender.user).toBe("bob");
   expect(f.threads.size).toBe(1);
@@ -91,7 +92,7 @@ test("assistant completions notify every member exactly once in their own ledger
   expect(f.notices.get("cara")).toBeUndefined();
 });
 
-test("the public room projection contains utterances, never thinking, tool bodies, private custom messages or raw context", () => {
+test("unprivileged room work is transparent, including thinking, tool calls/results and local notices", () => {
   const id = crypto.randomUUID();
   const snapshot = publicRoomSnapshot({ id, title: "House", state: "idle", metadata: { room: { id, members: people.slice(0, 2) } } }, { live: "Public live text", messages: [
     { role: "user", timestamp: 1, content: roomInput(people[1]!, "Visible input") },
@@ -101,7 +102,8 @@ test("the public room projection contains utterances, never thinking, tool bodie
     { role: "assistant", timestamp: 3, content: [{ type: "thinking", thinking: "Alice's private medical record" }, { type: "toolCall", name: "read", arguments: { path: "/secret" } }, { type: "text", text: "Visible answer", textSignature: "hidden-provider-field" }] },
   ] });
   expect(snapshot.messages.map(message => message.text)).toEqual(["Visible input", "Visible answer"]);
-  const encoded = JSON.stringify(snapshot); expect(encoded).not.toContain("private"); expect(encoded).not.toContain("/secret"); expect(encoded).not.toContain("hidden-provider-field");
+  const encoded = JSON.stringify(snapshot.work); expect(encoded).toContain("private custom message"); expect(encoded).toContain("/secret"); expect(encoded).toContain("Alice's private medical record");
+  expect(snapshot.work?.map(item => item.kind)).toEqual(["notice", "notice", "toolResult", "thinking", "toolCall"]);
 });
 
 test("a private thread is never converted into a room and a member cannot remove others", async () => {
@@ -112,4 +114,14 @@ test("a private thread is never converted into a room and a member cannot remove
     get: id => f.threads.get(id), create: async () => {}, update: async () => {}, send: async () => {}, history: async () => ({ messages: [], live: "" }), notify: () => {},
   });
   expect(response.status).toBe(400);
+});
+
+test("root's read-only audience attestation uses the current directory and never downgrades an unknown room token", async () => {
+  const f = fixture(); await f.create();
+  const audience = roomAudienceResolver(f.path);
+  expect(audience("alice", f.id)).toBeUndefined();
+  expect(audience("pi-rooms", f.id)).toEqual({ roomId: f.id, people: ["alice", "bob"] });
+  expect(() => audience("pi-rooms", crypto.randomUUID())).toThrow("no current room directory attestation");
+  await f.rooms.handle(request(`/v1/rooms/${f.id}/members`, "POST", { members: ["cara"] }), "bob");
+  expect(audience("pi-rooms", f.id)?.people).toEqual(["alice", "bob", "cara"]);
 });
