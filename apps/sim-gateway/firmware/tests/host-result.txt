@@ -1,0 +1,3 @@
+Compare 123456 on the allowed phone; USB console: confirm 123456
+Compare 123456 on the allowed phone; USB console: confirm 123456
+PASS: 77 firmware lifecycle/audio assertions; no radio, calls, or flashing

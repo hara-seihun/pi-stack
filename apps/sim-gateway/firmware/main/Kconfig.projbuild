@@ -1,0 +1,20 @@
+menu "Kenan SIM gateway (owner-only provisioning)"
+config SIM_WIFI_SSID
+    string "2.4 GHz Wi-Fi SSID"
+    default ""
+config SIM_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+config SIM_PHONE_BDA
+    string "Allowed phone Classic Bluetooth address AA:BB:CC:DD:EE:FF"
+    default ""
+config SIM_SERVER_URL
+    string "Gateway WebSocket URL"
+    default "wss://calls.kenan.works/gateway/connect"
+config SIM_GATEWAY_ID
+    string "Provisioned gateway ID"
+    default ""
+config SIM_DEVICE_TOKEN
+    string "Device-specific gateway token (never an administrator token)"
+    default ""
+endmenu
