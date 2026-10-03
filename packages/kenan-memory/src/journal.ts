@@ -1,5 +1,6 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { memoryClient } from "./client.js";
 import { oneKenanEnabled } from "./config.js";
@@ -26,11 +27,37 @@ export function actionObviouslyPrivate(spec: ActionSpec): boolean { return spec.
 
 export const actionJournalEnabled = oneKenanEnabled;
 export function actionPerson(): string { return process.env.PI_KENAN_PERSON ?? process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "kenan"; }
-function journalClient(): MemoryClient {
+export function actionJournalDirectory(env: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string {
+  let privateDir = env.PI_REMOTE_PRIVATE_DIR;
+  if (!privateDir && env.PI_REMOTE_CONFIG && existsSync(env.PI_REMOTE_CONFIG)) {
+    privateDir = JSON.parse(readFileSync(env.PI_REMOTE_CONFIG, "utf8")).unlock?.mountpoint;
+  }
+  if (uid !== 0 && privateDir && isAbsolute(privateDir)) return join(privateDir, ".kenan-actions");
+  return env.PI_KENAN_ACTION_JOURNAL_DIR ?? (privateDir ? join(privateDir, ".kenan-actions") : "/var/lib/pi-stack/kenan-actions");
+}
+
+export function journalDrainDirectories(env: NodeJS.ProcessEnv = process.env, mounted = (path: string) => spawnSync("mountpoint", ["-q", "--", path], { timeout: 1000 }).status === 0): string[] {
+  const directories = [actionJournalDirectory(env)];
+  const registry = env.PI_REMOTE_PERSONS_DIR ?? "/var/lib/pi-remote/persons";
+  if (existsSync(registry)) for (const file of readdirSync(registry).filter(name => name.endsWith(".json")).sort()) {
+    const person = JSON.parse(readFileSync(join(registry, file), "utf8"));
+    const mountpoint = person.unlock?.mountpoint;
+    if (person.version !== 1 || typeof mountpoint !== "string" || !isAbsolute(mountpoint) || !mounted(mountpoint)) continue;
+    directories.push(join(mountpoint, ".kenan-actions"));
+  }
+  return [...new Set(directories)];
+}
+
+export function journalClient(): MemoryClient {
   return { async request<T = MemoryValue>(request: MemoryRequest): Promise<MemoryResult<T>> {
     try {
       const path = process.env.PI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE ?? (process.env.CREDENTIALS_DIRECTORY ? join(process.env.CREDENTIALS_DIRECTORY, "kenan-memory-publisher") : undefined);
-      return memoryClient({ token: path ? readFileSync(path, "utf8").trim() : undefined }).request<T>(request);
+      let token: string | null = null;
+      if (path) try { token = readFileSync(path, "utf8").trim(); }
+      catch (cause) { if (!["ENOENT", "EACCES"].includes((cause as NodeJS.ErrnoException).code ?? "")) throw cause; }
+      // Journal replay outlives model sessions. No publisher means verified socket UID,
+      // never an inherited session token whose thread constraint may be stale.
+      return memoryClient({ token }).request<T>(request);
     } catch { return { ok: false, error: "unavailable", message: "Action journal publisher credential unavailable; receipts retained" }; }
   } };
 }
@@ -43,7 +70,7 @@ export class ActionJournal {
   private readonly autoDrain: boolean;
   private draining?: Promise<JournalResult>;
   constructor(options: Options = {}) {
-    this.directory = options.directory ?? process.env.PI_KENAN_ACTION_JOURNAL_DIR ?? "/var/lib/pi-stack/kenan-actions";
+    this.directory = options.directory ?? actionJournalDirectory();
     this.enabled = options.enabled ?? actionJournalEnabled;
     this.client = options.client ?? journalClient();
     this.person = options.person ?? actionPerson();

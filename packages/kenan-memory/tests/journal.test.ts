@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ActionJournal, actionObviouslyPrivate } from "../src/journal.ts";
+import { ActionJournal, actionObviouslyPrivate, actionJournalDirectory, journalDrainDirectories, journalClient } from "../src/journal.ts";
 import type { MemoryClient, MemoryInput } from "../src/contract.ts";
+import { MemoryStore } from "../src/store.ts";
+import { memoryService } from "../src/service.ts";
 const roots: string[] = [];
 function root() { const path = mkdtempSync(join(tmpdir(), "kenan-journal-")); roots.push(path); return path; }
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -72,4 +74,46 @@ test("replayed confirmed receipt keeps its external id for store idempotency", a
   const confirmations = accepted.filter(item => item.source.action === "calendar.create:confirmed");
   expect(confirmations).toHaveLength(2);
   expect(confirmations[0]!.source.externalId).toBe(confirmations[1]!.source.externalId);
+});
+
+test("ordinary UID uses its existing private mount even with root-only environment spool", () => {
+  const privateDir = root(), config = join(root(), "person.json");
+  writeFileSync(config, JSON.stringify({ unlock: { mountpoint: privateDir } }));
+  const env = { PI_REMOTE_CONFIG: config, PI_KENAN_ACTION_JOURNAL_DIR: "/root/private/action-journal" };
+  expect(actionJournalDirectory(env, 1001)).toBe(join(privateDir, ".kenan-actions"));
+  expect(actionJournalDirectory(env, 0)).toBe("/root/private/action-journal");
+});
+test("root drain discovers only known mounted person journals plus its root spool", async () => {
+  const registry = root(), alice = root(), bob = root(), unavailable = root(), shared = root(), items: MemoryInput[] = [];
+  for (const [user, mountpoint] of [["alice", alice], ["bob", bob], ["locked", unavailable]]) {
+    writeFileSync(join(registry, `${user}.json`), JSON.stringify({ version: 1, unlock: { mountpoint } }));
+  }
+  const env = { PI_REMOTE_PERSONS_DIR: registry, PI_KENAN_ACTION_JOURNAL_DIR: shared };
+  const paths = journalDrainDirectories(env, path => path !== unavailable);
+  expect(paths).toEqual([shared, join(alice, ".kenan-actions"), join(bob, ".kenan-actions")]);
+  for (const [person, directory] of [["root", shared], ["alice", paths[1]!], ["bob", paths[2]!]]) {
+    const journal = new ActionJournal({ directory, person, enabled: () => true, autoDrain: false, client: client(items) });
+    const ticket = journal.begin({ action: "email.send", recipients: ["Gaétane"], summary: "Foundation schedule" });
+    journal.finish(ticket, "confirmed");
+  }
+  for (const directory of paths) expect(await new ActionJournal({ directory, enabled: () => true, autoDrain: false, client: client(items) }).drain()).toEqual({ ok: true });
+  expect(items.filter(item => item.source.action === "email.send:confirmed").map(item => item.setting.person).sort()).toEqual(["alice", "bob", "root"]);
+});
+test("missing publisher uses verified UID, never expired inherited session token", async () => {
+  const previous = { ...process.env }, store = new MemoryStore(join(root(), "memory.sqlite3"));
+  const service = memoryService({ store, auth: { supervisors: [], uidPersons: { "1001": "alice" } }, enabled: () => true, peerUid: () => 1001 });
+  await new Promise<void>(resolve => service.listen(0, "127.0.0.1", resolve));
+  const address = service.address() as { port: number };
+  try {
+    process.env.PI_KENAN_MEMORY_URL = `http://127.0.0.1:${address.port}`;
+    process.env.PI_KENAN_MEMORY_TOKEN = "expired-session-from-another-thread";
+    process.env.PI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE = join(root(), "missing");
+    const result = await journalClient().request({ operation: "write", item: { text: "Kenan sent fixture mail for alice", about: ["alice", "Gaétane"], source: { actedFor: "alice", action: "email.send:confirmed", externalId: "fixture-replay" }, setting: { person: "alice", threadId: "original-thread" }, obviouslyPrivate: false } });
+    expect(result.ok).toBe(true);
+  } finally {
+    await new Promise<void>((resolve, reject) => service.close(error => error ? reject(error) : resolve()));
+    store.close();
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+  }
 });
