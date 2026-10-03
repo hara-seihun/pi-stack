@@ -163,6 +163,15 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void phoneOverlay(PluginCall call) {
+        Boolean visible = call.getBoolean("visible");
+        if (visible == null) { call.reject("visible must be a boolean", "invalid_args"); return; }
+        getActivity().runOnUiThread(() -> {
+            KenanOverlay.setVisible(getContext(), visible); phoneStatus(call);
+        });
+    }
+
+    @PluginMethod
     public void phoneConfigure(PluginCall call) {
         if (!Boolean.TRUE.equals(call.getBoolean("enabled", false))) {
             PhoneControlService.disable(getContext()); phoneStatus(call); return;
