@@ -31,6 +31,10 @@ def target(path): return fixture / path.lstrip('/') if fixture else pathlib.Path
 host = pathlib.Path(config.get('hostFile', '/etc/pi-stack/host.json')).resolve()
 persons_dir = pathlib.Path(config.get('personsDir', '/var/lib/pi-remote/persons')).resolve()
 shared = target('/var/lib/pi-kenan')
+consent_capability=pathlib.Path(config.get('rootConsentCapabilityFile',str(shared/'root-consent-capability'))).resolve()
+if not consent_capability.is_relative_to(shared): raise SystemExit('rootConsentCapabilityFile must stay in root-owned /var/lib/pi-kenan custody')
+router_port=config.get('routerPort',8788)
+if not isinstance(router_port,int) or isinstance(router_port,bool) or not 1023<router_port<=65535: raise SystemExit('Invalid routerPort')
 root_runtime=config.get('rootRuntime',config.get('remoteRoot','/srv/pi/pi-remote')+'/kenan-root')
 memory_runtime=config.get('memoryRuntime','/srv/pi/runtime/node_modules/kenan-memory')
 rooms_home = target('/var/lib/pi-rooms')
@@ -52,6 +56,7 @@ ports = {name: config.get(name, default) for name, default in [('memoryPort',188
 if any(not isinstance(port,int) or isinstance(port,bool) or not 1023 < port <= 65535 for port in ports.values()) or len(set(ports.values())) != len(ports):
     raise SystemExit('New ports must be distinct unprivileged TCP ports')
 if set(ports.values()) & {p['port'] for p in people}: raise SystemExit('New listener collides with a person supervisor')
+if router_port in ports.values(): raise SystemExit('New listener collides with existing router')
 if fixture and set(ports.values()) & (set(range(18790,18800)) | set(range(2461,2475))): raise SystemExit('Fixture ports overlap live listeners')
 root_config = config.get('root', {})
 if any(not root_config.get(name) for name in ('provider','model','thinkingLevel','promptFile')): raise SystemExit('root requires fixed provider/model/thinkingLevel/promptFile')
@@ -172,6 +177,7 @@ def rendered_units():
       '@ORCHESTRATOR_ROOT@':config.get('orchestratorRoot','/srv/pi/pi-orchestrator'),'@STACK_ROOT@':config.get('stackRoot',str(repo)),
       '@PUBLISHER_TOKEN_FILE@':str(shared/'publisher-token'),'@KENAN_PRIVATE_DIR@':str(shared/'private'),
       '@KENAN_MEMORY_SOURCE@':memory_runtime,
+      '@ROOT_CONSENT_CAPABILITY_FILE@':str(consent_capability),'@ROOT_ROUTER_URL@':f'http://127.0.0.1:{router_port}',
       '@STATE_DIR@':str(shared),'@ROOMS_HOME@':str(rooms_home),
       '@PERSONS_DIR@':str(persons_dir),'@BROKER_CONFIG@':str(target('/etc/pi-stack/one-kenan-broker.json')),
       '@ROOMS_ENV_FILE@':str(target('/etc/pi-stack/rooms.env')),'@ROOMS_CONFIG@':str(target('/etc/pi-stack/rooms.json')),
@@ -207,9 +213,11 @@ def install():
     for field,name in [('publisherToken','publisher-token'),('rootToken','root-memory-token')]:
         memory[field]=secrets.token_urlsafe(32); fresh(shared/name,memory[field]+'\n',0o600)
     fresh(shared/'root-admin-capability',secrets.token_hex(32)+'\n',0o600)
+    fresh(consent_capability,secrets.token_hex(32)+'\n',0o600)
     fresh(target('/etc/pi-stack/kenan-memory-auth.json'),json.dumps(memory)+'\n',0o600)
     one={**config,**ports,'executionUser':execution,'roomsUser':room_user,'custodySocket':str(target('/run/pi-kenan/custody.sock')),
-         'rootAdminCapabilityFile':str(shared/'root-admin-capability'),'brokerUser':operator}
+         'rootAdminCapabilityFile':str(shared/'root-admin-capability'),'rootConsentCapabilityFile':str(consent_capability),
+         'routerPort':router_port,'brokerUser':operator}
     fresh(target('/etc/pi-stack/one-kenan.json'),json.dumps(one,indent=2)+'\n')
     root={**root_config,'version':1,'cwd':str(shared/'private'),'agentDir':str(shared/'private/.pi/agent'),
           'sessionsDir':str(shared/'private/root-sessions'),'brokerUrl':f'http://127.0.0.1:{ports["rootBrokerPort"]}'}
