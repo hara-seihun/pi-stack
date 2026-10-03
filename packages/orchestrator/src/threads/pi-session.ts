@@ -6,6 +6,7 @@ import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessi
   convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession } from "./contracts.js";
 import { threadTools } from "./pi-tools.js";
+import { convergeTools } from "./converge.js";
 import { argument, assertPiSessionFile, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
@@ -106,7 +107,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
-        tools: sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined), customTools: sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env })]) });
+        tools: sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined), customTools: sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
       execution.bind(created.session);
       created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });
