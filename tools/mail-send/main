@@ -49,7 +49,8 @@ def creds():
     import os
     f = os.environ.get("MAIL_BRIDGE_CREDENTIAL_FILE")
     if f:
-        c = json.load(open(f))
+        with open(f, encoding="utf-8") as credential_file:
+            c = json.load(credential_file)
         return c["email"], c["password"]
     env = dict(os.environ)
     env.setdefault("PROTON_PASS_AGENT_REASON", "Read Proton Bridge local mail-client credentials")
@@ -115,7 +116,8 @@ def main():
     a = p.parse_args()
 
     user, password = creds()
-    body = open(a.body_file, encoding="utf-8").read()
+    with open(a.body_file, encoding="utf-8") as body_file:
+        body = body_file.read()
 
     msg = EmailMessage()
     sender = a.from_addr or user

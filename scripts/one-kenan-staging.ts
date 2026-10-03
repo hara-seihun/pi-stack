@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 
 const repository = resolve(import.meta.dir, "..");
 export const fixturePeople = ["alice", "bob"] as const;
-export type FixturePerson = typeof fixturePeople[number];
+export type FixturePerson = typeof fixturePeople[number] | "admin";
 
 /** Owns real Remote processes; the fixture systemctl never reaches the host manager. */
 export class StagingStack {
@@ -15,9 +15,11 @@ export class StagingStack {
   readonly children: Array<{ name: string; child: ReturnType<typeof Bun.spawn> }> = [];
   readonly tokens = new Map<FixturePerson, string>();
   readonly ports: Record<FixturePerson | "router", number>;
-  constructor(root = mkdtempSync(join(tmpdir(), "pi-one-kenan-")), port = 19880) {
+  readonly people: readonly FixturePerson[];
+  constructor(root = mkdtempSync(join(tmpdir(), "pi-one-kenan-")), port = 19880, includeAdministrator = false) {
     this.root = resolve(root);
-    this.ports = { router: port, alice: port + 1, bob: port + 2 };
+    this.people = includeAdministrator ? [...fixturePeople, "admin"] : fixturePeople;
+    this.ports = { router: port, alice: port + 1, bob: port + 2, admin: port + 7 };
     for (const value of Object.values(this.ports)) {
       if (!Number.isInteger(value) || value < 1024 || value > 65535 || value >= 18790 && value <= 18799 || value >= 2461 && value <= 2474)
         throw new Error("Staging requires unreserved, nonprivileged ports");
@@ -26,7 +28,7 @@ export class StagingStack {
     this.hostFile = join(this.root, "host.json");
   }
   initialize() {
-    for (const name of ["persons", "keys", "units", "bin", "logs", "upstream-credentials", ...fixturePeople])
+    for (const name of ["persons", "keys", "units", "bin", "logs", "upstream-credentials", ...this.people])
       mkdirSync(join(this.root, name), { recursive: true, mode: 0o700 });
     writeFileSync(this.hostFile, JSON.stringify({ version: 1, environments: [{ id: "staging", name: "Fixture staging", icon: "home" }] }));
     writeFileSync(join(this.root, "bin", "systemctl"), `#!/usr/bin/env bash
@@ -35,7 +37,7 @@ root=${JSON.stringify(this.root)}
 case "$1" in
   start)
     user=\${2#pi-remote@}; user=\${user%.service}
-    [[ $user == alice || $user == bob ]] || exit 64
+    [[ $user == alice || $user == bob || $user == admin ]] || exit 64
     [[ $(<"$root/keys/$user") == "$user-fixture-key" ]] || exit 1
     touch "$root/units/$2" ;;
   stop) rm -f "$root/units/$2" ;;
@@ -44,13 +46,14 @@ case "$1" in
   *) echo 'Fixture systemctl refuses this operation' >&2; exit 64 ;;
 esac
 `, { mode: 0o700 });
-    for (const user of fixturePeople) {
+    for (const user of this.people) {
       const home = join(this.root, user);
       mkdirSync(join(home, ".pi", "agent"), { recursive: true });
       mkdirSync(join(home, "private"), { recursive: true });
       writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ packages: [join(repository, "apps/remote")] }));
       writeFileSync(join(this.root, "persons", `${user}.json`), JSON.stringify({ version: 1, user,
-        displayName: user === "alice" ? "Alice Fixture" : "Bob Fixture", port: this.ports[user], remoteAccess: ["staging"],
+        displayName: `${user} Fixture`, port: this.ports[user], remoteAccess: ["staging"],
+        ...(user === "admin" ? { machineAdministrator: true } : {}),
         unlock: { cipherDir: join(home, "cipher"), mountpoint: join(home, "private") }, environment: {
           PI_REMOTE_ENVIRONMENT_ID: "staging", PI_REMOTE_ENVIRONMENT_NAME: "Fixture staging", PI_REMOTE_REQUIRES_UNLOCK: true,
         } }));
@@ -65,6 +68,7 @@ esac
       TMPDIR: this.root, PI_STACK_HOST_FILE: this.hostFile, PI_STACK_HOST_CONFIG: this.hostFile,
       PI_REMOTE_PERSONS_DIR: join(this.root, "persons"), PI_REMOTE_KEY_DIR: join(this.root, "keys"),
       PI_REMOTE_UPSTREAM_CREDENTIAL_DIR: join(this.root, "upstream-credentials"),
+      PI_REMOTE_ROOMS_DB: join(this.root, "rooms.sqlite3"),
       PI_REMOTE_ROUTER_HOST: "127.0.0.1", PI_REMOTE_ROUTER_PORT: String(this.ports.router),
       PI_REMOTE_UNLOCK_TIMEOUT_MS: "2000", PI_REMOTE_OIDC_CONFIG: "",
       PI_ORCHESTRATOR_CONFIG: join(home, "orchestrator.json"),
@@ -86,11 +90,11 @@ esac
   }
   async start() {
     try {
-      for (const user of fixturePeople) this.spawn(user, join(repository, "apps/remote/server/main.ts"), user);
+      for (const user of this.people) this.spawn(user, join(repository, "apps/remote/server/main.ts"), user);
       this.spawn("router", join(repository, "apps/remote/server/router.ts"));
       await Promise.all([
         this.ready(`${this.base}/v1/router-health`, "router"),
-        ...fixturePeople.map(user => this.ready(`http://127.0.0.1:${this.ports[user]}/v1/health`, user)),
+        ...this.people.map(user => this.ready(`http://127.0.0.1:${this.ports[user]}/v1/health`, user)),
       ]);
     } catch (error) { await this.stop(); throw error; }
   }
