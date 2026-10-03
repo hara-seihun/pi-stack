@@ -16,6 +16,7 @@ const jobs = [
   ["agent workspace", "npm", ["test", "--workspace=@hara-seihun/agent-workspace"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
   ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],
+  ["Kenan memory", "npm", ["test", "--workspace=kenan-memory"]],
   ["remote", "npm", ["test", "--workspace=pi-remote"]],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],
   ["mcp-script", "npm", ["test", "--workspace=@hara-seihun/mcp-script"]],
