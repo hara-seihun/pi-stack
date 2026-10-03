@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Disclosure, DisclosureInput, ForgetMode, MemoryInput, MemoryItem, MemoryRead, ReadContext, MemoryRole, MemoryResult, MemorySession, RootAdmission, RootFinalizeReply } from "./contract.js";
+import type { Disclosure, DisclosureInput, ForgetMode, MemoryInput, MemoryItem, MemoryRead, ReadContext, MemoryRole, MemoryResult, MemorySession, RootAdmission, RootFinalizeReply, RootResumeConsent, RootLogConsent } from "./contract.js";
 
 export class MemoryStore {
   readonly db: Database;
@@ -16,6 +16,7 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS disclosures(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, person TEXT NOT NULL, thread TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'person');
       CREATE TABLE IF NOT EXISTS root_runs(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS consent_resumes(id TEXT PRIMARY KEY, input TEXT NOT NULL, admission TEXT NOT NULL);
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(id UNINDEXED, text, tokenize='porter unicode61');
       INSERT INTO memory_search(memory_search,rank) VALUES('secure-delete',1);
       CREATE TRIGGER IF NOT EXISTS memory_search_insert AFTER INSERT ON memories WHEN new.stopped=0 BEGIN
@@ -132,6 +133,59 @@ export class MemoryStore {
   rootAdmission(id: string): RootAdmission | undefined {
     const row = this.db.query("SELECT body FROM root_runs WHERE id=?").get(id) as { body: string } | null;
     return row ? JSON.parse(row.body) : undefined;
+  }
+  private consentKey(rootSessionId: string, consentId: string): string {
+    return createHash("sha256").update(JSON.stringify([rootSessionId, consentId])).digest("hex");
+  }
+  logConsent(input: RootLogConsent): MemoryResult<Disclosure> {
+    return this.db.transaction((): MemoryResult<Disclosure> => {
+      const admission = this.rootAdmission(input.rootSessionId);
+      if (!admission) return { ok: false, error: "invalid-request", message: "Unknown original root session" };
+      const key = this.consentKey(input.rootSessionId, input.consentId);
+      const id = `consent-${input.kind}-${key}`;
+      const prior = this.db.query("SELECT body FROM disclosures WHERE id=?").get(id) as { body: string } | null;
+      if (prior) {
+        const disclosure = JSON.parse(prior.body) as Disclosure;
+        return disclosure.text === input.text && disclosure.consentSubject === input.subject
+          ? { ok: true, value: disclosure }
+          : { ok: false, error: "invalid-request", message: "Consent event was already logged with different content or subject" };
+      }
+      const question = this.db.query("SELECT body FROM disclosures WHERE id=?").get(`consent-question-${key}`) as { body: string } | null;
+      if (input.kind === "answer" && (!question || !JSON.parse(question.body).to.includes(input.subject)))
+        return { ok: false, error: "invalid-request", message: "Consent answers require a logged question to the same subject" };
+      const now = new Date().toISOString();
+      const disclosure: Disclosure = { id, rootSessionId: input.rootSessionId, consentId: input.consentId, consentSubject: input.subject,
+        kind: input.kind === "question" ? "consent-question" : "consent-answer", text: input.text,
+        about: [...new Set([...admission.subjects, admission.person, input.subject])],
+        to: input.kind === "question" ? [input.subject] : ["kenan"],
+        setting: { person: admission.person, threadId: admission.threadId, ...(admission.roomId ? { roomId: admission.roomId } : {}) },
+        occurredAt: now, recordedBy: "kenan" };
+      this.db.query("INSERT INTO disclosures(id,body) VALUES(?,?)").run(id, JSON.stringify(disclosure));
+      return { ok: true, value: disclosure };
+    })();
+  }
+  resumeConsent(input: RootResumeConsent): MemoryResult<RootAdmission> {
+    return this.db.transaction((): MemoryResult<RootAdmission> => {
+      const original = this.rootAdmission(input.rootSessionId);
+      if (!original || !this.db.query("SELECT id FROM disclosures WHERE id=?").get(`root-reply-${input.rootSessionId}`))
+        return { ok: false, error: "invalid-request", message: "Consent resumption requires a finalized original root session" };
+      const key = this.consentKey(input.rootSessionId, input.consentId);
+      const serialized = JSON.stringify([input.rootSessionId, input.subject, input.question, input.answer, input.consentId]);
+      const prior = this.db.query("SELECT input,admission FROM consent_resumes WHERE id=?").get(key) as { input: string; admission: string } | null;
+      if (prior) return prior.input === serialized
+        ? { ok: true, value: JSON.parse(prior.admission) }
+        : { ok: false, error: "invalid-request", message: "This consent was already resumed with different data" };
+      const questionRow = this.db.query("SELECT body FROM disclosures WHERE id=?").get(`consent-question-${key}`) as { body: string } | null;
+      const answerRow = this.db.query("SELECT body FROM disclosures WHERE id=?").get(`consent-answer-${key}`) as { body: string } | null;
+      const question = questionRow ? JSON.parse(questionRow.body) as Disclosure : undefined;
+      const answer = answerRow ? JSON.parse(answerRow.body) as Disclosure : undefined;
+      if (!question || !answer || question.text !== input.question || answer.text !== input.answer || !question.to.includes(input.subject))
+        return { ok: false, error: "invalid-request", message: "Consent resumption requires matching exact question and answer records" };
+      const admission = this.admitRoot(original.person, original.threadId, original.recipients,
+        [...new Set([...original.subjects, ...question.about, ...answer.about, input.subject])], original.roomId);
+      this.db.query("INSERT INTO consent_resumes(id,input,admission) VALUES(?,?,?)").run(key, serialized, JSON.stringify(admission));
+      return { ok: true, value: admission };
+    })();
   }
   finalizeRootReply(input: RootFinalizeReply): MemoryResult<Disclosure> {
     return this.db.transaction((): MemoryResult<Disclosure> => {

@@ -31,6 +31,7 @@ export interface Disclosure extends DisclosureInput {
   recordedBy: PersonId;
   kind?: "explicit" | "memory-read" | "root-reply" | "consent-question" | "consent-answer";
   consentId?: string;
+  consentSubject?: PersonId;
   rootSessionId?: string;
   turnId?: string;
   finalReply?: string;
