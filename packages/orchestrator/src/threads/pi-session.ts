@@ -20,8 +20,6 @@ import usageLogger from "../extension/usage-logger.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
 import { memoryExtension } from "kenan-memory/tools";
-import { prepareMemoryEnvironment } from "kenan-memory/session";
-import { oneKenanEnabled } from "kenan-memory/config";
 import { createThreadClient } from "./http.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
@@ -46,8 +44,6 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
   delete env.PI_KENAN_MEMORY_TOKEN;
   delete env.PI_KENAN_MEMORY_ROLE;
   const memoryEligible = !isRawSession(options.args) && !options.args.includes(SANDBOX_ARGUMENT) && !options.args.includes("--orchestrator-context");
-  const memoryEnabled = memoryEligible && oneKenanEnabled(env);
-  if (memoryEnabled) await prepareMemoryEnvironment(env, options.threadId);
   modeEnvironment(env);
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
   return piEnvironmentScope.run(env, async () => {
