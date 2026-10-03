@@ -14,8 +14,16 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 28, application = android.app.Application.class)
+@Config(sdk = 28, application = android.app.Application.class,
+    shadows = WriteAccessibilityServiceTest.FocusedNode.class)
 public class WriteAccessibilityServiceTest {
+    @org.robolectric.annotation.Implements(AccessibilityNodeInfo.class)
+    public static class FocusedNode extends org.robolectric.shadows.ShadowAccessibilityNodeInfo {
+        @org.robolectric.annotation.RealObject private AccessibilityNodeInfo node;
+        @org.robolectric.annotation.Implementation protected AccessibilityNodeInfo findFocus(int focus) {
+            return node.isFocused() ? node : null;
+        }
+    }
     private Object get(WriteAccessibilityService service, String name) throws Exception {
         Field field = WriteAccessibilityService.class.getDeclaredField(name);
         field.setAccessible(true);
@@ -126,6 +134,118 @@ public class WriteAccessibilityServiceTest {
     }
     @After public void clearSharedOwner() throws Exception {
         KenanOverlayTest.clearSharedOverlay();
+        android.content.Context context = org.robolectric.RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("write-settings", 0).edit().clear().commit();
+        NotificationIdentity.get(context).replace("", "");
+    }
+    private WriteAccessibilityService focusedService(boolean keyboard) throws Exception {
+        WriteAccessibilityService service = Robolectric.buildService(WriteAccessibilityService.class).get();
+        set(service, "active", service);
+        NotificationIdentity.get(service).replace("hara", "test-session");
+        shadowOf(org.robolectric.RuntimeEnvironment.getApplication()).grantPermissions(android.Manifest.permission.RECORD_AUDIO);
+        org.robolectric.shadows.ShadowSettings.setCanDrawOverlays(true);
+        AccessibilityNodeInfo node = editable("Existing text", false);
+        android.view.accessibility.AccessibilityWindowInfo application = android.view.accessibility.AccessibilityWindowInfo.obtain();
+        shadowOf(application).setType(android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION);
+        shadowOf(application).setRoot(node);
+        java.util.List<android.view.accessibility.AccessibilityWindowInfo> windows = new ArrayList<>();
+        windows.add(application);
+        if (keyboard) {
+            android.view.accessibility.AccessibilityWindowInfo input = android.view.accessibility.AccessibilityWindowInfo.obtain();
+            shadowOf(input).setType(android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD);
+            windows.add(input);
+        }
+        shadowOf(service).setWindows(windows);
+        KenanOverlayTest.Windows overlayWindows = new KenanOverlayTest.Windows();
+        KenanOverlay overlay = new KenanOverlay(service, overlayWindows.manager());
+        KenanOverlayTest.bindSharedOverlay(service, null, service, overlay);
+        return service;
+    }
+    private void enabled(WriteAccessibilityService service, boolean enabled) {
+        service.getSharedPreferences("write-settings", 0).edit().putBoolean("overlayEnabled", enabled).commit();
+        WriteAccessibilityService.settingsChanged();
+        shadowOf(android.os.Looper.getMainLooper()).idle();
+    }
+    @Test public void disablingFencesConnectingRecordingAndFinishingWithoutClosingPhoneOverlay() throws Exception {
+        for (String phase : new String[] { "connecting", "recording", "finishing" }) {
+            WriteAccessibilityService service = focusedService(true);
+            WriteAccessibilityService.settingsChanged();
+            shadowOf(android.os.Looper.getMainLooper()).idle();
+            assertTrue(service.visible());
+            set(service, phase, true);
+            set(service, "generation", 42L);
+            WriteConnection connection = new WriteConnection(service, NotificationIdentity.get(service).current(),
+                new WriteConnection.Events() {
+                    public void connected() {} public void partial(String text) {}
+                    public void finished(String text) {} public void failed(String message) {}
+                });
+            set(service, "connection", connection);
+            WriteOpusRecorder recorder = new WriteOpusRecorder(new WriteOpusRecorder.Listener() {
+                public void packet(byte[] packet) {} public void amplitude(int level) {}
+                public void stopped() {} public void failed(String message) {}
+            });
+            boolean[] inputStopped = { false };
+            org.robolectric.util.ReflectionHelpers.setField(recorder, "activeInput", new WriteOpusRecorder.Input() {
+                public void start() {} public int read(byte[] frame, int offset, int length) { return 0; }
+                public void stop() { inputStopped[0] = true; } public void close() {}
+            });
+            set(service, "recorder", recorder);
+            ((ArrayList<byte[]>) get(service, "packets")).add(new byte[] { 1, 2 });
+            PhoneAccessibilityService phone = Robolectric.buildService(PhoneAccessibilityService.class).get();
+            KenanOverlay overlay = SharedOverlay.current();
+            KenanOverlayTest.bindSharedOverlay(service, phone, service, overlay);
+
+            enabled(service, false);
+
+            assertFalse(phase, service.visible());
+            assertFalse(phase, service.busy());
+            assertTrue((long) get(service, "generation") > 42);
+            assertNull(get(service, "connection"));
+            assertNull(get(service, "recorder"));
+            assertTrue((boolean) org.robolectric.util.ReflectionHelpers.getField(connection, "closed"));
+            assertFalse((boolean) org.robolectric.util.ReflectionHelpers.getField(recorder, "running"));
+            assertTrue("microphone input stopped immediately", inputStopped[0]);
+            assertTrue(((ArrayList<?>) get(service, "packets")).isEmpty());
+            assertNull(get(service, "target"));
+            assertTrue(SharedOverlay.hasPhone());
+            assertSame(overlay, SharedOverlay.current());
+            assertFalse(overlay.closed());
+            call(service, "completed", "late transcript");
+            assertFalse((boolean) get(service, "clipboardReady"));
+            service.onAccessibilityEvent(android.view.accessibility.AccessibilityEvent.obtain());
+            assertFalse(service.visible());
+            enabled(service, true);
+            assertTrue("enabling refreshes without an accessibility event", service.visible());
+            KenanOverlayTest.clearSharedOverlay();
+        }
+    }
+    @Test public void disabledPreferenceSurvivesServiceRestartAndBlocksTaps() throws Exception {
+        WriteAccessibilityService first = focusedService(true);
+        enabled(first, false);
+        first.onDestroy();
+        WriteAccessibilityService restarted = focusedService(true);
+        restarted.onServiceConnected();
+        assertFalse(restarted.visible());
+        restarted.onAccessibilityEvent(android.view.accessibility.AccessibilityEvent.obtain());
+        restarted.tapped();
+        assertFalse(restarted.visible());
+        assertFalse(restarted.busy());
+        enabled(restarted, true);
+        assertTrue(restarted.visible());
+    }
+    @Test public void keyboardPreferenceRefreshesWithoutWaitingForAccessibilityEvents() throws Exception {
+        WriteAccessibilityService service = focusedService(false);
+        WriteAccessibilityService.settingsChanged();
+        shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertFalse(service.visible());
+        service.getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", false).commit();
+        WriteAccessibilityService.settingsChanged();
+        shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertTrue(service.visible());
+        service.getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", true).commit();
+        WriteAccessibilityService.settingsChanged();
+        shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertFalse(service.visible());
     }
     @Test public void destroyFencesAudioAndClosesOwnedOverlayWithoutRecreatingIt() throws Exception {
         WriteAccessibilityService service = withActiveSender();

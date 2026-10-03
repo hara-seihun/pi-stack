@@ -29,8 +29,8 @@ export interface PhoneStatus {
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
-  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean }>;
-  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean }): Promise<void>;
+  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean; overlayEnabled?: boolean }>;
+  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean } | { step: "enabled"; enabled: boolean }): Promise<void>;
   writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
