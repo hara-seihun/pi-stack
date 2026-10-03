@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { ActionJournal, actionObviouslyPrivate, actionJournalDirectory, journalDrainDirectories, journalClient } from "../src/journal.ts";
 import type { MemoryClient, MemoryInput } from "../src/contract.ts";
 import { MemoryStore } from "../src/store.ts";
@@ -76,6 +77,17 @@ test("replayed confirmed receipt keeps its external id for store idempotency", a
   expect(confirmations[0]!.source.externalId).toBe(confirmations[1]!.source.externalId);
 });
 
+test("machine-wide CLI admits nonzero service UID through filesystem and service capabilities", () => {
+  const directory = root(), registry = root(), host = join(root(), "host.json");
+  writeFileSync(host, JSON.stringify({ oneKenan: true }));
+  const result = spawnSync(process.execPath, [new URL("../src/journal-cli.ts", import.meta.url).pathname, "drain", "--all"], {
+    env: { PATH: process.env.PATH, PI_STACK_HOST_CONFIG: host, PI_REMOTE_PERSONS_DIR: registry, PI_KENAN_ACTION_JOURNAL_DIR: directory },
+    encoding: "utf8", timeout: 5000,
+  });
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ ok: true });
+  expect(readdirSync(directory)).toHaveLength(0);
+});
 test("ordinary UID uses its existing private mount even with root-only environment spool", () => {
   const privateDir = root(), config = join(root(), "person.json");
   writeFileSync(config, JSON.stringify({ unlock: { mountpoint: privateDir } }));

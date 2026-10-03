@@ -14,7 +14,6 @@ try {
     if (!result.ok) process.exitCode = 1;
   } else if (command === "drain") {
     if (process.argv[3] === "--all") {
-      if (process.getuid?.() !== 0) throw new Error("Only the root journal owner may scan person spools");
       const failures: string[] = [];
       if (actionJournalEnabled()) for (const directory of journalDrainDirectories()) {
         const result = await new ActionJournal({ directory, autoDrain: false }).drain();
