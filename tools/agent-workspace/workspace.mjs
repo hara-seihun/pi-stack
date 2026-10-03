@@ -1762,10 +1762,10 @@ function resumeCloneCheckout(destination, input, sourceCommit, upstream) {
   const head = git(destination, ["rev-parse", "HEAD"]);
   const selected = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
   const correctBranch = input.mode === "review" ? selected.status !== 0 : selected.stdout === input.branch;
-  if (head === sourceCommit && correctBranch) return;
   const refuse = reason => fail(`pending checkout cannot resume: ${reason}; preserve and repair it before resuming creation`);
-  const origin = repositoryLocation(git(destination, ["remote", "get-url", "origin"]), destination);
+  const origin = repositoryLocation(git(destination, ["config", "--local", "--get", "remote.origin.url"]), destination);
   if (![input.repository, upstream.fetch].includes(origin)) refuse("origin differs from the creation request");
+  if (head === sourceCommit && correctBranch) return;
   const unique = git(destination, ["rev-list", "--branches", "HEAD", "--not", "--remotes", sourceCommit]);
   if (unique) refuse("commits absent from remote refs and reserved source");
   const branch = command("git", ["-C", destination, "rev-parse", "--verify", `refs/heads/${input.branch}`]);
@@ -1852,7 +1852,8 @@ function finalizeCreationCommand(database, args, statePath) {
     if (realpathSync(common) !== realpathSync(mirrorFor(statePath, input.repository))) fail("pending worktree has a different source mirror");
   } else {
     const upstream = repositoryRemotes(input.repository);
-    if (![input.repository, upstream.fetch].includes(repositoryLocation(info.repository ?? "", record.path))) {
+    const origin = git(record.path, ["config", "--local", "--get", "remote.origin.url"]);
+    if (![input.repository, upstream.fetch].includes(repositoryLocation(origin, record.path))) {
       fail("pending checkout origin differs from the creation request");
     }
   }

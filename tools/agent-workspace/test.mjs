@@ -119,6 +119,52 @@ for (const stage of ["clone", "checkout"]) test(`creation resumes after interrup
   } finally { f.close(); }
 });
 
+for (const operation of ["resume-clone", "resume-checkout", "finalize"]) {
+  for (const differentOrigin of [false, true]) {
+    test(`${operation} ${differentOrigin ? "refuses a different stored origin" : "accepts the stored SSH origin"} under a global HTTPS rewrite`, () => {
+      const f = fixture();
+      try {
+        const repository = "git@github.com:workspace-fixture/repository.git";
+        const https = "https://github.com/workspace-fixture/repository.git";
+        const globalConfig = path.join(f.root, "gitconfig");
+        const env = { ...f.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: "1" };
+        execFileSync("git", ["config", "--file", globalConfig, `url.file://${f.remote}.insteadOf`, repository]);
+        const args = ["create", "--root", f.workspaces, "--name", "rewritten", "--repo", repository,
+          "--ref", git(f.source, "rev-parse", "HEAD"), "--min-free-gib", "0", "--json"];
+        assert.throws(() => run(args, { ...interruptCreation(f, operation === "resume-clone" ? "clone" : "checkout"), ...env }));
+        const [pending] = JSON.parse(run(["status", "--json"], env)).records;
+        writeFileSync(globalConfig, `[url "${https}"]\n\tinsteadOf = ${repository}\n`);
+        const destination = pending.path;
+        if (differentOrigin) git(destination, "remote", "set-url", "origin", "git@github.com:workspace-fixture/different.git");
+        const stored = git(destination, "config", "--local", "--get", "remote.origin.url");
+        if (!differentOrigin) {
+          assert.equal(stored, repository);
+          assert.equal(execFileSync("git", ["-C", destination, "remote", "get-url", "origin"], {
+            env: { ...process.env, ...env }, encoding: "utf8",
+          }).trim(), https);
+        }
+        const head = git(destination, "rev-parse", "HEAD");
+        const status = git(destination, "status", "--porcelain");
+        const retry = operation === "finalize" ? ["finalize-creation", "--id", pending.id, "--json"] : args;
+        if (differentOrigin) {
+          assert.throws(() => run(retry, env), /origin differs from the creation request/u);
+          assert.equal(git(destination, "rev-parse", "HEAD"), head);
+          assert.equal(git(destination, "status", "--porcelain"), status);
+          assert.equal(git(destination, "config", "--local", "--get", "remote.origin.url"), stored);
+          assert.equal(JSON.parse(run(["status", "--json"], env)).records[0].state, "creating");
+        } else {
+          const resumed = JSON.parse(run(retry, env));
+          assert.equal(resumed.id, pending.id);
+          assert.equal(resumed.state, "active");
+          assert.equal(git(destination, "rev-parse", "HEAD"), pending.sourceCommit);
+          assert.equal(git(destination, "status", "--porcelain"), "");
+          assert.equal(git(destination, "config", "--local", "--get", "remote.origin.url"), repository);
+        }
+      } finally { f.close(); }
+    });
+  }
+}
+
 function interruptedCheckout(f, name = "partial", mode = "writer") {
   writeFileSync(path.join(f.source, "missing.txt"), "not yet materialized\n");
   git(f.source, "add", ".");
