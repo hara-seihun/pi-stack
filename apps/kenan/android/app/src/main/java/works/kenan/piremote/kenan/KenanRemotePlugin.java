@@ -104,7 +104,8 @@ public final class KenanRemotePlugin extends Plugin {
             .put("accessibility", accessibility)
             .put("battery", ((android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE))
                 .isIgnoringBatteryOptimizations(getContext().getPackageName()))
-            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true)));
+            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true))
+            .put("overlayEnabled", getContext().getSharedPreferences("write-settings", 0).getBoolean("overlayEnabled", true)));
     }
 
     @PluginMethod
@@ -132,9 +133,17 @@ public final class KenanRemotePlugin extends Plugin {
                 getContext().startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                 call.resolve();
             }
+            case "enabled" -> {
+                Object enabled = call.getData().opt("enabled");
+                if (!(enabled instanceof Boolean)) { call.reject("Write enabled must be a boolean"); return; }
+                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("overlayEnabled", (Boolean) enabled).apply();
+                WriteAccessibilityService.settingsChanged();
+                call.resolve();
+            }
             case "keyboard" -> {
                 boolean required = Boolean.TRUE.equals(call.getBoolean("required", true));
                 getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", required).apply();
+                WriteAccessibilityService.settingsChanged();
                 call.resolve();
             }
             default -> call.reject("Unknown Write setup step");
