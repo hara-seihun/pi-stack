@@ -35,16 +35,16 @@ function fixture(t, defect) {
     for (const command of steps) {
       let result = {};
       if (command[0] === "frame") state.frame = command[1];
-      if (command[0] === "fill") state.values.set(state.frame, command[2]);
+      if (command[0] === "fill") state.values.set(`${state.frame}:${command[1]}`, command[2]);
       if (command[0] === "snapshot") result = { refs };
       if (command[0] === "get") {
         if (command[1] === "title") result = { title: options.title };
         if (command[1] === "cdp-url") result = { cdpUrl: "ws://127.0.0.1/probe" };
         if (command[1] === "url") result = { url: options.url };
-        if (command[1] === "value") result = { value: remote && defect === "remote-value" ? "" : state.values.get(state.frame) };
+        if (command[1] === "value") result = { value: remote && defect === "remote-value" || defect === "date-value" && command[2] === "#controlled-date" ? "" : state.values.get(`${state.frame}:${command[2]}`) };
       }
       if (command[0] === "eval") {
-        result = { result: command[1] === "location.hostname" ? "localhost" : true };
+        result = { result: command[1] === "location.hostname" ? "localhost" : command[1].includes("controlled-state") ? { date: defect === "date-state" ? "2026-10-02" : state.values.get("main:#controlled-date"), datetime: state.values.get("main:#controlled-datetime") } : true };
         if (defect === "dynamic-realm" && state.frame === "#dynamic-frame") result.result = "127.0.0.1";
         if (defect === "static-realm" && !remote && state.frame.includes("Secure payment")) result.result = "127.0.0.1";
       }
@@ -65,11 +65,11 @@ function fixture(t, defect) {
 test("complete native proof uses bounded batches and closes both named sessions", async (t) => {
   const f = fixture(t);
   await probeBrowser(f.tool, f.options);
-  assert.equal(f.calls.length, 6, "linear checks must not regress to per-command wrapper dispatch");
+  assert.equal(f.calls.length, 7, "linear checks must not regress to per-command wrapper dispatch");
   assert.deepEqual(f.closed, ["attached", "owner"]);
 });
 
-for (const defect of ["static-realm", "dynamic-realm", "remote-value", "download-bytes", "unverified-artifact", "truncated-batch", "failed-row", "attached-cleanup"]) {
+for (const defect of ["date-value", "date-state", "static-realm", "dynamic-realm", "remote-value", "download-bytes", "unverified-artifact", "truncated-batch", "failed-row", "attached-cleanup"]) {
   test(`rejects ${defect} and still closes the owner`, async (t) => {
     const f = fixture(t, defect);
     await assert.rejects(probeBrowser(f.tool, f.options));

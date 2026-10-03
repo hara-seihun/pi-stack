@@ -57,6 +57,15 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
     cdpUrl = page.data[5].result.cdpUrl;
     assert.ok(cdpUrl, "the owner must expose its CDP endpoint");
 
+    const dates = await batch("controlled-date-inputs", ownerArgs, [
+      ["fill", "#controlled-date", "2026-10-28"], ["fill", "#controlled-datetime", "2026-10-28T19:30"],
+      ["get", "value", "#controlled-date"], ["get", "value", "#controlled-datetime"],
+      ["eval", "JSON.parse(document.querySelector('#controlled-state').textContent)"],
+    ]);
+    assert.equal(dates.data[2].result.value, "2026-10-28", "date fill must change the DOM value");
+    assert.equal(dates.data[3].result.value, "2026-10-28T19:30", "datetime-local fill must change the DOM value");
+    assert.deepEqual(dates.data[4].result.result, { date: "2026-10-28", datetime: "2026-10-28T19:30" }, "date fill must update React state, not only the DOM");
+
     const frames = await batch("download-and-frames", ownerArgs, [
       ["download", `@${downloadRef}`, downloadPath],
       ...frameSteps("iframe[title='Secure payment input frame']"),

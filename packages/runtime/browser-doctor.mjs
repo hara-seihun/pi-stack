@@ -40,6 +40,24 @@ const downloadContent = `browser-download-${randomUUID()}\n`;
 const downloadPath = join(directory, "browser-download.txt");
 const screenshotPath = join(directory, "browser-screenshot.png");
 const frameValue = `frame-fill-${randomUUID()}`;
+const reactSources = Object.fromEntries([
+  ["react", "react", "react.production.js"], ["react-dom", "react-dom", "react-dom.production.js"],
+  ["react-dom/client", "react-dom", "react-dom-client.production.js"], ["scheduler", "scheduler", "scheduler.production.js"],
+].map(([id, pkg, file]) => [id, readFileSync(join(dirname(selected.resolve(pkg)), "cjs", file), "utf8")]));
+const controlledDates = `<div id="date-probe"></div><script>
+(() => {
+  const sources = ${JSON.stringify(reactSources).replaceAll("</script", "<\\/script")}, loaded = {};
+  function require(id) { if (!loaded[id]) { const module = loaded[id] = { exports: {} }; new Function('module', 'exports', 'require', sources[id])(module, module.exports, require); } return loaded[id].exports; }
+  const React = require('react'), { createRoot } = require('react-dom/client');
+  function Probe() {
+    const [date, setDate] = React.useState('2026-10-02'), [datetime, setDatetime] = React.useState('2026-10-02T23:00');
+    return React.createElement('section', null,
+      React.createElement('label', null, 'Controlled date', React.createElement('input', { id: 'controlled-date', type: 'date', value: date, onChange: e => setDate(e.target.value) })),
+      React.createElement('label', null, 'Controlled datetime', React.createElement('input', { id: 'controlled-datetime', type: 'datetime-local', value: datetime, onChange: e => setDatetime(e.target.value) })),
+      React.createElement('output', { id: 'controlled-state' }, JSON.stringify({ date, datetime })));
+  }
+  createRoot(document.getElementById('date-probe')).render(React.createElement(Probe));
+})();</script>`;
 const server = createServer((req, res) => {
   if (req.url === "/download") {
     res.writeHead(200, {
@@ -54,7 +72,7 @@ const server = createServer((req, res) => {
     res.end('<title>Frame probe</title><label>Frame input<input id="frame-input"></label>');
     return;
   }
-  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button><a href="/download" download>Download probe</a><iframe title="Secure payment input frame" src="http://localhost:${server.address().port}/frame"></iframe>`);
+  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button>${controlledDates}<a href="/download" download>Download probe</a><iframe title="Secure payment input frame" src="http://localhost:${server.address().port}/frame"></iframe>`);
 });
 let session;
 let accepted = false;
@@ -95,7 +113,7 @@ try {
     },
   });
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, frameEval: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, frameEval: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
