@@ -12,14 +12,14 @@ import type { Result, PiSessionOptions, OpenPiSession, PiEvent, PiCommand } from
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 function value<T>(result: Result<T>): T { if (!result.ok) throw Error(result.error.message); return result.value; }
-function fixture(openSession?: OpenPiSession) {
+function fixture(openSession?: OpenPiSession, intervalMs?: number) {
   const root = mkdtempSync(join(tmpdir(), "watch-list-"));
   cleanups.push(async () => rmSync(root, { recursive: true, force: true }));
   const opened: PiSessionOptions[] = [];
   const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async (options, output, exit) => { opened.push(options); if (openSession) return openSession(options, output, exit); throw Error("no model calls in this fixture"); } });
   cleanups.push(() => owner.close());
   const options = { databasePath: join(root, "threads.sqlite"), threads: owner,
-    placement: () => ({ ok: true as const, value: { cwd: root, metadata: { profileId: "home" } } }), onError: vi.fn() };
+    placement: () => ({ ok: true as const, value: { cwd: root, metadata: { profileId: "home" } } }), intervalMs, onError: vi.fn() };
   const watch = new WatchList(options); owner.setWatchList(watch);
   cleanups.push(() => watch.close());
   const add = async (what = "Check a fixture", nextDueAt = 100) => value(await watch.watch({ threadId: "agent", action: "add", requestId: `add:${what}`, item: { what, why: "Fixture state matters", nextDueAt } })) as { item: WatchItem };
@@ -96,8 +96,30 @@ it("keeps unanswered decisions from repeating while checking unrelated due items
   expect(owner.pending(first.id)[0]?.text).toContain("No commitment");
   value(await watch.tick(2e8)); expect(value(await owner.list()).threads).toHaveLength(2);
 });
+it("enforces the person's wake interval across short cadences, new items, retiming, and restart", async () => {
+  const interval = 4 * 60 * 60_000;
+  const { watch, owner, options, add } = fixture(undefined, interval);
+  const { item } = await add();
+  value(await watch.watch({ action: "update", threadId: "agent", requestId: "short", id: item.id, patch: { cadenceMs: 180_000 } }));
+  const { item: slower } = await add("Daily check");
+  value(await watch.watch({ action: "update", threadId: "agent", requestId: "slow", id: slower.id, patch: { cadenceMs: 86_400_000 } }));
+  value(await watch.tick(100));
+  const first = value(await owner.list()).threads[0]!;
+  value(await owner.control({ threadId: first.id, action: "stop", descendants: false }));
+  expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, nextDueAt: 100 + interval }, { id: slower.id, nextDueAt: 100 + 86_400_000 }] });
+  value(await watch.watch({ action: "update", threadId: "agent", requestId: "retime", id: item.id, patch: { nextDueAt: 101 } }));
+  await add("New due check", 101);
+  value(await watch.tick(101));
+  expect(value(await owner.list()).threads).toHaveLength(1);
+  await watch.close(); cleanups.pop();
+  const restored = new WatchList(options); cleanups.push(() => restored.close());
+  value(await restored.tick(100 + interval - 1));
+  expect(value(await owner.list()).threads).toHaveLength(1);
+  value(await restored.tick(100 + interval));
+  expect(value(await owner.list()).threads).toHaveLength(2);
+});
 it("reconciles a lost spawn acknowledgement after a scheduler restart without another thread", async () => {
-  const { watch, owner, options, add } = fixture();
+  const { watch, owner, options, add } = fixture(undefined, 4 * 60 * 60_000);
   await add();
   const actual = owner.spawn.bind(owner);
   const spawn = vi.spyOn(owner, "spawn").mockImplementationOnce(async input => { value(await actual(input)); return { ok: false, error: { code: "unavailable", message: "lost acknowledgement" } }; });

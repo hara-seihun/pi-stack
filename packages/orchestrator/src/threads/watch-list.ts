@@ -73,7 +73,9 @@ export class WatchList implements WatchApi {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS watch_item (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS watch_request (id TEXT PRIMARY KEY, input TEXT NOT NULL, response TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS watch_wake (id TEXT PRIMARY KEY, input TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS watch_wake (id TEXT PRIMARY KEY, input TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS watch_schedule (id INTEGER PRIMARY KEY CHECK(id=1), nextWakeAt INTEGER NOT NULL);
+      INSERT OR IGNORE INTO watch_schedule(id,nextWakeAt) VALUES(1,0);`);
   }
   private items(): WatchItem[] {
     return (this.db.prepare("SELECT body FROM watch_item ORDER BY rowid").all() as { body: string }[]).map(row => JSON.parse(row.body));
@@ -141,6 +143,8 @@ export class WatchList implements WatchApi {
         }
       }
     } else {
+      const schedule = this.db.prepare("SELECT nextWakeAt FROM watch_schedule WHERE id=1").get() as { nextWakeAt: number };
+      if (now < schedule.nextWakeAt) return good(undefined);
       const due = this.items().filter(item => item.nextDueAt <= now);
       if (!due.length) return good(undefined);
       const active = await this.options.threads.list({ state: "running", limit: 100 });
@@ -175,12 +179,13 @@ export class WatchList implements WatchApi {
       this.db.exec("BEGIN IMMEDIATE");
       try {
         this.db.prepare("INSERT INTO watch_wake(id,input) VALUES(?,?)").run(id, JSON.stringify(spawn));
+        this.db.prepare("UPDATE watch_schedule SET nextWakeAt=? WHERE id=1").run(now + this.intervalMs);
         for (const item of eligible) {
           const current = this.db.prepare("SELECT body FROM watch_item WHERE id=?").get(item.id) as { body: string } | undefined;
           if (!current) continue;
           const latest: WatchItem = JSON.parse(current.body);
           if (latest.updatedAt !== item.updatedAt || latest.nextDueAt !== item.nextDueAt) continue;
-          this.db.prepare("UPDATE watch_item SET body=? WHERE id=?").run(JSON.stringify({ ...latest, nextDueAt: now + (latest.cadenceMs ?? this.intervalMs), lastThreadId: id }), item.id);
+          this.db.prepare("UPDATE watch_item SET body=? WHERE id=?").run(JSON.stringify({ ...latest, nextDueAt: now + Math.max(latest.cadenceMs ?? this.intervalMs, this.intervalMs), lastThreadId: id }), item.id);
         }
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
