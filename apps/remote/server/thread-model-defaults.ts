@@ -35,7 +35,13 @@ export function configuredThreadDestinations(destinations: ThreadDestination[], 
     ].map(resolve))];
     const personalContext = destination.id === "personal" && !destination.raw && !destination.sandbox
       ? { contextDir: destination.contextDir ?? "context" } : {};
-    return { ...destination, ...personalContext, models, defaultModel };
+    const resolved = { ...destination, ...personalContext, models, defaultModel };
+    if (resolved.watchContextFiles !== undefined) {
+      if (!Array.isArray(resolved.watchContextFiles) || resolved.watchContextFiles.some(name => typeof name !== "string" || !/^[^/\\\0]+\.md$/i.test(name)))
+        throw new Error(`Thread profile ${destination.id}: watchContextFiles must be a list of Markdown file names`);
+      if (!resolved.contextDir || resolved.raw || resolved.sandbox) throw new Error(`Thread profile ${destination.id}: watchContextFiles needs a full-context destination with contextDir`);
+    }
+    return resolved;
   });
 }
 
@@ -68,6 +74,11 @@ export interface ThreadDestination {
   sandbox?: boolean;
   /** Folder inside the destination's workspace whose top-level Markdown files the picker offers as optional thread context. */
   contextDir?: string;
+  /**
+   * Context files (top-level Markdown names in `contextDir`) that watch-list checks for this destination load whole,
+   * as if chosen in the picker. Omitted means every top-level Markdown file there; destinations without `contextDir` load none.
+   */
+  watchContextFiles?: string[];
 }
 
 export function defaultThreadDestinations(personalWorkspaceId?: string): ThreadDestination[] {

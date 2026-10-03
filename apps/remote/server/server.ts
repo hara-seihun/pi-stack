@@ -34,7 +34,7 @@ import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
-import { contextFilesPrompt, listContextFiles, selectContextFiles, type ContextFileSources } from "./thread-context-files";
+import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
 import { CalendarStore } from "./calendar";
@@ -288,16 +288,27 @@ threads.setDirectory(directory, (parent, input) => {
   const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
   return privatePath(parent.cwd) || privatePath(input.cwd) ? undefined : fleet ?? undefined;
 });
+// Each watch item is checked in the destination it came from, with that destination's chosen context.
+const WATCH_DESTINATIONS = [...THREAD_DESTINATIONS.values()].filter(destination => !destination.raw && !destination.sandbox).map(destination => destination.id);
+const DEFAULT_WATCH_DESTINATION = process.env.PI_REMOTE_WATCH_DESTINATION
+  ?? (WATCH_DESTINATIONS.includes("home") ? "home" : WATCH_DESTINATIONS[0] ?? "home");
 const watchList = new WatchList({
   databasePath: join(DATA, "threads.sqlite3"), threads,
   intervalMs: watchInterval(process.env.PI_REMOTE_WATCH_INTERVAL_MS),
   enabled: process.env.PI_REMOTE_WATCH_ENABLED !== "0",
-  placement: () => {
-    const profileId = process.env.PI_REMOTE_WATCH_DESTINATION ?? "home";
+  destinations: WATCH_DESTINATIONS,
+  defaultDestination: DEFAULT_WATCH_DESTINATION,
+  destinationOf: threadId => {
+    const thread = threads.get(threadId);
+    const profileId = thread ? remotePlacement(thread, id => threads.get(id)).profileId : undefined;
+    return typeof profileId === "string" ? profileId : undefined;
+  },
+  placement: profileId => {
     const destination = THREAD_DESTINATIONS.get(profileId);
     if (!destination || destination.sandbox || destination.raw) return { ok: false, error: { code: "invalid_request", message: `Watch destination ${profileId} must be an offered full-context destination` } };
     const admitted = workspaceAdmission.resolve(destination.workspaceId);
-    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId } } }
+    const contextFiles = watchContextFiles(destination.watchContextFiles, destinationContextSources(destination)?.directory);
+    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId, ...(contextFiles.length ? { contextFiles } : {}) } } }
       : { ok: false, error: { code: "unavailable", message: admitted.error.message } };
   },
   onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },

@@ -17,6 +17,7 @@ const watchFields = {
   how: Type.Optional(Type.String({ description: "Known way to check it." })),
   cadenceMs: Type.Optional(Type.Integer({ minimum: 60000, description: "Repeat interval in milliseconds; omitted uses the person's default." })),
   nextDueAt: Type.Optional(Type.Integer({ minimum: 0, description: "Next due time as Unix epoch milliseconds; new items default to now." })),
+  destination: Type.Optional(Type.String({ minLength: 1, description: "Destination whose workspace and chosen context check this item, such as personal or home; omitted on add uses this thread's own destination." })),
 };
 const settings = Type.Object({
   model: Type.Optional(Type.String()),
@@ -68,9 +69,9 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "watch_list_update", label: "Update a watch item",
-      description: "Change a watch item's check, reason, method or timing. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
+      description: "Change a watch item's check, reason, method, timing or destination. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
       parameters: Type.Object({ id: Type.String({ minLength: 1 }), patch: Type.Object({
-        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt,
+        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt, destination: watchFields.destination,
         how: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         cadenceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 60000 }), Type.Null()])),
       }) }),
