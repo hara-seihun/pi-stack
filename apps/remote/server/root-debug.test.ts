@@ -75,7 +75,7 @@ describe("root is a private owner, not a hidden trace in a person's thread", () 
     expect((await rootDebugResponse(req("/v1/admin/root-sessions"), { authenticatedUser: "admin", persons: registry, config: null }))!.status).toBe(404);
     expect(await rootDebugResponse(req("/v1/sessions/person/context"), { authenticatedUser: "person", persons: registry, config: null })).toBeNull();
     writeFileSync(path, '{"oneKenan":true}');
-    expect(rootDebugConfig({ PI_STACK_HOST_FILE: path, PI_KENAN_CONFIG: join(root, "missing") })?.port).toBe(19886);
+    expect(rootDebugConfig({ PI_STACK_HOST_FILE: path, PI_KENAN_CONFIG: join(root, "missing") })?.port).toBe(18821);
   });
   test("root reply channel excludes session, traces, internal errors and metadata", async () => {
     const reply = rootReplyResponse("Chosen reply");
