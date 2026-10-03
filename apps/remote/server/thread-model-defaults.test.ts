@@ -107,3 +107,13 @@ test("destination edits cannot change defaults for another person or workspace",
   expect(defaultThreadDestinations("another")[0]!.models).toContain("astra");
   expect(defaultThreadDestinations("another")[0]!.defaultModel).toBe("astra");
 });
+
+test("watch context choices are Markdown names on a full-context destination with a context folder", () => {
+  const [personal, home, raw] = defaultThreadDestinations("private-workspace");
+  expect(configuredThreadDestinations([{ ...personal!, watchContextFiles: ["HARA.md", "KENAN.md"] }], [])[0]!.watchContextFiles).toEqual(["HARA.md", "KENAN.md"]);
+  expect(configuredThreadDestinations([personal!], [])[0]!.watchContextFiles).toBeUndefined();
+  expect(() => configuredThreadDestinations([{ ...personal!, watchContextFiles: ["reference/grants.md"] }], [])).toThrow("watchContextFiles");
+  expect(() => configuredThreadDestinations([{ ...personal!, watchContextFiles: "HARA.md" as never }], [])).toThrow("watchContextFiles");
+  expect(() => configuredThreadDestinations([{ ...home!, watchContextFiles: ["HARA.md"] }], [])).toThrow("contextDir");
+  expect(() => configuredThreadDestinations([{ ...raw!, contextDir: "context", watchContextFiles: ["HARA.md"] }], [])).toThrow("contextDir");
+});
