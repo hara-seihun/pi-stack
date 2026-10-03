@@ -25,6 +25,7 @@ public class KenanOverlayTest {
         final android.widget.FrameLayout root;
         int adds, updates, removes;
         int failAdd;
+        boolean deferAttachment;
         RuntimeException addFailure, updateFailure;
 
         Windows() {
@@ -40,8 +41,10 @@ public class KenanOverlayTest {
                             if (++adds == failAdd) throw addFailure;
                             View view = (View) args[0];
                             assertTrue("view added twice", attached.add(view));
-                            root.addView(view);
-                            assertTrue("fake window must attach its view", view.isAttachedToWindow());
+                            if (!deferAttachment) {
+                                root.addView(view);
+                                assertTrue("fake window must attach its view", view.isAttachedToWindow());
+                            }
                         }
                         case "updateViewLayout" -> {
                             updates++;
@@ -116,6 +119,15 @@ public class KenanOverlayTest {
                 assertEquals(0, windows.updates);
             }
         }
+    }
+    @Test public void failedDotAttachmentRemovesSceneBeforeItsFirstFrame() {
+        Windows windows = new Windows();
+        windows.deferAttachment = true;
+        windows.failAdd = 2;
+        windows.addFailure = new WindowManager.BadTokenException("Service token expired before first frame");
+        assertTrue(overlay(windows).closed());
+        assertEquals(1, windows.removes);
+        assertTrue(windows.attached.isEmpty());
     }
     @Test public void detachedPositionUpdateClosesOverlayInsteadOfCrashing() throws Exception {
         Windows windows = new Windows();

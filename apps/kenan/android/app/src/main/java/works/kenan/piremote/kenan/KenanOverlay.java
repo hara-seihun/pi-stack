@@ -41,6 +41,8 @@ import android.widget.TextView;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import org.json.JSONObject;
@@ -57,6 +59,7 @@ final class KenanOverlay {
     private final WindowManager.LayoutParams dotAt;
     private final ArrayDeque<String> transcript = new ArrayDeque<>();
     private final Map<String, Runnable> pending = new HashMap<>();
+    private final Set<View> ownedWindows = new HashSet<>();
     private LinearLayout panel;
     private WindowManager.LayoutParams panelAt;
     private TextView history;
@@ -108,7 +111,7 @@ final class KenanOverlay {
         if (writer() != null) writer().overlayUnavailable();
     }
     private boolean add(View view, WindowManager.LayoutParams at) {
-        try { windows.addView(view, at); return true; }
+        try { windows.addView(view, at); ownedWindows.add(view); return true; }
         catch (WindowManager.BadTokenException | WindowManager.InvalidDisplayException | SecurityException failure) {
             unavailable(failure); return false;
         }
@@ -119,7 +122,7 @@ final class KenanOverlay {
         catch (IllegalArgumentException | SecurityException failure) { unavailable(failure); return false; }
     }
     private void remove(View view) {
-        if (view == null || !view.isAttachedToWindow()) return;
+        if (view == null || !ownedWindows.remove(view)) return;
         try { windows.removeViewImmediate(view); }
         catch (IllegalArgumentException | SecurityException failure) { Log.w("KenanOverlay", "Window already detached", failure); }
     }
