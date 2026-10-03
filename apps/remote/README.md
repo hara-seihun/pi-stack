@@ -155,6 +155,8 @@ Android's [notification service](../kenan/android/app/src/main/java/works/kenan/
 - the root npm workspaces installed and Pi Orchestrator built
 - Android SDK 36 and Java 21 to build Kenan
 
+Remote's `test` and `typecheck` commands use [`prepare-check.mjs`](prepare-check.mjs) to build Kenan Memory, Root Kenan, and Orchestrator before checking consumers. This supplies workspace declarations and the Orchestrator runtime from a clean checkout without depending on another concurrent check or a previous deployment.
+
 ## Live development on a host
 
 Vite binds to loopback on port 5175 and proxies `/v1` to the local router on port 8788. Without `PI_REMOTE_DEV_ALLOWED_HOSTS`, Vite accepts its built-in localhost hosts only. To access a live checkout through a private hostname, set `PI_REMOTE_DEV_ALLOWED_HOSTS` to comma-separated hostnames in the host process environment. Do not put a machine's tailnet name in the Vite config. The setting affects only the development server, not production bundles or the Android bootstrap URL.

@@ -18,6 +18,7 @@
     "dev": "vite",
     "build": "vite build && npm run build:meet-adapter && node compress-dist.mjs",
     "build:meet-adapter": "vite build --config vite.meet-adapter.config.ts",
+    "pretypecheck": "node prepare-check.mjs",
     "typecheck": "tsc -p tsconfig.web.json && tsc -p tsconfig.json",
     "test": "npm run build && node check.mjs"
   },
