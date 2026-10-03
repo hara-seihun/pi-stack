@@ -6,7 +6,9 @@
   "exports": {
     "./runtime": { "types": "./dist/root-runtime.d.ts", "bun": "./src/root-runtime.ts", "default": "./dist/root-runtime.js" },
     "./service": { "types": "./dist/service.d.ts", "bun": "./src/service.ts", "default": "./dist/service.js" },
-    "./visibility": { "types": "./dist/visibility.d.ts", "bun": "./src/visibility.ts", "default": "./dist/visibility.js" }
+    "./visibility": { "types": "./dist/visibility.d.ts", "bun": "./src/visibility.ts", "default": "./dist/visibility.js" },
+    "./consent-contract": { "types": "./dist/consent-contract.d.ts", "bun": "./src/consent-contract.ts", "default": "./dist/consent-contract.js" },
+    "./consent": { "types": "./dist/consent.d.ts", "bun": "./src/consent.ts", "default": "./dist/consent.js" }
   },
   "scripts": { "build": "tsc -p tsconfig.json", "test": "bun test tests", "start": "bun src/main.ts" },
   "dependencies": { "kenan-memory": "file:../kenan-memory", "pi-orchestrator": "file:../orchestrator", "@earendil-works/pi-coding-agent": "0.87.1", "@earendil-works/pi-ai": "0.87.1", "typebox": "^1.3.16" }
