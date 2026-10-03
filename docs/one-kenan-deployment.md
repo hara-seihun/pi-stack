@@ -126,6 +126,14 @@ additive to these new services only; no original user's live unit or host swap i
 - `pi-kenan-root.service`: `pi-kenan`; joins custody's private namespace, reads
   `kenan-memory-root` and `kenan-root-admin` through systemd credentials. Admin capability is
   64 lowercase hexadecimal characters in `/var/lib/pi-kenan/root-admin-capability`.
+  Consent uses a distinct random 64-hex `rootConsentCapabilityFile` (default
+  `/var/lib/pi-kenan/root-consent-capability`), root-only `0600`, delivered solely to the
+  root runtime as `kenan-root-consent` through systemd credentials. Persons and rooms never
+  receive it. `PI_KENAN_ROOT_CONSENT_TOKEN_FILE=%d/kenan-root-consent` and
+  `PI_KENAN_ROOT_ROUTER_URL=http://127.0.0.1:routerPort` configure root→router consent;
+  `routerPort` defaults to the existing router's `8788`. The router reads capability/config
+  dynamically, without a restart. Consent SQLite is inside encrypted
+  `/var/lib/pi-kenan/private/root/consent.sqlite3`, never the public roster or deployment state.
 - `pi-kenan-memory.service`: `pi-kenan`; joins custody, reads auth config through credentials.
 - `pi-kenan-journal.timer/service`: `pi-kenan`; joins custody, publisher credential, encrypted store.
 - `pi-rooms.service`: separate `pi-rooms` identity, no custody namespace/key/private access,
@@ -150,7 +158,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-deploy.test.py
 sudo deploy/one-kenan-rehearse
 ```
 
-The eight tests use temporary people, paths, configs and command stubs. The privileged rehearsal
+The nine tests use temporary people, paths, configs and command stubs. The privileged rehearsal
 runs them foreground under `unshare --mount --propagation private`; no live unit, `/etc`, key,
 firewall or folder mount is touched. They prove preparation has no host effect, no user-service
 handoff, dedicated broker ownership, private root credentials, unprivileged room isolation,
