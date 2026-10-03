@@ -1,0 +1,324 @@
+{
+  "plain/immediate/natural-meeting": {
+    "clips": 7,
+    "passed": 2,
+    "meaning_proxy_passed": 3,
+    "client_finish_ms": [
+      217.493,
+      62.937,
+      99.183,
+      103.602,
+      65.561,
+      0.604,
+      107.605
+    ],
+    "errors": {
+      "raw_verbatim": 11,
+      "raw_target": 13,
+      "clean_target": 12
+    },
+    "words": {
+      "raw_verbatim": 84,
+      "raw_target": 77,
+      "clean_target": 77
+    },
+    "dictionary_raw": {
+      "tp": 2,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.6666666666666666
+    },
+    "dictionary_clean": {
+      "tp": 2,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.6666666666666666
+    },
+    "wer": {
+      "raw_verbatim": 0.13095238095238096,
+      "raw_target": 0.16883116883116883,
+      "clean_target": 0.15584415584415584
+    }
+  },
+  "dictionary/immediate/natural-meeting": {
+    "clips": 7,
+    "passed": 2,
+    "meaning_proxy_passed": 3,
+    "client_finish_ms": [
+      0.619,
+      68.909,
+      109.085,
+      105.138,
+      72.553,
+      0.781,
+      198.288
+    ],
+    "errors": {
+      "raw_verbatim": 13,
+      "raw_target": 15,
+      "clean_target": 14
+    },
+    "words": {
+      "raw_verbatim": 84,
+      "raw_target": 77,
+      "clean_target": 77
+    },
+    "dictionary_raw": {
+      "tp": 2,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.6666666666666666
+    },
+    "dictionary_clean": {
+      "tp": 2,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.6666666666666666
+    },
+    "wer": {
+      "raw_verbatim": 0.15476190476190477,
+      "raw_target": 0.19480519480519481,
+      "clean_target": 0.18181818181818182
+    }
+  },
+  "plain/silence/natural-meeting": {
+    "clips": 2,
+    "passed": 1,
+    "meaning_proxy_passed": 1,
+    "client_finish_ms": [
+      0.797,
+      0.815
+    ],
+    "errors": {
+      "raw_verbatim": 3,
+      "raw_target": 3,
+      "clean_target": 4
+    },
+    "words": {
+      "raw_verbatim": 26,
+      "raw_target": 26,
+      "clean_target": 26
+    },
+    "dictionary_raw": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "dictionary_clean": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "wer": {
+      "raw_verbatim": 0.11538461538461539,
+      "raw_target": 0.11538461538461539,
+      "clean_target": 0.15384615384615385
+    }
+  },
+  "dictionary/silence/natural-meeting": {
+    "clips": 2,
+    "passed": 1,
+    "meaning_proxy_passed": 1,
+    "client_finish_ms": [
+      0.501,
+      0.73
+    ],
+    "errors": {
+      "raw_verbatim": 5,
+      "raw_target": 5,
+      "clean_target": 6
+    },
+    "words": {
+      "raw_verbatim": 26,
+      "raw_target": 26,
+      "clean_target": 26
+    },
+    "dictionary_raw": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "dictionary_clean": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "wer": {
+      "raw_verbatim": 0.19230769230769232,
+      "raw_target": 0.19230769230769232,
+      "clean_target": 0.23076923076923078
+    }
+  },
+  "plain/immediate/synthetic-espeak": {
+    "clips": 6,
+    "passed": 0,
+    "meaning_proxy_passed": 0,
+    "client_finish_ms": [
+      398.911,
+      0.51,
+      0.571,
+      0.698,
+      0.806,
+      1.158
+    ],
+    "errors": {
+      "raw_verbatim": 12,
+      "raw_target": 12,
+      "clean_target": 12
+    },
+    "words": {
+      "raw_verbatim": 27,
+      "raw_target": 27,
+      "clean_target": 27
+    },
+    "dictionary_raw": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 3,
+      "precision": null,
+      "recall": 0.0
+    },
+    "dictionary_clean": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 3,
+      "precision": null,
+      "recall": 0.0
+    },
+    "wer": {
+      "raw_verbatim": 0.4444444444444444,
+      "raw_target": 0.4444444444444444,
+      "clean_target": 0.4444444444444444
+    }
+  },
+  "dictionary/immediate/synthetic-espeak": {
+    "clips": 6,
+    "passed": 0,
+    "meaning_proxy_passed": 0,
+    "client_finish_ms": [
+      367.228,
+      0.504,
+      0.594,
+      0.62,
+      0.934,
+      0.681
+    ],
+    "errors": {
+      "raw_verbatim": 12,
+      "raw_target": 11,
+      "clean_target": 11
+    },
+    "words": {
+      "raw_verbatim": 27,
+      "raw_target": 26,
+      "clean_target": 26
+    },
+    "dictionary_raw": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 3,
+      "precision": null,
+      "recall": 0.0
+    },
+    "dictionary_clean": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 3,
+      "precision": null,
+      "recall": 0.0
+    },
+    "wer": {
+      "raw_verbatim": 0.4444444444444444,
+      "raw_target": 0.4230769230769231,
+      "clean_target": 0.4230769230769231
+    }
+  },
+  "plain/tight/natural-meeting": {
+    "clips": 2,
+    "passed": 0,
+    "meaning_proxy_passed": 0,
+    "client_finish_ms": [
+      137.319,
+      173.786
+    ],
+    "errors": {
+      "raw_verbatim": 4,
+      "raw_target": 4,
+      "clean_target": 4
+    },
+    "words": {
+      "raw_verbatim": 26,
+      "raw_target": 26,
+      "clean_target": 26
+    },
+    "dictionary_raw": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "dictionary_clean": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "wer": {
+      "raw_verbatim": 0.15384615384615385,
+      "raw_target": 0.15384615384615385,
+      "clean_target": 0.15384615384615385
+    }
+  },
+  "dictionary/tight/natural-meeting": {
+    "clips": 2,
+    "passed": 0,
+    "meaning_proxy_passed": 0,
+    "client_finish_ms": [
+      120.856,
+      245.065
+    ],
+    "errors": {
+      "raw_verbatim": 6,
+      "raw_target": 6,
+      "clean_target": 6
+    },
+    "words": {
+      "raw_verbatim": 26,
+      "raw_target": 26,
+      "clean_target": 26
+    },
+    "dictionary_raw": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "dictionary_clean": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 1,
+      "precision": null,
+      "recall": 0.0
+    },
+    "wer": {
+      "raw_verbatim": 0.23076923076923078,
+      "raw_target": 0.23076923076923078,
+      "clean_target": 0.23076923076923078
+    }
+  }
+}
