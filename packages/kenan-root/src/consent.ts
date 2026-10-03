@@ -104,7 +104,7 @@ export class RootConsentManager {
       const answer = await this.options.bridge.answer({ consentId: row.id, subject: row.subject, ...row.receipt! });
       if (!answer.ok) return answer;
       if (answer.value.question !== row.question) return { ok: false, message: "Subject's question does not match the recorded consent" };
-      if (!answer.value.answer) return { ok: true, value: undefined };
+      if (!answer.value.answer) { this.save(row); return { ok: true, value: undefined }; }
       row.answer = JSON.stringify(answer.value.answer); row.state = "answered"; this.save(row);
     }
     if (row.state === "answered") {
