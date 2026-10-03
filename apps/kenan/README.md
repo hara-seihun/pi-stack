@@ -39,6 +39,8 @@ Finish** before timing out; this is a wait budget, not a latency promise. If rew
 is guarded, Android inserts the cleaned baseline and shows **Kept the original
 wording to avoid changing its meaning.** If inference is unavailable, it inserts
 the baseline and shows **Local rewrite unavailable; inserted the transcript.**
+During cold background prefix priming it shows **Local rewrite is warming up;
+inserted the transcript.** and does not make dictation wait for the cold model.
 These are explicit degraded outcomes, not successful meaning-aware rewrites.
 [Rewrite design/limits](../write/engine/REWRITE.md) owns the guard and pinned runtime
 links and [bounded measured results](../write/engine/rewrite-results/README.md).

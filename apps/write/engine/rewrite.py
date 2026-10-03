@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+import http.client
 import json
 import logging
 from pathlib import Path
@@ -12,7 +13,7 @@ import secrets
 import socket
 import subprocess
 import tempfile
-from threading import Lock
+from threading import Event, Lock, Thread
 import time
 import urllib.error
 import urllib.request
@@ -101,8 +102,13 @@ class Decision:
 
 
 class LocalRewriter:
-    def __init__(self, binary: Path, model: Path, *, threads: int = 4, timeout: float = 18.0):
+    def __init__(self, binary: Path, model: Path, *, threads: int = 4, batch_threads: int = 8,
+                 timeout: float = 18.0, startup_timeout: float = 20.0, warmup_timeout: float = 120.0):
         self.lock = Lock()
+        self.warm_done = Event()
+        self.warm_error = None
+        self.warm_thread = None
+        self.warmup_timeout = warmup_timeout
         self.timeout = timeout
         self.process = None
         self.closed = False
@@ -120,9 +126,9 @@ class LocalRewriter:
         try:
             self.process = subprocess.Popen([
                 str(binary), '-m', str(model), '--host', '127.0.0.1', '--port', str(port),
-                '-ngl', '0', '-t', str(threads), '-tb', str(threads), '-c', '2048', '-np', '1',
+                '-ngl', '0', '-t', str(threads), '-tb', str(batch_threads), '-c', '2048', '-np', '1',
                 '--api-key-file', str(key_file), '--log-disable'], stdout=subprocess.DEVNULL, stderr=self.diagnostics)
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + startup_timeout
             while True:
                 if self.process.poll() is not None:
                     self.diagnostics.seek(0)
@@ -135,13 +141,29 @@ class LocalRewriter:
                     if time.monotonic() >= deadline:
                         raise RuntimeError('Local Write rewrite model did not become ready')
                     time.sleep(.025)
-            # Populate shared prompt KV once, outside a person's first Finish.
-            self._request('hello', {})
+            self.warm_thread = Thread(target=self._warm, name='write-rewrite-warmup', daemon=True)
+            self.warm_thread.start()
         except BaseException:
             self.close()
             raise
 
-    def _request(self, source: str, dictionary: dict) -> tuple[str, str]:
+    def _warm(self):
+        began = time.monotonic()
+        try:
+            with self.lock:
+                if self.closed:
+                    return
+                self._request('hello', {}, timeout=self.warmup_timeout, max_tokens=1)
+            LOG.info('Write local rewrite prefix ready in %.2fs', time.monotonic() - began)
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
+            self.warm_error = type(error).__name__
+            if not self.closed:
+                LOG.error('Write local rewrite warmup failed: %s', self.warm_error)
+        finally:
+            self.warm_done.set()
+
+    def _request(self, source: str, dictionary: dict, *, timeout: float | None = None,
+                 max_tokens: int | None = None) -> tuple[str, str]:
         messages = [{'role': 'system', 'content': SYSTEM}]
         for before, after in EXAMPLES:
             messages.extend([{'role': 'user', 'content': json.dumps({'dictation': before})}, {'role': 'assistant', 'content': after}])
@@ -155,12 +177,13 @@ class LocalRewriter:
         if present:
             data['protectedTerms'] = present
         messages.append({'role': 'user', 'content': json.dumps(data)})
-        body = json.dumps({'messages': messages, 'temperature': 0, 'max_tokens': min(384, max(64, len(tokens(source)) * 3)),
+        body = json.dumps({'messages': messages, 'temperature': 0,
+                           'max_tokens': max_tokens if max_tokens is not None else min(384, max(64, len(tokens(source)) * 3)),
                            'cache_prompt': True}).encode()
         request = urllib.request.Request(self.url + '/v1/chat/completions', data=body,
                                          headers={'Content-Type': 'application/json',
                                                   'Authorization': 'Bearer ' + self.secret})
-        with self.opener.open(request, timeout=self.timeout) as response:
+        with self.opener.open(request, timeout=self.timeout if timeout is None else timeout) as response:
             result = json.load(response)
         try:
             choice = result['choices'][0]
@@ -171,6 +194,10 @@ class LocalRewriter:
             raise ValueError('Invalid local rewrite response content')
         return text.strip(), finish
 
+    def wait_ready(self, timeout: float | None = None) -> bool:
+        return (self.warm_done.wait(self.warmup_timeout + 3 if timeout is None else timeout)
+                and not self.closed and self.warm_error is None)
+
     def rewrite(self, source: str, baseline: str, dictionary: dict) -> Decision:
         if not source.strip():
             return Decision(baseline, 'unchanged', None, 0)
@@ -178,6 +205,10 @@ class LocalRewriter:
             return Decision(baseline, 'guarded', 'chat_control_input', 0)
         if len(tokens(source)) > 256 or len(source) > 2400:
             return Decision(baseline, 'guarded', 'input_limit', 0)
+        if not self.warm_done.is_set():
+            return Decision(baseline, 'unavailable', 'warming', 0)
+        if self.warm_error:
+            return Decision(baseline, 'unavailable', 'warmup_failed', 0)
         began = time.perf_counter()
         if not self.lock.acquire(timeout=8):
             return Decision(baseline, 'unavailable', 'queue_busy', round((time.perf_counter() - began) * 1000, 2))
@@ -186,7 +217,7 @@ class LocalRewriter:
                 return Decision(baseline, 'unavailable', 'runtime_closed', round((time.perf_counter() - began) * 1000, 2))
             try:
                 candidate, finish = self._request(source, dictionary)
-            except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
+            except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
                 LOG.warning('Write rewrite unavailable: %s', type(error).__name__)
                 return Decision(baseline, 'unavailable', 'inference_failed', round((time.perf_counter() - began) * 1000, 2))
         finally:
@@ -208,6 +239,8 @@ class LocalRewriter:
                 self.process.kill()
                 self.process.wait(timeout=3)
             self.process = None
+        if self.warm_thread is not None:
+            self.warm_thread.join(timeout=3)
         if hasattr(self, 'diagnostics'):
             self.diagnostics.close()
         if hasattr(self, 'private'):

@@ -1,6 +1,7 @@
 import io
 import json
 from pathlib import Path
+from threading import Event, Lock
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -10,6 +11,59 @@ from rewrite import LocalRewriter, guard, negations
 
 
 class RewriteGuardTest(unittest.TestCase):
+    def test_cold_warming_is_explicit_and_does_not_wait_for_the_generation_lock(self):
+        runtime = object.__new__(LocalRewriter)
+        runtime.warm_done = Event()
+        runtime.warm_error = None
+        runtime.lock = Lock()
+        runtime.lock.acquire()
+        decision = runtime.rewrite('hello', 'Hello.', {})
+        self.assertEqual((decision.text, decision.status, decision.reason, decision.latency_ms),
+                         ('Hello.', 'unavailable', 'warming', 0))
+        self.assertTrue(runtime.lock.locked())
+        runtime.lock.release()
+
+    def test_warmup_is_bounded_one_token_and_failure_is_not_readiness(self):
+        runtime = object.__new__(LocalRewriter)
+        runtime.warm_done, runtime.lock = Event(), Lock()
+        runtime.closed, runtime.warm_error, runtime.warmup_timeout = False, None, 120
+        calls = []
+        def fail(source, dictionary, **kwargs):
+            calls.append(kwargs)
+            raise TimeoutError('cold prefix too slow')
+        runtime._request = fail
+        runtime._warm()
+        self.assertEqual(calls, [{'timeout': 120, 'max_tokens': 1}])
+        self.assertFalse(runtime.wait_ready(0))
+        self.assertEqual(runtime.rewrite('hello', 'Hello.', {}).reason, 'warmup_failed')
+
+    def test_close_reaps_the_child_and_joins_inflight_warmup(self):
+        entered, stopped = Event(), Event()
+        class Process:
+            def poll(self):
+                return 0 if stopped.is_set() else None
+            def terminate(self):
+                stopped.set()
+            def wait(self, **kwargs):
+                return 0
+        def warm(*args, **kwargs):
+            entered.set()
+            if not stopped.wait(1):
+                raise TimeoutError('test did not close the runtime')
+            raise ConnectionResetError('child closed')
+        opener = SimpleNamespace(open=lambda *args, **kwargs: io.BytesIO(b'{}'))
+        with patch('rewrite.subprocess.Popen', return_value=Process()), \
+                patch('rewrite.urllib.request.build_opener', return_value=opener), \
+                patch.object(LocalRewriter, '_request', side_effect=warm):
+            runtime = LocalRewriter(Path('/runtime'), Path('/model'))
+            directory = Path(runtime.private.name)
+            self.assertTrue(entered.wait(1))
+            runtime.close()
+            self.assertTrue(stopped.is_set())
+            self.assertFalse(runtime.warm_thread.is_alive())
+            self.assertFalse(directory.exists())
+            self.assertFalse(runtime.wait_ready(0))
+
     def test_editor_receives_only_dictionary_terms_already_present(self):
         runtime = object.__new__(LocalRewriter)
         runtime.url, runtime.secret, runtime.timeout = 'http://127.0.0.1:1', 'test-key', 1

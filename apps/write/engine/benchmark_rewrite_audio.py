@@ -41,6 +41,8 @@ def main():
     dictionary = manifest['dictionary'] if enabled else {}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if not rewriter.wait_ready():
+            raise RuntimeError('Local rewrite did not become ready for the warmed benchmark')
         with args.output.open('w') as output:
             for record in selected:
                 fixture = fixtures[record['id']]

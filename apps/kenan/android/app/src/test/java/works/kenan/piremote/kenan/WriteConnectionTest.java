@@ -105,6 +105,16 @@ public final class WriteConnectionTest {
         }
     }
 
+    @Test public void coldRewriteWarmingKeepsTranscriptAndReportsItsActualState() throws Exception {
+        Capture capture = new Capture();
+        capture.connect();
+        capture.socket.listener.onMessage(capture.socket,
+            "{\"type\":\"final\",\"text\":\"Ready transcript\",\"rewrite\":{\"status\":\"unavailable\",\"reason\":\"warming\"}}");
+        capture.closed();
+        assertEquals("Ready transcript", capture.result);
+        assertEquals(List.of("Local rewrite is warming up; inserted the transcript."), capture.notices);
+    }
+
     @Test public void finishFollowsTailPacketExactlyOnceAndKeepsSocketForFinal() throws Exception {
         Capture capture = new Capture();
         WriteConnection connection = capture.connect();
