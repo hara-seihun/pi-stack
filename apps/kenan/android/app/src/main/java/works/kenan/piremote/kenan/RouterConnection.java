@@ -14,6 +14,7 @@ public final class RouterConnection extends Application {
 
     @Override public void onCreate() {
         super.onCreate();
+        CrashReports.install(this);
         preferences = getSharedPreferences("router-connection", MODE_PRIVATE);
     }
 
