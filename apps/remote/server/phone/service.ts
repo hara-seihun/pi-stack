@@ -151,7 +151,11 @@ const local = Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostnam
       await finish(c, "preflight", "No telephone call placed");
       return json({ ready: true, model: "gpt-live-1", audioOutputBytes: c.audioOutputBytes, placedCall: false });
     }
-    catch { await finish(c, "failed", "Preflight failed"); return error("Voice audio preflight failed", 502); }
+    catch (cause) {
+      const diagnostics = await c.page?.evaluate(() => (window as any).telephoneMediaDiagnostics?.()).catch(() => null);
+      log(c.id, "preflight-error", { error: cause instanceof Error ? cause.message : "Preflight failed", diagnostics });
+      await finish(c, "failed", "Preflight failed"); return error("Voice audio preflight failed", 502);
+    }
   }
   if (url.pathname === "/calls" && req.method === "GET") return json(db.query("SELECT id,provider_id,status,started_at,ended_at,error FROM calls ORDER BY started_at DESC LIMIT 50").all());
   if (url.pathname === "/calls" && req.method === "POST") {
