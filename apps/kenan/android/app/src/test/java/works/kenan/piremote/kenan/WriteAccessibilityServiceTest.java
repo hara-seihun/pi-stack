@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -65,43 +66,66 @@ public class WriteAccessibilityServiceTest {
         call(service, "failed", "connection lost");
         assertFalse((boolean) get(service, "finishing"));
     }
-    private void windowCall(WriteAccessibilityService service, String method) throws Exception {
-        Method call = WriteAccessibilityService.class.getDeclaredMethod(method);
-        call.setAccessible(true);
-        call.invoke(service);
+    @After public void clearSharedOwner() throws Exception {
+        KenanOverlayTest.clearSharedOverlay();
     }
-    private void windows(WriteAccessibilityService service, String failedOperation) throws Exception {
-        set(service, "windows", java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
-            new Class<?>[]{android.view.WindowManager.class}, (proxy, method, args) -> {
-                if (method.getName().equals(failedOperation)) {
-                    if (failedOperation.equals("addView")) throw new android.view.WindowManager.BadTokenException("Service token expired");
-                    throw new IllegalArgumentException("Window was detached");
-                }
-                return null;
-            }));
-    }
-    @Test public void expiredWindowTokenDoesNotCrashApplication() throws Exception {
-        WriteAccessibilityService service = Robolectric.buildService(WriteAccessibilityService.class).get();
-        windows(service, "addView");
-        windowCall(service, "show");
-        windowCall(service, "showDismissTarget");
-        assertNull(get(service, "bubble"));
-        assertNull(get(service, "dismissTarget"));
-    }
-    @Test public void detachedWindowUpdateRemovesOverlayInsteadOfCrashing() throws Exception {
-        WriteAccessibilityService service = Robolectric.buildService(WriteAccessibilityService.class).get();
-        windows(service, "updateViewLayout");
-        windowCall(service, "show");
-        assertNotNull(get(service, "bubble"));
-        Method move = WriteAccessibilityService.class.getDeclaredMethod("move", int.class, int.class);
-        move.setAccessible(true);
-        move.invoke(service, 10, 10);
-        assertNull(get(service, "bubble"));
-    }
-    @Test public void destroyDoesNotRecreateOverlay() throws Exception {
+    @Test public void destroyFencesAudioAndClosesOwnedOverlayWithoutRecreatingIt() throws Exception {
         WriteAccessibilityService service = withActiveSender();
+        set(service, "active", service);
+        set(service, "shown", true);
+        KenanOverlayTest.Windows windows = new KenanOverlayTest.Windows();
+        KenanOverlay overlay = new KenanOverlay(service, windows.manager());
+        KenanOverlayTest.bindSharedOverlay(service, null, service, overlay);
+        assertTrue(service.visible());
+
         service.onDestroy();
+
         assertTrue((boolean) get(service, "destroyed"));
-        assertNull(get(service, "bubble"));
+        assertFalse(service.visible());
+        assertFalse(service.busy());
+        assertNull(get(service, "active"));
+        assertTrue(overlay.closed());
+        assertNull(SharedOverlay.current());
+        assertNull(SharedOverlay.writer());
+        assertTrue(windows.attached.isEmpty());
+        int added = windows.adds;
+        int removed = windows.removes;
+
+        call(service, "completed", "late result");
+        call(service, "failed", "late failure");
+        service.onAccessibilityEvent(android.view.accessibility.AccessibilityEvent.obtain());
+        service.onDestroy();
+        SharedOverlay.refresh();
+
+        assertFalse(service.visible());
+        assertNull(SharedOverlay.current());
+        assertEquals(added, windows.adds);
+        assertEquals(removed, windows.removes);
+    }
+    @Test public void destroyingWriteLeavesPhoneOwnedOverlayRunning() throws Exception {
+        WriteAccessibilityService service = withActiveSender();
+        set(service, "active", service);
+        set(service, "shown", true);
+        PhoneAccessibilityService phone = Robolectric.buildService(PhoneAccessibilityService.class).get();
+        KenanOverlayTest.Windows windows = new KenanOverlayTest.Windows();
+        KenanOverlay overlay = new KenanOverlay(phone, windows.manager());
+        KenanOverlayTest.bindSharedOverlay(phone, phone, service, overlay);
+
+        service.onDestroy();
+
+        assertTrue((boolean) get(service, "destroyed"));
+        assertFalse(service.visible());
+        assertNull(SharedOverlay.writer());
+        assertTrue(SharedOverlay.hasPhone());
+        assertSame(overlay, SharedOverlay.current());
+        assertFalse(overlay.closed());
+        assertEquals(0, windows.removes);
+        assertEquals(2, windows.attached.size());
+
+        SharedOverlay.detach(phone);
+        assertTrue(overlay.closed());
+        assertNull(SharedOverlay.current());
+        assertFalse(SharedOverlay.hasPhone());
+        assertTrue(windows.attached.isEmpty());
     }
 }
