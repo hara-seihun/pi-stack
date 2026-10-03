@@ -1,0 +1,31 @@
+[Unit]
+Description=Kenan thread daemon for %i
+Requires=pi-kenan-custody.service
+BindsTo=pi-kenan-custody.service
+After=pi-kenan-custody.service
+JoinsNamespaceOf=pi-kenan-custody.service
+
+[Service]
+Type=simple
+User=@EXECUTION_USER@
+Group=@EXECUTION_USER@
+EnvironmentFile=@KENAN_ENV_FILE@
+EnvironmentFile=@STATE_DIR@/environments/%i
+Environment=HOME=/home/%i
+Environment=PI_CODING_AGENT_DIR=/home/%i/.pi/agent
+Environment=PI_REMOTE_CONFIG=@PERSONS_DIR@/%i.json
+Environment=PATH=@STATE_DIR@/bin:/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+LoadCredential=kenan-memory-supervisor:@STATE_DIR@/supervisor-capabilities/%i
+PrivateMounts=yes
+ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
+ExecStart=@REMOTE_ROOT@/server/pi-kenan-launch /usr/local/bin/node /srv/pi/pi-orchestrator/dist/cli.js daemon
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+MemoryHigh=4G
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target

@@ -16,6 +16,7 @@ import type { HostAuthentication } from "./protocol";
 import { networkStatus, readPrivateNetwork } from "./private-network";
 import { Rooms, ROOM_CUSTODIAN } from "./rooms";
 import { oneKenanEnabled } from "kenan-memory/config";
+import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -42,6 +43,7 @@ const login = oidcSettings ? new OidcLogin(oidcSettings) : null;
 const privateNetwork = readPrivateNetwork();
 const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
+const ONE_KENAN = oneKenanConfig();
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
 const operations = new Map<string, Promise<unknown>>();
 const rooms = oneKenanEnabled() ? new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/var/lib/pi-remote/one-kenan/rooms.sqlite3",
@@ -111,6 +113,15 @@ async function waitForSupervisor(person: Person): Promise<boolean> {
 
 type StartResult = { ok: true } | { ok: false; error: string; status: number };
 async function start(person: Person, key: string): Promise<StartResult> {
+  const personal = await startPersonal(person, key);
+  if (personal.ok && ONE_KENAN && person.unlock) {
+    void custodyAuthenticate(ONE_KENAN, person.user, key).then(captured => {
+      if (!captured.ok) console.error(`Kenan custody capture for ${person.user} did not finish: ${captured.error}`);
+    });
+  }
+  return personal;
+}
+async function startPersonal(person: Person, key: string): Promise<StartResult> {
   if (person.unlock && !key) return { ok: false, error: "Key required", status: 400 };
   if (await unitActive(person)) {
     if (person.unlock) {
@@ -315,7 +326,9 @@ async function proxy(person: Pick<Person, "user" | "port">, origin: string, req:
 }
 
 const persons = login ? [] : PEOPLE.filter(person => person.auth !== "oidc").map(publicPerson);
-const lockedEnvironment = () => ({
+const lockedEnvironment = async () => ({
+  ...(ONE_KENAN ? { custody: { oneKenan: true, locked: (await custodyStatus(ONE_KENAN))?.locked ?? true,
+    message: "Kenan holds the folder keys. After a restart, the first enrolled person to log in opens custody and every known folder." } } : {}),
   id: ENVIRONMENT_ID, name: ENVIRONMENT_NAME, requiresUnlock: true, persons, profiles: [],
   ...(login ? { authentication: { type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with Google" } satisfies HostAuthentication } : {}),
   capabilities: { voice: true, downloads: true, notifications: true, files: true },
@@ -397,7 +410,8 @@ async function route(req: Request, url: URL): Promise<Response> {
   if (appUpdate) return appUpdate;
   if (url.pathname === "/v1/router-health") {
     const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
-    return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key" });
+    return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key",
+      ...(ONE_KENAN ? { custody: await custodyStatus(ONE_KENAN) } : {}) });
   }
   if (url.pathname === "/v1/network" && req.method === "GET") return Response.json(networkStatus(privateNetwork, req));
   const asset = webResponse(WEB_DIR, url.pathname, req.method, req);
@@ -406,7 +420,7 @@ async function route(req: Request, url: URL): Promise<Response> {
   const identity = requestIdentity(req, url);
   if (identity.error) return identity.error;
   const { authenticated, asserted, person } = identity;
-  if (url.pathname === "/v1/environment" && req.method === "GET" && !authenticated) return Response.json({ environment: lockedEnvironment() });
+  if (url.pathname === "/v1/environment" && req.method === "GET" && !authenticated) return Response.json({ environment: await lockedEnvironment() });
   if (asserted && !person) return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote.", persons }, { status: 403 });
 
   if (url.pathname === "/v1/unlock" && req.method === "POST") {

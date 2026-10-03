@@ -1,0 +1,31 @@
+#!/usr/bin/python3
+"""Owning UID gate compiler while One Kenan is enabled; original compiler stays installed."""
+import json
+import os
+import pathlib
+import pwd
+import subprocess
+
+host = json.loads(pathlib.Path('/etc/pi-stack/host.json').read_text())
+if host.get('oneKenan') is not True:
+    os.execv('/usr/local/sbin/pi-user-access', ['/usr/local/sbin/pi-user-access'])
+one = json.loads(pathlib.Path('/etc/pi-stack/one-kenan.json').read_text())
+config = json.loads(pathlib.Path(one.get('ordinaryUsersFile', '/etc/pi-stack/ordinary-users.json')).read_text())
+shared = pwd.getpwnam(one['executionUser']).pw_uid
+owner, people = config['ownerUid'], config['people']
+def nft_set(values):
+    return '{ ' + ', '.join(str(value) for value in sorted(set(values))) + ' }'
+rules = ['destroy table inet pi_user_access', 'table inet pi_user_access {', 'chain output {', 'type filter hook output priority -20; policy accept;']
+ports = list(config['ownerPorts']) + [config['voicePort']]
+for person in people.values():
+    scoped = [person['brokerPort'], person['orchestratorPort']]
+    rules.append(f'fib daddr type local tcp dport {nft_set(scoped)} meta skuid != {nft_set([0, owner, person["uid"], shared])} reject with tcp reset')
+    rules.append(f'fib daddr type local tcp dport {person["supervisorPort"]} meta skuid != {nft_set([0, person["uid"], shared])} reject with tcp reset')
+    ports.extend(scoped + [person['supervisorPort']])
+rules.append(f'fib daddr type local tcp dport {nft_set(config["ownerPorts"])} meta skuid != {nft_set([0, owner, shared])} reject with tcp reset')
+rules.append(f'fib daddr type local tcp dport {config["voicePort"]} meta skuid != {nft_set([0, owner, shared] + [person["uid"] for person in people.values()])} reject with tcp reset')
+new_ports = list(one['ports'].values()) + [one.get('memoryPort', 19883)]
+rules.append(f'fib daddr type local tcp dport {nft_set(new_ports)} meta skuid != {nft_set([0, shared])} reject with tcp reset')
+ports.extend(new_ports)
+rules.extend(['}', 'chain input {', 'type filter hook input priority -20; policy accept;', f'iifname != "lo" tcp dport {nft_set(ports)} reject with tcp reset', '}', '}'])
+subprocess.run(['/usr/sbin/nft', '-f', '-'], input='\n'.join(rules)+'\n', text=True, check=True)
