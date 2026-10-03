@@ -46,10 +46,26 @@ def _word(item: Mapping[str, Any] | str) -> str:
     return item if isinstance(item, str) else str(item.get("w", ""))
 
 
+def _literal_indices(words: Sequence[str], context: str) -> set[int]:
+    literal: set[int] = set()
+    explicit_open = context.count('“') > context.count('”') or context.count('"') % 2 == 1
+    for index, word in enumerate(words):
+        if explicit_open or any(mark in word for mark in '“”"'):
+            literal.add(index)
+        for mark in word:
+            if mark == '“':
+                explicit_open = True
+            elif mark == '”':
+                explicit_open = False
+            elif mark == '"':
+                explicit_open = not explicit_open
+    return literal
+
+
 def _quotation_controls(words: Sequence[str], context: str) -> tuple[dict[int, tuple[int, str]], set[int]]:
     bare = [_bare(word) for word in words]
     commands: dict[int, tuple[int, str]] = {}
-    literal: set[int] = set()
+    literal = _literal_indices(words, context)
     opened = context.count('“') > context.count('”')
     i = 0
     while i < len(bare):
@@ -242,7 +258,8 @@ def _format(tokens: list[_Token], context: str) -> tuple[str, list[dict]]:
             cap = text.rstrip('”"').endswith(tuple(_END))
     terminal = text.rstrip('”"')
     if terminal and terminal[-1] not in ".?!,:;":
-        text = terminal + "." + text[len(terminal):]
+        literal_close = tokens[-1].text.endswith(('”', '"')) and tokens[-1].text not in {'”', '"'}
+        text = text + "." if literal_close else terminal + "." + text[len(terminal):]
         edits.append({"kind": "insert", "from": "", "to": ".",
                       "at": [tokens[-1].end, tokens[-1].end]})
     return text, edits
@@ -386,7 +403,11 @@ def clean(words: Sequence[Mapping[str, Any] | str],
         if len(punctuated) != len(kept):
             raise ValueError('punctuator must return one output per source token')
         restored = []
-        for token, text in zip(kept, punctuated):
+        literal_source = _literal_indices([_word(item) for item in words], context)
+        literal = {index for index, token in enumerate(kept) if token.start in literal_source}
+        for index, (token, text) in enumerate(zip(kept, punctuated)):
+            if index in literal:
+                text = token.text
             if text != token.text:
                 edits.append({'kind': 'format', 'from': token.text, 'to': text,
                               'at': [token.start, token.end]})

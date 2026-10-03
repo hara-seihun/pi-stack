@@ -75,6 +75,33 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(result['text'], 'Not 25 Sybil.')
         self.assertEqual([e['at'] for e in result['edits'] if e['kind']=='delete'], [[3,4]])
 
+    def test_literal_quoted_fillers_are_content_not_disfluencies(self):
+        class Tagger:
+            def predict(self, words):
+                return [(1, 1.0) if w.strip('“”"') in {'uh', 'um'} else (0, 1.0)
+                        for w in words]
+        for quote in ('"uh um"', '“uh um”'):
+            source = ('the exact string is ' + quote).split()
+            result = clean(source, tagger=Tagger())
+            self.assertIn(quote, result['text'])
+            self.assertFalse(any(edit['kind'] == 'delete' for edit in result['edits']))
+        self.assertEqual(clean(['uh', 'um'], context='The exact string is “',
+                               tagger=Tagger())['text'], 'uh um.')
+
+    def test_literal_quote_contents_are_not_repunctuated(self):
+        class Punctuator:
+            def punctuate(self, words):
+                return [word + ',' for word in words]
+        result = clean('the exact string is "uh um"'.split(), punctuator=Punctuator())
+        self.assertIn('"uh um"', result['text'])
+        self.assertFalse(any(edit['kind'] == 'format' and edit['at'][0] >= 4
+                             for edit in result['edits']))
+
+    def test_literal_quote_protection_ends_at_closing_mark(self):
+        result = clean('the string is “uh um” uh send it'.split())
+        self.assertIn('“uh um”', result['text'])
+        self.assertEqual([edit['at'] for edit in result['edits'] if edit['kind'] == 'delete'], [[5, 6]])
+
     def test_commands_are_format_edits(self):
         words = 'tasks colon bullet point review code bullet point send notes'.split()
         self.assertEqual(clean(words)['text'], 'Tasks:\n- Review code\n- Send notes.')
