@@ -45,13 +45,16 @@ test("any enrolled person's first post-reboot login opens all known folders", as
   expect(reboot.status().locked).toBe(false);
   expect((await reboot.authenticate("alice", "wrong")).ok).toBe(false);
 });
-test("unenrolled person cannot decrypt an existing locked store; next valid login collects once", async () => {
+test("unenrolled person's valid key waits in RAM and is retained when custody opens", async () => {
   const f = fixture(), first = f.create();
   await first.authenticate("alice", "alice-fixture-key");
   const reboot = f.create();
-  expect(await reboot.authenticate("bob", "bob-fixture-key")).toMatchObject({ ok: false, status: 423 });
-  await reboot.authenticate("alice", "alice-fixture-key");
   expect((await reboot.authenticate("bob", "bob-fixture-key")).ok).toBe(true);
+  expect(reboot.status()).toMatchObject({ locked: true, pending: ["bob"] });
+  expect((await reboot.authenticate("bob", "wrong")).ok).toBe(false);
+  await reboot.authenticate("alice", "alice-fixture-key");
+  expect(reboot.status()).toMatchObject({ locked: false, pending: [], enrolled: ["alice", "bob"] });
+  expect((await f.create().authenticate("bob", "bob-fixture-key")).ok).toBe(true);
   const original = readFileSync(f.path, "utf8");
   await reboot.authenticate("bob", "bob-fixture-key");
   expect(readFileSync(f.path, "utf8")).toBe(original);

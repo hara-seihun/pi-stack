@@ -7,7 +7,7 @@ type Box = { iv: string; tag: string; data: string };
 type Wrapper = { salt: string; box: Box };
 type DiskStore = { version: 1; wrappers: Record<string, Wrapper>; vault: Box };
 export type CustodyResult = { ok: true } | { ok: false; status: number; error: string };
-export type CustodyStatus = { locked: boolean; initialized: boolean; enrolled: string[]; mounted: string[]; missing: string[] };
+export type CustodyStatus = { locked: boolean; initialized: boolean; enrolled: string[]; mounted: string[]; missing: string[]; pending: string[] }; 
 export type FolderMount = (person: Person, key: string) => Promise<CustodyResult>;
 
 function seal(key: Buffer, plaintext: Buffer, context: string): Box {
@@ -37,6 +37,7 @@ export class KenanKeys {
   private keys: Record<string, string> = Object.create(null);
   private disk: DiskStore | null;
   private mounted = new Set<string>();
+  private pending = new Map<string, string>();
   private queue = Promise.resolve();
 
   constructor(private path: string, private people: Person[], private mount: FolderMount,
@@ -47,7 +48,7 @@ export class KenanKeys {
 
   status(): CustodyStatus {
     const enrolled = Object.keys(this.disk?.wrappers ?? {}).sort();
-    return { locked: !this.master, initialized: !!this.disk, enrolled, mounted: [...this.mounted].sort(),
+    return { locked: !this.master, initialized: !!this.disk, enrolled, mounted: [...this.mounted].sort(), pending: [...this.pending.keys()].sort(),
       missing: this.people.filter(person => person.unlock && !enrolled.includes(person.user)).map(person => person.user).sort() };
   }
 
@@ -64,9 +65,16 @@ export class KenanKeys {
       if (!person.unlock) return { ok: false, status: 403, error: "One Kenan requires a folder key for every person" };
       if (!key || Buffer.byteLength(key) > 4096 || /[\r\n\0]/.test(key)) return { ok: false, status: 400, error: "Key required" };
       try {
+        if (this.pending.has(user) && !equal(this.pending.get(user)!, key)) return { ok: false, status: 403, error: "Wrong key" };
         if (!this.master && this.disk) {
           const wrapper = this.disk.wrappers[user];
-          if (!wrapper) return { ok: false, status: 423, error: "Kenan's custody is locked after a restart. An enrolled person must log in before this key can be collected." };
+          if (!wrapper) {
+            const checked = await this.mount(person, key);
+            if (!checked.ok) return checked;
+            this.mounted.add(user);
+            this.pending.set(user, key);
+            return { ok: true };
+          }
           const wrapping = await wrappingKey(key, wrapper.salt);
           let candidate: Buffer;
           try { candidate = open(wrapping, wrapper.box, `one-kenan/master/${user}`); }
@@ -85,18 +93,10 @@ export class KenanKeys {
           if (!mounted.ok) return mounted;
           this.mounted.add(user);
         }
-        if (this.keys[user] === undefined) {
-          const master = this.master ?? randomBytes(32);
-          const salt = randomBytes(32).toString("base64");
-          const wrapping = await wrappingKey(key, salt);
-          const keys = { ...this.keys, [user]: key };
-          const next: DiskStore = { version: 1, wrappers: { ...this.disk?.wrappers, [user]: { salt, box: seal(wrapping, master, `one-kenan/master/${user}`) } },
-            vault: seal(master, Buffer.from(JSON.stringify(keys)), "one-kenan/keys") };
-          wrapping.fill(0);
-          this.persist(next);
-          this.disk = next;
-          this.keys = keys;
-          this.master = master;
+        await this.retain(user, key);
+        for (const [pendingUser, pendingKey] of this.pending) {
+          await this.retain(pendingUser, pendingKey);
+          this.pending.delete(pendingUser);
         }
         const shared = await this.opened(this.master!);
         if (!shared.ok) return shared;
@@ -119,6 +119,10 @@ export class KenanKeys {
         const keys = JSON.parse(open(master, this.disk.vault, "one-kenan/keys").toString("utf8"));
         this.master = Buffer.from(master);
         this.keys = keys;
+        for (const [pendingUser, pendingKey] of this.pending) {
+          await this.retain(pendingUser, pendingKey);
+          this.pending.delete(pendingUser);
+        }
         const shared = await this.opened(this.master);
         if (!shared.ok) return shared;
         for (const person of this.people) {
@@ -130,6 +134,21 @@ export class KenanKeys {
         return { ok: true };
       } catch { return { ok: false, status: 503, error: "Master provider cannot open custody" }; }
     });
+  }
+
+  private async retain(user: string, key: string) {
+    if (this.keys[user] !== undefined) return;
+    const master = this.master ?? randomBytes(32);
+    const salt = randomBytes(32).toString("base64");
+    const wrapping = await wrappingKey(key, salt);
+    const keys = { ...this.keys, [user]: key };
+    const next: DiskStore = { version: 1, wrappers: { ...this.disk?.wrappers, [user]: { salt, box: seal(wrapping, master, `one-kenan/master/${user}`) } },
+      vault: seal(master, Buffer.from(JSON.stringify(keys)), "one-kenan/keys") };
+    wrapping.fill(0);
+    this.persist(next);
+    this.disk = next;
+    this.keys = keys;
+    this.master = master;
   }
 
   private persist(value: DiskStore) {

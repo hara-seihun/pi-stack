@@ -1,0 +1,85 @@
+#!/usr/bin/python3
+"""Real owner-preserving FUSE rehearsal; only temporary fixtures in a private namespace."""
+import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
+
+if os.geteuid() != 0:
+    raise SystemExit('Run sudo deploy/one-kenan-rehearse; it changes only its temporary fixture tree')
+repo = pathlib.Path(__file__).resolve().parent.parent
+root = pathlib.Path(tempfile.mkdtemp(prefix='pi-kenan-fuse-fixture-'))
+try:
+    root.chmod(0o711)
+    for name in ('one-kenan-keys.ts', 'one-kenan-mounts.ts'):
+        source = (repo / 'apps/remote/server' / name).read_text()
+        if name == 'one-kenan-mounts.ts': source = source.replace('await errors;', 'console.error(await errors);')
+        (root / name).write_text(source)
+    (root / 'fixture.ts').write_text('''
+import { mkdirSync, readFileSync, statSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { KenanKeys } from "./one-kenan-keys";
+import { KenanMounts } from "./one-kenan-mounts";
+const root = import.meta.dir;
+const people = ["alice", "bob"].map(user => ({ version: 1 as const, user, displayName: user, port: 19881,
+  unlock: { cipherDir: join(root, user, "cipher"), mountpoint: join(root, user, "private") }, environment: {} }));
+const run = async (command: string[]) => {
+  const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+  const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  if (code !== 0) throw new Error(`Fixture command failed ${command[0]}: ${err}`);
+  return out;
+};
+for (const person of people) {
+  mkdirSync(person.unlock.cipherDir, { recursive: true, mode: 0o700 });
+  mkdirSync(person.unlock.mountpoint, { recursive: true, mode: 0o700 });
+  mkdirSync(join(root, person.user, "personal"), { recursive: true, mode: 0o700 });
+  await run(["chown", "-R", "65534:65534", join(root, person.user)]);
+  await run(["setfacl", "-R", "-m", "u:65533:rwX,u:65534:rwX", join(root, person.user)]);
+  await run(["setfacl", "-m", "d:u:65533:rwx,d:u:65534:rwx", person.unlock.cipherDir]);
+  const init = Bun.spawn(["runuser", "-u", "nobody", "--", "gocryptfs", "-q", "-nosyslog", "-scryptn", "10", "-init", "--", person.unlock.cipherDir], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
+  init.stdin.write(`${person.user}-fixture-key\\n`); init.stdin.end();
+  if (await init.exited !== 0) throw new Error(`Fixture init failed: ${await new Response(init.stderr).text()}`);
+}
+const personalMounts = new KenanMounts({ userFor: () => "nobody" });
+const personal = people.map(person => ({ ...person, user: `${person.user}_personal`, unlock: { ...person.unlock, mountpoint: join(root, person.user, "personal") } }));
+for (let i = 0; i < people.length; i++) {
+  if (!(await personalMounts.mount(personal[i], `${people[i].user}-fixture-key`)).ok) throw new Error("Original personal fixture could not mount");
+}
+let mounts = new KenanMounts({ userFor: () => "nobody", forceOwner: { uid: 65533, gid: 65533 } });
+let keys = new KenanKeys(join(root, "keys.json"), people, (person, key) => mounts.mount(person, key));
+try {
+  if ((await keys.authenticate("alice", "wrong")).ok) throw new Error("Wrong key admitted");
+  for (const person of people) {
+    if (!(await keys.authenticate(person.user, `${person.user}-fixture-key`)).ok) throw new Error("Valid key refused");
+    // Distinct unprivileged root-Kenan fixture UID writes through owner-mounted FUSE.
+    await run(["setpriv", "--reuid=65533", "--regid=65533", "--clear-groups", "bash", "-c", 'printf "%s" "written by root-Kenan fixture UID65533" > "$1/proof.txt"', "fixture", person.unlock.mountpoint]);
+    if (statSync(join(person.unlock.mountpoint, "proof.txt")).uid !== 65533) throw new Error("Root view has wrong owner");
+    if (readdirSync(person.unlock.cipherDir).some(name => statSync(join(person.unlock.cipherDir, name)).uid !== 65534)) throw new Error("Root write changed backing ownership");
+    if (!(await run(["runuser", "-u", "nobody", "--", "cat", join(root, person.user, "personal", "proof.txt")])).includes("UID65533")) throw new Error("Original owner cannot read root write");
+  }
+  await mounts.close();
+  for (const person of people) {
+    const present = Bun.spawn(["mountpoint", "-q", person.unlock.mountpoint], { stdout: "ignore", stderr: "ignore" });
+    if (await present.exited === 0) await run(["fusermount3", "-u", person.unlock.mountpoint]);
+  }
+  mounts = new KenanMounts({ userFor: () => "nobody", forceOwner: { uid: 65533, gid: 65533 } });
+  keys = new KenanKeys(join(root, "keys.json"), people, (person, key) => mounts.mount(person, key));
+  if (!keys.status().locked) throw new Error("Reboot should lock custody");
+  if (!(await keys.authenticate("bob", "bob-fixture-key")).ok) throw new Error("Bob cannot open all folders");
+  for (const person of people) {
+    const out = await run(["setpriv", "--reuid=65533", "--regid=65533", "--clear-groups", "cat", join(person.unlock.mountpoint, "proof.txt")]);
+    if (!out.includes("UID65533")) throw new Error("Reboot lost data or root access");
+  }
+  if (readFileSync(join(root, "keys.json"), "utf8").includes("fixture-key")) throw new Error("Plaintext key on disk");
+  console.log(JSON.stringify({ ok: true, rootRuntimeUid: 65533, originalOwnerUid: 65534, mounted: keys.status().mounted,
+    originalOwnerReadsRootWrites: true, rebootFirstLogin: "bob", realFuse: true }));
+} finally { await mounts.close(); await personalMounts.close(); }
+''')
+    (root / 'fuse.conf').write_text('user_allow_other\n')
+    (root / 'fuse.conf').chmod(0o644)
+    subprocess.run(['unshare', '--mount', '--propagation', 'private', 'bash', '-c',
+                    'mount --bind "$1/fuse.conf" /etc/fuse.conf; exec "$2" "$1/fixture.ts"',
+                    'fixture', str(root), shutil.which('bun')], check=True, timeout=45)
+finally:
+    shutil.rmtree(root)

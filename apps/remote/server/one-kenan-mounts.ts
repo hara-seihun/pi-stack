@@ -4,7 +4,7 @@ import type { CustodyResult } from "./one-kenan-keys";
 
 export class KenanMounts {
   private children = new Map<string, ReturnType<typeof Bun.spawn>>();
-  constructor(private options: { userFor?: (person: Person) => string } = {}) {}
+  constructor(private options: { userFor?: (person: Person) => string; forceOwner?: { uid: number; gid: number } } = {}) {}
   async mount(person: Person, key: string): Promise<CustodyResult> {
     if (!person.unlock) return { ok: true };
     const { cipherDir, mountpoint } = person.unlock;
@@ -14,7 +14,9 @@ export class KenanMounts {
     mkdirSync(mountpoint, { recursive: true, mode: 0o700 });
     const owner = this.options.userFor?.(person);
     if (owner && process.getuid!() !== 0) return { ok: false, status: 503, error: "Folder-owner mount helper requires its fixed privileged service" };
-    const command = ["gocryptfs", "-fg", "-q", "-nosyslog", "-acl", "-allow_other", "--", cipherDir, mountpoint];
+    const forced = this.options.forceOwner;
+    const command = ["gocryptfs", "-fg", "-q", "-nosyslog", "-acl", "-allow_other",
+      ...(forced ? ["-force_owner", `${forced.uid}:${forced.gid}`] : []), "--", cipherDir, mountpoint];
     const child = Bun.spawn(owner ? ["runuser", "-u", owner, "--", ...command] : command, { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
     // Never put folder keys in argv, the environment, logs or durable plaintext files.
     child.stdin.write(`${key}\n`);
