@@ -43,7 +43,7 @@ export type MemoryRequest =
   | { operation: "forget"; ids: string[]; mode: ForgetMode }
   | { operation: "log-disclosure"; disclosure: DisclosureInput }
   | { operation: "disclosures"; context: ReadContext; limit?: number };
-export type MemoryValue = MemoryItem | MemoryRead<MemoryItem[]> | Disclosure | MemoryRead<Disclosure[]> | { forgotten: string[]; mode: ForgetMode };
+export type MemoryValue = { id: string; forgotten: true } | MemoryItem | MemoryRead<MemoryItem[]> | Disclosure | MemoryRead<Disclosure[]> | { forgotten: string[]; mode: ForgetMode };
 export type MemoryError = "disabled" | "unauthenticated" | "invalid-request" | "unavailable";
 export type MemoryResult<T = MemoryValue> = { ok: true; value: T } | { ok: false; error: MemoryError; message: string };
 /** person comes from the verified connection, never the request body. */
