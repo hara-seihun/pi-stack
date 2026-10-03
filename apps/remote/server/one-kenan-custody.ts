@@ -18,7 +18,14 @@ if (existsSync(socket)) {
     unlinkSync(socket);
   }
 }
-const mounts = new KenanMounts({ userFor: person => person.user === "_kenan_store" ? config.executionUser : person.user });
+const identity = (flag: string) => {
+  const result = Bun.spawnSync(["id", flag, config.executionUser], { stdout: "pipe", stderr: "pipe" });
+  const value = Number(result.stdout.toString().trim());
+  if (result.exitCode !== 0 || !Number.isInteger(value) || value <= 0) throw new Error("Kenan execution account is not prepared");
+  return value;
+};
+const mounts = new KenanMounts({ userFor: person => person.user === "_kenan_store" ? config.executionUser : person.user,
+  forceOwner: { uid: identity("-u"), gid: identity("-g") } });
 const privateDir = process.env.PI_KENAN_PRIVATE_DIR ?? "/var/lib/pi-kenan/private";
 const sharedCipher = process.env.PI_KENAN_SHARED_CIPHER ?? "/var/lib/pi-kenan/.private.crypt";
 const keys = new KenanKeys(process.env.PI_KENAN_KEY_STORE ?? "/var/lib/pi-kenan/custody/keys.json", listPersons(), (person, key) => mounts.mount(person, key), async master => {

@@ -64,8 +64,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
 }
 
 async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
-  const { createAgentSession, DefaultResourceLoader, SettingsManager, SessionManager, createBashTool, defineTool } = await import("@earendil-works/pi-coding-agent");
-  const { getModel } = await import("@earendil-works/pi-ai/compat");
+  const { createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager, createBashTool, defineTool } = await import("@earendil-works/pi-coding-agent");
   const { Type } = await import("typebox");
   const { memoryExtension } = await import("kenan-memory/tools");
   const scopeKey = Symbol.for("pi-stack.session-environment");
@@ -74,21 +73,21 @@ async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
   return scope.run(spec.env, async () => {
     const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 }, compaction: { enabled: true } });
     const routing = new URL("./extension/routing.ts", import.meta.resolve("pi-orchestrator/api")).pathname;
-    const loader = new DefaultResourceLoader({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,
-      noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      systemPromptOverride: () => spec.prompt, appendSystemPromptOverride: () => [],
-      additionalExtensionPaths: [routing], extensionFactories: [memoryExtension({ env: spec.env,
-        ask: async () => ({ clarificationRequired: true, message: "Ask the subject before forgetting; no change was made" }) })] });
-    await loader.reload();
-    const model = getModel(spec.config.provider as never, spec.config.model as never);
+    const services = await createAgentSessionServices({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,
+      resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+        systemPromptOverride: () => spec.prompt, appendSystemPromptOverride: () => [],
+        additionalExtensionPaths: [routing], extensionFactories: [memoryExtension({ env: spec.env,
+          ask: async () => ({ clarificationRequired: true, message: "Ask the subject before forgetting; no change was made" }) })] } });
+    if (services.diagnostics.some(diagnostic => diagnostic.type === "error") || services.resourceLoader.getExtensions().errors.length) throw new Error("Host root resources could not initialize");
+    const model = services.modelRuntime.getModels().find(model => model.provider === spec.config.provider && model.id === spec.config.model);
     if (!model) throw new Error("Host root model is unavailable");
     const bash = createBashTool(spec.config.cwd, { spawnHook: context => ({ ...context, env: { ...context.env, ...spec.env } }) });
     let chosen: { reply: string; subjects: string[] } | undefined;
     const replyTool = defineTool({ name: "root_reply", label: "Choose Kenan's reply", description: "Select the only text to disclose to this request's entire verified recipient set. List the people whose information was used or discussed, including file reads. The service logs the reply before delivery.",
       parameters: Type.Object({ reply: Type.String({ minLength: 1 }), subjects: Type.Array(Type.String({ minLength: 1 }), { maxItems: 100 }) }),
       execute: async (_id, input) => { chosen = input; return { content: [{ type: "text", text: "Reply selected for disclosure accounting; finish this session." }], details: {} }; } });
-    const { session } = await createAgentSession({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, resourceLoader: loader,
-      settingsManager: settings, sessionManager: SessionManager.create(spec.config.cwd, spec.directory), model,
+    const { session } = await createAgentSessionFromServices({ services,
+      sessionManager: SessionManager.create(spec.config.cwd, spec.directory), model,
       thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, replyTool] });
     if (session.systemPrompt !== spec.prompt) { session.dispose(); throw new Error("Root prompt was modified during initialization"); }
     return { prompt: async text => scope.run(spec.env, () => session.prompt(text)),
