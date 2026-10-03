@@ -1,0 +1,272 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pi telephone media</title>
+<p id="status">Connecting</p>
+<script id="telephone-worklet" type="text/plain">
+class TelephoneAudio extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    if (sampleRate !== 48000) throw new Error('Telephone audio requires a 48 kHz AudioContext');
+    this.ring = new Float32Array(3200);
+    this.read = 0;
+    this.count = 0;
+    this.phase = 0;
+    this.waiting = true;
+    this.history = new Float32Array(63);
+    this.head = 0;
+    this.decimation = 0;
+    this.packet = new ArrayBuffer(640);
+    this.packetView = new DataView(this.packet);
+    this.packetSamples = 0;
+    this.filter = new Float64Array(63);
+    let sum = 0;
+    for (let i = 0; i < this.filter.length; i++) {
+      const x = i - 31;
+      const sinc = x === 0 ? 0.3 : Math.sin(Math.PI * 0.3 * x) / (Math.PI * x);
+      const window = 0.42 - 0.5 * Math.cos(2 * Math.PI * i / 62) + 0.08 * Math.cos(4 * Math.PI * i / 62);
+      sum += this.filter[i] = sinc * window;
+    }
+    for (let i = 0; i < this.filter.length; i++) this.filter[i] /= sum;
+    this.port.onmessage = ({ data }) => {
+      const pcm = new DataView(data);
+      for (let i = 0; i < pcm.byteLength; i += 2) {
+        if (this.count === this.ring.length) {
+          this.read = (this.read + 1) % this.ring.length;
+          this.count--;
+        }
+        this.ring[(this.read + this.count) % this.ring.length] = pcm.getInt16(i, true) / 32768;
+        this.count++;
+      }
+    };
+  }
+  inputSample() {
+    if (this.waiting && this.count < 640) return 0;
+    this.waiting = false;
+    if (this.count < 2) {
+      this.waiting = true;
+      this.phase = 0;
+      return 0;
+    }
+    const a = this.ring[this.read];
+    const b = this.ring[(this.read + 1) % this.ring.length];
+    const value = a + (b - a) * this.phase / 3;
+    if (++this.phase === 3) {
+      this.phase = 0;
+      this.read = (this.read + 1) % this.ring.length;
+      this.count--;
+    }
+    return value;
+  }
+  captureSample(value) {
+    this.history[this.head] = value;
+    this.head = (this.head + 1) % this.history.length;
+    if (++this.decimation !== 3) return;
+    this.decimation = 0;
+    let filtered = 0;
+    for (let i = 0; i < this.filter.length; i++) {
+      filtered += this.filter[i] * this.history[(this.head + this.history.length - 1 - i) % this.history.length];
+    }
+    const clipped = Math.max(-1, Math.min(1, filtered));
+    this.packetView.setInt16(this.packetSamples++ * 2, Math.round(clipped * (clipped < 0 ? 32768 : 32767)), true);
+    if (this.packetSamples === 320) {
+      this.port.postMessage({ pcm: this.packet, time: currentFrame / sampleRate }, [this.packet]);
+      this.packet = new ArrayBuffer(640);
+      this.packetView = new DataView(this.packet);
+      this.packetSamples = 0;
+    }
+  }
+  process(inputs, outputs) {
+    const output = outputs[0][0];
+    const channels = inputs[0];
+    for (let i = 0; i < output.length; i++) {
+      output[i] = this.inputSample();
+      let remote = 0;
+      for (const channel of channels) remote += channel[i] || 0;
+      this.captureSample(channels.length ? remote / channels.length : 0);
+    }
+    return true;
+  }
+}
+registerProcessor('telephone-audio', TelephoneAudio);
+</script>
+<script type="module">
+const status = document.getElementById('status');
+const token = decodeURIComponent(location.hash.slice(1));
+history.replaceState(null, '', location.pathname + location.search);
+let socket, audio, bridge, destination, peer, channel, remoteSource;
+let closed = false;
+let started = false;
+let outputTimer, startupTimer;
+const outgoing = [];
+const pendingEvents = [];
+let pendingBytes = 0;
+const abort = new AbortController();
+
+function send(message) {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+}
+function close() {
+  if (closed) return;
+  closed = true;
+  abort.abort();
+  clearInterval(outputTimer);
+  clearTimeout(startupTimer);
+  if (channel?.readyState === 'open' && started) channel.send(JSON.stringify({ type: 'session.close', event_id: crypto.randomUUID() }));
+  channel?.close();
+  peer?.close();
+  remoteSource?.disconnect();
+  bridge?.disconnect();
+  if (bridge) bridge.port.close();
+  for (const track of destination?.stream.getTracks() || []) track.stop();
+  if (audio && audio.state !== 'closed') void audio.close();
+  socket?.close();
+  outgoing.length = pendingEvents.length = 0;
+  status.textContent = 'Closed';
+}
+function fail(error) {
+  if (closed) return;
+  const message = String(error?.message || error);
+  send({ type: 'error', error: message });
+  close();
+  status.textContent = 'Error: ' + message;
+}
+function ensureOpen() {
+  if (closed) throw new Error('Telephone media closed during startup');
+}
+function sendLive(event) {
+  const payload = JSON.stringify(event);
+  if (started && channel?.readyState === 'open') channel.send(payload);
+  else {
+    if (pendingEvents.length >= 64 || pendingBytes + payload.length > 128 * 1024) throw new Error('Live event queue overflow');
+    pendingEvents.push(payload);
+    pendingBytes += payload.length;
+  }
+}
+function gatherIce() {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      peer.removeEventListener('icegatheringstatechange', changed);
+      abort.signal.removeEventListener('abort', cancelled);
+    };
+    const changed = () => {
+      if (peer.iceGatheringState === 'complete') { cleanup(); resolve(); }
+    };
+    const cancelled = () => { cleanup(); reject(new Error('ICE gathering cancelled')); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('ICE gathering timed out')); }, 10000);
+    peer.addEventListener('icegatheringstatechange', changed);
+    abort.signal.addEventListener('abort', cancelled, { once: true });
+    changed();
+  });
+}
+async function connectLive() {
+  peer = new RTCPeerConnection();
+  for (const track of destination.stream.getAudioTracks()) {
+    track.contentHint = 'speech';
+    peer.addTrack(track, destination.stream);
+  }
+  peer.ontrack = ({ track }) => {
+    if (closed || track.kind !== 'audio') return;
+    remoteSource?.disconnect();
+    remoteSource = audio.createMediaStreamSource(new MediaStream([track]));
+    // This input is captured only; the worklet's output contains telephone PCM, never remote audio.
+    remoteSource.connect(bridge);
+    track.onended = () => fail(new Error('GPT Live audio track ended'));
+  };
+  peer.onconnectionstatechange = () => {
+    if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) fail(new Error('GPT Live WebRTC ' + peer.connectionState));
+  };
+  channel = peer.createDataChannel('oai-events');
+  channel.onclose = () => fail(new Error('GPT Live event channel closed'));
+  channel.onerror = () => fail(new Error('GPT Live event channel failed'));
+  channel.onmessage = ({ data }) => {
+    try {
+      const event = JSON.parse(data);
+      if (!event || typeof event.type !== 'string') throw new Error('Invalid GPT Live event');
+      send({ type: 'live-event', event });
+      if (event.type === 'session.started' && !started) {
+        started = true;
+        clearTimeout(startupTimer);
+        outgoing.length = 0;
+        for (const payload of pendingEvents.splice(0)) channel.send(payload);
+        pendingBytes = 0;
+        send({ type: 'ready' });
+        status.textContent = 'Ready';
+      } else if (event.type === 'error') {
+        fail(new Error(event.error?.message || 'GPT Live protocol error'));
+      } else if (event.type === 'session.closed') close();
+    } catch (error) { fail(error); }
+  };
+  await peer.setLocalDescription(await peer.createOffer());
+  ensureOpen();
+  await gatherIce();
+  ensureOpen();
+  const response = await fetch('/media/offer', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sdp: peer.localDescription.sdp }),
+    signal: abort.signal,
+  });
+  if (!response.ok) throw new Error('GPT Live offer failed (' + response.status + ')');
+  const connection = await response.json();
+  ensureOpen();
+  if (!connection.session?.id || !connection.transport?.sdp) throw new Error('GPT Live offer returned no session or SDP');
+  await peer.setRemoteDescription({ type: 'answer', sdp: connection.transport.sdp });
+}
+async function start() {
+  if (!token) throw new Error('Missing telephone media token');
+  startupTimer = setTimeout(() => fail(new Error('GPT Live session startup timed out')), 30000);
+  audio = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+  const workletUrl = URL.createObjectURL(new Blob([document.getElementById('telephone-worklet').textContent], { type: 'text/javascript' }));
+  try { await audio.audioWorklet.addModule(workletUrl); } finally { URL.revokeObjectURL(workletUrl); }
+  ensureOpen();
+  bridge = new AudioWorkletNode(audio, 'telephone-audio', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+  bridge.onprocessorerror = () => fail(new Error('Telephone audio worklet failed'));
+  destination = audio.createMediaStreamDestination();
+  bridge.connect(destination);
+  bridge.port.onmessage = ({ data }) => {
+    if (closed || !started || audio.currentTime - data.time > 0.1) return;
+    if (outgoing.length === 5) outgoing.shift();
+    outgoing.push(data);
+  };
+  await audio.resume();
+  ensureOpen();
+  if (audio.state !== 'running') throw new Error('Chromium must permit autoplay for telephone media');
+  audio.onstatechange = () => { if (audio.state === 'suspended') fail(new Error('Telephone AudioContext suspended')); };
+  const url = new URL('/browser-media', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  socket = new WebSocket(url);
+  socket.binaryType = 'arraybuffer';
+  socket.onopen = () => {
+    send({ type: 'authenticate', token });
+    void connectLive().catch(fail);
+  };
+  socket.onmessage = ({ data }) => {
+    try {
+      if (data instanceof ArrayBuffer) {
+        if (data.byteLength !== 640) throw new Error('Telephone PCM packet must contain 320 signed 16-bit samples');
+        bridge.port.postMessage(data, [data]);
+        return;
+      }
+      const message = JSON.parse(data);
+      if (message.type === 'context' && typeof message.text === 'string') {
+        sendLive({ type: 'session.commentary.append', event_id: crypto.randomUUID(), delegation_id: null, content: message.text });
+      } else if (message.type === 'live-event' && typeof message.event?.type === 'string') sendLive(message.event);
+      else if (message.type === 'close') close();
+      else if (message.type === 'error') fail(new Error(String(message.error || 'Telephone service error')));
+    } catch (error) { fail(error); }
+  };
+  socket.onerror = () => fail(new Error('Telephone media websocket failed'));
+  socket.onclose = () => { if (!closed) fail(new Error('Telephone media websocket closed')); };
+  outputTimer = setInterval(() => {
+    while (outgoing.length && audio.currentTime - outgoing[0].time > 0.1) outgoing.shift();
+    const packet = outgoing.shift();
+    if (!packet || socket.readyState !== WebSocket.OPEN) return;
+    if (socket.bufferedAmount > 640 * 5) { fail(new Error('Telephone media websocket audio backpressure')); return; }
+    socket.send(packet.pcm);
+  }, 20);
+}
+window.addEventListener('pagehide', close);
+void start().catch(fail);
+</script>
