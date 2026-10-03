@@ -1,4 +1,5 @@
 export type PersonId = string;
+export type MemoryRole = "person" | "root";
 export type ForgetMode = "delete" | "stop-using";
 export type MemorySetting = { person: PersonId; threadId?: string; roomId?: string };
 export interface MemoryInput {
@@ -28,7 +29,8 @@ export interface Disclosure extends DisclosureInput {
   id: string;
   occurredAt: string;
   recordedBy: PersonId;
-  kind?: "explicit" | "memory-read";
+  kind?: "explicit" | "memory-read" | "root-reply";
+  rootSessionId?: string;
   turnId?: string;
   finalReply?: string;
   finalizedAt?: string;
@@ -57,4 +59,17 @@ export const MEMORY_READ_DETAIL = "kenanMemoryRead";
 export const MEMORY_DEFAULT_PORT = 18820;
 export const MEMORY_TOKEN_HEADER = "x-kenan-memory-session";
 /** A shared-UID runner uses a supervisor-issued session credential, not a claimed person name. */
-export interface MemorySession { person: PersonId; threadId: string; token: string }
+export interface MemorySession { person: PersonId; threadId: string; token: string; role: MemoryRole }
+export interface RootAdmission {
+  person: PersonId;
+  threadId: string;
+  rootSessionId: string;
+  recipients: PersonId[];
+  subjects: PersonId[];
+  roomId?: string;
+  memoryToken: string;
+}
+export interface RootAdmitRequest { callerToken: string; request: string; rootSessionId?: string }
+export interface RootFinalizeReply { rootSessionId: string; reply: string; subjects: PersonId[]; recipients?: PersonId[] }
+export type RoomAudienceResolver = (person: PersonId, threadId: string) => { roomId: string; people: PersonId[] } | undefined | Promise<{ roomId: string; people: PersonId[] } | undefined>;
+export const KENAN_ROOT_DEFAULT_PORT = 18821;
