@@ -332,6 +332,37 @@ it("keeps provider-exhausted accepted work unsettled across restart and resumes 
   expect(admit.mock.calls.at(-1)?.[3]).toBe(executionId);
 });
 
+it.each([
+  ["stop", undefined, "complete"],
+  ["aborted", undefined, "cancelled"],
+  ["error", "400 invalid request", "failed"],
+])("reconciles a native terminal %s after a crash with stale provider waiting without replay", async (stopReason, errorMessage, outcome) => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-provider-terminal-crash-")); roots.push(directory);
+  const sessions: FakePiSession[] = [];
+  const finalMessage = { role: "assistant", content: [{ type: "text", text: "durable native result" }], stopReason, ...(errorMessage ? { errorMessage } : {}) };
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    admit: async () => ({ ok: true, value: { release() {} } }),
+    openSession: async (options, output) => {
+      const session = new FakePiSession(options, output);
+      session.acceptedWorkIds.add("accepted-crash");
+      session.completedWorkIds.add("accepted-crash");
+      session.lastAssistantMessage = finalMessage;
+      sessions.push(session); return session;
+    } }); services.push(service);
+  value(service.importThread({ id: "crashed", title: "crashed", cwd: directory,
+    sessionFile: join(directory, "crashed.jsonl"), settings: { model: "anthropic/claude-opus-5-5" },
+    metadata: { providerWait: { executionId: "original-execution", workId: "accepted-crash", retryAt: 0, broker: false } } }));
+  value(service.importMessage({ id: "accepted-crash", threadId: "crashed", text: "execute once",
+    state: "dispatched", executionId: "original-execution" }));
+  await service.start(); await waitFor(() => service.latestSettlement("crashed") !== null);
+  expect(service.latestSettlement("crashed")).toMatchObject({ executionId: "original-execution", workId: "accepted-crash", outcome, finalMessage });
+  expect(sessions).toHaveLength(1);
+  expect(sessions[0]!.commands.filter(command => command.type === "prompt")).toEqual([]);
+  expect(service.get("crashed")?.metadata?.providerWait).toBeUndefined();
+  expect(service.get("crashed")?.metadata?.admissionWait).toBeUndefined();
+  service.reconcile(); await turn(); expect(sessions).toHaveLength(1);
+});
+
 it("cold pooled startup without quota waits without consuming the startup failure budget",async()=>{
   const directory=mkdtempSync(join(tmpdir(),"thread-cold-capacity-"));roots.push(directory);
   const sessions:FakePiSession[]=[];let available=false;

@@ -905,8 +905,9 @@ export class ThreadService implements ThreadApi {
         runtime.executionId = execution.id;
         const accepted = new Set<string>(state.acceptedWorkIds ?? []), completed = new Set<string>(state.completedWorkIds ?? []);
         const works = this.sql("SELECT * FROM thread_work WHERE execution_id=? AND status!='done' ORDER BY ordinal").all(execution.id) as Json[];
-        if (!runtime.busy && completed.has(execution.work_id) && !providerWait) {
-          const last = state.lastAssistantMessage;
+        const last = state.lastAssistantMessage;
+        const capacityFailure = last?.stopReason === "error" && (isRateLimitError(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
+        if (!runtime.busy && completed.has(execution.work_id) && (!providerWait || !capacityFailure)) {
           await this.finish(id, runtime, last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete", last ?? null);
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
