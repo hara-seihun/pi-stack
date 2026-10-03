@@ -30,7 +30,17 @@ Arguments and output shapes are documented by the implemented CLI catalogue. `sc
 
 ## Kenan overlay
 
-While phone control's accessibility service runs, Kenan has a dot over other apps (toggle with **Show Kenan over other apps** in the phone card, the phone-control notification's Show/Hide action, `overlay.show`/`overlay.hide`, or by dragging the dot onto its ✕). Tapping the dot opens a small chat panel; Send collapses it so the app underneath keeps focus.
+Phone control and Pi Stack Write share exactly one movable overlay dot. Their accessibility services and permissions remain independent: phone control alone supplies Kenan, Write alone supplies the microphone, and enabling both never creates a second dot. While phone control's accessibility service runs, toggle Kenan with **Show Kenan over other apps** in the phone card, the phone-control notification's Show/Hide action, or `overlay.show`/`overlay.hide`.
+
+When Write is available and an eligible editable field has focus, the dot becomes a microphone. Password, number, and phone fields remain excluded; the keyboard must be visible unless Write's keyboard requirement is turned off. Otherwise the dot shows Kenan if his overlay is enabled. Tap Kenan to open the small chat panel; Send collapses it so the app underneath keeps focus. Tap the microphone to start dictation, then tap again to finish and insert at the cursor. Active dictation retains its microphone control so it remains finishable even if focus or Kenan visibility changes. The dot has one shared saved edge and height across both modes, can be dragged during dictation, and stays above the keyboard. [Write on Android](../../kenan/README.md#pi-stack-write-on-android) owns dictation setup and insertion behavior.
+
+Dragging the idle dot in either mode exposes labelled **Kenan**, **Mic**, and **Both** dismissal targets above the keyboard:
+
+- **Kenan** turns off the existing persistent `overlayVisible` preference, just like `overlay.hide`; it does not suppress Write. Use any Kenan show control above to restore it.
+- **Mic** suppresses Write for the current field only. It returns when another field gains focus, or after leaving and refocusing the same field; Kenan's visibility preference is unchanged.
+- **Both** applies both independent dismissals.
+
+While dictation is connecting, recording, or finalizing, **Mic** and **Both** dismissal are unavailable. **Kenan** can still be hidden without stopping dictation or removing its finish control.
 
 - Phone→server frame: `{type:"overlay.message",id,text,context:{package,label}}` (text 1..8000). The supervisor replies `{type:"overlay.ack",id,ok:true,threadId}` or `{type:"overlay.ack",id,ok:false,error}`. `server/phone-overlay.ts` owns the conversation: each phone has one thread (`Phone · NAME`, Home destination, default model), recorded in supervisor metadata `phone-overlay:DEVICE`; an archived or missing thread is replaced on the next message. The first message carries a briefing on using the overlay; later messages are steered into the running thread with a `[Phone overlay · in APP]` line.
 - Thread events drive the dot: inserted message → `overlay.state thinking`, tool start → `working`, every assistant message's text (Remote tags removed, ≤2000 chars) → `overlay.say`, settlement → `idle`. A reply produced while the phone is offline is spoken once when it reconnects.
