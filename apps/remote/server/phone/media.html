@@ -93,7 +93,9 @@ registerProcessor('telephone-audio', TelephoneAudio);
 const status = document.getElementById('status');
 const token = decodeURIComponent(location.hash.slice(1));
 history.replaceState(null, '', location.pathname + location.search);
-let socket, audio, bridge, destination, peer, channel, remoteSource;
+let socket, audio, bridge, destination, peer, channel, remoteSource, renderSink, remotePlayback;
+const diagnostics = { packetsCaptured: 0, packetsSent: 0, peak: 0, audioState: 'none', remoteTrack: 'none' };
+window.telephoneMediaDiagnostics = () => ({ ...diagnostics, audioState: audio?.state || 'none', audioTime: audio?.currentTime || 0, connectionState: peer?.connectionState || 'none', queue: outgoing.length });
 let closed = false;
 let started = false;
 let outputTimer, startupTimer;
@@ -115,7 +117,9 @@ function close() {
   channel?.close();
   peer?.close();
   remoteSource?.disconnect();
+  if (remotePlayback) { remotePlayback.pause(); remotePlayback.srcObject = null; }
   bridge?.disconnect();
+  renderSink?.disconnect();
   if (bridge) bridge.port.close();
   for (const track of destination?.stream.getTracks() || []) track.stop();
   if (audio && audio.state !== 'closed') void audio.close();
@@ -169,7 +173,15 @@ async function connectLive() {
   peer.ontrack = ({ track }) => {
     if (closed || track.kind !== 'audio') return;
     remoteSource?.disconnect();
-    remoteSource = audio.createMediaStreamSource(new MediaStream([track]));
+    diagnostics.remoteTrack = track.readyState;
+    const stream = new MediaStream([track]);
+    if (remotePlayback) { remotePlayback.pause(); remotePlayback.srcObject = null; }
+    // Chromium does not feed a WebRTC MediaStreamAudioSourceNode until an HTMLMediaElement plays the stream.
+    remotePlayback = new Audio();
+    remotePlayback.volume = 0;
+    remotePlayback.srcObject = stream;
+    void remotePlayback.play().catch(fail);
+    remoteSource = audio.createMediaStreamSource(stream);
     // This input is captured only; the worklet's output contains telephone PCM, never remote audio.
     remoteSource.connect(bridge);
     track.onended = () => fail(new Error('GPT Live audio track ended'));
@@ -225,7 +237,15 @@ async function start() {
   bridge.onprocessorerror = () => fail(new Error('Telephone audio worklet failed'));
   destination = audio.createMediaStreamDestination();
   bridge.connect(destination);
+  // Chromium's realtime rendering must be driven by an AudioDestinationNode, even headlessly.
+  renderSink = audio.createGain();
+  renderSink.gain.value = 0;
+  bridge.connect(renderSink);
+  renderSink.connect(audio.destination);
   bridge.port.onmessage = ({ data }) => {
+    diagnostics.packetsCaptured++;
+    const samples = new DataView(data.pcm);
+    for (let i = 0; i < samples.byteLength; i += 2) diagnostics.peak = Math.max(diagnostics.peak, Math.abs(samples.getInt16(i, true)));
     if (closed || !started || audio.currentTime - data.time > 0.1) return;
     if (outgoing.length === 5) outgoing.shift();
     outgoing.push(data);
@@ -265,6 +285,7 @@ async function start() {
     if (!packet || socket.readyState !== WebSocket.OPEN) return;
     if (socket.bufferedAmount > 640 * 5) { fail(new Error('Telephone media websocket audio backpressure')); return; }
     socket.send(packet.pcm);
+    diagnostics.packetsSent++;
   }, 20);
 }
 window.addEventListener('pagehide', close);

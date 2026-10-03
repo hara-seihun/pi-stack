@@ -92,10 +92,15 @@ async function browser() {
     AudioContext: class {
       state = 'running'; currentTime = 0;
       audioWorklet = { addModule: async () => {} };
+      destination = {};
       createMediaStreamDestination() { return { stream }; }
+      createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; }
+      createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
       async resume() {}
       async close() { this.state = 'closed'; }
     },
+    Audio: class { volume = 1; srcObject = null; async play() {} pause() {} },
+    MediaStream: class { constructor(_tracks: any[]) {} },
     AudioWorkletNode: class { port = { onmessage: null, postMessage() {}, close() {} }; connect() {} disconnect() {} },
     RTCPeerConnection: class {
       iceGatheringState = 'complete'; localDescription = { sdp: 'offer' }; connectionState = 'connected';
