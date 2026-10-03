@@ -52,6 +52,12 @@ class PinnedPunctuationTest(unittest.TestCase):
             if any(c in source for c in '/_@'):
                 self.assertEqual(result, source)
 
+    def test_dictionary_phrase_is_an_atomic_punctuation_boundary(self):
+        source = "So even if it doesn't work, you can jiggery pokery it around and make it work"
+        result = clean(source.split(), {'words': ['jiggery pokery']}, punctuator=self.model)
+        self.assertIn('jiggery pokery', result['text'])
+        self.assertNotIn('jiggery, pokery', result['text'])
+
     def test_chunked_cleanup_matches_final_and_keeps_edit_offsets(self):
         words = 'um can you send me the report I need it by Friday thanks'.split()
         session = IncrementalCleaner(punctuator=self.model)

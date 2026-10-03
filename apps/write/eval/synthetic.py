@@ -16,6 +16,8 @@ RECIPES = [
     ("negative-call-anna", "Call Anna tomorrow.", "Call Anna tomorrow.", []),
     ("replacement-positive", "Open lantern works.", "Open lantern works.", ["LanternWorks"]),
     ("replacement-negative", "Open the lantern and close the window.", "Open the lantern and close the window.", []),
+    ("rewrite-color", "I want the blue one. No actually the red one would be better.", "I want the red one, which would be better.", []),
+    ("rewrite-intent", "The thing is I guess what I am trying to say is the menu has too many buttons and needs a simpler layout.", "The menu has too many buttons and needs a simpler layout.", []),
 ]
 
 
@@ -61,6 +63,15 @@ def main():
             fixture["dictionary_target"] = "Open LanternWorks."
             fixture["meaning"]["required"] = [["open"], ["lantern works", "LanternWorks"]]
             fixture["tags"].append("dictionary-replacement")
+        if name == "rewrite-color":
+            fixture["expectation"] = "meaning"
+            fixture["tags"].append("meaning-aware-rewrite")
+            fixture["meaning"] = {"required": [["red"], ["better"]], "forbidden": ["blue", "actually"]}
+        elif name == "rewrite-intent":
+            fixture["expectation"] = "meaning"
+            fixture["tags"].append("meaning-aware-rewrite")
+            fixture["meaning"] = {"required": [["menu"], ["too many buttons"], ["simpler layout"]],
+                                  "forbidden": ["what I am trying", "what I'm trying"]}
         generated.append(fixture)
     if not args.check:
         manifest["fixtures"] = [item for item in manifest["fixtures"] if item["kind"] != "synthetic-espeak"] + generated

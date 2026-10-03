@@ -146,6 +146,41 @@ def _replace_dictionary(tokens: list[_Token], dictionary: Mapping[str, Any]) -> 
     return result, edits
 
 
+def _canonical_dictionary(tokens: list[_Token], dictionary: Mapping[str, Any]) -> tuple[list[_Token], list[dict]]:
+    def key(word):
+        return word.strip('.,!?;:“”"').casefold()
+    phrases = [(str(word).split(), str(word)) for word in dictionary.get('words', [])
+               if isinstance(word, str) and word.strip()]
+    phrases.sort(key=lambda item: -len(item[0]))
+    result, edits = [], []
+    i = 0
+    while i < len(tokens):
+        match = next(((parts, text) for parts, text in phrases if
+                      [key(token.text) for token in tokens[i:i + len(parts)]] ==
+                      [key(part) for part in parts]), None)
+        if match is None:
+            result.append(tokens[i]); i += 1; continue
+        parts, canonical = match
+        chunk = tokens[i:i + len(parts)]
+        source = ' '.join(token.text for token in chunk)
+        prefix = re.match(r'^[“"]*', chunk[0].text).group()
+        suffix = re.search(r'[.,!?;:”"]*$', chunk[-1].text).group()
+        text = prefix + canonical + suffix
+        result.append(_Token(text, chunk[0].start, chunk[-1].end))
+        if source != text:
+            edits.append({'kind': 'format', 'from': source, 'to': text,
+                          'at': [chunk[0].start, chunk[-1].end]})
+        i += len(parts)
+    return result, edits
+
+
+def dictionary_text(words: Sequence[Mapping[str, Any] | str], dictionary: Mapping[str, Any]) -> str:
+    tokens = [_Token(_word(word), i, i + 1) for i, word in enumerate(words)]
+    tokens, _ = _replace_dictionary(tokens, dictionary)
+    tokens, _ = _canonical_dictionary(tokens, dictionary)
+    return ' '.join(token.text for token in tokens)
+
+
 def _direct_speech_start(tokens: list[_Token], start: int) -> bool:
     first = _bare(tokens[start].text)
     if first in _DIRECT_START:
@@ -219,7 +254,7 @@ def _number(tokens: list[_Token], i: int) -> tuple[str, int] | None:
     return None
 
 
-def _format(tokens: list[_Token], context: str) -> tuple[str, list[dict]]:
+def _format(tokens: list[_Token], context: str, preserve_case: frozenset[str] = frozenset()) -> tuple[str, list[dict]]:
     if not tokens:
         return "", []
     text = ""
@@ -235,7 +270,7 @@ def _format(tokens: list[_Token], context: str) -> tuple[str, list[dict]]:
             continue
         if word.lower() == "i":
             word = "I"
-        if cap and word[0].isalpha():
+        if cap and word[0].isalpha() and word.strip('.,!?;:') not in preserve_case:
             word = word[0].upper() + word[1:]
         if word != token.text:
             edits.append({"kind": "format", "from": token.text, "to": word,
@@ -398,6 +433,8 @@ def clean(words: Sequence[Mapping[str, Any] | str],
         kept.append(token); j += 1
     kept, replacements = _replace_dictionary(kept, dictionary)
     edits.extend(replacements)
+    kept, casing = _canonical_dictionary(kept, dictionary)
+    edits.extend(casing)
     if punctuator and kept:
         punctuated = punctuator.punctuate([token.text for token in kept])
         if len(punctuated) != len(kept):
@@ -415,7 +452,8 @@ def clean(words: Sequence[Mapping[str, Any] | str],
         kept = restored
     kept, quotations = _infer_quotations(kept)
     edits.extend(quotations)
-    text, formatting = _format(kept, context)
+    text, formatting = _format(kept, context, frozenset(
+        str(word) for word in dictionary.get('words', []) if isinstance(word, str)))
     edits.extend(formatting)
     edits.sort(key=lambda edit: (edit["at"][0], edit["at"][1], edit["kind"]))
     return {"text": text, "edits": edits}

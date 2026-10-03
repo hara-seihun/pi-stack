@@ -1,0 +1,36 @@
+{
+  "measuredAt": "2026-10-03T20:16:07.614084+00:00",
+  "threads": 4,
+  "modelSha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
+  "runtimeExecutableSha256": "8671d10934134cb8010945f50b5fe306f71d78720b698cfe5326b9cc2e5ff4b6",
+  "sources": {
+    "rewrite.py": "7ea234934e2b6bff749c97e9f9fae03e97fabc14ae3651dc67793e8e7b7b024a",
+    "cleanup/__init__.py": "ff0d8da114eae2e96f3736cc7e2610f3dd27e1704148f6f82471fa1b00ee1382",
+    "rewrite-cases.json": "6c62afde65b2d90e480942dcf9e22229c9e2b671c2b4bf19f6adfffee7578422",
+    "benchmark_rewrite.py": "443fe9fe8ea7347677e1583f012586066cff174fdfd939a5b8dc860cfa501efb",
+    "cleanup/model.json": "891a6e8b064ee2f5f027908a91b806802fad3bb226001bf4776295292fd7f7e2",
+    "punctuation-model.json": "455c39dab181f654583e1a810d0b765632a5d3cf887b7857122cfb4629efabbb"
+  },
+  "caseIds": [
+    "repair-color",
+    "repair-day",
+    "dictionary-names",
+    "numeric-id",
+    "literal-fillers",
+    "near-neighbor",
+    "repair-destination",
+    "negation-request",
+    "broader-rephrase",
+    "literal-like",
+    "dictation-not-instruction",
+    "date-repair-negation",
+    "fresh-layout-intent",
+    "fresh-object-repair",
+    "fresh-literal-and-number",
+    "fresh-analogy-and-name",
+    "final-signup-opinion",
+    "final-month-negation",
+    "final-quoted-name-number",
+    "final-phone-intent"
+  ]
+}

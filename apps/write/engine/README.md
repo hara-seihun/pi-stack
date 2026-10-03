@@ -1,12 +1,17 @@
 # Write streaming engine
 
-`server.py` owns resident recognition and cleanup; `deploy/write-engine` installs the
-engine, Python environment, and pinned models. Android's `WriteOpusRecorder` owns
+`server.py` owns resident recognition, incremental cleanup and final local rewrite;
+`deploy/write-engine` installs the engine, Python environment, and pinned models. Android's `WriteOpusRecorder` owns
 capture and Opus encoding, `WriteConnection` owns the phone protocol, and Pi Remote
 and the orchestrator forward frames in order. See [GPU behavior](GPU_REPORT.md) and
-[cleanup](cleanup/README.md) for those components. [Audio evaluation](../eval/README.md)
-owns the licensed fixtures and replay tool; [local rewrite evaluation](../local-rewrite/README.md)
-owns the rejected task-trained CPU candidate and reproducible scores.
+[cleanup](cleanup/README.md) for those components. [Final rewrite](REWRITE.md)
+owns the resident CPU Qwen3-4B-Instruct-2507 path, guards, limits and reproduction;
+[runtime installation](../rewrite-runtime/README.md) owns its pinned artifacts.
+[Audio evaluation](../eval/README.md) owns the licensed fixtures and replay tool;
+[local rewrite evaluation](../local-rewrite/README.md) owns the separate rejected
+Mumble candidate and reproducible scores. [Current Qwen measurements](rewrite-results/README.md)
+report returned-output quality, retained failures and guard decisions; this source
+description is not an installed-device or deployment claim.
 
 ## Dictionary support
 
@@ -16,21 +21,26 @@ pieces. An alternative replaces one piece's score with that piece's own support;
 it is not assigned the primary word's score. Alternatives are ranked by support
 and cannot cross a word boundary. These local scores are not calibrated
 probabilities of word correctness or a fully decoded alternative lattice.
-Dictionary phrase boosts still apply during recognition; explicit replacement
-rules remain the person's authority. Automatic cleanup substitution requires a
+[Bounded lexical search](DICTIONARY.md) now scores complete dictionary paths
+with refunded incomplete-prefix credit, independent of canonical BPE segmentation.
+Words and explicit replacement source phrases provide recognition context;
+replacement execution remains the person's authority. Automatic cleanup substitution requires a
 low-confidence primary, a dictionary-listed alternative and measured support
-within .12 of the primary. Unscored legacy alternatives cannot trigger it.
+within .12 of the primary. Unscored alternatives cannot trigger it.
+[Measured before/after results](../eval/DICTIONARY.md) include the natural phrase
+gain, caught quotation-control regression and limits of the synthetic name controls.
 
 ```sh
-/srv/pi/write-engine/venv/bin/python -m unittest test_dictionary_scores -v
+/srv/pi/write-engine/venv/bin/python -m unittest test_dictionary_decoder test_dictionary_scores -v
 ```
 
-The product currently uses a learned deletion tagger plus source-constrained
-rules and resident punctuation, not a generative LLM rewrite. The earlier local
-Qwen3-0.6B experiments did not improve held-out accuracy; their receipts and
-limitations are linked from the cleanup owner. New audio evaluation must score
-meaning preservation and unwanted dictionary substitutions as well as fluency
-before a generative rewrite replaces this path.
+Partials use the learned deletion tagger, source-constrained rules and resident
+punctuation. Finish then runs the entirely local resident generative editor on the
+dictionary-normalized recognized text. Guarded or unavailable rewrite retains the
+cleaned baseline with an explicit client notice, not silent degradation. Earlier
+Qwen3-0.6B and Mumble failures are separate experiments, not evidence for this
+candidate. Meaning preservation and unwanted dictionary substitutions must be
+scored alongside fluency; lexical guards alone are not a semantic guarantee.
 
 ## End of speech is an ordered boundary
 
@@ -55,6 +65,12 @@ This is model right context, not an extra microphone wait. Real AMI terminal wor
 600 ms completed both. On the local two-thread CPU probe this cost about 280 ms
 when no speculative final was ready: completeness takes precedence over the
 100 ms flush target, which is not met by that immediate-Finish case.
+These recognition-only timings exclude the new final rewrite. Finish with rewrite
+is seconds-scale, not the 100 ms recognition flush target; native Android waits up
+to 30 seconds after sending Finish. `timing.flushMs` includes rewrite, while
+`rewrite.latencyMs` isolates its queue/inference time. Seven combined loopback
+regressions measured 1.15–2.24 seconds at immediate Finish; broader latency is unproven.
+
 Immediate and speculative finalization use the same right context. A speculative
 result is reusable only when its sample count exactly matches the received PCM;
 quiet speech after that boundary cannot be discarded by the RMS silence detector.

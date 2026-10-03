@@ -240,6 +240,9 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 render();
             }); }
             @Override public void partial(String text) { }
+            @Override public void notice(String message) { main.post(() -> {
+                if (attempt == generation) Toast.makeText(WriteAccessibilityService.this, message, Toast.LENGTH_LONG).show();
+            }); }
             @Override public void finished(String text) { main.post(() -> { if (attempt == generation) completed(text); }); }
             @Override public void failed(String message) { main.post(() -> { if (attempt == generation) failed(message); }); }
         });
@@ -279,7 +282,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
                     render();
                     main.postDelayed(() -> {
                         if (attempt == generation && finishing) failed("Server did not finish");
-                    }, 5000);
+                    }, 30000);
                 });
             } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
             catch (java.io.IOException error) { main.post(() -> {

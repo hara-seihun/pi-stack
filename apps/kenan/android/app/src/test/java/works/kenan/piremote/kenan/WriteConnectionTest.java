@@ -42,6 +42,7 @@ public final class WriteConnectionTest {
         final AtomicInteger allocations = new AtomicInteger();
         int connected, terminals, partials;
         String result, failure;
+        final List<String> notices = new ArrayList<>();
         boolean cleanedAtCallback;
         WriteConnection connection(WriteConnection.EndpointLookup lookup) {
             return new WriteConnection(new RemoteSession.Identity("person", "token"), this, lookup, current::get,
@@ -64,6 +65,7 @@ public final class WriteConnectionTest {
         }
         public void connected() { connected++; }
         public void partial(String text) { partials++; }
+        public void notice(String message) { notices.add(message); }
         public void finished(String text) { result = text; terminal(); }
         public void failed(String message) { failure = message; terminal(); }
         private void terminal() { terminals++; cleanedAtCallback = socket.cancellations > 0 || allocations.get() == 0; done.countDown(); }
@@ -87,6 +89,20 @@ public final class WriteConnectionTest {
         assertEquals(1, capture.terminals);
         assertEquals(0, capture.partials);
         assertEquals(1, capture.socket.messages.size());
+    }
+
+    @Test public void guardedOrUnavailableRewriteStillInsertsTextWithOneVisibleNotice() throws Exception {
+        for (String status : List.of("guarded", "unavailable")) {
+            Capture capture = new Capture();
+            capture.connect();
+            String response = "{\"type\":\"final\",\"text\":\"Keep this transcript\",\"rewrite\":{\"status\":\"" + status + "\"}}";
+            capture.socket.listener.onMessage(capture.socket, response);
+            capture.closed();
+            assertEquals("Keep this transcript", capture.result);
+            assertEquals(1, capture.notices.size());
+            capture.socket.listener.onMessage(capture.socket, response);
+            assertEquals(1, capture.notices.size());
+        }
     }
 
     @Test public void finishFollowsTailPacketExactlyOnceAndKeepsSocketForFinal() throws Exception {
