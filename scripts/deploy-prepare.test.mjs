@@ -25,10 +25,39 @@ function fixture() {
       assert.equal(result.status, 0, result.stderr);
     }
   }
-  function run(name, extra = {}) {
-    return spawnSync(join(repo, "deploy", name), [], { env: { ...env, ...extra }, encoding: "utf8", timeout: 3000 });
+  function run(name, extra = {}, args = []) {
+    return spawnSync(join(repo, "deploy", name), args, { env: { ...env, ...extra }, encoding: "utf8", timeout: 3000 });
   }
   return { directory, repo, bin, env, executable, commit, run, close: () => rmSync(directory, { recursive: true, force: true }) };
+}
+
+function rewriteFixture(f) {
+  const manifests = join(f.repo, "apps/write/rewrite-runtime");
+  const cache = join(f.directory, "rewrite-cache");
+  mkdirSync(manifests, { recursive: true });
+  mkdirSync(cache);
+  copyFileSync(join(root, "deploy/write-rewrite-runtime"), join(f.repo, "deploy/write-rewrite-runtime"));
+  copyFileSync(join(root, "apps/write/rewrite-runtime/install.py"), join(manifests, "install.py"));
+  const archive = join(cache, "runtime.zip");
+  const packed = spawnSync("python3", ["-c", `import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as bundle:
+    bundle.writestr('build/bin/llama-server', '#!/bin/sh\\necho fixture-version\\n')
+    bundle.writestr('build/bin/LICENSE', 'MIT fixture')
+`, archive], { encoding: "utf8", timeout: 3000 });
+  assert.equal(packed.status, 0, packed.stderr);
+  const model = join(cache, "model.gguf");
+  writeFileSync(model, "GGUFfixture");
+  for (const [name, file, fields] of [
+    ["runtime", archive, { archive_prefix: "build/bin/", files: ["llama-server", "LICENSE"], minimum_glibc: "2.34", cpu_flags: [] }],
+    ["model", model, {}],
+  ]) {
+    const bytes = readFileSync(file);
+    writeFileSync(join(manifests, `${name}.json`), JSON.stringify({
+      ...fields, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length,
+      url: "https://fixture.invalid/never-download-rewrite",
+    }));
+  }
+  f.env.PI_STACK_WRITE_REWRITE_CACHE = cache;
 }
 
 function preparationFixture() {
@@ -68,6 +97,7 @@ for (const writeLoadState of ["loaded", "not-found"]) test(`Write owns host disc
   const f = preparationFixture();
   try {
     copyFileSync(join(root, "deploy/write-engine"), join(f.repo, "deploy/write-engine"));
+    rewriteFixture(f);
     f.executable(join(f.bin, "systemctl"), `[[ "$*" == "show pi-stack-write.service -p LoadState --value" ]] || exit 64
 printf 'discovery\\n' >> "$TRACE"
 printf '%s\\n' '${writeLoadState}'`);
@@ -104,6 +134,7 @@ test("Write resumes model downloads, reuses pinned copies, and keeps verified we
   const f = fixture();
   try {
     copyFileSync(join(root, "deploy/write-engine"), join(f.repo, "deploy/write-engine"));
+    rewriteFixture(f);
     const source = join(f.repo, "apps/write/engine");
     mkdirSync(join(source, "cleanup"), { recursive: true });
     const bytes = Buffer.from("fixture pinned model bytes\n".repeat(8));
@@ -155,6 +186,10 @@ printf '206'`);
     const firstTree = realpathSync(destination);
     const weights = realpathSync(join(destination, "model"));
     const venv = realpathSync(join(destination, "venv"));
+    const rewriteRuntime = realpathSync(join(destination, "rewrite-runtime"));
+    const rewriteModel = realpathSync(join(destination, "rewrite-model"));
+    assert.match(readFileSync(join(rewriteRuntime, "bin/llama-server"), "utf8"), /fixture-version/);
+    assert.equal(readFileSync(join(rewriteModel, "model.gguf"), "utf8"), "GGUFfixture");
     assert.deepEqual(readFileSync(join(weights, "encoder.onnx")), bytes);
     assert.deepEqual(readFileSync(join(weights, "shared/tokenizer.json")), bytes);
     assert.deepEqual(readFileSync(join(destination, "cleanup-model/joint-f32.onnx")), bytes);
@@ -174,6 +209,19 @@ printf '206'`);
     assert.equal(existsSync(join(firstTree, "venv/bin/python")), true, "previous dependencies remain available");
     assert.equal(realpathSync(join(destination, "punctuation-model")), punctuation);
     const secondTree = realpathSync(destination);
+    assert.equal(realpathSync(join(destination, "rewrite-runtime")), rewriteRuntime);
+    assert.equal(realpathSync(join(destination, "rewrite-model")), rewriteModel);
+    const selected = f.run("write-engine", env, ["--select"]);
+    assert.equal(selected.status, 0, selected.stderr);
+    writeFileSync(join(rewriteModel, "model.gguf"), "BADUfixture");
+    const corruptRewrite = f.run("write-engine", env, ["--select"]);
+    assert.equal(corruptRewrite.status, 65, corruptRewrite.stderr);
+    assert.match(corruptRewrite.stderr, /rewrite runtime\/model is missing or corrupt/);
+    assert.equal(realpathSync(destination), secondTree, "selection cannot accept corrupt rewrite assets");
+    const repairedRewrite = f.run("write-engine", env);
+    assert.equal(repairedRewrite.status, 0, repairedRewrite.stderr);
+    assert.equal(readFileSync(join(rewriteModel, "model.gguf"), "utf8"), "GGUFfixture");
+    assert.equal(readFileSync(f.env.TRACE, "utf8"), trace, "rewrite preparation reuses the seed without downloading");
     writeFileSync(join(punctuation, punctuationFiles[0]), "corrupt model");
     const corrupt = f.run("write-engine", env);
     assert.equal(corrupt.status, 1, corrupt.stderr);

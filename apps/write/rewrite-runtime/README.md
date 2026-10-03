@@ -47,8 +47,13 @@ Seconds-only fixture checks:
 
 ```sh
 python3 -m unittest discover -s apps/write/rewrite-runtime -p 'test_*.py'
+node --test scripts/deploy-prepare.test.mjs
 ```
 
-The fixtures cover checksum reuse, corruption repair, input-key invalidation,
-public permissions, path/link rejection and incompatible glibc rejection. Runtime
+The installer fixtures cover checksum reuse, corruption repair, input-key
+invalidation, public permissions, path/link rejection and incompatible glibc
+rejection. Deployment fixtures seed tiny pinned artifacts and run the real rewrite
+installer through engine preparation and selection. They cover host discovery,
+dependency-change reuse and retention, and refusal to select corrupt rewrite
+weights until preparation repairs them. No model downloads are needed. Runtime
 lifecycle, inference parameters and rewrite behavior belong to the engine.
