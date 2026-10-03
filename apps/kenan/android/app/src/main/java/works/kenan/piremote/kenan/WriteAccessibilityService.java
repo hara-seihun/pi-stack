@@ -139,12 +139,17 @@ public final class WriteAccessibilityService extends AccessibilityService {
         AccessibilityNodeInfo focused = null;
         List<AccessibilityWindowInfo> visible = getWindows();
         if (visible != null) for (AccessibilityWindowInfo window : visible) {
-            if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || window.getRoot() == null) continue;
-            AccessibilityNodeInfo candidate = window.getRoot().findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+            // getRoot() fetches a fresh snapshot each call and can turn null between calls.
+            AccessibilityNodeInfo root = window.getRoot();
+            if (root == null) continue;
+            AccessibilityNodeInfo candidate = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
             if (eligible(candidate)) { focused = candidate; break; }
         }
-        if (focused == null && getRootInActiveWindow() != null)
-            focused = getRootInActiveWindow().findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        if (focused == null) {
+            AccessibilityNodeInfo activeRoot = getRootInActiveWindow();
+            if (activeRoot != null) focused = activeRoot.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        }
         boolean keyboardRequired = getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true);
         if (!allowed || !eligible(focused) || keyboardRequired && !hasKeyboard()
             || focused != null && dismissal.hides(field(focused), false)) {
