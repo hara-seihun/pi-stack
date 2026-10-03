@@ -123,6 +123,34 @@ or credentials:
 node --test packages/runtime/summary-recovery.test.mjs packages/runtime/compaction-errors.test.mjs packages/runtime/compaction-cut.test.mjs
 ```
 
+## Shell output custody
+
+[`patch-bash-spill.mjs`](patch-bash-spill.mjs) keeps shell output in memory only.
+Pi's rolling buffer and tail truncation remain, but discarded output is never
+written to a temporary spill log. Tool descriptions, model-context messages and
+interactive displays report truncation without a full-output path. Deployment
+patches both the coding-agent SDK and bundled CLI, including the agent-core
+harness bash tool and shell collector, and hashes the patch into the immutable
+dependency-tree identity. Changed upstream anchors fail deployment.
+
+[`bash-spill.test.mjs`](bash-spill.test.mjs) runs actual local shell commands over
+the byte and line limits through both source forms, checks exact tail output,
+streaming updates, truncation notices and renderers, and covers cancellation,
+nonzero exit and the native environment harness. It asserts no spill logs appear.
+To prove an installed tree without patching it:
+
+```sh
+PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
+  node --test packages/runtime/bash-spill.test.mjs
+```
+
+The proof copies public runtime code for private-entrypoint instrumentation;
+shell test output is synthetic and no installed runtime files are changed.
+`deploy/runtime` runs this installed-tree proof before accepting each runtime
+release, then deletes preexisting `/tmp/pi-bash-*.log` files and records the count
+in the host release log. Active turns retain their original runtime until
+settlement; reopen a shell/CLI session to select the new tree.
+
 ## Session crash durability
 
 Pi 0.87.1 closes JSONL files after writes without syncing them. A hard host reset can therefore persist a new gocryptfs file length without the complete authenticated final block, making every later read that reaches that block fail with `EIO`. [`patch-session-durability.mjs`](patch-session-durability.mjs) repairs both the SDK and bundled CLI copies. Appends are synced before returning, initial and fork writes are completed and synced as one file, and rewrites use a synced temporary file followed by an atomic rename and parent-directory sync. [`session-durability.test.mjs`](session-durability.test.mjs) checks both deployed source forms and their syntax.
