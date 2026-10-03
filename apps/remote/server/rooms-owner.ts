@@ -1,13 +1,13 @@
 import type { Room, RoomSnapshot } from "../shared/rooms";
 import { roomInput, roomMembers, roomMetadata, readRoomInput } from "../shared/rooms";
 
-interface OwnedRoomThread { id: string; title: string; state: "idle" | "running"; metadata?: Record<string, unknown> }
+interface OwnedRoomThread { id: string; title: string; state: "idle" | "running"; held?: boolean; metadata?: Record<string, unknown> }
 interface RoomOwner {
   get(id: string): OwnedRoomThread | null;
   create(id: string, title: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   update(id: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   send(id: string, requestId: string, text: string): Promise<void>;
-  history(id: string): Promise<{ messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown }>;
+  history(id: string): Promise<{ messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown; error?: string }>;
   stop?(id: string): Promise<void>;
   answer?(id: string, questionId: string, sender: NonNullable<ReturnType<typeof roomMembers>>[number], body: any): Promise<void>;
   notify(id: string, receiptId: string, title: string, body: string, time: number): void;
@@ -15,7 +15,7 @@ interface RoomOwner {
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
 const fail = (error: string, status = 400) => Response.json({ error }, { status });
 
-export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown }): RoomSnapshot {
+export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown; error?: string }): RoomSnapshot {
   const metadata = roomMetadata(thread.metadata?.room)!;
   const room: Room = { ...metadata, title: thread.title };
   const messages: RoomSnapshot["messages"] = [];
@@ -24,13 +24,26 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: 
     if (!value || typeof value !== "object") continue;
     const message = value as Record<string, any>;
     const entryId = typeof message.identity?.id === "string" ? message.identity.id : `entry:${index}`;
+    const record = message.role === "notice" ? message.content : null;
+    if (record?.customType === "thread_input" && typeof record.data?.message === "string") {
+      const input = readRoomInput(record.data.message);
+      if (input) {
+        let materialized = false;
+        for (const following of source.messages.slice(index + 1) as Record<string, any>[]) {
+          if (following?.content?.customType === "thread_input") break;
+          if (following?.role === "user") { materialized = true; break; }
+        }
+        if (!materialized) messages.push({ id: entryId, sender: input.sender, text: input.text, time: Date.parse(record.timestamp) || 0 });
+        continue;
+      }
+    }
     if (message.role === "assistant" && Array.isArray(message.content)) for (const [blockIndex, block] of message.content.entries()) {
       if (block?.type === "thinking") work.push({ id: `${entryId}:${blockIndex}`, kind: "thinking", text: String(block.thinking ?? "") });
       if (block?.type === "toolCall") work.push({ id: `${entryId}:${blockIndex}`, kind: "toolCall", name: block.name, text: JSON.stringify(block.arguments, null, 2) ?? "" });
     }
     if (message.role === "toolResult") work.push({ id: entryId, kind: "toolResult", name: message.toolName, text: typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2) ?? "" });
     if (message.role !== "user" && message.role !== "assistant") {
-      if (message.role !== "toolResult") work.push({ id: entryId, kind: "notice", text: JSON.stringify(message, null, 2) });
+      if (message.role !== "toolResult") work.push({ id: entryId, kind: typeof (message.content?.customType ?? message.content?.type) === "string" ? (message.content.customType ?? message.content.type).replaceAll("_", " ") : "notice", text: JSON.stringify(message, null, 2) });
       continue;
     }
     const text = typeof message.content === "string" ? message.content : Array.isArray(message.content)
@@ -42,7 +55,7 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: 
     const id = typeof message.identity?.id === "string" ? message.identity.id : `${message.role}:${time}:${messages.length}`;
     messages.push({ id, time, sender: input?.sender ?? { user: "assistant", displayName: "Kenan" }, text: input?.text ?? text });
   }
-  return { room, state: thread.state, messages, live: source.live, questions: source.questions ?? [], work, thinking: source.thinking ?? "", context: source.context ?? null,
+  return { room, state: thread.state, held: thread.held ?? false, ...(source.error ? { error: source.error } : {}), messages, live: source.live, questions: source.questions ?? [], work, thinking: source.thinking ?? "", context: source.context ?? null,
     notificationId: thread.state === "idle" ? messages.filter(message => message.sender.user === "assistant").at(-1)?.id ?? null : null };
 }
 

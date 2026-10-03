@@ -113,6 +113,33 @@ test("unprivileged room work is transparent, including thinking, tool calls/resu
   expect(snapshot.work?.map(item => item.kind)).toEqual(["notice", "notice", "toolResult", "thinking", "toolCall"]);
 });
 
+test("room startup failure remains visible even before a user message enters native history", () => {
+  const id = crypto.randomUUID();
+  const snapshot = publicRoomSnapshot({ id, title: "House", state: "idle", held: true, metadata: { room: { id, members: people.slice(0, 2) } } }, {
+    live: "", error: "Room tools did not initialize", messages: [
+      { role: "notice", content: { type: "model_change", provider: "openai-codex" } },
+      { role: "notice", content: { type: "thinking_level_change", thinkingLevel: "high" } },
+    ],
+  });
+  expect(snapshot.messages).toEqual([]);
+  expect(snapshot.error).toBe("Room tools did not initialize");
+  expect(snapshot.held).toBe(true);
+  expect(snapshot.work?.map(item => item.kind)).toEqual(["model change", "thinking level change"]);
+});
+
+test("rejected room input remains a human message, while accepted native input renders only once", () => {
+  const id = crypto.randomUUID();
+  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const receipt = { role: "notice", identity: { id: "receipt" }, content: { type: "custom", customType: "thread_input", timestamp: "2026-10-03T23:00:00Z", data: { workId: "work", message: roomInput(people[1]!, "Hello") } } };
+  const rejection = { role: "notice", content: { type: "custom", customType: "thread_rejected", data: { error: "fetch failed" } } };
+  const failed = publicRoomSnapshot(thread, { live: "", error: "fetch failed", messages: [receipt, rejection] });
+  expect(failed.messages.map(message => ({ text: message.text, sender: message.sender.user }))).toEqual([{ text: "Hello", sender: people[1]!.user }]);
+  expect(failed.work?.map(item => item.kind)).toEqual(["thread rejected"]);
+  expect(failed.error).toBe("fetch failed");
+  const accepted = publicRoomSnapshot(thread, { live: "", messages: [receipt, { role: "user", content: receipt.content.data.message }, { role: "assistant", content: "Hi" }] });
+  expect(accepted.messages.map(message => message.text)).toEqual(["Hello", "Hi"]);
+});
+
 test("a private thread is never converted into a room and a member cannot remove others", async () => {
   const f = fixture(); f.threads.set(f.id, { id: f.id, title: "Private", state: "idle", metadata: {} });
   expect((await f.create()).status).toBe(409);

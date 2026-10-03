@@ -2,7 +2,7 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { KENAN_ROOT_DEFAULT_PORT } from "kenan-memory/contract";
-import { rootService } from "./service.js";
+import { rootService, type RootReleaseState } from "./service.js";
 import { createRootExecutor, readRootConfig } from "./root-runtime.js";
 import { awaitPrivateMount } from "kenan-memory/private-store";
 import { RootConsentManager, createConsentBridge, rootMemoryRpc } from "./consent.js";
@@ -28,15 +28,16 @@ if (!consentStore.startsWith(resolve(privateDir) + sep)) throw new Error("Root c
 consent = new RootConsentManager(consentStore, {
   bridge: createConsentBridge(process.env.PI_KENAN_ROOT_ROUTER_URL ?? "http://127.0.0.1:8788", consentCapability),
   memory: rootMemoryRpc(memoryUrl, memoryRootToken), executor, enabled: oneKenanEnabled });
-let reconciling = false;
+const releaseState: RootReleaseState = { quiescing: false, consentActive: false };
 const timer = setInterval(async () => {
-  if (reconciling || closing.signal.aborted) return;
-  reconciling = true;
+  if (releaseState.consentActive || releaseState.quiescing || closing.signal.aborted) return;
+  releaseState.consentActive = true;
   try { const result = await consent.drain(); if (result.errors) console.error(`Root consent: ${result.errors} pending exchanges require retry; state retained`); }
-  finally { reconciling = false; }
+  finally { releaseState.consentActive = false; }
 }, 2_000);
 const handle = rootService({ enabled: oneKenanEnabled, memoryUrl,
-  memoryRootToken, adminCapability, sessionsDir: config.sessionsDir, executor });
+  memoryRootToken, adminCapability, sessionsDir: config.sessionsDir, executor,
+  releaseCommit: process.env.PI_STACK_RELEASE_COMMIT, releaseState });
 const server = Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT), idleTimeout: 255,
   fetch: handle });
 closing.signal.addEventListener("abort", () => { clearInterval(timer); server.stop(true); process.exit(0); }, { once: true });

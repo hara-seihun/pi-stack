@@ -4,8 +4,9 @@ export const ROOT_ADMIN_HEADER = "x-pi-kenan-admin";
 export const ROOT_CONFIDENCE_NOTE = "Root sessions are private because their traces reveal information Kenan holds in confidence.";
 export interface RegisteredPerson { user: string; machineAdministrator?: boolean }
 export type RootDebugRoute = { kind: "list" } | { kind: "transcript"; sessionId: string };
+export type RootAdminRoute = RootDebugRoute | { kind: "release" };
 export type RootAdminAdmission =
-  | { ok: true; principal: { kind: "machine-administrator" }; route: RootDebugRoute }
+  | { ok: true; principal: { kind: "machine-administrator" }; route: RootAdminRoute }
   | { ok: false; response: Response };
 
 export function isMachineAdministrator(authenticatedUser: string, registry: readonly RegisteredPerson[]): boolean {
@@ -31,7 +32,7 @@ export function rootSessionDenied(): Response {
 }
 
 export function rootAdminAdmission(request: Request, expectedCapability: string): RootAdminAdmission {
-  const route = rootDebugRoute(request);
+  const route: RootAdminRoute | null = new URL(request.url).pathname === "/v1/admin/release" && ["POST", "DELETE"].includes(request.method) ? { kind: "release" } : rootDebugRoute(request);
   const supplied = request.headers.get(ROOT_ADMIN_HEADER);
   if (!route || !supplied || !/^[0-9a-f]{64}$/.test(expectedCapability)) return { ok: false, response: rootSessionDenied() };
   const digest = (value: string) => createHash("sha256").update(value).digest();

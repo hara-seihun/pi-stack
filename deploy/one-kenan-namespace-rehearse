@@ -61,7 +61,8 @@ throw new Error("Runtime did not see custody's later FUSE mount: "+readFileSync(
 ''')
     for public in (root/'runtime',runtime): public.chmod(0o755)
     (runtime/'main.ts').chmod(0o644)
-    config={'executionUser':'nobody','remoteRoot':str(root/'remote'),'memoryRuntime':str(root/'runtime'),'hostFile':str(root/'host.json'),'bun':shutil.which('bun')}
+    (root/'runtime/.pi-stack-commit').write_text('fixture-release\n')
+    config={'executionUser':'nobody','remoteRoot':str(root/'remote'),'memoryRuntime':str(root/'runtime'),'runtimeRoot':str(root/'runtime'),'hostFile':str(root/'host.json'),'bun':shutil.which('bun')}
     (root/'config.json').write_text(json.dumps(config))
     (root/'launch.py').write_text('''
 import importlib.machinery,json,os,sys

@@ -14,7 +14,8 @@ Environment=PI_REMOTE_DATA=@ROOMS_HOME@
 Environment=PI_AGENT_DIR=@ROOMS_HOME@/agent
 LoadCredential=kenan-memory-supervisor:@STATE_DIR@/supervisor-capabilities/pi-rooms
 ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
-ExecStart=@BUN@ @REMOTE_ROOT@/server/rooms-main.ts
+ExecStart=@REMOTE_ROOT@/server/pi-remote-supervise @BUN@ @REMOTE_ROOT@/server/rooms-main.ts
+ExecReload=/bin/kill -HUP $MAINPID
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
