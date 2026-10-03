@@ -55,7 +55,7 @@ test("an unavailable catalogue does not open an empty picker", () => {
   expect(reduce({ kind: "closed" }, { type: "open", starts: [] })).toEqual({ kind: "closed" });
 });
 
-test("instruction-file labels do not replace their exact source identity or auto-select them", () => {
+test("instruction files default to checked with their exact identity and reset on reopening", () => {
   const path = "/home/person/private/AGENTS.md";
   const personal: ThreadStart = {
     id: "personal", label: "Personal", icon: "personal",
@@ -63,13 +63,15 @@ test("instruction-file labels do not replace their exact source identity or auto
     contexts: [{ name: path, label: "AGENTS.md", tokens: 123, bytes: 456 }],
   };
   const models = reduce(reduce({ kind: "closed" }, { type: "open", starts: [personal] }), choose("personal"));
-  expect(models).toMatchObject({ kind: "models", contexts: [], destination: { contexts: [{ label: "AGENTS.md" }] } });
+  expect(models).toMatchObject({ kind: "models", contexts: [path], destination: { contexts: [{ label: "AGENTS.md" }] } });
   expect(reduce(models, { type: "toggleContext", name: "AGENTS.md" })).toBe(models);
-  const checked = reduce(models, { type: "toggleContext", name: path });
-  expect(reduce(checked, choose("astra", "models:personal")))
+  expect(reduce(models, choose("astra", "models:personal")))
     .toMatchObject({ kind: "creating", request: { contextFiles: [path] } });
-  const next = reduce(reduce(checked, { type: "dismiss" }), { type: "open", starts: [personal] });
-  expect(reduce(next, choose("personal"))).toMatchObject({ contexts: [] });
+  const unchecked = reduce(models, { type: "toggleContext", name: path });
+  expect(reduce(unchecked, choose("astra", "models:personal")))
+    .toMatchObject({ kind: "creating", request: { contextFiles: [] } });
+  const next = reduce(reduce(unchecked, { type: "dismiss" }), { type: "open", starts: [personal] });
+  expect(reduce(next, choose("personal"))).toMatchObject({ contexts: [path] });
 });
 
 test("checked context files travel with the creation request and only for destinations that offer them", () => {
@@ -80,8 +82,10 @@ test("checked context files travel with the creation request and only for destin
   };
   const opened = reduce({ kind: "closed" }, { type: "open", starts: [personal, ...starts] });
   const models = reduce(opened, choose("personal"));
-  expect(models).toMatchObject({ kind: "models", contexts: [] });
-  const one = reduce(models, { type: "toggleContext", name: "NEBULANI.md" });
+  expect(models).toMatchObject({ kind: "models", contexts: ["HARA.md", "NEBULANI.md"] });
+  expect(reduce(models, choose("astra", "models:personal")))
+    .toMatchObject({ kind: "creating", request: { contextFiles: ["HARA.md", "NEBULANI.md"] } });
+  const one = reduce(models, { type: "toggleContext", name: "HARA.md" });
   expect(one).toMatchObject({ contexts: ["NEBULANI.md"] });
   const both = reduce(one, { type: "toggleContext", name: "HARA.md" });
   expect(both).toMatchObject({ contexts: ["HARA.md", "NEBULANI.md"] });
