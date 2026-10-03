@@ -184,6 +184,10 @@ const registryPaths = new WeakMap();
 
 const REGISTRY_SCHEMA_VERSION = 1;
 
+function hasPendingIndex(database) {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='workspace_pending'").get() !== undefined;
+}
+
 function registrySchemaVersion(database) {
   const version = database.prepare("PRAGMA user_version").get().user_version;
   if (version > REGISTRY_SCHEMA_VERSION) fail(`workspace registry schema ${version} needs a newer agent-workspace`);
@@ -194,7 +198,10 @@ function initializeRegistry(database) {
   if (database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
     database.exec("PRAGMA journal_mode = WAL");
   }
-  if (registrySchemaVersion(database) === REGISTRY_SCHEMA_VERSION) return;
+  if (registrySchemaVersion(database) === REGISTRY_SCHEMA_VERSION) {
+    database.exec("CREATE INDEX IF NOT EXISTS workspace_pending ON workspace(root, path) WHERE state='creating'");
+    return;
+  }
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec(`
@@ -228,6 +235,7 @@ function initializeRegistry(database) {
       database.exec("ALTER TABLE workspace ADD COLUMN creation_request TEXT");
     }
     database.exec(`CREATE INDEX IF NOT EXISTS workspace_group ON workspace(group_id);
+      CREATE INDEX IF NOT EXISTS workspace_pending ON workspace(root, path) WHERE state='creating';
       PRAGMA user_version = ${REGISTRY_SCHEMA_VERSION}; COMMIT`);
   } catch (error) {
     database.exec("ROLLBACK");
@@ -241,7 +249,7 @@ function openRegistry(statePath = DEFAULT_STATE) {
   registryPaths.set(database, statePath);
   try {
     database.exec("PRAGMA busy_timeout = 5000");
-    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION ||
+    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION || !hasPendingIndex(database) ||
       database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
       withResourceLock(statePath, "registry-schema", () => initializeRegistry(database));
     }
@@ -1489,12 +1497,14 @@ function adoptCommand(database, args, statePath) {
 
 function assertCapacity(root, args, database, reservedPath) {
   mkdirSync(root, { recursive: true });
-  const pending = database?.prepare("SELECT path FROM workspace WHERE root=? AND state='creating'").all(root) ?? [];
-  const count = readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && path.join(root, entry.name) !== reservedPath).length +
-    pending.filter((record) => record.path !== reservedPath && !existsSync(record.path)).length;
   const maxCount = numberFlag(args, "max-count", DEFAULT_MAX_COUNT);
-  if (maxCount > 0 && count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
+  if (maxCount > 0) {
+    const pending = database?.prepare("SELECT path FROM workspace WHERE root=? AND state='creating'").all(root) ?? [];
+    const count = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && path.join(root, entry.name) !== reservedPath).length +
+      pending.filter((record) => record.path !== reservedPath && !existsSync(record.path)).length;
+    if (count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
+  }
   const stats = statfsSync(root);
   const freeGiB = stats.bavail * stats.bsize / 1024 ** 3;
   const minFreeGiB = numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB);
@@ -1591,12 +1601,31 @@ function cachedImmutableSource(mirror, repository, ref) {
 }
 
 function resolveSource(statePath, mirror, repository, upstream, ref) {
+  if (existsSync(repository)) {
+    const resolved = command("git", ["-C", repository, "rev-parse", "--verify", `${ref}^{commit}`]);
+    if (resolved.status !== 0) fail(`cannot resolve source ${ref}: ${resolved.stderr}`);
+    ref = resolved.stdout;
+  } else if (!/^[0-9a-f]{4,40}$/u.test(ref)) {
+    const candidates = [ref, `refs/heads/${ref}`, `refs/tags/${ref}`];
+    const advertised = run("git", ["ls-remote", "--exit-code", repository,
+      ...candidates.flatMap(candidate => [candidate, `${candidate}^{}`])]);
+    const refs = new Map(advertised.split("\n").map(line => {
+      const [commit, name] = line.split(/\s+/u);
+      return [name, commit];
+    }));
+    const named = candidates.find(candidate => refs.has(candidate));
+    if (named === undefined) fail(`cannot resolve source ${ref}; provide an exact remote ref or full commit`);
+    ref = refs.get(`${named}^{}`) ?? refs.get(named);
+  }
   const cached = cachedImmutableSource(mirror, repository, ref);
   if (cached !== null) return cached;
   return withResourceLock(statePath, `mirror:${mirror}`, () => {
     const shared = cachedImmutableSource(mirror, repository, ref);
     if (shared !== null) return shared;
     prepareMirror(mirror, repository, upstream);
+    if (/^[0-9a-f]{4,39}$/u.test(ref)) {
+      run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
+    }
     return fetchSource(mirror, repository, ref);
   });
 }
@@ -1617,7 +1646,6 @@ function prepareMirror(mirror, repository, upstream) {
     "--git-dir", mirror, "config", "--replace-all", "remote.origin.fetch",
     "+refs/heads/*:refs/remotes/origin/*",
   ]);
-  run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
 }
 
 function fetchSource(mirror, repository, ref) {

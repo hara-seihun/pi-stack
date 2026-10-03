@@ -550,6 +550,59 @@ test("forty concurrent create and heartbeat clients share registry writes", asyn
   } finally { f.close(); }
 });
 
+test("concurrent local HEAD creates never refresh upstream and use immutable mirror custody", async () => {
+  const f = fixture();
+  try {
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const wrapper = path.join(bin, "git");
+    writeFileSync(wrapper, `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args.includes('fetch') && args.at(-1) === 'origin') {
+  console.error('local allocation attempted serialized upstream refresh'); process.exit(99);
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'});
+process.exit(result.status ?? 1);
+`);
+    chmodSync(wrapper, 0o755);
+    const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+    const create = ["create", "--root", f.workspaces, "--repo", f.source, "--min-free-gib", "0", "--json"];
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const records = await Promise.all(Array.from({ length: 24 }, async (_, index) =>
+      JSON.parse(await runAsync([...create, "--name", `local-${index}`], env))));
+    assert.equal(new Set(records.map(record => record.id)).size, 24);
+    for (const record of records) {
+      assert.equal(record.state, "active");
+      assert.equal(record.sourceCommit, commit);
+      assert.equal(git(record.path, "rev-parse", "HEAD"), commit);
+    }
+    const remoteRecords = await Promise.all(Array.from({ length: 24 }, async (_, index) =>
+      JSON.parse(await runAsync(["create", "--root", f.workspaces, "--repo", `file://${f.remote}`,
+        "--name", `remote-${index}`, "--min-free-gib", "0", "--json"], env))));
+    for (const record of remoteRecords) {
+      assert.equal(record.state, "active");
+      assert.equal(record.sourceCommit, commit);
+    }
+    git(f.source, "tag", "-a", "annotated-source", "-m", "tag source");
+    git(f.source, "push", "origin", "annotated-source");
+    const tagged = JSON.parse(run(["create", "--root", f.workspaces, "--repo", `file://${f.remote}`,
+      "--ref", "annotated-source", "--name", "tagged", "--min-free-gib", "0", "--json"], env));
+    assert.equal(tagged.sourceCommit, commit);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const plan = database.prepare("EXPLAIN QUERY PLAN SELECT path FROM workspace WHERE root=? AND state='creating'").all(f.workspaces);
+    assert.ok(plan.some(row => row.detail.includes("workspace_pending")));
+    database.close();
+    writeFileSync(path.join(f.source, "next.txt"), "unpushed next HEAD\n");
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "new local source");
+    const next = JSON.parse(run([...create, "--name", "next-head"], env));
+    assert.equal(next.sourceCommit, git(f.source, "rev-parse", "HEAD"));
+    assert.notEqual(next.sourceCommit, commit);
+  } finally { f.close(); }
+});
+
 test("Docker authority excludes only an ungranted foreign Unix socket", () => {
   const denied = (code = "EACCES") => { throw Object.assign(new Error(code), { code }); };
   const foreign = { uid: 1006, inspect: () => ({ uid: 0, isSocket: () => true }), writable: () => denied() };
