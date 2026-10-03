@@ -3,5 +3,6 @@ numpy==2.5.3
 onnx==1.23.0
 onnxruntime==1.30.0
 tokenizers==0.23.2
+sentencepiece==0.2.2
 websockets==17.1
 av==15.1.0

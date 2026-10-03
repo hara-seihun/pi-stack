@@ -1,0 +1,9 @@
+{
+  "repository": "1-800-BAD-CODE/punctuation_fullstop_truecase_english",
+  "revision": "b26fd1c40e88678859048898218ea4edcc24c84a",
+  "license": "Apache-2.0",
+  "files": {
+    "punct_cap_seg_en.onnx": "dd922d459da618cd324280889740608b76fb3e9e61d3f402291be1251f91421b",
+    "spe_32k_lc_en.model": "9e86d0263de80b3b68327a21f5350c8cdf846e4c4400253c9baf05e3d44871c3"
+  }
+}
