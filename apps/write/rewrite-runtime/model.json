@@ -1,0 +1,15 @@
+{
+  "repository": "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF",
+  "revision": "ae44f08e1392f39c0e474af10c3ff8355c8b6688",
+  "file": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+  "base_model": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
+  "license": "Apache-2.0",
+  "attribution": "Qwen3-4B-Instruct-2507, Qwen Team / Alibaba Cloud. GGUF quantization by bartowski.",
+  "base_revision": "cdbee75f17c01a7cc42f958dc650907174af0554",
+  "license_url": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/LICENSE",
+  "license_sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+  "quantization_source": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/tree/ae44f08e1392f39c0e474af10c3ff8355c8b6688",
+  "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+  "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
+  "size": 2497280736
+}
