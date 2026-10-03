@@ -234,10 +234,6 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
       attachIdentity(message, itemsBefore);
       continue;
     }
-    if (role === "traceWithheld") {
-      inline("notice", `traceWithheld:${identity}`, "Privacy", String(message.content), stamp);
-      continue;
-    }
     if (role === "toolResult" && paired.has(message)) continue;
     const text = contentMarkdown(message?.content);
     if (role === "user") inline("user", `user:${identity}`, "User", text, stamp);

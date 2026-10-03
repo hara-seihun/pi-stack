@@ -38,7 +38,7 @@ export function displayAssistantMessage(message: JsonObject): JsonObject {
 }
 
 /** Builds the smaller transcript-only document shared by the browser and Android clients. */
-export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map(), imageReference?: ImageReference, tools: Iterable<ToolProgress> = [], responseMetrics: ReadonlyMap<string, ResponseMetrics> = new Map(), privacy: (context: any) => any = context => context): string {
+export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map(), imageReference?: ImageReference, tools: Iterable<ToolProgress> = [], responseMetrics: ReadonlyMap<string, ResponseMetrics> = new Map()): string {
   const context = JSON.parse(document) as JsonObject;
   const messages = withToolProgress(Array.isArray(context.messages) ? context.messages : [], tools);
   const projected = messages.map((value) => {
@@ -67,20 +67,15 @@ export function displayContextDocument(document: string, streamedThinking: Reado
         if (block.type === "text") delete block.textSignature;
         return block;
       });
+    } else if (message.role === "toolResult") {
+      delete message.details;
     }
-    return message;
-  });
-  const safe = privacy({ ...context, messages: projected });
-  const safeMessages = safe.messages.map((source: any) => {
-    if (!object(source)) return source;
-    const message = { ...source };
-    if (message.role === "toolResult") delete message.details;
-    if (imageReference && Array.isArray(message.content)) message.content = message.content.map((value: any) => {
+    if (imageReference && Array.isArray(message.content)) message.content = message.content.map((value) => {
       const block = object(value);
       if (block?.type !== "image" || typeof block.data !== "string" || typeof block.mimeType !== "string") return value;
       return { type: "image", mimeType: block.mimeType, src: imageReference({ data: block.data, mimeType: block.mimeType }) };
     });
     return message;
   });
-  return JSON.stringify({ ...safe, messages: safeMessages });
+  return JSON.stringify({ ...context, messages: projected });
 }

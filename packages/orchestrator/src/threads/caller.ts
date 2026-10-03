@@ -32,7 +32,6 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SendThread, SpawnThread } from "./contracts.js";
-import { oneKenanEnabled, isMachineAdministrator, tracePersons } from "./trace-access.js";
 
 export const THREAD_TOKEN_HEADER = "x-pi-thread-token";
 export const UPSTREAM_CREDENTIAL_HEADER = "x-pi-remote-upstream";
@@ -300,15 +299,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
 export function admissionFor(resolver: CallerResolver, source: CallerSource): (operation: string, input: Record<string, any>) => Promise<AdmissionResult> {
   let caller: ThreadCaller | { error: string } | undefined;
   return async (operation, input) => {
-    const traceOperation = ["read", "inspect", "command"].includes(operation) && oneKenanEnabled();
-    if (!traceOperation && operation !== "spawn" && operation !== "send" && operation !== "watch") return { ok: true, input };
-    if (traceOperation) {
-      caller ??= resolver.resolve(source);
-      if ("error" in caller) return { ok: false, status: 401, message: caller.error };
-      const internal = ["thread", "runtime", "service"].includes(caller.kind);
-      const viewer = caller.kind === "person" ? source.headers.get("x-pi-remote-user") ?? "" : "";
-      if (!internal && !isMachineAdministrator(viewer, tracePersons())) return refuse("Raw history, model context and exports can reveal information Kenan holds in confidence. Use the redacted Remote transcript.");
-    }
+    if (operation !== "spawn" && operation !== "send" && operation !== "watch") return { ok: true, input };
     caller ??= resolver.resolve(source);
     if ("error" in caller) return { ok: false, status: 401, message: caller.error };
     return resolver.admit(operation, input, caller);
