@@ -126,8 +126,8 @@ node --test packages/runtime/summary-recovery.test.mjs packages/runtime/compacti
 ## Shell output custody
 
 [`patch-bash-spill.mjs`](patch-bash-spill.mjs) keeps shell output in memory only.
-Pi's rolling buffer and tail truncation remain, but discarded output is never
-written to a temporary spill log. Tool descriptions, model-context messages and
+The shell executor and tool share Pi's byte-aware output accumulator and tail
+truncation; discarded output is never written to a temporary spill log. Tool descriptions, model-context messages and
 interactive displays report truncation without a full-output path. Deployment
 patches both the coding-agent SDK and bundled CLI, including the agent-core
 harness bash tool and shell collector, and hashes the patch into the immutable
@@ -146,6 +146,15 @@ PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-cod
 
 The proof copies public runtime code for private-entrypoint instrumentation;
 shell test output is synthetic and no installed runtime files are changed.
+
+October 3, 2026: publication `PUB-aa1ead02f2677ab683a35c2f` failed on Converge
+because the executor evicted whole pipe chunks and derived truncation from only
+the remaining text. A large chunk followed by a short tail could discard part of
+the required tail and report `truncated: false`. The executor now uses the same
+UTF-8 byte-aware accumulator as the tool, retaining total-output accounting across
+evictions and flushing its decoder on completion or cancellation. Deterministic
+chunk partitions guard exact tails, flags, exit status and streaming in both SDK
+and bundled CLI forms. Reapplying the patch also upgrades already-patched trees.
 `deploy/runtime` runs this installed-tree proof before accepting each runtime
 release, then uses [`deploy/clean-shell-spills.mjs`](../../deploy/clean-shell-spills.mjs)
 to delete preexisting regular `/tmp/pi-bash-*.log` files and record the actual
