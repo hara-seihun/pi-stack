@@ -1,0 +1,31 @@
+[Unit]
+Description=Unprivileged shared Kenan room owner
+Requires=pi-kenan-access.service pi-kenan-broker.service
+After=pi-kenan-access.service pi-kenan-broker.service
+
+[Service]
+Type=simple
+User=@ROOMS_USER@
+Group=@ROOMS_USER@
+EnvironmentFile=@ROOMS_ENV_FILE@
+Environment=HOME=@ROOMS_HOME@
+Environment=PI_REMOTE_CONFIG=@ROOMS_CONFIG@
+Environment=PI_REMOTE_DATA=@ROOMS_HOME@
+Environment=PI_AGENT_DIR=@ROOMS_HOME@/agent
+LoadCredential=kenan-memory-supervisor:@STATE_DIR@/supervisor-capabilities/pi-rooms
+ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
+ExecStart=@BUN@ @REMOTE_ROOT@/server/rooms-main.ts
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=@ROOMS_HOME@
+InaccessiblePaths=@STATE_DIR@/private @STATE_DIR@/.private.crypt @STATE_DIR@/custody
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -19,7 +19,11 @@ import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { appendContextPatch, readContext } from "./context-journal";
-import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor } from "./database";
+import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
+import { oneKenanEnabled } from "kenan-memory/config";
+import { handleRoomOwner } from "./rooms-owner";
+import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
+import { readThreadHistory } from "pi-orchestrator/history";
 import { dismissError, observeError } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
@@ -93,6 +97,7 @@ if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_E
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
 const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
+const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
@@ -145,7 +150,7 @@ function assertContextMirrorLoadsLast() {
   }
 }
 
-assertContextMirrorLoadsLast();
+if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
@@ -276,7 +281,7 @@ unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "thread
 ensureSupervisorSchema(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
-const fleetUrl = configuredOrchestratorThreadUrl();
+const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 const namingUrl = modelBrokerUrl() ?? fleetUrl;
 const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
@@ -789,6 +794,7 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
   return [
     audience === "thread" ? chosenContextFiles(sessionId) : "",
     meetingInstructions(sessionId, audience),
+    ROOMS_ENABLED ? roomInstructions(threads.get(sessionId)?.metadata?.room) : "",
     registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
     piReactions.session(sessionId).size ? `Message reactions, keyed by stable message ID: ${JSON.stringify(Object.fromEntries(piReactions.session(sessionId)))}` : "",
     slackReactions.instructions(),
@@ -1001,7 +1007,7 @@ function namingError(id: string, message: string | null) {
   if (result.changes) signalSync();
 }
 async function nameThread(sessionId: string): Promise<void> {
-  if (namingThreads.has(sessionId) || shuttingDown) return;
+  if (namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
   namingThreads.add(sessionId);
   try {
     const row = sessionRow.get(sessionId);
@@ -1150,7 +1156,7 @@ function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archiv
   const parents = new Set(local.map(thread => thread.parentId));
   const runningParents = runningChildParents(local, peerThreads.values());
   const localIds = new Set(local.map(thread => thread.id));
-  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
+  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
     localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
 }
 function pendingMessages(id: string) {
@@ -1204,7 +1210,7 @@ function publicSession(row: any,
 // hold, which it remembers on the ClientStream.
 
 function bootstrap(): Bootstrap {
-  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null };
+  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
 }
 
 let stateEncoded = "";
@@ -1298,7 +1304,7 @@ function pushNotifications(target?: ClientStream): void {
   for (const stream of target ? [target] : [...streams.values()]) {
     const cursor = stream.subscription.notificationsAfter;
     if (cursor === undefined || cursor === null) continue;
-    const feed = idleNotifications(db, cursor, id => threads.get(id) ?? null);
+    const feed = idleNotifications(db, cursor, notificationThread);
     if (!feed.notifications.length) continue;
     stream.subscription.notificationsAfter = feed.cursor;
     stream.send({ type: "notifications", feed });
@@ -1664,6 +1670,7 @@ function threadEnvironment(thread: Thread) {
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
     PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
+    ...(ROOMS_ENABLED && roomMetadata(thread.metadata?.room) ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
@@ -1782,6 +1789,13 @@ const handoffHistory: HandoffHistory = {
 };
 
 async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Promise<Result<{text: string; images?: unknown[]}>> {
+  const room = ROOMS_ENABLED && roomMetadata(thread.metadata?.room);
+  if (room && message.id.startsWith("question-answer:")) {
+    const stored = db.query("SELECT value FROM metadata WHERE key=?").get(`room-answer:${message.id}`) as { value: string } | null;
+    const sender = stored && roomMembers([JSON.parse(stored.value)])?.[0];
+    if (!sender) return { ok: false, error: { code: "unavailable", message: "Room question answer has no authenticated speaker" } };
+    return { ok: true, value: { text: roomInput(sender, message.text), images: message.images } };
+  }
   const meetingId = remotePlacement(thread).meetingId;
   if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
@@ -1794,6 +1808,12 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   } catch (cause) {
     return { ok: false, error: { code: "unavailable", message: cause instanceof Error ? cause.message : String(cause) } };
   }
+}
+
+function notificationThread(id: string): { parentId: string | null } | null {
+  const thread = threads.get(id);
+  if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
+  return thread ?? (ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null);
 }
 
 async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
@@ -1887,6 +1907,53 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (url.pathname.startsWith("/v1/room-owner/")) {
+      if (!ROOMS_ENABLED) return error("Not found", 404);
+      if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || resolved.kind !== "person" || resolved.via !== "router") return error("Rooms require the authenticated local router", 403);
+      return handleRoomOwner(req, {
+        get: id => threads.get(id) ?? null,
+        create: async (id, title, members) => {
+          const destination = meetingDestination();
+          if (destination.raw || destination.sandbox) throw new Error("Rooms require a full-context destination");
+          const admitted = workspaceAdmission.resolve(destination.workspaceId);
+          if (!admitted.ok) throw new Error(admitted.error.message);
+          unwrap(await directory.spawn({ id, requestId: id, title, cwd: admitted.value.cwd,
+            settings: { model: destination.defaultModel }, createdBy: { kind: "person", via: "router" },
+            metadata: { workspaceId: destination.workspaceId, profileId: destination.id, room: { id, members } } }));
+          ensureThreadView(db, id);
+        },
+        update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
+        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
+        history: async id => {
+          const thread = threads.get(id)!;
+          const messages = readThreadHistory(thread.sessionFile).map(entry => entry.type === "message"
+            ? { ...entry.message, identity: { id: `pi/${id}/${entry.id}` } }
+            : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
+          if (!storedContext(id)) await refreshThreadInspection(id);
+          const context = storedContext(id);
+          return { messages, live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+            context: context ? JSON.parse(context.document) : null, questions: unwrap(await directory.questions(id)) };
+        },
+        stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },
+        answer: async (id, questionId, sender, body) => {
+          const key = `room-answer:question-answer:${questionId}`;
+          const previous = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
+          if (previous && JSON.parse(previous.value).user !== sender.user) throw new Error("Another room member already answered this question");
+          db.query("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)").run(key, JSON.stringify(sender));
+          const answered = await directory.answer({ threadId: id, questionId, selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
+          if (!answered.ok && !previous) db.query("DELETE FROM metadata WHERE key=?").run(key);
+          unwrap(answered);
+        },
+        notify: (id, receiptId, title, body, time) => {
+          const target = `room:${id}`;
+          db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`room-link:${target}`, "1");
+          recordIdleNotification(db, receiptId, { id: target, title }, time, { kind: "idle", body });
+          signalSync();
+        },
+      });
+    }
     if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
       const feed = url.pathname.startsWith("/v1/calendar/feed/");
       if (!feed) {
@@ -2278,7 +2345,7 @@ const server = Bun.serve<SocketData>({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications();
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, id => threads.get(id)) });
+      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
@@ -2419,6 +2486,7 @@ const server = Bun.serve<SocketData>({
     const id = sessionMatch.params.sessionId;
     const action = sessionMatch.action;
     const row = sessionRow.get(id) as any;
+    if (ROOMS_ENABLED && roomMetadata(row?.metadata?.room) && ["prompt", "fork", "command"].includes(action ?? "")) return error("Use the room API for room messages", 403);
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
     if (action === "unarchive" && req.method === "POST") {
