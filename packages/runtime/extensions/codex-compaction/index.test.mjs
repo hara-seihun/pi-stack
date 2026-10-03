@@ -183,7 +183,7 @@ test("failed native compaction retains context and fences automatic retries acro
   f.ctx.model = { ...model, provider: "openai-codex-9" };
   for (let i = 0; i < 32; i++) {
     const retry = await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
-    assert.match(retry.error, /Automatic resubmission is blocked/);
+    assert.match(retry.error, /Automatic compaction retries after/);
   }
   assert.equal(calls, 1);
   const rejected = f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx);
@@ -191,6 +191,11 @@ test("failed native compaction retains context and fences automatic retries acro
   assert.equal(f.aborted, false);
   await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch(), reason: "manual" }, f.ctx);
   assert.equal(calls, 2);
+  const later = Date.now() + 2 * 60 * 60_000;
+  t.mock.method(Date, "now", () => later);
+  assert.equal(f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx).error, undefined, "an expired fence no longer rejects chat");
+  await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
+  assert.equal(calls, 3, "automatic compaction retries once its fence expires");
   assert.equal(f.handlers.has("turn_end"), false);
   assert.equal(f.handlers.has("agent_settled"), false);
 });

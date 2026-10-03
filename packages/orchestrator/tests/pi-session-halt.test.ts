@@ -220,6 +220,33 @@ it("answers a steer that the controller sends after native settlement instead of
   expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0, completedWorkIds: ["root", "late"] } });
 }, 3000);
 
+it("runs steers stranded by a terminal error instead of leaving the execution open forever", async () => {
+  const f = await fixture(), started = deferred();
+  const first = createAssistantMessageEventStream();
+  const requests: string[][] = [];
+  f.native.agent.streamFunction = (_model, context) => {
+    requests.push(userTexts(context));
+    if (requests.length === 1) { started.resolve(); return first; }
+    return f.reply(f.message([{ type: "text", text: "steers answered" }], "stop"));
+  };
+  expect(await f.command("prompt", { workId: "root", message: "work" })).toMatchObject({ success: true });
+  await started.promise;
+  for (const index of [1, 2, 3]) expect(await f.command("steer", { workId: `steer-${index}`, message: `steer ${index}` })).toMatchObject({ success: true });
+  // Production Pi ends this run without consuming its queue (a propagated compaction failure, or a settle boundary
+  // that cannot continue from an error); that is the exit the October 3 integrator wedge took.
+  const native = f.native as unknown as { _handlePostAgentRun(): Promise<boolean>; _runBeforeSettleBoundary(): Promise<boolean> };
+  vi.spyOn(native, "_handlePostAgentRun").mockResolvedValueOnce(false);
+  vi.spyOn(native, "_runBeforeSettleBoundary").mockResolvedValueOnce(false);
+  const failed = f.message([], "error");
+  failed.errorMessage = "Context rejected: Native compaction failed: fixture fence";
+  first.push({ type: "error", reason: "error", error: failed });
+  first.end();
+  const settled = await f.waitFor(event => event.type === "agent_settled");
+  expect(settled.workIds).toEqual(["root", "steer-1", "steer-2", "steer-3"]);
+  expect(requests.at(-1)?.slice(-3)).toEqual(["steer 1", "steer 2", "steer 3"]);
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0 } });
+}, 3000);
+
 it("answers a steer that arrives while Pi is emitting settlement, and settles it only after its reply", async () => {
   const gate = deferred(), settling = deferred();
   Object.assign(globalThis, { __piSettleGate: gate.promise, __piSettling: settling.resolve });

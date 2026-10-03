@@ -2,6 +2,8 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { compactionRetryAt } from "./extensions/codex-compaction/retry.mjs";
+
 const helper = readFileSync(new URL("./bounded-summary.js", import.meta.url), "utf8").replace("export async function", "async function");
 
 export function patchSummaryRecovery(source) {
@@ -30,12 +32,14 @@ export function patchSummaryFailureFence(source) {
   _assertSummaryRecovery() {
     if (!this.model || this.model.api === "openai-codex-responses") return;
     const modelKey = this.model.api + "/" + this.model.id;
+    let latest, failures = 0;
     for (const entry of this.sessionManager.getBranch().slice().reverse()) {
-      if (entry.type === "compaction") return;
-      if (entry.type === "custom" && entry.customType === "pi-stack-auto-compaction-failure" && entry.data?.modelKey === modelKey) {
-        throw new Error("Context rejected: " + entry.data.error + ". Context is unchanged. Automatic resubmission is blocked; retry with /compact or compact RPC, or switch model.");
-      }
+      if (entry.type === "compaction") break;
+      if (entry.type === "custom" && entry.customType === "pi-stack-auto-compaction-failure" && entry.data?.modelKey === modelKey) { latest ??= entry; failures++; }
     }
+    if (!latest) return;
+    const retryAt = (${compactionRetryAt.toString()})(latest.data.failedAt ?? (Date.parse(latest.timestamp) || 0), failures);
+    if (Date.now() < retryAt) throw new Error("Context rejected: " + latest.data.error + ". Context is unchanged. Automatic compaction retries after " + new Date(retryAt).toISOString() + "; /compact or compact RPC retries now.");
   }
   `;
   source = source.slice(0, insertion) + method + source.slice(insertion);
@@ -51,7 +55,7 @@ export function patchSummaryFailureFence(source) {
   methodSource = methodSource.replace(tryBoundary, match => `${match} this._assertSummaryRecovery();`);
   const aborted = /\baborted\s*=\s*abortController\?\.signal\.aborted\s*===\s*(?:true|!0)\s*\|\|\s*cancelledByExtension;?/g;
   if ([...methodSource.matchAll(aborted)].length !== 1) throw new Error("Pinned Pi auto-compaction cancellation changed");
-  methodSource = methodSource.replace(aborted, match => `${match}; if (!aborted && model && model.api !== "openai-codex-responses" && !message.startsWith("Context rejected:")) this.sessionManager.appendCustomEntry("pi-stack-auto-compaction-failure", { modelKey: model.api + "/" + model.id, error: message, reason });`);
+  methodSource = methodSource.replace(aborted, match => `${match}; if (!aborted && model && model.api !== "openai-codex-responses" && !message.startsWith("Context rejected:")) this.sessionManager.appendCustomEntry("pi-stack-auto-compaction-failure", { modelKey: model.api + "/" + model.id, error: message, reason, failedAt: Date.now() });`);
   return source.slice(0, start) + methodSource + source.slice(end);
 }
 
