@@ -124,7 +124,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = process.argv[2];
 const lock = JSON.parse(fs.readFileSync(path.join(root, 'node_modules/.package-lock.json'), 'utf8'));
-process.exit(Object.keys(lock.packages ?? {}).every(name => fs.existsSync(path.join(root, name, 'package.json'))) ? 0 : 1);
+process.exit(Object.entries(lock.packages ?? {}).every(([name, spec]) =>
+  !name.split('/').includes('node_modules') || spec.optional || fs.existsSync(path.join(root, name, 'package.json'))
+) ? 0 : 1);
 JS
     then
       export PI_STACK_DEPENDENCIES_READY=$key

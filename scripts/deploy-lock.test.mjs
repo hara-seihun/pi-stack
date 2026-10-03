@@ -79,7 +79,7 @@ test("a deleted nested dependency invalidates an otherwise matching receipt", ()
         printf 'called\\n' >> "$calls"
         mkdir -p "$root/node_modules" "$root/apps/remote/node_modules/plugin"
         printf '{}' > "$root/apps/remote/node_modules/plugin/package.json"
-        printf '{"packages":{"apps/remote/node_modules/plugin":{}}}' > "$root/node_modules/.package-lock.json"
+        printf '{"packages":{"apps/remote/node_modules/plugin":{},"packages/removed-workspace":{},"node_modules/skipped-platform-package":{"optional":true}}}' > "$root/node_modules/.package-lock.json"
       }
       pi_stack_prepare_dependencies "$root"
       pi_stack_prepare_dependencies "$root"
