@@ -226,6 +226,7 @@ function Step({ entry, sessionId, home, forceExpanded = false, onThinkingOpen }:
   forceExpanded?: boolean;
   onThinkingOpen?(open: boolean): void;
 }) {
+  if (entry.kind === "notice" && entry.label === "Privacy") return <p className="trace-privacy" role="status">{entry.text}</p>;
   return entry.kind === "toolCall"
     ? <ToolStep entry={entry} home={home} forceExpanded={forceExpanded} />
     : <TextStep entry={entry} sessionId={sessionId} forceExpanded={forceExpanded} onOpen={entry.live ? onThinkingOpen : undefined} />;
@@ -262,6 +263,8 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
   const [expanded, setExpanded] = useState(false);
   const running = newest && item.running;
   const elapsed = useElapsed(item.summary.startedAt, running);
+  if (item.entries.every(entry => entry.kind === "notice" && entry.label === "Privacy"))
+    return <p className="trace-privacy" role="status">{item.latest.text}</p>;
   return <section className={`work-card${running ? " running" : ""}${item.summary.hasErrors ? " has-errors" : ""}`}>
     <button type="button" className="work-card-header" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
       <span className="work-chevron" aria-hidden="true">›</span>

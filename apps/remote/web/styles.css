@@ -77,6 +77,7 @@ button:disabled { cursor: default; opacity: .45; }
 .context-earlier { display: block; margin: 0 auto var(--space-5); padding: var(--space-2) var(--space-4); border: 0; border-radius: var(--radius-2); color: var(--muted); background: var(--surface); font: inherit; }
 .context-earlier[disabled] { opacity: .6; }
 .context-earlier-error { margin: 0 auto var(--space-4); color: var(--danger); font-size: 13px; text-align: center; }
+.trace-privacy { margin: var(--space-3) 0; color: var(--muted); font-size: 12px; }
 .message-header { min-height: 20px; display: flex; align-items: baseline; gap: 8px; margin-bottom: var(--space-2); }
 .message-label { display: block; flex: 1; min-width: 0; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
 .message-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; }

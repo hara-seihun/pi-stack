@@ -14,6 +14,8 @@ import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
 import { displayAssistantMessage, displayContextDocument, type ContextImage } from "./context-display";
+import { TracePrivacy, TRACE_WITHHELD, type TraceState } from "./trace-privacy";
+import { oneKenanEnabled, isMachineAdministrator, tracePersons } from "../../../packages/orchestrator/src/threads/trace-access";
 import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
@@ -274,6 +276,17 @@ const threads = new ThreadService({
 unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "threads"),
   resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
 ensureSupervisorSchema(db);
+const activeTraceTurns = new Set<string>();
+const privacyPersons = oneKenanEnabled() ? tracePersons() : [];
+const tracePrivacy = new TracePrivacy({
+  enabled: oneKenanEnabled() && !isMachineAdministrator(MESSAGE_OWNER.id, privacyPersons),
+  viewer: MESSAGE_OWNER.id, persons: privacyPersons,
+  load: id => {
+    const row = db.query("SELECT value FROM metadata WHERE key=?").get(`trace-privacy:${id}`) as { value: string } | null;
+    return row ? JSON.parse(row.value) as TraceState : undefined;
+  },
+  save: (id, state) => { db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`trace-privacy:${id}`, JSON.stringify(state)); },
+});
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
 const fleetUrl = configuredOrchestratorThreadUrl();
@@ -317,6 +330,17 @@ threads.setWatchList(watchList);
 const peerThreads = new Map<string, Thread>();
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
+function traceScope(id: string) {
+  const thread = threads.get(id) ?? peerThreads.get(id);
+  return { room: Boolean(thread?.metadata?.room || (thread && remotePlacement(thread).meetingId)), running: activeTraceTurns.has(id) || thread?.state === "running", cwd: thread?.cwd };
+}
+function clientActivity(id: string, events: ReturnType<typeof activity.since>) {
+  if (tracePrivacy.enabled) {
+    const stored = storedContext(id);
+    if (stored) tracePrivacy.observeContext(id, JSON.parse(stored.document), traceScope(id));
+  }
+  return tracePrivacy.events(id, events, traceScope(id));
+}
 let peerError: string | null = null;
 const notificationErrors = new Map<string, string>();
 let peerRefresh: Promise<void> | null = null;
@@ -625,6 +649,11 @@ function streamedThinkingByMessage(sessionId: string): Map<string, string> {
 }
 
 function displayContext(sessionId: string, sourceHash: string, sourceDocument: string) {
+  const scope = traceScope(sessionId);
+  if (tracePrivacy.enabled) {
+    tracePrivacy.observeContext(sessionId, JSON.parse(sourceDocument), scope);
+    sourceHash += JSON.stringify({ scope, privacy: tracePrivacy.state(sessionId) });
+  }
   const cached = displayContexts.get(sessionId) ?? openDisplayContexts.get(sessionId);
   if (cached?.sourceHash === sourceHash) return cached;
   const progress = liveProjections.get(sessionId)?.toolProgress;
@@ -638,7 +667,8 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     const hash = sha256(`${image.mimeType}\0${image.data}`);
     images.set(hash, image);
     return API.sessionImage.path({ sessionId, hash });
-  }, liveProjections.get(sessionId)?.toolProgress.values(), responseMetricsByMessage(sessionId));
+  }, liveProjections.get(sessionId)?.toolProgress.values(), responseMetricsByMessage(sessionId),
+  context => tracePrivacy.context(sessionId, context, scope));
   const projected = { sourceHash, document, hash: sha256(document), images };
   openDisplayContexts.delete(sessionId);
   releaseOpenDisplayContexts();
@@ -657,6 +687,7 @@ function cacheStoredContext(sessionId: string, stored: { capturedAt: number; doc
     }
   }
   storedContextCache.set(sessionId, stored, stored ? stored.document.length * 2 : 4);
+  if (tracePrivacy.enabled && stored) tracePrivacy.observeContext(sessionId, JSON.parse(stored.document), traceScope(sessionId));
   if (known?.hash !== stored?.hash) signalTranscript(sessionId);
 }
 
@@ -757,12 +788,20 @@ function threadError(failure: { code: string; message: string }) {
     : failure.code === "invalid_request" ? 400 : failure.code === "unavailable" ? 503 : 409);
 }
 
+function rawTraceRoots(): string[] {
+  return [join(DATA, "threads"), join(DATA, "ingestion"),
+    ...["supervisor.sqlite3", "threads.sqlite3"].flatMap(name => ["", "-wal", "-shm"].map(suffix => join(DATA, name + suffix))),
+    ...allThreadRows().map(row => row.session_path).filter((path): path is string => typeof path === "string").map(path => dirname(path))];
+}
+
 async function sessionFileResponse(url: URL, method: string, req: Request): Promise<Response | null> {
   const match = API.sessionFiles.match(method, url.pathname) ?? API.sessionFilesHead.match(method, url.pathname);
   if (!match) return null;
   const row = sessionRow.get(match.sessionId) as any;
   if (!row) return new Response("Session not found", { status: 404, headers: API_CORS_HEADERS });
-  return localFileResponse(url.searchParams.get("path") ?? "", method, req);
+  const path = url.searchParams.get("path") ?? "";
+  if (tracePrivacy.enabled && !tracePrivacy.rawFileAllowed(path, rawTraceRoots())) return error(TRACE_WITHHELD, 403);
+  return localFileResponse(path, method, req);
 }
 
 // The meeting root is the conversation thread the room is attached to; Voice hard-steers it on
@@ -803,7 +842,8 @@ function voiceInstructions(row: any): string {
   const instructions = [
     policy,
     `Connected Pi thread: ${JSON.stringify({ id: row.id, name: row.name, meeting: Boolean(row.meeting_id) })}`,
-    threadInstructions(row.id, "voice"),
+    tracePrivacy.enabled && (traceScope(row.id).room || tracePrivacy.state(row.id).privateSince !== undefined)
+      ? TRACE_WITHHELD : threadInstructions(row.id, "voice"),
     history ? `Recent thread transcript:\n${history}` : "",
   ].filter(Boolean).join("\n\n");
   // Meeting Voice opens on demand, so it starts without having heard the room; the recent transcript fills that in when it fits the Voice service's 32 kB bound.
@@ -1288,7 +1328,7 @@ function sendEvents(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   const after = stream.subscription.eventsAfter;
   if (!sessionId || after === undefined || after === null) return;
-  const events = activity.since(sessionId, after);
+  const events = clientActivity(sessionId, activity.since(sessionId, after));
   if (!events.length) return;
   stream.subscription.eventsAfter = events.at(-1)!.seq;
   stream.send({ type: "events", sessionId, events });
@@ -1298,7 +1338,7 @@ function pushNotifications(target?: ClientStream): void {
   for (const stream of target ? [target] : [...streams.values()]) {
     const cursor = stream.subscription.notificationsAfter;
     if (cursor === undefined || cursor === null) continue;
-    const feed = idleNotifications(db, cursor, id => threads.get(id) ?? null);
+    const feed = tracePrivacy.notifications(idleNotifications(db, cursor, id => threads.get(id) ?? null));
     if (!feed.notifications.length) continue;
     stream.subscription.notificationsAfter = feed.cursor;
     stream.send({ type: "notifications", feed });
@@ -1310,7 +1350,7 @@ function sendLive(stream: ClientStream): void {
   if (!sessionId) return;
   const runtime = liveProjections.get(sessionId);
   stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "",
-    ...(stream.subscription.thinking ? { thinking: runtime?.liveThinking ?? "" } : {}) });
+    ...(stream.subscription.thinking ? { thinking: tracePrivacy.liveThinking(sessionId, runtime?.liveThinking ?? "", traceScope(sessionId)) } : {}) });
 }
 
 function pushLive(): void {
@@ -1478,6 +1518,13 @@ function handlePiEvent(sessionId: string, event: any) {
   try { phoneOverlay?.event(sessionId, event); } catch (cause) { console.error("phone overlay event failed", cause); }
   ensureThreadView(db, sessionId);
   const rt = liveFor(sessionId);
+  if (tracePrivacy.enabled) {
+    if (["agent_start", "thread_message_inserted", "message_start", "message_update"].includes(event.type)
+      || event.type === "response" && event.command === "get_state" && event.data?.isStreaming) activeTraceTurns.add(sessionId);
+    if (event.type === "thread_settled") activeTraceTurns.delete(sessionId);
+    const stored = storedContext(sessionId);
+    tracePrivacy.observeEvent(sessionId, event, traceScope(sessionId), stored ? JSON.parse(stored.document) : undefined);
+  }
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
     restoreLiveProjection(rt, event.data.live);
     invalidateDisplayContext(sessionId);
@@ -1508,6 +1555,7 @@ function handlePiEvent(sessionId: string, event: any) {
   if (event.type === "thread_settled") {
     responseTiming.forget(sessionId);
     settleLiveProjection(rt);
+    if (tracePrivacy.enabled) invalidateDisplayContext(sessionId);
     void refreshThreadNotifications();
     emit(sessionId, "settled", { workId: event.workId, outcome: event.outcome }, `settled:${event.executionId}`);
     if (event.outcome === "failed") emit(sessionId, "notice", {
@@ -1831,13 +1879,13 @@ await inlineImages.start();
 const meet = new MeetServer((id) => {
   const row = sessionRow.get(id) as any;
   return Boolean(row && !row.archived_at);
-}, undefined, db, (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
+}, undefined, db, (meetingId, rootId) => meetingActivity(id => clientActivity(id, activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8)), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
   const runtime = liveProjections.get(row.id);
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
     activity: threadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id)),
-    tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+    tools: tracePrivacy.enabled ? [] : [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
 
 
@@ -2012,6 +2060,10 @@ const server = Bun.serve<SocketData>({
     }
     const instructionsRequest = API.sessionInstructions.match(req.method, url.pathname);
     if (instructionsRequest) {
+      if (tracePrivacy.enabled) {
+        const requester = callers.resolve(caller);
+        if ("error" in requester || !["thread", "runtime", "service"].includes(requester.kind)) return error(TRACE_WITHHELD, 403);
+      }
       if (!sessionRow.get(instructionsRequest.sessionId)) return error("Session not found", 404);
       return json({ instructions: threadInstructions(instructionsRequest.sessionId) });
     }
@@ -2058,7 +2110,7 @@ const server = Bun.serve<SocketData>({
     if (itemRequest) {
       const id = itemRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      let body = transcripts.get(id)?.bodies.get(itemRequest.itemId);
+      let body = tracePrivacy.enabled ? refreshTranscript(id)?.current.bodies.get(itemRequest.itemId) : transcripts.get(id)?.bodies.get(itemRequest.itemId);
       if (!body) {
         if (!storedContext(id)) await refreshThreadInspection(id);
         body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
@@ -2068,7 +2120,7 @@ const server = Bun.serve<SocketData>({
         ...API_CORS_HEADERS,
         "content-type": "application/json",
         // The id is the body's hash, so this body can never change.
-        "cache-control": "private, max-age=31536000, immutable",
+        "cache-control": tracePrivacy.enabled ? "no-store" : "private, max-age=31536000, immutable",
         etag: `"${itemRequest.itemId}"`,
         vary: "accept-encoding",
       };
@@ -2082,7 +2134,9 @@ const server = Bun.serve<SocketData>({
     const deliveredFile = await sessionFileResponse(url, req.method, req);
     if (deliveredFile) return deliveredFile;
     if (API.fileDownload.match(req.method, url.pathname) || API.fileDownloadHead.match(req.method, url.pathname)) {
-      return localFileResponse(url.searchParams.get("path") ?? "", req.method, req);
+      const path = url.searchParams.get("path") ?? "";
+      if (tracePrivacy.enabled && !tracePrivacy.rawFileAllowed(path, rawTraceRoots())) return error(TRACE_WITHHELD, 403);
+      return localFileResponse(path, req.method, req);
     }
     const web = webResponse(WEB_DIR, url.pathname, req.method, req);
     if (web) return web;
@@ -2103,6 +2157,7 @@ const server = Bun.serve<SocketData>({
     if (API.environments.match(req.method, url.pathname)) return json({ environments: [ownEnvironment()] });
     if (API.fileInfo.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
+      if (tracePrivacy.enabled && !tracePrivacy.rawFileAllowed(requested, rawTraceRoots())) return error(TRACE_WITHHELD, 403);
       if (!isAbsolute(requested)) return error("Valid absolute path required");
       try { return json({ entry: inspectPath(requested) }); }
       catch (cause) {
@@ -2278,7 +2333,7 @@ const server = Bun.serve<SocketData>({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications();
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, id => threads.get(id)) });
+      return json({ environmentId: ENVIRONMENT_ID, ...tracePrivacy.notifications(idleNotifications(db, after, id => threads.get(id))) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
@@ -2451,13 +2506,14 @@ const server = Bun.serve<SocketData>({
     if (action === "context" && req.method === "GET") {
       await refreshThreadInspection(id);
       const stored = storedContext(id);
-      const hash = stored?.hash ?? "empty";
+      const projected = tracePrivacy.enabled && stored ? displayContext(id, stored.hash, stored.document) : stored;
+      const hash = projected?.hash ?? "empty";
       const etag = `\"${hash}\"`;
       if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { ...API_CORS_HEADERS, etag, "cache-control": "no-cache" } });
       const response = json({
         capturedAt: stored?.capturedAt ?? 0,
-        context: stored ? JSON.parse(stored.document) : null,
-        hash: stored?.hash ?? "",
+        context: projected ? JSON.parse(projected.document) : null,
+        hash: projected?.hash ?? "",
         session: publicSession(sessionRow.get(id)),
       });
       response.headers.set("etag", etag);
@@ -2494,12 +2550,12 @@ const server = Bun.serve<SocketData>({
     }
     if (action === "events" && req.method === "GET") {
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
-      const events = activity.since(id, after);
+      const events = clientActivity(id, activity.since(id, after));
       const rt = liveProjections.get(id);
       return json({
         events,
         liveText: rt?.liveText ?? "",
-        liveThinking: rt?.liveThinking ?? "",
+        liveThinking: tracePrivacy.liveThinking(id, rt?.liveThinking ?? "", traceScope(id)),
         session: publicSession(sessionRow.get(id)),
       });
     }
