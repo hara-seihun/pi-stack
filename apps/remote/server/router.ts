@@ -8,6 +8,7 @@ import { listPersons, publicPerson, type Person } from "./persons";
 import { configuredEnvironments, personEnvironments, publicEnvironments } from "./environments";
 import { RouterSessions } from "./router-sessions";
 import { rootDebugConfig, rootDebugResponse } from "./root-debug";
+import { rootConsentCapability, rootConsentHandler } from "./root-consent";
 import { proxyFetch } from "./proxy-fetch";
 import { proxyWebsocket, type ProxySocketData } from "./proxy-websocket";
 import { preflight, withCors } from "./cors";
@@ -405,7 +406,11 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
   catch { return failure("The host could not finish account setup. Please try again.", 503); }
 }
 
+const consentBridge = rootConsentHandler({ capability: rootConsentCapability, persons: listPersons,
+  roomsOrigin: process.env.PI_REMOTE_ROOMS_OWNER_URL });
 async function route(req: Request, url: URL): Promise<Response> {
+  const consent = await consentBridge(req);
+  if (consent) return consent;
   activeRooms();
   if (url.pathname.startsWith("/calendar-feed/")) {
     const match = /^\/calendar-feed\/([a-z_][a-z0-9_-]*)\/([a-f0-9]{64})\.ics$/.exec(url.pathname);
