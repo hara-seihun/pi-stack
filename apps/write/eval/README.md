@@ -109,3 +109,11 @@ Concrete observations:
 - Several immediate final roundtrips exceed 100 ms, including first-request 217 ms, date 109 ms, known-bias 198 ms, and synthetic Kenan 399 ms. Appended-silence final waits are under 1 ms on the two measured natural clips, after already spending 400 ms. These are loopback client timings under live CPU conditions, not a broad SLA or accuracy result.
 
 Use the same commands against a candidate engine and compare immutable receipts. Recognition, cleanup and dictionary failures need different remedies. This owner supplies that separation; it claims neither a full rewrite nor overall product accuracy improvement.
+
+## Scored dictionary candidate
+
+[Dictionary evaluation](DICTIONARY.md) owns the subsequent bounded lexical-path
+candidate, its natural positive increment and remaining extra-word error, 29 newly
+labelled synthetic controls, caught quotation-control failure, repaired final
+sentence holdout, immutable receipts and CPU latency. It does not replace or
+relabel this earlier baseline, and does not establish broad unfamiliar-name accuracy.

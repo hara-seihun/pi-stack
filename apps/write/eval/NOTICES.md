@@ -26,9 +26,12 @@ Keep this attribution, source links, license link and change notice with copied 
 
 ## Synthetic domain-name and dictionary extras
 
-Files: `audio/domain-*.wav`, `audio/negative-*.wav`, `audio/replacement-*.wav`.
+Files: `audio/domain-*.wav`, `audio/negative-*.wav`, `audio/replacement-*.wav`,
+`audio/tune-*.wav`, `audio/held-*.wav`, `audio/fresh-*.wav`, `audio/final-*.wav`.
 
-These files are **deterministic synthetic speech**, generated for Pi Stack with eSpeak NG **1.52.0**, `en-gb`, 155 words/minute. The exact text recipe and generator declaration are in each manifest entry and `synthetic.py`. They contain no voice clone or recorded personal dictation. References are the text recipe, not a claimed human transcript or natural-speech gold.
+These files are **deterministic synthetic speech**, generated for Pi Stack with eSpeak NG **1.52.0**, `en-gb`, 155 words/minute. The exact text recipe and generator declaration are in each manifest entry,
+`synthetic.py` and `dictionary_controls.py`. The latter owns 29 additional
+synthetic dictionary/quotation controls across three separately declared selections. They contain no voice clone or recorded personal dictation. References are the text recipe, not a claimed human transcript or natural-speech gold.
 
 The authored synthetic audio, text recipes, intended targets and curation metadata are dedicated by this repository to the public domain under **CC0 1.0 Universal**:
 
