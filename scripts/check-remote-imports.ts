@@ -10,6 +10,7 @@ for (const resource of [
   "deploy/release-checkout",
   "deploy/meeting-census",
   "deploy/smoke",
+  "deploy/one-kenan-activate",
   "skills/livedev/SKILL.md",
   "server/voice/delegation-policy.md",
   "server/meet/transcriber.ts",

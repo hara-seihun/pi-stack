@@ -125,7 +125,9 @@ def acl_path(block):
     name=next(line[8:] for line in block.splitlines() if line.startswith('# file: '))
     return re.sub(r'\\([0-7]{3})',lambda match: chr(int(match[1],8)),name)
 def grant_spaces(uid):
-    spaces=[*config.get('spaces',[]),{'path':str(target('/var/lib/pi-remote/one-kenan')),'owner':'root','recursive':True,'access':'r-X','defaultAccess':'r-x'}]
+    spaces=[*config.get('spaces',[]),
+        {'path':str(target('/var/lib/pi-remote/one-kenan')),'owner':'root','recursive':True,'access':'r-X','defaultAccess':'r-x'},
+        {'path':str(rooms_home),'owner':room_user,'recursive':True,'access':'r-X','defaultAccess':'r-x'}]
     for person in people:
         if person.get('unlock'):
             spaces += [{'path':person['unlock'][key],'owner':person['user'],'ownerUid':person_uid(person),'recursive':key=='cipherDir','access':'rwX','ownerAccess':key=='cipherDir'} for key in ('cipherDir','mountpoint')]

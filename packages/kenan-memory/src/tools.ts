@@ -5,6 +5,7 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
 import { oneKenanEnabled } from "./config.js";
 import { prepareMemoryEnvironment } from "./session.js";
+import { infrastructureReason, reportInfrastructure, type InfrastructureReporter } from "./diagnostics.js";
 import { KENAN_ROOT_DEFAULT_PORT, MEMORY_TOKEN_HEADER, MEMORY_READ_DETAIL, type MemoryClient, type MemoryRead, type MemoryRequest, type MemoryResult, type ReadContext } from "./contract.js";
 export const MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure"];
 const strings = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 });
@@ -12,6 +13,9 @@ const optionalTime = Type.Optional(Type.String());
 export interface MemoryToolOptions {
   env: NodeJS.ProcessEnv;
   client?: MemoryClient;
+  rootTransport?: typeof fetch;
+  rootTimeoutMs?: number;
+  report?: InfrastructureReporter;
   ask: (id: string, question: string, suggestions: string[]) => Promise<unknown>;
 }
 export function memoryExtension(options: MemoryToolOptions) {
@@ -61,15 +65,33 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
         execute: async (_id, input, signal) => {
           const session = await ensureSession();
           if (!session.ok) return failure(session);
+          const started = performance.now();
+          const report = options.report ?? reportInfrastructure;
+          const deadline = AbortSignal.timeout(options.rootTimeoutMs ?? 120_000);
+          const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
           try {
             const url = options.env.PI_KENAN_ROOT_URL ?? `http://127.0.0.1:${options.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT}`;
-            const response = await fetch(`${url}/v1/ask`, { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN! },
-              body: JSON.stringify(input), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000) });
+            const response = await (options.rootTransport ?? fetch)(`${url}/v1/ask`, { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN! },
+              body: JSON.stringify(input), signal: combined });
+            if (!response.ok) {
+              report({ component: "root-client", stage: "request", outcome: "failed", reason: "http-error", status: response.status, durationMs: Math.round(performance.now() - started) });
+              await response.body?.cancel();
+              return failure({ ok: false, error: "unavailable", message: `Kenan's privileged context could not answer (HTTP ${response.status}); ordinary work can continue` });
+            }
             const result = await response.json() as any;
-            const reply = response.ok ? result.reply ?? (result.ok === true ? result.value?.reply : undefined) : undefined;
-            if (typeof reply !== "string") return failure({ ok: false, error: "unavailable", message: "Kenan's privileged context could not answer; ordinary work can continue" });
+            const reply = result?.reply ?? (result?.ok === true ? result.value?.reply : undefined);
+            if (typeof reply !== "string") {
+              report({ component: "root-client", stage: "request", outcome: "failed", reason: "invalid-response", status: response.status, durationMs: Math.round(performance.now() - started) });
+              return failure({ ok: false, error: "unavailable", message: "Kenan's privileged context returned an invalid response; ordinary work can continue" });
+            }
+            report({ component: "root-client", stage: "request", outcome: "ok", status: response.status, durationMs: Math.round(performance.now() - started) });
             return { content: [{ type: "text" as const, text: reply }], details: undefined };
-          } catch { return failure({ ok: false, error: "unavailable", message: "Kenan's privileged context is unavailable; ordinary work can continue" }); }
+          } catch (error) {
+            const reason = combined.aborted ? deadline.aborted ? "timeout" : "cancelled" : infrastructureReason(error);
+            report({ component: "root-client", stage: "request", outcome: "failed", reason, durationMs: Math.round(performance.now() - started) });
+            const message = reason === "timeout" ? "Kenan's privileged request timed out; its outcome is unknown" : combined.aborted ? "Kenan's privileged request was cancelled; its outcome is unknown" : "Kenan's privileged context is unavailable; ordinary work can continue";
+            return failure({ ok: false, error: "unavailable", message });
+          }
         },
       }));
     }

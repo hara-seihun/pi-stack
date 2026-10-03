@@ -197,6 +197,13 @@ additive to these new services only; no original user's live unit or host swap i
 - `pi-kenan-journal.timer/service`: `pi-kenan`; joins custody, publisher credential, encrypted store.
 - `pi-rooms.service`: separate `pi-rooms` identity, no custody namespace/key/private access,
   no-new-privileges, its own `/var/lib/pi-rooms` store and fixed room memory credential.
+  Root Kenan gets recursive read-only `r-X` ACL access to that shared room runtime state,
+  plus directory default `r-x` ACLs for new state. Room custody retains write authority;
+  ordinary people gain no filesystem grant. This built-in owner grant lets privileged Kenan
+  diagnose a room without importing its contents into a person's transparent thread.
+  Native/custody atomic replacements preserve existing file modes; new room native files
+  use `0640` so the inherited observer ACL remains effective. Ordinary new private files
+  remain `0600`. Granting defaults alone is insufficient if a replacement forces `0600`.
 - `pi-kenan-broker.service`: original operator identity, additive principal-scoped listener grants.
 - `pi-kenan-access.service`: root oneshot, separate `inet pi_one_kenan` table. No ordinary
   port rule is widened. Root/room broker ports admit only root and their corresponding service;
@@ -234,3 +241,32 @@ The separate namespace rehearsal starts a real runtime under a dropped fixture U
 custody creates its FUSE mount: it then observes and reads the later mount, reads its sealed
 credential across setns/exec, and proves the original namespace never receives that mount.
 The integrator's staging stack owns the complete-product acceptance tests.
+
+## Explicit consumer release activation
+
+Source publication does not replace root or memory consumers. `deploy/host` automatically refreshes the installed `pi-kenan-access` command and its additive nft table on enabled hosts, then invokes the room-only rolling handoff and verifies the room startup commit. Root/memory/custody services are not restarted. Room self-instructions access is restricted to root and the room UID; root executor access to room state is a separate read-only filesystem grant.
+
+After selecting committed Remote source, a room-only rolling handoff needs no root migration and touches no memory/root service:
+
+```sh
+sudo python3 deploy/one-kenan-activate rooms --host /etc/pi-stack/host.json --expected COMMIT
+```
+
+After selecting the committed runtime/Remote sources, install the current fixed namespace launcher and explicitly activate all consumers:
+
+```sh
+sudo install -m 755 deploy/one-kenan-runtime /usr/local/libexec/pi-kenan-runtime
+sudo python3 deploy/one-kenan-activate check --host /etc/pi-stack/host.json --expected COMMIT
+sudo python3 deploy/one-kenan-activate activate --host /etc/pi-stack/host.json --expected COMMIT
+sudo python3 deploy/one-kenan-activate proof --host /etc/pi-stack/host.json --expected COMMIT
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-activate.test.py
+node --test scripts/one-kenan-access-release.test.mjs
+```
+
+The helper accepts custom listener/runtime paths from the root-owned `/etc/pi-stack/one-kenan.json`; `--config` overrides that file. It never opens private stores, sessions or encrypted custody. Disabled hosts change nothing. `check` refuses the pre-protocol root generation with exit 75: that generation exposes neither active asks nor consent reconciliation, so its first replacement requires an administrator-owned controlled idle migration. Installing this helper is not permission to terminate an unknown active request.
+
+New root generations expose startup `releaseCommit` and `releaseProtocol:1`. The separately authenticated `POST /v1/admin/release` atomically refuses busy asks/consent continuations or gates new admission; `DELETE` releases the gate. Activation restarts only stale memory/root consumers while root is quiescent, lets memory finish accepted requests before closing SQLite, and never restarts custody. Root/memory/journal launchers pin their source and record the selected commit before dropping privilege. Sealed custody or readiness that exceeds the bounded activation deadline remains pending, never a completed release.
+
+Rooms use the existing `pi-remote-supervise` rolling handoff, so active runtime hosts keep running and the replacement supervisor adopts them without replay. The helper installs a room-only launcher drop-in. For an existing direct-Bun room unit, it temporarily sets `KillMode=process`, sends `SIGUSR2` to only the legacy main PID, and waits for a new main PID **and** expected startup health before removing that migration drop-in. Later handoffs keep `KillMode=control-group` for deliberate service shutdown. A failed first handoff retains its migration setting for repair rather than killing active hosts. Ordinary users' units are untouched.
+
+`proof` checks each consumer's live HTTP startup commit, not selected symlinks or service start times. Its output contains only role/unit/revision metadata. Existing general publication receipts cover ordinary supervisors, router and voice; host activation now checks rooms, but receipts still do not imply root/memory were activated.

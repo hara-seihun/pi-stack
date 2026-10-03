@@ -103,6 +103,16 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertTrue((self.root/'usr/local/libexec/pi-kenan-runtime').exists())
         self.assertIn('PI_KENAN_MEMORY_ROOT_TOKEN_FILE=%d/kenan-memory-root',(units/'pi-kenan-root.service').read_text())
         self.assertIn('default:user:65010:r-x',subprocess.check_output(['getfacl','-cpn',str(self.root/'var/lib/pi-remote/one-kenan')],text=True))
+        rooms=self.root/'var/lib/pi-rooms'
+        for directory in (rooms,rooms/'agent'):
+            acl=subprocess.check_output(['getfacl','-cpn',str(directory)],text=True)
+            self.assertIn('user:65010:r-x',acl)
+            self.assertIn('default:user:65010:r-x',acl)
+            self.assertNotIn('user:65010:rwx',acl)
+        self.assertIn('user:65010:r--',subprocess.check_output(['getfacl','-cpn',str(rooms/'agent/settings.json')],text=True))
+        inherited=rooms/'native-session.jsonl'
+        inherited.write_text('synthetic fixture')
+        self.assertIn('user:65010:r-x\t#effective:r--',subprocess.check_output(['getfacl','-cpn',str(inherited)],text=True))
         self.assertTrue(all(len(item['token'])>=32 for item in auth['supervisors']))
         self.assertEqual({item['person'] for item in auth['supervisors']},{'alice','bob','pi-rooms'})
         self.assertEqual(next(item['displayName'] for item in auth['supervisors'] if item['person']=='alice'),'alice')
@@ -246,7 +256,8 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertIn('table inet pi_one_kenan',result); self.assertNotIn('pi_user_access',result)
         self.assertIn('tcp dport 19880 meta skuid != { 0, 65010 }',result)
         self.assertIn('tcp dport 19882 meta skuid != { 0, 65011 }',result)
-        self.assertIn('tcp dport 19884 meta skuid != { 0 }',result)
+        self.assertIn('tcp dport 19884 meta skuid != { 0, 65011 }',result)
+        self.assertNotIn('tcp dport 19884 meta skuid != { 0, 65010',result)
         self.assertIn('tcp dport 19886 meta skuid != { 0, 64000, 64001, 65010, 65011 }',result)
         self.assertNotIn('19870',result); self.assertNotIn('19890',result)
     def test_acl_mask_expansion_does_not_reactivate_other_people(self):

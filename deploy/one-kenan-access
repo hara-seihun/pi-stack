@@ -21,7 +21,7 @@ if args.action=='apply':
     if json.loads(pathlib.Path(config['hostFile']).read_text()).get('oneKenan') is not True: raise SystemExit('One Kenan is disabled')
     rules += ['table inet pi_one_kenan {','chain output {','type filter hook output priority -19; policy accept;']
     for port,uids in [(config['rootPort'],[0,root,rooms,*people]),(config['memoryPort'],[0,root,rooms,*people]),
-      (config['roomsPort'],[0]),(config['rootBrokerPort'],[0,root]),(config['roomsBrokerPort'],[0,rooms])]:
+      (config['roomsPort'],[0,rooms]),(config['rootBrokerPort'],[0,root]),(config['roomsBrokerPort'],[0,rooms])]:
         rules.append(f'fib daddr type local tcp dport {port} meta skuid != {nft_set(uids)} reject with tcp reset')
     rules += ['}','chain input {','type filter hook input priority -19; policy accept;',f'iifname != "lo" tcp dport {nft_set(ports)} reject with tcp reset','}','}']
 source='\n'.join(rules)+'\n'

@@ -1933,7 +1933,11 @@ const server = Bun.serve<SocketData>({
             : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
           if (!storedContext(id)) await refreshThreadInspection(id);
           const context = storedContext(id);
-          return { messages, live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+          const settlement = threads.latestSettlement(id);
+          const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
+          const failure = thread.state !== "running" && settlement?.outcome === "failed"
+            ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
+          return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
             context: context ? JSON.parse(context.document) : null, questions: unwrap(await directory.questions(id)) };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },

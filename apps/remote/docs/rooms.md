@@ -46,7 +46,9 @@ are disabled. The exact initialized model-facing tool set is checked:
 There are no local file/shell tools, general thread discovery/history/messaging tools or direct
 memory tools. This also prevents one room from reading another room's files or history under the
 shared service UID. The client sees all room-local thinking, tool requests/results, notices and
-context. Root does file operations, actions and private-memory work; only his chosen reply comes
+context. Native session records use their actual type names instead of anonymous “notice” rows.
+Snapshots expose stopped state and the latest failed execution's error, including failures before
+any user message reaches native history; a failed room must not masquerade as an empty idle chat. Root does file operations, actions and private-memory work; only his chosen reply comes
 back through `ask_kenan`. Root histories are not part of the room snapshot.
 
 `metadata.room = { id, members: [{ user, displayName }] }` is the audience. The runtime fetches turn
@@ -81,6 +83,10 @@ administrator, checks the flag and fixed config user, and fixes its workspace/pr
   privately by the service; persons never receive it. Session tokens bind the current room thread.
 
 There is no creator-private runtime fallback when the room service or root request channel is down.
+The room listener's UID gate admits root and `pi-rooms`: the room runner must fetch its own
+`/v1/sessions/:id/instructions` before every turn. Blocking that self-connection rejects input
+before a native user message or model request exists (`thread_rejected: fetch failed`). Ordinary
+person UIDs remain excluded from the internal listener and use the authenticated router.
 
 ## Notifications and persistence
 
@@ -122,7 +128,7 @@ All public routes require this host's authenticated router session:
   pendingQuestions }`; `state` is `idle` or `running` and counts are nonnegative integers.
 - `POST /v1/rooms` with `{ requestId: UUID, title, members: [user] }` → `{ room }`. Creator is
   included automatically; the receipt is the stable room/thread ID, including on retries.
-- `GET /v1/rooms/:id` → `{ room, state, messages, live, questions, work, thinking, context, notificationId }`.
+- `GET /v1/rooms/:id` → `{ room, state, held, error?, messages, live, questions, work, thinking, context, notificationId }`.
 - `POST /v1/rooms/:id/members` with `{ members: [user] }` adds people only while idle.
 - `POST /v1/rooms/:id/prompt` with `{ requestId: UUID, text }` queues an authenticated utterance.
 - `POST /v1/rooms/:id/questions/:questionId/answer` with the standard

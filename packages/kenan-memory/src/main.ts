@@ -23,7 +23,7 @@ if (!oneKenanEnabled()) {
     const store = new MemoryStore(process.env.PI_KENAN_MEMORY_STORE ?? `${privateDir}/memory/memory.sqlite3`);
     const roomModule = process.env.PI_KENAN_ROOM_AUDIENCE_MODULE;
     const roomAudience = roomModule ? (await import(roomModule)).roomAudienceResolver(process.env.PI_REMOTE_ROOMS_DB, "pi-rooms") : undefined;
-    const service = memoryService({ store, auth, enabled: () => oneKenanEnabled(), roomAudience });
+    const service = memoryService({ store, auth, enabled: () => oneKenanEnabled(), roomAudience, releaseCommit: process.env.PI_STACK_RELEASE_COMMIT });
     service.listen(Number(process.env.PI_KENAN_MEMORY_PORT ?? MEMORY_DEFAULT_PORT), "127.0.0.1");
     const stop = () => service.close(() => { store.close(); });
     process.once("SIGTERM", stop); process.once("SIGINT", stop);

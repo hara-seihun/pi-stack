@@ -260,6 +260,13 @@ elif ! remote_matches_release "$expected"; then
   activate_remote "$expected" || activation_failed=1
 fi
 
+# Refresh the additive gates before rolling the shared-room supervisor. Root,
+# memory and encrypted custody remain untouched by the ordinary host release.
+if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
+  activation_failed=1
+elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
+  pi_stack_as_root python3 "$root/deploy/one-kenan-activate" rooms --host "$PI_STACK_HOST_FILE" --expected "$expected" || activation_failed=1
+fi
 if (( write )); then
   wait "$write_pid" || activation_failed=1
 fi

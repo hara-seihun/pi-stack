@@ -25,7 +25,7 @@ export function loopbackUid(request: IncomingMessage): number | undefined {
     if (f[1] === client && f[2] === server) return Number(f[7]);
   }
 }
-export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; enabled: () => boolean; peerUid?: (request: IncomingMessage) => number | undefined; roomAudience?: RoomAudienceResolver }) {
+export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; enabled: () => boolean; peerUid?: (request: IncomingMessage) => number | undefined; roomAudience?: RoomAudienceResolver; releaseCommit?: string }) {
   const { store, auth } = options;
   const principal = (request: IncomingMessage): Principal | undefined => {
     const supplied = request.headers[MEMORY_TOKEN_HEADER];
@@ -47,6 +47,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
     const denied = (message: string) => send(403, { ok: false, error: "unauthenticated", message });
     try {
       if (!options.enabled()) return send(503, { ok: false, error: "disabled", message: "One Kenan is disabled on this host" });
+      if (request.method === "GET" && request.url === "/v1/health") return send(200, { ok: true, service: "kenan-memory", releaseCommit: options.releaseCommit ?? null });
       if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent"].includes(request.url ?? ""))
         return send(404, { ok: false, error: "invalid-request", message: "Unknown memory route" });
       const caller = principal(request);

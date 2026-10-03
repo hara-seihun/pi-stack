@@ -24,7 +24,7 @@ ExecCondition=/usr/local/bin/bun -e "import { oneKenanEnabled } from '/srv/pi/ke
 ExecStart=+@RUNTIME_LAUNCHER@ memory
 Restart=on-failure
 RestartSec=2
-TimeoutStopSec=10
+TimeoutStopSec=infinity
 
 [Install]
 WantedBy=multi-user.target

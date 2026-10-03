@@ -27,7 +27,7 @@ User threads are fully transparent. Their direct view contains only facts record
 
 Tools: `memory_search`, `memory_read`, `memory_write`, `memory_forget`, `memory_disclosures`, `memory_log_disclosure`, `ask_kenan`. Rooms register only `ask_kenan`; the room runtime separately supplies asynchronous questions and enforces that two-tool whitelist. Root registers unrestricted memory tools, not recursive `ask_kenan`.
 
-`ask_kenan({request})` calls the separate root service with the verified session token. It accepts only the reply; root session IDs, transcripts, tools, traces and credentials never return. `PI_KENAN_ROOT_URL` selects the configured endpoint, otherwise loopback `PI_KENAN_ROOT_PORT` or 18821. The person cannot select root's model, prompt, tools, context or audience.
+`ask_kenan({request})` calls the separate root service with the verified session token. It accepts only the reply; root session IDs, transcripts, tools, traces and credentials never return. `PI_KENAN_ROOT_URL` selects the configured endpoint, otherwise loopback `PI_KENAN_ROOT_PORT` or 18821. The person cannot select root's model, prompt, tools, context or audience. Root HTTP failures, transport failures, cancellation and the 120-second deadline are diagnosed separately without echoing any root response/error body. Cancellation or timeout reports an unknown outcome and never automatically replays the request. Operational logs contain bounded stage/reason/status/duration fields, not private content or identities. `GET /v1/health` reports the memory process's startup-pinned `releaseCommit` without reading records.
 
 ## Memory API
 

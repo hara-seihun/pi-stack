@@ -8,6 +8,10 @@
 
 Root configuration is `PI_KENAN_ROOT_CONFIG` (default `/etc/pi-stack/kenan-root.json`), root-owned and not group/world writable. Required fields are version/provider/model/thinkingLevel/cwd/agentDir/sessionsDir/promptFile/brokerUrl. Root HTTP is loopback `PI_KENAN_ROOT_PORT`, default 18821; memory is `PI_KENAN_MEMORY_URL`, default loopback18820. Provider traffic uses the explicit host model broker. Startup waits for the real encrypted `PI_KENAN_PRIVATE_DIR` gocryptfs mount; no plaintext fallback is opened.
 
+`GET /v1/health` reports `releaseCommit` pinned at process startup and `releaseProtocol:1`. Authenticated `POST /v1/admin/release` returns 409 while an ask or consent reconciliation is active; otherwise it atomically fences both new asks and consent reconciliation. `DELETE` unfences it. The separate admin capability is required for both operations. Release activation never infers idle from an open TCP listener.
+
+Operational `Kenan infrastructure` logs contain only component, stage, outcome, elapsed milliseconds, bounded reason and HTTP status. Request text, reply text, exception messages/stacks, credentials and person/thread/session identities never enter these logs. A 120-second client deadline is a timed-out request with unknown outcome, not evidence that the root daemon is down; it is not automatically replayed.
+
 Systemd credentials `kenan-memory-root`, `kenan-root-admin`, `kenan-root-consent` have distinct authority. Explicit file overrides are `PI_KENAN_MEMORY_ROOT_TOKEN_FILE`, `PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE`, `PI_KENAN_ROOT_CONSENT_TOKEN_FILE`. Never pass their values as arguments or put them in transcript text.
 
 ## Async subject consent

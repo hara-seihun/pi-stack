@@ -237,7 +237,7 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
         </details> : null}
         {snapshot?.live && <div className="live-answer"><ChatMessage kind="assistant" label="Kenan" avatar={agentAvatar()} text={snapshot.live} contentFormat="markdown" renderMarkdown={source => <Markdown source={source} sessionId={id} streaming assistant sessionMedia={false} />} /></div>}
       </div>}>
-      <DismissibleError className="conversation-error" message={error} resetKey={id} dismissLabel="Dismiss conversation error" />
+      <DismissibleError className="conversation-error" message={snapshot?.error || (snapshot?.held ? "Kenan is stopped in this room." : "") || error} resetKey={id} dismissLabel="Dismiss conversation error" />
       {question ? <section className="questions-composer" aria-label="Questions to answer">
         <div className="questions-heading" role="status">{snapshot!.questions!.length === 1 ? "Question to answer" : `${snapshot!.questions!.length} questions to answer`}<span>Answer or dismiss to return to messaging</span></div>
         <RoomQuestion key={question.id} question={question} roomId={id} onAnswered={load} />

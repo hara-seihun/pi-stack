@@ -1,0 +1,177 @@
+#!/usr/bin/python3
+"""Activate and prove enabled One Kenan consumers without touching custody or private state."""
+import argparse
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+UNITS = {'memory': 'pi-kenan-memory.service', 'root': 'pi-kenan-root.service', 'rooms': 'pi-rooms.service'}
+
+class Deferred(Exception):
+    pass
+
+class Host:
+    def __init__(self, config, expected):
+        self.config, self.expected = config, expected
+        self.deadline = time.monotonic() + 40
+    def command(self, *args):
+        return subprocess.check_output(args, text=True, timeout=min(5, max(.1, self.deadline-time.monotonic()))).strip()
+    def health(self, role):
+        return self.http(role, '/v1/health')[1]
+    def http(self, role, path, method='GET'):
+        port = self.config.get(role+'Port', {'memory': 18820, 'root': 18821, 'rooms': 18822}[role])
+        if not isinstance(port, int) or not 0 < port < 65536:
+            raise RuntimeError('Invalid One Kenan listener port')
+        headers = {}
+        if path == '/v1/admin/release':
+            token = pathlib.Path(self.config['rootAdminCapabilityFile']).read_text().strip()
+            if not re.fullmatch('[0-9a-f]{64}', token):
+                raise RuntimeError('Invalid root release capability')
+            headers['x-pi-kenan-admin'] = token
+        request = urllib.request.Request(f'http://127.0.0.1:{port}{path}', method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return response.status, json.loads(response.read(16384))
+        except urllib.error.HTTPError as error:
+            return error.code, {}
+        except (urllib.error.URLError, TimeoutError):
+            return 0, {}
+    def ready(self, role, previous_pid=None):
+        while time.monotonic() < self.deadline:
+            health = self.health(role)
+            replaced = previous_pid is None or self.command('systemctl', 'show', UNITS[role], '-p', 'MainPID', '--value') not in ('0', previous_pid)
+            if replaced and health.get('ok') is True and health.get('releaseCommit') == self.expected:
+                return health
+            time.sleep(.1)
+        raise Deferred(f'{UNITS[role]} has not activated {self.expected}; no active turn was killed')
+    def install_room_launcher(self):
+        remote = self.config.get('remoteRoot', '/srv/pi/pi-remote')
+        bun = self.config.get('bun', '/usr/local/bin/bun')
+        # Configuration is host-owned. Refuse systemd directive/argument injection.
+        if any(not os.path.isabs(p) or re.search(r'[\s%\\]', p) for p in [remote, bun]):
+            raise RuntimeError('Invalid room launcher path')
+        directory = pathlib.Path('/etc/systemd/system/pi-rooms.service.d')
+        directory.mkdir(mode=0o755, exist_ok=True)
+        dropin = directory/'release.conf'
+        dropin.write_text(f'[Service]\nExecStart=\nExecStart={remote}/server/pi-remote-supervise {bun} {remote}/server/rooms-main.ts\nExecReload=\nExecReload=/bin/kill -HUP $MAINPID\n')
+        dropin.chmod(0o644)
+        migration = directory/'release-migration.conf'
+        old_start = self.command('systemctl', 'show', UNITS['rooms'], '-p', 'ExecStart', '--value')
+        previous_pid = None
+        if 'pi-remote-supervise' not in old_start:
+            previous_pid = self.command('systemctl', 'show', UNITS['rooms'], '-p', 'MainPID', '--value')
+            # The direct-Bun unit exits 75 on handoff. Only during that first
+            # transition, let systemd replace its main PID without killing hosts.
+            migration.write_text('[Service]\nKillMode=process\n')
+            migration.chmod(0o644)
+        self.command('systemctl', 'daemon-reload')
+        return migration, previous_pid
+    def install_memory_drain(self):
+        directory = pathlib.Path('/etc/systemd/system/pi-kenan-memory.service.d')
+        directory.mkdir(mode=0o755, exist_ok=True)
+        dropin = directory/'release.conf'
+        dropin.write_text('[Service]\nTimeoutStopSec=infinity\n')
+        dropin.chmod(0o644)
+        self.command('systemctl', 'daemon-reload')
+    def finish_room_migration(self, migration):
+        if migration.exists():
+            migration.unlink()
+            self.command('systemctl', 'daemon-reload')
+
+def check(host):
+    for role, unit in UNITS.items():
+        if host.command('systemctl', 'show', unit, '-p', 'LoadState', '--value') != 'loaded':
+            raise RuntimeError(f'Enabled One Kenan is missing {unit}')
+    health = host.health('root')
+    if health.get('releaseProtocol') != 1:
+        raise Deferred('Root Kenan lacks the safe release protocol; perform a controlled idle migration before automatic activation')
+
+def prove(host):
+    result = {}
+    for role, unit in UNITS.items():
+        if host.command('systemctl', 'is-active', unit) != 'active':
+            raise RuntimeError(f'{unit} is not active')
+        health = host.health(role)
+        if health.get('ok') is not True or health.get('releaseCommit') != host.expected:
+            raise RuntimeError(f'{unit} running release does not match {host.expected}')
+        # Only lifecycle metadata is evidence, never session IDs/content or stores.
+        result[role] = {'unit': unit, 'releaseCommit': health['releaseCommit']}
+    return {'enabled': True, 'consumers': result}
+
+def activate_rooms(host):
+    migration, previous_pid = host.install_room_launcher()
+    if previous_pid is not None:
+        host.command('systemctl', 'kill', '--kill-whom=main', '--signal=SIGUSR2', UNITS['rooms'])
+        host.ready('rooms', previous_pid)
+    elif host.health('rooms').get('releaseCommit') != host.expected:
+        host.command('systemctl', 'reload', '--no-block', UNITS['rooms'])
+        host.ready('rooms')
+    host.finish_room_migration(migration)
+    health = host.health('rooms')
+    if health.get('ok') is not True or health.get('releaseCommit') != host.expected:
+        raise RuntimeError('pi-rooms.service running release does not match the selected release')
+    return {'enabled': True, 'consumers': {'rooms': {'unit': UNITS['rooms'], 'releaseCommit': health['releaseCommit']}}}
+
+def activate(host):
+    check(host)
+    status, _ = host.http('root', '/v1/admin/release', 'POST')
+    if status != 200:
+        raise Deferred('Root Kenan has active work or could not quiesce; release deferred without restarting consumers')
+    try:
+        # Root admission is gated, and no asks/consent continuations remain. Memory
+        # closes accepted HTTP requests before closing SQLite; custody is untouched.
+        for role in ['memory', 'root']:
+            if host.health(role).get('releaseCommit') != host.expected:
+                if role == 'memory': host.install_memory_drain()
+                previous_pid = host.command('systemctl', 'show', UNITS[role], '-p', 'MainPID', '--value')
+                host.command('systemctl', 'restart', '--no-block', UNITS[role])
+                host.ready(role, previous_pid)
+        activate_rooms(host)
+        return prove(host)
+    finally:
+        # A failed/pending activation must not leave the surviving root gated.
+        status, _ = host.http('root', '/v1/admin/release', 'DELETE')
+        if status != 200:
+            raise RuntimeError('Root admission gate could not be released')
+
+def public_config(path):
+    path = pathlib.Path(path)
+    info = path.stat()
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise RuntimeError('One Kenan configuration must be root-owned and not writable by other identities')
+    return json.loads(path.read_text())
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['check', 'activate', 'rooms', 'proof'])
+    parser.add_argument('--host', required=True)
+    parser.add_argument('--expected', required=True)
+    parser.add_argument('--config', default='/etc/pi-stack/one-kenan.json')
+    args = parser.parse_args()
+    if public_config(args.host).get('oneKenan') is not True:
+        print(json.dumps({'enabled': False}))
+        return
+    if os.geteuid() != 0:
+        raise RuntimeError('One Kenan activation/proof requires the host administrator')
+    host = Host(public_config(args.config), args.expected)
+    if args.action == 'check':
+        check(host)
+    else:
+        action = {'activate': activate, 'rooms': activate_rooms, 'proof': prove}[args.action]
+        print(json.dumps(action(host)))
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Deferred as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(75)
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f'One Kenan release failed: {error}', file=sys.stderr)
+        sys.exit(1)

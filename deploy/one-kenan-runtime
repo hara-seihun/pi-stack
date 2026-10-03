@@ -64,6 +64,13 @@ def launch(role,config,pid,environment):
     }[role]
     bun=config.get('bun','/usr/local/bin/bun')
     if not os.path.isabs(bun) or not os.path.isabs(source): raise RuntimeError('Runtime source must be an absolute host-owned path')
+    release=config.get('runtimeRoot','/srv/pi/runtime') if role in ('memory','journal') else remote
+    marker=pathlib.Path(release)/'.pi-stack-commit'
+    environment['PI_STACK_RELEASE_COMMIT']=marker.read_text().strip()
+    # Pin code before exec; a later selector switch must not mix this process's imports.
+    source=os.path.realpath(source)
+    if environment.get('PI_KENAN_ROOM_AUDIENCE_MODULE'):
+        environment['PI_KENAN_ROOM_AUDIENCE_MODULE']=os.path.realpath(environment['PI_KENAN_ROOM_AUDIENCE_MODULE'])
     os.initgroups(user.pw_name,user.pw_gid); os.setgid(user.pw_gid); os.setuid(user.pw_uid)
     if os.getuid()==0 or os.geteuid()==0: raise RuntimeError('Runtime privilege drop failed')
     environment.update(USER=user.pw_name,LOGNAME=user.pw_name)
