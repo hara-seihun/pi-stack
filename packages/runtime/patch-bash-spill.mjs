@@ -53,6 +53,29 @@ function patchExecutor(source) {
   return source;
 }
 
+function patchExecutorTail(source) {
+  if (source.includes("const output = new OutputAccumulator();")) return source;
+  source = replace(source, 'import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.js";',
+    'import { OutputAccumulator } from "./tools/output-accumulator.js";');
+  source = replace(source, `    const outputChunks = [];
+    let outputBytes = 0;
+    const maxOutputBytes = DEFAULT_MAX_BYTES * 2;`, "    const output = new OutputAccumulator();");
+  source = replace(source, "    const onData = (data) => {", "    const onText = (decoded) => {");
+  source = replace(source, "stripAnsi(decoder.decode(data, { stream: true }))", "stripAnsi(decoded)");
+  source = cut(source, "        // Keep rolling buffer", "        // Stream to callback", "        output.appendDecodedText(text);\n");
+  source = replace(source, "    try {\n        const result = await operations.exec", `    const onData = (data) => onText(decoder.decode(data, { stream: true }));
+    const finishOutput = () => {
+        onText(decoder.decode());
+        output.finish();
+        return output.snapshot();
+    };
+    try {
+        const result = await operations.exec`);
+  source = replace(source, 'const fullOutput = outputChunks.join("");', "const snapshot = finishOutput();", 2);
+  source = replace(source, "const truncationResult = truncateTail(fullOutput);", "const truncationResult = snapshot.truncation;", 2);
+  return replace(source, "output: truncationResult.truncated ? truncationResult.content : fullOutput,", "output: snapshot.content,", 2);
+}
+
 function patchAccumulator(source) {
   source = cut(source, 'import { randomBytes }', 'import { DEFAULT_MAX_BYTES');
   source = cut(source, "function defaultTempFilePath(prefix)", "function byteLength(text)");
@@ -137,7 +160,8 @@ export function patchBashSpillCopies(nodeModules) {
   for (const [name, patch] of changes) {
     const path = join(base, name);
     const source = readFileSync(path, "utf8");
-    const patched = source.includes(MARKER) ? source : MARKER + patch(source);
+    let patched = source.includes(MARKER) ? source : MARKER + patch(source);
+    if (name === "core/bash-executor.js") patched = patchExecutorTail(patched);
     sdk.set(name, patched);
     pending.set(path, patched);
   }
@@ -153,16 +177,19 @@ export function patchBashSpillCopies(nodeModules) {
   if (bundles.length !== 1) throw new Error("Pinned Pi bundled bash executor not found uniquely");
   for (const path of bundles) {
     let source = readFileSync(path, "utf8");
-    if (source.includes(MARKER)) continue;
+    const executor = sdk.get("core/bash-executor.js");
+    const executorSource = executor.slice(executor.indexOf("export async function executeBashWithOperations"), executor.indexOf("//# sourceMappingURL"))
+      .replace("export async function", "async function");
+    if (source.includes(MARKER)) {
+      pending.set(path, cut(source, "async function executeBashWithOperations(", 'import*as os5 from"node:os";', executorSource));
+      continue;
+    }
     const accumulator = sdk.get("core/tools/output-accumulator.js");
     const classSource = accumulator.slice(accumulator.indexOf("export class OutputAccumulator"), accumulator.indexOf("//# sourceMappingURL"))
       .replace("export class OutputAccumulator", "var OutputAccumulator = class").replaceAll("truncateTail(", "truncateTail2(")
       .replaceAll("DEFAULT_MAX_LINES", "2000").replaceAll("DEFAULT_MAX_BYTES", "51200");
     source = cut(source, "function defaultTempFilePath(prefix)", "function byteLength(text)");
     source = cut(source, "var OutputAccumulator=class", 'import*as os4 from"node:os";', classSource + ";");
-    const executor = sdk.get("core/bash-executor.js");
-    const executorSource = executor.slice(executor.indexOf("export async function executeBashWithOperations"), executor.indexOf("//# sourceMappingURL"))
-      .replace("export async function", "async function").replaceAll("DEFAULT_MAX_BYTES", "51200").replaceAll("truncateTail(", "truncateTail2(");
     source = cut(source, "async function executeBashWithOperations(", 'import*as os5 from"node:os";', executorSource);
     source = replace(source, "If truncated, full output is saved to a temp file.", "Truncated output is discarded; shell output is kept in memory only.", 2);
     source = replace(source, "spill:!0", "spill:!1", 2);

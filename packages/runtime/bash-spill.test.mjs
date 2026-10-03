@@ -103,6 +103,39 @@ const cases = [
         assert.deepEqual(spillFiles(), startFiles, fixture.name);
       }
     });
+    test(`${name}: executor tail is independent of chunk boundaries, including cancellation`, async () => {
+      for (const fixture of [...cases, { name: "short output", value: "é😀\nTAIL-MARKER" }]) {
+        const data = Buffer.from(fixture.value);
+        const expected = truncateTail(fixture.value);
+        for (const chunkBytes of new Set([data.length, data.length - 10, 65536, 8191])) {
+          for (const cancelled of [false, true]) {
+            const controller = new AbortController();
+            const streamed = [];
+            const operations = { exec: async (command, cwd, { onData }) => {
+              for (let start = 0; start < data.length; start += chunkBytes) {
+                onData(data.subarray(start, start + chunkBytes));
+              }
+              if (cancelled) {
+                controller.abort();
+                throw new Error("aborted");
+              }
+              return { exitCode: 7 };
+            } };
+            const result = await api.executeBashWithOperations("chunk-proof", directory, operations, {
+              signal: controller.signal, onChunk: text => streamed.push(text),
+            });
+            const label = `${fixture.name}, chunkBytes=${chunkBytes}, cancelled=${cancelled}`;
+            assert.equal(result.truncated, expected.truncated, label);
+            assert.equal(result.output, expected.content, label);
+            assert.equal(result.cancelled, cancelled, label);
+            assert.equal(result.exitCode, cancelled ? undefined : 7, label);
+            assert.equal(streamed.join(""), fixture.value, label);
+            assert.ok(!("fullOutputPath" in result));
+          }
+        }
+      }
+      assert.deepEqual(spillFiles(), startFiles);
+    });
     test(`${name}: cancellation and nonzero exit never spill`, async () => {
       const controller = new AbortController();
       const operations = { exec: async (command, cwd, { onData }) => {
