@@ -148,6 +148,54 @@ console.log('fresh naming account selected');
   finally{await rm(root,{recursive:true,force:true});}
 },fixtureTestTimeout);
 
+test('shared-runner inherited account custody cannot pin an idle native compaction', async () => {
+  const root=await mkdtemp(join(tmpdir(),'pi-inherited-custody-')),fixture=join(root,'fixture.mjs');
+  await writeFile(fixture,`
+import assert from 'node:assert/strict';
+import {mkdirSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {openPiSession} from ${JSON.stringify(join(buildRoot,'compiled/threads/pi-session.js'))};
+import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
+import {seedPiSession} from ${JSON.stringify(join(buildRoot,'compiled/threads/pi-session-file.js'))};
+import {SessionManager} from ${JSON.stringify(sdk)};
+const root=process.env.HOME,dir=join(root,'agent'),file=join(root,'history.jsonl');mkdirSync(dir);
+writeFileSync(join(dir,'auth.json'),'{}');writeFileSync(join(dir,'models.json'),${JSON.stringify(JSON.stringify(customModelConfig))});
+writeFileSync(join(root,'auth.json'),JSON.stringify({'anthropic-2':{type:'oauth',access:'test',refresh:'test',expires:Date.now()+3600000}}));
+const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);store.upsertAccount({id:'anthropic-2',provider:'anthropic'});
+seedPiSession(file,root);const manager=SessionManager.open(file);
+const usage={input:50000,output:1,cacheRead:0,cacheWrite:0,totalTokens:50001,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
+for(let i=0;i<3;i++){
+  manager.appendMessage({role:'user',content:'historical work '+('context '.repeat(30000)),timestamp:Date.now()});
+  manager.appendMessage({role:'assistant',content:[{type:'text',text:'finished '+i}],api:'anthropic-messages',provider:'anthropic-2',model:'claude-opus-5-5',usage,stopReason:'stop',timestamp:Date.now()});
+}
+let requests=0;
+globalThis.fetch=async()=>{
+  requests++;
+  const events=[
+    ['message_start',{type:'message_start',message:{id:'summary',type:'message',role:'assistant',content:[],model:'claude-opus-5-5',stop_reason:null,stop_sequence:null,usage:{input_tokens:10,output_tokens:0}}}],
+    ['content_block_start',{type:'content_block_start',index:0,content_block:{type:'text',text:''}}],
+    ['content_block_delta',{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Historical work completed; retain the current task.'}}],
+    ['content_block_stop',{type:'content_block_stop',index:0}],
+    ['message_delta',{type:'message_delta',delta:{stop_reason:'end_turn',stop_sequence:null},usage:{output_tokens:10}}],['message_stop',{type:'message_stop'}]];
+  return new Response(events.map(([name,data])=>'event: '+name+'\\ndata: '+JSON.stringify(data)+'\\n\\n').join(''),{headers:{'content-type':'text/event-stream'}});
+};
+process.env.PI_ORCHESTRATOR_ASSIGNED='1';process.env.PI_ORCHESTRATOR_ACCOUNT_ID='anthropic-999';process.env.PI_ORCHESTRATOR_PROVIDER='anthropic';process.env.PI_ORCHESTRATOR_RUN_ID='retired-run';process.env.PI_SUBAGENT_MODEL='luna';
+const events=[];let compacted;const done=new Promise(resolve=>compacted=resolve);
+const session=await openPiSession({cwd:root,threadId:'idle-command',sessionFile:file,args:['--raw','--provider','anthropic','--model','claude-opus-5-5','--thinking','high'],env:{PI_CODING_AGENT_DIR:dir}},event=>{events.push(event);if(event.type==='command_settled'&&event.commandId==='compact')compacted(event);},()=>{});
+try{
+  await session.command({type:'get_state',id:'state'});const state=events.find(event=>event.id==='state');
+  assert.equal(state.success,true);assert.equal(state.data.model.provider,'anthropic-2');assert.equal(state.data.model.id,'claude-opus-5-5');assert.equal(state.data.thinkingLevel,'high');assert.equal(requests,0);
+  await session.command({type:'compact',id:'compact'});const result=await done;
+  assert.equal(result.response.success,true,JSON.stringify(result));assert.equal(requests,1);
+}finally{await session.close();store.close();}
+console.log('idle native compaction uses this sessions fresh account custody');
+`);
+  const env={...process.env,HOME:root,PI_CODING_AGENT_DIR:join(root,'agent'),PI_ORCHESTRATOR_LEDGER:join(root,'ledger.sqlite3'),PI_ORCHESTRATOR_AUTH:join(root,'auth.json'),PI_ORCHESTRATOR_ASSIGNED:'0',PI_OFFLINE:'1'};
+  for(const key of Object.keys(env))if(/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key))delete env[key as keyof typeof env];
+  try{const result=await runFixture([fixture],{cwd:root,env},20_000);expect(result.stdout).toContain('idle native compaction uses this sessions fresh account custody');}
+  finally{await rm(root,{recursive:true,force:true});}
+},25_000);
+
 test('native pooled refusal makes one request, then resumes the same failed work once without replaying its input', async () => {
   const root=await mkdtemp(join(tmpdir(),'pi-native-provider-wait-')),fixture=join(root,'fixture.mjs');
   await writeFile(fixture,`
