@@ -37,6 +37,7 @@ import { configuredThreadDestinations, defaultThreadDestinations, recentThreadMo
 import { contextFilesPrompt, listContextFiles, selectContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
+import { CalendarStore } from "./calendar";
 import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
@@ -1830,6 +1831,8 @@ const meet = new MeetServer((id) => {
 
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
+const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
+calendar.start();
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
 type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
@@ -1873,6 +1876,15 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
+      const feed = url.pathname.startsWith("/v1/calendar/feed/");
+      if (!feed) {
+        const resolved = callers.resolve(caller);
+        if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Calendar access requires this person's authorized router or local caller", 403);
+      }
+      httpServer.timeout(req, 65);
+      return await calendar.handle(req);
+    }
     if (url.pathname === "/v1/phones" || url.pathname.startsWith("/v1/phones/")) {
       const connecting = !!API.phoneConnect.match(req.method, url.pathname);
       const resolved = callers.resolve(caller);
@@ -2754,7 +2766,7 @@ const supervisorRelease = new SupervisorRelease({
     runner.detach();
   },
   detach: () => threads.detach(),
-  closeImages: async () => { await watchList.close(); speech?.close(); await messaging.close(); await closeImageGeneration(); },
+  closeImages: async () => { await calendar.close(); await watchList.close(); speech?.close(); await messaging.close(); await closeImageGeneration(); },
   stopServer: () => { server.stop(true); },
   closeDatabase: () => db.close(),
   exit: code => process.exit(code),

@@ -122,6 +122,8 @@ Long-press or right-click a message and choose Speak to hear it. The reader bar 
 
 ## Phone control
 
+[Personal calendar](docs/calendar.md) gives each person a private agenda with event editing, the `pi-calendar` agent CLI, tokenized outbound ICS feeds and read-only inbound ICS subscriptions.
+
 [Phone control](docs/phone-control.md) connects the Android app to its person's supervisor over an authenticated outbound WebSocket and exposes the `pi-phone` CLI. **Machine → Phone control** supplies explicit enablement and one-time capability grants. Cellular Tailscale works without Wi-Fi/ADB or per-session screen-capture approval. Other people cannot list or command that person's phone. Commands have bounded deadlines, are not queued offline, and uncertain mutations are never automatically replayed. The [Android client](../kenan/README.md#unattended-phone-control) owns service/setup behavior.
 
 ## Telephone voice

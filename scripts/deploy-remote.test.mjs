@@ -34,7 +34,7 @@ function fixture() {
   put(join(repo, "apps/remote/shared/value.ts"), 'export const value = true;');
   put(join(repo, "apps/remote/server/main.ts"), 'import { chromium } from "playwright-core"; import { ok } from "pi-orchestrator/api"; import { value } from "../shared/state.js"; console.log(chromium, ok, value);');
   for (const entry of ["router.ts", "person-cli.ts", "voice/service.ts"]) put(join(repo, "apps/remote/server", entry), "export {};");
-  for (const entry of ["pi-remote", "pi-phone", "pi-remote-launch", "pi-remote-supervise"]) put(join(repo, "apps/remote/server", entry), "#!/bin/sh\nexit 0\n", 0o755);
+  for (const entry of ["pi-remote", "pi-phone", "pi-calendar", "pi-remote-launch", "pi-remote-supervise"]) put(join(repo, "apps/remote/server", entry), "#!/bin/sh\nexit 0\n", 0o755);
   put(join(orchestrator, "package.json"), JSON.stringify({name: "pi-orchestrator", exports: {"./api": "./src/api.ts"}}));
   put(join(orchestrator, "src/api.ts"), "export const ok = true;");
   put(join(orchestrator, "src/boost.ts"), "export {};");
@@ -64,6 +64,7 @@ test("Remote publishes production dependencies and checks the unchanged release"
     assert.equal(realpathSync(join(f.dest, "node_modules/pi-orchestrator")), f.orchestrator);
     for (const resource of releaseResources) assert.ok(existsSync(join(f.dest, resource)), resource);
     assert.ok(existsSync(join(f.dest, "server/pi-phone")), "phone CLI is published with Remote");
+    assert.ok(existsSync(join(f.dest, "server/pi-calendar")), "calendar CLI is published with Remote");
     result = f.run();
     assert.equal(result.status, 0, result.stderr);
     rmSync(join(f.dest, "node_modules/playwright-core"));

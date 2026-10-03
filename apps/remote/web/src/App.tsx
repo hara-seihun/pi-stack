@@ -60,6 +60,7 @@ const InspectorSheet = lazy(() => import("./features/inspector/InspectorSheet").
 const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
 const WorkersTree = lazy(() => import("./features/workers/WorkersTree").then(module => ({ default: module.WorkersTree })));
 const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
+const CalendarScreen = lazy(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
 const MachineTab = lazy(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
 
 function Loading({ label }: { label: string }) {
@@ -879,7 +880,7 @@ function RemoteApp() {
   }), [knownSessions, openThreadId, discoverThreads]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "machine" || route.tab === "files" || !!routeChat;
+  const showDetail = route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || !!routeChat;
 
   const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} />,
     [threadStarts, state.messaging, selectChat, openThreadId, kick]);
@@ -917,12 +918,14 @@ function RemoteApp() {
     return <Suspense fallback={<Loading label="Loading files…" />}><FilesScreen layout={mode} selectedPath={route.tab === "files" ? route.path : null} shortcuts={shortcuts} onAttach={selectedAiId(stateRef.current) ? path => void attachPath(path) : undefined} onSelect={path => navigate({ tab: "files", path }, { replace: mode === "split" || !path })} /></Suspense>;
   }
 
-  const detail = route.tab === "machine"
+  const detail = route.tab === "calendar"
+    ? <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>
+    : route.tab === "machine"
     ? <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>
     : route.tab === "files" ? filesScreen(layout === "phone" ? "stack" : "split")
     : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
 
-  const showTabs = route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
+  const showTabs = route.tab === "calendar" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>

@@ -368,6 +368,14 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
 }
 
 async function route(req: Request, url: URL): Promise<Response> {
+  if (url.pathname.startsWith("/calendar-feed/")) {
+    const match = /^\/calendar-feed\/([a-z_][a-z0-9_-]*)\/([a-f0-9]{64})\.ics$/.exec(url.pathname);
+    const person = match && PEOPLE.find(p => p.user === match[1]);
+    if (req.method !== "GET" || !match || !person) return new Response("Not found", { status: 404 });
+    try {
+      return await proxyFetch(`http://127.0.0.1:${person.port}/v1/calendar/feed/${match[2]}`, { signal: AbortSignal.timeout(5000), redirect: "manual" });
+    } catch { return new Response("Calendar unavailable while the person's folder is locked", { status: 503, headers: { "cache-control": "no-store" } }); }
+  }
   const appUpdate = await appUpdateResponse(req);
   if (appUpdate) return appUpdate;
   if (url.pathname === "/v1/router-health") {
