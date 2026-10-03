@@ -162,7 +162,10 @@ export interface ThreadStartModel {
 
 /** A Markdown file the destination offers as optional thread context, with its measured size. */
 export interface ThreadStartContext {
+  /** Selection identity: folder basename or an absolute instruction-file path. */
   name: string;
+  /** Optional friendly picker label, independent of selection identity. */
+  label?: string;
   tokens: number;
   bytes: number;
 }
@@ -174,7 +177,7 @@ export interface ThreadStart {
   accent?: string;
   defaultModel?: string;
   models: ThreadStartModel[];
-  /** Present only for destinations with a context folder; empty when the folder has no Markdown files. */
+  /** Present for destinations offering optional context; empty when no offered files are readable. */
   contexts?: ThreadStartContext[];
 }
 

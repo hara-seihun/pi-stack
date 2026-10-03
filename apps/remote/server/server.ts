@@ -34,7 +34,7 @@ import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
-import { contextFilesPrompt, listContextFiles, selectContextFiles } from "./thread-context-files";
+import { contextFilesPrompt, listContextFiles, selectContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
@@ -163,11 +163,17 @@ const THREAD_DESTINATIONS = new Map(configuredThreadDestinations(destinationDefi
 const machineActions = new MachineActions();
 const speech = createSpeechService();
 
-/** The absolute context folder of a destination, or null when it offers none. */
-function destinationContextDir(destination: ThreadDestination | undefined): string | null {
-  if (!destination?.contextDir) return null;
+/** Optional context is owned by the destination's workspace and the supervisor's Unix account. */
+function destinationContextSources(destination: ThreadDestination | undefined): ContextFileSources | null {
+  if (!destination || destination.raw || destination.sandbox) return null;
   const workspace = workspaces.get(destination.workspaceId);
-  return workspace ? resolve(workspace.path, destination.contextDir) : null;
+  if (!workspace) return null;
+  const personal = destination.id === "personal";
+  if (!destination.contextDir && !personal) return null;
+  return {
+    ...(destination.contextDir ? { directory: resolve(workspace.path, destination.contextDir) } : {}),
+    ...(personal ? { agentsPaths: [...new Set([join(workspace.path, "AGENTS.md"), join(HOME, "AGENTS.md")])] } : {}),
+  };
 }
 
 // Which models each profile used most recently. Archived threads never move
@@ -186,7 +192,7 @@ function noteModelRecency(thread: Thread, lookup: ThreadLookup = liveThread): bo
 function threadStartProfiles() {
   const history = [...modelRecency.values()];
   return [...THREAD_DESTINATIONS.values()].map((destination) => {
-    const contextDir = destinationContextDir(destination);
+    const contextSources = destinationContextSources(destination);
     return {
       id: destination.id,
       label: destination.label,
@@ -198,7 +204,7 @@ function threadStartProfiles() {
         if (!model) throw new Error(`Unknown thread model ${id} in profile ${destination.id}`);
         return { id: model.id, label: model.label, icon: model.icon, accent: model.accent };
       }),
-      ...(contextDir ? { contexts: listContextFiles(contextDir) } : {}),
+      ...(contextSources ? { contexts: listContextFiles(contextSources) } : {}),
     };
   });
 }
@@ -758,9 +764,8 @@ function chosenContextFiles(sessionId: string): string {
   const thread = threads.get(sessionId);
   const names = thread?.metadata?.contextFiles;
   if (!Array.isArray(names) || !names.length) return "";
-  const directory = destinationContextDir(THREAD_DESTINATIONS.get(String(thread!.metadata!.profileId ?? "")));
-  if (!directory) return "";
-  return contextFilesPrompt(directory, names.filter((name): name is string => typeof name === "string"));
+  const sources = destinationContextSources(THREAD_DESTINATIONS.get(String(thread!.metadata!.profileId ?? "")));
+  return contextFilesPrompt(sources, names.filter((name): name is string => typeof name === "string"));
 }
 
 function threadInstructions(sessionId: string, audience: "thread" | "voice" = "thread"): string {
@@ -2303,7 +2308,7 @@ const server = Bun.serve<SocketData>({
         const model = String(body.model ?? destination.defaultModel);
         if (!destination.models.includes(model)) return error("Model not available at this destination");
         const id = String(body.sessionId ?? requestId);
-        const contextFiles = selectContextFiles(destinationContextDir(destination), body.contextFiles);
+        const contextFiles = selectContextFiles(destinationContextSources(destination), body.contextFiles);
         if (!contextFiles.ok) return error(contextFiles.error);
         const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
         if (!creator.ok) return error(creator.message, creator.status);

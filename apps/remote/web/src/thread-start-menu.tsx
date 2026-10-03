@@ -180,9 +180,9 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
         {backend && <MessagingLinkController key={backend.id} backend={backend} />}
         {category.kind === "models" && contexts.length > 0 && <fieldset className="chat-picker-contexts" disabled={busy || state.kind === "failed"}>
           <legend>Context<span className="chat-picker-contexts-total">{checkedContexts.length ? `${formatTokens(checkedTokens)} tokens chosen` : "none chosen"}</span></legend>
-          {contexts.map(context => <label key={context.name} className="chat-picker-context">
+          {contexts.map(context => <label key={context.name} className="chat-picker-context" title={context.name}>
             <input type="checkbox" checked={checkedContexts.includes(context.name)} onChange={() => dispatch({ type: "toggleContext", name: context.name })} />
-            <span className="chat-picker-context-name">{context.name.replace(/\.md$/i, "")}</span>
+            <span className="chat-picker-context-name">{context.label ?? context.name.replace(/\.md$/i, "")}</span>
             <span className="chat-picker-context-tokens">{formatTokens(context.tokens)} tokens</span>
           </label>)}
         </fieldset>}
