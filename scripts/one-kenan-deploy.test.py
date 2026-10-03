@@ -110,10 +110,17 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertEqual(root_config['people'],[{'person':'alice','displayName':'alice'},{'person':'bob','displayName':'bob'}])
         for person in ('alice','bob'):
             self.assertEqual((self.root/person/'cipher/original').read_text(),'owner data')
-    def test_bun_cache_is_private_and_outside_the_unmounted_shared_store(self):
-        self.command('prepare'); self.command('cutover')
+    def test_home_and_caches_stay_outside_the_unmounted_shared_store_and_survive_rollback(self):
+        self.command('prepare')
         shared=self.root/'var/lib/pi-kenan'
-        for directory in ('bun','bun/install','bun/install/cache'):
+        for unit in self.state.glob('*.service'):
+            for line in unit.read_text().splitlines():
+                if not line.startswith('Environment='): continue
+                key,value=line[len('Environment='):].split('=',1)
+                if key=='HOME' or 'CACHE' in key or key=='BUN_INSTALL':
+                    self.assertFalse(pathlib.Path(value).is_relative_to(shared/'private'),f'{unit.name}: {line}')
+        self.command('cutover')
+        for directory in ('home','bun','bun/install','bun/install/cache'):
             self.assertEqual((shared/directory).stat().st_mode&0o777,0o700)
         for role in ('root','memory','journal'):
             source=(self.root/f'etc/systemd/system/pi-kenan-{role}.service').read_text()
@@ -121,7 +128,20 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
             self.assertEqual(pathlib.Path(env['BUN_INSTALL']),shared/'bun')
             self.assertEqual(pathlib.Path(env['BUN_INSTALL_CACHE_DIR']),shared/'bun/install/cache')
             (pathlib.Path(env['BUN_INSTALL_CACHE_DIR'])/role).write_text('pre-mount Bun cache')
+        root_unit=(self.root/'etc/systemd/system/pi-kenan-root.service').read_text()
+        home=pathlib.Path(next(line.removeprefix('Environment=HOME=') for line in root_unit.splitlines() if line.startswith('Environment=HOME=')))
+        self.assertEqual(home,shared/'home')
+        implicit_cache=home/'.bun/install/cache'
+        implicit_cache.mkdir(parents=True)
+        proof=implicit_cache/'startup'; proof.write_text('Bun ignores explicit cache settings here')
         self.assertEqual(list((shared/'private').iterdir()),[])
+        root_config=json.loads((self.root/'etc/pi-stack/kenan-root.json').read_text())
+        for key in ('cwd','agentDir','sessionsDir'):
+            self.assertTrue(pathlib.Path(root_config[key]).is_relative_to(shared/'private'))
+        self.command('rollback')
+        self.assertEqual(home.stat().st_mode&0o777,0o700)
+        self.assertEqual(proof.read_text(),'Bun ignores explicit cache settings here')
+        self.assertTrue((shared/'bun/install/cache/root').exists())
     def test_apparmor_preserves_existing_local_bytes_and_reloads_on_cutover_and_rollback(self):
         profile=self.root/'etc/apparmor.d/fusermount3'; profile.parent.mkdir(parents=True)
         profile.write_text('fixture profile')

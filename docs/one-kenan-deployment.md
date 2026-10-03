@@ -164,9 +164,14 @@ consumers if custody stops. Future FUSE mounts made by custody are visible to jo
 Custody, root, memory and journal units set `MemorySwapMax=0` and `LimitCORE=0`. Their
 private contexts and unlocked keys must not spill into the host's unencrypted swap or a core
 dump. Root, memory and journal set `BUN_INSTALL=/var/lib/pi-kenan/bun` and
-`BUN_INSTALL_CACHE_DIR=/var/lib/pi-kenan/bun/install/cache`. Cutover creates that tree
-as `pi-kenan`, mode `0700`; Bun startup cannot populate the not-yet-mounted shared
-private directory. The cache is not private personal state and remains outside the cipher.
+`BUN_INSTALL_CACHE_DIR=/var/lib/pi-kenan/bun/install/cache`. Root also sets
+`HOME=/var/lib/pi-kenan/home`: Bun can create `$HOME/.bun/install/cache` before
+custody mounts even with those explicit Bun settings. Cutover creates the home and
+Bun cache trees as `pi-kenan`, mode `0700`, outside the shared private mountpoint;
+gocryptfs requires that mountpoint to remain empty before mounting. Root's configured
+`cwd`, `agentDir` and `sessionsDir` stay inside the encrypted private store. Home and
+cache directories remain on rollback, like other retained state under `/var/lib/pi-kenan`;
+they are not private personal state and remain outside the cipher.
 Custody reports each rejected retained person with the specific failure and captures
 bounded, key-redacted gocryptfs stderr; a shared-store mount failure is not described as
 a need for another login.

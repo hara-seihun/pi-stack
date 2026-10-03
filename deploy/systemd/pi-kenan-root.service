@@ -9,7 +9,7 @@ Type=simple
 User=@EXECUTION_USER@
 Group=@EXECUTION_USER@
 EnvironmentFile=@KENAN_ENV_FILE@
-Environment=HOME=@STATE_DIR@/private
+Environment=HOME=@STATE_DIR@/home
 Environment=BUN_INSTALL=@STATE_DIR@/bun
 Environment=BUN_INSTALL_CACHE_DIR=@STATE_DIR@/bun/install/cache
 Environment=PATH=@STATE_DIR@/bin:/usr/local/bin:/usr/bin:/bin
