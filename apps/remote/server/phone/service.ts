@@ -185,8 +185,11 @@ Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostname: "127.0.0.1"
   const eventMatch = /^\/vonage\/events\/([^/]+)$/.exec(url.pathname);
   let body: Record<string, any>; try { body = JSON.parse(rawBody); } catch { return error("JSON required"); }
   if (!body || typeof body !== "object" || Array.isArray(body)) return error("Webhook object required");
-  if (eventMatch && req.method === "POST") {
-    const id = eventMatch[1]!; const c = active.get(id);
+  if (eventMatch || url.pathname === "/vonage/events") {
+    const stored = eventMatch ? null : db.query("SELECT id FROM calls WHERE provider_id=?").get(String(body.uuid ?? "")) as { id: string } | null;
+    const id = eventMatch?.[1] ?? stored?.id;
+    if (!id) return json({ accepted: true });
+    const c = active.get(id);
     if (c?.providerId && body.uuid !== c.providerId) return error("Call identity mismatch", 403);
     log(id, "provider-status", { status: body.status, uuid: body.uuid });
     if (c && ["completed", "busy", "cancelled", "unanswered", "rejected", "failed", "timeout"].includes(body.status)) void finish(c, body.status === "completed" ? "completed" : "failed", body.status);
