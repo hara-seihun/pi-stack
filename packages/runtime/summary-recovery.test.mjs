@@ -167,7 +167,7 @@ for (const path of summaries) {
   });
 }
 
-for (const path of sessions) test(`${path.includes("chunks") ? "bundled CLI" : "SDK"}: failed automatic prose compaction fences requests across reload/aliases until manual success`, async () => {
+for (const path of sessions) test(`${path.includes("chunks") ? "bundled CLI" : "SDK"}: failed automatic prose compaction fences requests across reload/aliases until its retry time`, async () => {
   const source = patchSummaryFailureFence(patchCompactionErrors(readFileSync(path, "utf8")));
   assert.equal(patchSummaryFailureFence(source), source);
   const start = source.indexOf("/* Pi Stack durable summary failure fence */");
@@ -199,7 +199,11 @@ for (const path of sessions) test(`${path.includes("chunks") ? "bundled CLI" : "
   await assert.rejects(request(), /Context rejected:.*token cap/);
   assert.equal(inference, 0);
   const reloaded = { ...session, model: { ...model, provider: "anthropic-99" } };
-  assert.throws(() => methods._assertSummaryRecovery.call(reloaded), /Automatic resubmission is blocked/);
+  assert.throws(() => methods._assertSummaryRecovery.call(reloaded), /Automatic compaction retries after/);
+  const now = Date.now;
+  Date.now = () => branch[0].data.failedAt + 60_000;
+  try { assert.doesNotThrow(() => methods._assertSummaryRecovery.call(reloaded), "the fence expires instead of waiting for a manual retry"); }
+  finally { Date.now = now; }
   reloaded.model = { ...model, id: "another-model" };
   assert.doesNotThrow(() => methods._assertSummaryRecovery.call(reloaded));
   branch.push({ type: "compaction" });

@@ -43,6 +43,39 @@ export function isRateLimitError(message: string): boolean {
 }
 
 /**
+ * Failures that say nothing is wrong with the work itself: a compaction that could not reach its provider, or a
+ * transport that dropped. Accepted work waits these out and resumes instead of settling as failed. On 2026-10-03
+ * one "servers are currently overloaded" compaction response wedged the OV integrator for four hours.
+ */
+const COMPACTION_PATTERNS = [/Native compaction (?:failed|cancelled)/i, /^Auto-compaction failed:/, /Automatic compaction retries after/];
+
+/** A compaction fence holds the session until its own retry time, whatever capacity the account pool has. */
+export function isCompactionFailure(message: string): boolean {
+  return COMPACTION_PATTERNS.some((p) => p.test(message));
+}
+
+const TRANSIENT_PATTERNS = [
+  ...COMPACTION_PATTERNS,
+  /fetch failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|WebSocket closed/i,
+  /\b(?:50[0-4]|52\d)\b/,
+];
+
+export function isTransientFailure(message: string): boolean {
+  return isRateLimitError(message) || TRANSIENT_PATTERNS.some((p) => p.test(message));
+}
+
+/**
+ * When accepted work that failed with `message` should next run. A failure that names its own retry time is
+ * believed; otherwise the wait doubles with each consecutive failure and is capped, so it always runs again.
+ */
+export function transientRetryAt(message: string, attempts: number, now = Date.now()): number {
+  const named = Date.parse(/retries after (\S+?Z)/.exec(message)?.[1] ?? "");
+  const backoff = Math.min(30_000 * 2 ** Math.max(0, attempts - 1), 30 * 60_000);
+  const floor = isRateLimitError(message) ? rateLimitCooldownMs(message) : 0;
+  return Math.max(Number.isFinite(named) ? named : 0, now + Math.max(backoff, floor));
+}
+
+/**
  * A 429 that reported no exhausted window at all. Providers throttle bursts
  * with the same status they use for plan limits, and a burst clears in
  * seconds, so this is short on purpose: a wave of parallel sessions that
