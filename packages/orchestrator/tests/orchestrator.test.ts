@@ -82,9 +82,11 @@ describe("current orchestrator state",()=>{
     expect(usage.metrics.remaining?.percentLeft).toBe(35);
     expect(usage.metrics.remaining?.accounts).toEqual([
       {accountId:"openai-codex-1",accountLabel:"Primary",state:"ready",percentLeft:35,usedPercent:65,meterId:"codex-7d",windowHours:168,readingAt:new Date(now).toISOString(),resetAt:new Date(now+5*24*3_600_000).toISOString(),bankedResets:2,bankedResetsAt:new Date(now).toISOString(),bankedResetExpiresAt:new Date(now+30*24*3_600_000).toISOString()},
-      {accountId:"openai-codex-2",accountLabel:"openai-codex-2",state:"stale",percentLeft:10,usedPercent:90,meterId:"codex-5h",windowHours:5,readingAt:new Date(now-2*3_600_000).toISOString(),resetAt:null,bankedResets:null,bankedResetsAt:null,bankedResetExpiresAt:null},
+      {accountId:"openai-codex-2",accountLabel:"openai-codex-2",state:"unavailable",percentLeft:null,usedPercent:null,meterId:null,windowHours:null,readingAt:null,resetAt:null,bankedResets:null,bankedResetsAt:null,bankedResetExpiresAt:null},
       {accountId:"openai-codex-3",accountLabel:"No reading",state:"unavailable",percentLeft:null,usedPercent:null,meterId:null,windowHours:null,readingAt:null,resetAt:null,bankedResets:0,bankedResetsAt:new Date(now).toISOString(),bankedResetExpiresAt:null},
     ]);
+    expect(usage.metrics["five-hour"]?.percentLeft).toBe(70);
+    expect(usage.metrics["five-hour"]?.accounts[1]).toMatchObject({state:"stale",percentLeft:10,meterId:"codex-5h"});
     client.close();rmSync(root,{recursive:true});
   });
 
@@ -93,6 +95,7 @@ describe("current orchestrator state",()=>{
     const store=Store.open(ledger);
     for(const [id,all,scoped] of [["anthropic",100,73],["anthropic-2",96,63],["anthropic-3",100,83]] as const){
       store.upsertAccount({id,provider:"anthropic"});
+      store.recordMeter(id,"anthropic-5h",10,now+3_600_000,now);
       store.recordMeter(id,"anthropic-7d",all,now+3_600_000,now);
       store.recordMeter(id,"anthropic-7d_oi",scoped,now+3_600_000,now);
     }
