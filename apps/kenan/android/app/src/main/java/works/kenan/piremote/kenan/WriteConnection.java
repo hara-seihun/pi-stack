@@ -41,6 +41,7 @@ final class WriteConnection {
     private WebSocket socket;
     private boolean started;
     private boolean closed;
+    private boolean finishing;
     private boolean terminal;
 
     WriteConnection(Context context, RemoteSession.Identity identity, Events events) {
@@ -153,14 +154,15 @@ final class WriteConnection {
     }
     synchronized boolean audio(byte[] packet) {
         if (!current.getAsBoolean()) { cancel(); return false; }
-        return !closed && socket != null && socket.queueSize() < 10_000
+        return !closed && !finishing && socket != null && socket.queueSize() < 10_000
             && socket.send(ByteString.of(packet));
     }
     synchronized long queueSize() { return socket == null ? 0 : socket.queueSize(); }
     synchronized boolean ended() { return terminal; }
     synchronized void finish() {
         if (!current.getAsBoolean()) { cancel(); return; }
-        if (socket == null || closed) return;
+        if (socket == null || closed || finishing) return;
+        finishing = true;
         if (!socket.send("{\"type\":\"finish\"}")) fail("Could not finish dictation");
     }
     void cancel() { terminate(false); }

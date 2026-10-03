@@ -6,3 +6,5 @@ apps/remote/android/build/
 apps/remote/android/app/build/
 apps/remote/android/local.properties
 *.log
+__pycache__/
+*.py[cod]

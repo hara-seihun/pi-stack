@@ -27,7 +27,7 @@ public final class WriteConnectionTest {
         public Request request() { return request; }
         public long queueSize() { return 0; }
         public boolean send(String message) { messages.add(message); return accepts; }
-        public boolean send(ByteString bytes) { return accepts; }
+        public boolean send(ByteString bytes) { messages.add("audio:" + bytes.hex()); return accepts; }
         public boolean close(int code, String reason) { return true; }
         public void cancel() {
             cancellations++;
@@ -87,6 +87,21 @@ public final class WriteConnectionTest {
         assertEquals(1, capture.terminals);
         assertEquals(0, capture.partials);
         assertEquals(1, capture.socket.messages.size());
+    }
+
+    @Test public void finishFollowsTailPacketExactlyOnceAndKeepsSocketForFinal() throws Exception {
+        Capture capture = new Capture();
+        WriteConnection connection = capture.connect();
+        assertTrue(connection.audio(new byte[] { 1 }));
+        assertTrue(connection.audio(new byte[] { 2 }));
+        connection.finish(); connection.finish();
+        assertFalse(connection.audio(new byte[] { 3 }));
+        assertEquals(4, capture.socket.messages.size());
+        assertEquals(List.of("audio:01", "audio:02", "{\"type\":\"finish\"}"), capture.socket.messages.subList(1, 4));
+        assertEquals(0, capture.socket.cancellations);
+        capture.socket.listener.onMessage(capture.socket, "{\"type\":\"final\",\"text\":\"Last word\"}");
+        capture.closed();
+        assertEquals("Last word", capture.result);
     }
 
     @Test public void serverErrorAndMalformedResponseAreTerminalAndReleaseSocket() throws Exception {

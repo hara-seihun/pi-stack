@@ -35,7 +35,7 @@ class Engine:
 
     PARTIAL_INTERVAL = 0.1
     SPECULATE_AFTER_SILENCE = 0.12
-    IMMEDIATE_PADDING = 1600
+    FINAL_PADDING = 9600
     GPU_RETRY_SECONDS = 20
 
     def __init__(self, model_dir: Path, threads=4, streams=4, cleanup_dir: Path | None = None,
@@ -109,8 +109,10 @@ class Engine:
             """Feed buffered audio to the stream; returns when the buffer is empty."""
             nonlocal committed, live_step
             while pending:
-                batch = np.concatenate(pending); pending.clear()
                 async with self.slots:
+                    # Cancellation while awaiting a slot must leave the PCM
+                    # buffered for the finish owner, not drop the spoken tail.
+                    batch = np.concatenate(pending); pending.clear()
                     live_step = asyncio.ensure_future(asyncio.to_thread(stream.accept, batch))
                     await asyncio.shield(live_step)
             result = stream.result()
@@ -124,8 +126,8 @@ class Engine:
         async def cpu_advance():
             nonlocal cpu_live_step, cpu_clean_step, cpu_committed
             while cpu_pending:
-                batch = np.concatenate(cpu_pending); cpu_pending.clear()
                 async with self.cpu_slots:
+                    batch = np.concatenate(cpu_pending); cpu_pending.clear()
                     cpu_live_step = asyncio.ensure_future(asyncio.to_thread(cpu_stream.accept, batch))
                     await asyncio.shield(cpu_live_step)
             result = cpu_stream.result()
@@ -174,7 +176,7 @@ class Engine:
                     speculating_at = received
                     candidate, cleaner_copy, offset = stream.fork(), cleaner.fork(), cleaned[0]
                     def ahead():
-                        finished = candidate.finish()
+                        finished = candidate.finish(self.FINAL_PADDING)
                         return finished, cleaner_copy.finish(finished['words'][offset:])
                     async with self.slots:
                         finished, final = await asyncio.to_thread(ahead)
@@ -237,13 +239,17 @@ class Engine:
                     behind = (received - stream.samples_decoded) / 16000
                     cpu_behind = (received - cpu_stream.samples_decoded) / 16000 if cpu_stream is not None else 0
                     closing = True; arrived.set()
-                    hit = speculative is not None and speculative[0] <= received and voiced_at <= speculative[0]
+                    # Even quiet terminal speech can fall below the RMS gate.
+                    # A speculative final is reusable only if it covers all PCM.
+                    hit = speculative is not None and speculative[0] == received
                     # Never wait for a speculation: cancel the decoder. A hit already
                     # holds the cleaned final; otherwise let at most the one live
                     # step already running complete, then take over the stream.
                     decoder_task.cancel()
                     if cpu_task is not None:
                         cpu_task.cancel(); cpu_arrived.set()
+                    await asyncio.gather(decoder_task, *([cpu_task] if cpu_task is not None else []),
+                                         return_exceptions=True)
                     waited_at = advanced_at = tail_at = cleaned_at = began
                     winner = 'speculative' if hit else ('gpu' if getattr(getattr(stream, 'model', None), 'gpu', None) else 'cpu')
                     cpu_phases = [began, began, began, began, began]
@@ -255,10 +261,10 @@ class Engine:
                         waited_at = time.perf_counter()
                         await advance()
                         advanced_at = time.perf_counter()
-                        # Keep 100 ms of additional silence to resolve terminal
-                        # wordpieces (removing it lost "default" as "def").
+                        # Match speculative finalization: terminal wordpieces
+                        # need the same right context even on immediate Finish.
                         async with self.slots:
-                            recognized = await asyncio.to_thread(stream.finish, self.IMMEDIATE_PADDING)
+                            recognized = await asyncio.to_thread(stream.finish, self.FINAL_PADDING)
                         tail_at = time.perf_counter()
                         if clean_step is not None and not clean_step.done():
                             await clean_step
@@ -275,7 +281,7 @@ class Engine:
                         await cpu_advance()
                         cpu_phases[2] = time.perf_counter()
                         async with self.cpu_slots:
-                            recognized = await asyncio.to_thread(cpu_stream.finish, self.IMMEDIATE_PADDING)
+                            recognized = await asyncio.to_thread(cpu_stream.finish, self.FINAL_PADDING)
                         cpu_phases[3] = time.perf_counter()
                         if cpu_clean_step is not None and not cpu_clean_step.done():
                             await cpu_clean_step

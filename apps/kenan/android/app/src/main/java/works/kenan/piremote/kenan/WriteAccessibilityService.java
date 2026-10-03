@@ -83,7 +83,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
             && insertedField != null && System.currentTimeMillis() < watchUntil && event.getWindowId() == windowId
             ? event.getSource() : null;
         if (changedNode != null && insertedNode != null && changedNode.equals(insertedNode)) {
-            String changed = changedNode.getText() == null ? "" : changedNode.getText().toString();
+            String changed = fieldText(changedNode);
             WriteText.Correction correction = WriteText.changedWord(insertedField, changed, insertedStart, insertedEnd);
             if (correction != null && learnedIdentity != null) {
                 insertedField = null;
@@ -117,6 +117,12 @@ public final class WriteAccessibilityService extends AccessibilityService {
         if (visible != null) for (AccessibilityWindowInfo window : visible)
             if (window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return true;
         return false;
+    }
+
+    static String fieldText(AccessibilityNodeInfo node) {
+        if (Build.VERSION.SDK_INT >= 26 && node.isShowingHintText()) return "";
+        CharSequence text = node.getText();
+        return text == null ? "" : text.toString();
     }
 
     private boolean eligible(AccessibilityNodeInfo node) {
@@ -197,16 +203,15 @@ public final class WriteAccessibilityService extends AccessibilityService {
 
     private void start() {
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
-        if (identity == null || target == null || !eligible(target)) return;
+        if (identity == null || target == null || !target.refresh() || !eligible(target)) return;
         synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
         clipboardReady = false; waveLevel = 0; backlog = false;
         long attempt = ++generation;
         connecting = true; stopped = false; sentPackets = 0;
         render();
         if (connection != null) connection.cancel();
-        CharSequence field = target.getText();
+        String text = fieldText(target);
         int cursor = target.getTextSelectionStart();
-        String text = field == null ? "" : field.toString();
         int end = Math.max(0, Math.min(text.length(), cursor < 0 ? text.length() : cursor));
         String context = text.substring(Math.max(0, end - 200), end);
         WriteConnection stream = new WriteConnection(this, identity, new WriteConnection.Events() {
@@ -315,7 +320,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
     private void stopRecorder() {
         recording = false;
-        if (recorder != null) recorder.stop();
+        if (recorder != null) recorder.cancel();
         recorder = null;
         stopForeground(STOP_FOREGROUND_REMOVE);
     }
@@ -344,8 +349,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
         finishing = false; connecting = false;
         if (text == null || text.isBlank()) { idle(); return; }
         AccessibilityNodeInfo node = target;
-        if (node == null || !eligible(node) || node.getWindowId() != windowId) { fallback(text); return; }
-        String original = node.getText() == null ? "" : node.getText().toString();
+        if (node == null || !node.refresh() || !eligible(node) || node.getWindowId() != windowId) { fallback(text); return; }
+        String original = fieldText(node);
         WriteText.Insertion result = WriteText.insert(original, node.getTextSelectionStart(), node.getTextSelectionEnd(), text);
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, result.text());
