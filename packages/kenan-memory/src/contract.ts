@@ -29,7 +29,8 @@ export interface Disclosure extends DisclosureInput {
   id: string;
   occurredAt: string;
   recordedBy: PersonId;
-  kind?: "explicit" | "memory-read" | "root-reply";
+  kind?: "explicit" | "memory-read" | "root-reply" | "consent-question" | "consent-answer";
+  consentId?: string;
   rootSessionId?: string;
   turnId?: string;
   finalReply?: string;
@@ -70,6 +71,20 @@ export interface RootAdmission {
   memoryToken: string;
 }
 export interface RootAdmitRequest { callerToken: string; request: string; rootSessionId?: string }
+export interface RootResumeConsent {
+  rootSessionId: string;
+  subject: PersonId;
+  question: string;
+  answer: string;
+  consentId: string;
+}
+export interface RootLogConsent {
+  rootSessionId: string;
+  consentId: string;
+  subject: PersonId;
+  kind: "question" | "answer";
+  text: string;
+}
 export interface RootFinalizeReply { rootSessionId: string; reply: string; subjects: PersonId[]; recipients?: PersonId[] }
 export type RoomAudienceResolver = (person: PersonId, threadId: string) => { roomId: string; people: PersonId[] } | undefined | Promise<{ roomId: string; people: PersonId[] } | undefined>;
 export const KENAN_ROOT_DEFAULT_PORT = 18821;
