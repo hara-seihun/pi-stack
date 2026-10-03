@@ -17,6 +17,8 @@ RestartSec=2
 KillMode=control-group
 TimeoutStopSec=15
 UMask=0077
+MemorySwapMax=0
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target

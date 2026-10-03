@@ -11,6 +11,8 @@ User=pi-kenan
 Group=pi-kenan
 PrivateMounts=yes
 UMask=0077
+MemorySwapMax=0
+LimitCORE=0
 WorkingDirectory=/srv/pi/kenan-memory
 Environment=PI_STACK_HOST_CONFIG=/etc/pi-stack/host.json
 Environment=PI_KENAN_MEMORY_AUTH_FILE=%d/kenan-memory-auth

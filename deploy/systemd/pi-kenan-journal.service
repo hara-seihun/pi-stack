@@ -17,3 +17,5 @@ ExecCondition=/usr/bin/mountpoint -q @KENAN_PRIVATE_DIR@
 ExecStart=@BUN@ @KENAN_MEMORY_SOURCE@/src/journal-cli.ts drain --all
 TimeoutStartSec=30
 UMask=0077
+MemorySwapMax=0
+LimitCORE=0

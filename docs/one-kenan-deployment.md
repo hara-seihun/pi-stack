@@ -115,6 +115,11 @@ for repair rather than opening an ungated privileged listener. The original fron
 
 ## Units and data
 
+Custody, root, memory and journal units set `MemorySwapMax=0` and `LimitCORE=0`. Their
+private contexts and unlocked keys must not spill into the host's unencrypted swap or a core
+dump. Custody's owner-run gocryptfs children remain in its no-swap cgroup. This policy is
+additive to these new services only; no original user's live unit or host swap is changed.
+
 - `pi-kenan-custody.service`: root, fixed helper only, root-only socket `/run/pi-kenan/custody.sock`.
   It deliberately has no `StateDirectory=pi-kenan`: systemd must not recursively re-own
   the `pi-kenan`-owned `.private.crypt` and `private` directories when starting root custody.

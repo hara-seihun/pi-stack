@@ -63,6 +63,10 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertFalse(any(any('pi-remote@' in arg or 'pi-orchestrator@' in arg or 'router.service' in arg for arg in call) for call in calls))
         self.assertFalse(any(call[0] in ('useradd','usermod','chown','nft') for call in calls))
         units=self.root/'etc/systemd/system'
+        for name in ('custody','root','memory','journal'):
+            source=(units/f'pi-kenan-{name}.service').read_text()
+            self.assertIn('MemorySwapMax=0',source)
+            self.assertIn('LimitCORE=0',source)
         self.assertIn('User=root',(units/'pi-kenan-custody.service').read_text())
         self.assertNotIn('StateDirectory=',(units/'pi-kenan-custody.service').read_text())
         self.assertIn('User=pi-kenan',(units/'pi-kenan-root.service').read_text())
