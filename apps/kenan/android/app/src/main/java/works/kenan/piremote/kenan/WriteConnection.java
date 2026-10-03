@@ -22,11 +22,12 @@ final class WriteConnection {
         void connected();
         void partial(String text);
         void finished(String text);
+        default void notice(String message) { }
         void failed(String message);
     }
 
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
-        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false)
         .addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
@@ -109,7 +110,15 @@ final class WriteConnection {
                                     case "partial" -> events.partial(event.optString("committed") + event.optString("tail"));
                                     case "final" -> {
                                         String text = event.getString("text");
-                                        if (terminate(true)) events.finished(text);
+                                        if (terminate(true)) {
+                                            JSONObject rewrite = event.optJSONObject("rewrite");
+                                            if (rewrite != null) {
+                                                String status = rewrite.optString("status");
+                                                if (status.equals("unavailable")) events.notice("Local rewrite unavailable; inserted the transcript.");
+                                                else if (status.equals("guarded")) events.notice("Kept the original wording to avoid changing its meaning.");
+                                            }
+                                            events.finished(text);
+                                        }
                                     }
                                     case "error" -> fail(event.optString("message", "Recognition failed"));
                                     default -> { }

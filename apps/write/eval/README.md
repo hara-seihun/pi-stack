@@ -1,6 +1,6 @@
 # Write public-audio regression corpus
 
-This owner contains fixtures, replay, and measurements only. It does not change recognition or implement a meaning-aware rewrite. The corpus is deliberately small: **13 actual AMI meeting recordings plus 6 explicitly synthetic domain/dictionary controls**, 75.56 seconds, about 2.4 MB of mono 16 kHz PCM16 WAV. No private speech or files are used.
+This owner contains fixtures, replay, and measurements only. It does not change recognition or implement a meaning-aware rewrite. The corpus is deliberately small: **21 fixtures: 13 actual AMI meeting recordings plus 8 explicitly synthetic controls**, stored as mono 16 kHz PCM16 WAV. The two new `rewrite-color` and `rewrite-intent` controls are authored rewrite diagnostics, not natural speech or holdout evidence. No private speech or files are used.
 
 ## Run
 
@@ -11,18 +11,24 @@ PY=/srv/pi/write-engine/venv/bin/python
 $PY apps/write/eval/evaluate.py check
 $PY -m unittest discover -s apps/write/eval -q
 
-# Sequential paired replay, ~9 seconds, no model initialization in the client.
+# Sequential paired replay; no model initialization in the client.
+# Allow seconds-scale final rewrite, rather than the default 8-second final wait.
 $PY apps/write/eval/evaluate.py replay --id ami-1016 \
-  --output /tmp/write-filler.jsonl
+  --final-timeout 30 --output /tmp/write-filler.jsonl
 
 # A bounded meaningful set, max concurrency remains one.
 $PY apps/write/eval/evaluate.py replay \
-  --id ami-4062 --id ami-11072 --limit 2 --output /tmp/write-semantic.jsonl
+  --id ami-4062 --id ami-11072 --limit 2 --final-timeout 30 \
+  --output /tmp/write-semantic.jsonl
 
 # Compare immediate finish to a conservative energy-trimmed endpoint and
 # 400 ms of transmitted silence. This is not a load test.
 $PY apps/write/eval/evaluate.py replay --id ami-25 --finish all \
-  --output /tmp/write-tail.jsonl
+  --final-timeout 30 --output /tmp/write-tail.jsonl
+
+# New synthetic meaning-aware rewrite diagnostics, not natural-speech proof.
+$PY apps/write/eval/evaluate.py replay --id rewrite-color --id rewrite-intent \
+  --limit 2 --final-timeout 30 --output /tmp/write-rewrite-audio.jsonl
 
 $PY apps/write/eval/evaluate.py score --output /tmp/write-tail.jsonl
 ```
@@ -30,6 +36,13 @@ $PY apps/write/eval/evaluate.py score --output /tmp/write-tail.jsonl
 `--url` selects another running engine (default `ws://127.0.0.1:8797`). `--dictionary off|on|paired`, `--chunk-ms 20|40|200`, and `--pace realtime|burst` expose independent transport conditions. `--limit` defaults to **one fixture**, even with multiple `--id` arguments: increase it explicitly. `--offset` permits bounded slices of the manifest. `--require-pass` turns failed desired expectations into exit status 1; without it, a successful measurement may report failed engine expectations. Operational errors exit nonzero and are not substituted with cleanup-only results.
 
 The client sends `start` with dictionary and PCM format, binary frames, then `finish`; it concurrently drains partials and waits for the engine's distinct `raw` and `text` final. It never waits for a partial per frame. All transmitted PCM is drained before `finish`. `realtime` places finish at the final transmitted sample's clock deadline. `burst` measures queued-audio draining, **not** the streamed finish SLA. No Opus encoding, recorder/UI testing, or concurrent stress is implied.
+
+The [engine rewrite owner](../engine/REWRITE.md) describes the entirely local resident
+CPU Qwen3-4B-Instruct-2507 candidate, guarded output and explicit client notices.
+Final rewrite adds seconds-scale latency; `--final-timeout 30` is a measurement
+budget aligned with native Android's wait, not a measured SLA. Prompt tuning and
+final corpus measurements are underway. This corpus's existing baseline predates
+that path and the two new fixtures; do not treat it as candidate success evidence.
 
 Finish variants:
 
@@ -80,14 +93,16 @@ WER ignores punctuation/case and normalizes curly apostrophes only. `lexical_exa
 | `domain-kenan`, `domain-kelana` | Synthetic domain-name positives; generator pronunciation, not natural personal dictation |
 | `negative-canon`, `negative-call-anna` | Synthetic ordinary-name/phrase near-neighbor negatives; must not become Kenan/Kelana |
 | `replacement-positive`, `replacement-negative` | Synthetic exact phrase replacement and absent-phrase control |
+| `rewrite-color` | Synthetic blue → red self-correction; retain the comparison/reason **better**, remove the abandoned color |
+| `rewrite-intent` | Synthetic empty lead-in removal; retain menu, too many buttons, and simpler layout |
 
-The 12 newly selected natural clips lie beyond the earlier project's first-100 AMI IHM test slice. They were selected by annotation content before this replay and were not used to tune the runtime in this task. This is a **new evaluation selection**, not a guarantee against all project/model training exposure. `ami-25` is expressly **prior-seen diagnostic**, not holdout. Synthetic extras are authored diagnostics, never holdout natural speech. Future engine tuning on these clips makes them regression fixtures, not fresh generalization evidence.
+The 12 newly selected natural clips lie beyond the earlier project's first-100 AMI IHM test slice. At initial corpus creation they were selected by annotation content before baseline replay, not runtime tuning. That historical **new evaluation selection** is not a guarantee against all project/model training exposure or independence from current prompt tuning. `ami-25` is expressly **prior-seen diagnostic**, not holdout. Synthetic extras, including the two rewrite controls, are authored diagnostics, never holdout natural speech. Any clips used for engine/prompt tuning are regression fixtures, not fresh generalization evidence.
 
 DisfluencySpeech was considered but not copied: it is a human speaker's studio reenactment of Switchboard-style utterances, **not natural spontaneous conversation**; earlier project validation/test splits were also already examined. GigaSpeech's repository license does not establish redistribution rights for all underlying recordings. AMI provides natural speech with explicit CC BY 4.0 permissions instead. See [NOTICES.md](NOTICES.md).
 
 ## Live CPU baseline, not candidate-fix evidence
 
-[`baseline/`](baseline/) records **34 sequential realtime sessions** against the selected CPU engine before the parent tail/scored-alternative changes. Seven natural clips and all six synthetic clips were measured in paired dictionary/plain mode; date and known-bias clips additionally have tight/silence variants. Six other committed natural clips remain unmeasured in this baseline. `metadata.json` identifies endpoint, runtime source-file hashes, corpus hash and limits; `summary.json` aggregates receipts by recording kind, dictionary mode and finish condition.
+[`baseline/`](baseline/) records **34 sequential realtime sessions** against the selected CPU engine before the parent tail/scored-alternative changes. Seven natural clips and the six synthetic clips present at baseline time were measured in paired dictionary/plain mode; date and known-bias clips additionally have tight/silence variants. Six other committed natural clips remain unmeasured in this baseline. `metadata.json` identifies endpoint, runtime source-file hashes, corpus hash and limits; `summary.json` aggregates receipts by recording kind, dictionary mode and finish condition.
 
 `dictionary_enabled: true/false` records what the client sent. `expectation_pass`, `meaning_proxy_pass`, `lexical_exact`, and `formatted_exact` are **desired-behavior outcomes**, not expected-current-engine labels or evidence that a failure is acceptable. This baseline is intentionally failing and must not be relabelled to make it green.
 
@@ -108,4 +123,8 @@ Concrete observations:
 - No active dictionary name was spuriously inserted in this bounded set. That does not establish safe dictionary behavior generally; synthetic positive recall is **0/3**, and synthetic near-neighbor speech itself is poorly recognized. All six synthetic exact-clean expectations fail in both modes.
 - Several immediate final roundtrips exceed 100 ms, including first-request 217 ms, date 109 ms, known-bias 198 ms, and synthetic Kenan 399 ms. Appended-silence final waits are under 1 ms on the two measured natural clips, after already spending 400 ms. These are loopback client timings under live CPU conditions, not a broad SLA or accuracy result.
 
-Use the same commands against a candidate engine and compare immutable receipts. Recognition, cleanup and dictionary failures need different remedies. This owner supplies that separation; it claims neither a full rewrite nor overall product accuracy improvement.
+Use the same commands against a candidate engine and compare immutable receipts. Recognition, cleanup and dictionary failures need different remedies. This owner supplies that separation; it claims no overall product accuracy improvement.
+[Operational evidence](/home/kenan/data/voice-write-reliability/README.md)
+owns the host/Android reliability receipts and earlier candidate comparisons; new
+rewrite results must retain their exact source/corpus identities rather than
+relabel these baseline receipts.

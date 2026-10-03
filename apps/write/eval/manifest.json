@@ -514,6 +514,54 @@
       "expected_terms": []
     },
     {
+      "id": "ami-25",
+      "audio": "audio/ami-25.wav",
+      "sha256": "63ce867aedbfb60c28b1243c164425fc4798e43c5579c68e7d4c3ab9039b2c83",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 25,
+        "audio_id": "AMI_EN2002a_H03_MEE071_0104146_0104463",
+        "meeting_id": "EN2002a",
+        "speaker_id": "MEE071",
+        "begin_time": 1041.4599609375,
+        "end_time": 1044.6300048828125,
+        "transcript": "SO EVEN IF IT DOESN'T WORK YOU CAN JIGGERY POKERY AROUND AND MAKE IT WORK",
+        "sha256": "f9e2cfc10dcc625596f95aa9cbae38c8a96d83e9fcf50bdcabca0565466b8d23"
+      },
+      "verbatim": "SO EVEN IF IT DOESN'T WORK YOU CAN JIGGERY POKERY AROUND AND MAKE IT WORK",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "prior-seen-AMI-bias-probe-diagnostic-not-holdout",
+      "target": "So even if it doesn't work you can jiggery pokery around and make it work.",
+      "expectation": "meaning",
+      "expected_terms": [
+        "jiggery pokery"
+      ],
+      "tags": [
+        "dictionary-positive",
+        "uncommon-phrase",
+        "known-dictionary-failure",
+        "negation-protection"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "doesn't work",
+            "does not work"
+          ],
+          [
+            "jiggery pokery"
+          ],
+          [
+            "make it work"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
       "id": "domain-kenan",
       "audio": "audio/domain-kenan.wav",
       "sha256": "0760b1f7aef6a62ad74d66a6bf76633cf6401d061f373ab8893825fa74923f71",
@@ -706,51 +754,80 @@
       }
     },
     {
-      "id": "ami-25",
-      "audio": "audio/ami-25.wav",
-      "sha256": "63ce867aedbfb60c28b1243c164425fc4798e43c5579c68e7d4c3ab9039b2c83",
+      "id": "rewrite-color",
+      "audio": "audio/rewrite-color.wav",
+      "sha256": "9c467026c6fb00a059de53271b2c08559648afd3561a5b5747143693928b6ee6",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
       "source": {
-        "dataset": "edinburghcstr/ami",
-        "config": "ihm",
-        "split": "test",
-        "row": 25,
-        "audio_id": "AMI_EN2002a_H03_MEE071_0104146_0104463",
-        "meeting_id": "EN2002a",
-        "speaker_id": "MEE071",
-        "begin_time": 1041.4599609375,
-        "end_time": 1044.6300048828125,
-        "transcript": "SO EVEN IF IT DOESN'T WORK YOU CAN JIGGERY POKERY AROUND AND MAKE IT WORK",
-        "sha256": "f9e2cfc10dcc625596f95aa9cbae38c8a96d83e9fcf50bdcabca0565466b8d23"
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "I want the blue one. No actually the red one would be better."
       },
-      "verbatim": "SO EVEN IF IT DOESN'T WORK YOU CAN JIGGERY POKERY AROUND AND MAKE IT WORK",
-      "kind": "natural-meeting",
-      "license": "CC-BY-4.0",
-      "exposure": "prior-seen-AMI-bias-probe-diagnostic-not-holdout",
-      "target": "So even if it doesn't work you can jiggery pokery around and make it work.",
+      "verbatim": "I want the blue one. No actually the red one would be better.",
+      "target": "I want the red one, which would be better.",
       "expectation": "meaning",
-      "expected_terms": [
-        "jiggery pokery"
-      ],
+      "expected_terms": [],
       "tags": [
-        "dictionary-positive",
-        "uncommon-phrase",
-        "known-dictionary-failure",
-        "negation-protection"
+        "synthetic",
+        "dictionary-negative",
+        "meaning-aware-rewrite"
       ],
       "meaning": {
         "required": [
           [
-            "doesn't work",
-            "does not work"
+            "red"
           ],
           [
-            "jiggery pokery"
-          ],
-          [
-            "make it work"
+            "better"
           ]
         ],
-        "forbidden": []
+        "forbidden": [
+          "blue",
+          "actually"
+        ]
+      }
+    },
+    {
+      "id": "rewrite-intent",
+      "audio": "audio/rewrite-intent.wav",
+      "sha256": "02d7556045997218a09ac039d752fff814be0915b0dee6db9de7463f2f9d09eb",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "The thing is I guess what I am trying to say is the menu has too many buttons and needs a simpler layout."
+      },
+      "verbatim": "The thing is I guess what I am trying to say is the menu has too many buttons and needs a simpler layout.",
+      "target": "The menu has too many buttons and needs a simpler layout.",
+      "expectation": "meaning",
+      "expected_terms": [],
+      "tags": [
+        "synthetic",
+        "dictionary-negative",
+        "meaning-aware-rewrite"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "menu"
+          ],
+          [
+            "too many buttons"
+          ],
+          [
+            "simpler layout"
+          ]
+        ],
+        "forbidden": [
+          "what I am trying",
+          "what I'm trying"
+        ]
       }
     }
   ],

@@ -1,5 +1,9 @@
 # Fixture provenance and redistribution
 
+The corpus contains **21 fixtures: 13 real AMI clips and 8 synthetic controls**.
+The synthetic `rewrite-color` and `rewrite-intent` additions exercise contextual
+cleanup; they are not recorded human speech or fresh holdout evidence.
+
 ## AMI natural meeting audio and orthographic annotations
 
 Files: `audio/ami-*.wav`; corresponding `source.transcript` / `verbatim` fields in `manifest.json`.
@@ -24,9 +28,10 @@ Changes made by this redistribution: selected already-segmented public IHM utter
 
 Keep this attribution, source links, license link and change notice with copied AMI fixtures. CC BY 4.0 permits redistribution/adaptation, including commercial use, with attribution; it does not imply endorsement by the speakers or AMI Consortium. These public recordings do not grant rights to unrelated private speech.
 
-## Synthetic domain-name and dictionary extras
+## Synthetic domain-name, dictionary and rewrite controls
 
-Files: `audio/domain-*.wav`, `audio/negative-*.wav`, `audio/replacement-*.wav`.
+Files: `audio/domain-*.wav`, `audio/negative-*.wav`, `audio/replacement-*.wav`,
+`audio/rewrite-color.wav`, `audio/rewrite-intent.wav`.
 
 These files are **deterministic synthetic speech**, generated for Pi Stack with eSpeak NG **1.52.0**, `en-gb`, 155 words/minute. The exact text recipe and generator declaration are in each manifest entry and `synthetic.py`. They contain no voice clone or recorded personal dictation. References are the text recipe, not a claimed human transcript or natural-speech gold.
 

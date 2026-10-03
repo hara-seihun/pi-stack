@@ -15,7 +15,8 @@ import numpy as np
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from cleanup import IncrementalCleaner
+from cleanup import IncrementalCleaner, dictionary_text
+from rewrite import LocalRewriter
 from cleanup.tagger import JointOnnxTagger
 from cleanup.punctuation import OnnxPunctuator
 from nemotron import Nemotron
@@ -39,7 +40,7 @@ class Engine:
     GPU_RETRY_SECONDS = 20
 
     def __init__(self, model_dir: Path, threads=4, streams=4, cleanup_dir: Path | None = None,
-                 punctuation_dir: Path | None = None):
+                 punctuation_dir: Path | None = None, rewriter: LocalRewriter | None = None):
         self.model_dir = model_dir
         self.recognizer = Nemotron(model_dir, threads)
         # A separate two-thread ORT pool keeps the CPU shadow warm without
@@ -49,6 +50,7 @@ class Engine:
         self.tagger = JointOnnxTagger(cleanup_dir) if cleanup_dir is not None else None
         self.punctuator = OnnxPunctuator(punctuation_dir) if punctuation_dir is not None else None
         self.slots = asyncio.Semaphore(streams)
+        self.rewriter = rewriter
 
     async def promote_when_available(self):
         """Transient GPU admission denial must not pin the daemon to CPU forever.
@@ -85,7 +87,7 @@ class Engine:
 
     async def handle(self, socket):
         connected_at = time.perf_counter()
-        state = {'last_audio_at': None, 'samples': 0, 'format': 'pcm'}
+        state = {'last_audio_at': None, 'samples': 0, 'format': 'pcm', 'rewrite': True}
         pending = []
         arrived = asyncio.Event()
         cpu_pending = []
@@ -216,6 +218,9 @@ class Engine:
                     dictionary = command.get('dictionary') or {}
                     context = command.get('context') or ''
                     state['format'] = command.get('audio', 'pcm')
+                    state['rewrite'] = command.get('rewrite', True)
+                    if not isinstance(state['rewrite'], bool):
+                        raise ValueError('rewrite must be a boolean')
                     if not isinstance(dictionary.get('words', []), list) or not isinstance(context, str) or state['format'] not in ('pcm', 'opus'):
                         raise ValueError('invalid dictionary, context or audio format')
                     opus_decoder = OpusDecoder() if state['format'] == 'opus' else None
@@ -319,8 +324,19 @@ class Engine:
                         # A losing CPU task may have been canceled halfway
                         # through a phase; do not report negative durations.
                         cpu_phases = [began]*5
+                    rewrite = None
+                    rewriter = getattr(self, 'rewriter', None)
+                    if rewriter is not None and state['rewrite']:
+                        decision = await asyncio.to_thread(rewriter.rewrite,
+                            dictionary_text(result['words'], dictionary), final['text'], dictionary)
+                        rewrite = {'status': decision.status, 'reason': decision.reason,
+                                   'latencyMs': decision.latency_ms}
+                        if decision.text != final['text']:
+                            final = {'text': decision.text, 'edits': [
+                                {'kind': 'rewrite', 'from': final['text'], 'to': decision.text,
+                                 'at': [0, len(result['words'])]}]}
                     elapsed = (time.perf_counter() - began)*1000
-                    await socket.send(json.dumps({'type': 'final', 'text': final['text'], 'raw': result['text'], 'edits': final['edits'], 'words': result['words'], 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit, 'encoder': winner}}))
+                    await socket.send(json.dumps({'type': 'final', 'text': final['text'], 'raw': result['text'], 'edits': final['edits'], 'words': result['words'], 'rewrite': rewrite, 'timing': {'flushMs': round(elapsed, 2), 'speculative': hit, 'encoder': winner}}))
                     steps = sorted(stream.timings) or [0.0]
                     stages = getattr(stream, 'stage_timings', ())
                     gpu_wait = max((s['gpuWaitMs'] for s in stages), default=0)
@@ -368,14 +384,22 @@ async def main():
                         default=Path(__file__).resolve().parent/'cleanup-model')
     parser.add_argument('--punctuation-model', type=Path,
                         default=Path(__file__).resolve().parent/'punctuation-model')
+    parser.add_argument('--rewrite-runtime', type=Path,
+                        default=Path(__file__).resolve().parent/'rewrite-runtime'/'llama-server')
+    parser.add_argument('--rewrite-model', type=Path,
+                        default=Path(__file__).resolve().parent/'rewrite-model'/'model.gguf')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    engine = Engine(args.model, args.threads, args.streams, args.cleanup_model,
-                    args.punctuation_model)
-    asyncio.create_task(engine.promote_when_available())
-    async with serve(engine.handle, args.host, args.port, max_size=4*1024*1024):
-        LOG.info('Write ASR listening at %s:%d', args.host, args.port)
-        await asyncio.Future()
+    rewriter = LocalRewriter(args.rewrite_runtime, args.rewrite_model)
+    try:
+        engine = Engine(args.model, args.threads, args.streams, args.cleanup_model,
+                        args.punctuation_model, rewriter)
+        asyncio.create_task(engine.promote_when_available())
+        async with serve(engine.handle, args.host, args.port, max_size=4*1024*1024):
+            LOG.info('Write ASR and local rewrite listening at %s:%d', args.host, args.port)
+            await asyncio.Future()
+    finally:
+        rewriter.close()
 
 
 if __name__ == '__main__':
