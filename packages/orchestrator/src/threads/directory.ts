@@ -1,5 +1,5 @@
 import { validateThreadAwait } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
@@ -35,6 +35,10 @@ export class ThreadDirectory implements ThreadApi {
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     const owner = await this.owner(threadId);
     return owner.ok ? owner.value.api.questions(threadId) : owner;
+  }
+  async questionState(threadId: string, questionId: string): Promise<Result<QuestionState>> {
+    const owner = await this.owner(threadId);
+    return owner.ok ? owner.value.api.questionState(threadId, questionId) : owner;
   }
   async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
     const owner = await this.owner(input.threadId);

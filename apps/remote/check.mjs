@@ -4,10 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { runJobs } from "../../scripts/run-jobs.mjs";
 
-execFileSync(process.execPath, [
-  fileURLToPath(new URL("../../node_modules/typescript/bin/tsc", import.meta.url)),
-  "-p", fileURLToPath(new URL("../../packages/orchestrator/tsconfig.build.json", import.meta.url)),
-], { stdio: "inherit" });
+await import("./prepare-check.mjs");
 
 execFileSync(process.execPath, [
   fileURLToPath(new URL("../../packages/runtime/patch-shared-rpc.mjs", import.meta.url)),

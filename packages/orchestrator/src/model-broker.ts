@@ -37,6 +37,7 @@ export interface ModelBrokerConfig {
   ledgerPath: string;
   authPath: string;
   listeners: BrokerListener[];
+  grantOwner?: string;
 }
 export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig {
   if (!value || typeof value !== "object") return false;
@@ -44,6 +45,7 @@ export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig
   const strings = (items: unknown): items is string[] => Array.isArray(items) && items.length > 0 && items.every(item => typeof item === "string" && item.length > 0);
   return typeof config.ledgerPath === "string" && config.ledgerPath.startsWith("/")
     && typeof config.authPath === "string" && config.authPath.startsWith("/")
+    && (config.grantOwner === undefined || typeof config.grantOwner === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(config.grantOwner))
     && Array.isArray(config.listeners) && config.listeners.length > 0
     && config.listeners.every(listener => listener && /^[a-z_][a-z0-9_-]*$/.test(listener.principal)
       && Number.isInteger(listener.port) && listener.port > 1023 && listener.port <= 65535
@@ -83,7 +85,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
     const used = allowances.spent(principal);
     return used >= weeklyUsd ? allowanceRefusal(weeklyUsd) : null;
   };
-  const publish = () => store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })));
+  const publish = () => store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })), config.grantOwner);
   const completions = new CompletionService(store, process.cwd());
   const providers = new Map(builtinProviders().filter(provider => provider.id in BROKER_ROUTES).map(provider => [provider.id, provider]));
   const auth = new Map([...providers].map(([id, provider]) => [id, providerOAuth(provider, config.authPath)]));
@@ -393,6 +395,10 @@ export async function runModelBroker(path: string): Promise<void> {
     let reloaded: ModelBrokerConfig;
     try { reloaded = loadBrokerConfig(path); }
     catch (error) { console.error(`Model broker kept its current grants: ${error instanceof Error ? error.message : "unreadable grant file"}`); return; }
+    if (reloaded.grantOwner !== config.grantOwner) {
+      console.error(`Model broker grant owner changed in ${path}; restart with the intended owner`);
+      return;
+    }
     if (topology(reloaded.listeners) !== topology(config.listeners)) console.error(`Model broker listeners changed in ${path}; restart the service to serve them`);
     broker.applyGrants(reloaded.listeners);
   });

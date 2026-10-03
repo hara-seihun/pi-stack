@@ -58,6 +58,13 @@ A publication also owns `/srv/pi/.pi-stack-deploy.lock.publication`, a root-owne
 
 The release checkout and its ignored dependencies are reproducible. `node_modules` is ignored at every depth as either a directory or a symlink; never commit it. A directory-only ignore let a writer's dependency symlink enter source, and installation replaced that tracked link with a directory, blocking the next release as dirty (PUB-bdcfabc30fecf8bed025a2f5). The release-checkout tests cover both forms and reject tracked dependencies. Retain its state while a release holds locks; remove it only after checking for unique source work and running releases. The next wrapper recreates it from its configured remote. `node --test scripts/deploy-lock.test.mjs scripts/release-checkout.test.mjs scripts/publication-reservation.test.mjs` covers locks, publication reservation recovery and source isolation in seconds.
 
+## Root Kenan activation
+
+[Root Kenan deployment](one-kenan-deployment.md) owns the separate, off-by-default
+`deploy/one-kenan` prepare/cutover/rollback transaction. It adds a private privileged request
+runtime and unprivileged room owner without changing the execution identity or stopping any
+existing person's supervisor. Source publication does not activate it.
+
 ## What a host provides
 
 Every host supplies Unix people, a host file and systemd services. The host file at `/etc/pi-stack/host.json` names a `fleetUser`, its endpoint catalog and optional extra packages and skills. This is a fictional example, not a production host file:
@@ -112,7 +119,7 @@ Each person's thread capability key is created on first use at `~/.local/state/p
 3. The deployed `pi-agent-browser-doctor` proves the native browser tool and executable from one immutable dependency tree. The fleet and enabled or running per-person Orchestrator daemons select the release. Voice readiness and `releaseCommit` match Remote before router and supervisor handoff. Active Pi turns continue under their recorded release; a replacement supervisor adopts them after settlement.
 4. `deploy/smoke` checks all web entrypoints, assets, Meet, Android CORS, Voice, transcription and every open person's app calls. Failure restores the earlier Remote, Voice and Write selections and hands supervisors back. Write's selection/service-state rollback also runs on earlier component failures and TERM/INT/HUP, before an acceptance can be claimed. The restored release's own smoke script checks its own contract.
 
-Pi is the sole agent runtime. Runtime generations and dependency trees remain while any Pi process or browser daemon uses them.
+Pi is the sole agent runtime. Runtime generations and dependency trees remain while any Pi process or browser daemon uses them. The shared dependency key includes the compaction retry helper and both `kenan-memory` and `kenan-root` source trees, manifests, TypeScript configurations and instruction files. `scripts/deploy-prepare.test.mjs` exercises cache invalidation for these inputs together so integrating either runtime change cannot silently reuse the other change's stale dependencies.
 
 ### Release retention
 

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { actionJournal, journalWarning } from "kenan-memory/journal";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -114,13 +115,20 @@ async function start(call: Call, dial = true) {
     if (call.finishing) return;
     if (dial && !call.providerId) {
       db.query("UPDATE calls SET status='dialing' WHERE id=?").run(call.id);
+      if (!call.gatewayId && !provider) { await finish(call, "failed", "Vonage is not configured"); return; }
+      const ticket = actionJournal.begin({ action: "telephone.dial", actedFor: owner, recipients: [call.brief.to], summary: call.brief.purpose, externalId: call.id });
+      const record = (ok: boolean, detail: string) => {
+        const warning = journalWarning(actionJournal.finish(ticket, ok ? "confirmed" : "unconfirmed", detail));
+        if (warning) { log(call.id, "journal-outcome-pending", { error: warning }); db.query("UPDATE calls SET error=? WHERE id=?").run(warning, call.id); }
+      };
       if (call.gatewayId) {
         const result = gateways.dial(call.gatewayId, call.id, call.brief.to, call.brief.maxSeconds ?? 300);
+        record(result.ok, result.ok ? "SIM dial command accepted; not proof of a connected call" : result.error);
         if (!result.ok) await finish(call, "failed", result.error);
         return;
       }
-      if (!provider) { await finish(call, "failed", "Vonage is not configured"); return; }
-      const result = await provider.dial(call.brief.to, ncco(call), `${publicBase}/vonage/events/${call.id}`);
+      const result = await provider!.dial(call.brief.to, ncco(call), `${publicBase}/vonage/events/${call.id}`);
+      record(result.ok, result.ok ? `Provider accepted call ${result.value.uuid}; not proof of a connected call` : result.error);
       if (!result.ok) { await finish(call, "failed", result.error); return; }
       call.providerId = result.value.uuid;
       db.query("UPDATE calls SET provider_id=?,cleanup=0 WHERE id=?").run(call.providerId, call.id);
