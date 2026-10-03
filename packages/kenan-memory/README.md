@@ -49,6 +49,14 @@ Only the root-service credential can call these routes:
 2. Root executes in a fresh host-controlled session using that `memoryToken` and `PI_KENAN_MEMORY_ROLE=root`. Memory reads record conservative subjects; root execution also accounts for subjects touched by file/action work.
 3. `POST /v1/root/finalize-reply {rootSessionId,reply,subjects,recipients?}` validates the admitted audience, rechecks live room membership, unions request/read/executor subjects and commits the exact reply atomically before acknowledgement. Refusals with no reads are logged too. Root's session token is then revoked. Repeated identical finalization is idempotent; changed replies or audiences are refused.
 
+### Durable consent continuation
+
+The root-service credential also owns `/v1/root/log-consent` and `/v1/root/resume-consent`. No person or admitted root-session token may call either route.
+
+- `log-consent {rootSessionId,consentId,subject,kind:'question'|'answer',text}` commits exact question/answer text before delivery or use. The subject must be a registered individual. A question is addressed only to that subject; the private answer is addressed to Kenan, not automatically to the original requester. Answers require a matching question record for the same subject. Repeated identical events are idempotent; altered subject/text is refused.
+- `resume-consent {rootSessionId,subject,question,answer,consentId}` requires a finalized original root reply and exact logged question/answer records. It creates a fresh root admission preserving the original authenticated requester, originating thread and full audience, unioning the subject into accountability. Current room membership is rechecked; a changed room fails closed. Request bodies cannot set person, recipients, context or role.
+- Resumption is durably idempotent per original root session and consent ID, including across memory-service restarts. Different data under that ID is refused. If the resumed root reply has already been finalized, its memory token is revoked as usual; the consent outbox must retain delivery/execution state and must not re-execute a completed reply. Root execution and the encrypted durable consent outbox are owned by the root service, not this store.
+
 No list/history/context/trace/file/debug API is exposed here. Administrator root-session inspection is separate. The room resolver is host-owned `roomAudienceResolver` from Remote's `server/room-audience.mjs`; `pi-rooms` cannot downgrade an unknown room into a personal audience. The memory unit configures `/var/lib/pi-remote/one-kenan/rooms.sqlite3` and the immutable deployed callback module.
 
 ## Build and operation
