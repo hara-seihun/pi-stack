@@ -15,7 +15,7 @@ import { PiCommandReceipts } from "./pi-command-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, POOLED_ACCOUNT_WAIT, resolveSessionModel } from "../extension/routing.js";
-import { isRateLimitError } from "../provider-errors.js";
+import { isTransientFailure } from "../provider-errors.js";
 import usageLogger from "../extension/usage-logger.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
@@ -156,7 +156,15 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       if (closed || replacing && !cancelled || executionStart === undefined && !activeWork.size) return;
       if (execution.active || !runtime.session.isIdle || runtime.session.isBashRunning) return;
       // An unacknowledged input may still start a run (Pi defers prompts made while it emits agent_settled); its response re-checks.
-      if (!cancelled && (pendingInputs.size || execution.blocked || runtime.session.getSteeringMessages().length || runtime.session.getFollowUpMessages().length)) return;
+      if (!cancelled && (pendingInputs.size || execution.blocked)) return;
+      if (!cancelled && runtime.session.agent.hasQueuedMessages()) {
+        // Pi consumes queued steering only inside a live run. A run that ended on a terminal error (for example a
+        // fenced compaction) leaves the queue stranded, and settlement would wait on it forever. Run it now.
+        void execution.run(() => runtime.session.agent.continue()).catch(error => { output({ type: "extension_error", error: String(error) }); });
+        return;
+      }
+      // Display copies of queue entries whose run already consumed or discarded them are not pending work.
+      if (runtime.session.pendingMessageCount) runtime.session.clearQueue();
       const entries = branch();
       const firstInput = entries.findIndex(entry => entry.id === executionStart);
       const final = entries.slice(firstInput < 0 ? entries.length : firstInput + 1).reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
@@ -203,6 +211,9 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const cwd = requirePiCwd(admission, override ?? assertPiSessionFile(path).cwd, "import.cwd");
       return replace(() => importFromJsonl(path, cwd));
     };
+    // Settlement is event driven; this re-evaluates it so that no missed or misordered event can leave work open.
+    const reconcile = setInterval(() => settle(), 30_000);
+    reconcile.unref();
     let rpc: PiSession;
     try {
       const sdk = join(getPackageDir(), "dist");
@@ -290,7 +301,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
                 const last = lastAssistant();
                 const capacityResume = command.resumeProviderWait === true && settled?.type === "custom"
                   && (settled.data as {outcome?:string}).outcome === "failed" && last?.role === "assistant" && last.stopReason === "error"
-                  && (isRateLimitError(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
+                  && (isTransientFailure(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
                 if (command.resumeProviderWait === true && existing.completedWorkIds.includes(workId) && !capacityResume) {
                   response(false, "Cannot resume completed work without a provider capacity failure"); return;
                 }
@@ -369,10 +380,11 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           if (backgroundCommands.size || !runtime.session.isIdle || runtime.session.isBashRunning || execution.active || execution.blocked) throw new Error("Cannot close active Pi execution; stop and confirm cancellation first");
           await halt();
           closed = true;
+          clearInterval(reconcile);
           execution.dispose();
           await rpc.close();
         }),
       };
-    } catch (error) { await runtime.dispose(); throw error; }
+    } catch (error) { clearInterval(reconcile); await runtime.dispose(); throw error; }
   });
 };

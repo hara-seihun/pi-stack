@@ -426,12 +426,43 @@ it("settles a thread whose admission refusal can never succeed instead of waitin
   expect(sessions).toHaveLength(0);
 });
 
+it("waits out a transient compaction failure and resumes the same accepted work at its retry time", async () => {
+  const directory=mkdtempSync(join(tmpdir(),"thread-transient-wait-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];
+  const failure="Context rejected: Native compaction failed: Codex error: Our servers are currently overloaded. Context is unchanged. Automatic compaction retries after 2026-10-03T16:00:00.000Z; /compact or the compact RPC command retries now.";
+  const openSession:OpenPiSession=async(options,output)=>{
+    const session=new FakePiSession(options,output);
+    if(sessions.length){session.acceptedWorkIds.add("accepted");session.completedWorkIds.add("accepted");session.lastAssistantMessage={role:"assistant",stopReason:"error",errorMessage:failure};}
+    sessions.push(session);return session;
+  };
+  const options={databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit:async()=>({ok:true as const,value:{release(){}}})};
+  const service=new ThreadService(options);services.push(service);
+  value(service.importThread({id:"integrator",title:"integrator",cwd:directory,sessionFile:join(directory,"integrator.jsonl"),settings:{model:"openai-codex/gpt-6.1-sol",thinkingLevel:"high",speed:"standard"}}));
+  value(service.importMessage({id:"accepted",threadId:"integrator",text:"integrate the train"}));
+  let now=Date.parse("2026-10-03T15:53:00.000Z");vi.spyOn(Date,"now").mockImplementation(()=>now);
+  await service.start();await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:failure});
+  await waitFor(()=>sessions[0]!.closed&&service.get("integrator")?.metadata?.providerWait!==undefined);
+  expect(service.latestSettlement("integrator")).toBeNull();
+  expect(service.get("integrator")?.metadata?.providerWait).toMatchObject({attempts:1,retryAt:Date.parse("2026-10-03T16:00:00.000Z")});
+  service.reconcile();await turn();expect(sessions).toHaveLength(1);
+  now=Date.parse("2026-10-03T16:00:01.000Z");service.reconcile();
+  await waitFor(()=>sessions[1]?.isStreaming===true);
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({workId:"accepted",resume:true,resumeProviderWait:true});
+  sessions[1]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:failure.replace("16:00:00","16:00:30")});
+  await waitFor(()=>sessions[1]!.closed&&service.get("integrator")?.metadata?.providerWait!==undefined);
+  expect(service.get("integrator")?.metadata?.providerWait).toMatchObject({attempts:2,retryAt:now+60_000});
+  now+=60_000;service.reconcile();await waitFor(()=>sessions[2]?.isStreaming===true);
+  sessions[2]!.settle("integrated");await waitFor(()=>service.latestSettlement("integrator")!==null);
+  expect(service.latestSettlement("integrator")).toMatchObject({workId:"accepted",outcome:"complete"});
+  expect(service.get("integrator")?.metadata?.providerRetry).toBeUndefined();
+});
+
 it("retains native failure causes in settlement receipts without treating cancellation as failure", async () => {
   const f = fixture();
   await f.service.start();
   for (const [stopReason, errorMessage] of [
-    ["error", "Auto-compaction failed: Native compaction failed: exceeded request buffer limit while retrying upstream"],
-    ["error", "Context rejected: Native compaction failed: fetch failed. Retry with /compact."],
+    ["error", "Context rejected: An extension changed the Codex checkpoint's retained message boundary"],
     ["aborted", "This operation was aborted"],
   ]) {
     const thread = value(await f.service.spawn({ requestId: errorMessage, cwd: f.directory, message: "work" }));

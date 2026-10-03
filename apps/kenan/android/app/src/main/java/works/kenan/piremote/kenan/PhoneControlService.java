@@ -122,6 +122,7 @@ public final class PhoneControlService extends Service {
                 .put("notificationListenerConnected", PhoneNotificationService.current != null)
                 .put("notifications", androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled())
                 .put("battery", ((PowerManager) context.getSystemService(POWER_SERVICE)).isIgnoringBatteryOptimizations(context.getPackageName()))
+                .put("overlay", android.provider.Settings.canDrawOverlays(context))
                 .put("camera", ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("microphone", ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("cameraCapture", false).put("microphoneCapture", false).put("clipboardRead", false)
