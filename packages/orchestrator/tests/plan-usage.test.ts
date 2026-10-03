@@ -2,18 +2,19 @@ import { afterEach, expect, it } from "vitest";
 import { ORCHESTRATOR_CATALOG } from "../src/catalog.js";
 import { planUsage } from "../src/client.js";
 import { Store } from "../src/store.js";
+import type { Account } from "../src/domain.js";
 
 const HOUR = 3_600_000;
 const now = Date.UTC(2026, 9, 2, 12);
 const stores: Store[] = [];
 afterEach(() => { for (const store of stores.splice(0)) store.close(); });
-function setup(provider: string) {
+function setup(provider: Account["provider"]) {
   const store = Store.open(":memory:");
   stores.push(store);
   store.upsertAccount({ id: "primary", provider, label: "Primary" });
   return store;
 }
-const providers = [
+const providers: { provider: Account["provider"]; plan: string; short: string; weekly: string; metric: string }[] = [
   { provider: "openai-codex", plan: "openai", short: "codex-5h", weekly: "codex-7d", metric: "remaining" },
   { provider: "anthropic", plan: "anthropic", short: "anthropic-5h", weekly: "anthropic-7d", metric: "weekly" },
 ];

@@ -350,7 +350,7 @@ it.each([
       sessions.push(session); return session;
     } }); services.push(service);
   value(service.importThread({ id: "crashed", title: "crashed", cwd: directory,
-    sessionFile: join(directory, "crashed.jsonl"), settings: { model: "anthropic/claude-opus-5-5" },
+    sessionFile: join(directory, "crashed.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" },
     metadata: { providerWait: { executionId: "original-execution", workId: "accepted-crash", retryAt: 0, broker: false } } }));
   value(service.importMessage({ id: "accepted-crash", threadId: "crashed", text: "execute once",
     state: "dispatched", executionId: "original-execution" }));
