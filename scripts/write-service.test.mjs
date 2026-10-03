@@ -14,7 +14,7 @@ function fixture() {
   mkdirSync(join(directory, "deploy"));
   copyFileSync(join(root, "deploy/write-service"), join(directory, "deploy/write-service"));
   // Only the host boundary and clock are simulated. Run the actual activation
-  // script, advancing one second per poll so a 30-second timeout takes <1s.
+  // script, advancing one second per poll so a cold-start timeout takes <1s.
   writeFileSync(join(directory, "deploy/lib"), `
 pi_stack_enter_deployment() { :; }
 sleep() { SECONDS=$((SECONDS + 1)); }
@@ -51,7 +51,7 @@ pi_stack_as_root() {
   };
 }
 
-for (const readyAt of [0, 11, 18, 29]) {
+for (const readyAt of [0, 11, 18, 29, 39]) {
   test(`Write accepts a healthy listener ready after ${readyAt} seconds without restarting again`, () => {
     const f = fixture();
     try {
@@ -70,10 +70,10 @@ test("Write bounds a live but unready engine and includes service diagnostics", 
   try {
     const result = f.run({ PROBE_AT: "1000" });
     assert.equal(result.status, 1, result.stderr);
-    assert.match(result.stderr, /did not bind its listener within 30 seconds/);
+    assert.match(result.stderr, /did not bind its listener within 40 seconds/);
     assert.match(result.stderr, /fixture service diagnostics/);
-    assert.match(f.trace(), /^30 status pi-stack-write.service --no-pager --full$/m);
-    assert.doesNotMatch(f.trace(), /^31 /m);
+    assert.match(f.trace(), /^40 status pi-stack-write.service --no-pager --full$/m);
+    assert.doesNotMatch(f.trace(), /^41 /m);
   } finally { f.close(); }
 });
 
