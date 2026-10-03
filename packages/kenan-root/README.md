@@ -8,7 +8,7 @@
 
 Root configuration is `PI_KENAN_ROOT_CONFIG` (default `/etc/pi-stack/kenan-root.json`), root-owned and not group/world writable. Required fields are version/provider/model/thinkingLevel/cwd/agentDir/sessionsDir/promptFile/brokerUrl. Root HTTP is loopback `PI_KENAN_ROOT_PORT`, default 18821; memory is `PI_KENAN_MEMORY_URL`, default loopback18820. Provider traffic uses the explicit host model broker. Startup waits for the real encrypted `PI_KENAN_PRIVATE_DIR` gocryptfs mount; no plaintext fallback is opened.
 
-Systemd credentials `kenan-memory-root`, `kenan-root-admin`, `kenan-root-consent` have distinct authority. Explicit file overrides are `PI_KENAN_MEMORY_ROOT_TOKEN_FILE`, `PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE`, `PI_KENAN_ROOT_CONSENT_TOKEN_FILE`. Never pass their values as arguments or place them in a native session.
+Systemd credentials `kenan-memory-root`, `kenan-root-admin`, `kenan-root-consent` have distinct authority. Explicit file overrides are `PI_KENAN_MEMORY_ROOT_TOKEN_FILE`, `PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE`, `PI_KENAN_ROOT_CONSENT_TOKEN_FILE`. Never pass their values as arguments or put them in transcript text.
 
 ## Async subject consent
 
