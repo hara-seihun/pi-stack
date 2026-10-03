@@ -317,7 +317,7 @@ window.fetch = async (input, init) => {
     const operation = rootPath(path, root);
     const pathname = new URL(operation, location.href).pathname;
     const publicRoute = (pathname === API.environment.path() && !auth.session) || pathname === API.unlock.path()
-      || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
+      || pathname === API.network.path() || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
     const rootRoute = publicRoute || pathname === API.environments.path() || pathname === "/v1/lock" || pathname === "/v1/lock-status";
     const selected = rootRoute || !auth.session ? null : await getState();
     const target = rootRoute ? `${root}${operation}` : explicitTarget(path, root) ?? `${selected?.baseUrl ?? root}${operation}`;

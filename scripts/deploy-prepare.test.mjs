@@ -100,7 +100,7 @@ printf '%s\\n' '${writeLoadState}'`);
   } finally { f.close(); }
 });
 
-test("Write resumes both model downloads, reuses pinned copies, and keeps weights across dependency changes", () => {
+test("Write resumes model downloads, reuses pinned copies, and keeps verified weights across dependency changes", () => {
   const f = fixture();
   try {
     copyFileSync(join(root, "deploy/write-engine"), join(f.repo, "deploy/write-engine"));
@@ -120,6 +120,10 @@ test("Write resumes both model downloads, reuses pinned copies, and keeps weight
       tokenizer_file: "tokenizer.json", tokenizer_repository: "fixture", tokenizer_revision: "pin", tokenizer_sha256: digest,
     }));
     writeFileSync(join(source, "cleanup/model.json"), JSON.stringify({ release: "https://fixture.invalid", files: { "joint-f32.onnx": digest } }));
+    const punctuationFiles = ["punct_cap_seg_en.onnx", "spe_32k_lc_en.model"];
+    writeFileSync(join(source, "punctuation-model.json"), JSON.stringify({
+      repository: "fixture", revision: "pin", files: Object.fromEntries(punctuationFiles.map(file => [file, digest])),
+    }));
     const store = join(f.directory, ".pi-write");
     const cached = join(store, "weights-cached/shared");
     mkdirSync(cached, { recursive: true });
@@ -155,7 +159,9 @@ printf '206'`);
     assert.deepEqual(readFileSync(join(weights, "shared/tokenizer.json")), bytes);
     assert.deepEqual(readFileSync(join(destination, "cleanup-model/joint-f32.onnx")), bytes);
     const trace = readFileSync(f.env.TRACE, "utf8");
-    assert.equal(trace, "encoder.onnx.part 0\nencoder.onnx.part 32\nconvert\njoint-f32.onnx.part 0\njoint-f32.onnx.part 32\n");
+    assert.equal(trace, "encoder.onnx.part 0\nencoder.onnx.part 32\nconvert\njoint-f32.onnx.part 0\njoint-f32.onnx.part 32\npunct_cap_seg_en.onnx.part 0\npunct_cap_seg_en.onnx.part 32\nspe_32k_lc_en.model.part 0\nspe_32k_lc_en.model.part 32\n");
+    const punctuation = realpathSync(join(destination, "punctuation-model"));
+    for (const file of punctuationFiles) assert.deepEqual(readFileSync(join(punctuation, file)), bytes);
     writeFileSync(join(source, "requirements.lock"), "second dependencies\n");
     f.commit();
     const second = f.run("write-engine", env);
@@ -166,6 +172,13 @@ printf '206'`);
     assert.equal(readFileSync(f.env.TRACE, "utf8"), trace, "dependency changes neither download nor convert weights again");
     assert.equal(existsSync(join(firstTree, "ready")), true, "previous release remains selectable");
     assert.equal(existsSync(join(firstTree, "venv/bin/python")), true, "previous dependencies remain available");
+    assert.equal(realpathSync(join(destination, "punctuation-model")), punctuation);
+    const secondTree = realpathSync(destination);
+    writeFileSync(join(punctuation, punctuationFiles[0]), "corrupt model");
+    const corrupt = f.run("write-engine", env);
+    assert.equal(corrupt.status, 1, corrupt.stderr);
+    assert.match(corrupt.stderr, /punctuation checksum mismatch/);
+    assert.equal(realpathSync(destination), secondTree, "a ready stamp cannot select corrupt assets");
   } finally { f.close(); }
 });
 

@@ -234,11 +234,13 @@ if (( smoke_failed || doctor_failed )); then
       # start limit; the previous release cannot come back through a unit
       # systemd refuses to start.
       pi_stack_as_root systemctl reset-failed 'pi-remote@*.service' 2>/dev/null || true
-      if [[ -f $previous_remote_release/server/voice/service.ts ]]; then
-        "$root/deploy/voice" --activate || echo 'Voice rollback failed' >&2
-      else
-        pi_stack_as_root systemctl stop pi-stack-voice.service
-      fi
+      for service in voice phone; do
+        if [[ -f $previous_remote_release/server/$service/service.ts ]]; then
+          "$root/deploy/$service" --activate || echo "$service rollback failed" >&2
+        elif [[ $(systemctl show "pi-stack-$service.service" -p LoadState --value) == loaded ]]; then
+          pi_stack_as_root systemctl stop "pi-stack-$service.service"
+        fi
+      done
       activate_remote "$previous_remote" || true
       if [[ -x $previous_remote_release/deploy/smoke ]]; then
         "$previous_remote_release/deploy/smoke" || echo 'The restored release failed its own smoke check' >&2
