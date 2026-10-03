@@ -4,8 +4,8 @@ Rooms are several people from this host plus an unprivileged Kenan in one conver
 enabled only when `host.json` has `oneKenan: true`. With the flag absent, neither room stores nor
 room requests are created; the existing inbox and transports are unchanged.
 
-The Rooms section in Chats is shared by the browser and Android web client. Any authenticated
-person can create a room and add registered people. Members can send, read the conversation and
+Rooms appear alongside regular chats in the same Needs you, Working and Quiet inbox rows in the
+browser and Android web client. Any authenticated person can create a room and add registered people. Members can send, read the conversation and
 its thinking/work/context, answer Kenan's questions, and stop his turn. Adding someone shares the
 existing room conversation; the picker says so. Adding requires the room to be idle, so an audience
 cannot expand under an utterance already in progress. Removing members is not implemented.
@@ -91,17 +91,35 @@ The existing cursor and Android native protocol are unchanged. Targets are `room
 client opens room routes and suppresses notifications for the visible room. The ordinary native
 completion target is suppressed to avoid a duplicate private-thread target.
 
-The router reconciles replies and delivery every two seconds. The room inbox and conversation
+The router reconciles replies and delivery every two seconds. The directory caches room work state,
+activity time and pending-question count from creation, accepted sends/answers and these existing
+snapshot ticks. Directory polls never fan out to room snapshots. The room inbox and conversation
 refresh while the client is visible. These are narrow room requests, not another person's event
 stream. Member additions and sends serialize per room at the router. Turning the flag off preserves
 the directory, outbox and native histories. Snapshot history comes from the native branch, including
 pre-compaction messages, not only the current model context.
 
+Closing a room is a per-person inbox choice, not a stop, archive, membership removal or change of
+custody. The directory retains both open and closed rooms so the picker can reopen them. `current`
+defaults to true for pre-existing rows. The directory's `room_inbox` table persists each person's
+visibility and read marker, independently of the shared room runtime. Closing does not mark read;
+opening does not mark read; reading does not change visibility or answer pending questions.
+
+`unreadCount` counts idempotent inbox events since that person's read marker: invitations/member
+additions, other members' accepted messages/answers, new questions and finished Kenan replies. It
+is independent of push delivery success. A newly recorded event reopens the room for its recipients;
+retries and repeated ticks of the same reply/question do not. Sending or answering also restores the
+sender's room. `updatedAt` is an epoch-millisecond activity timestamp, not a poll, read or close time.
+The fields `current`, `updatedAt`, `state`, `unreadCount` and `pendingQuestions` are optional in the
+shared type for existing fixtures and older snapshots; directory responses always supply them.
+
 ## API
 
 All public routes require this host's authenticated router session:
 
-- `GET /v1/rooms` → `{ rooms, people }`, filtered by membership; people is the host roster.
+- `GET /v1/rooms` → `{ rooms, people }`, filtered by membership, including closed rooms; people is
+  the host roster. Each room includes `{ id, title, members, current, updatedAt, state, unreadCount,
+  pendingQuestions }`; `state` is `idle` or `running` and counts are nonnegative integers.
 - `POST /v1/rooms` with `{ requestId: UUID, title, members: [user] }` → `{ room }`. Creator is
   included automatically; the receipt is the stable room/thread ID, including on retries.
 - `GET /v1/rooms/:id` → `{ room, state, messages, live, questions, work, thinking, context, notificationId }`.
@@ -110,6 +128,12 @@ All public routes require this host's authenticated router session:
 - `POST /v1/rooms/:id/questions/:questionId/answer` with the standard
   `{ selectedSuggestionIds, text, dismissed? }` accepts an authenticated public answer.
 - `POST /v1/rooms/:id/abort` with `{}` stops the room turn.
+- `POST /v1/rooms/:id/close` with `{}` → `{ room }`, sets only the caller's `current` to false.
+- `POST /v1/rooms/:id/open` with `{}` → `{ room }`, restores only the caller's `current` to true.
+- `POST /v1/rooms/:id/read` with `{}` → `{ room }`, acknowledges all inbox events currently recorded
+  for the caller. A later recorded event remains unread. These three operations do not call the
+  room runtime, and are available even while it is offline. Reading a snapshot with GET alone does
+  not mark it read.
 
 Nonmembership and missing rooms both return 404 at the router. Unknown people or malformed inputs
 return 400. Adding while running or a conflicting creation receipt returns 409. Rooms currently

@@ -57,7 +57,7 @@ export function inlineFileHtml(path: string, sessionId: string): string | null {
  */
 export function installInlineFiles(markdown: any) {
   markdown.inline.ruler.before("text", "inline_file", (state: any, silent: boolean) => {
-    if (state.src.charCodeAt(state.pos) !== 0x3c || !state.src.startsWith("<pi-remote-file", state.pos)) return false;
+    if (state.env?.sessionMedia === false || state.src.charCodeAt(state.pos) !== 0x3c || !state.src.startsWith("<pi-remote-file", state.pos)) return false;
     const match = FILE_TAG_AT.exec(state.src.slice(state.pos));
     if (!match) return false;
     if (!silent) {

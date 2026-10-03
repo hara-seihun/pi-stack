@@ -35,6 +35,17 @@ test("existing Personal profiles gain context by default without changing other 
   }
 });
 
+test("persisted Sandbox destinations have a distinct icon without replacing custom images", () => {
+  const sandbox = defaultThreadDestinations().find(destination => destination.id === "sandbox")!;
+  const raw = defaultThreadDestinations().find(destination => destination.id === "raw")!;
+  expect(sandbox.icon).not.toBe(raw.icon);
+  for (const icon of ["raw", "", undefined]) {
+    expect(configuredThreadDestinations([{ ...sandbox, icon: icon as string }], [])[0]!.icon).toBe("sandbox");
+  }
+  expect(configuredThreadDestinations([{ ...sandbox, icon: "/custom-sandbox.png" }], [])[0]!.icon).toBe("/custom-sandbox.png");
+  expect(configuredThreadDestinations([raw], [])[0]!.icon).toBe("raw");
+});
+
 test("configured models join existing destinations and provider defaults follow configuration order", () => {
   const models = [{ provider: "custom", id: "z/default", name: "Default custom", icon: "🧪" }, { provider: "custom", id: "a-second", name: "Second", icon: "🔬" }] as ThreadModelMetadata[];
   const defaults = defaultThreadDestinations();

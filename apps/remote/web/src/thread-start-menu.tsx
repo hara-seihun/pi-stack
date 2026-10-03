@@ -3,7 +3,9 @@ import { API } from "../../server/api";
 import type { MessagingSnapshot } from "../../server/messaging/protocol";
 import { api } from "./client";
 import { ChatIcon } from "./chat-row";
-import { aiChat, humanChat, type Chat } from "./chats";
+import { aiChat, humanChat, roomChat, type Chat } from "./chats";
+import type { Room, RoomMember } from "../../shared/rooms";
+import { RoomCreator } from "./rooms";
 import { DismissibleError } from "./dismissible-error";
 import { messagingClient } from "./messaging-client";
 import { groupedModels, modelDisplayIcon } from "./model-groups";
@@ -14,18 +16,20 @@ import type { Session, ThreadStart } from "./types";
 import "./chat-picker-trigger.css";
 import "./chat-picker.css";
 
-type Category = { kind: "root" } | { kind: "models" } | { kind: "archived" } | { kind: "backend"; id: string };
+type Category = { kind: "root" } | { kind: "models" } | { kind: "archived" } | { kind: "backend"; id: string } | { kind: "room" };
 type ArchivePage = { query: string; sessions: Session[]; total: number };
 export type ChatPickerEntry = { kind: "root" } | { kind: "archived"; query?: string };
 export type ChatPickerHandle = { open(entry?: ChatPickerEntry): void };
 export type ChatPickerProps = {
   starts: ThreadStart[]; messaging: MessagingSnapshot;
+  rooms?: { rooms: Room[]; people: RoomMember[]; refresh(): Promise<void> };
+  onRoomCreated?(id: string): void;
   onSelect(chat: Chat, signal?: AbortSignal): Promise<void>; onCreated(id: string): void; onSettled(): void;
   /** Entry requested while the lazy picker module was loading. */
   initialEntry?: ChatPickerEntry;
 };
 
-export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function ChatPicker({ starts, messaging, onSelect, onCreated, onSettled, initialEntry }, ref) {
+export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function ChatPicker({ starts, messaging, onSelect, onCreated, onSettled, initialEntry, rooms, onRoomCreated }, ref) {
   const root = useRef<HTMLDivElement>(null);
   const panel = useRef<HTMLElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -56,7 +60,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
   const models = pickerOptions(chosen?.models ?? [], query, item => `${item.label} ${item.id}`);
   const recipients = pickerOptions(recentRecipients(messaging.conversations, backend?.id ?? ""), query, item => `${item.title} ${item.externalId}`);
   const searchable = category.kind === "archived" || (category.kind === "models" ? models.searchable : category.kind === "backend" && recipients.searchable);
-  const title = category.kind === "archived" ? "Archived" : backend?.label || chosen?.label || "New chat";
+  const title = category.kind === "room" ? "Room" : category.kind === "archived" ? "Archived" : backend?.label || chosen?.label || "New chat";
   const close = useCallback((restoreFocus = false) => {
     setOpen(false); setCategory({ kind: "root" }); setQuery(""); setAddress(""); setError("");
     dispatch({ type: "dismiss" }); operation.current?.abort(); operation.current = null; setOpening(false);
@@ -173,9 +177,16 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
       {searchable && <input className="chat-picker-search" type="search" aria-label={`Search ${title}`} value={query} disabled={busy} onChange={event => setQuery(event.target.value)} placeholder={`Search ${title.toLocaleLowerCase()}`} />}
       {category.kind === "root" ? <div className="chat-picker-identities">
         {destinations.map(choice => <button className="chat-picker-identity" type="button" key={choice.id} aria-label={choice.label} title={choice.label} onClick={() => { setCategory({ kind: "models" }); choose(choice.id); }}>{showRootIcon(choice.icon) ? <ChatIcon icon={choice.icon} /> : <span className="chat-picker-identity-label">{choice.label}</span>}</button>)}
+        {rooms && <button className="chat-picker-identity" type="button" aria-label="Room" title="Room" onClick={() => navigate({ kind: "room" })}><ChatIcon icon="room" /></button>}
         <button className="chat-picker-identity" type="button" aria-label="Archived" title="Archived" onClick={() => navigate({ kind: "archived" })}><svg className="chat-picker-archive-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v12H4V8Zm-1-4h18v4H3V4Zm6 9h6" /></svg></button>
         {messaging.backends.map(item => <button className="chat-picker-identity" type="button" key={item.id} aria-label={item.label} title={item.label} onClick={() => navigate({ kind: "backend", id: item.id })}>{showRootIcon(item.icon) ? <ChatIcon icon={item.icon} /> : <span className="chat-picker-identity-label">{item.label}</span>}</button>)}
-      </div> : <>
+      </div> : category.kind === "room" && rooms ? <>
+        <RoomCreator people={rooms.people} onCreated={id => { close(); onRoomCreated?.(id); }} onRefresh={rooms.refresh} />
+        {rooms.rooms.some(room => room.current === false) && <div className="chat-picker-list" aria-label="Closed rooms">
+          <h3>Closed rooms</h3>
+          {rooms.rooms.filter(room => room.current === false).map(room => <button type="button" key={room.id} disabled={busy} onClick={() => void select(roomChat(room))}><ChatIcon icon="room" /><span>{room.title}</span></button>)}
+        </div>}
+      </> : <>
         {backend && backend.status !== "ready" && linkStage(backend) === "hidden" && <p className={`messaging-backend ${backend.status}`} role="status">{backend.detail || backend.status}</p>}
         {backend && <MessagingLinkController key={backend.id} backend={backend} />}
         {category.kind === "models" && contexts.length > 0 && <fieldset className="chat-picker-contexts" disabled={busy || state.kind === "failed"}>
