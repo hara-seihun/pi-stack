@@ -67,6 +67,7 @@ reconcile_links() {
     jq -r --arg dest "$dest" '.tools[] | .id as $tool | .commands[] | [.name, "\($dest)/\($tool)/\(.entry)"] | @tsv' "$manifest"
     printf 'pi-remote\t%s/server/pi-remote\n' "$remote"
     printf 'pi-phone\t%s/server/pi-phone\n' "$remote"
+    printf 'pi-call\t%s/server/pi-call\n' "$remote"
   })
   pi_stack_as_root env PI_STACK_TOOL_LINKS="$expected" bash -s -- "$home" "$owner" "$group" "$dest" "$remote" <<'ROOT'
 set -euo pipefail

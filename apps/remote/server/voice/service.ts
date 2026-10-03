@@ -23,7 +23,7 @@ const failure = (error: string, status = 400) => json({ error }, status);
 
 function close(id: string): Promise<Response> {
   const pending = closing.get(id);
-  if (pending) return pending;
+  if (pending) return pending.then(response => response.clone());
   const operation = broker.close(id).then((result) => {
     if (result.ok) {
       db.query("UPDATE sessions SET closed=1,error=NULL WHERE id=?").run(id);
@@ -34,7 +34,7 @@ function close(id: string): Promise<Response> {
     return failure(result.error, result.status);
   }).finally(() => closing.delete(id));
   closing.set(id, operation);
-  return operation;
+  return operation.then(response => response.clone());
 }
 
 const reaper = setInterval(() => {

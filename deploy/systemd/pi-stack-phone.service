@@ -1,0 +1,17 @@
+[Unit]
+Description=Pi Stack telephone Voice bridge
+After=network-online.target pi-remote@kenan.service pi-stack-voice.service
+BindsTo=pi-remote@kenan.service
+PartOf=pi-remote@kenan.service
+
+[Service]
+Type=simple
+# The host helper enters the owner's encrypted mount and drops to that owner.
+ExecStart=/usr/local/libexec/pi-stack-phone-run
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=45
+UMask=0077
+
+[Install]
+WantedBy=pi-remote@kenan.service

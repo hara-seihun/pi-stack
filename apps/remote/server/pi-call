@@ -1,0 +1,23 @@
+#!/usr/bin/env bun
+import { readFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (!args.length || args[0] === "--help") {
+  console.log("Usage: pi-call status | list | preflight | start --brief FILE | show ID | end ID | context ID --fact FILE\nBrief JSON: {to:'+15551234567',contactName?,purpose,shareableFacts:[],opening,maxSeconds?}. Every brief field must be safe to tell the recipient. Context FILE contains one explicitly shareable fact. Private files and thread history are never automatically sent to Voice.");
+  process.exit(0);
+}
+try {
+  const config = JSON.parse(readFileSync(process.env.PI_STACK_PHONE_CONFIG ?? "/etc/pi-stack/phone.json", "utf8"));
+  const token = readFileSync(config.adminTokenFile, "utf8").trim();
+  const [command, id] = args;
+  let path = "/status", method = "GET", body: unknown;
+  if (command === "list") path = "/calls";
+  else if (command === "preflight") { path = "/preflight"; method = "POST"; }
+  else if (command === "start" && id === "--brief" && args[2]) { path = "/calls"; method = "POST"; body = JSON.parse(readFileSync(args[2], "utf8")); }
+  else if (command === "show" && id) path = `/calls/${encodeURIComponent(id)}`;
+  else if (command === "end" && id) { path = `/calls/${encodeURIComponent(id)}`; method = "DELETE"; }
+  else if (command === "context" && id && args[2] === "--fact" && args[3]) { path = `/calls/${encodeURIComponent(id)}/context`; method = "POST"; body = { shareableFact: readFileSync(args[3], "utf8").trim() }; }
+  else if (command !== "status") { console.error("Invalid command. Use pi-call --help"); process.exit(64); }
+  const response = await fetch(`http://127.0.0.1:${config.localPort ?? 8802}${path}`, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(45_000) });
+  console.log(JSON.stringify(await response.json(), null, 2));
+  process.exit(response.ok ? 0 : 1);
+} catch (cause) { console.error(cause instanceof Error ? cause.message : "Phone command failed"); process.exit(1); }

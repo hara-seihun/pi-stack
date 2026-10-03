@@ -25,6 +25,7 @@ fi
 if (( services )); then
   pi_stack_check_person_configs
   "$root/deploy/voice" --check
+  "$root/deploy/phone" --check
 fi
 # Activation restarts Pi Remote, which ends every live Meet room: the meeting bot stays
 # in the call with no voice, canvas or agent (a release at 06:40Z on 2026-09-29 cut a
@@ -204,7 +205,7 @@ mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-bro
 if (( ${#brokers[@]} )); then
   pi_stack_as_root systemctl restart "${brokers[@]}" || activation_failed=1
 fi
-if { (( write )) && ! "$root/deploy/write-service" --activate; } || ! "$root/deploy/voice" --activate; then
+if { (( write )) && ! "$root/deploy/write-service" --activate; } || ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then
   activation_failed=1
 elif [[ $previous_remote != "$expected" ]]; then
   activate_remote "$expected" || activation_failed=1

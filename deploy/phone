@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+# Telephone credentials and the personal encrypted state are host-owned.
+[[ $(systemctl show pi-stack-phone.service -p LoadState --value) == loaded ]] || exit 0
+case ${1:---activate} in
+  --check)
+    pi_stack_as_root test -s /etc/pi-stack/phone.json
+    if systemctl is-active --quiet pi-stack-phone.service; then
+      status=$(bun "$root/apps/remote/server/pi-call" status) || { echo 'Phone census unavailable' >&2; exit 75; }
+      [[ $(jq -r '.activeCalls' <<<"$status") == 0 ]] || { echo 'Live telephone calls; defer deployment' >&2; exit 75; }
+    fi
+    ;;
+  --activate)
+    pi_stack_as_root systemctl restart pi-stack-phone.service
+    systemctl is-active --quiet pi-stack-phone.service
+    ;;
+  *) echo 'usage: deploy/phone [--check|--activate]' >&2; exit 64 ;;
+esac
