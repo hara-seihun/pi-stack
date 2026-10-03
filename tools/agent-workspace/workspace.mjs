@@ -1661,6 +1661,20 @@ function fetchSource(mirror, repository, ref) {
   return run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
 }
 
+function cloneSourceTag(statePath, mirror, sourceCommit) {
+  const name = `pi-workspace-source-${sourceCommit}`;
+  const ref = `refs/tags/${name}`;
+  const read = () => command("git", ["--git-dir", mirror, "rev-parse", "--verify", ref]);
+  const existing = read();
+  if (existing.status === 0 && existing.stdout === sourceCommit) return name;
+  return withResourceLock(statePath, `mirror:${mirror}`, () => {
+    const current = read();
+    if (current.status === 0 && current.stdout !== sourceCommit) fail(`clone source custody differs at ${ref}`);
+    if (current.status !== 0) run("git", ["--git-dir", mirror, "update-ref", ref, sourceCommit, ""]);
+    return name;
+  });
+}
+
 function createCommand(database, args, statePath) {
   const destination = path.join(path.resolve(required(args, "root")), safeName(required(args, "name")));
   return withWorkspaceLock(database, destination, () => createWorkspace(database, args, statePath), one(args, "group"));
@@ -1731,9 +1745,12 @@ function createWorkspace(database, args, statePath) {
         else worktreeArgs.push("-b", branch, destination, sourceCommit);
         run("git", worktreeArgs);
       } else {
+        const sourceTag = cloneSourceTag(statePath, mirror, sourceCommit);
         run("git", ["clone", "--no-local", ...Object.entries(REFERENCE_CLONE_CONFIG)
           .flatMap(([name, value]) => ["--config", `${name}=${value}`]),
-          "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 40_000 });
+          "--config", `remote.origin.url=${repository}`, "--origin", "workspace-source",
+          "--reference-if-able", mirror, "--no-checkout", "--no-tags", "--single-branch", "--branch", sourceTag,
+          mirror, destination], { timeout: 40_000 });
       }
     }
     const info = gitInfo(destination);
@@ -1747,7 +1764,10 @@ function createWorkspace(database, args, statePath) {
     assertPendingClean(destination);
     if (strategy === "clone") {
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
+      git(destination, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
       configurePushUrl(["-C", destination], upstream);
+      const cloneSource = command("git", ["-C", destination, "config", "--local", "--get", "remote.workspace-source.url"]);
+      if (cloneSource.status === 0 && cloneSource.stdout === mirror) git(destination, ["remote", "remove", "workspace-source"]);
       maintainReferenceClone(destination, true);
     }
     completeCreation(database, row.id, upstream.fetch, input.leaseSeconds, "creation completed", args);
@@ -1765,7 +1785,7 @@ function resumeCloneCheckout(destination, input, sourceCommit, upstream) {
   const refuse = reason => fail(`pending checkout cannot resume: ${reason}; preserve and repair it before resuming creation`);
   const origin = repositoryLocation(git(destination, ["config", "--local", "--get", "remote.origin.url"]), destination);
   if (![input.repository, upstream.fetch].includes(origin)) refuse("origin differs from the creation request");
-  if (head === sourceCommit && correctBranch) return;
+  if (head === sourceCommit && correctBranch && existsSync(path.join(destination, ".git", "index"))) return;
   const unique = git(destination, ["rev-list", "--branches", "HEAD", "--not", "--remotes", sourceCommit]);
   if (unique) refuse("commits absent from remote refs and reserved source");
   const branch = command("git", ["-C", destination, "rev-parse", "--verify", `refs/heads/${input.branch}`]);
