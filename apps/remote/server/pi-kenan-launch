@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${PI_REMOTE_CONFIG:?person registry required}"
+private_dir=$(jq -r '.unlock.mountpoint // empty' "$PI_REMOTE_CONFIG")
+[[ -n $private_dir ]] || { echo 'One Kenan requires a keyed folder for each person' >&2; exit 78; }
+# Custody is opened by the first authenticated login after boot, not by a daemon
+# treating the unmounted directory as empty application state.
+until mountpoint -q -- "$private_dir"; do sleep 0.2; done
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+exec "$(dirname "$0")/pi-remote-supervise" "$@"

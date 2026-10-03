@@ -127,6 +127,7 @@ function UnlockDialog() {
   const [selectedUser, setSelectedUser] = useState("");
   const [key, setKey] = useState("");
   const [message, setMessage] = useState("");
+  const [custody, setCustody] = useState<{ locked: boolean; message: string } | null>(null);
   useEffect(() => {
     registerUnlockHandler(async (nextMessage) => {
       setMessage(nextMessage);
@@ -135,6 +136,7 @@ function UnlockDialog() {
         const response = await fetchPersonChooser();
         if (!response.ok) throw new Error(`Person chooser returned HTTP ${response.status}`);
         const result = await response.json();
+        setCustody(result?.environment?.custody ?? null);
         const nextPeople = result?.environment?.persons || result?.persons || [];
         const savedUser = window.PiRemotePerson?.get() || "";
         const nextUser = nextPeople.some((person: { user: string }) => person.user === savedUser) ? savedUser : nextPeople[0]?.user || "";
@@ -157,7 +159,8 @@ function UnlockDialog() {
   return <dialog ref={dialog} className="unlock-dialog" aria-labelledby="unlock-title" onCancel={event => event.preventDefault()}>
     <form className="unlock-form" onSubmit={submit}>
       <h2 id="unlock-title">Pi Remote</h2>
-      {requiresKey && <p>Your folder key stays on this device.</p>}
+      {requiresKey && <p>{custody ? "Your key proves who you are to Kenan; he retains folder custody." : "Your folder key stays on this device."}</p>}
+      {custody?.locked && <p role="status">Kenan's custody is locked after a restart. {custody.message}</p>}
       {people.length > 0 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={selectedUser} onChange={(event) => { setSelectedUser(event.target.value); setKey(""); window.PiRemotePerson?.set(event.target.value); }}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
       {requiresKey && <div className="unlock-field"><label htmlFor="unlock-key">Folder key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>}
       <DismissibleError className="unlock-error" message={message} />

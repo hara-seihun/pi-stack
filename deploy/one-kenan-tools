@@ -1,0 +1,29 @@
+#!/usr/bin/python3
+"""Root-installed credential bridge; invoked as kenan by the pi-kenan-only sudo rule."""
+import json
+import os
+import pathlib
+import sys
+
+config = json.loads(pathlib.Path('/etc/pi-stack/one-kenan.json').read_text())
+commands = config.get('credentialTools', {})
+name, *args = sys.argv[1:]
+if name not in ('pass-cli', 'mail-send', 'mail-search', 'github', 'git-credential') or name not in commands:
+    raise SystemExit('Credential tool is not configured')
+if name == 'github' and (not args or args[0] not in ('api', 'repo', 'issue', 'pr', 'release', 'run', 'workflow')):
+    raise SystemExit('This bridge does not expose GitHub authentication, aliases or extensions')
+if name == 'git-credential' and args not in (['get'], ['store'], ['erase']):
+    raise SystemExit('Expected a Git credential operation')
+env = {'HOME': '/home/kenan', 'USER': 'kenan', 'LOGNAME': 'kenan',
+       'PATH': '/home/kenan/.local/bin:/usr/local/bin:/usr/bin:/bin',
+       'PROTON_PASS_SESSION_DIR': '/home/kenan/.config/proton-pass-cli/agent-session',
+       'PROTON_PASS_KEY_PROVIDER': 'fs', 'XDG_RUNTIME_DIR': '/run/user/1000',
+       'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus'}
+# Attribution is nonsecret and is carried into the reviewed action-journal tool.
+for key in ('PI_REMOTE_SENDER_ID', 'PI_REMOTE_SESSION_ID', 'PI_THREAD_ID', 'PI_KENAN_ACTION_JOURNAL_DIR'):
+    if key in os.environ:
+        env[key] = os.environ[key]
+command = commands[name]
+if not isinstance(command, list) or not command or not pathlib.Path(command[0]).is_absolute():
+    raise SystemExit('Credential bridge requires a root-owned absolute command')
+os.execve(command[0], [*command, *args], env)

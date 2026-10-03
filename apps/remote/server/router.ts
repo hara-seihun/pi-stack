@@ -13,6 +13,7 @@ import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
 import { networkStatus, readPrivateNetwork } from "./private-network";
+import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -39,7 +40,12 @@ const login = oidcSettings ? new OidcLogin(oidcSettings) : null;
 const privateNetwork = readPrivateNetwork();
 const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
-const unit = (person: Person) => `pi-remote@${person.user}.service`;
+const ONE_KENAN = oneKenanConfig();
+if (ONE_KENAN) for (const person of PEOPLE) {
+  if (!ONE_KENAN.ports[person.user]) throw new Error(`One Kenan has no supervisor port for ${person.user}`);
+}
+const localPort = (person: Person) => ONE_KENAN?.ports[person.user] ?? person.port;
+const unit = (person: Person) => `${ONE_KENAN ? "pi-kenan-remote" : "pi-remote"}@${person.user}.service`;
 const operations = new Map<string, Promise<unknown>>();
 
 async function serialized<T>(person: Person, operation: () => Promise<T>): Promise<T> {
@@ -75,7 +81,7 @@ async function systemctl(...args: string[]): Promise<{ ok: boolean; message: str
 
 async function supervisorHealthy(person: Person): Promise<boolean> {
   try {
-    const response = await fetch(`http://127.0.0.1:${person.port}/v1/health`, { signal: AbortSignal.timeout(1_500) });
+    const response = await fetch(`http://127.0.0.1:${localPort(person)}/v1/health`, { signal: AbortSignal.timeout(1_500) });
     if (response.ok) activeUsers.add(person.user);
     return response.ok;
   } catch { return false; }
@@ -95,6 +101,15 @@ async function waitForSupervisor(person: Person): Promise<boolean> {
 
 type StartResult = { ok: true } | { ok: false; error: string; status: number };
 async function start(person: Person, key: string): Promise<StartResult> {
+  if (ONE_KENAN) {
+    const authenticated = await custodyAuthenticate(ONE_KENAN, person.user, key);
+    if (!authenticated.ok) return authenticated;
+    if (!(await unitActive(person))) {
+      const started = await systemctl("start", unit(person));
+      if (!started.ok) return { ok: false, error: "The Kenan supervisor could not start", status: 503 };
+    }
+    return await waitForSupervisor(person) ? { ok: true } : { ok: false, error: "The Kenan supervisor did not become ready", status: 503 };
+  }
   if (person.unlock && !key) return { ok: false, error: "Key required", status: 400 };
   if (await unitActive(person)) {
     if (person.unlock) {
@@ -128,6 +143,7 @@ async function start(person: Person, key: string): Promise<StartResult> {
 
 async function forget(person: Person): Promise<{ ok: boolean; message: string }> {
   sessions.revoke(person.user);
+  if (ONE_KENAN) return { ok: true, message: "Sessions ended; Kenan retains folder custody" };
   activeUsers.delete(person.user);
   const stopped = await systemctl("stop", unit(person));
   await unlink(join(KEY_DIR, person.user)).catch((error) => { if (error.code !== "ENOENT") throw error; });
@@ -197,7 +213,7 @@ function proxyDestination(person: Person, url: URL): ProxyDestination {
     return { origin: endpoint.upstreams[person.user]!, target, upstream: match[1]! };
   }
   if (!url.pathname.startsWith("/v1/")) return { error: new Response("Not found", { status: 404 }) };
-  return { origin: `http://127.0.0.1:${person.port}`, target: url };
+  return { origin: `http://127.0.0.1:${localPort(person)}`, target: url };
 }
 
 function websocketUrl(origin: string, url: URL): string {
@@ -292,13 +308,15 @@ async function proxy(person: Person, origin: string, req: Request, url: URL, sig
     out.delete("set-cookie");
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers: out });
   } catch {
-    if (origin === `http://127.0.0.1:${person.port}`) activeUsers.delete(person.user);
+    if (origin === `http://127.0.0.1:${localPort(person)}`) activeUsers.delete(person.user);
     return Response.json({ error: signal.aborted ? "Session ended" : "Supervisor unreachable" }, { status: signal.aborted ? 423 : 502 });
   }
 }
 
 const persons = login ? [] : PEOPLE.filter(person => person.auth !== "oidc").map(publicPerson);
-const lockedEnvironment = () => ({
+const lockedEnvironment = async () => ({
+  ...(ONE_KENAN ? { custody: { oneKenan: true, locked: (await custodyStatus(ONE_KENAN))?.locked ?? true,
+    message: "Kenan holds the folder keys. After a restart, the first enrolled person to log in opens custody and every known folder." } } : {}),
   id: ENVIRONMENT_ID, name: ENVIRONMENT_NAME, requiresUnlock: true, persons, profiles: [],
   ...(login ? { authentication: { type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with Google" } satisfies HostAuthentication } : {}),
   capabilities: { voice: true, downloads: true, notifications: true, files: true },
@@ -306,7 +324,7 @@ const lockedEnvironment = () => ({
 const locked = (user?: string) => Response.json({ error: "Unlock to continue", locked: true, ...(!user ? { choosePerson: true } : { user }), persons }, { status: 423 });
 
 for (const person of PEOPLE) {
-  if (person.unlock || (await unitActive(person))) continue;
+  if (ONE_KENAN || person.unlock || (await unitActive(person))) continue;
   const result = await start(person, "");
   if (!result.ok) console.error(`pi-remote router: could not start ${person.user}: ${result.error}`);
 }
@@ -373,14 +391,15 @@ async function route(req: Request, url: URL): Promise<Response> {
     const person = match && PEOPLE.find(p => p.user === match[1]);
     if (req.method !== "GET" || !match || !person) return new Response("Not found", { status: 404 });
     try {
-      return await proxyFetch(`http://127.0.0.1:${person.port}/v1/calendar/feed/${match[2]}`, { signal: AbortSignal.timeout(5000), redirect: "manual" });
+      return await proxyFetch(`http://127.0.0.1:${localPort(person)}/v1/calendar/feed/${match[2]}`, { signal: AbortSignal.timeout(5000), redirect: "manual" });
     } catch { return new Response("Calendar unavailable while the person's folder is locked", { status: 503, headers: { "cache-control": "no-store" } }); }
   }
   const appUpdate = await appUpdateResponse(req);
   if (appUpdate) return appUpdate;
   if (url.pathname === "/v1/router-health") {
     const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
-    return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key" });
+    return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key",
+      ...(ONE_KENAN ? { custody: await custodyStatus(ONE_KENAN) } : {}) });
   }
   if (url.pathname === "/v1/network" && req.method === "GET") return Response.json(networkStatus(privateNetwork, req));
   const asset = webResponse(WEB_DIR, url.pathname, req.method, req);
@@ -389,7 +408,7 @@ async function route(req: Request, url: URL): Promise<Response> {
   const identity = requestIdentity(req, url);
   if (identity.error) return identity.error;
   const { authenticated, asserted, person } = identity;
-  if (url.pathname === "/v1/environment" && req.method === "GET" && !authenticated) return Response.json({ environment: lockedEnvironment() });
+  if (url.pathname === "/v1/environment" && req.method === "GET" && !authenticated) return Response.json({ environment: await lockedEnvironment() });
   if (asserted && !person) return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote.", persons }, { status: 403 });
 
   if (url.pathname === "/v1/unlock" && req.method === "POST") {
