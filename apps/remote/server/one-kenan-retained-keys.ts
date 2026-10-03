@@ -1,7 +1,7 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Person } from "./persons";
-import type { KenanKeys } from "./one-kenan-keys";
+import type { CustodyResult, KenanKeys } from "./one-kenan-keys";
 
 export function retainedCustodyKey(directory: string, person: Person): Buffer | null {
   if (!person.unlock || !/^[a-z_][a-z0-9_-]{0,31}$/.test(person.user)) return null;
@@ -21,15 +21,16 @@ export function retainedCustodyKey(directory: string, person: Person): Buffer | 
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export async function collectRetainedCustodyKeys(keys: KenanKeys, people: Person[], directory = process.env.PI_REMOTE_KEY_DIR ?? "/run/pi-remote-keys") {
-  const collected: string[] = [], rejected: string[] = [];
+export async function collectRetainedCustodyKeys(keys: Pick<KenanKeys, "authenticate">, people: Person[], directory = process.env.PI_REMOTE_KEY_DIR ?? "/run/pi-remote-keys", readKey = retainedCustodyKey) {
+  const collected: string[] = [], rejected: ({ person: string } & Extract<CustodyResult, { ok: false }>)[] = [];
   for (const person of people) {
-    const key = retainedCustodyKey(directory, person);
+    const key = readKey(directory, person);
     if (!key) continue;
     try {
       // Authentication must mount the encrypted folder successfully before retaining its key.
       const result = await keys.authenticate(person.user, key.toString("utf8"));
-      (result.ok ? collected : rejected).push(person.user);
+      if (result.ok) collected.push(person.user);
+      else rejected.push({ ...result, person: person.user, error: result.error.replaceAll(key.toString("utf8"), "[redacted]") });
     } finally { key.fill(0); }
   }
   return { collected, rejected };

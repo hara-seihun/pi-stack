@@ -3,9 +3,12 @@
 import json
 import os
 import pathlib
+import runpy
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 REPO=pathlib.Path(__file__).resolve().parent.parent
 
@@ -35,7 +38,7 @@ with open(os.environ['FIXTURE_CALLS'],'a') as f: f.write(json.dumps([os.path.bas
 if os.environ.get('FIXTURE_FAIL') and sys.argv[1:]==['enable','--now',os.environ['FIXTURE_FAIL']]: sys.exit(1)
 if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.environ['FIXTURE_STOP_FAIL']]: sys.exit(1)
 '''
-        for name in ('systemctl','node'):
+        for name in ('systemctl','node','apparmor_parser'):
             path=self.bin/name; path.write_text(stub); path.chmod(0o755)
         self.config=self.root/'config.json'
         self.values={'version':1,'hostFile':str(self.host),'personsDir':str(self.people),'brokerSource':str(self.broker),
@@ -107,6 +110,68 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertEqual(root_config['people'],[{'person':'alice','displayName':'alice'},{'person':'bob','displayName':'bob'}])
         for person in ('alice','bob'):
             self.assertEqual((self.root/person/'cipher/original').read_text(),'owner data')
+    def test_bun_cache_is_private_and_outside_the_unmounted_shared_store(self):
+        self.command('prepare'); self.command('cutover')
+        shared=self.root/'var/lib/pi-kenan'
+        for directory in ('bun','bun/install','bun/install/cache'):
+            self.assertEqual((shared/directory).stat().st_mode&0o777,0o700)
+        for role in ('root','memory','journal'):
+            source=(self.root/f'etc/systemd/system/pi-kenan-{role}.service').read_text()
+            env=dict(line[len('Environment='):].split('=',1) for line in source.splitlines() if line.startswith('Environment='))
+            self.assertEqual(pathlib.Path(env['BUN_INSTALL']),shared/'bun')
+            self.assertEqual(pathlib.Path(env['BUN_INSTALL_CACHE_DIR']),shared/'bun/install/cache')
+            (pathlib.Path(env['BUN_INSTALL_CACHE_DIR'])/role).write_text('pre-mount Bun cache')
+        self.assertEqual(list((shared/'private').iterdir()),[])
+    def test_apparmor_preserves_existing_local_bytes_and_reloads_on_cutover_and_rollback(self):
+        profile=self.root/'etc/apparmor.d/fusermount3'; profile.parent.mkdir(parents=True)
+        profile.write_text('fixture profile')
+        local=profile.parent/'local/fusermount3'; local.parent.mkdir(); original=b'# unrelated local rules\n\xff\n'
+        local.write_bytes(original); local.chmod(0o640)
+        self.command('prepare'); self.assertEqual(local.read_bytes(),original)
+        self.command('cutover')
+        self.assertTrue(local.read_bytes().startswith(original))
+        rules=local.read_bytes()[len(original):].decode()
+        self.assertIn('fstype=@{fuse_types} options=(nosuid,nodev)',rules)
+        self.assertIn(f'umount "{self.root}/var/lib/pi-kenan/private/",',rules)
+        reload=['apparmor_parser','-r',str(profile)]
+        self.assertIn(reload,self.calls())
+        self.assertLess(self.calls().index(reload),self.calls().index(['systemctl','enable','--now','pi-kenan-custody.service']))
+        self.command('rollback'); self.assertEqual(local.read_bytes(),original)
+        self.assertEqual(local.stat().st_mode&0o777,0o640)
+        self.assertEqual(self.calls().count(reload),2)
+    def test_apparmor_new_local_file_is_removed_and_profile_reloaded_on_failure(self):
+        profile=self.root/'etc/apparmor.d/fusermount3'; profile.parent.mkdir(parents=True); profile.write_text('fixture')
+        local=profile.parent/'local/fusermount3'
+        self.command('prepare'); self.command('cutover',ok=False,FIXTURE_FAIL='pi-kenan-root.service')
+        self.assertFalse(local.exists())
+        self.assertEqual(self.calls().count(['apparmor_parser','-r',str(profile)]),2)
+    def test_mail_routes_restore_regular_bytes_and_symlink_targets_without_changing_the_owned_tool(self):
+        main=self.root/'home/kenan/tools/mail-send/main'; main.parent.mkdir(parents=True)
+        original=b'#!/bin/sh\necho original sender\n'; main.write_bytes(original); main.chmod(0o750)
+        link=self.root/'home/alice/.local/bin/mail-send'; link.parent.mkdir(parents=True); link.symlink_to('../../../sender')
+        custom=self.root/'usr/local/bin/mail-send'; custom.parent.mkdir(parents=True); custom.symlink_to('missing-custom-sender')
+        self.values['mailSendRoutes']=['/usr/local/bin/mail-send']; self.config.write_text(json.dumps(self.values))
+        self.command('prepare'); self.assertEqual(main.read_bytes(),original)
+        self.command('cutover')
+        for path in (main,link,custom,self.root/'home/bob/.local/bin/mail-send'):
+            self.assertEqual(os.readlink(path),'/srv/pi/tools/mail-send/main')
+        self.assertFalse((self.root/'srv/pi/tools/mail-send/main').exists())
+        self.command('rollback'); self.assertFalse(main.is_symlink()); self.assertEqual(main.read_bytes(),original)
+        self.assertEqual(main.stat().st_mode&0o777,0o750)
+        self.assertEqual(os.readlink(link),'../../../sender'); self.assertEqual(os.readlink(custom),'missing-custom-sender')
+        self.assertFalse((self.root/'home/bob/.local/bin/mail-send').is_symlink())
+    def test_private_namespace_is_refused_before_config_or_state_access(self):
+        arguments=[str(REPO/'deploy/one-kenan'),'cutover','--config','/missing-plan','--state',str(self.state),'--authorize-cutover']
+        with patch.object(sys,'argv',arguments), patch.object(os,'readlink',side_effect=['mnt:[private]','mnt:[host]']):
+            with self.assertRaisesRegex(SystemExit,"requires PID 1.*nsenter -t 1 -m"):
+                runpy.run_path(str(REPO/'deploy/one-kenan'),run_name='__main__')
+        self.assertFalse(self.state.exists()); self.assertEqual(self.calls(),[])
+    def test_memory_package_exports_have_no_duplicate_json_keys(self):
+        def pairs(items):
+            keys=[key for key,value in items]; self.assertEqual(len(keys),len(set(keys)))
+            return dict(items)
+        package=json.loads((REPO/'packages/kenan-memory/package.json').read_text(),object_pairs_hook=pairs)
+        self.assertIn('./private-store',package['exports'])
     def test_rollback_preserves_cipher_and_restores_flag_acl_and_only_additive_services(self):
         before=subprocess.check_output(['getfacl','-cpn',str(self.root/'alice/cipher')],text=True)
         self.command('prepare'); self.command('cutover')

@@ -7,7 +7,12 @@ export function oneKenanEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 export function credential(env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (env.PI_KENAN_MEMORY_TOKEN) return env.PI_KENAN_MEMORY_TOKEN;
-  const path = env.PI_KENAN_MEMORY_SUPERVISOR_TOKEN_FILE ?? env.PI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE
-    ?? (env.CREDENTIALS_DIRECTORY ? `${env.CREDENTIALS_DIRECTORY}/kenan-memory-supervisor` : undefined);
-  return path ? readFileSync(path, "utf8").trim() : undefined;
+  const explicit = env.PI_KENAN_MEMORY_SUPERVISOR_TOKEN_FILE ?? env.PI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE;
+  if (explicit !== undefined) return readFileSync(explicit, "utf8").trim();
+  if (!env.CREDENTIALS_DIRECTORY) return undefined;
+  try { return readFileSync(`${env.CREDENTIALS_DIRECTORY}/kenan-memory-supervisor`, "utf8").trim(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }

@@ -10,6 +10,8 @@ User=@EXECUTION_USER@
 Group=@EXECUTION_USER@
 EnvironmentFile=@KENAN_ENV_FILE@
 Environment=HOME=@STATE_DIR@/private
+Environment=BUN_INSTALL=@STATE_DIR@/bun
+Environment=BUN_INSTALL_CACHE_DIR=@STATE_DIR@/bun/install/cache
 Environment=PATH=@STATE_DIR@/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PI_KENAN_MEMORY_ROOT_TOKEN_FILE=%d/kenan-memory-root
 Environment=PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE=%d/kenan-root-admin

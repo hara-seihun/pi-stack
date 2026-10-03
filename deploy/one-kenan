@@ -19,6 +19,8 @@ parser.add_argument('--root')
 parser.add_argument('--fixture', action='store_true')
 parser.add_argument('--authorize-cutover', action='store_true')
 args = parser.parse_args()
+if not args.fixture and os.readlink('/proc/self/ns/mnt') != os.readlink('/proc/1/ns/mnt'):
+    raise SystemExit('One Kenan deployment requires PID 1\'s mount namespace; rerun via sudo nsenter -t 1 -m -- deploy/one-kenan with the same absolute --config and --state paths. No host changes made.')
 repo = pathlib.Path(__file__).resolve().parent.parent
 config_path = pathlib.Path(args.config).resolve()
 config = json.loads(config_path.read_text())
@@ -92,10 +94,12 @@ def save():
     finally: os.close(fd)
 def run(command,**kwargs): return subprocess.run(command,check=True,text=True,timeout=30,**kwargs)
 def ctl(*arguments): return run(['systemctl',*arguments],capture_output=True).stdout.strip()
-def snapshot(path):
+def snapshot(path,allow_symlink=False):
     path = pathlib.Path(path); key = str(path)
     if key in record['files']: return
-    if path.is_symlink(): raise RuntimeError(f'Refusing to replace symlink: {path}')
+    if path.is_symlink():
+        if not allow_symlink: raise RuntimeError(f'Refusing to replace symlink: {path}')
+        info=path.lstat(); record['files'][key]={'link':os.readlink(path),'uid':info.st_uid,'gid':info.st_gid}; save(); return
     if path.exists():
         info=path.stat(); record['files'][key]={'data':base64.b64encode(path.read_bytes()).decode(),'mode':info.st_mode&0o7777,'uid':info.st_uid,'gid':info.st_gid}
     else: record['files'][key]=None
@@ -189,18 +193,48 @@ def rendered_units():
         source=(repo/'deploy/systemd'/name).read_text()
         if name=='pi-kenan-memory.service':
             source=source.replace('[Service]','[Service]\nEnvironmentFile=@KENAN_ENV_FILE@').replace('Requires=pi-kenan-custody.service','Requires=pi-kenan-custody.service pi-kenan-access.service').replace('User=pi-kenan',f'User={execution}').replace('Group=pi-kenan',f'Group={execution}')
-        for before,after in substitutions.items(): source=source.replace(before,after)
         if name=='pi-kenan-memory.service': source=source.replace('/var/lib/pi-kenan',str(shared)).replace('/srv/pi/kenan-memory',memory_runtime)
+        for before,after in substitutions.items(): source=source.replace(before,after)
         source=source.replace('/etc/pi-stack/host.json',str(host)).replace('/etc/pi-stack/kenan-memory-auth.json',str(target('/etc/pi-stack/kenan-memory-auth.json'))) 
         if re.search(r'@[A-Z_]+@',source): raise RuntimeError(f'Unrendered unit: {name}')
         units[name]=source
     return units
 
+def install_mail_routes():
+    tool=pathlib.Path(config.get('toolsRoot','/srv/pi/tools'))/'mail-send/main'
+    if not tool.is_absolute(): raise RuntimeError('toolsRoot must be absolute')
+    routes={target('/home/kenan/tools/mail-send/main')}
+    for user in {operator,*[person['user'] for person in people]}:
+        home=target('/home/'+user) if fixture else pathlib.Path(pwd.getpwnam(user).pw_dir)
+        routes.add(home/'.local/bin/mail-send')
+        main=home/'tools/mail-send/main'
+        if main.exists() or main.is_symlink(): routes.add(main)
+    for route in config.get('mailSendRoutes',[]):
+        if not pathlib.Path(route).is_absolute(): raise RuntimeError('mailSendRoutes must be absolute')
+        routes.add(target(route))
+    for path in sorted(routes):
+        snapshot(path,allow_symlink=True); path.parent.mkdir(parents=True,exist_ok=True)
+        temporary=path.with_name(path.name+'.one-kenan-tmp'); temporary.symlink_to(tool); os.replace(temporary,path)
+        previous=record['files'][str(path)]
+        if not fixture and previous: os.lchown(path,previous['uid'],previous['gid'])
+
+def install_fuse_apparmor():
+    profile=target('/etc/apparmor.d/fusermount3')
+    if not profile.exists(): return
+    local=target('/etc/apparmor.d/local/fusermount3')
+    previous=local.read_bytes() if local.exists() else b''
+    mountpoint=str(shared/'private')+'/'
+    rules=f'\n# One Kenan shared custody mount\nmount fstype=@{{fuse_types}} options=(nosuid,nodev) options in (ro,rw,noatime,dirsync,nodiratime,noexec,sync) -> "{mountpoint}",\numount "{mountpoint}",\n'
+    replace(local,previous+rules.encode())
+    run(['apparmor_parser','-r',str(profile)],capture_output=True)
+
 def install():
     root_uid,root_gid=user_identity(execution,shared); room_uid,room_gid=user_identity(room_user,rooms_home)
     record['rootUid']=root_uid; record['roomUid']=room_uid; save()
     for directory,uid,gid,mode in [(shared,0,0,0o711),(shared/'custody',0,0,0o700),(shared/'supervisor-capabilities',0,0,0o700),
-      (shared/'.private.crypt',root_uid,root_gid,0o700),(shared/'private',root_uid,root_gid,0o700),(shared/'bin',0,0,0o755),(rooms_home,room_uid,room_gid,0o700)]:
+      (shared/'.private.crypt',root_uid,root_gid,0o700),(shared/'private',root_uid,root_gid,0o700),
+      (shared/'bun',root_uid,root_gid,0o700),(shared/'bun/install',root_uid,root_gid,0o700),(shared/'bun/install/cache',root_uid,root_gid,0o700),
+      (shared/'bin',0,0,0o755),(rooms_home,room_uid,room_gid,0o700)]:
         directory.mkdir(parents=True,exist_ok=True,mode=mode); directory.chmod(mode)
         if not fixture: os.chown(directory,uid,gid)
     memory={'supervisors':[],'uidPersons':{}}
@@ -268,6 +302,8 @@ def install():
         if not fixture: run(['visudo','-cf',str(target('/etc/sudoers.d/pi-kenan'))],capture_output=True)
     fuse=target('/etc/fuse.conf'); previous=fuse.read_text() if fuse.exists() else ''
     if 'user_allow_other' not in [line.strip() for line in previous.splitlines() if not line.lstrip().startswith('#')]: replace(fuse,previous+'\nuser_allow_other\n')
+    install_fuse_apparmor()
+    install_mail_routes()
     grant_spaces(root_uid)
     ctl('daemon-reload')
 
@@ -302,10 +338,16 @@ def rollback():
         if path.is_relative_to(shared): continue
         def restore(path=path,previous=previous):
             if previous is None: path.unlink(missing_ok=True)
+            elif 'link' in previous:
+                path.unlink(missing_ok=True); path.symlink_to(previous['link'])
+                if not fixture: os.lchown(path,previous['uid'],previous['gid'])
             else:
+                if path.is_symlink(): path.unlink()
                 path.write_bytes(base64.b64decode(previous['data'])); path.chmod(previous['mode'])
                 if not fixture: os.chown(path,previous['uid'],previous['gid'])
         attempt(restore)
+    if str(target('/etc/apparmor.d/local/fusermount3')) in record['files']:
+        attempt(lambda: run(['apparmor_parser','-r',str(target('/etc/apparmor.d/fusermount3'))],capture_output=True))
     attempt(lambda: ctl('daemon-reload'))
     record['phase']='rollback-failed' if failures else 'rolled-back'; record['failures']=failures; save()
     if failures: raise RuntimeError('Rollback incomplete: '+'; '.join(failures))

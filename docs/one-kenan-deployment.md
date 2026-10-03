@@ -48,13 +48,23 @@ broker must support named grant ownership before activation; the old broker conf
 Public runtime path overrides are `remoteRoot` (`/srv/pi/pi-remote`), `rootRuntime`
 (`/srv/pi/pi-remote/kenan-root`), `memoryRuntime` (`/srv/pi/runtime/node_modules/kenan-memory`), `orchestratorRoot`
 (`/srv/pi/pi-orchestrator`), `modelCatalog` (the orchestrator's `dist/models.json`), `bun` and
-`node`. Publish these sources before cutover. The fixed root SDK waits for the encrypted mount
+`node`. `toolsRoot` defaults to `/srv/pi/tools`; cutover routes the known
+`/home/kenan/tools/mail-send/main`, registered people/operator `~/.local/bin/mail-send`,
+and existing `~/tools/mail-send/main` paths to its `mail-send/main`. `mailSendRoutes` can
+add other absolute command routes. Original file bytes/mode/ownership and symlink targets
+are saved in the transaction and restored on rollback. Publish these sources before cutover. The fixed root SDK waits for the encrypted mount
 before creating its agent/session directories. Rooms receive only public model metadata and
 broker settings, not private contexts, packages, keys or root credentials.
 
 `spaces` lists any additional explicit root read/write spaces, as
 `{"path":"/absolute/path","owner":"original-user","recursive":true,"access":"rwX"}`.
 Registered encrypted folder ciphertext and mountpoint traversal are added automatically.
+On hosts with `/etc/apparmor.d/fusermount3`, cutover appends an exact shared-store mount
+and umount grant to `/etc/apparmor.d/local/fusermount3` and reloads the profile. Existing
+local-file bytes are preserved, including unrelated rules, and restored byte-for-byte
+on rollback (or the newly created local file is removed), followed by another reload.
+Hosts without that profile are untouched.
+
 ACL grants preserve all other principals' **effective** rights when expanding an ACL mask;
 original-owner default ACLs keep new ciphertext owner-accessible. Each cipher root also gets
 an explicit named original-owner `rwx` ACL: the forced-owner FUSE view needs that entry to
@@ -89,6 +99,11 @@ sudo deploy/one-kenan rollback --authorize-cutover \
   --config /etc/pi-stack/one-kenan-plan.json --state /var/lib/pi-kenan-deploy
 ```
 
+Host commands must run in PID 1's mount namespace. A person supervisor's namespace
+is refused before reading configuration or creating transaction state; rerun through
+`sudo nsenter -t 1 -m --` with an absolute CLI, config and state path. Fixtures remain
+inside their staging namespace.
+
 Use the same plan and transaction directory for every step. A second transaction will not
 adopt existing service accounts or overwrite existing additive config. Interrupted cutover
 requires rollback, not another cutover. Partial failure rolls back automatically.
@@ -115,7 +130,9 @@ nonfatally. Missing folder keys are captured on their next successful login.
 
 Original supervisors get additive credential drop-ins, applied at their next **ordinary**
 start. Memory's verified original-UID mapping supplies identity to already-running supervisors
-meanwhile. The router likewise gets future room URL/database environment settings; the default
+meanwhile. A missing implicit `kenan-memory-supervisor` in an existing
+`CREDENTIALS_DIRECTORY` is optional; an explicitly configured missing token file or any
+other credential-read failure remains an error. The router likewise gets future room URL/database environment settings; the default
 production paths match them without an immediate restart. Custom ports require the staging
 router's matching environment. No deployment helper requests an existing-service restart.
 
@@ -146,7 +163,15 @@ consumers if custody stops. Future FUSE mounts made by custody are visible to jo
 
 Custody, root, memory and journal units set `MemorySwapMax=0` and `LimitCORE=0`. Their
 private contexts and unlocked keys must not spill into the host's unencrypted swap or a core
-dump. Custody's owner-run gocryptfs children remain in its no-swap cgroup. This policy is
+dump. Root, memory and journal set `BUN_INSTALL=/var/lib/pi-kenan/bun` and
+`BUN_INSTALL_CACHE_DIR=/var/lib/pi-kenan/bun/install/cache`. Cutover creates that tree
+as `pi-kenan`, mode `0700`; Bun startup cannot populate the not-yet-mounted shared
+private directory. The cache is not private personal state and remains outside the cipher.
+Custody reports each rejected retained person with the specific failure and captures
+bounded, key-redacted gocryptfs stderr; a shared-store mount failure is not described as
+a need for another login.
+
+Custody's owner-run gocryptfs children remain in its no-swap cgroup. This policy is
 additive to these new services only; no original user's live unit or host swap is changed.
 
 - `pi-kenan-custody.service`: root, fixed helper only, root-only socket `/run/pi-kenan/custody.sock`.
@@ -189,7 +214,7 @@ sudo deploy/one-kenan-fuse-rehearse
 sudo deploy/one-kenan-namespace-rehearse
 ```
 
-The nine tests use temporary people, paths, configs and command stubs. The privileged rehearsal
+The deployment tests use temporary people, paths, configs and command stubs. The privileged rehearsal
 runs them foreground under `unshare --mount --propagation private`; no live unit, `/etc`, key,
 firewall or folder mount is touched. They prove preparation has no host effect, no user-service
 handoff, dedicated broker ownership, private root credentials, unprivileged room isolation,

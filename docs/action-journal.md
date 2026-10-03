@@ -27,7 +27,7 @@ Long-lived boundaries start a bounded background drain. The owning deployment mu
 
 ## Mail custody and cutover
 
-`pi-mail-send` is additive in the tools manifest; deployment does not replace existing `mail-send` links while the host flag is off. Cutover must explicitly point the known `/home/kenan/tools/mail-send/main` and user `mail-send` command routes at the deployed owned tool. Otherwise an agent using that known absolute old path bypasses capture. This worker does not mutate those live routes. Keep the old route's exact code for reversible rollback, not as an unowned second mail implementation.
+`pi-mail-send` is additive in the tools manifest; deployment does not replace existing `mail-send` links while the host flag is off. `deploy/one-kenan` cutover points the known `/home/kenan/tools/mail-send/main`, registered people/operator `~/.local/bin/mail-send`, and existing `~/tools/mail-send/main` routes at `/srv/pi/tools/mail-send/main` (`toolsRoot` overrides the public tool root). `mailSendRoutes` adds other absolute routes. Transaction state retains exact original bytes, modes/ownership and symlink targets for rollback, not a second unowned mail implementation. Prepare and ordinary source publication do not change these routes. Both mail and publication default to `/srv/pi/runtime/node_modules/kenan-memory/src/journal-cli.ts`; `PI_KENAN_ACTION_JOURNAL_CLI` overrides it for staging.
 
 Focused checks:
 
