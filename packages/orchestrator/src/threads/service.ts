@@ -16,7 +16,7 @@ import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy,
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
 export interface ThreadAdmission { env?: Record<string, string | undefined>; settings?: ThreadSettings; release(): void | Promise<void> }
@@ -439,6 +439,15 @@ export class ThreadService implements ThreadApi {
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     if (!this.get(threadId)) return bad("not_found", "Thread not found");
     return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL ORDER BY created_at,rowid").all(threadId) as Json[]).map(row => this.question(row)));
+  }
+  async questionState(threadId: string, questionId: string): Promise<Result<QuestionState>> {
+    if (typeof threadId !== "string" || typeof questionId !== "string") return bad("invalid_request", "Thread and question IDs are required");
+    const row = this.sql("SELECT * FROM thread_question WHERE id=? AND thread_id=?").get(questionId, threadId) as Json | undefined;
+    if (!row) return bad("not_found", "Question not found in this thread");
+    const question = this.question(row);
+    if (row.accepted_at === null) return good({ question });
+    const answer = JSON.parse(row.answer);
+    return good({ question, answer: { text: answer.text, selectedSuggestions: question.suggestions.filter(choice => answer.selectedSuggestionIds.includes(choice.id)).map(choice => choice.text), dismissed: answer.dismissed === true, acceptedAt: row.accepted_at } });
   }
   async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");

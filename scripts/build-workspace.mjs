@@ -6,8 +6,8 @@ import { dirname, join, resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const name = process.argv[2];
 const builds = {
-  orchestrator: { sources: ["packages/orchestrator"], output: "packages/orchestrator/dist" },
-  remote: { sources: ["apps/remote", "packages/orchestrator/src"], output: "apps/remote/web/dist" },
+  orchestrator: { sources: ["packages/orchestrator", "packages/kenan-memory"], output: "packages/orchestrator/dist" },
+  remote: { sources: ["apps/remote", "packages/orchestrator/src", "packages/kenan-memory", "packages/kenan-root"], output: "apps/remote/web/dist" },
 };
 const build = builds[name];
 if (!build) {

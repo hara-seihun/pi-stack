@@ -66,6 +66,10 @@ export interface AnswerThreadQuestion {
   dismissed?: boolean;
 }
 export interface QuestionReceipt { accepted: true; questionId: string }
+export interface QuestionState {
+  question: ThreadQuestion;
+  answer?: { text: string; selectedSuggestions: string[]; dismissed: boolean; acceptedAt: number };
+}
 export interface QuestionEvents {
   cursor: number;
   items: Array<{ seq: number; questionId: string; threadId: string; question: string; time: number }>;
@@ -186,6 +190,7 @@ export interface ThreadApi {
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;
   questions(threadId: string): Promise<Result<ThreadQuestion[]>>;
+  questionState(threadId: string, questionId: string): Promise<Result<QuestionState>>;
   questionEvents(after?: number, limit?: number): Result<QuestionEvents> | Promise<Result<QuestionEvents>>;
   answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>>;
   spawn(input: SpawnThread): Promise<Result<Thread>>;

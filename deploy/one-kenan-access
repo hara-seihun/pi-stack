@@ -1,0 +1,29 @@
+#!/usr/bin/python3
+"""Additive UID gates for root Kenan listeners; never rewrites the ordinary-user table."""
+import argparse
+import json
+import pathlib
+import subprocess
+
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('action',choices=['apply','remove'])
+parser.add_argument('--config',required=True)
+parser.add_argument('--print',action='store_true')
+args=parser.parse_args()
+config=json.loads(pathlib.Path(args.config).read_text())
+def nft_set(values): return '{ '+', '.join(str(value) for value in sorted(set(values)))+' }'
+root,rooms,people=config['rootUid'],config['roomsUid'],config['personUids']
+if any(not isinstance(uid,int) or uid<0 for uid in [root,rooms,*people]): raise SystemExit('Invalid UID gate')
+ports=[config[name] for name in ['rootPort','memoryPort','roomsPort','rootBrokerPort','roomsBrokerPort']]
+if any(not isinstance(port,int) or not 1023<port<=65535 for port in ports): raise SystemExit('Invalid listener port')
+rules=['destroy table inet pi_one_kenan']
+if args.action=='apply':
+    if json.loads(pathlib.Path(config['hostFile']).read_text()).get('oneKenan') is not True: raise SystemExit('One Kenan is disabled')
+    rules += ['table inet pi_one_kenan {','chain output {','type filter hook output priority -19; policy accept;']
+    for port,uids in [(config['rootPort'],[0,root,rooms,*people]),(config['memoryPort'],[0,root,rooms,*people]),
+      (config['roomsPort'],[0]),(config['rootBrokerPort'],[0,root]),(config['roomsBrokerPort'],[0,rooms])]:
+        rules.append(f'fib daddr type local tcp dport {port} meta skuid != {nft_set(uids)} reject with tcp reset')
+    rules += ['}','chain input {','type filter hook input priority -19; policy accept;',f'iifname != "lo" tcp dport {nft_set(ports)} reject with tcp reset','}','}']
+source='\n'.join(rules)+'\n'
+if args.print: print(source,end='')
+else: subprocess.run(['/usr/sbin/nft','-f','-'],input=source,text=True,check=True,timeout=10)

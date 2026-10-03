@@ -11,6 +11,7 @@ const releaseResources = [
   "server/meet/transcriber.ts", "server/write.ts",
   "web/dist/index.html", "web/dist/meet.html", "web/dist/meet-adapter.js", "web/dist/voice.html", "web/dist/kenan.png",
   "shared/state.ts", "shared/value.ts",
+  "kenan-root/package.json", "kenan-root/instructions.md", "kenan-root/src/main.ts",
 ];
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "pi-remote-deploy-test-"));
@@ -26,14 +27,18 @@ function fixture() {
   }
   put(join(bin, "npm"), '#!/bin/sh\nmkdir -p apps/remote/web/dist\ncp "$BUILD_ASSETS"/* apps/remote/web/dist/\n', 0o755);
   put(join(repo, "apps/remote/package.json"), JSON.stringify({type: "module", dependencies: {"pi-orchestrator": "1.0.0", "playwright-core": "1.0.0"}}));
-  for (const resource of releaseResources.filter((path) => !path.startsWith("deploy/"))) {
+  for (const resource of releaseResources.filter((path) => !path.startsWith("deploy/") && !path.startsWith("kenan-root/"))) {
     put(join(repo, "apps/remote", resource), "fixture\n");
   }
   cpSync(join(repo, "apps/remote/web/dist"), join(dir, "build-assets"), { recursive: true });
   put(join(repo, "apps/remote/shared/state.ts"), 'export { value } from "./value.js";');
   put(join(repo, "apps/remote/shared/value.ts"), 'export const value = true;');
   put(join(repo, "apps/remote/server/main.ts"), 'import { chromium } from "playwright-core"; import { ok } from "pi-orchestrator/api"; import { value } from "../shared/state.js"; console.log(chromium, ok, value);');
-  for (const entry of ["router.ts", "person-cli.ts", "voice/service.ts"]) put(join(repo, "apps/remote/server", entry), "export {};");
+  put(join(repo, "packages/kenan-root/package.json"), JSON.stringify({ name: "kenan-root", type: "module" }));
+  put(join(repo, "packages/kenan-root/instructions.md"), "Fixed host root instructions\n");
+  put(join(repo, "packages/kenan-root/src/main.ts"), 'import { ok } from "pi-orchestrator/api"; console.log(ok);');
+  put(join(repo, "packages/kenan-root/dist/main.js"), "export {};");
+  for (const entry of ["router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts"]) put(join(repo, "apps/remote/server", entry), "export {};");
   for (const entry of ["pi-remote", "pi-phone", "pi-calendar", "pi-remote-launch", "pi-remote-supervise"]) put(join(repo, "apps/remote/server", entry), "#!/bin/sh\nexit 0\n", 0o755);
   put(join(orchestrator, "package.json"), JSON.stringify({name: "pi-orchestrator", exports: {"./api": "./src/api.ts"}}));
   put(join(orchestrator, "src/api.ts"), "export const ok = true;");

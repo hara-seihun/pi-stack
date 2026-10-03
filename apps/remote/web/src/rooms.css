@@ -1,0 +1,16 @@
+.room-inbox { padding: .75rem; border-bottom: 1px solid var(--border, #555); }
+.room-inbox > header, .room-conversation > header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.room-inbox form, .room-conversation form:not(.room-composer) { padding: .75rem 0; }
+.room-row { display: block; width: 100%; text-align: left; padding: .75rem; margin-top: .4rem; }
+.room-row span { display: block; font-size: .8rem; opacity: .7; margin-top: .3rem; }
+.room-row.selected { outline: 1px solid currentColor; }
+.room-member-picker { display: flex; flex-wrap: wrap; gap: .75rem; margin: .5rem 0; }
+.room-conversation { height: 100%; min-height: 0; display: flex; flex-direction: column; padding: .75rem; gap: .5rem; }
+.room-conversation > header p { margin: .3rem 0; font-size: .8rem; }
+.room-history { overflow-y: auto; flex: 1; min-height: 0; }
+.room-history .message { white-space: pre-wrap; }
+.room-composer { display: flex; flex-wrap: wrap; gap: .5rem; }
+.room-composer textarea { flex: 1; min-width: 0; min-height: 4rem; resize: vertical; }
+.room-discretion { font-size: .75rem; opacity: .6; margin: 0; }
+.room-question { max-height: 40vh; overflow-y: auto; }
+.room-question label { display: block; margin: .5rem 0; }
