@@ -142,7 +142,7 @@ export default function contextMirror(pi: ExtensionAPI) {
     baseMessages = identifyMessages(convertToLlm(messages), ctx, sessionId, {
       id: environment.PI_REMOTE_SENDER_ID || "user",
       ...(environment.PI_REMOTE_SENDER_NAME ? { name: environment.PI_REMOTE_SENDER_NAME } : {}),
-    }, AGENT_NAME);
+    }, AGENT_NAME, environment.PI_REMOTE_ROOM_ID === sessionId);
     context = {
       systemPrompt: ctx.getSystemPrompt(),
       tools: pi.getAllTools()
@@ -190,7 +190,7 @@ export default function contextMirror(pi: ExtensionAPI) {
     baseMessages = identifyMessages(baseMessages, ctx, sessionId, {
       id: environment.PI_REMOTE_SENDER_ID || "user",
       ...(environment.PI_REMOTE_SENDER_NAME ? { name: environment.PI_REMOTE_SENDER_NAME } : {}),
-    }, AGENT_NAME);
+    }, AGENT_NAME, environment.PI_REMOTE_ROOM_ID === sessionId);
     context = { ...context, messages: baseMessages };
     await publishCurrent();
   });

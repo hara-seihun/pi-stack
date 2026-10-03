@@ -1,5 +1,6 @@
 import { buildSessionProjection, convertToLlm, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { messageReference, parseMessageReference, type MessageIdentity, type MessageSender } from "./message-protocol";
+import { readRoomInput } from "../shared/rooms";
 
 type ModelMessage = ReturnType<typeof convertToLlm>[number];
 type AddressedMessage = ModelMessage & { identity?: MessageIdentity };
@@ -24,7 +25,7 @@ function recordedSender(value: unknown): MessageSender | undefined {
   return { id: sender.id, ...(typeof sender.name === "string" && sender.name ? { name: sender.name } : {}) };
 }
 
-export function identifyMessages(messages: ModelMessage[], ctx: ExtensionContext, sessionId: string, user: MessageSender, assistantName = "Assistant"): AddressedMessage[] {
+export function identifyMessages(messages: ModelMessage[], ctx: ExtensionContext, sessionId: string, user: MessageSender, assistantName = "Assistant", room = false): AddressedMessage[] {
   if (!ctx.sessionManager?.getBranch) return messages;
   const projection = buildSessionProjection(ctx.sessionManager.getBranch());
   const sources = projection.entries.flatMap(({ sourceEntry, messages }) =>
@@ -50,7 +51,10 @@ export function identifyMessages(messages: ModelMessage[], ctx: ExtensionContext
     const sourceMetadata = entry.type === "message" ? entry.message as unknown as Record<string, unknown> : entry.details as Record<string, unknown> | undefined;
     const recorded = recordedIdentity(sourceMetadata?.identity);
     if (recorded) return { ...message, identity: recorded };
-    const sender = recordedSender((sourceMetadata?.identity as { sender?: unknown } | undefined)?.sender)
+    const text = typeof message.content === "string" ? message.content : message.content.filter(block => block.type === "text").map(block => "text" in block ? block.text : "").join("\n");
+    const roomSender = room && message.role === "user" ? readRoomInput(text)?.sender : undefined;
+    const sender = roomSender ? { id: roomSender.user, name: roomSender.displayName }
+      : recordedSender((sourceMetadata?.identity as { sender?: unknown } | undefined)?.sender)
       ?? recordedSender(sourceMetadata?.sender)
       ?? (entry.type === "message" ? (message.role === "user" ? user : { id: "assistant", name: assistantName }) : undefined);
     if (!sender) return message;

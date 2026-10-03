@@ -38,4 +38,6 @@ Drafts, notification cursors and selected threads are scoped by person and endpo
 
 [Orchestrator threads](threads.md) own conversation identity, input delivery, execution state and parent notifications. Pi owns each individual session's native execution, compaction and JSONL transcript. The shared runner keeps many sessions in one process within each existing person and execution boundary. Remote owns presentation, uploads and person routing, not another scheduler.
 
+Behind `oneKenan: true`, [rooms](../apps/remote/docs/rooms.md) are fresh multi-person conversations routed through a host-owned room directory. Their initial custody is the creator's supervisor; the directory leaves moving custody to a Kenan-owned store possible without changing clients. Membership never grants a client access to the owner's private inbox or streams.
+
 Profiles and workspaces belong to each person's configured environment. Clients combine environments only at the presentation boundary. Thread directories include only explicitly authorized owners in the selected environment. Fleet control is available to the fleet's configured owning person, not to every person who can observe account usage. There is no cross-machine agent bridge.

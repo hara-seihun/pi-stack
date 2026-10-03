@@ -6,7 +6,7 @@
 import type { ThreadState } from "pi-orchestrator/api";
 import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
-export type ChatId = `ai:${string}` | `human:${string}`;
+export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
@@ -196,6 +196,7 @@ export interface AgentModelCount {
 /** Facts every client needs once: where new threads can start and the
  * person's home. Sent with `hello` and again only when they change. */
 export interface Bootstrap {
+  rooms?: true;
   environmentId: string;
   home: string;
   threadStarts: ThreadStart[];

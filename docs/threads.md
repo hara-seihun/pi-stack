@@ -64,6 +64,10 @@ Everything runs as the person's own Unix user. A process that deliberately reads
 
 Every normal thread can maintain its person's [watch list](watch-list.md) with `watch_list`, `watch_list_add`, `watch_list_update` and `watch_list_remove`. The unlocked Remote supervisor stores it in the existing encrypted thread database and starts a visible Opus 5.5 check only for due items. Major decisions use the asynchronous question tool. Fleet tools route to the person's owner rather than storing private checks in the fleet ledger. Watch checks are root conversations visible in Chats but cannot create workers.
 
+## Rooms
+
+With the host's `oneKenan` flag enabled, a fresh Remote conversation may be a [room](../apps/remote/docs/rooms.md). The router authenticates membership and stamps each actual speaker; the creator is the thread's custodian, not every message's speaker. `metadata.room.members` supplies the full audience to turn instructions, and notifications reach each member's own supervisor ledger. The public room API is separate from private supervisor context/stream access.
+
 ## Relationships and notifications
 
 Threads can list all accessible threads in their current environment or their direct children, read persisted history without starting a recipient, and steer or hard steer other accessible threads. Humans may also queue messages. Workers retain these collaboration tools but cannot spawn. Parentage determines discovery and automatic notifications, not aggregate execution state.
