@@ -24,6 +24,17 @@ _COMMANDS = {("new", "line"): "\n", ("new", "paragraph"): "\n\n",
              ("bullet", "point"): "\n- ", ("question", "mark"): "?",
              ("exclamation", "mark"): "!"}
 _SINGLE_COMMANDS = {"comma": ",", "period": ".", "fullstop": ".", "colon": ":"}
+_QUOTE_OPEN = {('open', 'quote'), ('start', 'quote'), ('begin', 'quote')}
+_QUOTE_CLOSE = {('close', 'quote'), ('end', 'quote'), ('un', 'quote')}
+_SPEECH_VERBS = {'said', 'says', 'asked', 'replied', 'shouted', 'whispered', 'wrote'}
+_SPEAKERS = {'i', 'he', 'she', 'they', 'you', 'we', 'someone', 'kenan',
+             'sign', 'message', 'email', 'text', 'note', 'button', 'label', 'error'}
+_DIRECT_START = {"i", "i'm", "i'll", "i've", "i'd", "we're", "we'll", "we've",
+                 'hello', 'hi', 'hey', 'goodbye', 'welcome', 'sorry', 'okay', 'ok',
+                 'thanks', 'thank', 'yes', 'no', 'please',
+                 "let's", 'go', 'stop', 'come', 'leave', 'wait', 'listen', 'look',
+                 'try', 'send', 'call', 'do', "don't", 'can', 'could', 'would',
+                 'will', 'are', 'is', 'have', 'did', 'does'}
 
 
 def _bare(word: str) -> str:
@@ -32,6 +43,36 @@ def _bare(word: str) -> str:
 
 def _word(item: Mapping[str, Any] | str) -> str:
     return item if isinstance(item, str) else str(item.get("w", ""))
+
+
+def _quotation_controls(words: Sequence[str], context: str) -> tuple[dict[int, tuple[int, str]], set[int]]:
+    bare = [_bare(word) for word in words]
+    commands: dict[int, tuple[int, str]] = {}
+    literal: set[int] = set()
+    opened = context.count('“') > context.count('”')
+    i = 0
+    while i < len(bare):
+        pair = tuple(bare[i:i+2])
+        count, mark = 0, ''
+        if pair in _QUOTE_OPEN:
+            count, mark = 2, '“'
+        elif pair in _QUOTE_CLOSE:
+            count, mark = 2, '”'
+        elif bare[i] == 'unquote' and opened:
+            count, mark = 1, '”'
+        elif bare[i] == 'quote' and not opened and any(
+                bare[k] == 'unquote' or tuple(bare[k:k+2]) in _QUOTE_CLOSE
+                for k in range(i + 1, len(bare))):
+            count, mark = 1, '“'
+        if count:
+            commands[i] = (count, mark)
+            opened = mark == '“'
+            i += count
+        else:
+            if opened:
+                literal.add(i)
+            i += 1
+    return commands, literal
 
 
 def _conf(item: Mapping[str, Any] | str) -> float:
@@ -79,6 +120,69 @@ def _replace_dictionary(tokens: list[_Token], dictionary: Mapping[str, Any]) -> 
     return result, edits
 
 
+def _direct_speech_start(tokens: list[_Token], start: int) -> bool:
+    first = _bare(tokens[start].text)
+    if first in _DIRECT_START:
+        return True
+    if first not in {'what', 'which', 'where', 'when', 'why', 'how', 'who'}:
+        return False
+    before_subject = {'i', 'you', 'he', 'she', 'they', 'we', 'it', 'the', 'a', 'an'}
+    auxiliaries = {'is', 'are', 'was', 'were', 'do', 'does', 'did', 'can',
+                   'could', 'will', 'would', 'should', 'has', 'have'}
+    for token in tokens[start + 1:start + 4]:
+        bare = _bare(token.text)
+        if bare in before_subject:
+            return False
+        if bare in auxiliaries:
+            return True
+    return False
+
+
+def _infer_quotations(tokens: list[_Token]) -> tuple[list[_Token], list[dict]]:
+    # Indirect speech and uncertain boundaries stay unquoted. The punctuation
+    # model has no quotation label: these explicit linguistic cues own inference.
+    if any(any(mark in token.text for mark in '“”"') for token in tokens):
+        return tokens, []
+    result: list[_Token] = []
+    edits: list[dict] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        speaker = tokens[i - 1].text if i else ''
+        direct = (i > 0 and i + 1 < len(tokens) and _bare(token.text) in _SPEECH_VERBS
+                  and not token.text.endswith(tuple(_END))
+                  and (_bare(speaker) in _SPEAKERS or speaker[:1].isupper())
+                  and _direct_speech_start(tokens, i + 1))
+        if not direct:
+            result.append(token)
+            i += 1
+            continue
+        end = i + 1
+        while end + 1 < len(tokens) and not tokens[end].text.endswith(tuple(_END)):
+            end += 1
+        # A following narrative clause is not evidence of what was said verbatim.
+        if any((_bare(tokens[k].text), _bare(tokens[k + 1].text)) == ('and', 'then')
+               for k in range(i + 1, end)):
+            result.append(token)
+            i += 1
+            continue
+        verb = token.text if token.text.endswith((',', ':')) else token.text + ','
+        if verb != token.text:
+            edits.append({'kind': 'format', 'from': token.text, 'to': verb,
+                          'at': [token.start, token.end]})
+        result.extend([_Token(verb, token.start, token.end),
+                       _Token('“', tokens[i + 1].start, tokens[i + 1].start)])
+        for quoted in tokens[i + 1:end + 1]:
+            result.append(quoted)
+        result.append(_Token('”', tokens[end].end, tokens[end].end))
+        edits.extend([{'kind': 'insert', 'from': '', 'to': '“',
+                       'at': [tokens[i + 1].start, tokens[i + 1].start]},
+                      {'kind': 'insert', 'from': '', 'to': '”',
+                       'at': [tokens[end].end, tokens[end].end]}])
+        i = end + 1
+    return result, edits
+
+
 def _number(tokens: list[_Token], i: int) -> tuple[str, int] | None:
     a = _bare(tokens[i].text)
     if a in _TENS and i+1 < len(tokens) and _bare(tokens[i+1].text) in _ONES:
@@ -94,7 +198,7 @@ def _format(tokens: list[_Token], context: str) -> tuple[str, list[dict]]:
         return "", []
     text = ""
     edits: list[dict] = []
-    cap = not context or context.rstrip().endswith(tuple(_END))
+    cap = not context or context.rstrip().rstrip('”"').endswith(tuple(_END))
     for idx, token in enumerate(tokens):
         if token.text in {"\n", "\n\n", "\n- "}:
             text = text.rstrip() + token.text
@@ -110,12 +214,25 @@ def _format(tokens: list[_Token], context: str) -> tuple[str, list[dict]]:
         if word != token.text:
             edits.append({"kind": "format", "from": token.text, "to": word,
                           "at": [token.start, token.end]})
-        if text and not word.startswith(tuple(".,!?;:)]}")) and not text.endswith(tuple("([{\n ")):
+        if word in _END and text.endswith(('”', '"')):
+            terminal = text.rstrip('”"')
+            if terminal.endswith(tuple(_END)):
+                edits.append({'kind': 'delete', 'from': word, 'to': '',
+                              'at': [token.start, token.end]})
+            else:
+                text = terminal + word + text[len(terminal):]
+            cap = True
+            continue
+        if text and not word.startswith(tuple(".,!?;:)]}”")) and not text.endswith(tuple("([{“\n ")):
             text += " "
         text += word
-        cap = word.endswith(tuple(_END))
-    if text and text[-1] not in ".?!,:;":
-        text += "."
+        if word == '“':
+            cap = cap or (idx > 0 and _bare(tokens[idx - 1].text) in _SPEECH_VERBS)
+        else:
+            cap = text.rstrip('”"').endswith(tuple(_END))
+    terminal = text.rstrip('”"')
+    if terminal and terminal[-1] not in ".?!,:;":
+        text = terminal + "." + text[len(terminal):]
         edits.append({"kind": "insert", "from": "", "to": ".",
                       "at": [tokens[-1].end, tokens[-1].end]})
     return text, edits
@@ -136,6 +253,9 @@ def clean(words: Sequence[Mapping[str, Any] | str],
     allowed = {_bare(str(w)) for w in dictionary.get("words", [])}
     tokens: list[_Token] = []
     edits: list[dict] = []
+    quote_controls, quoted = _quotation_controls([_word(item) for item in words], context)
+    quote_indices = {i for start, (count, _) in quote_controls.items()
+                     for i in range(start, start + count)}
     predictions = tagger.predict([_word(item) for item in words]) if tagger else None
     if predictions is not None and len(predictions) != len(words):
         raise ValueError('tagger must return one prediction per source word')
@@ -145,7 +265,8 @@ def clean(words: Sequence[Mapping[str, Any] | str],
             continue
         if predictions is not None:
             label, probability = predictions[i]
-            protected = (_bare(raw) in allowed or _bare(raw) in _NUMBERS or
+            protected = (i in quoted or i in quote_indices or
+                         _bare(raw) in allowed or _bare(raw) in _NUMBERS or
                          _bare(raw) in {"no", "not", "never", "nothing"} or
                          any(character.isdigit() for character in raw))
             if (label in (1, 2, 3, 4) and
@@ -171,6 +292,32 @@ def clean(words: Sequence[Mapping[str, Any] | str],
     while j < len(tokens):
         token = tokens[j]
         bare = _bare(token.text)
+        quote_command = quote_controls.get(token.start)
+        if quote_command:
+            count, mark = quote_command
+            chunk = tokens[j:j+count]
+            kept.append(_Token(mark, chunk[0].start, chunk[-1].end))
+            edits.append({'kind': 'format', 'from': ' '.join(t.text for t in chunk),
+                          'to': mark, 'at': [chunk[0].start, chunk[-1].end]})
+            j += count
+            continue
+        phrase = tuple(_bare(t.text) for t in tokens[j:j+2])
+        command = _COMMANDS.get(phrase)
+        count = 2
+        if not command and bare in _SINGLE_COMMANDS and kept:
+            command = _SINGLE_COMMANDS[bare]
+            count = 1
+        if command:
+            chunk = tokens[j:j+count]
+            kept.append(_Token(command, chunk[0].start, chunk[-1].end))
+            edits.append({'kind': 'format', 'from': ' '.join(t.text for t in chunk),
+                          'to': command, 'at': [chunk[0].start, chunk[-1].end]})
+            j += count
+            continue
+        if token.start in quoted:
+            kept.append(token)
+            j += 1
+            continue
         if bare in _FILLERS or (token.text.startswith("[") and token.text.endswith("]")):
             edits.append({"kind": "delete", "from": token.text, "to": "", "at": [token.start, token.end]})
             j += 1; continue
@@ -203,18 +350,6 @@ def clean(words: Sequence[Mapping[str, Any] | str],
             edits.append({"kind": "delete", "from": " ".join(t.text for t in chunk),
                           "to": "", "at": [chunk[0].start, chunk[-1].end]})
             j += marker_length; continue
-        phrase = tuple(_bare(t.text) for t in tokens[j:j+2])
-        command = _COMMANDS.get(phrase)
-        count = 2
-        if not command and bare in _SINGLE_COMMANDS and kept:
-            command = _SINGLE_COMMANDS[bare]
-            count = 1
-        if command:
-            chunk = tokens[j:j+count]
-            kept.append(_Token(command, chunk[0].start, chunk[-1].end))
-            edits.append({"kind": "format", "from": " ".join(t.text for t in chunk),
-                          "to": command, "at": [chunk[0].start, chunk[-1].end]})
-            j += count; continue
         if (j+3 < len(tokens) and
             [_bare(t.text) for t in tokens[j:j+2]] ==
             [_bare(t.text) for t in tokens[j+2:j+4]]):
@@ -247,6 +382,8 @@ def clean(words: Sequence[Mapping[str, Any] | str],
                               'at': [token.start, token.end]})
             restored.append(_Token(text, token.start, token.end))
         kept = restored
+    kept, quotations = _infer_quotations(kept)
+    edits.extend(quotations)
     text, formatting = _format(kept, context)
     edits.extend(formatting)
     edits.sort(key=lambda edit: (edit["at"][0], edit["at"][1], edit["kind"]))
@@ -278,8 +415,15 @@ class IncrementalCleaner:
         self._pending.extend(committed)
         if len(self._pending) > self.lookbehind * 2:
             limit = len(self._pending) - self.lookbehind
+            controls, quoted = _quotation_controls([_word(item) for item in self._pending],
+                                                    self.context + self._prefix)
+            unresolved = {i for i, item in enumerate(self._pending)
+                          if _bare(_word(item)) == 'quote' and i not in controls
+                          and not any(start <= i < start + count
+                                      for start, (count, _) in controls.items())}
             n = max((i+1 for i, item in enumerate(self._pending[:limit])
-                     if _word(item).rstrip().endswith(tuple(_END))), default=0)
+                     if _word(item).rstrip().endswith(tuple(_END)) and i not in quoted
+                     and not any(start <= i for start in unresolved)), default=0)
             if n:
                 stable = clean(self._pending[:n], self.dictionary, self.context + self._prefix,
                                self.tagger, self.punctuator)
