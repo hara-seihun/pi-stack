@@ -41,8 +41,8 @@ wording to avoid changing its meaning.** If inference is unavailable, it inserts
 the baseline and shows **Local rewrite unavailable; inserted the transcript.**
 These are explicit degraded outcomes, not successful meaning-aware rewrites.
 [Rewrite design/limits](../write/engine/REWRITE.md) owns the guard and pinned runtime
-links. Prompt tuning and final measurements are underway; this documents source
-behavior, not an installed APK or server deployment.
+links and [bounded measured results](../write/engine/rewrite-results/README.md).
+This documents source behavior, not an installed APK or server deployment.
 
 On Android 8 and later, accessibility text marked as a displayed hint is treated as an empty field for dictation context, insertion, and correction learning. Real typed text is preserved even when it exactly matches the hint; hint strings are not compared to infer emptiness.
 

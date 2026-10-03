@@ -1,8 +1,9 @@
 # Write final local rewrite
 
 `rewrite.py` owns the final dictation editor; `server.py` invokes it after recognition
-and baseline cleanup. This is active source work: prompt tuning and final metrics
-are underway. No corpus-success or deployment claim is made here.
+and baseline cleanup. [Measured results](rewrite-results/README.md) distinguish
+text controls, recorded real ASR, and complete local PCM/WebSocket regressions.
+They do not establish installed-phone accuracy or deployed-host behavior.
 
 ## Data and lifetime
 
@@ -25,7 +26,8 @@ kept separately. This preserves self-correction context that baseline cleanup ma
 remove. Cursor context is not passed to the generative editor. Dictation is a JSON
 data field, not an instruction to answer; a system prompt and examples ask for
 fluent writing that preserves register, reasons, uncertainty and literal content.
-The prompt is implementation-owned and still being tuned.
+Only dictionary terms already present accompany it as protected spellings; absent
+names are never offered as suggestions. The prompt is implementation-owned.
 
 CPU execution uses four threads by default, one server slot and a request lock,
 2048 context positions, temperature zero, shared prompt KV caching, and bounded
@@ -45,7 +47,9 @@ Protection rejects:
 - Non-stop generation, empty output, model control markers or excessive expansion.
 - Changes to digit sequences relative to the authorized cleaned baseline, and
   changes to literal straight/smart double-quoted spans relative to source.
-- Changes in negation counts (with bounded self-correction `no` exceptions).
+- Changes in negation counts (with bounded self-correction `no` exceptions),
+  deletion of selected uncertainty/opinion markers, or changed explicit line layout.
+- Reversion of quoted content already formatted by the baseline from spoken controls.
 - Changed occurrence counts of configured dictionary phrases, including inserting
   a dictionary name absent from the source.
 - Large lexical drift according to a sequence-overlap heuristic.
@@ -72,12 +76,15 @@ word-by-word rewrite alignment. [Write's wire owner](../../remote/docs/write.md)
 describes client behavior. Both clients show a notice for guarded/unavailable
 outcomes while inserting the cleaned baseline. A null `rewrite` is possible on an
 engine instance constructed without a rewriter, not an accepted rewrite result.
+Meeting transcription sends `rewrite: false` on internal engine Start: it needs
+raw recognition, not an editor or unnecessary generation delay.
 
 This final stage is seconds-scale, unlike the recognition-only 100 ms flush
 objective. `timing.flushMs` includes recognizer drain, baseline cleanup and rewrite;
 `rewrite.latencyMs` isolates rewrite queue/inference time. Native Android waits up
 to 30 seconds after wire Finish. Speculative recognition/cleanup does not eliminate
-final rewrite latency. Final measured distributions are still pending.
+final rewrite latency. Seven exposed live pipeline sessions measured
+1.15–2.24 seconds; this is a bounded regression, not a general latency SLA.
 
 ## Reproduce
 
@@ -99,8 +106,8 @@ $PY apps/write/engine/benchmark_rewrite.py \
 
 The benchmark uses the deployed cleanup/punctuation models for its baseline;
 record those identities alongside the candidate source/model. `--count` permits
-1–4 cases; advance `--start` in separate bounded calls. Text controls are not
-acoustic or holdout proof. Paths above require a prepared engine containing the
+1–20 cases; `--start` selects smaller bounded slices. Text controls are not
+acoustic or untouched holdout proof. Paths above require a prepared engine containing the
 new runtime/model links; do not infer deployment from these example paths.
 
 Replay the two new synthetic acoustic controls against an already-running
@@ -128,6 +135,8 @@ Android microphone behavior or deployed latency.
   [cleanup owner](cleanup/README.md) retain earlier task-trained/0.6B comparisons.
   Their results do not measure this Qwen 4B path.
 
-New rewrite receipts must name exact source, prompt, model/runtime and corpus
-identities, distinguish authored controls from real ASR, and report guard outcomes
-alongside quality and latency rather than treating baseline retention as success.
+[Current receipts](rewrite-results/README.md) name source/model/runtime and corpus
+identities, distinguish authored controls from real ASR, and report guard outcomes.
+Returned-output success includes explicit baseline retention, not model success.
+Natural-target WER increases in this bounded set despite more fluent output;
+general rewriting and unfamiliar-name accuracy remain unproven.

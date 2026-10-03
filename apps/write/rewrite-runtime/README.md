@@ -25,6 +25,13 @@ preparation hashes both manifests and installer inputs, and retains the selected
 and previous engine's linked entries. Verified artifacts are reused across keys;
 `PI_STACK_WRITE_REWRITE_CACHE=/absolute/directory` can seed preparation with a
 previously downloaded artifact (its name is immaterial; size/hash must match).
+By default the seed directory is `/srv/pi/write-rewrite-cache`, outside engine
+retention. It contains only root-owned public model/runtime downloads, no state or
+credentials. This avoids unrelated releases removing prepared-but-unselected
+assets and forcing the same large download again. Missing seeds are downloaded
+into the component store; the cache is optional and safe to remove/rebuild.
+Standalone installation is not selection or a retention pin; `deploy/write-engine`
+creates the dependency links for a complete prepared engine.
 Copies become root-owned public files, never links into that cache. With no seed,
 only public HTTPS artifacts are downloaded. Deployment's 50-second outer deadline
 bounds resumable downloads; `.part` files survive an interrupted preparation.

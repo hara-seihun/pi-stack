@@ -40,9 +40,10 @@ The client sends `start` with dictionary and PCM format, binary frames, then `fi
 The [engine rewrite owner](../engine/REWRITE.md) describes the entirely local resident
 CPU Qwen3-4B-Instruct-2507 candidate, guarded output and explicit client notices.
 Final rewrite adds seconds-scale latency; `--final-timeout 30` is a measurement
-budget aligned with native Android's wait, not a measured SLA. Prompt tuning and
-final corpus measurements are underway. This corpus's existing baseline predates
-that path and the two new fixtures; do not treat it as candidate success evidence.
+budget aligned with native Android's wait, not a measured SLA. [Current rewrite
+results](../engine/rewrite-results/README.md) preserve quality limits and guard outcomes.
+This corpus's existing baseline predates that path and the two new fixtures;
+do not treat it as candidate success evidence.
 
 Finish variants:
 

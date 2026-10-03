@@ -159,6 +159,7 @@ def install(store, manifests=MANIFESTS, mode='install', cache=None):
             raise ValueError('Write rewrite runtime/model is missing or corrupt; run deploy/prepare')
     else:
         store.mkdir(parents=True, exist_ok=True, mode=0o755)
+        store.chmod(0o755)
         runtime_dir.mkdir(exist_ok=True, mode=0o755)
         model_dir.mkdir(exist_ok=True, mode=0o755)
         if not runtime_ready(runtime_dir, runtime):
@@ -188,8 +189,8 @@ def install(store, manifests=MANIFESTS, mode='install', cache=None):
                 'Base revision: ' + model['base_revision'] + '\n'
                 'Quantized weights: ' + model['file'] + '\n'
                 'Quantization source: ' + model['quantization_source'] + '\n')
-        public(model_dir)
         (model_dir / 'ready').touch(mode=0o644)
+        public(model_dir)
     return runtime_dir, model_dir
 
 

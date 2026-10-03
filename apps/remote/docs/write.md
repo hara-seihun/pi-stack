@@ -14,7 +14,8 @@ The source now adds an entirely local, resident CPU Qwen3-4B-Instruct-2507 edito
 after baseline cleanup; partials still use incremental source-constrained cleanup.
 No dictation goes to a cloud/pooled rewrite API. [Rewrite design and limits](../../write/engine/REWRITE.md)
 and [pinned runtime](../../write/rewrite-runtime/README.md) own implementation and installation.
-Prompt tuning and final measurements are underway; this contract does not claim deployment.
+[Bounded measurements](../../write/engine/rewrite-results/README.md) separate
+fluency improvements from retained failures; this contract does not claim deployment.
 
 `rewrite.status` is `applied` when accepted text differs from the baseline,
 `unchanged` when it does not, `guarded` when a candidate/input fails protection,
@@ -23,7 +24,8 @@ outcomes and a machine-readable reason otherwise. Guarded/unavailable outcomes
 return the cleaned baseline, not raw ASR. Both browser and Android explicitly show
 **Kept the original wording to avoid changing its meaning.** or
 **Local rewrite unavailable; inserted the transcript.** respectively. A null
-`rewrite` means the engine instance has no rewriter; it is not an applied rewrite.
+`rewrite` means no rewriter ran; it is not an applied rewrite. Internal meeting
+transcription sends `rewrite: false` at Start and consumes `raw` without an editor.
 When rewrite changes text, `edits` contains a whole-source `kind: "rewrite"` receipt;
 `raw` and recognition `words` remain unchanged. Raw is ASR output, not a guaranteed
 verbatim transcript.
@@ -32,7 +34,8 @@ Final rewrite is seconds-scale. `timing.flushMs` includes recognizer drain,
 baseline cleanup and rewrite; `rewrite.latencyMs` reports the rewrite's own
 queue/inference duration. Android's native final wait is 30 seconds after wire
 Finish, not a promised latency. The recognition-only 100 ms target does not cover
-this stage. Final latency/quality receipts remain pending.
+this stage. Seven combined loopback regressions measured 1.15–2.24 seconds;
+these are not installed-phone latency or general accuracy guarantees.
 
 ## Dictionary and correction learning
 

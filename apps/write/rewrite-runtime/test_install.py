@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import stat
 import tempfile
@@ -14,6 +15,12 @@ spec.loader.exec_module(installer)
 
 
 class InstallTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_umask = os.umask(0o077)
+
+    def tearDown(self):
+        os.umask(self.previous_umask)
+
     def fixture(self, root):
         cache = root / 'cache'
         cache.mkdir()

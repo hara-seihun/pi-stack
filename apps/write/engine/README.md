@@ -9,8 +9,9 @@ owns the resident CPU Qwen3-4B-Instruct-2507 path, guards, limits and reproducti
 [runtime installation](../rewrite-runtime/README.md) owns its pinned artifacts.
 [Audio evaluation](../eval/README.md) owns the licensed fixtures and replay tool;
 [local rewrite evaluation](../local-rewrite/README.md) owns the separate rejected
-Mumble candidate and reproducible scores. Qwen prompt tuning and final measurements
-are underway; this source description is not a deployment or corpus-success claim.
+Mumble candidate and reproducible scores. [Current Qwen measurements](rewrite-results/README.md)
+report returned-output quality, retained failures and guard decisions; this source
+description is not an installed-device or deployment claim.
 
 ## Dictionary support
 
@@ -67,8 +68,8 @@ when no speculative final was ready: completeness takes precedence over the
 These recognition-only timings exclude the new final rewrite. Finish with rewrite
 is seconds-scale, not the 100 ms recognition flush target; native Android waits up
 to 30 seconds after sending Finish. `timing.flushMs` includes rewrite, while
-`rewrite.latencyMs` isolates its queue/inference time. Final latency measurements
-are still underway.
+`rewrite.latencyMs` isolates its queue/inference time. Seven combined loopback
+regressions measured 1.15–2.24 seconds at immediate Finish; broader latency is unproven.
 
 Immediate and speculative finalization use the same right context. A speculative
 result is reusable only when its sample count exactly matches the received PCM;

@@ -24,4 +24,4 @@ cd apps/write/engine
 /srv/pi/write-engine/venv/bin/python -m unittest test_dictionary_decoder test_dictionary_scores -v
 ```
 
-Fourteen tests cover alternative support, segmentation/case independence, refunded prefix bonuses, single completion credit, replacement-source context, immutable forks, common-prefix streaming commitment, and preservation of a quotation control after a name. Public-audio replay also checks the server's stable-before-last-two-words contract at every 40 ms input step.
+Sixteen tests cover per-frame symbol-budget exhaustion, alternative support, segmentation/case independence, refunded prefix bonuses, single completion credit, replacement-source context, immutable forks, common-prefix streaming commitment, and preservation of a quotation control after a name. Public-audio replay also checks the server's stable-before-last-two-words contract at every 40 ms input step.

@@ -1,4 +1,7 @@
+import io
+import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +10,20 @@ from rewrite import LocalRewriter, guard, negations
 
 
 class RewriteGuardTest(unittest.TestCase):
+    def test_editor_receives_only_dictionary_terms_already_present(self):
+        runtime = object.__new__(LocalRewriter)
+        runtime.url, runtime.secret, runtime.timeout = 'http://127.0.0.1:1', 'test-key', 1
+        bodies = []
+        def response(request, **kwargs):
+            bodies.append(json.loads(request.data))
+            return io.BytesIO(b'{"choices":[{"message":{"content":"Call Kenan."},"finish_reason":"stop"}]}')
+        runtime.opener = SimpleNamespace(open=response)
+        runtime._request('Call Kenan.', {'words': ['Kenan', 'Kelana', 'Pi Stack']})
+        data = json.loads(bodies[0]['messages'][-1]['content'])
+        self.assertEqual(data['protectedTerms'], ['Kenan'])
+        self.assertEqual(data['dictation'], 'Call Kenan.')
+        self.assertNotIn('Kelana', bodies[0]['messages'][-1]['content'])
+
     def test_failed_runtime_launch_removes_its_private_key(self):
         keys = []
         def fail_launch(argv, **kwargs):
