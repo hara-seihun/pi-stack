@@ -203,7 +203,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
 
     private void start() {
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
-        if (identity == null || target == null || !eligible(target)) return;
+        if (identity == null || target == null || !target.refresh() || !eligible(target)) return;
         synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
         clipboardReady = false; waveLevel = 0; backlog = false;
         long attempt = ++generation;
@@ -349,7 +349,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         finishing = false; connecting = false;
         if (text == null || text.isBlank()) { idle(); return; }
         AccessibilityNodeInfo node = target;
-        if (node == null || !eligible(node) || node.getWindowId() != windowId) { fallback(text); return; }
+        if (node == null || !node.refresh() || !eligible(node) || node.getWindowId() != windowId) { fallback(text); return; }
         String original = fieldText(node);
         WriteText.Insertion result = WriteText.insert(original, node.getTextSelectionStart(), node.getTextSelectionEnd(), text);
         Bundle args = new Bundle();

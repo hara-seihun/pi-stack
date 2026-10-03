@@ -63,6 +63,7 @@ public class WriteAccessibilityServiceTest {
         WriteAccessibilityService service = withActiveSender();
         set(service, "target", node);
         set(service, "windowId", node.getWindowId());
+        shadowOf(node).setRefreshReturnValue(true);
         shadowOf(node).setOnPerformActionListener((action, args) -> true);
         call(service, "completed", dictated);
         var actions = shadowOf(node).getPerformedActionsWithArgs();
@@ -92,6 +93,16 @@ public class WriteAccessibilityServiceTest {
         AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain();
         node.setText("Existing text");
         assertEquals("Existing text", WriteAccessibilityService.fieldText(node));
+    }
+    @Test public void vanishedFieldCopiesTranscriptInsteadOfOverwritingStaleHint() throws Exception {
+        WriteAccessibilityService service = withActiveSender();
+        AccessibilityNodeInfo node = editable("Type a message", true);
+        set(service, "target", node);
+        set(service, "windowId", node.getWindowId());
+        shadowOf(node).setRefreshReturnValue(false);
+        call(service, "completed", "Keep this transcript");
+        assertTrue((boolean) get(service, "clipboardReady"));
+        assertTrue(shadowOf(node).getPerformedActions().isEmpty());
     }
     @Test public void emptyResultFencesSenderBeforeClearingAudio() throws Exception {
         WriteAccessibilityService service = withActiveSender();
