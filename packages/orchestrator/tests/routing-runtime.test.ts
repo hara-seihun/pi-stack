@@ -148,6 +148,60 @@ console.log('fresh naming account selected');
   finally{await rm(root,{recursive:true,force:true});}
 },fixtureTestTimeout);
 
+test('native pooled refusal makes one request, then resumes the same failed work once without replaying its input', async () => {
+  const root=await mkdtemp(join(tmpdir(),'pi-native-provider-wait-')),fixture=join(root,'fixture.mjs');
+  await writeFile(fixture,`
+import assert from 'node:assert/strict';
+import {mkdirSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {openPiSession} from ${JSON.stringify(join(buildRoot,'compiled/threads/pi-session.js'))};
+import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
+import {SessionManager} from ${JSON.stringify(sdk)};
+const root=process.env.HOME,dir=join(root,'agent');mkdirSync(dir);
+writeFileSync(join(dir,'auth.json'),'{}');writeFileSync(join(dir,'models.json'),${JSON.stringify(JSON.stringify(customModelConfig))});
+writeFileSync(join(root,'auth.json'),JSON.stringify({'anthropic-2':{type:'oauth',access:'test',refresh:'test',expires:Date.now()+3600000}}));
+const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);store.upsertAccount({id:'anthropic-2',provider:'anthropic'});
+let requests=0,refuse=true;
+globalThis.fetch=async()=>{
+  requests++;
+  if(refuse)return new Response(JSON.stringify({type:'error',error:{type:'rate_limit_error',message:'account rate limit'}}),{status:429,headers:{'content-type':'application/json'}});
+  const events=[
+    ['message_start',{type:'message_start',message:{id:'fixture',type:'message',role:'assistant',content:[],model:'claude-opus-5-5',stop_reason:null,stop_sequence:null,usage:{input_tokens:10,output_tokens:0}}}],
+    ['content_block_start',{type:'content_block_start',index:0,content_block:{type:'text',text:''}}],
+    ['content_block_delta',{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'real work delivered'}}],
+    ['content_block_stop',{type:'content_block_stop',index:0}],
+    ['message_delta',{type:'message_delta',delta:{stop_reason:'end_turn',stop_sequence:null},usage:{output_tokens:4}}],
+    ['message_stop',{type:'message_stop'}]];
+  return new Response(events.map(([name,data])=>'event: '+name+'\\ndata: '+JSON.stringify(data)+'\\n\\n').join(''),{headers:{'content-type':'text/event-stream'}});
+};
+const events=[],settlers=[];
+const output=event=>{events.push(event);if(event.type==='agent_settled'&&event.workIds?.includes('accepted'))settlers.shift()?.(event);};
+const next=()=>new Promise(resolve=>settlers.push(resolve));
+const options={cwd:root,threadId:'native-wait',sessionFile:join(root,'history.jsonl'),args:['--raw','--provider','anthropic','--model','claude-opus-5-5','--thinking','high'],env:{PI_CODING_AGENT_DIR:dir,PI_ORCHESTRATOR_ASSIGNED:'1',PI_ORCHESTRATOR_ACCOUNT_ID:'anthropic-2'}};
+let session=await openPiSession(options,output,()=>{});
+try{
+  const failed=next();await session.command({type:'prompt',id:'initial',workId:'accepted',message:'finish the real work'});
+  const result=await failed;assert.equal(result.outcome,'failed');assert.equal(requests,1,'native retry must not resubmit a refused account');
+  assert.match(result.lastAssistantMessage.errorMessage,/Pooled account round finished/);
+  await session.close();refuse=false;store.setCooldown('anthropic-2',undefined);
+  session=await openPiSession(options,output,()=>{});
+  const recovered=next();await session.command({type:'prompt',id:'recover',workId:'accepted',message:'finish the real work',resume:true,resumeProviderWait:true});
+  const final=await recovered;assert.equal(final.outcome,'complete');assert.equal(requests,2);assert.equal(final.lastAssistantMessage.model,'claude-opus-5-5');
+  await session.command({type:'prompt',id:'duplicate',workId:'accepted',message:'finish the real work',resume:true,resumeProviderWait:true});
+  assert.equal(events.find(event=>event.id==='duplicate').success,false,'success cannot be resumed as provider waiting');
+  const history=SessionManager.open(options.sessionFile).getBranch();
+  assert.equal(history.filter(entry=>entry.type==='custom'&&entry.customType==='thread_input').length,1);
+  assert.equal(history.filter(entry=>entry.type==='message'&&entry.message.role==='user').length,1);
+  assert.equal(history.filter(entry=>entry.type==='custom'&&entry.customType==='thread_resume').length,1);
+}finally{await session.close();store.close();}
+console.log('native provider wait recovered exactly once');
+`);
+  const env={...process.env,HOME:root,PI_CODING_AGENT_DIR:join(root,'agent'),PI_ORCHESTRATOR_LEDGER:join(root,'ledger.sqlite3'),PI_ORCHESTRATOR_AUTH:join(root,'auth.json'),PI_ORCHESTRATOR_ASSIGNED:'0',PI_OFFLINE:'1'};
+  for(const key of Object.keys(env))if(/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key))delete env[key as keyof typeof env];
+  try{const result=await runFixture([fixture],{cwd:root,env},20_000);expect(result.stdout).toContain('native provider wait recovered exactly once');}
+  finally{await rm(root,{recursive:true,force:true});}
+},25_000);
+
 test('native history cannot overwrite an explicit thread model and thinking selection', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-explicit-model-'));
   const fixture = join(root, 'fixture.mjs');

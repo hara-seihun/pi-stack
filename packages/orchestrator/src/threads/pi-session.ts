@@ -14,7 +14,8 @@ import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
-import routing, { EXPLICIT_THREAD_MODEL_ENV, resolveSessionModel } from "../extension/routing.js";
+import routing, { EXPLICIT_THREAD_MODEL_ENV, POOLED_ACCOUNT_WAIT, resolveSessionModel } from "../extension/routing.js";
+import { isRateLimitError } from "../provider-errors.js";
 import usageLogger from "../extension/usage-logger.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
@@ -135,6 +136,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         if (entry.customType === "thread_input" && data?.workId) acceptedWorkIds.add(data.workId);
         if (entry.customType === "thread_rejected" && data?.workId) acceptedWorkIds.delete(data.workId);
         if (entry.customType === "thread_settled") for (const id of data?.workIds ?? []) completedWorkIds.add(id);
+        if (entry.customType === "thread_resume" && data?.workId) completedWorkIds.delete(data.workId);
       }
       return { acceptedWorkIds: [...acceptedWorkIds], completedWorkIds: [...completedWorkIds] };
     }
@@ -280,7 +282,15 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
               const workId = String(command.workId);
               const existing = receipts();
               if (existing.acceptedWorkIds.includes(workId)) {
-                if (command.resume === true && !existing.completedWorkIds.includes(workId)) {
+                const settled = [...branch()].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_settled" && (entry.data as {workIds?:string[]}).workIds?.includes(workId));
+                const last = lastAssistant();
+                const capacityResume = command.resumeProviderWait === true && settled?.type === "custom"
+                  && (settled.data as {outcome?:string}).outcome === "failed" && last?.role === "assistant" && last.stopReason === "error"
+                  && (isRateLimitError(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
+                if (command.resumeProviderWait === true && existing.completedWorkIds.includes(workId) && !capacityResume) {
+                  response(false, "Cannot resume completed work without a provider capacity failure"); return;
+                }
+                if (command.resume === true && (!existing.completedWorkIds.includes(workId) || capacityResume)) {
                   if (!runtime.session.isIdle || execution.active || executionStart !== undefined) { response(false, "Cannot resume active Pi execution"); return; }
                   const receipt = branch().find(entry => entry.type === "custom" && entry.customType === "thread_input" && (entry.data as { workId?: string }).workId === workId);
                   activeWork.add(workId);

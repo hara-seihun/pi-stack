@@ -291,6 +291,94 @@ it("records why a capacity refusal is waiting, keeps the work queued, and clears
   expect(service.get(thread.id)?.metadata?.admissionWait).toBeUndefined();
 });
 
+it("keeps provider-exhausted accepted work unsettled across restart and resumes the same work after capacity recovery",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-provider-wait-"));roots.push(directory);
+  const sessions:FakePiSession[]=[],release=vi.fn();
+  let available=true;
+  const admit=vi.fn(async(..._args:unknown[])=>available?{ok:true as const,value:{release}}:{ok:false as const,error:{code:"unavailable" as const,message:"anthropic-2: cooling until reset"}});
+  const openSession:OpenPiSession=async(options,output)=>{
+    const session=new FakePiSession(options,output);
+    if(sessions.length){session.acceptedWorkIds.add("accepted");session.completedWorkIds.add("accepted");session.lastAssistantMessage={role:"assistant",stopReason:"error",errorMessage:"429 account rate limit"};}
+    sessions.push(session);return session;
+  };
+  const options={databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit};
+  const service=new ThreadService(options);services.push(service);
+  value(service.importThread({id:"child",parentId:"parent",title:"child",cwd:directory,sessionFile:join(directory,"child.jsonl"),settings:{model:"anthropic/claude-opus-5-5",thinkingLevel:"high",speed:"standard"}}));
+  value(service.importMessage({id:"accepted",threadId:"child",text:"finish the real work"}));
+  await service.start();await waitFor(()=>sessions[0]?.isStreaming===true);
+  available=false;
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:"429 account rate limit"});
+  await waitFor(()=>sessions[0]!.closed&&service.get("child")?.metadata?.providerWait!==undefined);
+  expect(release).toHaveBeenCalledOnce();
+  expect(service.latestSettlement("child")).toBeNull();
+  expect(service.pending("child")).toMatchObject([{id:"accepted",state:"dispatched"}]);
+  expect(await service.command("child",{type:"get_state"})).toMatchObject({ok:true,value:{source:"thread-owner",isStreaming:false,threadState:"running",pendingWorkCount:1,providerWait:{workId:"accepted"}}});
+  expect(sessions).toHaveLength(1);
+  const db=new DatabaseSync(options.databasePath);
+  const executionId=db.prepare("SELECT id FROM thread_execution WHERE ended_at IS NULL").get()!.id;
+  expect(db.prepare("SELECT id FROM thread_work WHERE source='notification'").all()).toEqual([]);db.close();
+  service.reconcile();await turn();expect(sessions).toHaveLength(1);
+  value(await service.detach());
+  const reopened=new ThreadService(options);services.push(reopened);await reopened.start();await turn();
+  expect(sessions).toHaveLength(1);
+  expect(reopened.get("child")?.metadata?.providerWait).toBeDefined();
+  available=true;reopened.reconcile();await waitFor(()=>sessions[1]?.isStreaming===true);
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({workId:"accepted",resume:true,resumeProviderWait:true});
+  expect(sessions[1]!.options.args).toEqual(expect.arrayContaining(["anthropic","claude-opus-5-5","high"]));
+  expect(reopened.get("child")?.metadata?.providerWait).toBeUndefined();
+  sessions[1]!.settle("artifact delivered");await waitFor(()=>reopened.latestSettlement("child")!==null);
+  expect(reopened.latestSettlement("child")).toMatchObject({executionId,workId:"accepted",outcome:"complete"});
+  expect(admit.mock.calls.at(-1)?.[2]).toBe(false);
+  expect(admit.mock.calls.at(-1)?.[3]).toBe(executionId);
+});
+
+it("cold pooled startup without quota waits without consuming the startup failure budget",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-cold-capacity-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];let available=false;
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+    openSession:async(options,output)=>{if(!available)throw new Error("No eligible pooled account for anthropic/claude-opus-5-5");const session=new FakePiSession(options,output);sessions.push(session);return session;}});services.push(service);
+  await service.start();const thread=value(await service.spawn({requestId:"cold-capacity",cwd:directory,message:"work"}));
+  await waitFor(()=>service.get(thread.id)?.metadata?.admissionWait!==undefined);
+  for(let i=0;i<4;i++){service.reconcile();await turn();}
+  expect(service.get(thread.id)?.metadata?.startupFailure).toBeUndefined();expect(service.latestSettlement(thread.id)).toBeNull();
+  expect(service.pending(thread.id)).toMatchObject([{state:"queued"}]);
+  available=true;service.reconcile();await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settle("done");await waitFor(()=>service.latestSettlement(thread.id)!==null);
+});
+
+it("model-broker capacity waits respect a durable retry schedule rather than immediate re-admission",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-broker-wait-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+    openSession:async(options,output)=>{const session=new FakePiSession(options,output);sessions.push(session);return session;},
+    admit:async()=>({ok:true,value:{env:{PI_MODEL_BROKER_URL:"http://127.0.0.1:2461"},release(){}}})});services.push(service);
+  await service.start();const thread=value(await service.spawn({requestId:"broker-wait",cwd:directory,message:"work"}));
+  await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:"429 rate limit"});
+  await waitFor(()=>sessions[0]!.closed);
+  const wait=service.get(thread.id)!.metadata!.providerWait as {retryAt:number;broker:boolean};expect(wait.broker).toBe(true);
+  service.reconcile();await turn();service.reconcile();await turn();expect(sessions).toHaveLength(1);
+  vi.spyOn(Date,"now").mockReturnValue(wait.retryAt+1);service.reconcile();await waitFor(()=>sessions[1]?.isStreaming===true);
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({resumeProviderWait:true});
+  sessions[1]!.settle("done");await waitFor(()=>service.latestSettlement(thread.id)!==null);
+});
+
+it("stop cancels provider waiting without reopening or retrying a model",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-provider-stop-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];let available=true;
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+    openSession:async(options,output)=>{const session=new FakePiSession(options,output);sessions.push(session);return session;},
+    admit:async()=>available?{ok:true,value:{release(){}}}:{ok:false,error:{code:"unavailable",message:"quota exhausted"}}});services.push(service);
+  await service.start();const thread=value(await service.spawn({requestId:"stop-wait",cwd:directory,message:"work"}));
+  await waitFor(()=>sessions[0]?.isStreaming===true);available=false;
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:"429 quota exhausted"});
+  await waitFor(()=>sessions[0]!.closed);
+  value(await service.control({threadId:thread.id,action:"stop",descendants:false}));
+  available=true;service.reconcile();await turn();
+  expect(sessions).toHaveLength(1);expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
+  expect(service.get(thread.id)?.metadata?.providerWait).toBeUndefined();
+});
+
 it("settles a thread whose admission refusal can never succeed instead of waiting on it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-admission-reject-")); roots.push(directory);
   const sessions: FakePiSession[] = [];

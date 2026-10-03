@@ -7,6 +7,7 @@ import type { PiEvent, Result, Thread, ThreadSettings } from "./threads/contract
 import type { ThreadAdmission } from "./threads/service.js";
 import { BROKER_ROUTES } from "./model-broker-contract.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { modelDrainsMeter } from "./catalog.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
 
@@ -39,7 +40,14 @@ export class Fleet {
       const selected = held ? { assignment: { ...candidate, accountId: held.account_id }, refusals: [] }
         : assign(this.store, "thread", admissionClass(thread),
           { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user", excluded);
-      if (!selected.assignment) return { ok: false, error: { code: "unavailable", message: selected.refusals.map(item => `${item.accountId}: ${item.reason}`).join("; ") } };
+      if (!selected.assignment) {
+        const now=Date.now();
+        const opportunities=this.store.accounts().filter(account=>account.provider===candidate.provider&&!excluded.has(account.id)).map(account=>{
+          const exhausted=this.store.latestMeters(account.id).filter(meter=>meter.used_percent>=100&&modelDrainsMeter(candidate.provider,candidate.model,meter.meter_id));
+          return Math.max(account.cooldownUntil??0,...exhausted.map(meter=>meter.reset_at>now?meter.reset_at:now+60_000));
+        }).filter(time=>time>now);
+        return {ok:false,error:{code:"unavailable",message:selected.refusals.map(item=>`${item.accountId}: ${item.reason}`).join("; "),retryAt:opportunities.length?Math.min(...opportunities):now+60_000}};
+      }
       const assignment = selected.assignment;
       this.store.createLease(leaseId, assignment.accountId, "fleet", thread.id);
       if (rootRepair) this.store.setControl("repair-owner", thread.id);
@@ -106,7 +114,8 @@ export class Fleet {
     // one throttle cooled the only healthy Anthropic account while three workers
     // kept being admitted onto one at its monthly limit, and all three failed).
     const model = typeof message.model === "string" ? message.model : undefined;
-    if (message.stopReason === "error" && isRateLimitError(failure)) this.store.setCooldown(lease.accountId, Date.now() + rateLimitCooldownMs(failure), { model });
+    if (message.stopReason === "error" && isRateLimitError(failure)) this.store.transaction(()=>this.store.setCooldown(lease.accountId,
+      Math.max(this.store.account(lease.accountId)?.cooldownUntil??0,Date.now()+rateLimitCooldownMs(failure)),{model}));
     else if (message.stopReason === "error" && isCredentialError(failure)) this.store.setCooldown(lease.accountId, Date.now() + 30 * 60_000, { model });
     else if (providerAccepted(message)) this.store.recordProviderSuccess(lease.accountId, { model: model!, startedAt: Number(message.timestamp), source: "fleet" });
     if (!message.usage) return;

@@ -1,5 +1,5 @@
 import { completionFeedbackRefusal } from "./completion-feedback.js";
-import { admissionThinking, catalogMeter, type ModelCandidate } from "./catalog.js";
+import { admissionThinking, catalogMeter, modelDrainsMeter, type ModelCandidate } from "./catalog.js";
 import { reservationMatchesRun } from "./admission-reservation.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
 import type { Store } from "./store.js";
@@ -18,10 +18,10 @@ const HOUR=3_600_000;
 const HISTORY=6*HOUR;
 
 /** Account availability and background pacing, not a desired worker count. */
-export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),runId?:string):Capacity{
+export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),runId?:string,model?:string):Capacity{
   const account=store.account(accountId)!;
   const multiplier=Number(store.control(`boost:${account.provider}`)??"1");
-  const meters=store.latestMeters(accountId);
+  const meters=store.latestMeters(accountId).filter(meter=>!model||modelDrainsMeter(account.provider,model,meter.meter_id));
   const spent=Math.max(0,...meters.map((m)=>Number(m.used_percent)));
   const meterAt=meters.length?Math.max(...meters.map((m)=>Number(m.observed_at))):undefined;
   const stop=(reason:string):Capacity=>({sessions:0,spent,meterAt,reason});
@@ -91,7 +91,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
       if(excludedAccounts.has(account.id)){refusals.push({accountId:account.id,reason:"requested service tier unavailable"});continue;}
-      const capacity=accountCapacity(store,account.id,budget,cfg,now,runId);
+      const capacity=accountCapacity(store,account.id,budget,cfg,now,runId,candidate.model);
       const active=store.activeSessionLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
       const admitted=(store.db.prepare("SELECT last_admitted_meter_at FROM account WHERE id=?").get(account.id) as any)?.last_admitted_meter_at;

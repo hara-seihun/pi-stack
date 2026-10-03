@@ -6,9 +6,11 @@ import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
 import { isRunContext } from "../isolated-context-contract.js";
-import { isModelConfigurationError } from "../provider-errors.js";
+import { isModelConfigurationError, isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
+import { POOLED_ACCOUNT_WAIT, pooledRetryAvailability } from "../extension/routing.js";
 import { modelBrokerUrl } from "../model-broker-contract.js";
 import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
+import { threadSettingsMetadata } from "./settings-metadata.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
@@ -48,7 +50,7 @@ class NativeRejection extends Error {}
 class AdmissionWait extends Error {}
 interface Runtime {
   session: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings;
-  finalMessage?: Json; outcome?: WorkOutcome; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
+  finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
 const bad = <T = never>(code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed", message: string): Result<T> => ({ ok: false, error: { code, message } });
@@ -256,9 +258,9 @@ export class ThreadService implements ThreadApi {
   private admissionWait(id: string, error: ThreadError): void {
     if (this.suspended || this.closed) return;
     const existing = this.get(id)?.metadata?.admissionWait as Json | undefined;
-    const wait = { code: error.code, message: error.message, since: existing?.message === error.message ? existing.since : Date.now(), observedAt: Date.now() };
+    const wait = { code: error.code, message: error.message, since: existing?.message === error.message ? existing.since : Date.now(), observedAt: Date.now(), ...(error.retryAt ? { retryAt:error.retryAt } : {}) };
     this.sql("UPDATE thread SET metadata=json_set(metadata,'$.admissionWait',json(?)) WHERE id=?").run(JSON.stringify(wait), id);
-    if (existing?.message !== error.message) this.changed(id);
+    if (existing?.message !== error.message || existing?.retryAt !== error.retryAt) this.changed(id);
   }
   private clearAdmissionWait(id: string): void {
     if (this.suspended || this.closed) return;
@@ -280,6 +282,9 @@ export class ThreadService implements ThreadApi {
         if (this.closed || this.suspended || error instanceof AdmissionWait) return;
         if (this.runtimes.has(id) || this.row(id)?.held || this.halts.has(id)) throw error;
         const message = errorText(error);
+        if(/No eligible pooled account|(?:Saved|Pinned) model .*has no (?:eligible pooled|available) account/.test(message)){
+          this.admissionWait(id,{code:"unavailable",message});return;
+        }
         const work = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
         if (!work) throw error;
         const prior = this.get(id)?.metadata?.startupFailure as Json | undefined;
@@ -760,7 +765,13 @@ export class ThreadService implements ThreadApi {
           if (saved?.response) return JSON.parse(saved.response) as Result<unknown>;
           receipt = !!prior.value;
         }
-        const execution = this.execution(id), settings = execution ? JSON.parse(execution.settings) : this.get(id)!.settings;
+        const execution = this.execution(id), thread=this.get(id)!, settings = execution ? JSON.parse(execution.settings) : thread.settings;
+        if(command.type==="get_state"&&!this.runtimes.has(id)&&!this.opening.has(id)&&!thread.metadata?.runnerReference&&(!execution||thread.metadata?.providerWait)){
+          return good({...threadSettingsMetadata(settings),source:"thread-owner",sessionFile:thread.sessionFile,sessionName:thread.title,
+            isStreaming:false,isCompacting:false,isBashRunning:false,localTools:0,pendingCommandCount:0,pendingMessageCount:0,
+            threadState:thread.state,pendingWorkCount:thread.pendingMessages,providerWait:thread.metadata?.providerWait,
+            lastAssistantMessage:this.latestSettlement(id)?.finalMessage??null});
+        }
         let runtime = await this.open(id, settings, !!execution);
         if (this.runtimes.get(id) !== runtime) runtime = await this.open(id, this.get(id)!.settings, false);
         const observing = ["get_state", "get_context", "get_messages", "get_session_stats", "get_available_models", "get_available_thinking_levels", "get_commands", "get_fork_messages", "set_session_name", "extension_ui_response"].includes(command.type);
@@ -837,12 +848,24 @@ export class ThreadService implements ThreadApi {
   private async openOwned(id: string, settings: ThreadSettings, recovering: boolean, extraEnv: Record<string, string | undefined>): Promise<Runtime> {
     const thread = this.get(id)!;
     const recoveredExecution = recovering ? this.execution(id) : undefined;
+    const providerWait = recoveredExecution && thread.metadata?.providerWait as Json | undefined;
+    if(providerWait?.broker && Date.now()<providerWait.retryAt)throw new AdmissionWait("Waiting for model-broker capacity retry");
+    if(providerWait && !this.options.admit){
+      const env={...process.env,...this.options.environment?.(thread)};
+      const ready=modelBrokerUrl(env)||!/^(?:anthropic|openai-codex)(?:-\d+)?\//.test(settings.model)?{available:Date.now()>=providerWait.retryAt,retryAt:providerWait.retryAt}:pooledRetryAvailability(settings.model,env);
+      if(!ready.available){
+        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.providerWait.retryAt',?) WHERE id=?").run(ready.retryAt,id);
+        this.admissionWait(id,{code:"unavailable",message:`Provider capacity unavailable for ${settings.model}; next known opportunity ${new Date(ready.retryAt).toISOString()}`});
+        throw new AdmissionWait("Provider capacity unavailable");
+      }
+    }
     let recoveredAdmission: ThreadAdmission | undefined;
     if (recoveredExecution && this.options.admit) {
-      const admitted = await this.options.admit(thread, settings, true, recoveredExecution.id);
+      const admitted = await this.options.admit(thread, settings, !providerWait, recoveredExecution.id);
       if (!admitted.ok) {
         if (admitted.error.code === "unavailable") {
           this.admissionWait(id, admitted.error);
+          if(providerWait&&admitted.error.retryAt)this.sql("UPDATE thread SET metadata=json_set(metadata,'$.providerWait.retryAt',?) WHERE id=?").run(admitted.error.retryAt,id);
           throw new AdmissionWait(admitted.error.message);
         }
         throw new Error(admitted.error.message);
@@ -868,6 +891,7 @@ export class ThreadService implements ThreadApi {
       PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined };
     const brokerUrl = modelBrokerUrl(env);
     if (brokerUrl) env.PI_MODEL_BROKER_URL = brokerUrl;
+    runtime.broker=!!brokerUrl;
     this.runtimes.set(id, runtime);
     try {
       runtime.session = await this.options.openSession({ threadId: id, cwd: thread.cwd, sessionFile: thread.sessionFile,
@@ -881,12 +905,13 @@ export class ThreadService implements ThreadApi {
         runtime.executionId = execution.id;
         const accepted = new Set<string>(state.acceptedWorkIds ?? []), completed = new Set<string>(state.completedWorkIds ?? []);
         const works = this.sql("SELECT * FROM thread_work WHERE execution_id=? AND status!='done' ORDER BY ordinal").all(execution.id) as Json[];
-        if (!runtime.busy && completed.has(execution.work_id)) {
+        if (!runtime.busy && completed.has(execution.work_id) && !providerWait) {
           const last = state.lastAssistantMessage;
           await this.finish(id, runtime, last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete", last ?? null);
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
-          await this.rpc(runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null });
+          await this.rpc(runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null, ...(providerWait ? { resumeProviderWait: true } : {}) });
+          if(providerWait)this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait') WHERE id=?").run(id);
           this.sql("UPDATE thread_work SET landed_at=COALESCE(landed_at,?) WHERE id=?").run(Date.now(), work.id);
           runtime.busy = true;
         }
@@ -1055,13 +1080,32 @@ export class ThreadService implements ThreadApi {
     this.sql("UPDATE thread SET state='idle',metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(error, id);
     this.changed(id);
   }
+  private async waitForProvider(id:string,runtime:Runtime|undefined,execution:Json,failure:string):Promise<void>{
+    const prior=this.get(id)?.metadata?.providerWait as Json|undefined;
+    const wait={executionId:execution.id,workId:execution.work_id,failure,since:prior?.since??Date.now(),retryAt:Date.now()+rateLimitCooldownMs(failure),broker:runtime?.broker??prior?.broker??false};
+    this.sql("UPDATE thread SET state='running',metadata=json_set(metadata,'$.providerWait',json(?)) WHERE id=?").run(JSON.stringify(wait),id);
+    this.admissionWait(id,{code:"unavailable",message:`Accepted work is waiting for provider capacity: ${failure}`});
+    if(runtime){
+      runtime.busy=false;
+      if(runtime.lease){const lease=runtime.lease;runtime.lease=undefined;await lease.release();}
+      // Keep execution/work custody in SQLite, but retire the idle native runner.
+      runtime.executionId=undefined;
+      await this.retire(id,runtime);
+    }
+    this.changed(id);
+  }
   private async finish(id: string, runtime: Runtime | undefined, outcome: WorkOutcome, finalMessage: Json | null, error?: string): Promise<void> {
     if (this.suspended || this.closed) return;
+    const failure=error??finalMessage?.errorMessage??"";
     const execution = this.execution(id); if (!execution || runtime && runtime.executionId !== execution.id) { if (runtime) runtime.busy = false; return; }
+    if(outcome==="failed"&&!this.row(id)?.held&&(isRateLimitError(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
+      await this.waitForProvider(id,runtime,execution,failure);return;
+    }
     const thread = this.get(id)!, workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
     this.transaction(() => {
       this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, Date.now(), execution.id);
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait') WHERE id=?").run(id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
       if (thread.metadata?.ephemeral && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
         this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);

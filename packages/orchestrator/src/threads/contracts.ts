@@ -2,7 +2,7 @@ export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
 import type { ThreadCreator } from "./caller.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; requestId?: string };
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
