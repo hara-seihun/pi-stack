@@ -64,6 +64,7 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertFalse(any(call[0] in ('useradd','usermod','chown','nft') for call in calls))
         units=self.root/'etc/systemd/system'
         self.assertIn('User=root',(units/'pi-kenan-custody.service').read_text())
+        self.assertNotIn('StateDirectory=',(units/'pi-kenan-custody.service').read_text())
         self.assertIn('User=pi-kenan',(units/'pi-kenan-root.service').read_text())
         room=(units/'pi-rooms.service').read_text()
         self.assertNotIn('JoinsNamespaceOf',room); self.assertNotIn('LoadCredential=kenan-memory-root',room)
@@ -136,5 +137,12 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.command('prepare'); self.command('cutover')
         acl=subprocess.check_output(['getfacl','-cpn',str(directory)],text=True)
         self.assertIn('user:62000:r-x',acl); self.assertIn('user:65010:rwx',acl)
+        self.assertIn('user:64000:rwx',acl)
+        self.assertIn('default:user:64000:rwx',acl)
+        self.assertIn('default:user:65010:rwx',acl)
+        parent_acl=subprocess.check_output(['getfacl','-cpn',str(self.root/'alice')],text=True)
+        self.assertNotIn('user:64000:rwx',parent_acl)
+        file_acl=subprocess.check_output(['getfacl','-cpn',str(directory/'original')],text=True)
+        self.assertNotIn('user:64000:rwx',file_acl)
 
 if __name__=='__main__': unittest.main()
