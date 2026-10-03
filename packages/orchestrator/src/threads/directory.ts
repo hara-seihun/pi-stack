@@ -10,6 +10,10 @@ export class ThreadDirectory implements ThreadApi {
     this.owners = [local, ...peers];
     if (new Set(this.owners.map(owner => owner.id)).size !== this.owners.length) throw new Error("Thread owner IDs must be unique");
   }
+  async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
+    const person = this.owners.find(owner => owner.id === "person");
+    return person ? person.api.watch(input) : { ok: false, error: { code: "unavailable", message: "This person has no unlocked watch list owner" } };
+  }
   async owner(threadId: string): Promise<Result<ThreadOwner>> {
     if (!threadId) return error("invalid_request", "A thread ID is required");
     for (const owner of this.owners) {

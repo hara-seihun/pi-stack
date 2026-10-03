@@ -31,6 +31,7 @@ export { admissionFor, callerResolver, hostIdentityConfig, threadCapability, THR
 export type { CallerResolver, CallerSource, ThreadCaller, ThreadCapability, ThreadCreator } from "./threads/caller.js";
 export { openPiSession } from "./threads/pi-session.js";
 export { createSharedPiSessionOpener } from "./threads/runner-transport.js";
+export { WatchList, watchInterval, DEFAULT_WATCH_INTERVAL_MS, type WatchRequest, type WatchResponse, type WatchItem } from "./threads/watch-list.js";
 export { ThreadDirectory, type ThreadOwner } from "./threads/directory.js";
 export { importRemoteThreads } from "./threads/import.js";
 export type { LaneManifest, LaneSpec, LaneReadiness, Run } from "./domain.js";

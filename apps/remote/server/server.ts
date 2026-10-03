@@ -7,7 +7,7 @@ import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
+import { WatchList, watchInterval, loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -278,6 +278,21 @@ threads.setDirectory(directory, (parent, input) => {
   const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
   return privatePath(parent.cwd) || privatePath(input.cwd) ? undefined : fleet ?? undefined;
 });
+const watchList = new WatchList({
+  databasePath: join(DATA, "threads.sqlite3"), threads,
+  intervalMs: watchInterval(process.env.PI_REMOTE_WATCH_INTERVAL_MS),
+  enabled: process.env.PI_REMOTE_WATCH_ENABLED !== "0",
+  placement: () => {
+    const profileId = process.env.PI_REMOTE_WATCH_DESTINATION ?? "home";
+    const destination = THREAD_DESTINATIONS.get(profileId);
+    if (!destination || destination.sandbox || destination.raw) return { ok: false, error: { code: "invalid_request", message: `Watch destination ${profileId} must be an offered full-context destination` } };
+    const admitted = workspaceAdmission.resolve(destination.workspaceId);
+    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId } } }
+      : { ok: false, error: { code: "unavailable", message: admitted.error.message } };
+  },
+  onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
+});
+threads.setWatchList(watchList);
 const peerThreads = new Map<string, Thread>();
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
@@ -2632,6 +2647,7 @@ refreshPlanUsageIfDue();
 void refreshPeers();
 
 unwrap(await threads.start());
+watchList.start();
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
 const stopAutoArchive = startAutoArchive(directory, AUTO_ARCHIVE_AFTER_MS, error => console.error("[supervisor] auto-archive failed", error), thread => Boolean((unreadThread.get(thread.id) as { idle_unread: number } | null)?.idle_unread),
   thread => typeof thread.metadata?.meetingId === "string" && meet.isLive(thread.metadata.meetingId));
@@ -2674,6 +2690,7 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  watchList.stop();
   stopAutoArchive();
   clearInterval(uploadPruner);
   clearInterval(namingReceipts);
@@ -2701,7 +2718,7 @@ const supervisorRelease = new SupervisorRelease({
     runner.detach();
   },
   detach: () => threads.detach(),
-  closeImages: async () => { speech?.close(); await messaging.close(); await closeImageGeneration(); },
+  closeImages: async () => { await watchList.close(); speech?.close(); await messaging.close(); await closeImageGeneration(); },
   stopServer: () => { server.stop(true); },
   closeDatabase: () => db.close(),
   exit: code => process.exit(code),

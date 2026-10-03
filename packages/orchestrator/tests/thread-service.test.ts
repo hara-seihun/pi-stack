@@ -558,7 +558,8 @@ async function settle(session: FakePiSession, service: ThreadService, threadId: 
 }
 
 describe("ThreadService", () => {
-  it("archives an ephemeral worker only after its final queued assignment, retaining its result", async () => {
+  it("archives an ephemeral worker only after its final queued assignment, retaining its result even when both settlements share a millisecond", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
     const { service, directory, sessions } = fixture();
     const root = value(await service.spawn({ requestId: "root", cwd: directory }));
     expect(await service.spawn({ requestId: "invalid-root", cwd: directory, ephemeral: true })).toMatchObject({ ok: false, error: { code: "invalid_request" } });

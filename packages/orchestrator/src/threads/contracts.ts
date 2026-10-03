@@ -178,6 +178,7 @@ export type ThreadControl =
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
   | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };
 export interface ThreadApi {
+  watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;
   questions(threadId: string): Promise<Result<ThreadQuestion[]>>;
   answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>>;

@@ -60,6 +60,10 @@ Everything runs as the person's own Unix user. A process that deliberately reads
 
 `request_user_input_async` stores a pending question with its thread owner and returns immediately. Suggestions have no fixed count; one may be explicitly recommended. Human answers combine zero or more selections with free text, with only an entirely empty answer rejected. Durable question identity correlates the answer to its question, and ordinary human steer delivery supplies it at a safe boundary without cancelling work. Questions remain pending beyond the current turn and across restarts. The [Remote question contract](../apps/remote/docs/questions.md) describes the shared client and API.
 
+## Personal watch list
+
+Every normal thread can maintain its person's [watch list](watch-list.md) with `watch_list`, `watch_list_add`, `watch_list_update` and `watch_list_remove`. The unlocked Remote supervisor stores it in the existing encrypted thread database and starts a visible Opus 5.5 check only for due items. Major decisions use the asynchronous question tool. Fleet tools route to the person's owner rather than storing private checks in the fleet ledger. Watch checks are root conversations visible in Chats but cannot create workers.
+
 ## Relationships and notifications
 
 Threads can list all accessible threads in their current environment or their direct children, read persisted history without starting a recipient, and steer or hard steer other accessible threads. Humans may also queue messages. Workers retain these collaboration tools but cannot spawn. Parentage determines discovery and automatic notifications, not aggregate execution state.

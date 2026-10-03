@@ -309,6 +309,7 @@ export class Daemon {
     }
     const directory=new ThreadDirectory({id:"fleet",api:this.threads},owners);
     this.threads.setDirectory(directory);
+    for (const service of this.isolated.values()) service.setWatchList(directory);
     return directory;
   }
   private laneActive(laneId:string):number{return this.threads.snapshot().filter(thread=>thread.metadata?.laneId===laneId&&thread.state==="running").length;}

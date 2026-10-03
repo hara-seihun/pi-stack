@@ -45,6 +45,6 @@ Browser and Android clients switch endpoints through same-origin `/v1/remotes/<i
 
 ## Architecture
 
-[Unified threads](docs/threads.md) describes Orchestrator-owned conversations, shared Pi execution, messaging, cancellation and model defaults. Remote, fleet lanes and agents use the same thread operations.
+[Unified threads](docs/threads.md) describes Orchestrator-owned conversations, shared Pi execution, messaging, cancellation and model defaults. Remote, fleet lanes and agents use the same thread operations. The [personal watch list](docs/watch-list.md) lets agents maintain persistent checks and wakes an Opus 5.5 thread only when work is due.
 
 [`docs/architecture.md`](docs/architecture.md) describes repository boundaries, environment identity, Android state isolation, and the work-thread cutover.

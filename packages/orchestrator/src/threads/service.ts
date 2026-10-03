@@ -70,6 +70,14 @@ export class ThreadService implements ThreadApi {
   private closed = false;
   private suspended = false;
   private directory?: ThreadApi;
+  private watchList?: import("./watch-list.js").WatchApi;
+  setWatchList(watchList: import("./watch-list.js").WatchApi): void { this.watchList = watchList; }
+  async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    if (this.watchList) return this.watchList.watch(input);
+    if (this.options.workersOnly && this.directory) return this.directory.watch(input);
+    return bad("unavailable", "This person has no unlocked watch list owner");
+  }
   private workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined;
   private routing = false;
   private transactionDepth = 0;
@@ -206,7 +214,7 @@ export class ThreadService implements ThreadApi {
   }
   live(id: string): Json | undefined { return this.projections.get(id)?.live; }
   latestSettlement(id: string): import("./contracts.js").ThreadSettlement | null {
-    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,id DESC LIMIT 1").get(id) as Json | undefined;
+    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,settlement_seq DESC,id DESC LIMIT 1").get(id) as Json | undefined;
     return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
   }
   async inspect(id: string, options: InspectOptions = {}): Promise<Result<ThreadInspection>> {
@@ -344,7 +352,7 @@ export class ThreadService implements ThreadApi {
       if (input.ephemeral && !parent) return bad("invalid_request", "Only subagents can be ephemeral");
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
-      if (parent && (parent.parentId || parent.role === "worker")) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
+      if (parent && (parent.parentId || parent.role === "worker" || parent.metadata?.watchList)) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
       if (parent?.metadata?.sandbox) return bad("invalid_request", "Sandbox threads cannot create workers");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
@@ -842,7 +850,7 @@ export class ThreadService implements ThreadApi {
       PI_THREAD_DATABASE: this.options.databasePath,
       // Explicit false survives JSON transport and overrides older runners' launch environment.
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",
-      PI_THREAD_CAN_SPAWN: sandbox || thread.role === "worker" ? "0" : "1",
+      PI_THREAD_CAN_SPAWN: sandbox || thread.role === "worker" || thread.metadata?.watchList ? "0" : "1",
       PI_THREAD_MODE: isThreadModeName(thread.metadata?.mode) ? thread.metadata.mode : undefined,
       PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined };
     const brokerUrl = modelBrokerUrl(env);

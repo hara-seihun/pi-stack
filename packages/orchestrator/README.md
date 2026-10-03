@@ -6,6 +6,8 @@ Pi Orchestrator runs persistent Pi threads against pooled subscription accounts.
 
 [Ordinary Unix users](docs/ordinary-users.md) use separate local state and a model-only broker. The host binds each broker listener to a Unix UID through packet filtering and explicitly grants account aliases. Ordinary users never receive owner OAuth credentials, owner ledger access or fleet API access. The same native providers supply chat, compaction and image generation.
 
+The [personal watch list](../../docs/watch-list.md) is maintained through tools shared by Remote and Orchestrator agents. Its scheduler and encrypted state belong to the person's Remote supervisor, not a fleet lane or recurring schedule.
+
 ## Runtime model
 
 The daemon reconciles provider meters, weighted lanes and optional readiness probes. A lane has a positive weight, not a worker target. Eligible lanes spawn threads through the ordinary API. A wave is a one-off batch. [Recurring jobs](docs/schedules.md) start fresh threads on durable fixed intervals without cron or another runtime.

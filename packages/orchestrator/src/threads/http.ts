@@ -11,7 +11,7 @@ export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number;
 export type ThreadAdmission = (operation: string, input: Record<string, any>) => Promise<AdmissionResult>;
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const operations = ["ask", "questions", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
+const operations = ["watch", "ask", "questions", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -55,8 +55,8 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
   const base = baseUrl.replace(/\/$/, "");
   async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
     const body = JSON.stringify(input ?? {});
-    const requestId = (["send", "spawn", "ask"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
-    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "answer", "settlements"].includes(operation);
+    const requestId = (["send", "spawn", "ask", "watch"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
+    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "answer", "settlements"].includes(operation) || operation === "watch" && (input as { action?: string })?.action === "list";
     const terminal = (value: Result<T>): Result<T> => value.ok ? value
       : { ok: false, error: { ...value.error, retryable: false, ...(requestId ? { requestId } : {}) } };
     const inherited = requestContext.getStore();
@@ -97,6 +97,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
       message: `Thread ${operation} ${reason}: ${lastError}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}` } };
   }
   return {
+    watch: input => call("watch", input),
     ask: input => call("ask", input), questions: threadId => call("questions", { threadId }), answer: input => call("answer", input),
     spawn: input => call("spawn", input), send: input => call("send", input), list: input => call("list", input),
     read: input => call("read", input), control: input => call("control", input),
