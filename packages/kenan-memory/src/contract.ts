@@ -48,7 +48,7 @@ export type MemoryRequest =
   | { operation: "read"; ids: string[]; context: ReadContext }
   | { operation: "forget"; ids: string[]; mode: ForgetMode }
   | { operation: "log-disclosure"; disclosure: DisclosureInput }
-  | { operation: "disclosures"; context: ReadContext; limit?: number }
+  | { operation: "disclosures"; context: ReadContext; limit?: number; about?: PersonId }
   | { operation: "finalize-turn"; context: ReadContext; reply: string }; 
 export type MemoryValue = { finalized: string[] } | { id: string; forgotten: true } | MemoryItem | MemoryRead<MemoryItem[]> | Disclosure | MemoryRead<Disclosure[]> | { forgotten: string[]; mode: ForgetMode };
 export type MemoryError = "disabled" | "unauthenticated" | "invalid-request" | "unavailable";

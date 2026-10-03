@@ -46,12 +46,13 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_") || key === EXPLICIT_THREAD_MODEL_ENV) delete env[key];
   delete env.PI_KENAN_MEMORY_PERSON;
   delete env.PI_KENAN_MEMORY_TOKEN;
+  delete env.PI_KENAN_MEMORY_ROLE;
   if (options.env.PI_REMOTE_ROOM_ID === undefined) delete env.PI_REMOTE_ROOM_ID;
   if (options.env.PI_REMOTE_ROOMS_RUNTIME === undefined) delete env.PI_REMOTE_ROOMS_RUNTIME;
   const room = isRoomSession(env, options.threadId);
   if (room && !oneKenanEnabled(env)) throw new Error("Room execution requires the oneKenan host flag");
-  const memoryEnabled = oneKenanEnabled(env) && !isRawSession(options.args) && !options.args.includes(SANDBOX_ARGUMENT)
-    && !options.args.includes("--orchestrator-context");
+  const memoryEligible = !isRawSession(options.args) && !options.args.includes(SANDBOX_ARGUMENT) && !options.args.includes("--orchestrator-context");
+  const memoryEnabled = memoryEligible && oneKenanEnabled(env);
   if (memoryEnabled) await prepareMemoryEnvironment(env, options.threadId);
   modeEnvironment(env);
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
@@ -76,7 +77,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       cwd = requirePiCwd(admission, cwd, "runtime.cwd");
       if (sandbox && cwd !== options.cwd) throw new Error("Sandbox sessions cannot switch workspaces");
       preparePiSession(sessionManager);
-      const memoryFactories = memoryEnabled ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
+      const memoryFactories = memoryEligible ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
         const api = options.threads ?? createThreadClient(env.PI_THREAD_API_URL!, fetch, { token: env.PI_THREAD_TOKEN });
         const result = await api.ask({ threadId: options.threadId, requestId: `${options.threadId}:${id}`, questions: [{ question, suggestions }] });
         if (!result.ok) throw new Error(`Cannot ask which forget mode: ${JSON.stringify(result)}`);

@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Disclosure, DisclosureInput, ForgetMode, MemoryInput, MemoryItem, MemoryRead, ReadContext } from "./contract.js";
+import type { Disclosure, DisclosureInput, ForgetMode, MemoryInput, MemoryItem, MemoryRead, ReadContext, MemoryRole, MemoryResult, MemorySession, RootAdmission, RootFinalizeReply } from "./contract.js";
 
 export class MemoryStore {
   readonly db: Database;
@@ -14,7 +14,8 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, body TEXT NOT NULL, stopped INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS dedup(key TEXT PRIMARY KEY, id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS disclosures(id TEXT PRIMARY KEY, body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, person TEXT NOT NULL, thread TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, person TEXT NOT NULL, thread TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'person');
+      CREATE TABLE IF NOT EXISTS root_runs(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(id UNINDEXED, text, tokenize='porter unicode61');
       INSERT INTO memory_search(memory_search,rank) VALUES('secure-delete',1);
       CREATE TRIGGER IF NOT EXISTS memory_search_insert AFTER INSERT ON memories WHEN new.stopped=0 BEGIN
@@ -30,6 +31,8 @@ export class MemoryStore {
       INSERT INTO memory_search(id,text) SELECT id,json_extract(body,'$.text') FROM memories
         WHERE stopped=0 AND id NOT IN (SELECT id FROM memory_search);
     `);
+    const columns = this.db.query("PRAGMA table_info(sessions)").all() as { name: string }[];
+    if (!columns.some(column => column.name === "role")) this.db.exec("ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT 'person'");
   }
   close() { this.db.close(); }
   write(person: string, input: MemoryInput): MemoryItem | { id: string; forgotten: true } {
@@ -49,7 +52,7 @@ export class MemoryStore {
       return item;
     })();
   }
-  search(person: string, context: ReadContext, query: string, about?: string[], limit = 20): MemoryRead<MemoryItem[]> {
+  search(person: string, context: ReadContext, query: string, about?: string[], limit = 20, role: MemoryRole = "root"): MemoryRead<MemoryItem[]> {
     const terms = query.match(/[\p{L}\p{N}]+/gu) ?? [];
     if (query.trim() && !terms.length) return this.report(person, context, []);
     const clauses: string[] = [];
@@ -62,15 +65,19 @@ export class MemoryStore {
       clauses.push(`EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value IN (${about.map(() => "?").join(",")}))`);
       parameters.push(...about);
     }
+    if (role === "person") {
+      clauses.push(this.ownClause());
+      parameters.push(person, person, person);
+    }
     parameters.push(Math.min(100, Math.max(1, limit)));
     const join = terms.length ? "JOIN memory_search ON memory_search.id=memories.id" : "";
     const ranking = terms.length ? "bm25(memory_search)," : "";
     const rows = this.db.query(`SELECT body FROM memories ${join} WHERE stopped=0 ${clauses.length ? `AND ${clauses.join(" AND ")}` : ""} ORDER BY ${ranking} json_extract(body,'$.recordedAt') DESC,memories.id DESC LIMIT ?`).all(...parameters) as { body: string }[];
     return this.report(person, context, rows.map(row => JSON.parse(row.body)));
   }
-  read(person: string, context: ReadContext, ids: string[]): MemoryRead<MemoryItem[]> {
-    const query = this.db.query("SELECT body FROM memories WHERE id=? AND stopped=0");
-    const items = ids.flatMap(id => { const row = query.get(id) as { body: string } | null; return row ? [JSON.parse(row.body)] : []; });
+  read(person: string, context: ReadContext, ids: string[], role: MemoryRole = "root"): MemoryRead<MemoryItem[]> {
+    const query = this.db.query(`SELECT body FROM memories WHERE id=? AND stopped=0 ${role === "person" ? `AND ${this.ownClause()}` : ""}`);
+    const items = ids.flatMap(id => { const row = query.get(id, ...(role === "person" ? [person, person, person] : [])) as { body: string } | null; return row ? [JSON.parse(row.body)] : []; });
     return this.report(person, context, items);
   }
   forget(ids: string[], mode: ForgetMode): { forgotten: string[]; mode: ForgetMode } {
@@ -93,18 +100,61 @@ export class MemoryStore {
     this.db.query("INSERT INTO disclosures(id,body) VALUES(?,?)").run(disclosure.id, JSON.stringify(disclosure));
     return disclosure;
   }
-  disclosures(person: string, context: ReadContext, limit = 50): MemoryRead<Disclosure[]> {
-    const rows = this.db.query(`SELECT body FROM disclosures WHERE EXISTS(SELECT 1 FROM json_each(json_extract(disclosures.body,'$.about')) WHERE value=?) ORDER BY json_extract(body,'$.occurredAt') DESC,id DESC LIMIT ?`).all(person, Math.min(100, Math.max(1, limit))) as { body: string }[];
+  disclosures(person: string, context: ReadContext, limit = 50, role: MemoryRole = "root", subject = person): MemoryRead<Disclosure[]> {
+    const own = role === "person" ? "AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(disclosures.body,'$.about')) WHERE value<>?)" : "";
+    const rows = this.db.query(`SELECT body FROM disclosures WHERE EXISTS(SELECT 1 FROM json_each(json_extract(disclosures.body,'$.about')) WHERE value=?) ${own} ORDER BY json_extract(body,'$.occurredAt') DESC,id DESC LIMIT ?`).all(subject, ...(role === "person" ? [person] : []), Math.min(100, Math.max(1, limit))) as { body: string }[];
     return this.report(person, context, rows.map(row => JSON.parse(row.body)));
   }
-  session(person: string, threadId: string): { person: string; threadId: string; token: string } {
+  session(person: string, threadId: string, role: MemoryRole = "person"): MemorySession {
     const token = randomUUID() + randomUUID();
-    this.db.query("INSERT INTO sessions(token,person,thread) VALUES(?,?,?)").run(token, person, threadId);
-    return { person, threadId, token };
+    this.db.query("INSERT INTO sessions(token,person,thread,role) VALUES(?,?,?,?)").run(token, person, threadId, role);
+    return { person, threadId, token, role };
   }
-  resolveSession(token: string): { person: string; threadId: string } | undefined {
-    const row = this.db.query("SELECT person,thread FROM sessions WHERE token=?").get(token) as { person: string; thread: string } | null;
-    return row ? { person: row.person, threadId: row.thread } : undefined;
+  resolveSession(token: string): { person: string; threadId: string; role: MemoryRole } | undefined {
+    const row = this.db.query("SELECT person,thread,role FROM sessions WHERE token=?").get(token) as { person: string; thread: string; role: MemoryRole } | null;
+    return row ? { person: row.person, threadId: row.thread, role: row.role } : undefined;
+  }
+  canForget(person: string, ids: string[]): boolean {
+    const query = this.db.query("SELECT id FROM memories WHERE id=? AND json_extract(body,'$.recordedBy')=? AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value<>?)");
+    return ids.every(id => !!query.get(id, person, person));
+  }
+  private ownClause(): string {
+    return `((json_extract(memories.body,'$.recordedBy')=? AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value<>?)) OR (json_extract(memories.body,'$.source.action') IS NOT NULL AND json_extract(memories.body,'$.obviouslyPrivate')=0 AND EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value=?)))`;
+  }
+  admitRoot(person: string, threadId: string, recipients: string[], subjects: string[], roomId?: string, rootSessionId = randomUUID()): RootAdmission {
+    return this.db.transaction(() => {
+      const memory = this.session(person, rootSessionId, "root");
+      const admission: RootAdmission = { person, threadId, recipients, subjects, rootSessionId, memoryToken: memory.token, ...(roomId ? { roomId } : {}) };
+      this.db.query("INSERT INTO root_runs(id,body) VALUES(?,?)").run(rootSessionId, JSON.stringify(admission));
+      return admission;
+    })();
+  }
+  rootAdmission(id: string): RootAdmission | undefined {
+    const row = this.db.query("SELECT body FROM root_runs WHERE id=?").get(id) as { body: string } | null;
+    return row ? JSON.parse(row.body) : undefined;
+  }
+  finalizeRootReply(input: RootFinalizeReply): MemoryResult<Disclosure> {
+    return this.db.transaction((): MemoryResult<Disclosure> => {
+      const admission = this.rootAdmission(input.rootSessionId);
+      if (!admission) return { ok: false, error: "invalid-request", message: "Unknown root session" };
+      if (input.recipients && [...input.recipients].sort().join("\0") !== [...admission.recipients].sort().join("\0"))
+        return { ok: false, error: "unauthenticated", message: "Root reply audience differs from admission" };
+      const id = `root-reply-${input.rootSessionId}`;
+      const prior = this.db.query("SELECT body FROM disclosures WHERE id=?").get(id) as { body: string } | null;
+      if (prior) {
+        const old = JSON.parse(prior.body) as Disclosure;
+        return old.text === input.reply ? { ok: true, value: old } : { ok: false, error: "invalid-request", message: "Root reply was already finalized with different text" };
+      }
+      const reads = this.db.query("SELECT body FROM disclosures WHERE json_extract(body,'$.kind')='memory-read' AND json_extract(body,'$.setting.threadId')=?").all(input.rootSessionId) as { body: string }[];
+      const about = [...new Set([...admission.subjects, admission.person, ...input.subjects, ...reads.flatMap(row => (JSON.parse(row.body) as Disclosure).about)])];
+      const now = new Date().toISOString();
+      const disclosure: Disclosure = { id, rootSessionId: input.rootSessionId, kind: "root-reply", text: input.reply, finalReply: input.reply,
+        about, to: admission.recipients, setting: { person: admission.person, threadId: admission.threadId, ...(admission.roomId ? { roomId: admission.roomId } : {}) },
+        occurredAt: now, finalizedAt: now, recordedBy: "kenan" };
+      this.db.query("INSERT INTO disclosures(id,body) VALUES(?,?)").run(id, JSON.stringify(disclosure));
+      this.db.query("DELETE FROM sessions WHERE token=?").run(admission.memoryToken);
+      return { ok: true, value: disclosure };
+    })();
   }
   finalize(person: string, context: ReadContext, reply: string): { finalized: string[] } {
     const id = this.readLogId(person, context);

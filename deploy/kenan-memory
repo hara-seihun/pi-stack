@@ -12,7 +12,7 @@ pi_stack_prepare_dependencies "$root"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-kenan-memory.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 rsync -a "$root/packages/kenan-memory/src" "$root/packages/kenan-memory/dist" \
-  "$root/packages/kenan-memory/discretion.md" "$root/packages/kenan-memory/package.json" "$stage/"
+  "$root/packages/kenan-memory/discretion.md" "$root/packages/kenan-memory/person.md" "$root/packages/kenan-memory/package.json" "$stage/"
 ln -s "$(readlink -f "$runtime/node_modules")" "$stage/node_modules"
 printf '%s\n' "$commit" > "$stage/.pi-stack-commit"
 pi_stack_publish_release "$root" "$stage" "$dest" kenan-memory

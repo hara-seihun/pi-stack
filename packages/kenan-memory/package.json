@@ -10,6 +10,7 @@
     "./private-store": { "types": "./dist/private-store.d.ts", "bun": "./src/private-store.ts", "default": "./dist/private-store.js" },
     "./tools": { "types": "./dist/tools.d.ts", "bun": "./src/tools.ts", "default": "./dist/tools.js" },
     "./session": { "types": "./dist/session.d.ts", "bun": "./src/session.ts", "default": "./dist/session.js" },
+    "./private-store": { "types": "./dist/private-store.d.ts", "bun": "./src/private-store.ts", "default": "./dist/private-store.js" },
     "./journal": { "types": "./dist/journal.d.ts", "bun": "./src/journal.ts", "default": "./dist/journal.js" }
   },
   "scripts": { "build": "tsc -p tsconfig.json", "test": "bun test tests", "start": "bun src/main.ts" },
