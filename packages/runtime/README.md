@@ -35,6 +35,27 @@ On 2026-09-05, a running worker retained a native extension requiring 0.34.0 whi
 
 That version's QA text predicate misses phrases split across React text nodes, including Pi Remote's client revision footer. [`patch-browser-qa.mjs`](patch-browser-qa.mjs) repairs the pinned dependency during [`deploy/runtime`](../../deploy/runtime). It joins visible text across adjacent nodes and inline markup, preserves block boundaries, and excludes hidden text. Its source participates in the immutable dependency key, and an upstream source change that no longer matches fails deployment. [`browser-doctor.mjs`](browser-doctor.mjs) compiles the installed QA predicate on every host release. Its disposable browser checks a heading split across spans, verifies a PNG screenshot and downloads a loopback attachment through a current `@ref`, requiring verified artifact metadata and exact file bytes before the release can activate.
 
+## Anthropic error tool-result content
+
+[`patch-anthropic-error-content.mjs`](patch-anthropic-error-content.mjs) normalizes
+error tool results to text at the Anthropic wire boundary, in both SDK and bundled
+CLI providers. Non-text blocks become MIME-labelled references to the preserved
+native tool-result history; existing text and the error flag stay intact. Successful
+tool results still carry images. No native history is mutated or deleted.
+Deployment hashes the patch into the immutable dependency identity.
+[`anthropic-error-content.test.mjs`](anthropic-error-content.test.mjs) checks both
+provider copies, mixed/image-only/text-only/empty errors, successful images,
+idempotence and native-history immutability.
+
+October 2, 2026: a failed browser batch included a successful screenshot alongside
+its failed scroll. Anthropic rejected every later turn with `all content must be
+type text if is_error is true`. The Comedy Review Study Synthesis thread was held
+through its owner, a complete repaired native file retained every entry with just
+the offending inline image replaced by a reference to its byte-preserved encrypted
+PNG, and the owner adopted that file using a serialized `switch_session` command.
+The original JSONL and per-entry/file SHA256 evidence remain in the person's
+private thread store. Opus and all user messages were retained.
+
 ## Codex transport framing
 
 [`patch-codex-sse.mjs`](patch-codex-sse.mjs) repairs Pi 0.87.1's LF-only SSE frame splitter in both the SDK and bundled CLI Codex providers. Compaction tests exposed valid CRLF frames being joined into malformed JSON. Deployment applies the patch to the immutable dependency tree and includes its source in that tree's hash. [`codex-sse.test.mjs`](codex-sse.test.mjs) exercises both copies with LF, CRLF and one-byte chunks. The extension observes response bytes without replacing Pi's parser.
