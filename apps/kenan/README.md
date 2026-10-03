@@ -88,7 +88,7 @@ npm run android:test --workspace=kenan
 
 Kenan is a thin shell: the APK carries a built-in copy of the shared web client, and a published web bundle for the same shell replaces that copy in place. Only changes to the native layer need a new APK.
 
-`release-info.mjs` derives a `shellId` from the tracked native inputs: `apps/kenan/android` without its unit tests, `capacitor.config.json` and `package.json`. Gradle embeds it in `BuildConfig.SHELL_ID`. Every publication produces two artifacts from one build: the APK, and a zip of the APK's own `assets/public` as the web bundle, both carrying the same revision, version code and shell identity. A web-only change keeps the shell identity; a native change produces a new one.
+`release-info.mjs` derives a `shellId` from the tracked native inputs: `apps/kenan/android` without its unit tests, `capacitor.config.json` and `package.json`. It also hashes the compiled `piRemoteRouterUrl` and `piRemotePublicRouterUrl` from ignored `android/local.properties`, because those are native fields: changing the bootstrap reaches installed apps as an APK, not as a web bundle that would leave the old URL compiled in. Gradle embeds it in `BuildConfig.SHELL_ID`. Every publication produces two artifacts from one build: the APK, and a zip of the APK's own `assets/public` as the web bundle, both carrying the same revision, version code and shell identity. A web-only change keeps the shell identity; a native change produces a new one.
 
 Kenan checks the bootstrap router's public `GET /v1/app-update` when the app opens or returns to the foreground. The response carries `release` (the APK) and `web` (the bundle). The shell decides:
 
