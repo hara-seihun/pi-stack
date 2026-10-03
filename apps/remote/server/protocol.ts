@@ -13,6 +13,10 @@ export type { InlineImage, InlineImageSnapshot };
 
 export interface HostAuthentication { type: "oidc"; loginPath: "/v1/auth/login"; label: string }
 
+/** The coordination network this deployment expects clients to join, and whether the current request arrived over it. */
+export interface PrivateNetwork { id: string; name: string; loginServer: string }
+export type NetworkStatus = { network: PrivateNetwork; connected: boolean } | { network: null };
+
 export interface EnvironmentEndpoint {
   id: string;
   name: string;

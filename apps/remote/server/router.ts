@@ -12,6 +12,7 @@ import { proxyWebsocket, type ProxySocketData } from "./proxy-websocket";
 import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
+import { networkStatus, readPrivateNetwork } from "./private-network";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -35,6 +36,7 @@ const grants = new Map(PEOPLE.map((person) => [person.user, personEnvironments(p
 const byUser = new Map(PEOPLE.map((person) => [person.user, person]));
 const oidcSettings = readOidcSettings();
 const login = oidcSettings ? new OidcLogin(oidcSettings) : null;
+const privateNetwork = readPrivateNetwork();
 const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
@@ -372,6 +374,7 @@ async function route(req: Request, url: URL): Promise<Response> {
     const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
     return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key" });
   }
+  if (url.pathname === "/v1/network" && req.method === "GET") return Response.json(networkStatus(privateNetwork, req));
   const asset = webResponse(WEB_DIR, url.pathname, req.method, req);
   if (asset) return asset;
 
