@@ -25,7 +25,6 @@ const WEB_DIR = join(import.meta.dir, "../web/dist");
 const UNLOCK_TIMEOUT_MS = Number(process.env.PI_REMOTE_UNLOCK_TIMEOUT_MS ?? "20000");
 const VERSION = "2.0.0";
 
-const ROOT_DEBUG = rootDebugConfig();
 const PEOPLE = listPersons();
 if (PEOPLE.length === 0) throw new Error("Pi Remote knows no persons; add one with `pi-remote person add`");
 const environmentIds = new Set(PEOPLE.map((person) => String(person.environment.PI_REMOTE_ENVIRONMENT_ID ?? "local")));
@@ -417,8 +416,14 @@ async function route(req: Request, url: URL): Promise<Response> {
     sessions.revoke(person.user);
     return locked(person.user);
   }
-  const rootDebug = await rootDebugResponse(req, { authenticatedUser: authenticated.user, persons: PEOPLE, config: ROOT_DEBUG, signal: authenticated.signal });
-  if (rootDebug) return rootDebug;
+  if (url.pathname === "/v1/admin/root-sessions" || url.pathname.startsWith("/v1/admin/root-sessions/")) {
+    try {
+      const rootDebug = await rootDebugResponse(req, { authenticatedUser: authenticated.user, persons: listPersons(), config: rootDebugConfig(), signal: authenticated.signal });
+      if (rootDebug) return rootDebug;
+    } catch {
+      return (await rootDebugResponse(req, { authenticatedUser: authenticated.user, persons: [], config: null }))!;
+    }
+  }
   if (url.pathname === "/v1/lock-status") return Response.json({ user: person.user, unlocked: true });
   if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments: publicEnvironments(grants.get(person.user)!) });
   const destination = proxyDestination(person, url);

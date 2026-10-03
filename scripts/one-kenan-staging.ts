@@ -66,6 +66,7 @@ esac
     return {
       PATH: `${join(this.root, "bin")}:${process.env.PATH}`, HOME: home, USER: user ?? "staging", LANG: "C.UTF-8",
       TMPDIR: this.root, PI_STACK_HOST_FILE: this.hostFile, PI_STACK_HOST_CONFIG: this.hostFile,
+      PI_KENAN_CONFIG: join(this.root, "one-kenan.json"),
       PI_REMOTE_PERSONS_DIR: join(this.root, "persons"), PI_REMOTE_KEY_DIR: join(this.root, "keys"),
       PI_REMOTE_UPSTREAM_CREDENTIAL_DIR: join(this.root, "upstream-credentials"),
       PI_REMOTE_ROOMS_DB: join(this.root, "rooms.sqlite3"),
