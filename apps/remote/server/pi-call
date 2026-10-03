@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (!args.length || args[0] === "--help") {
-  console.log("Usage: pi-call status | list | preflight | start --brief FILE | show ID | end ID | context ID --fact FILE\nBrief JSON: {to:'+15551234567',contactName?,purpose,shareableFacts:[],opening,maxSeconds?}. Every brief field must be safe to tell the recipient. Context FILE contains one explicitly shareable fact. Private files and thread history are never automatically sent to Voice.");
+  console.log("Usage: pi-call status | gateways | list | preflight | start [--gateway ID] --brief FILE | show ID | end ID | context ID --fact FILE\nBrief JSON: {to:'+15551234567',contactName?,purpose,shareableFacts:[],opening,maxSeconds?}. Every brief field must be safe to tell the recipient. Context FILE contains one explicitly shareable fact. Private files and thread history are never automatically sent to Voice.");
   process.exit(0);
 }
 try {
@@ -12,7 +12,20 @@ try {
   let path = "/status", method = "GET", body: unknown;
   if (command === "list") path = "/calls";
   else if (command === "preflight") { path = "/preflight"; method = "POST"; }
-  else if (command === "start" && id === "--brief" && args[2]) { path = "/calls"; method = "POST"; body = JSON.parse(readFileSync(args[2], "utf8")); }
+  else if (command === "gateways") path = "/gateways";
+  else if (command === "start") {
+    let briefFile: string | undefined, gatewayId: string | undefined;
+    for (let i = 1; i < args.length; i += 2) {
+      const value = args[i + 1];
+      if (!value || !["--brief", "--gateway"].includes(args[i]!)) throw new Error("Use start [--gateway ID] --brief FILE");
+      if (args[i] === "--brief" && !briefFile) briefFile = value;
+      else if (args[i] === "--gateway" && !gatewayId) gatewayId = value;
+      else throw new Error("Duplicate start option");
+    }
+    if (!briefFile) throw new Error("An approved --brief FILE is required");
+    const brief = JSON.parse(readFileSync(briefFile, "utf8"));
+    path = gatewayId ? "/sim-calls" : "/calls"; method = "POST"; body = gatewayId ? { gatewayId, brief } : brief;
+  }
   else if (command === "show" && id) path = `/calls/${encodeURIComponent(id)}`;
   else if (command === "end" && id) { path = `/calls/${encodeURIComponent(id)}`; method = "DELETE"; }
   else if (command === "context" && id && args[2] === "--fact" && args[3]) { path = `/calls/${encodeURIComponent(id)}/context`; method = "POST"; body = { shareableFact: readFileSync(args[3], "utf8").trim() }; }
