@@ -21,6 +21,9 @@ export const PHONE_HELP = `usage: pi-phone [--phone DEVICE_ID] [--timeout MS] OP
   open URL                     Open Android URL handler
   clipboard TEXT               Set clipboard
   notifications                List notifications
+  say TEXT [X Y]               Speak in Kenan's overlay bubble (optionally from X Y)
+  point X Y [TEXT]             Fly Kenan's dot to X Y, highlight it, optional bubble
+  overlay show|hide|clear      Show, hide or reset Kenan's overlay dot
   files list [PHONE_PATH]       List phone directory
   files read PHONE_PATH --output LOCAL_PATH
   files write PHONE_PATH --input LOCAL_PATH [--overwrite --confirm]
@@ -84,6 +87,11 @@ export function parsePhoneArgs(argv: string[], readStdin: () => string = () => r
     case "swipe": command = "ui.swipe"; args = { x1: numeric(0), y1: numeric(1), x2: numeric(2), y2: numeric(3), ...(values[4] === undefined ? {} : { durationMs: numeric(4) }) }; if (values.length < 4 || values.length > 5) return { ok: false, message: "swipe requires X1 Y1 X2 Y2 [MS]" }; break;
     case "text": command = "ui.text"; args = { text: values[0], ...(values[1] === undefined ? {} : { nodeId: values[1] }) }; if (values.length < 1 || values.length > 2) return { ok: false, message: "text requires TEXT [NODE_ID]" }; break;
     case "action": command = "ui.action"; args = { nodeId: values[0], action: values[1] }; if (values.length !== 2) return { ok: false, message: "action requires NODE_ID ACTION" }; break;
+    case "say": command = "overlay.say"; args = { text: values[0], ...(values.length === 3 ? { x: numeric(1), y: numeric(2) } : {}) }; if (values.length !== 1 && values.length !== 3) return { ok: false, message: "say requires TEXT [X Y]" }; break;
+    case "point": command = "overlay.point"; args = { x: numeric(0), y: numeric(1), ...(values[2] === undefined ? {} : { text: values.slice(2).join(" ") }) }; if (values.length < 2) return { ok: false, message: "point requires X Y [TEXT]" }; break;
+    case "overlay":
+      if (values.length !== 1 || !["show", "hide", "clear"].includes(values[0]!)) return { ok: false, message: "overlay requires show|hide|clear" };
+      command = `overlay.${values[0]}`; args = {}; break;
     case "global": case "launch": case "open": case "clipboard":
       if (values.length !== 1) return { ok: false, message: `${operation} requires one argument` };
       command = ({ global: "ui.global", launch: "app.launch", open: "url.open", clipboard: "clipboard.set" })[operation]!;

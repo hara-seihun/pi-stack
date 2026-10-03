@@ -2,6 +2,8 @@ export const PHONE_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const PHONE_MAX_FILE_BYTES = 1024 * 1024;
 export const PHONE_DEFAULT_TIMEOUT_MS = 15_000;
 export const PHONE_MAX_TIMEOUT_MS = 60_000;
+export const OVERLAY_MAX_SAY = 2000;
+export const OVERLAY_MAX_MESSAGE = 8000;
 
 type Field = { type: "string" | "number" | "boolean" | "object" | "array"; required?: boolean; values?: readonly string[]; min?: number; max?: number; description?: string; nullable?: boolean };
 export type PhoneCommand = { command: string; description: string; permission?: string; mutation: boolean; args: Record<string, Field>; result?: string };
@@ -21,6 +23,13 @@ export const PHONE_COMMANDS: readonly PhoneCommand[] = [
   c("ui.action", "Perform an accessible node action", true, { nodeId: str(), action: choice(["click", "longClick", "focus", "scrollForward", "scrollBackward", "paste"]) }, "accessibility"),
   c("ui.global", "Perform an Android global action", true, { action: choice(["back", "home", "recents", "notifications", "quickSettings", "lock"]) }, "accessibility"),
   c("screen.capture", "Capture unprotected screen content; rate limited by Android", false, {}, "screenshots", "{mime:'image/png',base64,width,height}"),
+  c("overlay.show", "Show Kenan's overlay dot (persists on the phone)", true, {}, "accessibility", "{visible}"),
+  c("overlay.hide", "Hide Kenan's overlay dot (persists on the phone)", true, {}, "accessibility", "{visible}"),
+  c("overlay.say", "Speech bubble beside Kenan's dot; x/y or nodeId moves the dot there first. durationMs 0 keeps it until the next say/clear", true, { text: str(), x: num(false), y: num(false), nodeId: str(false), durationMs: num(false, 0, 120_000) }, "accessibility"),
+  c("overlay.point", "Fly Kenan's dot to a point, rectangle or tree node and highlight it without acting; optional bubble text", true, { x: num(false), y: num(false), nodeId: str(false), left: num(false), top: num(false), right: num(false), bottom: num(false), text: str(false) }, "accessibility"),
+  c("overlay.move", "Fly Kenan's dot to screen pixels", true, { x: num(), y: num() }, "accessibility"),
+  c("overlay.state", "Set the dot's animation", true, { state: choice(["idle", "thinking", "working"]) }, "accessibility"),
+  c("overlay.clear", "Clear bubble and highlights; the dot glides home", true, {}, "accessibility"),
   c("app.launch", "Launch a visible application", true, { package: str() }),
   c("url.open", "Open a URL using Android's handler", true, { url: str() }),
   c("clipboard.set", "Set clipboard text", true, { text: str() }),
@@ -81,6 +90,13 @@ export function validatePhoneCommand(input: unknown): { ok: true; command: strin
   if (command.command === "files.write") {
     const data = fields.base64 as string;
     if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || data.length > 4 * Math.ceil(PHONE_MAX_FILE_BYTES / 3) || Buffer.from(data, "base64").byteLength > PHONE_MAX_FILE_BYTES) return invalid("base64 must encode at most 1 MiB");
+  }
+  if (command.command === "overlay.say" && ((fields.text as string).length < 1 || (fields.text as string).length > OVERLAY_MAX_SAY)) return invalid(`text must be 1..${OVERLAY_MAX_SAY} characters`);
+  if (command.command === "overlay.point") {
+    const rect = ["left", "top", "right", "bottom"].filter(key => fields[key] !== undefined).length;
+    const point = ["x", "y"].filter(key => fields[key] !== undefined).length;
+    const targets = (fields.nodeId !== undefined ? 1 : 0) + (point === 2 ? 1 : 0) + (rect === 4 ? 1 : 0);
+    if (targets !== 1 || (point % 2) || (rect % 4)) return invalid("point needs exactly one of x+y, left+top+right+bottom, or nodeId");
   }
   if (command.command === "apps.suspend") {
     const packages = fields.packages as unknown[];

@@ -22,11 +22,20 @@ Pi Remote owns an unattended Android control connection. The Kenan Android app i
 
 ## Command names
 
-Core UI/notification operations: `status`, `ui.tree`, `ui.tap`, `ui.swipe`, `ui.text`, `ui.action`, `ui.global`, `screen.capture`, `app.launch`, `url.open`, `clipboard.set`, `notifications.list`, `notifications.dismiss`, `notifications.action`, `notifications.reply`.
+Core UI/notification operations: `status`, `overlay.show`, `overlay.hide`, `overlay.say`, `overlay.point`, `overlay.move`, `overlay.state`, `overlay.clear`, `ui.tree`, `ui.tap`, `ui.swipe`, `ui.text`, `ui.action`, `ui.global`, `screen.capture`, `app.launch`, `url.open`, `clipboard.set`, `notifications.list`, `notifications.dismiss`, `notifications.action`, `notifications.reply`.
 
 Data/device operations: `device.info`, `apps.list`, `files.list`, `files.read`, `files.write`, `files.mkdir`, `files.delete`, `contacts.list`, `contacts.get`, `contacts.insert`, `calendar.list`, `calendar.events`, `calendar.instances`, `calendar.insert`, `location.get`, `sms.list`, `sms.send`, `calls.list`, `call.dial`, `usage.query`, `settings.get`, `settings.put`, `device.lock`, `device.reboot`, `device.wipe`, `apps.suspend`, `permissions.grant`.
 
 Arguments and output shapes are documented by the implemented CLI catalogue. `screen.capture` returns `{mime:"image/png",base64,width,height}`; the CLI can save it to an exact requested path. `files.read`/`files.write` use base64 for binary data and explicit size ceilings. Destructive operations need an explicit `confirm:true` argument; they are available capabilities, never setup actions or acceptance probes.
+
+## Kenan overlay
+
+While phone control's accessibility service runs, Kenan has a dot over other apps (toggle with **Show Kenan over other apps** in the phone card, the phone-control notification's Show/Hide action, `overlay.show`/`overlay.hide`, or by dragging the dot onto its ✕). Tapping the dot opens a small chat panel; Send collapses it so the app underneath keeps focus.
+
+- Phone→server frame: `{type:"overlay.message",id,text,context:{package,label}}` (text 1..8000). The supervisor replies `{type:"overlay.ack",id,ok:true,threadId}` or `{type:"overlay.ack",id,ok:false,error}`. `server/phone-overlay.ts` owns the conversation: each phone has one thread (`Phone · NAME`, Home destination, default model), recorded in supervisor metadata `phone-overlay:DEVICE`; an archived or missing thread is replaced on the next message. The first message carries a briefing on using the overlay; later messages are steered into the running thread with a `[Phone overlay · in APP]` line.
+- Thread events drive the dot: inserted message → `overlay.state thinking`, tool start → `working`, every assistant message's text (Remote tags removed, ≤2000 chars) → `overlay.say`, settlement → `idle`. A reply produced while the phone is offline is spoken once when it reconnects.
+- Agent-facing commands: `overlay.say {text,x?,y?,nodeId?,durationMs?}`, `overlay.point` with exactly one of `x+y`, `left+top+right+bottom` or `nodeId` (optional `text`), `overlay.move {x,y}`, `overlay.state`, `overlay.clear`. CLI: `pi-phone say TEXT [X Y]`, `pi-phone point X Y [TEXT]`, `pi-phone overlay show|hide|clear`.
+- `ui.tap`, `ui.swipe`, `ui.action` and `ui.text` are visualised: the dot flies to the target, then a ripple, trail or highlight shows the action. Touchable overlay windows become non-touchable while a gesture runs, and the animation is skipped when it would push a gesture past its deadline. `screen.capture` hides the overlay for the capture.
 
 ## CLI
 

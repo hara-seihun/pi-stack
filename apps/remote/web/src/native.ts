@@ -21,6 +21,8 @@ export interface PhoneStatus {
   deviceId: string;
   name: string;
   environment: string;
+  /** Kenan's dot is shown over other apps; absent on shells without the overlay. */
+  overlay?: boolean;
   error?: string | { code: string; message: string } | null;
   capabilities: Record<string, boolean | string | number | null>;
 }
@@ -33,6 +35,7 @@ interface RemoteBridge {
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
   phoneSetup?(options: { step: PhoneSetupStep }): Promise<void>;
+  phoneOverlay?(options: { visible: boolean }): Promise<PhoneStatus>;
   haptic?(options: { kind: string }): Promise<void>;
   keepAwake?(options: { enabled: boolean }): Promise<void>;
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
@@ -99,6 +102,7 @@ export const remote: RemoteBridge = !nativePlatform
         phoneStatus: () => capacitor.nativePromise("KenanRemote", "phoneStatus", {}),
         phoneConfigure: (options) => capacitor.nativePromise("KenanRemote", "phoneConfigure", options),
         phoneSetup: (options) => capacitor.nativePromise("KenanRemote", "phoneSetup", options),
+        phoneOverlay: (options) => capacitor.nativePromise("KenanRemote", "phoneOverlay", options),
         haptic: (options) => capacitor.nativePromise("KenanRemote", "haptic", options),
         keepAwake: (options) => capacitor.nativePromise("KenanRemote", "keepAwake", options),
         notifications: (options) => capacitor.nativePromise("KenanRemote", "notifications", options),

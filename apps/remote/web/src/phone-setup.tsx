@@ -93,6 +93,9 @@ export function PhoneSetup() {
       {status?.enabled ? "Disable phone control" : "Enable for this person and environment"}</button>
       {status?.enabled && <button type="button" disabled={busy} onClick={() => void configure(true)}>Use current environment / save name</button>}</p>
     {grants(baseline)}
+    {status?.overlay !== undefined && <p><label><input type="checkbox" disabled={busy || status.capabilities.accessibility !== true} checked={status.overlay}
+      onChange={event => { const visible = event.target.checked; void run(async () => { await remote.phoneOverlay!({ visible }); }); }} /> Show Kenan over other apps</label>
+      {" "}Tap the dot to talk to Kenan anywhere; it also shows what Kenan taps, swipes and types.</p>}
     <details><summary>Additional one-time access</summary>
       <p>Only enable what you want your agent to use. Revoking a grant disables that capability, not the connection.</p>
       {grants(additional)}

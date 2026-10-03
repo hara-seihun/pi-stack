@@ -37,6 +37,7 @@ import { configuredThreadDestinations, defaultThreadDestinations, recentThreadMo
 import { contextFilesPrompt, listContextFiles, selectContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
+import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
@@ -278,6 +279,8 @@ const fleetUrl = configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 const namingUrl = modelBrokerUrl() ?? fleetUrl;
 const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
+/** Assigned once the phone broker exists; thread events can arrive earlier. */
+let phoneOverlay: PhoneOverlay | null = null;
 const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
 threads.setDirectory(directory, (parent, input) => {
   // Encrypted-folder sessions must retain their mount namespace and transcript custody.
@@ -1459,6 +1462,7 @@ async function rpc(id: string, type: string, body: Record<string, unknown> = {})
 
 function handlePiEvent(sessionId: string, event: any) {
   if (!ownsSupervisorLease()) return;
+  try { phoneOverlay?.event(sessionId, event); } catch (cause) { console.error("phone overlay event failed", cause); }
   ensureThreadView(db, sessionId);
   const rt = liveFor(sessionId);
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
@@ -1828,7 +1832,27 @@ const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
 type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
-const phones = new PhoneBroker();
+const phones = new PhoneBroker({
+  overlayMessage: (device, message) => phoneOverlay!.message(device, message),
+  ready: device => phoneOverlay?.ready(device),
+});
+phoneOverlay = new PhoneOverlay({
+  thread: id => { const row = sessionRow.get(id) as any; return row ? { archived: Boolean(row.archived_at) } : null; },
+  create: async (message, device) => {
+    const destination = meetingDestination();
+    const id = crypto.randomUUID();
+    await insertThread(id, `Phone · ${device.name}`, destination, destination.defaultModel, null, message);
+    signalSync();
+    return id;
+  },
+  prompt: async (threadId, requestId, text) => { await enqueuePrompt(threadId, requestId, text, "steer"); },
+  send: (deviceId, command, args) => phones.send(deviceId, command, args),
+  online: deviceId => phones.online(deviceId),
+  load: () => (db.query("SELECT key,value FROM metadata WHERE key LIKE 'phone-overlay:%'").all() as Array<{ key: string; value: string }>)
+    .map(row => ({ deviceId: row.key.slice("phone-overlay:".length), threadId: row.value })),
+  save: (deviceId, threadId) => { db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`phone-overlay:${deviceId}`, threadId); },
+  log: message => console.warn(message),
+});
 const writeEndpoint = writeEngineEndpoint();
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({

@@ -1,5 +1,5 @@
 import { API } from "./api";
-import { PHONE_MAX_FRAME_BYTES, phoneCatalogue, validatePhoneCommand } from "./phone-commands";
+import { OVERLAY_MAX_MESSAGE, PHONE_MAX_FRAME_BYTES, phoneCatalogue, validatePhoneCommand } from "./phone-commands";
 
 export type PhoneDevice = { id: string; name: string; model: string; android: string; capabilities: Record<string, unknown> };
 export type PhoneResult = { type: "result"; id: string; ok: true; result: unknown } | { type: "result"; id: string; ok: false; error: { code: string; message: string } };
@@ -8,6 +8,10 @@ type Pending = { settle(result: PhoneResult): void; timer: ReturnType<typeof set
 export type PhoneConnection = { transport: PhoneTransport; device?: PhoneDevice; pending: Map<string, Pending>; closed: boolean; helloTimer?: ReturnType<typeof setTimeout> };
 export type PhoneSocketData = { kind: "phone"; connection?: PhoneConnection };
 type Registered = { device: PhoneDevice; lastSeen: number; connection?: PhoneConnection };
+/** A person typed to Kenan in the phone overlay. */
+export type OverlayMessage = { id: string; text: string; context: { package: string | null; label: string | null } };
+export type OverlayAck = { ok: true; threadId: string } | { ok: false; error: { code: string; message: string } };
+export type PhoneHooks = { overlayMessage?(device: PhoneDevice, message: OverlayMessage): Promise<OverlayAck>; ready?(device: PhoneDevice): void };
 const failure = (id: string, code: string, message: string): PhoneResult => ({ type: "result", id, ok: false, error: { code, message } });
 const object = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
 
@@ -22,6 +26,7 @@ export class PhoneBroker {
   private readonly devices = new Map<string, Registered>();
   private readonly connections = new Set<PhoneConnection>();
   private stopped = false;
+  constructor(private readonly hooks: PhoneHooks = {}) {}
 
   open(transport: PhoneTransport): PhoneConnection {
     const connection: PhoneConnection = { transport, pending: new Map(), closed: false };
@@ -52,8 +57,10 @@ export class PhoneBroker {
       this.devices.set(device.id, { device: connection.device, lastSeen: Date.now(), connection });
       try { if (connection.transport.send(JSON.stringify({ type: "ready" })) === 0) this.close(connection, 1011, "Phone send failed"); }
       catch { this.close(connection, 1011, "Phone send failed"); }
+      if (!connection.closed) this.hooks.ready?.(connection.device);
       return;
     }
+    if (connection.device && frame.type === "overlay.message") { this.overlayMessage(connection, connection.device, frame); return; }
     if (!connection.device || frame.type !== "result" || typeof frame.id !== "string" || typeof frame.ok !== "boolean"
       || (!frame.ok && (!object(frame.error) || typeof frame.error.code !== "string" || typeof frame.error.message !== "string"))
       || (frame.ok && !("result" in frame))) { this.close(connection, 1008, "Invalid phone result"); return; }
@@ -61,6 +68,23 @@ export class PhoneBroker {
     if (registered?.connection === connection) registered.lastSeen = Date.now();
     connection.pending.get(frame.id)?.settle(frame as PhoneResult);
   }
+
+  private overlayMessage(connection: PhoneConnection, device: PhoneDevice, frame: Record<string, any>): void {
+    const id = frame.id, text = frame.text, context = frame.context ?? {};
+    if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) { this.close(connection, 1008, "Invalid overlay message"); return; }
+    const reply = (ack: OverlayAck) => { if (!connection.closed) try { connection.transport.send(JSON.stringify({ type: "overlay.ack", id, ...ack })); } catch {} };
+    const name = (value: unknown) => typeof value === "string" && value.length <= 256 ? value : null;
+    if (typeof text !== "string" || !text.trim() || text.length > OVERLAY_MAX_MESSAGE || !object(context)) {
+      reply({ ok: false, error: { code: "invalid_request", message: `Message must be 1..${OVERLAY_MAX_MESSAGE} characters` } }); return;
+    }
+    if (!this.hooks.overlayMessage) { reply({ ok: false, error: { code: "unsupported", message: "This supervisor does not accept overlay messages" } }); return; }
+    this.hooks.overlayMessage(device, { id, text: text.trim(), context: { package: name(context.package), label: name(context.label) } })
+      .then(reply, (cause: unknown) => reply({ ok: false, error: { code: "unavailable", message: cause instanceof Error ? cause.message : String(cause) } }));
+  }
+
+  /** Send a command without waiting on the caller; resolves to the phone's result. */
+  send(deviceId: string, command: string, args: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<PhoneResult> { return this.execute(deviceId, { command, args, timeoutMs }); }
+  online(deviceId: string): boolean { const connection = this.devices.get(deviceId)?.connection; return !!connection && !connection.closed; }
 
   disconnected(connection: PhoneConnection): void {
     if (connection.closed) return;
