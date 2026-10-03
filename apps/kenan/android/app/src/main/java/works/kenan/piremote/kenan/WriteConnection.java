@@ -114,7 +114,9 @@ final class WriteConnection {
                                             JSONObject rewrite = event.optJSONObject("rewrite");
                                             if (rewrite != null) {
                                                 String status = rewrite.optString("status");
-                                                if (status.equals("unavailable")) events.notice("Local rewrite unavailable; inserted the transcript.");
+                                                if (status.equals("unavailable")) events.notice(rewrite.optString("reason").equals("warming")
+                                                    ? "Local rewrite is warming up; inserted the transcript."
+                                                    : "Local rewrite unavailable; inserted the transcript.");
                                                 else if (status.equals("guarded")) events.notice("Kept the original wording to avoid changing its meaning.");
                                             }
                                             events.finished(text);

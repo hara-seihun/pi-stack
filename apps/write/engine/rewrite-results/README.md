@@ -51,4 +51,30 @@ $PY apps/write/engine/benchmark_rewrite_audio.py \
 
 `rewrite-v2-audio.jsonl` retains the earlier failure: lost `better`, retained rambling scaffolding and omitted meaningful `I think`. `rewrite-v3-audio.jsonl` is the intermediate repair, before final present-term prompting/formatting protections. Neither is relabelled as final candidate evidence.
 
+## Converge cold-start repair
+
+Publication reached Converge but startup repeatedly failed: full static-prefix priming
+shared the normal 18-second inference timeout. A 40-second foreground budget still
+failed under co-tenant load; it was not a permission or model-download failure.
+The repaired constructor starts owned one-token prefix priming in the background,
+keeps recognition available, and reports explicit `unavailable/warming` rather
+than waiting on its lock. Warm failure is explicit, not readiness. Ordinary
+request timeout remains 18 seconds; background priming is bounded at 120 seconds.
+
+`converge-bootstrap.json` is a public-only direct CPU probe using the service's
+Nice=-10 priority, four generation/eight batch threads, and the pinned model/runtime.
+Constructor returns in **2.81 seconds**, prefix priming then completes in
+**28.89 seconds**, and the first warmed repair returns **“Send it Thursday.”** in
+**1,222 ms**. The initial baseline with `warming` is retained as a distinct outcome.
+Child and warm thread are both closed. This proves the repaired runtime on the
+actual host, not deployment acceptance or a phone roundtrip. Earlier generation/
+punctuation measurements above used four batch threads; their identities and
+results are unchanged rather than relabelled.
+
+Deployment now prepares without selecting/collecting Write, warms alongside
+independent release work, and rolls back Write selection/service state on failed
+or interrupted activation. Acceptance owns retention of selected, prior and live
+mapped dependencies. These changes prevent a rejected release leaving a restart
+loop or deleting the prior engine before rollback. See the deployment owner.
+
 Runtime smoke checks also reject unauthenticated generation with HTTP 401, reap the child on close and remove its private key directory. Fast tests cover failed launch cleanup and that only dictionary terms already present are passed to the editor. No installed-device/hardware claim follows from these checks. Publication owns both-host deployment and terminal reporting.

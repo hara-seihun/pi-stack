@@ -21,7 +21,10 @@ fluency improvements from retained failures; this contract does not claim deploy
 `unchanged` when it does not, `guarded` when a candidate/input fails protection,
 or `unavailable` when local inference cannot run. `reason` is null for accepted
 outcomes and a machine-readable reason otherwise. Guarded/unavailable outcomes
-return the cleaned baseline, not raw ASR. Both browser and Android explicitly show
+return the cleaned baseline, not raw ASR. During cold background prefix priming,
+`unavailable` with `reason: "warming"` inserts baseline immediately and shows
+**Local rewrite is warming up; inserted the transcript.** A failed priming task
+reports `warmup_failed`, not readiness. Both browser and Android otherwise show
 **Kept the original wording to avoid changing its meaning.** or
 **Local rewrite unavailable; inserted the transcript.** respectively. A null
 `rewrite` means no rewriter ran; it is not an applied rewrite. Internal meeting

@@ -37,7 +37,9 @@ gain, caught quotation-control regression and limits of the synthetic name contr
 Partials use the learned deletion tagger, source-constrained rules and resident
 punctuation. Finish then runs the entirely local resident generative editor on the
 dictionary-normalized recognized text. Guarded or unavailable rewrite retains the
-cleaned baseline with an explicit client notice, not silent degradation. Earlier
+cleaned baseline with an explicit client notice, not silent degradation. Cold
+static-prefix priming is owned background work; ASR can listen while it completes,
+and an early Finish reports `unavailable/warming` instead of blocking recognition. Earlier
 Qwen3-0.6B and Mumble failures are separate experiments, not evidence for this
 candidate. Meaning preservation and unwanted dictionary substitutions must be
 scored alongside fluency; lexical guards alone are not a semantic guarantee.

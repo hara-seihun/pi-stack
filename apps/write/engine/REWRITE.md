@@ -13,9 +13,16 @@ owns artifact pins, checksums, licenses, host compatibility and reproducible
 preparation. No pooled/cloud inference receives dictation. Public artifact
 downloads are installation, not inference.
 
-The engine starts and owns the subprocess, waits for readiness, and warms its
-shared prompt cache before accepting dictation. Failure to initialize prevents
-engine startup. Shutdown terminates the child and removes its private API key.
+The engine starts and owns the subprocess and waits for model/HTTP readiness.
+Static prefix warmup is owned background work, not a prerequisite for ASR listening:
+Converge's cold prefix exceeded the 18-second dictation request timeout and then
+40 seconds even with a one-token warm, repeatedly crashing the previous startup.
+Cold dictation now returns explicit `unavailable/warming` baseline immediately
+instead of waiting on the warmup lock; clients report that warming state. Warmup
+has its own 120-second ceiling and generates only one token. An actual warm failure
+reports `unavailable/warmup_failed`; it is not rewrite readiness. Warmed benchmarks
+explicitly wait for completion. Failure to load the runtime/model still prevents
+engine startup. Shutdown terminates the child, joins warmup and removes its private API key.
 The child listens on an ephemeral loopback port with a per-process key; requests
 ignore proxy environment settings. Models are not loaded per dictation.
 
@@ -29,7 +36,8 @@ fluent writing that preserves register, reasons, uncertainty and literal content
 Only dictionary terms already present accompany it as protected spellings; absent
 names are never offered as suggestions. The prompt is implementation-owned.
 
-CPU execution uses four threads by default, one server slot and a request lock,
+CPU execution uses four generation and eight batch/prefill threads by default,
+one server slot and a request lock,
 2048 context positions, temperature zero, shared prompt KV caching, and bounded
 output (64–384 tokens based on source length). Different people's requests share
 the resident runtime; these settings are not a per-person model session.
@@ -64,7 +72,8 @@ question/request remains text; it must not be answered by the editor.
 The lock waits at most 8 seconds; local HTTP inference has an 18-second timeout.
 A busy queue, stopped runtime or failed response reports `unavailable`. Guard
 failures report their own machine-readable reason. Startup readiness has a
-separate 20-second bound. These bounds are not promised per-dictation latency.
+separate 20-second bound; background prefix warmup has a 120-second bound.
+These bounds are not promised per-dictation latency.
 
 ## Client contract and timing
 

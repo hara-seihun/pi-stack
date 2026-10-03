@@ -65,7 +65,10 @@ export async function startWrite(options: { context: string; partial(committed: 
         const frame = JSON.parse(event.data);
         if (frame.type === "partial") options.partial(String(frame.committed ?? ""), String(frame.tail ?? ""));
         else if (frame.type === "final") {
-          if (frame.rewrite?.status === "unavailable") toast.error("Local rewrite unavailable; inserted the transcript.");
+          if (frame.rewrite?.status === "unavailable") {
+            if (frame.rewrite.reason === "warming") toast("Local rewrite is warming up; inserted the transcript.");
+            else toast.error("Local rewrite unavailable; inserted the transcript.");
+          }
           else if (frame.rewrite?.status === "guarded") toast("Kept the original wording to avoid changing its meaning.");
           options.final(String(frame.text ?? "")); ended = true; cleanup();
         }

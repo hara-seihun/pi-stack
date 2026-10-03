@@ -37,6 +37,8 @@ def main():
     rows = []
     rewriter = LocalRewriter(args.binary, args.model)
     try:
+        if not rewriter.wait_ready():
+            raise RuntimeError('Local rewrite did not become ready for the warmed benchmark')
         for case in cases:
             dictionary = case.get('dictionary', {})
             words = case['source'].split()
