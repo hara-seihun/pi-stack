@@ -64,6 +64,45 @@ test("one host deployment installs its shared dependency tree once", () => {
   }
 });
 
+test("concurrent dependency consumers serialize npm ci and share its completed receipt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-concurrent-"));
+  try {
+    writeFileSync(join(directory, "package.json"), "{}\n");
+    writeFileSync(join(directory, "package-lock.json"), "{}\n");
+    const script = `set -euo pipefail
+      source "$1"
+      root=$2
+      npm() {
+        mkdir "$root/installing" || return 71
+        printf 'called\\n' >> "$root/npm-calls"
+        rm -rf "$root/node_modules"
+        mkdir -p "$root/node_modules"
+        sleep 0.15
+        printf '{}\\n' > "$root/node_modules/.package-lock.json"
+        rmdir "$root/installing"
+      }
+      pi_stack_prepare_dependencies "$root"
+      test -n "$PI_STACK_DEPENDENCIES_READY"`;
+    await Promise.all([waitForExit(start(script, [helper, directory])), waitForExit(start(script, [helper, directory]))]);
+    assert.equal(readFileSync(join(directory, "npm-calls"), "utf8"), "called\n");
+    assert.ok(existsSync(join(directory, "node_modules/.pi-stack-dependency-key")));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("dependency install failure propagates even in a conditional and never stamps readiness", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-failed-"));
+  try {
+    writeFileSync(join(directory, "package.json"), "{}\n");
+    writeFileSync(join(directory, "package-lock.json"), "{}\n");
+    const result = spawnSync("bash", ["-c", `set -euo pipefail
+      source "$1"
+      npm() { return 23; }
+      if pi_stack_prepare_dependencies "$2"; then exit 99; else test "$?" = 23; fi
+      test ! -e "$2/node_modules/.pi-stack-dependency-key"`, "failed-dependencies", helper, directory], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("a deleted nested dependency invalidates an otherwise matching receipt", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-"));
   try {

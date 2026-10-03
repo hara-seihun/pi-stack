@@ -113,7 +113,13 @@ pi_stack_dependency_key() {
 
 pi_stack_prepare_dependencies() {
   local root=$1 key stamp hidden_lock hidden_hash expected
-  key=$(pi_stack_dependency_key "$root")
+  key=$(pi_stack_dependency_key "$root") || return
+  (
+  # npm ci removes node_modules, so its lock must live outside that tree.
+  # Lock the checkout directory inode: aliases share custody without a lock file.
+  local dependency_lock
+  exec {dependency_lock}<"$root" || exit
+  flock "$dependency_lock" || exit
   stamp="$root/node_modules/.pi-stack-dependency-key"
   hidden_lock="$root/node_modules/.package-lock.json"
   if [[ -f $stamp && -f $hidden_lock ]]; then
@@ -129,13 +135,14 @@ process.exit(Object.entries(lock.packages ?? {}).every(([name, spec]) =>
 ) ? 0 : 1);
 JS
     then
-      export PI_STACK_DEPENDENCIES_READY=$key
-      return
+      exit 0
     fi
   fi
-  (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund)
-  hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
-  printf '%s %s\n' "$key" "$hidden_hash" > "$stamp"
+  rm -f "$stamp" || exit
+  (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund) || exit
+  hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1) || exit
+  printf '%s %s\n' "$key" "$hidden_hash" > "$stamp" || exit
+  ) || return
   export PI_STACK_DEPENDENCIES_READY=$key
 }
 
