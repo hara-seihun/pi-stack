@@ -126,7 +126,7 @@ class Stream:
         duplicate.stage_timings = self.stage_timings.copy()
         return duplicate
 
-    def finish(self, silence_samples=3200):
+    def finish(self, silence_samples=9600):
         if silence_samples:
             self.audio = np.concatenate((self.audio, np.zeros(silence_samples, np.float32)))
         if len(self.audio) > self.samples_decoded:

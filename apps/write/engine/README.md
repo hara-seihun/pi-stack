@@ -4,7 +4,9 @@
 engine, Python environment, and pinned models. Android's `WriteOpusRecorder` owns
 capture and Opus encoding, `WriteConnection` owns the phone protocol, and Pi Remote
 and the orchestrator forward frames in order. See [GPU behavior](GPU_REPORT.md) and
-[cleanup](cleanup/README.md) for those components.
+[cleanup](cleanup/README.md) for those components. [Audio evaluation](../eval/README.md)
+owns the licensed fixtures and replay tool; [local rewrite evaluation](../local-rewrite/README.md)
+owns the rejected task-trained CPU candidate and reproducible scores.
 
 ## Dictionary support
 
@@ -47,7 +49,12 @@ flushing discarded audio. Neither path waits for microphone data on the UI threa
 
 The engine keeps pending samples until an encoder slot has been acquired. Finish
 cancels and joins the decoder tasks, awaits any already-running live model step,
-then consumes all pending samples before adding 200 ms of recognizer silence.
+then consumes all pending samples before adding 600 ms of recognizer silence.
+This is model right context, not an extra microphone wait. Real AMI terminal words
+`fourth` and `toolkit` still disappeared at 200 ms; 400 ms left `four`/`tool`, while
+600 ms completed both. On the local two-thread CPU probe this cost about 280 ms
+when no speculative final was ready: completeness takes precedence over the
+100 ms flush target, which is not met by that immediate-Finish case.
 Immediate and speculative finalization use the same right context. A speculative
 result is reusable only when its sample count exactly matches the received PCM;
 quiet speech after that boundary cannot be discarded by the RMS silence detector.
@@ -60,13 +67,16 @@ its isolated stream after cancellation.
 From this directory, with the deployed engine's Python environment:
 
 ```sh
-/srv/pi/write-engine/venv/bin/python -m unittest test_finishing test_opus -v
+/srv/pi/write-engine/venv/bin/python -m unittest test_finishing test_opus test_dictionary_scores -v
+PI_STACK_TEST_WRITE_MODEL=/srv/pi/write-engine/model OPENBLAS_NUM_THREADS=1 \
+  /srv/pi/write-engine/venv/bin/python -m unittest test_audio_tail -v
 ```
 
 `test_finishing.py` covers Finish during encoder-slot contention on both paths,
 a quiet terminal word after speculation, and cancellation while an encoder is busy.
 `test_opus.py` covers real packet decoding, socket framing, batching and backend
-races. Phone-side `WriteOpusRecorderTest` covers delayed tail delivery, partial-frame
+races. `test_audio_tail.py` uses the licensed AMI date/tool-name fixtures against
+pinned weights to require complete terminal words after immediate Finish. Phone-side `WriteOpusRecorderTest` covers delayed tail delivery, partial-frame
 padding, EOS packets before the terminal callback and immediate cancellation;
 `WriteConnectionTest` covers tail-packet/finish ordering and one-shot finish.
 

@@ -35,7 +35,7 @@ class Engine:
 
     PARTIAL_INTERVAL = 0.1
     SPECULATE_AFTER_SILENCE = 0.12
-    FINAL_PADDING = 3200
+    FINAL_PADDING = 9600
     GPU_RETRY_SECONDS = 20
 
     def __init__(self, model_dir: Path, threads=4, streams=4, cleanup_dir: Path | None = None,
