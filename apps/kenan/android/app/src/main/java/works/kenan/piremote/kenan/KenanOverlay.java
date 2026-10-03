@@ -21,6 +21,7 @@ import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -75,9 +76,10 @@ final class KenanOverlay {
     private final Runnable clearBubble;
     private final Runnable clearHighlight;
 
-    KenanOverlay(AccessibilityService service) {
+    KenanOverlay(AccessibilityService service) { this(service, (WindowManager) service.getSystemService(Context.WINDOW_SERVICE)); }
+    KenanOverlay(AccessibilityService service, WindowManager windows) {
         this.service = service;
-        windows = (WindowManager) service.getSystemService(Context.WINDOW_SERVICE);
+        this.windows = windows;
         scene = new Scene(); dot = new Dot();
         clearBubble = () -> { scene.words = null; scene.invalidate(); };
         clearHighlight = () -> { scene.highlight = null; scene.invalidate(); };
@@ -89,9 +91,8 @@ final class KenanOverlay {
         dot.setVisibility(View.INVISIBLE);
         dot.setContentDescription("Kenan. Tap to chat, drag to move.");
         dot.setOnTouchListener(new DotTouch());
-        windows.addView(scene, canvasAt);
-        try { windows.addView(dot, dotAt); }
-        catch (RuntimeException failure) { windows.removeView(scene); throw failure; }
+        if (!add(scene, canvasAt)) return;
+        add(dot, dotAt);
     }
 
     static boolean isVisible(Context context) { return PhoneControlService.settings(context).getBoolean("overlayVisible", true); }
@@ -100,11 +101,27 @@ final class KenanOverlay {
         SharedOverlay.refresh();
         PhoneControlService.refresh();
     }
-    void visibility(boolean value) {
-        if (closed) return;
-        visible = value;
-        if (!value) { closePanel(); scene.words = null; }
-        restoreVisibility();
+    boolean closed() { return closed; }
+    private void unavailable(RuntimeException failure) {
+        Log.w("KenanOverlay", "Overlay window unavailable", failure);
+        close();
+        if (writer() != null) writer().overlayUnavailable();
+    }
+    private boolean add(View view, WindowManager.LayoutParams at) {
+        try { windows.addView(view, at); return true; }
+        catch (WindowManager.BadTokenException | WindowManager.InvalidDisplayException | SecurityException failure) {
+            unavailable(failure); return false;
+        }
+    }
+    private boolean update(View view, WindowManager.LayoutParams at) {
+        if (closed) return false;
+        try { windows.updateViewLayout(view, at); return true; }
+        catch (IllegalArgumentException | SecurityException failure) { unavailable(failure); return false; }
+    }
+    private void remove(View view) {
+        if (view == null || !view.isAttachedToWindow()) return;
+        try { windows.removeViewImmediate(view); }
+        catch (IllegalArgumentException | SecurityException failure) { Log.w("KenanOverlay", "Window already detached", failure); }
     }
     void foreground(String name) { foregroundPackage = name; }
     private WriteAccessibilityService writer() { return SharedOverlay.writer(); }
@@ -232,7 +249,7 @@ final class KenanOverlay {
         if (closed) return;
         WriteBubblePosition.Point at = WriteBubblePosition.clamp(x, y, available(), dp(50));
         dotAt.x = at.x(); dotAt.y = at.y();
-        windows.updateViewLayout(dot, dotAt); scene.invalidate();
+        update(dot, dotAt); scene.invalidate();
     }
     private void fly(int x, int y, long duration) {
         if (flight != null) flight.cancel();
@@ -270,11 +287,11 @@ final class KenanOverlay {
         if (closed) return;
         if (gestures > 0) dotAt.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         else dotAt.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-        windows.updateViewLayout(dot, dotAt);
+        if (!update(dot, dotAt)) return;
         if (panel != null) {
             if (gestures > 0) panelAt.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
             else panelAt.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-            windows.updateViewLayout(panel, panelAt);
+            update(panel, panelAt);
         }
     }
     void state(String next) { if (closed) return; state = next; dot.invalidate(); if (next.equals("idle")) activity(); else main.removeCallbacks(home); }
@@ -385,7 +402,8 @@ final class KenanOverlay {
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT);
         panelAt.gravity = Gravity.BOTTOM;
         panelAt.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE;
-        windows.addView(panel, panelAt); input.requestFocus();
+        if (!add(panel, panelAt)) return;
+        input.requestFocus();
         input.post(() -> {
             if (input == null) return;
             if (Build.VERSION.SDK_INT >= 33) backControl = new BackControl(panel, this::closePanel);
@@ -398,7 +416,7 @@ final class KenanOverlay {
         draft = input.getText().toString();
         if (backControl != null) { backControl.close(); backControl = null; }
         ((InputMethodManager) service.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(panel.getWindowToken(), 0);
-        windows.removeView(panel); panel = null; panelAt = null; input = null; history = null;
+        remove(panel); panel = null; panelAt = null; input = null; history = null;
     }
     void suspendCapture() { captures++; restoreVisibility(); }
     void restoreCapture() { if (captures > 0) captures--; restoreVisibility(); }
@@ -411,7 +429,7 @@ final class KenanOverlay {
     void close() {
         if (closed) return;
         closePanel(); closed = true; main.removeCallbacksAndMessages(null); pending.clear();
-        if (flight != null) flight.cancel(); windows.removeView(dot); windows.removeView(scene);
+        if (flight != null) flight.cancel(); remove(dot); remove(scene);
     }
     private float dismissX(OverlayPolicy.Dismissal target) {
         WriteBubblePosition.Bounds bounds = available();
@@ -479,7 +497,7 @@ final class KenanOverlay {
                     boolean moved = dragging;
                     OverlayPolicy.Dismissal dropped = moved && event.getActionMasked() == MotionEvent.ACTION_UP ? overDismiss : null;
                     dragging = false; pressed = false; overDismiss = null; scene.invalidate();
-                    if (dropped != null && canDismiss(dropped)) { dismiss(dropped); snap(0); }
+                    if (dropped != null && canDismiss(dropped)) { dismiss(dropped); fly(homeX(), homeY(), 180); }
                     else if (moved) snap(vx);
                     else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
                         dot.performClick();

@@ -22,7 +22,7 @@ final class SharedOverlay {
     }
 
     private static void ensure(AccessibilityService service) {
-        if (overlay != null) return;
+        if (overlay != null && !overlay.closed()) return;
         owner = service;
         overlay = new KenanOverlay(service);
     }

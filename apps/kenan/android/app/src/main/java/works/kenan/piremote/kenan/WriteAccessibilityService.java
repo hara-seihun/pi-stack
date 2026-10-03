@@ -68,6 +68,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (destroyed) return;
+        SharedOverlay.write(this);
         if (dismissal.active() && event.getEventType() == AccessibilityEvent.TYPE_VIEW_FOCUSED
             && isApplicationWindow(event.getWindowId())) {
             AccessibilityNodeInfo source = event.getSource();
@@ -155,6 +157,10 @@ public final class WriteAccessibilityService extends AccessibilityService {
         SharedOverlay.refresh();
     }
 
+    void overlayUnavailable() {
+        shown = false;
+        if (busy()) failed("Overlay window is no longer available");
+    }
     boolean visible() { return shown; }
     boolean busy() { return recording || connecting || finishing; }
     boolean canDismiss() { return !busy(); }
@@ -358,7 +364,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         render();
     }
 
-    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); SharedOverlay.refresh(); }
+    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); if (!destroyed) SharedOverlay.write(this); }
     @Override public void onInterrupt() { cancel(); hide(); }
     @Override public void onDestroy() {
         destroyed = true;

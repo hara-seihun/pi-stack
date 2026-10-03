@@ -2,6 +2,7 @@ package works.kenan.piremote.kenan;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
@@ -38,6 +39,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     void overlayDisconnected() { if (SharedOverlay.current() != null) SharedOverlay.current().disconnected(); }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         if (isOverlayWindow(event.getWindowId())) return;
+        ensureOverlay();
         for (AccessibilityWindowInfo window : getWindows()) if (window.getId() == event.getWindowId()
             && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return;
         if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
@@ -61,6 +63,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
             active.clearNodes(); if (SharedOverlay.current() != null) SharedOverlay.current().resetSession();
         });
     }
+    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); ensureOverlay(); }
     @Override public void onInterrupt() { clearNodes(); closeOverlay(); }
     private void closeOverlay() { SharedOverlay.detach(this); }
     @Override public void onDestroy() { if (current == this) current = null; clearNodes(); closeOverlay(); PhoneControlService.refresh(); super.onDestroy(); }
