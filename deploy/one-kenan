@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Prepare without activation; explicitly authorized, journalled cutover and rollback."""
+"""Additive root Kenan preparation, authorized activation and data-preserving rollback."""
 import argparse
 import base64
 import fcntl
@@ -7,12 +7,9 @@ import json
 import os
 import pathlib
 import pwd
-import secrets
 import re
-import shutil
+import secrets
 import subprocess
-import sys
-import urllib.request
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('action', choices=['prepare', 'cutover', 'rollback', 'status'])
@@ -27,306 +24,302 @@ config_path = pathlib.Path(args.config).resolve()
 config = json.loads(config_path.read_text())
 state = pathlib.Path(args.state).resolve()
 fixture = pathlib.Path(args.root).resolve() if args.fixture and args.root else None
-if args.fixture != bool(fixture):
-    parser.error('--fixture requires --root and --root is only for fixtures')
-if config.get('version') != 1 or not config.get('ports'):
-    raise SystemExit('Expected version 1 configuration with per-person side ports')
-if not args.fixture and args.action in ('cutover', 'rollback') and (os.geteuid() != 0 or not args.authorize_cutover):
-    raise SystemExit('Host mutation requires root and --authorize-cutover, after Hara says go')
+if args.fixture != bool(fixture): parser.error('--fixture requires --root; --root is fixture-only')
+if not fixture and args.action in ('cutover', 'rollback') and (os.geteuid() != 0 or not args.authorize_cutover):
+    raise SystemExit('Host mutation requires root and --authorize-cutover after Hara says go')
+def target(path): return fixture / path.lstrip('/') if fixture else pathlib.Path(path)
 host = pathlib.Path(config.get('hostFile', '/etc/pi-stack/host.json')).resolve()
 persons_dir = pathlib.Path(config.get('personsDir', '/var/lib/pi-remote/persons')).resolve()
+shared = target('/var/lib/pi-kenan')
+root_runtime=config.get('rootRuntime',config.get('remoteRoot','/srv/pi/pi-remote')+'/kenan-root')
+memory_runtime=config.get('memoryRuntime','/srv/pi/runtime/node_modules/kenan-memory')
+rooms_home = target('/var/lib/pi-rooms')
 if fixture:
     for path in (state, config_path, host, persons_dir):
-        if not path.is_relative_to(fixture):
-            raise SystemExit(f'Fixture path escaped staging root: {path}')
+        if not path.is_relative_to(fixture): raise SystemExit(f'Fixture path escaped staging root: {path}')
+if config.get('version') != 1: raise SystemExit('Expected version 1 root-Kenan configuration')
+if any(name in config for name in ('ports', 'orchestratorPorts', 'oldOrchestratorPorts', 'extraUnits', 'unitTemplates')):
+    raise SystemExit('Per-person side supervisors and execution-identity switching are not part of root Kenan')
 people = [json.loads(path.read_text()) for path in sorted(persons_dir.glob('*.json'))]
-if not people or any(not person.get('unlock') or person['user'] not in config['ports'] for person in people):
-    raise SystemExit('Every person requires a keyed folder and a side port')
-if len(set(config['ports'].values())) != len(config['ports']) or set(config['ports'].values()) & {person['port'] for person in people}:
-    raise SystemExit('Side ports must be unique and separate from old ports')
-execution = config.get('executionUser', 'pi-kenan')
-if not execution.replace('-', '').replace('_', '').isalnum() or execution[0].isdigit():
-    raise SystemExit('Invalid execution user')
+if not people: raise SystemExit('No registered people')
+execution, room_user = config.get('executionUser', 'pi-kenan'), config.get('roomsUser', 'pi-rooms')
+operator = config.get('brokerUser', json.loads(host.read_text()).get('fleetUser'))
+for user in (execution, room_user, operator, *[person['user'] for person in people]):
+    if not isinstance(user, str) or not re.fullmatch('[a-z_][a-z0-9_-]*', user): raise SystemExit('Invalid service/person user')
+if len({execution, room_user, operator}) != 3 or execution in [p['user'] for p in people] or room_user in [p['user'] for p in people]:
+    raise SystemExit('Root and room service accounts must be distinct from each other and from people')
+ports = {name: config.get(name, default) for name, default in [('memoryPort',18820),('rootPort',18821),('roomsPort',18822),('rootBrokerPort',2480),('roomsBrokerPort',2481)]}
+if any(not isinstance(port,int) or isinstance(port,bool) or not 1023 < port <= 65535 for port in ports.values()) or len(set(ports.values())) != len(ports):
+    raise SystemExit('New ports must be distinct unprivileged TCP ports')
+if set(ports.values()) & {p['port'] for p in people}: raise SystemExit('New listener collides with a person supervisor')
+if fixture and set(ports.values()) & (set(range(18790,18800)) | set(range(2461,2475))): raise SystemExit('Fixture ports overlap live listeners')
+root_config = config.get('root', {})
+if any(not root_config.get(name) for name in ('provider','model','thinkingLevel','promptFile')): raise SystemExit('root requires fixed provider/model/thinkingLevel/promptFile')
+if not pathlib.Path(root_config['promptFile']).is_absolute(): raise SystemExit('Root promptFile must be absolute')
+broker_source = pathlib.Path(config.get('brokerSource', '/etc/pi-model-broker.json')).resolve()
+if fixture and not broker_source.is_relative_to(fixture): raise SystemExit('Fixture brokerSource escaped root')
+broker = json.loads(broker_source.read_text())
+if not broker.get('listeners') or not all(pathlib.Path(broker[name]).is_absolute() for name in ('ledgerPath','authPath')): raise SystemExit('Invalid source broker config')
+if fixture and any(not pathlib.Path(broker[name]).resolve().is_relative_to(fixture) for name in ('ledgerPath','authPath')): raise SystemExit('Fixture broker paths escaped root')
+if fixture and not pathlib.Path(root_config['promptFile']).resolve().is_relative_to(fixture): raise SystemExit('Fixture root prompt escaped root')
+existing_ports = {entry['port'] for entry in broker['listeners']}
+if existing_ports & set(ports.values()): raise SystemExit('New listener collides with existing model broker')
+accounts = config.get('brokerAccounts', sorted({account for entry in broker['listeners'] for account in entry['accounts']}))
+models = config.get('brokerModels', sorted({model for entry in broker['listeners'] for model in entry['models']}))
+if not accounts or not models or any(not isinstance(item,str) or not item for item in [*accounts,*models]): raise SystemExit('Explicit model/account grants are required')
+if f'{root_config["provider"]}/{root_config["model"]}' not in models: raise SystemExit('Fixed root model is absent from broker grants')
+if not fixture:
+    protected=[config_path,broker_source]
+    if pathlib.Path(root_config['promptFile']).exists(): protected.append(pathlib.Path(root_config['promptFile']))
+    for path in protected:
+        if path.stat().st_uid != 0 or path.stat().st_mode & 0o022: raise SystemExit(f'Privileged configuration must be root-owned and not group/world writable: {path}')
 state.mkdir(parents=True, exist_ok=True, mode=0o700)
-os.chmod(state, 0o700)
-lock = open(state / 'lock', 'a')
-fcntl.flock(lock, fcntl.LOCK_EX)
-record_file = state / 'transaction.json'
-record = json.loads(record_file.read_text()) if record_file.exists() else {'phase': 'new', 'files': {}, 'oldActive': [], 'newUnits': [], 'createdUser': False, 'aclFiles': [], 'spaces': []}
+os.chmod(state,0o700)
+lock = open(state/'lock','a'); fcntl.flock(lock,fcntl.LOCK_EX)
+record_file = state/'transaction.json'
+record = json.loads(record_file.read_text()) if record_file.exists() else {'phase':'new','files':{},'newUnits':[],'createdUsers':[],'aclFiles':[]}
 def save():
-    temporary = state / 'transaction.tmp'
-    temporary.write_text(json.dumps(record, indent=2)+'\n')
-    temporary.chmod(0o600)
-    with temporary.open('rb') as stream:
-        os.fsync(stream.fileno())
-    os.replace(temporary, record_file)
-    fd = os.open(state, os.O_RDONLY)
+    temporary = state/'transaction.tmp'; temporary.write_text(json.dumps(record,indent=2)+'\n'); temporary.chmod(0o600)
+    with temporary.open('rb') as stream: os.fsync(stream.fileno())
+    os.replace(temporary,record_file)
+    fd = os.open(state,os.O_RDONLY)
     try: os.fsync(fd)
     finally: os.close(fd)
-def run(command, **kwargs):
-    return subprocess.run(command, check=True, text=True, timeout=30, **kwargs)
-def ctl(*arguments):
-    return run(['systemctl', *arguments], capture_output=True).stdout.strip()
-def target(path):
-    return fixture / path.lstrip('/') if fixture else pathlib.Path(path)
+def run(command,**kwargs): return subprocess.run(command,check=True,text=True,timeout=30,**kwargs)
+def ctl(*arguments): return run(['systemctl',*arguments],capture_output=True).stdout.strip()
 def snapshot(path):
-    path = pathlib.Path(path)
-    key = str(path)
+    path = pathlib.Path(path); key = str(path)
     if key in record['files']: return
     if path.is_symlink(): raise RuntimeError(f'Refusing to replace symlink: {path}')
     if path.exists():
-        info = path.stat()
-        record['files'][key] = {'data': base64.b64encode(path.read_bytes()).decode(), 'mode': info.st_mode & 0o7777, 'uid': info.st_uid, 'gid': info.st_gid}
-    else: record['files'][key] = None
+        info=path.stat(); record['files'][key]={'data':base64.b64encode(path.read_bytes()).decode(),'mode':info.st_mode&0o7777,'uid':info.st_uid,'gid':info.st_gid}
+    else: record['files'][key]=None
     save()
-def replace(path, contents, mode=0o644):
-    path = pathlib.Path(path)
-    snapshot(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name+'.one-kenan-tmp')
-    temporary.write_bytes(contents if isinstance(contents, bytes) else contents.encode())
-    temporary.chmod(mode)
-    os.replace(temporary, path)
-def active(unit):
-    return ctl('show', '-p', 'ActiveState', '--value', unit) == 'active'
-def new_units():
-    return ['pi-kenan-custody.service', *[f'pi-kenan-orchestrator@{person["user"]}.service' for person in people if person['user'] in config.get('orchestratorPorts', {})], *[f'pi-kenan-remote@{person["user"]}.service' for person in people], *config.get('extraUnits', [])]
-def quiescent():
-    for person in people:
-        unit = f'pi-remote@{person["user"]}.service'
-        if not active(unit): continue
-        with urllib.request.urlopen(f'http://127.0.0.1:{person["port"]}/v1/sessions', timeout=2) as response:
-            body = json.load(response)
-        sessions = body if isinstance(body, list) else body.get('sessions')
-        if not isinstance(sessions, list): raise RuntimeError(f'Cannot prove {person["user"]} is idle')
-        if any(row.get('state') in ('running', 'queued') or row.get('running') or row.get('pendingMessages') for row in sessions):
-            raise RuntimeError(f'{person["user"]} still has work; finish or hold it before cutover')
-    for person in people:
-        unit = f'pi-orchestrator@{person["user"]}.service'
-        if not active(unit): continue
-        port = config.get('oldOrchestratorPorts', {}).get(person['user'])
-        if not port or person['user'] not in config.get('orchestratorPorts', {}):
-            raise RuntimeError(f'{unit}: old and side daemon ports are required before cutover')
-        with urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/status', timeout=2) as response:
-            status = json.load(response)
-        if not isinstance(status.get('threads'), list) or not isinstance(status.get('leases'), list):
-            raise RuntimeError(f'{unit}: cannot prove worker quiescence')
-        if status['leases'] or any(thread.get('state') in ('running', 'queued') for thread in status['threads']) or any(lane.get('active') for lane in status.get('lanes', [])):
-            raise RuntimeError(f'{unit}: workers still active; finish or hold them before cutover')
-def rendered_units():
-    substitutions = {'@EXECUTION_USER@': execution, '@KENAN_ENV_FILE@': str(target('/etc/pi-stack/one-kenan.env')), '@HOST_FILE@': str(host),
-        '@BUN@': config.get('bun', '/usr/local/bin/bun'), '@REMOTE_ROOT@': config.get('remoteRoot', '/srv/pi/pi-remote'),
-        '@STACK_ROOT@': config.get('stackRoot', str(repo)), '@STATE_DIR@': str(target('/var/lib/pi-kenan')), '@PERSONS_DIR@': str(persons_dir)}
-    files = {}
-    names = ['pi-kenan-custody.service', 'pi-kenan-remote@.service', *(['pi-kenan-orchestrator@.service'] if config.get('orchestratorPorts') else []), *config.get('unitTemplates', [])]
-    for name in names:
-        source = (repo / 'deploy/systemd' / name).read_text()
-        for before, after in substitutions.items(): source = source.replace(before, after)
-        if '@' in source.replace('@.service', '').replace('pi-kenan-remote@', '') and any(part.startswith('@') for part in source.split()):
-            raise RuntimeError(f'Unrendered unit template: {name}')
-        files[name] = source
-    return files
+def replace(path,contents,mode=0o644):
+    path=pathlib.Path(path); snapshot(path); path.parent.mkdir(parents=True,exist_ok=True)
+    temporary=path.with_name(path.name+'.one-kenan-tmp'); temporary.write_bytes(contents if isinstance(contents,bytes) else contents.encode()); temporary.chmod(mode); os.replace(temporary,path)
+def fresh(path,contents,mode=0o644):
+    if pathlib.Path(path).exists(): raise RuntimeError(f'Additive path already exists: {path}')
+    replace(path,contents,mode)
+def user_identity(name,home):
+    if fixture: return (config.get('fixtureUids',{}).get(name,os.getuid()),os.getgid())
+    try: pwd.getpwnam(name)
+    except KeyError: pass
+    else: raise RuntimeError(f'{name} already exists; use its owning transaction')
+    record['createdUsers'].append(name); save()
+    run(['useradd','--system','--user-group','--home-dir',str(home),'--no-create-home','--shell','/usr/sbin/nologin',name])
+    entry=pwd.getpwnam(name); return (entry.pw_uid,entry.pw_gid)
+def person_uid(person):
+    return person.get('fixtureUid',os.getuid()) if fixture else pwd.getpwnam(person['user']).pw_uid
 
 def acl_path(block):
-    name = next(line[8:] for line in block.splitlines() if line.startswith('# file: '))
-    return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), name)
+    name=next(line[8:] for line in block.splitlines() if line.startswith('# file: '))
+    return re.sub(r'\\([0-7]{3})',lambda match: chr(int(match[1],8)),name)
 def grant_spaces(uid):
-    spaces = list(config.get('spaces', []))
+    spaces=[*config.get('spaces',[]),{'path':str(target('/var/lib/pi-remote/one-kenan')),'owner':'root','recursive':True,'access':'r-X','defaultAccess':'r-x'}]
     for person in people:
-        for key in ('cipherDir', 'mountpoint'):
-            spaces.append({'path': person['unlock'][key], 'owner': person['user'], 'recursive': key == 'cipherDir', 'access': 'rwX'})
-    blocks, access = {}, {}
+        if person.get('unlock'):
+            spaces += [{'path':person['unlock'][key],'owner':person['user'],'ownerUid':person_uid(person),'recursive':key=='cipherDir','access':'rwX','ownerAccess':key=='cipherDir'} for key in ('cipherDir','mountpoint')]
+    blocks,access={},{}
     for space in spaces:
-        path = pathlib.Path(space['path']).resolve()
+        path=pathlib.Path(space['path']).resolve()
         if fixture and not path.is_relative_to(fixture): raise RuntimeError('Fixture ACL path escaped root')
         if not path.exists(): raise RuntimeError(f'Required space does not exist: {path}')
-        record['spaces'].append({**space, 'path': str(path)})
-        source = run(['getfacl', '-p', '-n', *(['-R'] if space.get('recursive') else []), '--', str(path)], capture_output=True).stdout
+        source=run(['getfacl','-p','-n',*(['-R'] if space.get('recursive') else []),'--',str(path)],capture_output=True).stdout
         for block in source.strip().split('\n\n'):
-            name = acl_path(block)
+            name=acl_path(block)
             if pathlib.Path(name).is_symlink(): continue
-            blocks.setdefault(name, block)
-            access[name] = (space.get('access', 'rwX'), space['owner'], space.get('recursive', False))
+            owner_uid=space.get('ownerUid',os.getuid() if fixture else pwd.getpwnam(space['owner']).pw_uid)
+            blocks.setdefault(name,block); access[name]=(space.get('access','rwX'),owner_uid,space.get('recursive',False),space.get('defaultAccess','rwx'),space.get('ownerAccess',False) and pathlib.Path(name)==path)
         for parent in path.parents:
             if parent == pathlib.Path('/') or (fixture and not parent.is_relative_to(fixture)): break
-            name = str(parent)
-            if name not in blocks: blocks[name] = run(['getfacl', '-p', '-n', '--', name], capture_output=True).stdout.strip()
-            access.setdefault(name, ('--x', space['owner'], False))
-    backup = state / 'acls.txt'
-    backup.write_text('\n\n'.join(blocks.values())+'\n')
+            name=str(parent)
+            if name not in blocks: blocks[name]=run(['getfacl','-p','-n','--',name],capture_output=True).stdout.strip()
+            access.setdefault(name,('--x',None,False,'rwx',False))
+    backup=state/'acls.txt'; backup.write_text('\n\n'.join(blocks.values())+'\n'); backup.chmod(0o600)
     record['aclFiles'].append(str(backup)); save()
-    modified = []
-    for name, block in blocks.items():
-        rights, owner, defaults = access[name]
-        isdir = pathlib.Path(name).is_dir()
-        rights = rights.replace('X', 'x' if isdir or pathlib.Path(name).stat().st_mode & 0o111 else '-')
-        lines = block.splitlines()
-        # Preserve the EFFECTIVE rights of every existing named user/group. Merely
-        # widening the ACL mask would activate previously masked household grants.
-        for prefix in ('', 'default:'):
-            mask = next((line.split(':')[-1].split()[0] for line in lines if line.startswith(prefix+'mask:')), 'rwx')
-            adjusted = []
+    modified=[]
+    for name,block in blocks.items():
+        rights,owner_uid,defaults,default_rights,owner_access=access[name]; isdir=pathlib.Path(name).is_dir()
+        rights=rights.replace('X','x' if isdir or pathlib.Path(name).stat().st_mode&0o111 else '-')
+        lines=block.splitlines()
+        # Widening a mask must not reactivate another person's masked-out grants.
+        for prefix in ('','default:'):
+            mask=next((line.split(':')[-1].split()[0] for line in lines if line.startswith(prefix+'mask:')),'rwx')
+            adjusted=[]
             for line in lines:
-                clean = line.split('\t')[0].split(' #')[0]
-                parts = clean.removeprefix(prefix).split(':') if clean.startswith(prefix) else []
-                if len(parts) == 3 and (parts[0] == 'group' or (parts[0] == 'user' and parts[1])):
-                    permissions = ''.join(char if char in mask else '-' for char in parts[2])
-                    clean = prefix+':'.join([parts[0], parts[1], permissions])
+                clean=line.split('\t')[0].split(' #')[0]; parts=clean.removeprefix(prefix).split(':') if clean.startswith(prefix) else []
+                if len(parts)==3 and (parts[0]=='group' or (parts[0]=='user' and parts[1])):
+                    clean=prefix+':'.join([parts[0],parts[1],''.join(char if char in mask else '-' for char in parts[2])])
                 adjusted.append(clean)
-            lines = adjusted
-        lines = [line for line in lines if not line.startswith((f'user:{uid}:', 'mask::'))]
-        lines += [f'user:{uid}:{rights}', 'mask::rwx']
+            lines=adjusted
+        lines=[line for line in lines if not line.startswith((f'user:{uid}:','mask::'))]+[f'user:{uid}:{rights}','mask::rwx']
+        if owner_access:
+            lines=[line for line in lines if not line.startswith(f'user:{owner_uid}:')]+[f'user:{owner_uid}:rwx']
         if isdir and defaults:
-            if not any(line.startswith('default:') for line in lines):
-                lines += ['default:user::rwx', 'default:group::---', 'default:other::---']
-            owner_uid = os.getuid() if fixture else pwd.getpwnam(owner).pw_uid
-            lines = [line for line in lines if not line.startswith((f'default:user:{uid}:', f'default:user:{owner_uid}:', 'default:mask::'))]
-            lines += [f'default:user:{uid}:rwx', f'default:user:{owner_uid}:rwx', 'default:mask::rwx']
+            if not any(line.startswith('default:') for line in lines): lines+=['default:user::rwx','default:group::---','default:other::---']
+            lines=[line for line in lines if not line.startswith((f'default:user:{uid}:',f'default:user:{owner_uid}:','default:mask::'))]
+            lines += [f'default:user:{uid}:{default_rights}',f'default:user:{owner_uid}:rwx','default:mask::rwx']
         modified.append('\n'.join(lines))
-    run(['setfacl', '--restore=-'], input='\n\n'.join(modified)+'\n', capture_output=True)
+    if modified: run(['setfacl','--restore=-'],input='\n\n'.join(modified)+'\n',capture_output=True)
+
+unit_names=['pi-kenan-access.service','pi-kenan-broker.service','pi-kenan-custody.service','pi-kenan-memory.service','pi-kenan-root.service','pi-rooms.service','pi-kenan-journal.service','pi-kenan-journal.timer']
+active_units=[name for name in unit_names if name!='pi-kenan-journal.service']
+def rendered_units():
+    substitutions={'@EXECUTION_USER@':execution,'@ROOMS_USER@':room_user,'@BROKER_USER@':operator,'@KENAN_ENV_FILE@':str(target('/etc/pi-stack/one-kenan.env')),
+      '@HOST_FILE@':str(host),'@BUN@':config.get('bun','/usr/local/bin/bun'),'@NODE@':config.get('node','/usr/local/bin/node'),
+      '@REMOTE_ROOT@':config.get('remoteRoot','/srv/pi/pi-remote'),'@ROOT_RUNTIME@':root_runtime,
+      '@ORCHESTRATOR_ROOT@':config.get('orchestratorRoot','/srv/pi/pi-orchestrator'),'@STACK_ROOT@':config.get('stackRoot',str(repo)),
+      '@PUBLISHER_TOKEN_FILE@':str(shared/'publisher-token'),'@KENAN_PRIVATE_DIR@':str(shared/'private'),
+      '@KENAN_MEMORY_SOURCE@':memory_runtime,
+      '@STATE_DIR@':str(shared),'@ROOMS_HOME@':str(rooms_home),
+      '@PERSONS_DIR@':str(persons_dir),'@BROKER_CONFIG@':str(target('/etc/pi-stack/one-kenan-broker.json')),
+      '@ROOMS_ENV_FILE@':str(target('/etc/pi-stack/rooms.env')),'@ROOMS_CONFIG@':str(target('/etc/pi-stack/rooms.json')),
+      '@ORCHESTRATOR_CONFIG@':config.get('orchestratorConfig','/var/lib/pi-orchestrator/config.json'),
+      '@ACCESS_CONFIG@':str(target('/etc/pi-stack/one-kenan-access.json')),'@ACCESS_COMMAND@':str(target('/usr/local/sbin/pi-kenan-access'))}
+    units={}
+    for name in unit_names:
+        source=(repo/'deploy/systemd'/name).read_text()
+        if name=='pi-kenan-memory.service':
+            source=source.replace('[Service]','[Service]\nEnvironmentFile=@KENAN_ENV_FILE@').replace('Requires=pi-kenan-custody.service','Requires=pi-kenan-custody.service pi-kenan-access.service').replace('User=pi-kenan',f'User={execution}').replace('Group=pi-kenan',f'Group={execution}')
+        for before,after in substitutions.items(): source=source.replace(before,after)
+        if name=='pi-kenan-memory.service': source=source.replace('/var/lib/pi-kenan',str(shared)).replace('/srv/pi/kenan-memory',memory_runtime)
+        source=source.replace('/etc/pi-stack/host.json',str(host)).replace('/etc/pi-stack/kenan-memory-auth.json',str(target('/etc/pi-stack/kenan-memory-auth.json'))) 
+        if re.search(r'@[A-Z_]+@',source): raise RuntimeError(f'Unrendered unit: {name}')
+        units[name]=source
+    return units
 
 def install():
-    if fixture:
-        uid, gid = os.getuid(), os.getgid()
-    else:
-        try: pwd.getpwnam(execution)
-        except KeyError: pass
-        else: raise RuntimeError('Execution account already exists; use its owning transaction, not a second cutover')
-        record['createdUser'] = True; save()
-        run(['useradd', '--system', '--user-group', '--home-dir', '/var/lib/pi-kenan', '--no-create-home', '--shell', '/usr/sbin/nologin', execution])
-        user = pwd.getpwnam(execution); uid, gid = user.pw_uid, user.pw_gid
-        snapshot(pathlib.Path('/var/lib/systemd/linger') / execution)
-        run(['loginctl', 'enable-linger', execution], capture_output=True)
-        ctl('start', f'user@{uid}.service')
-    record['uid'] = uid; record['gid'] = gid; save()
-    shared = target('/var/lib/pi-kenan')
-    shared.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chown(shared, uid, gid)
-    for name in ('custody', '.private.crypt', 'private', 'environments', 'supervisor-capabilities', 'bin'):
-        directory = shared / name; directory.mkdir(exist_ok=True, mode=0o700)
-        if name not in ('environments', 'supervisor-capabilities', 'bin'): os.chown(directory, uid, gid)
-        if name == 'bin': directory.chmod(0o755)
-    memory = {'supervisors': []}
+    root_uid,root_gid=user_identity(execution,shared); room_uid,room_gid=user_identity(room_user,rooms_home)
+    record['rootUid']=root_uid; record['roomUid']=room_uid; save()
+    for directory,uid,gid,mode in [(shared,0,0,0o711),(shared/'custody',0,0,0o700),(shared/'supervisor-capabilities',0,0,0o700),
+      (shared/'.private.crypt',root_uid,root_gid,0o700),(shared/'private',root_uid,root_gid,0o700),(shared/'bin',0,0,0o755),(rooms_home,room_uid,room_gid,0o700)]:
+        directory.mkdir(parents=True,exist_ok=True,mode=mode); directory.chmod(mode)
+        if not fixture: os.chown(directory,uid,gid)
+    memory={'supervisors':[],'uidPersons':{}}
     for person in people:
-        token = secrets.token_urlsafe(32)
-        replace(shared / 'supervisor-capabilities' / person['user'], token+'\n', 0o600)
-        memory['supervisors'].append({'person': person['user'], 'token': token})
-        environment = f'PI_REMOTE_PORT={config["ports"][person["user"]]}\nPI_REMOTE_SENDER_ID={person["user"]}\nPI_REMOTE_SENDER_NAME={json.dumps(person["displayName"])}\n'
-        if person['user'] in config.get('orchestratorPorts', {}):
-            environment += f'PI_ORCHESTRATOR_PORT={config["orchestratorPorts"][person["user"]]}\nPI_REMOTE_ORCHESTRATOR_URL=http://127.0.0.1:{config["orchestratorPorts"][person["user"]]}\n'
-        replace(shared / 'environments' / person['user'], environment, 0o644)
-    publisher = secrets.token_urlsafe(32)
-    memory['publisherToken'] = publisher
-    replace(shared / 'publisher-token', publisher+'\n', 0o600)
-    replace(target('/etc/pi-stack/kenan-memory-auth.json'), json.dumps(memory)+'\n', 0o600)
-    replace(target('/etc/pi-stack/one-kenan.json'), json.dumps(config, indent=2)+'\n')
-    env = f'PI_STACK_HOST_FILE={host}\nPI_STACK_HOST_CONFIG={host}\nPI_KENAN_CONFIG={target("/etc/pi-stack/one-kenan.json")}\nPI_REMOTE_PERSONS_DIR={persons_dir}\nPI_KENAN_KEY_STORE={shared}/custody/keys.json\nPI_KENAN_PRIVATE_DIR={shared}/private\nPI_KENAN_SHARED_CIPHER={shared}/.private.crypt\nPI_KENAN_MEMORY_STORE={shared}/private/memory/memory.sqlite3\nPI_KENAN_MEMORY_URL=http://127.0.0.1:{config.get("memoryPort", 19883)}\nPI_KENAN_ACTION_JOURNAL_DIR={shared}/private/action-journal\nPI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE={shared}/publisher-token\n'
-    replace(target('/etc/pi-stack/one-kenan.env'), env)
-    for name, contents in rendered_units().items():
-        path = target('/etc/systemd/system') / name
-        if path.exists(): raise RuntimeError(f'Additive unit already exists: {path}')
-        replace(path, contents)
-    for source, destination in (('one-kenan-tools', '/usr/local/libexec/pi-kenan-tools'), ('one-kenan-user-access', '/usr/local/sbin/pi-kenan-user-access')):
-        replace(target(destination), (repo / 'deploy' / source).read_bytes(), 0o755)
-    replace(target('/etc/sudoers.d/pi-kenan'), f'{execution} ALL=(kenan) NOPASSWD: /usr/local/libexec/pi-kenan-tools *\n', 0o440)
-    for name in config.get('credentialTools', {}):
-        replace(shared / 'bin' / name, f'#!/bin/sh\nexec sudo -n -u kenan /usr/local/libexec/pi-kenan-tools {name} "$@"\n', 0o755)
-    fuse = target('/etc/fuse.conf')
-    previous = fuse.read_text() if fuse.exists() else ''
-    if 'user_allow_other' not in [line.strip() for line in previous.splitlines() if not line.lstrip().startswith('#')]:
-        replace(fuse, previous+'\nuser_allow_other\n')
-    grant_spaces(uid)
-    if not fixture:
-        run(['visudo', '-cf', '/etc/sudoers.d/pi-kenan'], capture_output=True)
-        snapshot(state / 'firewall.nft')
-        (state / 'firewall.nft').write_text(run(['nft', 'list', 'table', 'inet', 'pi_user_access'], capture_output=True).stdout)
-        replace(target('/etc/systemd/system/pi-user-access.service.d/one-kenan.conf'), '[Service]\nExecStart=\nExecStart=/usr/local/sbin/pi-kenan-user-access\nExecReload=\nExecReload=/usr/local/sbin/pi-kenan-user-access\n')
-        run(['systemd-analyze', 'verify', *[str(target('/etc/systemd/system') / name) for name in rendered_units()]], capture_output=True)
+        token=secrets.token_urlsafe(32); cap=shared/'supervisor-capabilities'/person['user']; fresh(cap,token+'\n',0o600)
+        memory['supervisors'].append({'person':person['user'],'token':token}); memory['uidPersons'][str(person_uid(person))]=person['user']
+        fresh(target(f'/etc/systemd/system/pi-remote@{person["user"]}.service.d/one-kenan.conf'),
+          f'[Service]\nLoadCredential=kenan-memory-supervisor:{cap}\nEnvironment=PI_KENAN_MEMORY_URL=http://127.0.0.1:{ports["memoryPort"]}\nEnvironment=PI_KENAN_ROOT_URL=http://127.0.0.1:{ports["rootPort"]}\n')
+    room_token=secrets.token_urlsafe(32); fresh(shared/'supervisor-capabilities/pi-rooms',room_token+'\n',0o600)
+    memory['supervisors'].append({'person':'pi-rooms','token':room_token}); memory['uidPersons'][str(room_uid)]='pi-rooms'
+    for field,name in [('publisherToken','publisher-token'),('rootToken','root-memory-token')]:
+        memory[field]=secrets.token_urlsafe(32); fresh(shared/name,memory[field]+'\n',0o600)
+    fresh(shared/'root-admin-capability',secrets.token_hex(32)+'\n',0o600)
+    fresh(target('/etc/pi-stack/kenan-memory-auth.json'),json.dumps(memory)+'\n',0o600)
+    one={**config,**ports,'executionUser':execution,'roomsUser':room_user,'custodySocket':str(target('/run/pi-kenan/custody.sock')),
+         'rootAdminCapabilityFile':str(shared/'root-admin-capability'),'brokerUser':operator}
+    fresh(target('/etc/pi-stack/one-kenan.json'),json.dumps(one,indent=2)+'\n')
+    root={**root_config,'version':1,'cwd':str(shared/'private'),'agentDir':str(shared/'private/.pi/agent'),
+          'sessionsDir':str(shared/'private/root-sessions'),'brokerUrl':f'http://127.0.0.1:{ports["rootBrokerPort"]}'}
+    fresh(target('/etc/pi-stack/kenan-root.json'),json.dumps(root,indent=2)+'\n')
+    prompt=pathlib.Path(root['promptFile'])
+    if not prompt.exists():
+        source=pathlib.Path(config.get('rootPromptSource',root_runtime+'/instructions.md'))
+        if fixture and not source.resolve().is_relative_to(fixture): raise RuntimeError('Fixture root prompt source escaped root')
+        fresh(prompt,source.read_bytes())
+    additive_broker={**broker,'grantOwner':'one-kenan','listeners':[{'principal':user,'port':port,'accounts':accounts,'models':models,'maxInFlight':config.get('brokerMaxInFlight',20)}
+        for user,port in [(execution,ports['rootBrokerPort']),(room_user,ports['roomsBrokerPort'])]]}
+    fresh(target('/etc/pi-stack/one-kenan-broker.json'),json.dumps(additive_broker,indent=2)+'\n')
+    env=f'PI_STACK_HOST_FILE={host}\nPI_STACK_HOST_CONFIG={host}\nPI_KENAN_CONFIG={target("/etc/pi-stack/one-kenan.json")}\nPI_REMOTE_PERSONS_DIR={persons_dir}\nPI_KENAN_KEY_STORE={shared}/custody/keys.json\nPI_KENAN_PRIVATE_DIR={shared}/private\nPI_KENAN_SHARED_CIPHER={shared}/.private.crypt\nPI_KENAN_MEMORY_STORE={shared}/private/memory/memory.sqlite3\nPI_KENAN_MEMORY_PORT={ports["memoryPort"]}\nPI_KENAN_MEMORY_URL=http://127.0.0.1:{ports["memoryPort"]}\nPI_KENAN_ROOT_PORT={ports["rootPort"]}\nPI_KENAN_ROOT_URL=http://127.0.0.1:{ports["rootPort"]}\nPI_KENAN_ROOT_CONFIG={target("/etc/pi-stack/kenan-root.json")}\nPI_KENAN_ACTION_JOURNAL_DIR={shared}/private/action-journal\nPI_KENAN_ROOM_AUDIENCE_MODULE={config.get("remoteRoot","/srv/pi/pi-remote")}/server/room-audience.mjs\nPI_REMOTE_ROOMS_DB={target("/var/lib/pi-remote/one-kenan/rooms.sqlite3")}\n'
+    fresh(target('/etc/pi-stack/one-kenan.env'),env)
+    room_environment={'PI_REMOTE_HOST':'127.0.0.1','PI_REMOTE_PORT':ports['roomsPort'],'PI_REMOTE_DATA':str(rooms_home),
+      'PI_AGENT_DIR':str(rooms_home/'agent'),'PI_MODEL_BROKER_URL':f'http://127.0.0.1:{ports["roomsBrokerPort"]}',
+      'PI_KENAN_ROOT_URL':f'http://127.0.0.1:{ports["rootPort"]}','PI_KENAN_MEMORY_URL':f'http://127.0.0.1:{ports["memoryPort"]}',
+      'PI_STACK_HOST_CONFIG':str(host),**config.get('roomsEnvironment',{})}
+    fresh(target('/etc/pi-stack/rooms.json'),json.dumps({'version':1,'user':room_user,'displayName':'Kenan rooms','environment':room_environment},indent=2)+'\n')
+    fresh(target('/etc/pi-stack/rooms.env'),'\n'.join(f'{key}={value}' for key,value in room_environment.items())+'\n')
+    (rooms_home/'agent').mkdir(exist_ok=True,mode=0o700)
+    if not fixture: os.chown(rooms_home/'agent',room_uid,room_gid)
+    room_settings={'packages':[],'defaultProvider':root_config['provider'],'defaultModel':root_config['model'],'defaultThinkingLevel':root_config['thinkingLevel']}
+    fresh(rooms_home/'agent/settings.json',json.dumps(room_settings)+'\n',0o600)
+    if not fixture: os.chown(rooms_home/'agent/settings.json',room_uid,room_gid)
+    catalog=pathlib.Path(config.get('modelCatalog',config.get('orchestratorRoot','/srv/pi/pi-orchestrator')+'/dist/models.json'))
+    if fixture and not catalog.resolve().is_relative_to(fixture): raise RuntimeError('Fixture model catalog escaped root')
+    fresh(rooms_home/'agent/models.json',catalog.read_bytes(),0o600)
+    if not fixture: os.chown(rooms_home/'agent/models.json',room_uid,room_gid)
+    roster=target('/var/lib/pi-remote/one-kenan'); roster.mkdir(parents=True,exist_ok=True,mode=0o750); roster.chmod(0o750)
+    if not fixture: os.chown(roster,0,root_gid)
+    fresh(target('/etc/systemd/system/pi-remote-router.service.d/one-kenan.conf'),
+      f'[Service]\nEnvironment=PI_REMOTE_ROOMS_OWNER_URL=http://127.0.0.1:{ports["roomsPort"]}\nEnvironment=PI_REMOTE_ROOMS_DB={roster}/rooms.sqlite3\n')
+    for name,contents in rendered_units().items(): fresh(target('/etc/systemd/system')/name,contents)
+    fresh(target('/usr/local/sbin/pi-kenan-access'),(repo/'deploy/one-kenan-access').read_bytes(),0o755)
+    person_uids=[person_uid(p) for p in people]
+    access={'hostFile':str(host),'rootUid':root_uid,'roomsUid':room_uid,'personUids':person_uids,**ports}
+    fresh(target('/etc/pi-stack/one-kenan-access.json'),json.dumps(access)+'\n')
+    if config.get('credentialTools'):
+        fresh(target('/usr/local/libexec/pi-kenan-tools'),(repo/'deploy/one-kenan-tools').read_bytes(),0o755)
+        fresh(target('/etc/sudoers.d/pi-kenan'),f'{execution} ALL=({operator}) NOPASSWD: /usr/local/libexec/pi-kenan-tools *\n',0o440)
+        for name in config['credentialTools']:
+            if not re.fullmatch('[a-z][a-z0-9-]*',name): raise RuntimeError('Invalid credential tool')
+            fresh(shared/'bin'/name,f'#!/bin/sh\nexec sudo -n -u {operator} /usr/local/libexec/pi-kenan-tools {name} "$@"\n',0o755)
+        if not fixture: run(['visudo','-cf',str(target('/etc/sudoers.d/pi-kenan'))],capture_output=True)
+    fuse=target('/etc/fuse.conf'); previous=fuse.read_text() if fuse.exists() else ''
+    if 'user_allow_other' not in [line.strip() for line in previous.splitlines() if not line.lstrip().startswith('#')]: replace(fuse,previous+'\nuser_allow_other\n')
+    grant_spaces(root_uid)
     ctl('daemon-reload')
 
 def rollback():
-    if record['phase'] in ('new', 'prepared', 'rolled-back'):
-        return
-    failures = []
+    if record['phase'] in ('new','prepared','rolled-back'): return
+    failures=[]
     def attempt(fn):
         try: fn()
         except Exception as error: failures.append(str(error))
-    # Fence requests before changing writer ownership or mount namespace.
-    attempt(lambda: ctl('stop', config.get('routerUnit', 'pi-remote-router.service')))
-    for unit in reversed(record['newUnits']): attempt(lambda unit=unit: ctl('disable', '--now', unit))
-    uid = record.get('uid')
-    if uid is not None:
-        for space in record['spaces']:
-            root = pathlib.Path(space['path'])
-            owner = os.getuid() if fixture else pwd.getpwnam(space['owner']).pw_uid
-            group = os.getgid() if fixture else pwd.getpwnam(space['owner']).pw_gid
-            candidates = [root, *root.rglob('*')] if root.exists() and space.get('recursive') else [root]
-            for path in candidates:
-                if path.is_symlink() or not path.exists(): continue
-                if path.stat().st_uid == uid and not fixture: attempt(lambda path=path: os.chown(path, owner, group))
-    # Parent ACLs were acquired last; restoring in reverse returns their original masks.
+    # Fence only root/room feature requests; the original front door never stops.
+    previous=record['files'].get(str(host))
+    if previous:
+        attempt(lambda: host.write_bytes(base64.b64decode(previous['data'])))
+    else:
+        payload=json.loads(host.read_text()); payload['oneKenan']=False
+        attempt(lambda: host.write_text(json.dumps(payload,indent=2)+'\n'))
+    for unit in reversed(record['newUnits']):
+        if unit!='pi-kenan-access.service': attempt(lambda unit=unit: ctl('disable','--now',unit))
+    if not failures and record.get('brokerStarted'):
+        attempt(lambda: run([config.get('node','/usr/local/bin/node'),'--input-type=module','-e',
+          'import { Store } from '+json.dumps(config.get('orchestratorRoot','/srv/pi/pi-orchestrator')+'/dist/store.js')+'; const store=Store.open(process.argv[1]); try { store.publishBrokerGrants([], "one-kenan"); } finally { store.close(); }',broker['ledgerPath']],capture_output=True))
+    if failures:
+        record['phase']='rollback-failed'; record['failures']=failures; save()
+        raise RuntimeError('Rollback incomplete; UID gates/config preserved: '+'; '.join(failures))
+    if 'pi-kenan-access.service' in record['newUnits']: attempt(lambda: ctl('disable','--now','pi-kenan-access.service'))
     for backup in reversed(record['aclFiles']):
-        source = pathlib.Path(backup).read_text()
-        retained = [block for block in source.strip().split('\n\n') if pathlib.Path(acl_path(block)).exists()]
-        if retained: attempt(lambda retained=retained: run(['setfacl', '--restore=-'], input='\n\n'.join(retained)+'\n', capture_output=True))
-    for name, previous in reversed(list(record['files'].items())):
-        path = pathlib.Path(name)
-        if path == state / 'firewall.nft': continue
-        def restore(path=path, previous=previous):
-            if previous is None:
-                if path.exists(): path.unlink()
+        retained=[block for block in pathlib.Path(backup).read_text().strip().split('\n\n') if block and pathlib.Path(acl_path(block)).exists()]
+        if retained: attempt(lambda retained=retained: run(['setfacl','--restore=-'],input='\n\n'.join(retained)+'\n',capture_output=True))
+    for name,previous in reversed(list(record['files'].items())):
+        path=pathlib.Path(name)
+        # Credentials and encrypted custody stay under root custody for reactivation/recovery.
+        if path.is_relative_to(shared): continue
+        def restore(path=path,previous=previous):
+            if previous is None: path.unlink(missing_ok=True)
             else:
-                path.write_bytes(base64.b64decode(previous['data'])); path.chmod(previous['mode']); os.chown(path, previous['uid'], previous['gid'])
+                path.write_bytes(base64.b64decode(previous['data'])); path.chmod(previous['mode'])
+                if not fixture: os.chown(path,previous['uid'],previous['gid'])
         attempt(restore)
-    if not fixture and (state / 'firewall.nft').exists():
-        attempt(lambda: run(['nft', '-f', '-'], input='destroy table inet pi_user_access\n'+(state / 'firewall.nft').read_text(), capture_output=True))
     attempt(lambda: ctl('daemon-reload'))
-    for unit in record['oldActive']: attempt(lambda unit=unit: ctl('start', unit))
-    if record.get('routerActive'): attempt(lambda: ctl('start', config.get('routerUnit', 'pi-remote-router.service')))
-    if not fixture and record['createdUser']:
-        if record.get('uid') is not None: attempt(lambda: ctl('stop', f'user@{record["uid"]}.service'))
-        attempt(lambda: run(['userdel', execution], capture_output=True))
-        shared = target('/var/lib/pi-kenan')
-        for path in [shared, *shared.rglob('*')]:
-            if not path.is_symlink() and path.exists() and path.stat().st_uid == record.get('uid'):
-                attempt(lambda path=path: os.chown(path, 0, 0))
-        shared.chmod(0o700)
-    record['phase'] = 'rollback-failed' if failures else 'rolled-back'; record['failures'] = failures; save()
+    record['phase']='rollback-failed' if failures else 'rolled-back'; record['failures']=failures; save()
     if failures: raise RuntimeError('Rollback incomplete: '+'; '.join(failures))
 
-if args.action == 'prepare':
-    if record['phase'] not in ('new', 'prepared'): raise SystemExit('Existing transaction cannot be prepared again')
-    for name, content in rendered_units().items(): (state / name).write_text(content)
-    record['phase'] = 'prepared'; save()
-    print(json.dumps({'phase': 'prepared', 'liveChanged': False, 'units': new_units(), 'required': ['Hara cutover authorization', 'quiescent old writers', 'explicit ACL spaces and credential routes', 'first post-reboot login to open custody']}))
-elif args.action == 'cutover':
-    if record['phase'] != 'prepared': raise SystemExit('Run prepare first; interrupted transactions require rollback')
-    record['phase'] = 'applying'; save()
+if args.action=='prepare':
+    if record['phase'] not in ('new','prepared'): raise SystemExit('Existing transaction cannot be prepared again')
+    if json.loads(host.read_text()).get('oneKenan') is True: raise SystemExit('Prepare requires the existing feature to be off')
+    for name,contents in rendered_units().items(): (state/name).write_text(contents)
+    record['phase']='prepared'; save()
+    print(json.dumps({'phase':'prepared','liveChanged':False,'units':active_units,'required':['Hara cutover authorization','committed root/rooms runtimes','first post-reboot login opens encrypted custody']}))
+elif args.action=='cutover':
+    if record['phase']!='prepared': raise SystemExit('Run prepare first; interrupted transactions require rollback')
+    record['phase']='applying'; save()
     try:
-        router_unit = config.get('routerUnit', 'pi-remote-router.service')
-        record['routerActive'] = active(router_unit)
-        record['oldActive'] = [unit for person in people for unit in (f'pi-remote@{person["user"]}.service', f'pi-orchestrator@{person["user"]}.service') if active(unit)]
-        save()
-        quiescent()
-        ctl('stop', router_unit)
-        record['fenced'] = True; save()
-        quiescent()
-        for unit in record['oldActive']: ctl('stop', unit)
+        snapshot(host)
         install()
-        payload = json.loads(host.read_text()); payload['oneKenan'] = True
-        replace(host, json.dumps(payload, indent=2)+'\n')
-        if not fixture: run(['/usr/local/sbin/pi-kenan-user-access'], capture_output=True)
-        record['newUnits'] = new_units(); save()
-        for unit in record['newUnits']: ctl('enable', '--now', unit)
-        ctl('start', router_unit)
-        record['phase'] = 'active'; save()
-        print(json.dumps({'phase': 'active', 'pending': ['first enrolled login opens custody and folders; absent keys collected on subsequent logins'], 'oldUnitsPreserved': True}))
+        payload=json.loads(host.read_text()); payload['oneKenan']=True; replace(host,json.dumps(payload,indent=2)+'\n')
+        record['newUnits']=active_units; save()
+        for unit in active_units:
+            if unit=='pi-kenan-broker.service': record['brokerStarted']=True; save()
+            ctl('enable','--now',unit)
+        record['phase']='active'; save()
+        print(json.dumps({'phase':'active','originalServicesUntouched':True,'pending':['Existing supervisors gain credentials at their next ordinary start; UID identity works meanwhile','First enrolled login opens custody; absent folder keys are collected on successful logins']}))
     except Exception:
-        if record.get('fenced'): rollback()
-        else: record['phase'] = 'prepared'; save()
-        raise
-elif args.action == 'rollback':
-    rollback()
-    print(json.dumps({'phase': record['phase'], 'encryptedCustodyPreserved': True}))
-else:
-    print(json.dumps({'phase': record['phase'], 'newUnits': record['newUnits'], 'oldActive': record['oldActive'], 'failures': record.get('failures', [])}))
+        rollback(); raise
+elif args.action=='rollback':
+    rollback(); print(json.dumps({'phase':record['phase'],'encryptedCustodyPreserved':True,'originalServicesUntouched':True}))
+else: print(json.dumps({'phase':record['phase'],'newUnits':record['newUnits'],'failures':record.get('failures',[])}))

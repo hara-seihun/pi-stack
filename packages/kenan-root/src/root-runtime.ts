@@ -63,7 +63,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
   };
 }
 
-async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
+export async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
   const { createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager, createBashTool, defineTool } = await import("@earendil-works/pi-coding-agent");
   const { Type } = await import("typebox");
   const { memoryExtension } = await import("kenan-memory/tools");
@@ -89,7 +89,12 @@ async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
     const { session } = await createAgentSessionFromServices({ services,
       sessionManager: SessionManager.create(spec.config.cwd, spec.directory), model,
       thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, replyTool] });
-    if (session.systemPrompt !== spec.prompt) { session.dispose(); throw new Error("Root prompt was modified during initialization"); }
+    const resources = services.resourceLoader;
+    const names = session.agent.state.tools.map(tool => tool.name);
+    if (resources.getSystemPrompt() !== spec.prompt || resources.getAgentsFiles().agentsFiles.length || resources.getSkills().skills.length || resources.getAppendSystemPrompt().length) {
+      session.dispose(); throw new Error("Root prompt resources were modified during initialization");
+    }
+    if (names.length !== ROOT_TOOLS.length || names.some(name => !ROOT_TOOLS.includes(name))) { session.dispose(); throw new Error("Root runtime initialized a different toolset"); }
     return { prompt: async text => scope.run(spec.env, () => session.prompt(text)),
       reply: () => chosen?.reply, subjects: () => chosen?.subjects ?? [], dispose: () => session.dispose() };
   });

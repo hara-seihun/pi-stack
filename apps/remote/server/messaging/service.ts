@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { actionJournal, journalWarning, type ActionTicket, type ActionJournal } from "kenan-memory/journal";
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -178,7 +179,7 @@ export class MessagingService {
   private closed = false;
   private started: Promise<void> | null = null;
   private closeTask: Promise<void> | null = null;
-  constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY) {
+  constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY, private readonly journal: Pick<ActionJournal, "begin" | "finish"> = actionJournal) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     this.linkPreview = createLinkPreviewResolver(join(root, "preview-images"));
     this.db = new Database(join(root, "messages.sqlite3"));
@@ -524,6 +525,7 @@ export class MessagingService {
     if (conversation.kind !== "direct") throw new MessagingFailure("Signal calls are available only in direct conversations", 409, "calls_direct_only");
     const backend = this.readyCallBackend(backendId);
     if (this.activeCall) throw new MessagingFailure("Another call is already in progress", 409, "call_in_progress");
+    const ticket = this.journal.begin({ action: `${backendId}.call`, recipients: [conversation.title, conversation.external_id], summary: "Initiated an outgoing call; not proof of a connected call", externalId: requestId });
     this.clearEndedCall();
     this.setCurrent(conversation.id, true);
     const call = this.newServiceCall(backend, backend.plugin.calls, conversation, {
@@ -535,6 +537,8 @@ export class MessagingService {
       let result;
       try { result = await call.support.start(conversation.external_id); }
       catch (cause) { result = { ok: false as const, error: { code: "call_failed", message: failureText(cause) } }; }
+      const warning = journalWarning(this.journal.finish(ticket, result.ok ? "confirmed" : "unconfirmed", result.ok ? `Backend accepted call ${result.value.externalId}; not proof it connected` : result.error.message));
+      if (warning) call.value.error = warning;
       if (this.activeCall !== call) return;
       if (!result.ok) {
         this.finishCall(call, result.error.code, result.error.message);
@@ -757,12 +761,18 @@ export class MessagingService {
     const backend = this.backends.get(conversation.backend_id);
     if (!backend?.plugin?.react) return { ok: false, error: { code: "reactions_unsupported", message: "This messaging backend does not support reactions" } };
     if (backend.info.status !== "ready") return { ok: false, error: { code: "backend_unavailable", message: backend.info.detail } };
+    let ticket: ActionTicket | null;
+    try { ticket = this.journal.begin({ action: `${conversation.backend_id}.reaction`, recipients: [conversation.title, conversation.external_id], summary: `${remove ? "Removed" : "Sent"} reaction ${emoji}`, externalId: messageId }); }
+    catch (cause) { return { ok: false, error: { code: "journal_unavailable", message: `Not dispatched: ${failureText(cause)}` } }; }
     let result;
     try { result = await backend.plugin.react({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { author: row.sender, timestamp: row.timestamp }, emoji, remove); }
-    catch (cause) { return { ok: false, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } }; }
+    catch (cause) { result = { ok: false as const, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } }; }
+    const warning = journalWarning(this.journal.finish(ticket, result.ok ? "confirmed" : result.error.code === "unknown" ? "unconfirmed" : "failed", result.ok ? `Reaction accepted at ${result.value.timestamp}` : result.error.message));
+    if (warning) { this.db.query("UPDATE messages SET error=? WHERE id=?").run(warning, messageId); this.changed(); }
     if (!result.ok) return result;
     await this.receiveReaction(conversation.backend_id, { conversation: { id: conversation.external_id, title: conversation.title, kind: conversation.kind }, target: { author: row.direction === "outgoing" ? result.value.sender : row.sender, timestamp: row.timestamp }, account: result.value.sender, sender: result.value.sender, emoji, remove, timestamp: result.value.timestamp });
-    return { ok: true, value: this.reactions(row) };
+    const receipt = { ok: true as const, value: this.reactions(row), ...(warning ? { journalWarning: warning } : {}) };
+    return receipt;
   }
   private messageSender(row: MessageRow, backendId: string): string {
     if (row.direction === "outgoing" && row.sender === "You") {
@@ -965,6 +975,14 @@ export class MessagingService {
     return { message, settled: task };
   }
   private async dispatch(plugin: MessagingPlugin, conversation: ConversationRow, input: MessagingSend, attachments: AttachmentRow[], reply?: BackendReply): Promise<MessagingMessage> {
+    let ticket: ActionTicket | null;
+    try {
+      ticket = this.journal.begin({ action: `${conversation.backend_id}.message`, recipients: [conversation.title, conversation.external_id], summary: `${input.text} (${attachments.length} attachments)`, externalId: input.requestId });
+    } catch (cause) {
+      this.db.query("UPDATE messages SET status='failed',error=? WHERE id=?").run(`Not dispatched: action journal unavailable: ${failureText(cause)}`, input.requestId);
+      this.changed();
+      return this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
+    }
     try {
       const result = await plugin.send({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { requestId: input.requestId, text: input.text, attachments: attachments.map(item => ({ path: item.path, name: item.name, mimeType: item.mime_type, size: item.size })), ...(reply ? { reply } : {}) });
       if (result.ok) {
@@ -996,6 +1014,9 @@ export class MessagingService {
     } catch (cause) {
       this.db.query("UPDATE messages SET status='unknown',error=? WHERE id=?").run(`Backend did not confirm the send: ${failureText(cause)}`, input.requestId);
     }
+    const row = this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow;
+    const warning = journalWarning(this.journal.finish(ticket, row.status === "sent" ? "confirmed" : row.status === "failed" ? "failed" : "unconfirmed", row.external_id ?? row.error ?? row.status));
+    if (warning) this.db.query("UPDATE messages SET error=? WHERE id=?").run(warning, input.requestId);
     this.changed();
     return this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
   }

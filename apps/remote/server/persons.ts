@@ -12,6 +12,7 @@ export type Person = {
   version: 1;
   user: string;
   displayName: string;
+  machineAdministrator?: boolean;
   port: number;
   remoteAccess?: string[];
   auth?: "oidc";
@@ -35,6 +36,7 @@ export function parsePerson(source: string, path: string): Person {
   if (!Number.isInteger(person.port) || person.port <= 0) throw new Error(`${path}: port must be a positive integer`);
   if (person.remoteAccess !== undefined && (!Array.isArray(person.remoteAccess) || person.remoteAccess.some((id) => typeof id !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(id)) || new Set(person.remoteAccess).size !== person.remoteAccess.length)) throw new Error(`${path}: remoteAccess must contain unique endpoint ids`);
   if (!person.environment || typeof person.environment !== "object") throw new Error(`${path}: environment object required`);
+  if (person.machineAdministrator !== undefined && typeof person.machineAdministrator !== "boolean") throw new Error(`${path}: machineAdministrator must be a boolean`);
   if (person.auth !== undefined && person.auth !== "oidc") throw new Error(`${path}: unsupported authentication method`);
   if (person.auth === "oidc" && !person.unlock) throw new Error(`${path}: OAuth persons require an encrypted folder`);
   if (person.unlock && (!person.unlock.cipherDir || !person.unlock.mountpoint)) throw new Error(`${path}: unlock needs cipherDir and mountpoint`);

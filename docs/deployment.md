@@ -58,6 +58,13 @@ A publication also owns `/srv/pi/.pi-stack-deploy.lock.publication`, a root-owne
 
 The release checkout and its ignored dependencies are reproducible. Retain its state while a release holds locks; remove it only after checking for unique source work and running releases. The next wrapper recreates it from its configured remote. `node --test scripts/deploy-lock.test.mjs scripts/release-checkout.test.mjs scripts/publication-reservation.test.mjs` covers locks, publication reservation recovery and source isolation in seconds.
 
+## Root Kenan activation
+
+[Root Kenan deployment](one-kenan-deployment.md) owns the separate, off-by-default
+`deploy/one-kenan` prepare/cutover/rollback transaction. It adds a private privileged request
+runtime and unprivileged room owner without changing the execution identity or stopping any
+existing person's supervisor. Source publication does not activate it.
+
 ## What a host provides
 
 Every host supplies Unix people, a host file and systemd services. The host file at `/etc/pi-stack/host.json` names a `fleetUser`, its endpoint catalog and optional extra packages and skills. This is a fictional example, not a production host file:

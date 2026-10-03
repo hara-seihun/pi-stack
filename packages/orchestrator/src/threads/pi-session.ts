@@ -6,6 +6,7 @@ import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessi
   convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession } from "./contracts.js";
 import { threadTools } from "./pi-tools.js";
+import { convergeTools } from "./converge.js";
 import { argument, assertPiSessionFile, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
@@ -19,9 +20,9 @@ import { isRateLimitError } from "../provider-errors.js";
 import usageLogger from "../extension/usage-logger.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
-import { memoryExtension, MEMORY_TOOL_NAMES } from "kenan-memory/tools";
-import { prepareMemoryEnvironment } from "kenan-memory/session";
+import { memoryExtension } from "kenan-memory/tools";
 import { oneKenanEnabled } from "kenan-memory/config";
+import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
 import { createThreadClient } from "./http.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
@@ -44,8 +45,12 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_") || key === EXPLICIT_THREAD_MODEL_ENV) delete env[key];
   delete env.PI_KENAN_MEMORY_PERSON;
   delete env.PI_KENAN_MEMORY_TOKEN;
-  const memoryEnabled = oneKenanEnabled(env) && !isRawSession(options.args) && !options.args.includes(SANDBOX_ARGUMENT) && !options.args.includes("--orchestrator-context");
-  if (memoryEnabled) await prepareMemoryEnvironment(env, options.threadId);
+  delete env.PI_KENAN_MEMORY_ROLE;
+  if (options.env.PI_REMOTE_ROOM_ID === undefined) delete env.PI_REMOTE_ROOM_ID;
+  if (options.env.PI_REMOTE_ROOMS_RUNTIME === undefined) delete env.PI_REMOTE_ROOMS_RUNTIME;
+  const room = isRoomSession(env, options.threadId);
+  if (room && !oneKenanEnabled(env)) throw new Error("Room execution requires the oneKenan host flag");
+  const memoryEligible = !isRawSession(options.args) && !options.args.includes(SANDBOX_ARGUMENT) && !options.args.includes("--orchestrator-context");
   modeEnvironment(env);
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
   return piEnvironmentScope.run(env, async () => {
@@ -69,7 +74,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       cwd = requirePiCwd(admission, cwd, "runtime.cwd");
       if (sandbox && cwd !== options.cwd) throw new Error("Sandbox sessions cannot switch workspaces");
       preparePiSession(sessionManager);
-      const memoryFactories = memoryEnabled ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
+      const memoryFactories = memoryEligible ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
         const api = options.threads ?? createThreadClient(env.PI_THREAD_API_URL!, fetch, { token: env.PI_THREAD_TOKEN });
         const result = await api.ask({ threadId: options.threadId, requestId: `${options.threadId}:${id}`, questions: [{ question, suggestions }] });
         if (!result.ok) throw new Error(`Cannot ask which forget mode: ${JSON.stringify(result)}`);
@@ -77,7 +82,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       } })] : [];
       const isolated = await isolatedPiContext({ ...options, cwd, sessionFile: sessionManager.getSessionFile()! }, env);
       // Pi Remote's context-mirror extension owns context capture when it is loaded; a raw session loads no packages, so the runner reports.
-      const contextOwner = !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
+      const contextOwner = !room && !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
       // Like the mirror, the runner also reports each finished reply. The `context` event fires only before a
       // model call, so without this a raw thread's context never held its final answer: the transcript kept it
       // as live text and the supervisor's response metrics, keyed to that message, had nothing to attach to.
@@ -98,7 +103,11 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       } };
       const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
         settingsManager: isolated?.settingsManager,
-        resourceLoaderOptions: isolated ? {
+        resourceLoaderOptions: room ? {
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
+          extensionFactories: [routing, usageLogger, threadSpeed, threadContext, ...memoryFactories, roomSessionInstructions(env)],
+        } : isolated ? {
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           extensionsOverride: () => isolated.resourceLoader.getExtensions(),
         } : raw ? {
@@ -120,7 +129,10 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
-        tools: sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined), customTools: sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env })]) });
+        tools: room ? ROOM_TOOLS : sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined),
+        customTools: room ? threadTools({ ...options, cwd, env }).filter(tool => tool.name === "request_user_input_async")
+          : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
+      if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
       execution.bind(created.session);
       created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });

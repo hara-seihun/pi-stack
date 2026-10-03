@@ -1,0 +1,19 @@
+[Unit]
+Description=Publish Kenan's durable outbound action journal into shared memory
+Requires=pi-kenan-custody.service
+BindsTo=pi-kenan-custody.service
+After=pi-kenan-custody.service pi-kenan-memory.service
+JoinsNamespaceOf=pi-kenan-custody.service
+
+[Service]
+Type=oneshot
+User=@EXECUTION_USER@
+EnvironmentFile=@KENAN_ENV_FILE@
+Environment=PI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE=%d/kenan-memory-publisher
+LoadCredential=kenan-memory-publisher:@PUBLISHER_TOKEN_FILE@
+PrivateMounts=yes
+ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
+ExecCondition=/usr/bin/mountpoint -q @KENAN_PRIVATE_DIR@
+ExecStart=@BUN@ @KENAN_MEMORY_SOURCE@/src/journal-cli.ts drain --all
+TimeoutStartSec=30
+UMask=0077

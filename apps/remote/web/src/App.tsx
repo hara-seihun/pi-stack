@@ -18,6 +18,7 @@ import { deliverIdleNotifications, readIdleCursor, takeNotificationTarget, retai
 import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
+import { useRooms, RoomInbox, RoomConversation } from "./rooms";
 import { workerThreads, working } from "./thread-state";
 import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
@@ -206,6 +207,7 @@ function RemoteApp() {
     }
   }, [autoCollapseKey]);
   const { state, stateRef, patch } = useStableState();
+  const roomDirectory = useRooms(state.bootstrap?.rooms === true);
   const layout = useLayout();
   const route = useRoute();
   const routeChat = routeChatId(route);
@@ -217,6 +219,7 @@ function RemoteApp() {
   const showConversationIdentity = layout === "phone" || listSelection.key !== selectionKey || !listSelection.visible;
   const aiId = routeThreadId(route);
   const messagingActive = routeChat?.startsWith("human:") ?? false;
+  const roomId = state.bootstrap?.rooms && routeChat?.startsWith("room:") ? routeChat.slice(5) : null;
   const humanConversation = state.messaging.conversations.find(item => `human:${item.id}` === routeChat && item.current) ?? null;
   const [chatError, setChatError] = useState("");
   const [closing, setClosing] = useState<PendingCloses>(() => new Set());
@@ -327,7 +330,7 @@ function RemoteApp() {
     if (tab === "workers") navigate({ tab: "workers", thread: chat.slice(3), panel: null }, options);
     else navigate({ tab: "chats", chat, panel: null }, options);
   }, [route.tab]);
-  const openThreadId = useCallback((id: string, tab?: Tab) => openChat(`ai:${id}`, { tab }), [openChat]);
+  const openThreadId = useCallback((id: string, tab?: Tab) => openChat(id.startsWith("room:") ? id as ChatId : `ai:${id}`, { tab }), [openChat]);
   // Opening a thread from inside a panel used to close the panel and navigate
   // in the same tick. `history.back()` settles later, so its popstate landed
   // after the push and returned the person to the thread they came from: a
@@ -894,7 +897,9 @@ function RemoteApp() {
     {voiceDetail && <p className="muted">{voiceDetail}</p>}
   </div>;
 
-  const conversation = selected && !messagingActive
+  const conversation = roomId
+    ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} onRefresh={roomDirectory.refresh} />
+    : selected && !messagingActive
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
@@ -907,7 +912,7 @@ function RemoteApp() {
         ? <section className="empty-state"><strong>Opening…</strong></section>
         : <section className="empty-state"><strong>{route.tab === "workers" ? "Choose a worker" : "Choose a chat"}</strong></section>;
 
-  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
+  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError} picker={picker} rooms={state.bootstrap?.rooms ? <RoomInbox rooms={roomDirectory.rooms} people={roomDirectory.people} selected={roomId} error={roomDirectory.error} onOpen={id => openChat(`room:${id}`)} onRefresh={roomDirectory.refresh} /> : undefined} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
     : route.tab === "workers" ? <Suspense fallback={<Loading label="Loading workers…" />}><WorkersTree sessions={workerSessions} selectedId={aiId} compactSelected={layout !== "phone"} filter={workersFilter} onFilter={setWorkersFilter} onOpen={openWorker} onPrefetch={prefetchSession} onSelectedVisibleChange={onSelectedVisibleChange} /></Suspense>
     : null;
 
@@ -929,7 +934,7 @@ function RemoteApp() {
     : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
 
   const showTabs = route.tab === "calendar" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
-  return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
+  return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
         <SpeechBar />

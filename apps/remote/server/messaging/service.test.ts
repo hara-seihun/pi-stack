@@ -7,12 +7,14 @@ import { join } from "node:path";
 import { MessagingService, messagingConfig } from "./service";
 import { messagingRoot, createMessagingService } from "./index";
 import type { MessagingPlugin, MessagingPluginContext } from "./plugin";
+import { ActionJournal } from "kenan-memory/journal";
+import type { MemoryInput, MemoryClient } from "kenan-memory/contract";
 
 const roots: string[] = [];
 const services: MessagingService[] = [];
 function directory() { const path = mkdtempSync(join(tmpdir(), "pi-messaging-")); roots.push(path); return path; }
 afterEach(async () => { await Promise.all(services.splice(0).map(service => service.close())); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-async function setup(root = directory(), onChange?: () => void) {
+async function setup(root = directory(), onChange?: () => void, journal?: ActionJournal) {
   let context!: MessagingPluginContext;
   let sends = 0;
   let callStarts = 0;
@@ -40,7 +42,7 @@ async function setup(root = directory(), onChange?: () => void) {
     async send() { sends++; return mode === "ok" ? { ok: true, value: { externalId: `sent-${sends}`, timestamp: Date.now() } } : { ok: false, error: { code: mode, message: mode } }; },
     async close() {},
   };
-  const service = new MessagingService(root, [{ id: "personal", label: "Personal Signal", plugin: "test" }], async () => plugin, onChange);
+  const service = new MessagingService(root, [{ id: "personal", label: "Personal Signal", plugin: "test" }], async () => plugin, onChange, undefined, journal);
   services.push(service);
   await service.start();
   const conversation = await service.open("personal", "+15551230000");
@@ -53,6 +55,31 @@ async function setup(root = directory(), onChange?: () => void) {
 }
 
 describe("messaging custody", () => {
+  test("outbound boundary journals confirmation once across receipt replay and uncertain sends", async () => {
+    const items: MemoryInput[] = [];
+    const client = { async request(request: any) { items.push(request.item); return { ok: true, value: request.item }; } } as MemoryClient;
+    const journal = new ActionJournal({ directory: directory(), enabled: () => true, person: "alice", autoDrain: false, client });
+    const fixture = await setup(directory(), undefined, journal);
+    const input = { requestId: "journal-confirmed", text: "Foundation schedule for Sybil", attachmentIds: [] };
+    expect((await fixture.service.send(fixture.conversation.id, input)).status).toBe("sent");
+    await fixture.service.send(fixture.conversation.id, input);
+    expect(fixture.sends()).toBe(1);
+    await journal.drain();
+    expect(items.filter(item => item.source.action?.endsWith(":confirmed"))).toHaveLength(1);
+    expect(items.find(item => item.source.action?.endsWith(":confirmed"))?.text).toContain("Foundation schedule for Sybil");
+    fixture.setMode("unknown");
+    await fixture.service.send(fixture.conversation.id, { ...input, requestId: "journal-unknown" });
+    await journal.drain();
+    expect(items.filter(item => item.source.action?.endsWith(":unconfirmed"))).toHaveLength(1);
+    fixture.plugin.react = async () => ({ ok: true, value: { timestamp: Date.now(), sender: "self" } });
+    expect((await fixture.service.react(input.requestId, "👍", false)).ok).toBe(true);
+    await fixture.service.placeCall("personal", fixture.conversation.id, "journal-call");
+    await fixture.service.placeCall("personal", fixture.conversation.id, "journal-call");
+    expect(fixture.callStarts()).toBe(1);
+    await journal.drain();
+    expect(items.filter(item => item.source.action === "personal.reaction:confirmed")).toHaveLength(1);
+    expect(items.filter(item => item.source.action === "personal.call:confirmed")).toHaveLength(1);
+  });
   test("revision diffs reproduce the rendered window through every kind of change", async () => {
     const { service, context, conversation, plugin } = await setup();
     const chat = { id: conversation.externalId, title: conversation.title, kind: 'direct' as const };
