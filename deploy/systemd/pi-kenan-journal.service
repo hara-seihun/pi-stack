@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish Kenan's durable outbound action journal into shared memory
+After=pi-kenan-memory.service
+
+[Service]
+Type=oneshot
+User=@EXECUTION_USER@
+EnvironmentFile=@KENAN_ENV_FILE@
+ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
+ExecStart=@BUN@ @STACK_ROOT@/packages/kenan-memory/src/journal-cli.ts drain
+TimeoutStartSec=30
+UMask=0077
