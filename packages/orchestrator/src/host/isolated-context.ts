@@ -1,4 +1,4 @@
-import { DefaultResourceLoader, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isRunContext } from "../isolated-context-contract.js";
@@ -10,9 +10,8 @@ import { threadSpeed } from "../threads/pi-speed.js";
 import { argument } from "../threads/pi-session-file.js";
 
 import { isolatePiEnvironment } from "../threads/pi-environment.js";
-import { MEMORY_TOOL_NAMES } from "../../../kenan-memory/dist/tools.js";
 
-export async function isolatedPiContext(options: PiSessionOptions, environment: NodeJS.ProcessEnv, additionalFactories: ExtensionFactory[] = []) {
+export async function isolatedPiContext(options: PiSessionOptions, environment: NodeJS.ProcessEnv) {
   const raw = argument(options.args, "--orchestrator-context");
   if (raw === undefined) return undefined;
   const context: unknown = JSON.parse(raw);
@@ -43,7 +42,7 @@ export async function isolatedPiContext(options: PiSessionOptions, environment: 
     systemPromptOverride: () => undefined,
     appendSystemPromptOverride: () => [],
     additionalExtensionPaths,
-    extensionFactories: [routing, usageLogger, outputLimitContinuation, threadSpeed, ...additionalFactories],
+    extensionFactories: [routing, usageLogger, outputLimitContinuation, threadSpeed],
   });
   await resourceLoader.reload();
   const { errors, extensions } = resourceLoader.getExtensions();
@@ -58,6 +57,6 @@ export async function isolatedPiContext(options: PiSessionOptions, environment: 
     context,
     settingsManager,
     resourceLoader,
-    tools: [...new Set([...context.tools, ...(additionalFactories.length ? MEMORY_TOOL_NAMES : [])])],
+    tools: [...context.tools],
   };
 }

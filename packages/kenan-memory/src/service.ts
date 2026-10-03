@@ -71,5 +71,6 @@ function dispatch(store: MemoryStore, person: string, request: MemoryRequest): M
     case "forget": return store.forget(request.ids, request.mode);
     case "log-disclosure": return store.disclose(person, request.disclosure);
     case "disclosures": return store.disclosures(person, request.context, request.limit);
+    case "finalize-turn": return store.finalize(person, request.context, request.reply);
   }
 }

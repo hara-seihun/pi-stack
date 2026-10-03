@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+dest=${PI_STACK_KENAN_MEMORY_DEST:-/srv/pi/kenan-memory}
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+commit=$(git -C "$root" rev-parse HEAD)
+pi_stack_prepare_dependencies "$root"
+(cd "$root" && npm run build --workspace=kenan-memory)
+[[ -d $runtime/node_modules ]] || { echo 'Deploy Pi Runtime before Kenan memory' >&2; exit 66; }
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-kenan-memory.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+rsync -a "$root/packages/kenan-memory/src" "$root/packages/kenan-memory/dist" \
+  "$root/packages/kenan-memory/discretion.md" "$root/packages/kenan-memory/package.json" "$stage/"
+ln -s "$(readlink -f "$runtime/node_modules")" "$stage/node_modules"
+printf '%s\n' "$commit" > "$stage/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage" "$dest" kenan-memory
+if [[ ${PI_STACK_INSTALL_SYSTEMD_UNITS:-1} == 1 ]]; then
+  pi_stack_as_root install -m 644 "$root/deploy/systemd/pi-kenan-memory.service" \
+    "${PI_STACK_SYSTEMD_DIR:-/etc/systemd/system}/pi-kenan-memory.service"
+fi
+printf 'deployed Kenan memory %s to %s; no unit was started or enabled\n' "$commit" "$dest"

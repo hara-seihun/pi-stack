@@ -34,6 +34,7 @@ export function validateRequest(v: unknown): MemoryRequest | undefined {
   if (v.operation === "forget") return strings(v.ids) && ["delete", "stop-using"].includes(v.mode) ? { operation: "forget", ids: v.ids, mode: v.mode } : undefined;
   const c = context(v.context);
   if (!c) return;
+  if (v.operation === "finalize-turn") return typeof v.reply === "string" && v.reply.length <= 100_000 ? { operation: "finalize-turn", context: c, reply: v.reply } : undefined;
   if (v.operation === "read") return strings(v.ids) ? { operation: "read", ids: v.ids, context: c } : undefined;
   if (v.operation === "disclosures") return limit(v.limit) ? { operation: "disclosures", context: c, limit: v.limit } : undefined;
   if (v.operation === "search" && typeof v.query === "string" && v.query.length <= 10_000 && limit(v.limit) && (v.about === undefined || strings(v.about)))
