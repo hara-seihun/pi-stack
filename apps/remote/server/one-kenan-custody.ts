@@ -18,14 +18,14 @@ if (existsSync(socket)) {
     unlinkSync(socket);
   }
 }
-const mounts = new KenanMounts();
+const mounts = new KenanMounts({ userFor: person => person.user === "_kenan_store" ? config.executionUser : person.user });
 const privateDir = process.env.PI_KENAN_PRIVATE_DIR ?? "/var/lib/pi-kenan/private";
 const sharedCipher = process.env.PI_KENAN_SHARED_CIPHER ?? "/var/lib/pi-kenan/.private.crypt";
 const keys = new KenanKeys(process.env.PI_KENAN_KEY_STORE ?? "/var/lib/pi-kenan/custody/keys.json", listPersons(), (person, key) => mounts.mount(person, key), async master => {
   const password = master.toString("hex");
   if (!existsSync(join(sharedCipher, "gocryptfs.conf"))) {
     mkdirSync(sharedCipher, { recursive: true, mode: 0o700 });
-    const init = Bun.spawn(["gocryptfs", "-q", "-nosyslog", "-init", "--", sharedCipher], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
+    const init = Bun.spawn(["runuser", "-u", config.executionUser, "--", "gocryptfs", "-q", "-nosyslog", "-init", "--", sharedCipher], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
     init.stdin.write(`${password}\n`); init.stdin.end();
     const errors = new Response(init.stderr).text();
     const code = await init.exited; await errors;

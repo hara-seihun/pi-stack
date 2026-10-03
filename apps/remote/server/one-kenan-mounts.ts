@@ -4,6 +4,7 @@ import type { CustodyResult } from "./one-kenan-keys";
 
 export class KenanMounts {
   private children = new Map<string, ReturnType<typeof Bun.spawn>>();
+  constructor(private options: { userFor?: (person: Person) => string } = {}) {}
   async mount(person: Person, key: string): Promise<CustodyResult> {
     if (!person.unlock) return { ok: true };
     const { cipherDir, mountpoint } = person.unlock;
@@ -11,7 +12,10 @@ export class KenanMounts {
     if (existing && existing.exitCode === null && await this.isMounted(mountpoint)) return { ok: true };
     if (await this.isMounted(mountpoint)) return { ok: false, status: 503, error: "A folder mount not owned by custody is present" };
     mkdirSync(mountpoint, { recursive: true, mode: 0o700 });
-    const child = Bun.spawn(["gocryptfs", "-fg", "-q", "-nosyslog", "-acl", "-force_owner", `${process.getuid!()}:${process.getgid!()}`, "--", cipherDir, mountpoint], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
+    const owner = this.options.userFor?.(person);
+    if (owner && process.getuid!() !== 0) return { ok: false, status: 503, error: "Folder-owner mount helper requires its fixed privileged service" };
+    const command = ["gocryptfs", "-fg", "-q", "-nosyslog", "-acl", "-allow_other", "--", cipherDir, mountpoint];
+    const child = Bun.spawn(owner ? ["runuser", "-u", owner, "--", ...command] : command, { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
     // Never put folder keys in argv, the environment, logs or durable plaintext files.
     child.stdin.write(`${key}\n`);
     child.stdin.end();
