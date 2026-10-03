@@ -1,6 +1,37 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, readlinkSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Person } from "./persons";
 import type { CustodyResult } from "./one-kenan-keys";
+
+export function inheritedCustodyMounts(people: Person[], mountinfo = readFileSync("/proc/self/mountinfo", "utf8")): string[] {
+  const registered = new Set(people.flatMap(person => person.unlock ? [resolve(person.unlock.mountpoint)] : []));
+  const decode = (path: string) => path.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
+  return mountinfo.split("\n").flatMap(line => {
+    const [mount, filesystem] = line.split(" - ");
+    const path = mount?.split(" ")[4];
+    return path && filesystem?.split(" ")[0] === "fuse.gocryptfs" && registered.has(decode(path)) ? [decode(path)] : [];
+  });
+}
+
+export async function detachInheritedCustodyMounts(people: Person[]): Promise<number> {
+  if (process.getuid?.() !== 0 || readlinkSync("/proc/self/ns/mnt") === readlinkSync("/proc/1/ns/mnt"))
+    throw new Error("Custody detachment requires root in a separate private mount namespace");
+  const run = async (args: string[]) => {
+    const child = Bun.spawn(args, { stdout: "ignore", stderr: "ignore" });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+    try { if (await child.exited !== 0) throw new Error("Inherited custody mount could not be detached safely"); }
+    finally { clearTimeout(timer); }
+  };
+  // A distinct namespace alone may still propagate an unmount through shared mounts.
+  await run(["mount", "--make-rprivate", "/"]);
+  let detached = 0;
+  for (const path of inheritedCustodyMounts(people)) {
+    await run(["umount", "--lazy", "--", path]);
+    detached++;
+  }
+  if (inheritedCustodyMounts(people).length) throw new Error("Inherited custody folder mounts remain");
+  return detached;
+}
 
 export class KenanMounts {
   private children = new Map<string, ReturnType<typeof Bun.spawn>>();

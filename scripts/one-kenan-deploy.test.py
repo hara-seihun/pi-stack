@@ -98,6 +98,9 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertIn('default:user:65010:r-x',subprocess.check_output(['getfacl','-cpn',str(self.root/'var/lib/pi-remote/one-kenan')],text=True))
         self.assertTrue(all(len(item['token'])>=32 for item in auth['supervisors']))
         self.assertEqual({item['person'] for item in auth['supervisors']},{'alice','bob','pi-rooms'})
+        self.assertEqual(next(item['displayName'] for item in auth['supervisors'] if item['person']=='alice'),'alice')
+        root_config=json.loads((self.root/'etc/pi-stack/kenan-root.json').read_text())
+        self.assertEqual(root_config['people'],[{'person':'alice','displayName':'alice'},{'person':'bob','displayName':'bob'}])
         for person in ('alice','bob'):
             self.assertEqual((self.root/person/'cipher/original').read_text(),'owner data')
     def test_rollback_preserves_cipher_and_restores_flag_acl_and_only_additive_services(self):

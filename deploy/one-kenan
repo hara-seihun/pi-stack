@@ -205,7 +205,7 @@ def install():
     memory={'supervisors':[],'uidPersons':{}}
     for person in people:
         token=secrets.token_urlsafe(32); cap=shared/'supervisor-capabilities'/person['user']; fresh(cap,token+'\n',0o600)
-        memory['supervisors'].append({'person':person['user'],'token':token}); memory['uidPersons'][str(person_uid(person))]=person['user']
+        memory['supervisors'].append({'person':person['user'],'displayName':person['displayName'],'token':token}); memory['uidPersons'][str(person_uid(person))]=person['user']
         fresh(target(f'/etc/systemd/system/pi-remote@{person["user"]}.service.d/one-kenan.conf'),
           f'[Service]\nLoadCredential=kenan-memory-supervisor:{cap}\nEnvironment=PI_KENAN_MEMORY_URL=http://127.0.0.1:{ports["memoryPort"]}\nEnvironment=PI_KENAN_ROOT_URL=http://127.0.0.1:{ports["rootPort"]}\n')
     room_token=secrets.token_urlsafe(32); fresh(shared/'supervisor-capabilities/pi-rooms',room_token+'\n',0o600)
@@ -220,7 +220,8 @@ def install():
          'routerPort':router_port,'brokerUser':operator}
     fresh(target('/etc/pi-stack/one-kenan.json'),json.dumps(one,indent=2)+'\n')
     root={**root_config,'version':1,'cwd':str(shared/'private'),'agentDir':str(shared/'private/.pi/agent'),
-          'sessionsDir':str(shared/'private/root-sessions'),'brokerUrl':f'http://127.0.0.1:{ports["rootBrokerPort"]}'}
+          'sessionsDir':str(shared/'private/root-sessions'),'brokerUrl':f'http://127.0.0.1:{ports["rootBrokerPort"]}',
+          'people':[{'person':person['user'],'displayName':person['displayName']} for person in people]}
     fresh(target('/etc/pi-stack/kenan-root.json'),json.dumps(root,indent=2)+'\n')
     prompt=pathlib.Path(root['promptFile'])
     if not prompt.exists():
