@@ -57,6 +57,16 @@ test("only local conversation roots notify, including when replaying stored work
   db.close();
 });
 
+test("worker questions notify while worker completions stay silent", () => {
+  const db = new Database(":memory:");
+  ensureSupervisorSchema(db);
+  const thread = { id: "child", title: "Child" };
+  recordIdleNotification(db, "completed", thread, 1000);
+  recordIdleNotification(db, "question", thread, 1001, { kind: "question", body: "Decision?" });
+  expect(idleNotifications(db, 0, () => ({ parentId: "parent" })).notifications).toMatchObject([{ sessionId: "child", kind: "question", body: "Decision?" }]);
+  db.close();
+});
+
 test("a full page of suppressed completions advances to the next conversation", () => {
   const db = new Database(":memory:");
   ensureSupervisorSchema(db);

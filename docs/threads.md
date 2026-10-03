@@ -58,7 +58,7 @@ Everything runs as the person's own Unix user. A process that deliberately reads
 
 ## Asynchronous user questions
 
-`request_user_input_async` stores a pending question with its thread owner and returns immediately. Suggestions have no fixed count; one may be explicitly recommended. Human answers combine zero or more selections with free text, with only an entirely empty answer rejected. Durable question identity correlates the answer to its question, and ordinary human steer delivery supplies it at a safe boundary without cancelling work. Questions remain pending beyond the current turn and across restarts. The [Remote question contract](../apps/remote/docs/questions.md) describes the shared client and API.
+`request_user_input_async` stores a pending question with its thread owner and returns immediately. Suggestions have no fixed count; one may be explicitly recommended. Human answers combine zero or more selections with free text, with only an entirely empty answer rejected. An explicit dismissal settles a question without answering or authorizing a suggestion and delivers a correlated human steer saying it was skipped. Durable question identity correlates the answer to its question, and ordinary human steer delivery supplies it at a safe boundary without cancelling work. Questions remain pending beyond the current turn and across restarts. Asking also atomically records an owner-local sequenced occurrence for client notifications; accepted questions advance notification cursors without replaying an alert. The [Remote question contract](../apps/remote/docs/questions.md) describes the shared client and API.
 
 ## Personal watch list
 

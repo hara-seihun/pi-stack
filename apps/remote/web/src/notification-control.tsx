@@ -10,7 +10,7 @@ import { toast } from "./toasts";
 const POLL_MS = 30_000;
 const NotificationContext = createContext({ enabled: false, error: "", enable: () => {} });
 type Environment = { id: string; name: string; baseUrl: string };
-type ToastNotification = NotificationTarget & { title: string; seq: number };
+type ToastNotification = NotificationTarget & { title: string; seq: number; body?: string };
 
 function openNotification(target: NotificationTarget) {
   retainNotificationTarget(target);
@@ -29,10 +29,10 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
   const selected = useRef({ sessionId, environment: environment?.id });
   selected.current = { sessionId, environment: environment?.id };
 
-  const showToast = (key: string, title: string, open: () => void) => {
+  const showToast = (key: string, title: string, open: () => void, body = "Session is idle") => {
     toastKeys.current.add(key);
     toast(<button type="button" className="notification-toast" onClick={() => { toast.dismiss(key); toastKeys.current.delete(key); open(); }}>
-      <strong>{title}</strong><span>Session is idle</span>
+      <strong>{title}</strong><span>{body}</span>
     </button>, { id: key, duration: 6000, onDismiss: () => toastKeys.current.delete(key), onAutoClose: () => toastKeys.current.delete(key) });
   };
   const clearToast = (key: string) => { toast.dismiss(key); toastKeys.current.delete(key); };
@@ -63,7 +63,7 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
           clearToast(key);
           return;
         }
-        showToast(key, item.title, () => openNotification(item));
+        showToast(key, item.title, () => openNotification(item), item.body);
       };
       window.addEventListener("pi-notification-toast", receive);
       return () => { window.removeEventListener("pi-notification-toast", receive); clear(); };
@@ -152,7 +152,7 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
           clearToast(key);
           continue;
         }
-        await browserNotifications.show(key, `${source.name} · ${event.name}`, () => openNotification({ user, environment: source.id, sessionId: event.sessionId }));
+        await browserNotifications.show(key, `${source.name} · ${event.name}${event.kind === "question" ? " · Question" : ""}`, () => openNotification({ user, environment: source.id, sessionId: event.sessionId }), event.body);
       }
     };
     let streamDelivery = Promise.resolve();

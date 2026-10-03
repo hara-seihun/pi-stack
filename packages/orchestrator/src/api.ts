@@ -19,7 +19,7 @@ export { createWorkspaceAdmission, createCwdAdmission,
   type WorkspaceAdmissionErrorCode, type ConfiguredWorkspace, type AdmittedWorkspace, type CwdAdmission,
 } from "./workspace-admission.js";
 export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, ThreadState, WorkOutcome,
-  ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, SpawnThread, SendThread, ThreadList, ThreadPage,
+  ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, SpawnThread, SendThread, ThreadList, ThreadPage,
   ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { ThreadService } from "./threads/service.js";

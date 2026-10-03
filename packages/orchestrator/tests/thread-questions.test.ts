@@ -70,6 +70,25 @@ it("acknowledges immediately, persists across owner restart, and atomically queu
   expect(restored.pending("thread")[0]?.text).toContain("East\n- North\nFor the morning");
   expect(await restored.answer({ ...answer, text: "changed" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(restored.pending("thread")).toHaveLength(1);
+  const events = restored.questionEvents(0, 1);
+  expect(events).toEqual({ ok: true, value: { cursor: 1, items: [] } });
+  expect(restored.questionEvents(1, 1)).toMatchObject({ ok: true, value: { cursor: 2, items: [{ questionId: secondId, threadId: "thread" }] } });
+});
+
+it("dismissal settles one question with an explicit correlated non-authorization and survives retries", async () => {
+  const { root, service } = await setup();
+  const asked = await service.ask({ requestId: "dismiss", threadId: "thread", questions: [{ question: "Spend money?", suggestions: ["Yes"] }, { question: "Next?" }] });
+  if (!asked.ok) throw Error(asked.error.message);
+  const id = asked.value.questionIds[0]!;
+  const dismiss = { threadId: "thread", questionId: id, selectedSuggestionIds: [], text: "", dismissed: true };
+  expect(await service.answer({ ...dismiss, selectedSuggestionIds: [`${id}:0`] })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(await service.answer(dismiss)).toMatchObject({ ok: true });
+  await service.close();
+  const restored = owner(root);
+  expect(await restored.answer(dismiss)).toMatchObject({ ok: true });
+  expect(await restored.questions("thread")).toMatchObject({ ok: true, value: [{ id: asked.value.questionIds[1] }] });
+  expect(restored.pending("thread")).toMatchObject([{ replyTo: id, text: `Dismissed question ${id}: Spend money?\nThe user skipped this question without selecting or authorizing any suggestion.` }]);
+  expect(await restored.answer({ ...dismiss, dismissed: false, text: "Yes" })).toMatchObject({ ok: false, error: { code: "conflict" } });
 });
 
 it("rejects invalid recommendations and answers without consuming the question", async () => {
@@ -136,4 +155,5 @@ it("routes owner HTTP requests and deduplicates a lost ask acknowledgement", asy
   expect((await client.questions("thread"))).toMatchObject({ ok: true, value: [{ question: "Why?", suggestions: [] }, { question: "When?", suggestions: [] }] });
   expect((await service.questions("thread"))).toMatchObject({ ok: true, value: [expect.any(Object), expect.any(Object)] });
   expect(fetcher).toHaveBeenCalledTimes(3);
+  expect(await client.questionEvents(0)).toMatchObject({ ok: true, value: { cursor: 2, items: [{ question: "Why?" }, { question: "When?" }] } });
 });

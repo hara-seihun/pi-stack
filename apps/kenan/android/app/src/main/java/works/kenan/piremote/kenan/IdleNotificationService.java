@@ -36,7 +36,7 @@ public final class IdleNotificationService extends Service {
         state = NotificationIdentity.get(this);
         notifications = getSystemService(NotificationManager.class);
         notifications.createNotificationChannel(new NotificationChannel(WATCHING, "Session monitoring", NotificationManager.IMPORTANCE_LOW));
-        notifications.createNotificationChannel(new NotificationChannel(IDLE, "Session idle", NotificationManager.IMPORTANCE_HIGH));
+        notifications.createNotificationChannel(new NotificationChannel(IDLE, "Agent updates and questions", NotificationManager.IMPORTANCE_HIGH));
         startForeground(1, monitoringNotification());
     }
 

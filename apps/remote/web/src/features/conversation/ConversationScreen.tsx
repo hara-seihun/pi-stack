@@ -15,7 +15,7 @@ import { OFFLINE_STATUS, threadStatus } from "../status/thread-status";
 import { composerAction } from "../../thread-state";
 import { DELIVERY_LABELS } from "../queue/delivery";
 import { Transcript } from "./Transcript";
-import { QuestionsSheet } from "./questions";
+import { QuestionsComposer } from "./questions";
 import type { ThreadQuestion } from "../../../../server/protocol";
 import "./conversation.css";
 
@@ -91,8 +91,6 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const queued = session.queuedMessages.length;
   const action = composerAction(session, prompt);
   const [delivery, setDelivery] = useState<Delivery>("queue");
-  const [questionsOpenFor, setQuestionsOpenFor] = useState<string | null>(null);
-  useEffect(() => { if (questions.length === 0) setQuestionsOpenFor(null); }, [questions.length]);
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
   const modeToggleRef = useRef<HTMLButtonElement>(null);
@@ -110,7 +108,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const modelShort = session.model.split("/").at(-1) || session.model;
   return <div className="conversation-screen">
     <ConversationHeader title={session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<span className="conversation-meta">{modelShort}</span>} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
-      trailing={<>{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
+      trailing={<>{questions.length > 0 && running && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Stop thread</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {ancestors.length > 0 && <nav className="ancestry" aria-label="Parent threads">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <ConversationView key={session.id} active label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
       <Transcript entries={entries} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
@@ -119,10 +117,10 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
     </InlineImagesContext.Provider>}>
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
       <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
-      <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
+      {questions.length > 0 ? <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} /> : <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}
         before={<>{reply && <ReplyComposer target={reply} onCancel={onCancelReply} />}{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}</>}
-        actions={<>{questions.length > 0 && <button type="button" className="questions-trigger" aria-haspopup="dialog" aria-label={`Questions to answer, ${questions.length} pending`} title="Questions to answer" onClick={() => setQuestionsOpenFor(session.id)}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 3.5M12 16h.01" /></svg><span aria-hidden="true">{questions.length}</span></button>}{running && hasText && <div className="delivery-mode" ref={modeRef}>
+        actions={<>{running && hasText && <div className="delivery-mode" ref={modeRef}>
           <button ref={modeToggleRef} type="button" className="delivery-toggle" aria-haspopup="menu" aria-expanded={modeOpen} aria-label={`Change delivery. Current: ${DELIVERY_LABELS[delivery].label}`} onClick={() => setModeOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setModeOpen(true); } }}><span>{DELIVERY_LABELS[delivery].label}</span><ChevronIcon /></button>
           {modeOpen && <div ref={modeMenuRef} className="delivery-menu" role="menu" aria-label="Change delivery" onKeyDown={event => {
             if (event.key === "Escape") { setModeOpen(false); modeToggleRef.current?.focus(); return; }
@@ -133,8 +131,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
             const next = event.key === "Home" ? 0 : event.key === "End" ? choices.length - 1 : event.key === "ArrowDown" ? (current + 1) % choices.length : (current - 1 + choices.length) % choices.length;
             choices[next]?.focus();
           }}>{(["queue", "steer", "hardSteer"] as Delivery[]).filter(mode => mode !== delivery).map(mode => <button key={mode} type="button" role="menuitem" data-mode={mode} onClick={() => { setDelivery(mode); setModeOpen(false); modeToggleRef.current?.focus(); }}><strong>{DELIVERY_LABELS[mode].label}</strong><span>{DELIVERY_LABELS[mode].detail}</span></button>)}</div>}
-        </div>}</>} />
+        </div>}</>} />}
     </ConversationView>
-    {questionsOpenFor === session.id && <QuestionsSheet key={session.id} sessionId={session.id} questions={questions} open onClose={() => setQuestionsOpenFor(null)} onAccepted={onQuestionAccepted} />}
   </div>;
 }

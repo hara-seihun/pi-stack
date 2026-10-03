@@ -300,11 +300,17 @@ let peerError: string | null = null;
 const notificationErrors = new Map<string, string>();
 let peerRefresh: Promise<void> | null = null;
 const notificationRefreshes = new Map<string, Promise<void>>();
+const notificationRefreshAgain = new Set<string>();
 function refreshThreadNotifications(): Promise<void> {
   return Promise.all(directory.owners.map(owner => {
     const existing = notificationRefreshes.get(owner.id);
-    if (existing) return existing;
-    const refresh = projectThreadNotifications(db, owner.id, owner.api)
+    if (existing) { notificationRefreshAgain.add(owner.id); return existing; }
+    const refresh = (async () => {
+      do {
+        notificationRefreshAgain.delete(owner.id);
+        await projectThreadNotifications(db, owner.id, owner.api);
+      } while (notificationRefreshAgain.has(owner.id));
+    })()
       .then(() => { observeError(db, `notifications:${owner.id}`, null); if (notificationErrors.delete(owner.id)) signalSync(); })
       .catch(cause => {
         const message = cause instanceof Error ? cause.message : String(cause);
@@ -342,7 +348,7 @@ async function refreshPeers() {
     for (const [id, thread] of next) peerThreads.set(id, thread);
     const lookup = cachedThreadLookup(next, id => threads.get(id) ?? null);
     for (const thread of updated) noteModelRecency(thread, lookup);
-    if (changed) signalSync();
+    if (changed) { signalSync(); void refreshThreadNotifications(); }
   })().catch(cause => {
     const message = cause instanceof Error ? cause.message : String(cause);
     observeError(db, "peer:fleet", message);
@@ -1792,7 +1798,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); signalSync(); }
+  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();
@@ -2320,7 +2326,7 @@ const server = Bun.serve<SocketData>({
       try {
         const body = await readBody(req);
         const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
-          selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text });
+          selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
         if (!result.ok) return threadError(result.error);
         if (questionReads.has(answerRequest.sessionId)) await questionReads.get(answerRequest.sessionId);
         for (const stream of sessionSubscribers(answerRequest.sessionId)) void sendQuestions(stream);

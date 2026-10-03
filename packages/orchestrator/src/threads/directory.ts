@@ -1,5 +1,5 @@
 import { validateThreadAwait } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
@@ -165,6 +165,9 @@ export class ThreadDirectory implements ThreadApi {
       signal?.removeEventListener("abort", onAbort);
       controller.abort();
     }
+  }
+  async questionEvents(after = 0, limit = 100): Promise<Result<QuestionEvents>> {
+    return this.owners[0]!.api.questionEvents(after, limit);
   }
   async settlements(after = 0, limit = 100): Promise<Result<ThreadSettlements>> {
     return this.owners[0]!.api.settlements(after, limit);

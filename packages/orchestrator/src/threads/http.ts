@@ -11,7 +11,7 @@ export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number;
 export type ThreadAdmission = (operation: string, input: Record<string, any>) => Promise<AdmissionResult>;
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const operations = ["watch", "ask", "questions", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
+const operations = ["watch", "ask", "questions", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -41,6 +41,7 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
     const result = await requestContext.run({ deadline, signal }, () =>
       operation === "await" ? api.await(fields as Parameters<ThreadApi["await"]>[0], signal)
       : operation === "settlements" ? api.settlements(fields.after, fields.limit)
+      : operation === "questionEvents" ? api.questionEvents(fields.after, fields.limit)
       : operation === "inspect" ? api.inspect(fields.threadId, Number.isSafeInteger(fields.contextRevision) ? { contextRevision: fields.contextRevision } : undefined)
       : operation === "questions" ? api.questions(fields.threadId)
       : operation === "command" ? api.command(fields.threadId, fields.command)
@@ -56,7 +57,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
   async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
     const body = JSON.stringify(input ?? {});
     const requestId = (["send", "spawn", "ask", "watch"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
-    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "answer", "settlements"].includes(operation) || operation === "watch" && (input as { action?: string })?.action === "list";
+    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "questionEvents", "answer", "settlements"].includes(operation) || operation === "watch" && (input as { action?: string })?.action === "list";
     const terminal = (value: Result<T>): Result<T> => value.ok ? value
       : { ok: false, error: { ...value.error, retryable: false, ...(requestId ? { requestId } : {}) } };
     const inherited = requestContext.getStore();
@@ -103,6 +104,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     read: input => call("read", input), control: input => call("control", input),
     inspect: (threadId, inspection) => call("inspect", { threadId, ...(inspection?.contextRevision === undefined ? {} : { contextRevision: inspection.contextRevision }) }), command: (threadId, command) => call("command", { threadId, command }),
     settlements: (after, limit) => call("settlements", { after, limit }),
+    questionEvents: (after, limit) => call("questionEvents", { after, limit }),
     await: (input, signal) => call("await", input, signal),
   };
 }
