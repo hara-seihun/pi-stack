@@ -30,7 +30,7 @@ test('headless Chromium forwards native WebRTC audio as PCM without feeding it b
         }
         close() { this.readyState = 3; }
       };
-      window.fetch = async (_url, options) => {
+      (window as any).fetch = async (_url: RequestInfo | URL, options?: RequestInit) => {
         const remote = new RTCPeerConnection();
         const audio = new AudioContext({ sampleRate: 48000 });
         const oscillator = audio.createOscillator();
