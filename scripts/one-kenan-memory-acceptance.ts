@@ -8,7 +8,7 @@ import { memoryService } from "../packages/kenan-memory/src/service";
 import { memoryClient } from "../packages/kenan-memory/src/client";
 import { oneKenanEnabled } from "../packages/kenan-memory/src/config";
 import { rootService } from "../packages/kenan-root/src/service";
-import { createRootExecutor } from "../packages/kenan-root/src/root-runtime";
+import { createFixedSession, createRootExecutor } from "../packages/kenan-root/src/root-runtime";
 import { catalogModel } from "../packages/orchestrator/src/catalog";
 import { fixtureBroker } from "./one-kenan-fixture-broker";
 import { StagingStack } from "./one-kenan-staging";
@@ -67,7 +67,9 @@ try {
     const specification = catalogModel(model)!;
     for (const name of ["root-workspace", "root-agent", "root-sessions"]) mkdirSync(join(root, name), { mode: 0o700 });
     const config = { version: 1 as const, provider: specification.provider, model: specification.model, thinkingLevel: "low" as const, cwd: join(root, "root-workspace"), agentDir: join(root, "root-agent"), sessionsDir: join(root, "root-sessions"), promptFile: join(import.meta.dir, "../packages/kenan-root/instructions.md"), brokerUrl: `${broker.url}/` };
-    const executor = createRootExecutor(config, { env: { PI_STACK_HOST_CONFIG: host, PI_STACK_HOST_FILE: host, PI_KENAN_MEMORY_URL: url } });
+    const executor = createRootExecutor(config, { env: { PI_STACK_HOST_CONFIG: host, PI_STACK_HOST_FILE: host, PI_KENAN_MEMORY_URL: url }, factory: async spec => {
+      try { return await createFixedSession(spec); } catch (error) { console.error("Fixture SDK initialization:", error); throw error; }
+    } });
     rootServer = Bun.serve({ hostname: "127.0.0.1", port: 19886, idleTimeout: 255, fetch: rootService({ enabled, memoryUrl: url, memoryRootToken: auth.rootToken, adminCapability, sessionsDir: config.sessionsDir, executor }) });
     async function ask(person: string, question: string, index: string) {
       const caller = await session(person, `${person}-root-${index}`);
