@@ -6,6 +6,30 @@ capture and Opus encoding, `WriteConnection` owns the phone protocol, and Pi Rem
 and the orchestrator forward frames in order. See [GPU behavior](GPU_REPORT.md) and
 [cleanup](cleanup/README.md) for those components.
 
+## Dictionary support
+
+ASR words include `w`, `conf`, and scored `alts: [{w, conf}]`. Scores are the
+geometric mean of original (unbiased) joiner softmax support over that word's
+pieces. An alternative replaces one piece's score with that piece's own support;
+it is not assigned the primary word's score. Alternatives are ranked by support
+and cannot cross a word boundary. These local scores are not calibrated
+probabilities of word correctness or a fully decoded alternative lattice.
+Dictionary phrase boosts still apply during recognition; explicit replacement
+rules remain the person's authority. Automatic cleanup substitution requires a
+low-confidence primary, a dictionary-listed alternative and measured support
+within .12 of the primary. Unscored legacy alternatives cannot trigger it.
+
+```sh
+/srv/pi/write-engine/venv/bin/python -m unittest test_dictionary_scores -v
+```
+
+The product currently uses a learned deletion tagger plus source-constrained
+rules and resident punctuation, not a generative LLM rewrite. The earlier local
+Qwen3-0.6B experiments did not improve held-out accuracy; their receipts and
+limitations are linked from the cleanup owner. New audio evaluation must score
+meaning preservation and unwanted dictionary substitutions as well as fluency
+before a generative rewrite replaces this path.
+
 ## End of speech is an ordered boundary
 
 One socket carries `start`, binary audio frames, then exactly one `finish` or

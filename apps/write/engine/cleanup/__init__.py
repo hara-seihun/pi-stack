@@ -5,6 +5,7 @@ vocabulary. No network, model loading or global mutable state is on the hot path
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
@@ -75,9 +76,18 @@ def _quotation_controls(words: Sequence[str], context: str) -> tuple[dict[int, t
     return commands, literal
 
 
-def _conf(item: Mapping[str, Any] | str) -> float:
+def _probability(item: Mapping[str, Any] | str) -> float | None:
     value = item.get("conf") if isinstance(item, Mapping) else None
-    return float(value) if value is not None else 1.0
+    try:
+        probability = float(value)
+    except (TypeError, ValueError):
+        return None
+    return probability if math.isfinite(probability) and 0 <= probability <= 1 else None
+
+
+def _conf(item: Mapping[str, Any] | str) -> float:
+    probability = _probability(item)
+    return probability if probability is not None else 1.0
 
 
 class WordTagger(Protocol):
@@ -276,12 +286,12 @@ def clean(words: Sequence[Mapping[str, Any] | str],
         candidate = raw
         if isinstance(item, Mapping) and _conf(item) < .78:
             alternatives = item.get("alts", [])
-            ranked = [a if isinstance(a, Mapping) else {"w": a, "conf": _conf(item)}
-                      for a in alternatives]
-            selected = next((a for a in sorted(ranked, key=lambda a: -float(a.get("conf") or 0))
+            ranked = [a for a in alternatives if isinstance(a, Mapping)
+                      and _probability(a) is not None]
+            selected = next((a for a in sorted(ranked, key=lambda a: -_conf(a))
                              if _bare(str(a.get("w", ""))) in allowed
                              and _bare(str(a.get("w", ""))) != _bare(raw)
-                             and float(a.get("conf") or 0) >= _conf(item) - .12), None)
+                             and _conf(a) >= _conf(item) - .12), None)
             if selected:
                 candidate = str(selected["w"])
                 edits.append({"kind": "substitute", "from": raw, "to": candidate, "at": [i, i+1]})

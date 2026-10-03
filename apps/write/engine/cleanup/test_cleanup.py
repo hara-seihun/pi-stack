@@ -13,11 +13,39 @@ class CleanupTest(unittest.TestCase):
                       result['edits'])
 
     def test_dictionary_and_alternatives(self):
-        words = [{'w': 'pie', 'conf': .4, 'alts': ['Pi']},
+        words = [{'w': 'pie', 'conf': .4, 'alts': [{'w': 'Pi', 'conf': .35}]},
                  {'w': 'stack', 'conf': None, 'alts': []}]
         result = clean(words, {'words': ['Pi'], 'replacements':
                               [{'from': 'Pi stack', 'to': 'Pi Stack'}]})
         self.assertEqual(result['text'], 'Pi Stack.')
+
+    def test_dictionary_does_not_invent_support_for_unscored_alternatives(self):
+        for alternatives in (['Pi'], [{'w': 'Pi'}], [{'w': 'Pi', 'conf': None}],
+                             [{'w': 'Pi', 'conf': float('nan')}],
+                             [{'w': 'Pi', 'conf': float('inf')}],
+                             [{'w': 'Pi', 'conf': 2}], [{'w': 'Pi', 'conf': -.2}],
+                             [{'w': 'Pi', 'conf': .1}]):
+            with self.subTest(alternatives=alternatives):
+                result = clean([{'w': 'pie', 'conf': .4, 'alts': alternatives}],
+                               {'words': ['Pi']})
+                self.assertEqual(result['text'], 'Pie.')
+                self.assertFalse(any(edit['kind'] == 'substitute' for edit in result['edits']))
+
+    def test_dictionary_does_not_override_confident_ordinary_word(self):
+        result = clean([{'w': 'pie', 'conf': .9,
+                         'alts': [{'w': 'Pi', 'conf': .85}]}], {'words': ['Pi']})
+        self.assertEqual(result['text'], 'Pie.')
+
+    def test_dictionary_selects_best_supported_candidate_not_list_order(self):
+        result = clean([{'w': 'misheard', 'conf': .4, 'alts': [
+            {'w': 'Kelana', 'conf': .3}, {'w': 'Kenan', 'conf': .39}]}],
+            {'words': ['Kelana', 'Kenan']})
+        self.assertEqual(result['text'], 'Kenan.')
+
+    def test_explicit_replacement_authorizes_unscored_correction(self):
+        result = clean([{'w': 'pie', 'conf': None, 'alts': ['Pi']}],
+                       {'replacements': [{'from': 'pie', 'to': 'Pi'}]})
+        self.assertEqual(result['text'], 'Pi.')
 
     def test_incremental_boundary_and_finish(self):
         source = 'we spoke yesterday. on Tuesday wait no Friday and then met there.'

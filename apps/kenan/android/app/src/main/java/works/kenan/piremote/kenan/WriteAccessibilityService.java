@@ -320,7 +320,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
     private void stopRecorder() {
         recording = false;
-        if (recorder != null) recorder.stop();
+        if (recorder != null) recorder.cancel();
         recorder = null;
         stopForeground(STOP_FOREGROUND_REMOVE);
     }

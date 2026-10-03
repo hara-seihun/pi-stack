@@ -87,6 +87,7 @@ class Stream:
         self.pieces = []
         self.token_scores = []
         self.alternative_pieces = []
+        self.alternative_scores = []
         self.token_times = []
         self.timings = []
         self.stage_timings = []
@@ -119,6 +120,7 @@ class Stream:
         duplicate.pieces = self.pieces.copy()
         duplicate.token_scores = self.token_scores.copy()
         duplicate.alternative_pieces = self.alternative_pieces.copy()
+        duplicate.alternative_scores = self.alternative_scores.copy()
         duplicate.token_times = self.token_times.copy()
         duplicate.timings = self.timings.copy()
         duplicate.stage_timings = self.stage_timings.copy()
@@ -182,11 +184,14 @@ class Stream:
                 # Exact local joiner alternatives, not a re-ranked phrase lattice.
                 best = np.argpartition(scores, -3)[-3:]
                 best = sorted(best, key=lambda index: -scores[index])
-                probability = np.exp(scores[token] - np.logaddexp.reduce(scores))
+                normalizer = np.logaddexp.reduce(scores)
+                probability = np.exp(scores[token] - normalizer)
+                alternatives = [int(index) for index in best if int(index) != token and int(index) != BLANK]
                 self.ids.append(token)
                 self.pieces.append(self.model.vocab.get(token, ''))
                 self.token_scores.append(float(probability))
-                self.alternative_pieces.append([self.model.vocab.get(int(index), '') for index in best if int(index) != token and int(index) != BLANK])
+                self.alternative_pieces.append([self.model.vocab.get(index, '') for index in alternatives])
+                self.alternative_scores.append([float(np.exp(scores[index] - normalizer)) for index in alternatives])
                 self.token_times.append((self.samples_decoded / 16000) + frame*0.08)
                 self.last = token
                 self.state1, self.state2 = next1, next2
@@ -205,14 +210,19 @@ class Stream:
             if not tokens:
                 return
             text = ''.join(self.pieces[i] for i in tokens).replace('▁', ' ').strip()
-            conf = math.exp(sum(math.log(max(self.token_scores[i], 1e-9)) for i in tokens)/len(tokens))
-            alts = []
+            log_support = sum(math.log(max(self.token_scores[i], 1e-9)) for i in tokens)
+            conf = math.exp(log_support / len(tokens))
+            alternatives = {}
             for i in tokens:
-                for alternative in self.alternative_pieces[i]:
+                for alternative, probability in zip(self.alternative_pieces[i], self.alternative_scores[i]):
                     candidate = ''.join(alternative if j == i else self.pieces[j] for j in tokens).replace('▁', ' ').strip()
-                    if candidate and ' ' not in candidate and candidate != text and candidate not in alts:
-                        alts.append(candidate)
-            words.append({'w': text, 'conf': round(conf, 4), 'alts': alts[:3], 'start': round(self.token_times[tokens[0]], 2), 'end': round(self.token_times[tokens[-1]]+0.08, 2)})
+                    if candidate and ' ' not in candidate and candidate != text:
+                        support = math.exp((log_support - math.log(max(self.token_scores[i], 1e-9))
+                                            + math.log(max(probability, 1e-9))) / len(tokens))
+                        alternatives[candidate] = max(alternatives.get(candidate, 0), support)
+            alts = [{'w': candidate, 'conf': round(support, 4)} for candidate, support in
+                    sorted(alternatives.items(), key=lambda item: (-item[1], item[0]))[:3]]
+            words.append({'w': text, 'conf': round(conf, 4), 'alts': alts, 'start': round(self.token_times[tokens[0]], 2), 'end': round(self.token_times[tokens[-1]]+0.08, 2)})
         for i, piece in enumerate(self.pieces):
             if piece.startswith('▁') and tokens:
                 commit()
