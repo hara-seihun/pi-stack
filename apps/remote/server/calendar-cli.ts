@@ -34,7 +34,7 @@ export function calendarInvocation(argv: string[]): { ok: true; path: string; me
   if (op === "update" && positional.length === 1) return { ok: true, path: `${base}/events/${encodeURIComponent(positional[0]!)}`, method: "PATCH", body: options };
   if (["delete", "unsubscribe"].includes(op!) && positional.length === 1) return { ok: true, path: `${base}/${op === "delete" ? "events" : "subscriptions"}/${encodeURIComponent(positional[0]!)}`, method: "DELETE" };
   if (op === "zone" && positional.length === 1) return { ok: true, path: `${base}/settings`, method: "PUT", body: { zone: positional[0] } };
-  if (["feed", "rotate-feed", "refresh", "subscribe"].includes(op!) && !positional.length) return { ok: true, path: `${base}/${op === "subscribe" ? "subscriptions" : op === "rotate-feed" ? "feed" : op}`, method: op === "feed" ? "GET" : "POST", body: op === "subscribe" ? options : {} };
+  if (["feed", "rotate-feed", "refresh", "subscribe"].includes(op!) && !positional.length) return { ok: true, path: `${base}/${op === "subscribe" ? "subscriptions" : op === "rotate-feed" ? "feed" : op}`, method: op === "feed" ? "GET" : "POST", ...(op === "feed" ? {} : { body: op === "subscribe" ? options : {} }) };
   return { ok: false, error: "Invalid operation; run pi-calendar --help" };
 }
 export async function runCalendarCli(argv: string[]): Promise<number> {

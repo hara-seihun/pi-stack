@@ -9,7 +9,7 @@ const blank = (zone: string) => {
   const now = Temporal.Now.zonedDateTimeISO(zone).round({ smallestUnit: "hour", roundingMode: "ceil" });
   return { title: "", start: now.toPlainDateTime().toString().slice(0, 16), end: now.add({ hours: 1 }).toPlainDateTime().toString().slice(0, 16), zone, allDay: false, location: "", notes: "" };
 };
-type Draft = ReturnType<typeof blank> & { id?: string };
+type Draft = ReturnType<typeof blank> & { id?: string; instantStart?: string; instantEnd?: string };
 function EventEditor({ draft, onClose, onSave }: { draft: Draft; onClose(): void; onSave(draft: Draft): Promise<void> }) {
   const [value, setValue] = useState(draft), [error, setError] = useState(""), [saving, setSaving] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -28,12 +28,14 @@ function EventEditor({ draft, onClose, onSave }: { draft: Draft; onClose(): void
 }
 export function CalendarScreen() {
   const [snapshot, setSnapshot] = useState<CalendarSnapshot | null>(null), [zone, setZone] = useState(localZone), [error, setError] = useState("");
+  const preferenceLoaded = useRef(false);
   const [draft, setDraft] = useState<Draft | null>(null), [feed, setFeed] = useState(""), [sync, setSync] = useState(false), [busy, setBusy] = useState(false);
   const [name, setName] = useState(""), [url, setUrl] = useState(""), [month, setMonth] = useState("");
   const reload = useCallback(async () => {
     const from = month ? Temporal.PlainDate.from(month + "-01").toZonedDateTime(zone).toInstant().toString() : new Date().toISOString();
     const to = month ? Temporal.PlainDate.from(month + "-01").add({ months: 1 }).toZonedDateTime(zone).toInstant().toString() : new Date(Date.now() + 180 * 86400000).toISOString();
     const next: CalendarSnapshot = await api("GET", `/v1/calendar?${new URLSearchParams({ from, to })}`); setSnapshot(next);
+    if (!preferenceLoaded.current) { preferenceLoaded.current = true; if (next.zone) setZone(next.zone); }
   }, [month, zone]);
   useEffect(() => {
     let current = true;
@@ -45,12 +47,13 @@ export function CalendarScreen() {
   async function action(work: () => Promise<unknown>) { setBusy(true); setError(""); try { await work(); await reload(); } catch (cause) { setError(String(cause)); } finally { setBusy(false); } }
   function edit(e: CalendarEvent) {
     const wall = (v: string) => e.allDay ? v : Temporal.Instant.from(v).toZonedDateTimeISO(e.zone).toPlainDateTime().toString().slice(0, 16);
-    setDraft({ ...e, start: wall(e.start), end: wall(e.end) });
+    setDraft({ ...e, start: wall(e.start), end: wall(e.end), instantStart: e.start, instantEnd: e.end });
   }
   function when(e: CalendarEvent) {
     if (e.allDay) return `${e.start} · All day${Temporal.PlainDate.from(e.end).since(Temporal.PlainDate.from(e.start)).days > 1 ? ` (through ${Temporal.PlainDate.from(e.end).subtract({ days: 1 })})` : ""}`;
     const format = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-    return `${format.format(new Date(e.start))} – ${new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(new Date(e.end))}`;
+    const sameDay = Temporal.Instant.from(e.start).toZonedDateTimeISO(zone).toPlainDate().equals(Temporal.Instant.from(e.end).toZonedDateTimeISO(zone).toPlainDate());
+    return `${format.format(new Date(e.start))} – ${sameDay ? new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(new Date(e.end)) : format.format(new Date(e.end))}`;
   }
   return <section className="calendar-screen">
     <header className="calendar-actions"><h1>Calendar</h1><button className="accent" onClick={() => setDraft(blank(zone))}>New event</button><button onClick={() => setSync(!sync)}>Sync</button></header>
@@ -63,6 +66,6 @@ export function CalendarScreen() {
       {snapshot?.subscriptions.map(s => <article key={s.id}><strong>{s.name}</strong><p>{s.refreshed ? `Updated ${new Date(s.refreshed).toLocaleString()}` : "Not yet refreshed"}{s.error && ` · ${s.error}`}</p><button disabled={busy} onClick={() => { if (confirm(`Remove ${s.name}?`)) void action(() => api("DELETE", `/v1/calendar/subscriptions/${s.id}`)); }}>Remove subscription</button></article>)}
     </section>}
     {!snapshot ? <p>Loading calendar…</p> : !snapshot.events.length ? <p>No events {month ? "this month" : "in the next six months"}.</p> : <div className="calendar-agenda">{snapshot.events.map(e => <article key={e.id}><p className="calendar-time">{when(e)}</p><h2>{e.title}</h2>{e.location && <p>{e.location}</p>}{e.notes && <p className="calendar-notes">{e.notes}</p>}{e.zone !== zone && !e.allDay && <p className="muted">Event zone: {e.zone} · {new Intl.DateTimeFormat(undefined, { timeZone: e.zone, hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(e.start))}</p>}{e.readOnly ? <p className="muted">{e.source} · Read-only</p> : <div className="calendar-actions"><button onClick={() => edit(e)}>Edit</button><button disabled={busy} onClick={() => { if (confirm(`Delete ${e.title}?`)) void action(() => api("DELETE", `/v1/calendar/events/${e.id}`)); }}>Delete</button></div>}</article>)}</div>}
-    {draft && <EventEditor draft={draft} onClose={() => setDraft(null)} onSave={async value => { await api(value.id ? "PATCH" : "POST", `/v1/calendar/events${value.id ? `/${value.id}` : ""}`, value); await reload(); }} />}
+    {draft && <EventEditor draft={draft} onClose={() => setDraft(null)} onSave={async value => { await api(value.id ? "PATCH" : "POST", `/v1/calendar/events${value.id ? `/${value.id}` : ""}`, { ...value, start: value.start === draft.start && value.zone === draft.zone && value.allDay === draft.allDay ? draft.instantStart ?? value.start : value.start, end: value.end === draft.end && value.zone === draft.zone && value.allDay === draft.allDay ? draft.instantEnd ?? value.end : value.end }); await reload(); }} />}
   </section>;
 }

@@ -74,16 +74,17 @@ export function importedEvents(body: string, subscription: Pick<CalendarSubscrip
       };
       if (!event.isRecurring()) { append(event.startDate, event.endDate, event); continue; }
       const iterator = event.iterator();
+      let complete = false;
       for (let n = 0; n < 100000; n++) {
-        const occurrence = iterator.next(); if (!occurrence) break;
+        const occurrence = iterator.next(); if (!occurrence) { complete = true; break; }
         const originalZone = String(event.component.getFirstProperty("dtstart")?.getParameter("tzid") ?? "").replace(prefix, "");
         const value = instant(occurrence, validZone(originalZone) ? originalZone : subscription.zone);
-        if (Date.parse(value) >= upper + 86400000) break;
+        if (Date.parse(value) >= upper + 86400000) { complete = true; break; }
         if (Date.parse(value) < lower - 366 * 86400000) continue;
         const details = event.getOccurrenceDetails(occurrence);
         append(details.startDate, details.endDate, details.item);
-        if (n === 99999) throw new Error("Recurrence limit exceeded");
       }
+      if (!complete) throw new Error("Recurrence limit exceeded");
     }
     return result;
   } finally {
@@ -139,7 +140,7 @@ export class CalendarStore {
       try { events.push(...importedEvents(row.ics, subscription, from, to)); }
       catch { subscription.error = "Calendar could not be expanded in this date range"; }
     }
-    return { events: events.sort((a, b) => a.start.localeCompare(b.start)), subscriptions, zone: this.setting("zone", "UTC") };
+    return { events: events.sort((a, b) => a.start.localeCompare(b.start)), subscriptions, zone: this.setting("zone", "") };
   }
   refresh(): Promise<void> {
     if (this.refreshing) return this.refreshing;
@@ -198,7 +199,7 @@ export class CalendarStore {
       if (!object(input) || typeof input.name !== "string" || !input.name.trim() || input.name.length > 200 || typeof input.url !== "string" || input.url.length > 8000) return fail("Subscription name and HTTP(S) URL are required");
       let source: URL; try { source = new URL(input.url.replace(/^webcal:/, "https:")); } catch { return fail("Invalid subscription URL"); }
       if (!["https:", "http:"].includes(source.protocol) || source.username || source.password) return fail("Use HTTP(S) without embedded user/password");
-      const zone = typeof input.zone === "string" ? input.zone : this.setting("zone", "UTC"); if (!validZone(zone)) return fail("Invalid time zone");
+      const zone = typeof input.zone === "string" ? input.zone : this.setting("zone", "") || "UTC"; if (!validZone(zone)) return fail("Invalid time zone");
       const s: CalendarSubscription = { id: crypto.randomUUID(), name: input.name.trim(), url: source.href, zone, refreshed: null, error: null };
       this.saveSubscription(s, ""); await this.refresh(); return Response.json(this.subscriptions().find(item => item.id === s.id));
     }

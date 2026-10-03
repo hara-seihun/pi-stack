@@ -47,5 +47,6 @@ test("inbound subscriptions fetch and survive failure with visible stale state",
 });
 test("CLI commands map to one person's API", () => {
   expect(calendarInvocation(["add", "--title", "Test", "--start", "2026-10-08", "--end", "2026-10-09", "--all-day"])).toMatchObject({ ok: true, method: "POST", path: "/v1/calendar/events", body: { allDay: true } });
+  expect(calendarInvocation(["feed"])).toEqual({ ok: true, method: "GET", path: "/v1/calendar/feed" });
   expect(calendarInvocation(["unsubscribe", "id"])).toMatchObject({ ok: true, method: "DELETE", path: "/v1/calendar/subscriptions/id" });
 });
