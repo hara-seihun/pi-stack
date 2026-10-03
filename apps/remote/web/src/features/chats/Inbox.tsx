@@ -56,13 +56,14 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
 
 // Memoized with its rows and handlers: typing in the composer, a live frame or
 // a dashboard tick must not walk this list again.
-export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactSelected = false, error, picker, onOpen, onPrefetch, onClose, onSearchArchived, onSelectedVisibleChange }: {
+export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactSelected = false, error, picker, rooms, onOpen, onPrefetch, onClose, onSearchArchived, onSelectedVisibleChange }: {
   rows: InboxRow[];
   selectedId: ChatId | null;
   showPlace: boolean;
   compactSelected?: boolean;
   error: string;
   picker: ReactNode;
+  rooms?: ReactNode;
   onOpen(chat: Chat): void;
   onPrefetch?(chat: Chat): void;
   onClose(chat: Chat): void;
@@ -93,6 +94,7 @@ export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactS
     </header>
     <DismissibleError message={error} />
     <div className="inbox-list">
+      {rooms}
       {INBOX_SECTIONS.map(section => {
         const items = filtered.filter(row => row.section === section.id);
         if (!items.length) return null;

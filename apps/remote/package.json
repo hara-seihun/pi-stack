@@ -37,6 +37,7 @@
     "kenan-memory": "0.1.0",
     "openid-client": "^6.8.8",
     "pi-orchestrator": "0.2.1",
+    "kenan-memory": "0.1.0",
     "playwright-core": "^1.58.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

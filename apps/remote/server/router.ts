@@ -14,6 +14,8 @@ import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
 import { networkStatus, readPrivateNetwork } from "./private-network";
+import { Rooms, ROOM_CUSTODIAN } from "./rooms";
+import { oneKenanEnabled } from "kenan-memory/config";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -42,6 +44,19 @@ const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
 const operations = new Map<string, Promise<unknown>>();
+const rooms = oneKenanEnabled() ? new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/var/lib/pi-remote/one-kenan/rooms.sqlite3",
+  () => PEOPLE.map(({ user, displayName }) => ({ user, displayName })),
+  async (owner, actor, path, method, body) => {
+    const person = byUser.get(owner);
+    const origin = owner === ROOM_CUSTODIAN ? process.env.PI_REMOTE_ROOMS_OWNER_URL ?? "http://127.0.0.1:18822" : person ? `http://127.0.0.1:${person.port}` : null;
+    if (!origin) return Response.json({ error: "Room owner no longer registered" }, { status: 503 });
+    const endpoint = new URL(origin);
+    if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.pathname !== "/" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Room runtime must be a local loopback HTTP origin");
+    return proxy({ port: person?.port ?? Number(endpoint.port), user: actor }, origin,
+      new Request(`http://router${path}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) }),
+      new URL(`http://router${path}`), AbortSignal.timeout(10_000));
+  }) : null;
+if (rooms) setInterval(() => { void rooms.tick().catch(error => console.error("Room reconciliation failed", error)); }, 2_000);
 
 async function serialized<T>(person: Person, operation: () => Promise<T>): Promise<T> {
   const previous = operations.get(person.user) ?? Promise.resolve();
@@ -185,6 +200,7 @@ function requestIdentity(req: Request, url: URL): RequestIdentity {
 }
 
 function proxyDestination(person: Person, url: URL): ProxyDestination {
+  if (rooms && (url.pathname.startsWith("/v1/room-owner/") || /^\/v1\/remotes\/[^/]+\/v1\/(rooms|room-owner)(\/|$)/.test(url.pathname))) return { error: Response.json({ error: "Use this host's room directory" }, { status: 403 }) };
   if (url.pathname.startsWith("/v1/remotes/")) {
     const match = /^\/v1\/remotes\/([a-z][a-z0-9-]{0,31})(\/v1\/.*)$/.exec(url.pathname);
     if (!match) return { error: Response.json({ error: "Unknown remote route" }, { status: 404 }) };
@@ -268,7 +284,7 @@ async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySo
   return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
 }
 
-async function proxy(person: Person, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
+async function proxy(person: Pick<Person, "user" | "port">, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {
@@ -426,6 +442,9 @@ async function route(req: Request, url: URL): Promise<Response> {
   }
   if (url.pathname === "/v1/lock-status") return Response.json({ user: person.user, unlocked: true });
   if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments: publicEnvironments(grants.get(person.user)!) });
+  // The internal room owner API accepts only router-generated requests, never browser proxying.
+  if (rooms && (url.pathname.startsWith("/v1/room-owner/") || /^\/v1\/remotes\/[^/]+\/v1\/(rooms|room-owner)(\/|$)/.test(url.pathname))) return Response.json({ error: "Use this host's room directory" }, { status: 403 });
+  if (rooms && /^\/v1\/rooms(?:\/|$)/.test(url.pathname)) return rooms.handle(req, person.user);
   const destination = proxyDestination(person, url);
   if ("error" in destination) return destination.error;
   return proxy(person, destination.origin, req, destination.target, authenticated.signal, destination.upstream);
