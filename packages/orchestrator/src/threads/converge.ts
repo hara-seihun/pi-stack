@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { oneKenanEnabled } from "../../../kenan-memory/dist/config.js";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { CONVERGE_WORKER } from "./converge-worker.js";
@@ -23,8 +23,7 @@ export function convergePerson(env: NodeJS.ProcessEnv): string | undefined {
 
 export function convergeEnabled(env: NodeJS.ProcessEnv): boolean {
   if (convergePerson(env) !== "kenan") return false;
-  const path = env.PI_STACK_HOST_CONFIG ?? env.PI_STACK_HOST_FILE ?? "/etc/pi-stack/host.json";
-  return existsSync(path) && JSON.parse(readFileSync(path, "utf8")).oneKenan === true;
+  return oneKenanEnabled(env);
 }
 
 export function convergeTimeout(env: NodeJS.ProcessEnv): number {
