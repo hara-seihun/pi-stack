@@ -17,6 +17,7 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, person TEXT NOT NULL, thread TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'person');
       CREATE TABLE IF NOT EXISTS root_runs(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS consent_resumes(id TEXT PRIMARY KEY, input TEXT NOT NULL, admission TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS root_continuations(original TEXT PRIMARY KEY, resumed TEXT NOT NULL);
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(id UNINDEXED, text, tokenize='porter unicode61');
       INSERT INTO memory_search(memory_search,rank) VALUES('secure-delete',1);
       CREATE TRIGGER IF NOT EXISTS memory_search_insert AFTER INSERT ON memories WHEN new.stopped=0 BEGIN
@@ -167,8 +168,7 @@ export class MemoryStore {
   resumeConsent(input: RootResumeConsent): MemoryResult<RootAdmission> {
     return this.db.transaction((): MemoryResult<RootAdmission> => {
       const original = this.rootAdmission(input.rootSessionId);
-      if (!original || !this.db.query("SELECT id FROM disclosures WHERE id=?").get(`root-reply-${input.rootSessionId}`))
-        return { ok: false, error: "invalid-request", message: "Consent resumption requires a finalized original root session" };
+      if (!original) return { ok: false, error: "invalid-request", message: "Consent resumption requires an authenticated original root admission" };
       const key = this.consentKey(input.rootSessionId, input.consentId);
       const serialized = JSON.stringify([input.rootSessionId, input.subject, input.question, input.answer, input.consentId]);
       const prior = this.db.query("SELECT input,admission FROM consent_resumes WHERE id=?").get(key) as { input: string; admission: string } | null;
@@ -184,6 +184,10 @@ export class MemoryStore {
       const admission = this.admitRoot(original.person, original.threadId, original.recipients,
         [...new Set([...original.subjects, ...question.about, ...answer.about, input.subject])], original.roomId);
       this.db.query("INSERT INTO consent_resumes(id,input,admission) VALUES(?,?,?)").run(key, serialized, JSON.stringify(admission));
+      if (!this.db.query("SELECT id FROM disclosures WHERE id=?").get(`root-reply-${original.rootSessionId}`)) {
+        this.db.query("INSERT OR IGNORE INTO root_continuations(original,resumed) VALUES(?,?)").run(original.rootSessionId, admission.rootSessionId);
+        this.db.query("DELETE FROM sessions WHERE token=?").run(original.memoryToken);
+      }
       return { ok: true, value: admission };
     })();
   }
@@ -199,6 +203,8 @@ export class MemoryStore {
         const old = JSON.parse(prior.body) as Disclosure;
         return old.text === input.reply ? { ok: true, value: old } : { ok: false, error: "invalid-request", message: "Root reply was already finalized with different text" };
       }
+      if (this.db.query("SELECT original FROM root_continuations WHERE original=?").get(input.rootSessionId))
+        return { ok: false, error: "invalid-request", message: "This unfinished root session was superseded by consent continuation" };
       const reads = this.db.query("SELECT body FROM disclosures WHERE json_extract(body,'$.kind')='memory-read' AND json_extract(body,'$.setting.threadId')=?").all(input.rootSessionId) as { body: string }[];
       const about = [...new Set([...admission.subjects, admission.person, ...input.subjects, ...reads.flatMap(row => (JSON.parse(row.body) as Disclosure).about)])];
       const now = new Date().toISOString();
