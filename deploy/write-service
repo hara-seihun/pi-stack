@@ -23,11 +23,10 @@ case ${1:---activate} in
     pi_stack_as_root systemctl enable pi-stack-write.service
     pi_stack_as_root systemctl reset-failed pi-stack-write.service
     pi_stack_as_root systemctl restart pi-stack-write.service || fail 'Write engine restart failed'
-    # Type=simple reports active before model loading and GPU warmup finish.
-    # GMKtec GPU startup measured 9.6–18 seconds (10.8 in
-    # PUB-819a4d53104745bfb703640c). Keep readiness below the enclosing
-    # 50-second deploy bound so timeout diagnostics can run.
-    readiness_seconds=30
+    # CPU recognition plus the cold Qwen prefix exceeds the old 30s budget.
+    # Host activation overlaps this warmup with independent release work;
+    # the enclosing deployment still has its unchanged 50s deadline.
+    readiness_seconds=40
     deadline=$((SECONDS + readiness_seconds))
     while :; do
       systemctl is-active --quiet pi-stack-write.service || fail 'Write engine stopped before its listener was ready'
