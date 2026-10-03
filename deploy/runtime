@@ -50,6 +50,18 @@ check_release() {
   grep -rlq 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
   grep -q 'Anthropic error tool results require text' "$release/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js"
   grep -rlq 'Anthropic error tool results require text' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
+  local shell_source
+  for shell_source in core/bash-executor.js core/tools/output-accumulator.js core/tools/bash.js; do
+    grep -q 'PiStack shell output stays in memory' "$release/node_modules/@earendil-works/pi-coding-agent/dist/$shell_source"
+    node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/$shell_source"
+  done
+  grep -rlq 'PiStack shell output stays in memory' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
+  PI_TEST_RUNTIME_ENTRY="file://$release/node_modules/@earendil-works/pi-coding-agent/dist/index.js" \
+    node --test "$runtime_source/bash-spill.test.mjs"
+  local spill_count
+  spill_count=$(find /tmp -maxdepth 1 -type f -name 'pi-bash-*.log' -printf '. ' | wc -w)
+  pi_stack_as_root find /tmp -maxdepth 1 -type f -name 'pi-bash-*.log' -delete
+  printf 'shell output custody proof passed; removed %s preexisting /tmp/pi-bash-*.log files\n' "$spill_count"
   local doctor command
   for doctor in browser model-selection; do
     command=pi-agent-browser-doctor
@@ -98,7 +110,7 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/browser-probe.mjs packages/runtime/model-selection-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-codex-service-recovery.mjs packages/runtime/codex-service-recovery.js packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/browser-probe.mjs packages/runtime/model-selection-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-codex-service-recovery.mjs packages/runtime/codex-service-recovery.js packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-bash-spill.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
   sha256sum packages/runtime/patch-claude-oauth.mjs packages/runtime/extensions/claude-oauth/client.json packages/runtime/patch-anthropic-error-content.mjs packages/runtime/patch-summary-recovery.mjs packages/runtime/bounded-summary.js
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1-durable-sessions-v1
 } | sha256sum | cut -d' ' -f1)
@@ -127,6 +139,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   node --check "$browser_job"
   node "$runtime_source/patch-compaction-errors.mjs" "$stage/node_modules"
   node "$runtime_source/patch-summary-recovery.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-bash-spill.mjs" "$stage/node_modules"
   node "$runtime_source/patch-session-durability.mjs" "$stage/node_modules"
   node "$runtime_source/patch-shared-custody.mjs" "$stage/node_modules"
   node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
