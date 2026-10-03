@@ -199,6 +199,100 @@ test("pending creation preserves edits and ignored output instead of deleting a 
   } finally { f.close(); }
 });
 
+test("interrupted creation resumes with ignored output without removing it", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "ignored", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "checkout")));
+    const destination = path.join(f.workspaces, "ignored");
+    mkdirSync(path.join(destination, "ignored-output"));
+    const output = path.join(destination, "ignored-output", "proof");
+    writeFileSync(output, "retain ignored work\n");
+    assert.equal(git(destination, "status", "--porcelain"), "");
+    assert.equal(JSON.parse(run(args, f.env)).state, "active");
+    assert.equal(readFileSync(output, "utf8"), "retain ignored work\n");
+    const release = JSON.parse(run(["release", "--path", destination, "--json"], f.env));
+    assert.match(release.inspection.reason, /unclassified ignored output/);
+    assert.equal(existsSync(output), true);
+  } finally { f.close(); }
+});
+
+test("finalize-creation adopts an interrupted clean descendant without losing work or peers", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--repo", f.source, "--min-free-gib", "0", "--json"];
+    const peer = JSON.parse(run([...args, "--name", "peer"], f.env));
+    const peerBefore = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env));
+    assert.throws(() => run([...args, "--name", "descendant"], interruptCreation(f, "checkout")));
+    const destination = path.join(f.workspaces, "descendant");
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const before = database.prepare("SELECT * FROM workspace WHERE path=?").get(destination);
+    database.close();
+    const finalize = ["finalize-creation", "--id", before.id, "--json"];
+    git(destination, "config", "user.name", "Test");
+    git(destination, "config", "user.email", "test@example.invalid");
+    git(destination, "branch", "-m", "renamed-after-interruption");
+    writeFileSync(path.join(destination, "file.txt"), "descendant work\n");
+    assert.throws(() => run(finalize, f.env), /pending checkout contains changes/);
+    git(destination, "commit", "-am", "work after interruption");
+    const head = git(destination, "rev-parse", "HEAD");
+    mkdirSync(path.join(destination, "ignored-output"));
+    const ignored = path.join(destination, "ignored-output", "proof");
+    writeFileSync(ignored, "ignored evidence\n");
+    git(destination, "remote", "set-url", "origin", path.join(f.root, "unrelated.git"));
+    assert.throws(() => run(finalize, f.env), /origin differs/);
+    git(destination, "remote", "set-url", "origin", f.source);
+    git(destination, "checkout", "--orphan", "unrelated");
+    git(destination, "commit", "-am", "unrelated root");
+    assert.throws(() => run(finalize, f.env), /not descended/);
+    git(destination, "checkout", "renamed-after-interruption");
+    git(destination, "branch", "-D", "unrelated");
+    // The original disposable source can already be gone when a task finishes.
+    rmSync(f.source, { recursive: true });
+    const finalized = JSON.parse(run(finalize, f.env));
+    assert.equal(finalized.id, before.id);
+    assert.equal(finalized.owner, before.owner);
+    assert.equal(finalized.sourceCommit, before.source_commit);
+    assert.equal(finalized.state, "active");
+    assert.deepEqual(JSON.parse(run(finalize, f.env)), finalized);
+    assert.equal(git(destination, "rev-parse", "HEAD"), head);
+    assert.equal(git(destination, "branch", "--show-current"), "renamed-after-interruption");
+    assert.equal(readFileSync(ignored, "utf8"), "ignored evidence\n");
+    const afterDb = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    assert.equal(afterDb.prepare("SELECT creation_request FROM workspace WHERE id=?").get(before.id).creation_request, before.creation_request);
+    afterDb.close();
+    assert.deepEqual(JSON.parse(run(["status", "--path", peer.path, "--json"], f.env)), peerBefore);
+    // Normal release still refuses unclassified ignored files and unpushed commits.
+    assert.notEqual(JSON.parse(run(["release", "--id", before.id, "--json"], f.env)).action, "released");
+    rmSync(path.join(destination, "ignored-output"), { recursive: true });
+    assert.notEqual(JSON.parse(run(["release", "--id", before.id, "--json"], f.env)).action, "released");
+    assert.equal(existsSync(destination), true);
+    git(destination, "remote", "add", "publish", f.remote);
+    git(destination, "push", "publish", "HEAD:refs/heads/descendant");
+    assert.equal(JSON.parse(run(["release", "--id", before.id, "--json"], f.env)).action, "released");
+    assert.equal(git(f.remote, "rev-parse", "refs/heads/descendant"), head);
+    assert.equal(existsSync(peer.path), true);
+  } finally { f.close(); }
+});
+
+test("finalize-creation validates the interrupted linked worktree mode and mirror", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "linked", "--repo", f.source,
+      "--strategy", "worktree", "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "worktree")));
+    const destination = path.join(f.workspaces, "linked");
+    const finalize = ["finalize-creation", "--path", destination, "--json"];
+    git(destination, "checkout", "--detach");
+    assert.throws(() => run(finalize, f.env), /branch mode differs/);
+    git(destination, "checkout", "agent/linked");
+    const record = JSON.parse(run(finalize, f.env));
+    assert.equal(record.checkoutType, "worktree");
+    assert.equal(record.state, "active");
+  } finally { f.close(); }
+});
+
 test("local reference creation does not copy unreachable source objects", () => {
   const f = fixture();
   try {

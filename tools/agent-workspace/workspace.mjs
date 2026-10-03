@@ -1754,23 +1754,61 @@ function createWorkspace(database, args, statePath) {
     if (head !== sourceCommit || (mode === "writer" ? selectedBranch.stdout !== branch : selectedBranch.status === 0)) {
       fail("pending checkout HEAD or branch differs from the reserved source");
     }
-    if (git(destination, ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"])) {
-      fail("pending checkout contains changes; preserve and repair them before resuming creation");
-    }
+    assertPendingClean(destination);
     if (strategy === "clone") {
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
       configurePushUrl(["-C", destination], upstream);
       maintainReferenceClone(destination, true);
     }
-    const now = Date.now();
-    database.prepare("UPDATE workspace SET repository=?, state='active', detail='creation completed', updated_at=?, lease_expires_at=? WHERE id=?")
-      .run(upstream.fetch, now, now + input.leaseSeconds * 1000, row.id);
-    print(recordBy(database, { id: row.id }), bool(args, "json"));
+    completeCreation(database, row.id, upstream.fetch, input.leaseSeconds, "creation completed", args);
   } catch (error) {
     database.prepare("UPDATE workspace SET detail=?, updated_at=? WHERE id=? AND state='creating'")
       .run(`creation retained: ${error.message}`, Date.now(), row.id);
     throw error;
   }
+}
+
+function assertPendingClean(destination) {
+  const changes = git(destination, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  if (changes) fail(`pending checkout contains changes: ${changes.split("\n").slice(0, 8).join(" | ")}; preserve and repair them before resuming creation`);
+}
+
+function completeCreation(database, id, repository, leaseSeconds, detail, args) {
+  const now = Date.now();
+  database.prepare("UPDATE workspace SET repository=?, state='active', detail=?, updated_at=?, lease_expires_at=? WHERE id=? AND state='creating'")
+    .run(repository, detail, now, now + leaseSeconds * 1000, id);
+  print(recordBy(database, { id }), bool(args, "json"));
+}
+
+function finalizeCreationCommand(database, args, statePath) {
+  assertOnly(args, ["id", "path", "json"]);
+  const record = recordBy(database, selectorFrom(args));
+  if (record.state === "active") {
+    print(record, bool(args, "json"));
+    return;
+  }
+  if (record.state !== "creating") fail(`workspace cannot finalize creation from state ${record.state}`);
+  if (record.sourceCommit === null) fail("pending creation has no recorded source commit; repeat the original create command first");
+  const input = record.creation;
+  const info = gitInfo(record.path);
+  if (info.checkoutType !== input.strategy) fail("pending checkout type changed");
+  if (info.checkoutType === "worktree") {
+    const common = path.resolve(record.path, git(record.path, ["rev-parse", "--git-common-dir"]));
+    if (realpathSync(common) !== realpathSync(mirrorFor(statePath, input.repository))) fail("pending worktree has a different source mirror");
+  } else {
+    const upstream = repositoryRemotes(input.repository);
+    if (![input.repository, upstream.fetch].includes(repositoryLocation(info.repository ?? "", record.path))) {
+      fail("pending checkout origin differs from the creation request");
+    }
+  }
+  const ancestry = command("git", ["-C", record.path, "merge-base", "--is-ancestor", record.sourceCommit, info.head]);
+  if (ancestry.status !== 0) fail("pending checkout HEAD is not descended from the recorded source commit");
+  const branch = command("git", ["-C", record.path, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (input.mode === "writer" ? branch.status !== 0 : branch.status === 0) fail("pending checkout branch mode differs from the creation request");
+  assertPendingClean(record.path);
+  if (info.checkoutType === "clone") maintainReferenceClone(record.path, true);
+  completeCreation(database, record.id, info.repository ?? record.repository, input.leaseSeconds,
+    "creation finalized; existing HEAD, branches, remotes and ignored output preserved", args);
 }
 
 function cancelCreationCommand(database, args) {
@@ -1780,7 +1818,7 @@ function cancelCreationCommand(database, args) {
   // lstat also protects dangling symlinks. Cancellation never removes filesystem entries.
   try {
     lstatSync(record.path);
-    fail(`pending checkout exists; repeat the original create command to resume and preserve its source: ${record.path}`);
+    fail(`pending checkout exists; repeat the original create command or use finalize-creation for a clean descendant checkout: ${record.path}`);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -1983,6 +2021,7 @@ function help() {
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
   agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
   agent-workspace cancel-creation (--id ID|--path PATH)
+  agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
@@ -2034,18 +2073,19 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
       return;
     }
   }
-  if (!["status", "list", "maintain", "cancel-creation"].includes(commandName)
+  if (!["status", "list", "maintain", "cancel-creation", "finalize-creation"].includes(commandName)
     && (commandName !== "reconcile" || bool(args, "execute"))) drainGc(statePath);
   const database = openRegistry(statePath);
   try {
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
     else if (commandName === "adopt") adoptCommand(database, args, statePath);
-    else if (["heartbeat", "release", "cancel-creation"].includes(commandName)) {
+    else if (["heartbeat", "release", "cancel-creation", "finalize-creation"].includes(commandName)) {
       const record = recordBy(database, selectorFrom(args));
       withWorkspaceLock(database, record.path, () => {
         if (commandName === "heartbeat") heartbeatCommand(database, args);
         else if (commandName === "cancel-creation") cancelCreationCommand(database, args);
+        else if (commandName === "finalize-creation") finalizeCreationCommand(database, args, statePath);
         else releaseCommand(database, args, statePath);
       }, record.groupId);
     }
