@@ -140,7 +140,7 @@ const local = Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostnam
     return json(result.value);
   }
   if (!same(bearer, `Bearer ${adminToken}`)) return error("Owner authorization required", 403);
-  if (url.pathname === "/status") return json({ enabled: true, releaseCommit, from: provider.credentials.VONAGE_FROM_NUMBER, model: "gpt-live-1", activeCalls: active.size });
+  if (url.pathname === "/status") return json({ enabled: true, callingEnabled: config.callingEnabled === true, releaseCommit, storedCallerId: provider.credentials.VONAGE_FROM_NUMBER, model: "gpt-live-1", activeCalls: active.size });
   if (url.pathname === "/preflight" && req.method === "POST") {
     if (stopping || active.size) return error("Phone service is busy", 409);
     const c = create({ to: "+15555550100", purpose: "Check the telephone audio connection without calling anyone.", shareableFacts: [], opening: "This is an audio connection test.", maxSeconds: 60 });
@@ -160,6 +160,7 @@ const local = Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostnam
   }
   if (url.pathname === "/calls" && req.method === "GET") return json(db.query("SELECT id,provider_id,status,started_at,ended_at,error FROM calls ORDER BY started_at DESC LIMIT 50").all());
   if (url.pathname === "/calls" && req.method === "POST") {
+    if (config.callingEnabled !== true) return error("Confirm provider credit and number ownership, then enable calling in host configuration", 409);
     if (stopping || active.size >= 2) return error("Phone service is busy", 409);
     let body; try { body = await req.json(); } catch { return error("JSON required"); }
     const result = callBrief(body); if (!result.ok) return error(result.error);
@@ -192,7 +193,7 @@ Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostname: "127.0.0.1"
     return json({ accepted: true });
   }
   if (url.pathname === "/vonage/answer") {
-    if (stopping || active.size >= 2 || !body.uuid || String(body.to).replace(/^\+/, "") !== provider.credentials.VONAGE_FROM_NUMBER.replace(/^\+/, "")) return json([{ action: "talk", text: "Kenan is unavailable. Please call again later." }]);
+    if (config.callingEnabled !== true || stopping || active.size >= 2 || !body.uuid || String(body.to).replace(/^\+/, "") !== provider.credentials.VONAGE_FROM_NUMBER.replace(/^\+/, "")) return json([{ action: "talk", text: "Kenan is unavailable. Please call again later." }]);
     const previous = db.query("SELECT id FROM calls WHERE provider_id=?").get(body.uuid) as { id: string } | null;
     if (previous) { const c = active.get(previous.id); return c ? json(ncco(c)) : json([]); }
     const c = create({ to: `+${String(body.from).replace(/^\+/, "")}`, purpose: "Receive a call for Hara's AI assistant Kenan and take a message.", shareableFacts: ["You are Kenan, Hara's AI assistant.", "You can take a message for Hara but cannot share her private information or confirm private details."], opening: "Hello, I'm Kenan, Hara's AI assistant. How can I help?", maxSeconds: 300 }, body.uuid);
