@@ -126,5 +126,12 @@ Concrete observations:
 Use the same commands against a candidate engine and compare immutable receipts. Recognition, cleanup and dictionary failures need different remedies. This owner supplies that separation; it claims no overall product accuracy improvement.
 [Operational evidence](/home/kenan/data/voice-write-reliability/README.md)
 owns the host/Android reliability receipts and earlier candidate comparisons; new
-rewrite results must retain their exact source/corpus identities rather than
-relabel these baseline receipts.
+rewrite results retain their source/corpus identities rather than relabelling these baseline receipts.
+
+## Scored dictionary candidate
+
+[Dictionary evaluation](DICTIONARY.md) owns the subsequent bounded lexical-path
+candidate, its natural positive increment and remaining extra-word error, 29 additional
+labelled synthetic controls, caught quotation-control failure, repaired final
+sentence holdout, immutable receipts and CPU latency. It does not replace or
+relabel this earlier baseline, and does not establish broad unfamiliar-name accuracy.

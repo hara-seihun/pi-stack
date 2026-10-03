@@ -9,6 +9,8 @@ import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer
 from gpu_encoder import maybe_load
+from dictionary import PhraseBias
+from dictionary_decoder import DictionaryDecoder
 
 BLANK = 1024
 LOG_FLOOR = math.log(2**-24)
@@ -37,11 +39,12 @@ class Nemotron:
         self.gpu = maybe_load(Path(__file__).resolve().parent / 'gpu-model') if enable_gpu else None
 
     def create_stream(self, dictionary=None):
-        phrases = []
-        for text in (dictionary or {}).get('words', []):
-            if isinstance(text, str) and text.strip():
-                phrases.append(self.tokenizer.encode(text.strip()).ids)
-        return Stream(self, phrases)
+        dictionary = dictionary or {}
+        phrases = list(dictionary.get('words', []))
+        phrases.extend(rule['from'] for rule in dictionary.get('replacements', [])
+                       if isinstance(rule, dict) and isinstance(rule.get('from'), str)
+                       and isinstance(rule.get('to'), str) and rule['to'].strip())
+        return Stream(self, PhraseBias(self.vocab, phrases))
 
     def features(self, audio, first=0, count=None):
         """Log-mel frames [first, first+count) of `audio`, identical to slicing the
@@ -72,6 +75,7 @@ class Stream:
     def __init__(self, model, phrases):
         self.model = model
         self.phrases = phrases
+        self.dictionary_decoder = DictionaryDecoder(model, phrases, BLANK) if phrases.phrases else None
         self.ids = []
         self.audio = np.empty(0, dtype=np.float32)
         self.samples_decoded = 0
@@ -105,6 +109,7 @@ class Stream:
         duplicate = object.__new__(Stream)
         duplicate.model = self.model
         duplicate.phrases = self.phrases
+        duplicate.dictionary_decoder = self.dictionary_decoder.fork() if self.dictionary_decoder else None
         duplicate.ids = self.ids.copy()
         duplicate.audio = self.audio
         duplicate.samples_decoded = self.samples_decoded
@@ -134,7 +139,19 @@ class Stream:
                 chunks = min(4, math.ceil((len(self.audio)-self.samples_decoded)/self.model.chunk_samples)) if self.model.gpu else 1
                 self._step(math.ceil(min(len(self.audio)-self.samples_decoded, chunks*self.model.chunk_samples) / 160))
                 self.samples_decoded += chunks * self.model.chunk_samples
+        if self.dictionary_decoder:
+            self.dictionary_decoder.finished = True
+            self._dictionary_visible()
         return self.result()
+
+    def _dictionary_visible(self):
+        hypothesis, count = self.dictionary_decoder.visible()
+        self.ids = list(hypothesis.ids[:count])
+        self.pieces = list(hypothesis.pieces[:count])
+        self.token_scores = list(hypothesis.probabilities[:count])
+        self.alternative_pieces = list(hypothesis.alternatives[:count])
+        self.alternative_scores = list(hypothesis.alternative_scores[:count])
+        self.token_times = list(hypothesis.times[:count])
 
     def _step(self, valid_frames):
         began = time.perf_counter()
@@ -163,6 +180,10 @@ class Stream:
             })
         encoded_at = time.perf_counter()
         for frame in range(min(int(lengths[0]), max(1, math.ceil(valid_frames/8)))):
+            if self.dictionary_decoder:
+                self.dictionary_decoder.frame(encoded[:, :, frame:frame+1],
+                                              self.samples_decoded / 16000 + frame * .08)
+                continue
             for _ in range(10):
                 logits, _, next1, next2 = self.model.decoder.run(None, {
                     'encoder_outputs': encoded[:, :, frame:frame+1],
@@ -172,13 +193,7 @@ class Stream:
                     'input_states_2': self.state2,
                 })
                 scores = logits[0, 0, 0]
-                biased = scores.copy()
-                for phrase in self.phrases:
-                    for prefix in range(len(phrase)-1, 0, -1):
-                        if self.ids[-prefix:] == phrase[:prefix]:
-                            biased[phrase[prefix]] += 3.0
-                            break
-                token = int(np.argmax(biased))
+                token = int(np.argmax(scores))
                 if token == BLANK:
                     break
                 # Exact local joiner alternatives, not a re-ranked phrase lattice.
@@ -195,6 +210,8 @@ class Stream:
                 self.token_times.append((self.samples_decoded / 16000) + frame*0.08)
                 self.last = token
                 self.state1, self.state2 = next1, next2
+        if self.dictionary_decoder:
+            self._dictionary_visible()
         completed = time.perf_counter()
         self.timings.append((completed-began)*1000)
         self.stage_timings.append({'featureMs': feature_ms,

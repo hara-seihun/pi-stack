@@ -20,13 +20,17 @@ pieces. An alternative replaces one piece's score with that piece's own support;
 it is not assigned the primary word's score. Alternatives are ranked by support
 and cannot cross a word boundary. These local scores are not calibrated
 probabilities of word correctness or a fully decoded alternative lattice.
-Dictionary phrase boosts still apply during recognition; explicit replacement
-rules remain the person's authority. Automatic cleanup substitution requires a
+[Bounded lexical search](DICTIONARY.md) now scores complete dictionary paths
+with refunded incomplete-prefix credit, independent of canonical BPE segmentation.
+Words and explicit replacement source phrases provide recognition context;
+replacement execution remains the person's authority. Automatic cleanup substitution requires a
 low-confidence primary, a dictionary-listed alternative and measured support
-within .12 of the primary. Unscored legacy alternatives cannot trigger it.
+within .12 of the primary. Unscored alternatives cannot trigger it.
+[Measured before/after results](../eval/DICTIONARY.md) include the natural phrase
+gain, caught quotation-control regression and limits of the synthetic name controls.
 
 ```sh
-/srv/pi/write-engine/venv/bin/python -m unittest test_dictionary_scores -v
+/srv/pi/write-engine/venv/bin/python -m unittest test_dictionary_decoder test_dictionary_scores -v
 ```
 
 Partials use the learned deletion tagger, source-constrained rules and resident
