@@ -6,7 +6,7 @@ export function publicationJournalEnabled() {
   return existsSync(path) && JSON.parse(readFileSync(path, "utf8")).oneKenan === true;
 }
 function invoke(command, payload) {
-  const cli = process.env.PI_KENAN_ACTION_JOURNAL_CLI ?? "/srv/pi/kenan-memory/src/journal-cli.ts";
+  const cli = process.env.PI_KENAN_ACTION_JOURNAL_CLI ?? "/srv/pi/runtime/node_modules/kenan-memory/src/journal-cli.ts";
   const result = spawnSync("bun", [cli, command], { input: JSON.stringify(payload), encoding: "utf8", timeout: 10_000 });
   if (result.status !== 0) throw new Error(`Action journal ${command}: ${result.stderr || result.stdout || result.error?.message}`);
   return JSON.parse(result.stdout);

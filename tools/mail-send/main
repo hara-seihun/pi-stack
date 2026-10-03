@@ -24,7 +24,7 @@ def journal_enabled():
 
 
 def journal(command, payload):
-    cli = os.environ.get("PI_KENAN_ACTION_JOURNAL_CLI", "/srv/pi/kenan-memory/src/journal-cli.ts")
+    cli = os.environ.get("PI_KENAN_ACTION_JOURNAL_CLI", "/srv/pi/runtime/node_modules/kenan-memory/src/journal-cli.ts")
     result = subprocess.run(["bun", cli, command], input=json.dumps(payload),
                             capture_output=True, text=True, timeout=15)
     if result.returncode:

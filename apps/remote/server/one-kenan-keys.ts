@@ -104,7 +104,7 @@ export class KenanKeys {
         for (const other of this.people) {
           if (!other.unlock || other.user === user || this.keys[other.user] === undefined) continue;
           const result = await this.mount(other, this.keys[other.user]!);
-          if (!result.ok) return { ok: false, status: 503, error: `Kenan's custody is open, but ${other.user}'s folder could not mount` };
+          if (!result.ok) return { ok: false, status: 503, error: `Kenan's custody is open, but ${other.user}'s folder could not mount: ${result.error}` };
           this.mounted.add(other.user);
         }
         return { ok: true };

@@ -38,6 +38,14 @@ def send_fixture():
 
 class BoundaryTests(unittest.TestCase):
     def setUp(self): SMTP.sent = []; SMTP.error = None
+    def test_default_and_explicit_journal_cli_use_the_owned_runtime(self):
+        result = mail.subprocess.CompletedProcess([], 0, '{"id":"fixture"}', '')
+        with patch.dict(os.environ, {}, clear=True), patch.object(mail.subprocess, 'run', return_value=result) as run:
+            self.assertEqual(mail.journal('begin', {'summary':'fixture'}), {'id':'fixture'})
+            self.assertEqual(run.call_args.args[0], ['bun', '/srv/pi/runtime/node_modules/kenan-memory/src/journal-cli.ts', 'begin'])
+            os.environ['PI_KENAN_ACTION_JOURNAL_CLI'] = '/fixture/journal-cli.ts'
+            mail.journal('finish', {})
+            self.assertEqual(run.call_args.args[0][1], '/fixture/journal-cli.ts')
     def test_success_logs_accepted_mail_after_dispatch(self):
         events = []
         def journal(command, payload):

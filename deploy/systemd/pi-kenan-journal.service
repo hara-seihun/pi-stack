@@ -8,6 +8,8 @@ After=pi-kenan-custody.service pi-kenan-memory.service
 Type=oneshot
 User=@EXECUTION_USER@
 EnvironmentFile=@KENAN_ENV_FILE@
+Environment=BUN_INSTALL=@STATE_DIR@/bun
+Environment=BUN_INSTALL_CACHE_DIR=@STATE_DIR@/bun/install/cache
 Environment=PI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE=%d/kenan-memory-publisher
 LoadCredential=kenan-memory-publisher:@PUBLISHER_TOKEN_FILE@
 ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@

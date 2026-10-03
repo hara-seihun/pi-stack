@@ -33,6 +33,11 @@ export async function detachInheritedCustodyMounts(people: Person[]): Promise<nu
   return detached;
 }
 
+export function custodyDiagnostic(message: string, stderr: string, key: string): string {
+  const detail = stderr.replaceAll(key, "[redacted]").trim().slice(0, 4096);
+  return detail ? `${message}: ${detail}` : message;
+}
+
 export class KenanMounts {
   private children = new Map<string, ReturnType<typeof Bun.spawn>>();
   constructor(private options: { userFor?: (person: Person) => string; forceOwner?: { uid: number; gid: number } } = {}) {}
@@ -60,8 +65,8 @@ export class KenanMounts {
     }
     child.kill();
     await child.exited;
-    await errors;
-    return { ok: false, status: 403, error: "Wrong key, or the folder could not mount" };
+    const detail = await errors;
+    return { ok: false, status: 403, error: custodyDiagnostic("Wrong key, or the folder could not mount", detail, key) };
   }
   private async isMounted(path: string) {
     const proc = Bun.spawn(["mountpoint", "-q", "--", path], { stdout: "ignore", stderr: "ignore" });

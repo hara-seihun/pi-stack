@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { KenanKeys } from "./one-kenan-keys";
-import { KenanMounts, detachInheritedCustodyMounts } from "./one-kenan-mounts";
+import { KenanMounts, custodyDiagnostic, detachInheritedCustodyMounts } from "./one-kenan-mounts";
 import { collectRetainedCustodyKeys } from "./one-kenan-retained-keys";
 import { listPersons } from "./persons";
 import { oneKenanConfig } from "./one-kenan";
@@ -38,8 +38,8 @@ const keys = new KenanKeys(process.env.PI_KENAN_KEY_STORE ?? "/var/lib/pi-kenan/
     const init = Bun.spawn(["runuser", "-u", config.executionUser, "--", "gocryptfs", "-q", "-nosyslog", "-init", "--", sharedCipher], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
     init.stdin.write(`${password}\n`); init.stdin.end();
     const errors = new Response(init.stderr).text();
-    const code = await init.exited; await errors;
-    if (code !== 0) return { ok: false, status: 503, error: "Kenan's encrypted shared storage could not initialize" };
+    const code = await init.exited; const detail = await errors;
+    if (code !== 0) return { ok: false, status: 503, error: custodyDiagnostic("Kenan's encrypted shared storage could not initialize", detail, password) };
   }
   return mounts.mount({ version: 1, user: "_kenan_store", displayName: "Kenan storage", port: 1,
     unlock: { cipherDir: sharedCipher, mountpoint: privateDir }, environment: {} }, password);
@@ -52,7 +52,7 @@ if (provider) {
   if (!opened.ok) throw new Error(opened.error);
 }
 const retained = await collectRetainedCustodyKeys(keys, people);
-if (retained.rejected.length) console.warn(`Retained custody keys require a new successful login: ${retained.rejected.join(", ")}`);
+for (const failure of retained.rejected) console.warn(`Retained custody rejected ${failure.person} (${failure.status}): ${failure.error}`);
 const service = Bun.serve({ unix: socket, async fetch(req) {
   const path = new URL(req.url).pathname;
   if (path === "/status" && req.method === "GET") return Response.json(keys.status());

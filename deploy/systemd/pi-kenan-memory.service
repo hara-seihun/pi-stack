@@ -15,6 +15,8 @@ WorkingDirectory=/srv/pi/kenan-memory
 Environment=PI_STACK_HOST_CONFIG=/etc/pi-stack/host.json
 Environment=PI_KENAN_MEMORY_AUTH_FILE=%d/kenan-memory-auth
 Environment=PI_KENAN_PRIVATE_DIR=/var/lib/pi-kenan/private
+Environment=BUN_INSTALL=@STATE_DIR@/bun
+Environment=BUN_INSTALL_CACHE_DIR=@STATE_DIR@/bun/install/cache
 Environment=PI_KENAN_ROOM_AUDIENCE_MODULE=/srv/pi/pi-remote/server/room-audience.mjs
 Environment=PI_REMOTE_ROOMS_DB=/var/lib/pi-remote/one-kenan/rooms.sqlite3
 LoadCredential=kenan-memory-auth:/etc/pi-stack/kenan-memory-auth.json
