@@ -17,19 +17,17 @@ export interface MemoryToolOptions {
 export function memoryExtension(options: MemoryToolOptions) {
   return (pi: ExtensionAPI) => {
     let initialized = false;
-    if (oneKenanEnabled(options.env) && options.env.PI_KENAN_MEMORY_TOKEN && options.env.PI_KENAN_MEMORY_PERSON && options.env.PI_KENAN_MEMORY_ROLE) {
+    if (oneKenanEnabled(options.env)) {
       registerMemoryTools(options, pi);
       initialized = true;
     }
-    pi.on("before_agent_start", async event => {
+    pi.on("before_agent_start", event => {
       const names = new Set([...MEMORY_TOOL_NAMES, "ask_kenan"]);
       if (!oneKenanEnabled(options.env)) {
         if (initialized) pi.setActiveTools(pi.getActiveTools().filter(name => !names.has(name)));
         return;
       }
       if (!initialized) {
-        if (!options.env.PI_KENAN_MEMORY_TOKEN || !options.env.PI_KENAN_MEMORY_PERSON || !options.env.PI_KENAN_MEMORY_ROLE)
-          await prepareMemoryEnvironment(options.env, options.env.PI_THREAD_ID!);
         registerMemoryTools(options, pi);
         initialized = true;
       }
@@ -40,26 +38,38 @@ export function memoryExtension(options: MemoryToolOptions) {
   };
 }
 function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
-    const person = options.env.PI_KENAN_MEMORY_PERSON;
     const threadId = options.env.PI_THREAD_ID;
-    if (!person || !threadId) throw new Error("One Kenan memory requires a verified person and thread session");
-    const client = options.client ?? memoryClient({ url: options.env.PI_KENAN_MEMORY_URL, token: options.env.PI_KENAN_MEMORY_TOKEN });
+    if (!threadId) throw new Error("Kenan memory tools require a thread identity");
     const root = options.env.PI_KENAN_MEMORY_ROLE === "root";
+    if (root && (!options.env.PI_KENAN_MEMORY_TOKEN || !options.env.PI_KENAN_MEMORY_PERSON))
+      throw new Error("Root memory requires an admitted root capability");
     const room = options.env.PI_REMOTE_ROOMS_RUNTIME === "1";
+    let pending: Promise<MemoryResult<unknown>> | undefined;
+    const ensureSession = async (): Promise<MemoryResult<unknown>> => {
+      if (!oneKenanEnabled(options.env)) return { ok: false, error: "disabled", message: "One Kenan is disabled on this host" };
+      if (options.env.PI_KENAN_MEMORY_TOKEN && options.env.PI_KENAN_MEMORY_PERSON && (root || options.env.PI_KENAN_MEMORY_ROLE === "person")) return { ok: true, value: undefined };
+      if (root) return { ok: false, error: "unauthenticated", message: "Root memory requires an admitted root capability" };
+      if (pending) return pending;
+      pending = prepareMemoryEnvironment(options.env, threadId);
+      try { return await pending; } finally { pending = undefined; }
+    };
+    const failure = (result: MemoryResult<unknown>) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result }, isError: true });
     if (!root) {
       pi.registerTool(defineTool({ name: "ask_kenan", label: "Ask Kenan",
         description: "Ask privileged Kenan about cross-person memory or resources. Only his reply returns. Your authenticated session fixes who asks and the full room audience; you cannot set his prompt, model, tools or context.",
         parameters: Type.Object({ request: Type.String({ minLength: 1, maxLength: 100_000 }) }),
         execute: async (_id, input, signal) => {
+          const session = await ensureSession();
+          if (!session.ok) return failure(session);
           try {
             const url = options.env.PI_KENAN_ROOT_URL ?? `http://127.0.0.1:${options.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT}`;
             const response = await fetch(`${url}/v1/ask`, { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN! },
               body: JSON.stringify(input), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000) });
             const result = await response.json() as any;
             const reply = response.ok ? result.reply ?? (result.ok === true ? result.value?.reply : undefined) : undefined;
-            if (typeof reply !== "string") return { content: [{ type: "text" as const, text: "Kenan could not answer this request." }], details: undefined, isError: true };
+            if (typeof reply !== "string") return failure({ ok: false, error: "unavailable", message: "Kenan's privileged context could not answer; ordinary work can continue" });
             return { content: [{ type: "text" as const, text: reply }], details: undefined };
-          } catch { return { content: [{ type: "text" as const, text: "Kenan's privileged context is unavailable." }], details: undefined, isError: true }; }
+          } catch { return failure({ ok: false, error: "unavailable", message: "Kenan's privileged context is unavailable; ordinary work can continue" }); }
         },
       }));
     }
@@ -68,8 +78,13 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     pi.on("turn_start", () => { turnId = randomUUID(); });
     const roomId = options.env.PI_REMOTE_ROOM_ID ?? options.env.PI_KENAN_MEMORY_ROOM_ID;
     const context = (): ReadContext => ({ threadId, turnId, ...(roomId ? { roomId } : {}) });
-    const setting = () => ({ person, threadId, ...(roomId ? { roomId } : {}) });
+    const setting = () => ({ person: options.env.PI_KENAN_MEMORY_PERSON ?? "", threadId, ...(roomId ? { roomId } : {}) });
     const request = async (input: MemoryRequest): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError: boolean }> => {
+      const session = await ensureSession();
+      if (!session.ok) return failure(session);
+      if (input.operation === "write") input = { ...input, item: { ...input.item, setting: setting() } };
+      if (input.operation === "log-disclosure") input = { ...input, disclosure: { ...input.disclosure, setting: setting() } };
+      const client = options.client ?? memoryClient({ url: options.env.PI_KENAN_MEMORY_URL, token: options.env.PI_KENAN_MEMORY_TOKEN });
       const result: MemoryResult<any> = await client.request(input);
       const report = result.ok && result.value && "readReport" in result.value ? (result.value as MemoryRead<unknown>).readReport : undefined;
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result, ...(report ? { [MEMORY_READ_DETAIL]: report } : {}) }, isError: !result.ok };

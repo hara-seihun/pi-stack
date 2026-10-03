@@ -27,10 +27,12 @@ test("an already-open flag-off session lazily mints from verified UID and rolls 
     expect(store.db.query("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
     writeFileSync(path, JSON.stringify({ oneKenan: true }));
     expect((await before({ systemPrompt: "base" })).systemPrompt).toBeTypeOf("string");
-    expect(env.PI_KENAN_MEMORY_PERSON).toBe("bob"); expect(env.PI_KENAN_MEMORY_ROLE).toBe("person");
+    expect(env.PI_KENAN_MEMORY_PERSON).toBeUndefined();
+    expect(store.db.query("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
     expect(pi.getActiveTools()).toContain("ask_kenan"); expect(pi.getActiveTools()).toContain("root_reply");
     const found = await pi.tools.find(t => t.name === "memory_search").execute("id", { query: "" });
     expect(found.details.kenanMemoryRead).toMatchObject({ person: "bob", threadId: "b", touchedOtherPeople: false });
+    expect(env.PI_KENAN_MEMORY_PERSON).toBe("bob"); expect(env.PI_KENAN_MEMORY_ROLE).toBe("person");
     writeFileSync(path, "{}"); await before({ systemPrompt: "base" });
     expect(pi.getActiveTools()).toEqual(["read", "bash", "root_reply"]);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); store.close(); rmSync(root, { recursive: true, force: true }); }
