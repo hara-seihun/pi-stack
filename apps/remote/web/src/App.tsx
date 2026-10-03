@@ -18,7 +18,7 @@ import { deliverIdleNotifications, readIdleCursor, takeNotificationTarget, retai
 import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
-import { working } from "./thread-state";
+import { workerThreads, working } from "./thread-state";
 import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
 import type { ChatPickerHandle } from "./thread-start-menu";
@@ -621,7 +621,7 @@ function RemoteApp() {
       patch(current => ({ discovered: [...current.sessions, ...current.discovered].some(session => session.id === chat.session.id) ? current.discovered : [...current.discovered, chat.session] }));
       if (chat.session.archivedAt) await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: chat.session.id }), {});
       if (signal?.aborted) return;
-      openChat(chat.id, { tab: "chats" });
+      openChat(chat.id, { tab: chat.session.watchList ? "workers" : "chats" });
     } else {
       if (!chat.conversation.current) await api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: chat.conversation.backendId, target: chat.conversation.externalId });
       if (signal?.aborted) return;
@@ -842,18 +842,13 @@ function RemoteApp() {
   const modelCounts = useMemo(() => new Map((dashboard?.modelCounts ?? []).map((model) => [model.key, model.count])), [dashboard]);
   const images = useMemo(() => state.images ? new Map(state.images.images.map(image => [image.id, image])) : null, [state.images]);
   const humanBackend = state.messaging.backends.find(item => item.id === humanConversation?.backendId);
-  // The tree shows every thread that is a worker or has workers, including
-  // the person's own conversation roots that spawned them.
-  const workerSessions = useMemo(() => {
-    const live = knownSessions.filter(session => !session.archivedAt);
-    const parents = new Set(live.map(session => session.parentId).filter(Boolean));
-    return live.filter(session => session.parentId || session.origin === "fleet" || parents.has(session.id) || session.hasChildren);
-  }, [knownSessions]);
+  // Watch checks live alongside workers and the conversation roots that spawned them.
+  const workerSessions = useMemo(() => workerThreads(knownSessions), [knownSessions]);
   const showPlace = useMemo(() => new Set(state.sessions.map(session => `${session.environment}/${session.workspaceName}`)).size > 1, [state.sessions]);
   const attentionCount = rows.filter(row => row.section === "attention").length;
   const badges = {
     chats: { count: attentionCount || rows.length, attention: attentionCount > 0 },
-    workers: { count: workerSessions.filter(session => (session.parentId || session.origin === "fleet") && working(session)).length },
+    workers: { count: workerSessions.filter(session => (session.parentId || session.origin === "fleet" || session.watchList) && working(session)).length },
     machine: { count: state.ownerErrors.length + (state.offline ? 1 : 0), attention: true },
   };
   // A thread tool call names threads by id. The transcript shows what they are

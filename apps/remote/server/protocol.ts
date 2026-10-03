@@ -61,6 +61,8 @@ export interface Session {
   parentId: string | null;
   hasChildren: boolean;
   origin: "person" | "fleet";
+  /** Scheduled watch checks belong in Workers without changing their owning supervisor. */
+  watchList?: boolean;
   model: string;
   name: string;
   color?: ThreadColor | null;
