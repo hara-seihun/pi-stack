@@ -119,6 +119,89 @@ for (const stage of ["clone", "checkout"]) test(`creation resumes after interrup
   } finally { f.close(); }
 });
 
+function interruptedCheckout(f, name = "partial", mode = "writer") {
+  writeFileSync(path.join(f.source, "missing.txt"), "not yet materialized\n");
+  git(f.source, "add", ".");
+  git(f.source, "commit", "-m", "reserved tree");
+  const reserved = git(f.source, "rev-parse", "HEAD");
+  writeFileSync(path.join(f.source, "later.txt"), "main advanced\n");
+  git(f.source, "add", ".");
+  git(f.source, "commit", "-m", "main ahead of reserved source");
+  git(f.source, "push", "origin", "main");
+  const args = ["create", "--root", f.workspaces, "--name", name, "--repo", f.source,
+    "--ref", reserved, "--mode", mode, "--min-free-gib", "0", "--json"];
+  assert.throws(() => run(args, interruptCreation(f, "clone")));
+  const destination = path.join(f.workspaces, name);
+  // Git has written some reserved files but has not committed its index or HEAD update.
+  git(destination, "read-tree", "--empty");
+  writeFileSync(path.join(destination, "file.txt"), "source\n");
+  writeFileSync(path.join(destination, ".gitignore"), "ignored-output/\n");
+  return { args, destination, reserved };
+}
+
+for (const [mode, indexState] of [["writer", "empty"], ["review", "absent"], ["writer", "reserved"]]) test(`creation resumes a partially materialized reserved checkout in ${mode} mode with ${indexState} index`, () => {
+  const f = fixture();
+  try {
+    const { args, destination, reserved } = interruptedCheckout(f, "partial", mode);
+    const [pending] = JSON.parse(run(["status", "--json"], f.env)).records;
+    const mainHead = git(destination, "rev-parse", "HEAD");
+    assert.notEqual(mainHead, reserved);
+    assert.match(git(destination, "status", "--porcelain"), /D .*file.txt/u);
+    assert.match(git(destination, "status", "--porcelain"), /\?\? file.txt/u);
+    if (indexState === "absent") rmSync(path.join(destination, ".git", "index"));
+    if (indexState === "reserved") git(destination, "read-tree", reserved);
+    mkdirSync(path.join(destination, "ignored-output"));
+    writeFileSync(path.join(destination, "ignored-output", "proof"), "preserved\n");
+    const resumed = JSON.parse(run(args, f.env));
+    assert.equal(resumed.id, pending.id);
+    assert.equal(resumed.state, "active");
+    assert.equal(git(destination, "rev-parse", "HEAD"), reserved);
+    assert.equal(git(destination, "status", "--porcelain"), "");
+    assert.equal(readFileSync(path.join(destination, "ignored-output", "proof"), "utf8"), "preserved\n");
+    assert.equal(readFileSync(path.join(destination, ".gitignore"), "utf8"), "ignored-output/\n");
+    assert.equal(git(destination, "rev-parse", "main"), mainHead);
+    if (mode === "writer") assert.equal(git(destination, "branch", "--show-current"), "agent/partial");
+    else assert.equal(git(destination, "branch", "--show-current"), "");
+  } finally { f.close(); }
+});
+
+for (const change of ["edit", "untracked", "staged", "local-commit", "ignored-collision", "symlink"]) {
+  test(`interrupted checkout recovery preserves genuine ${change} work`, () => {
+    const f = fixture();
+    try {
+      const { args, destination } = interruptedCheckout(f);
+      if (change === "edit") writeFileSync(path.join(destination, "file.txt"), "unique edit\n");
+      if (change === "untracked") writeFileSync(path.join(destination, "notes.txt"), "unique notes\n");
+      if (change === "staged") {
+        writeFileSync(path.join(destination, "file.txt"), "unique staged edit\n");
+        git(destination, "add", "file.txt");
+      }
+      if (change === "local-commit") {
+        git(destination, "config", "user.name", "Test");
+        git(destination, "config", "user.email", "test@example.invalid");
+        git(destination, "add", "file.txt");
+        git(destination, "commit", "-m", "unique local work");
+      }
+      if (change === "ignored-collision") {
+        writeFileSync(path.join(destination, ".git", "info", "exclude"), ".gitignore\n");
+        writeFileSync(path.join(destination, ".gitignore"), "unique ignored collision\n");
+      }
+      if (change === "symlink") {
+        rmSync(path.join(destination, "file.txt"));
+        symlinkSync(path.join(f.source, "file.txt"), path.join(destination, "file.txt"));
+      }
+      const head = git(destination, "rev-parse", "HEAD");
+      const status = git(destination, "status", "--porcelain");
+      const index = git(destination, "ls-files", "--stage");
+      assert.throws(() => run(args, f.env), /pending checkout cannot resume/u);
+      assert.equal(git(destination, "rev-parse", "HEAD"), head);
+      assert.equal(git(destination, "status", "--porcelain"), status);
+      assert.equal(git(destination, "ls-files", "--stage"), index);
+      assert.equal(JSON.parse(run(["status", "--json"], f.env)).records[0].state, "creating");
+    } finally { f.close(); }
+  });
+}
+
 test("source preparation interruption leaves no destination reservation", () => {
   const f = fixture();
   try {

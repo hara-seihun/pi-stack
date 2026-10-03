@@ -228,7 +228,7 @@ function installFrom(sourceRoot, activate = true) {
   for (const name of modules) atomicWrite(join(dirname(installedCommand), name), readFileSync(join(sourceRoot, "deploy", name)), 0o644);
   atomicWrite(installedCommand, readFileSync(commandSource), 0o750);
   if (!activate) return;
-  const replacements = { "@PUBLICATION_COMMAND@": installedCommand, "@PUBLICATION_WAKE@": join(stateRoot, "wake"), "@PUBLICATION_PATH@": `${join(homedir(), ".local/bin")}:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin` };
+  const replacements = { "@PUBLICATION_COMMAND@": installedCommand, "@PUBLICATION_WAKE@": join(stateRoot, "wake"), "@PUBLICATION_PATH@": `${join(homedir(), ".local/bin")}:/usr/local/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin` };
   for (const name of unitNames) {
     let unit = readFileSync(join(sourceRoot, "deploy/systemd", name), "utf8");
     for (const [token, value] of Object.entries(replacements)) unit = unit.replaceAll(token, value);
