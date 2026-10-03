@@ -105,6 +105,10 @@ class DictionaryDecoder:
             active = self.prune(emitted)
             if not active or (len(ended) >= self.WIDTH and self.rank(active[0]) < self.rank(ended[-1])):
                 break
+        else:
+            # Match the greedy decoder's symbol cap: carry the emitted history
+            # into the next acoustic frame, without fabricating a blank score.
+            ended.extend(active)
         self.beam = self.prune(ended)
         if len(self.beam) > 1:
             best, common = self.visible()

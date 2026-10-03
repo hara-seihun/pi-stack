@@ -127,6 +127,38 @@ class DictionaryDecoderTest(unittest.TestCase):
         decoder.frame(np.array([[[2]]], np.float32), .16)
         self.assertTrue(all(hypothesis.pieces[-1] == '▁close' for hypothesis in decoder.beam))
 
+    def capped_decoder(self, phrase):
+        class AlwaysNonblank:
+            def run(self, unused, inputs):
+                scores = np.array([0., -20., -20.], np.float32)
+                return (scores[None, None, None], None,
+                        inputs['input_states_1'] + 1, inputs['input_states_2'] + 1)
+        vocabulary = {0: '▁ordinary', 1: '▁other'}
+        model = SimpleNamespace(vocab=vocabulary, decoder=AlwaysNonblank())
+        return DictionaryDecoder(model, PhraseBias(vocabulary, [phrase]), 2)
+
+    def test_nonblank_symbol_cap_carries_history_into_next_frame(self):
+        decoder = self.capped_decoder('UnrelatedName')
+        decoder.frame(np.zeros((1, 1, 1), np.float32), 0)
+        best, visible = decoder.visible()
+        self.assertEqual(best.ids, (0,) * 10)
+        self.assertEqual(visible, 10)
+        self.assertTrue(np.all(best.state1 == 10))
+        self.assertGreater(best.acoustic, -.001)
+        self.assertEqual(len(self.words(decoder)), 10)
+        decoder.frame(np.zeros((1, 1, 1), np.float32), .08)
+        best, visible = decoder.visible()
+        self.assertEqual(best.ids, (0,) * 20)
+        self.assertEqual(visible, 20)
+        self.assertTrue(np.all(best.state2 == 20))
+
+    def test_symbol_cap_retains_active_path_when_blank_paths_exist(self):
+        decoder = self.capped_decoder(' '.join(['ordinary'] * 11))
+        decoder.frame(np.zeros((1, 1, 1), np.float32), 0)
+        self.assertGreater(len(decoder.beam), 1)
+        self.assertEqual(decoder.beam[0].ids, (0,) * 10)
+        self.assertGreater(decoder.beam[0].acoustic, -.001)
+
     def test_fork_does_not_finish_or_advance_original(self):
         decoder = self.decoder()
         decoder.frame(np.array([[[0]]], np.float32), 0)
