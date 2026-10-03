@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver } from "./contract.js";
+import { MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type RootResumeConsent, type RootLogConsent } from "./contract.js";
 import { MemoryStore } from "./store.js";
 import { validateRequest } from "./validation.js";
 export interface MemoryAuth {
@@ -47,7 +47,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
     const denied = (message: string) => send(403, { ok: false, error: "unauthenticated", message });
     try {
       if (!options.enabled()) return send(503, { ok: false, error: "disabled", message: "One Kenan is disabled on this host" });
-      if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply"].includes(request.url ?? ""))
+      if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent"].includes(request.url ?? ""))
         return send(404, { ok: false, error: "invalid-request", message: "Unknown memory route" });
       const caller = principal(request);
       if (!caller) return denied("Memory access requires a verified local identity");
@@ -58,6 +58,24 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
       if (request.url?.startsWith("/v1/root/")) {
         if (caller.kind !== "root-service") return denied("This operation belongs to the root Kenan service");
         if (!object(input)) return invalid("Root operation must be an object");
+        if (["/v1/root/resume-consent", "/v1/root/log-consent"].includes(request.url!)) {
+          const resume = request.url === "/v1/root/resume-consent";
+          const allowed = resume ? ["rootSessionId", "subject", "question", "answer", "consentId"] : ["rootSessionId", "consentId", "subject", "kind", "text"];
+          const identifier = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 200;
+          const prose = (value: unknown) => typeof value === "string" && value.trim().length > 0 && value.length <= 100_000;
+          if (!fields(input, allowed) || !identifier(input.rootSessionId) || !identifier(input.subject) || !identifier(input.consentId)
+            || (resume ? !prose(input.question) || !prose(input.answer) : !["question", "answer"].includes(input.kind) || !prose(input.text))) return invalid("Invalid consent boundary operation");
+          if (input.subject === "pi-rooms" || ![...auth.supervisors.map(entry => entry.person), ...Object.values(auth.uidPersons ?? {})].includes(input.subject))
+            return invalid("Consent requires a registered individual subject");
+          const admitted = store.rootAdmission(input.rootSessionId);
+          if (admitted?.roomId) {
+            const current = await options.roomAudience?.(admitted.person, admitted.threadId);
+            if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0"))
+              return denied("The original room audience changed; ask again");
+          }
+          const result = resume ? store.resumeConsent(input as RootResumeConsent) : store.logConsent(input as RootLogConsent);
+          return send(result.ok ? 200 : result.error === "unauthenticated" ? 403 : 400, result);
+        }
         if (request.url === "/v1/root/admit") {
           if (!fields(input, ["callerToken", "request", "rootSessionId"]) || typeof input.callerToken !== "string" || typeof input.request !== "string" || !input.request.trim() || input.request.length > 100_000
             || input.rootSessionId !== undefined && (typeof input.rootSessionId !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(input.rootSessionId))) return invalid("Invalid root admission");
