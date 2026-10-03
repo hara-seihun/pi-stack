@@ -129,6 +129,7 @@ const local = Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostnam
     const c = [...active.values()].find(c => same(bearer, `Bearer ${c.token}`)); if (!c || c.finishing) return error("Unknown media session", 403);
     if (c.voiceId || c.offerPending) return error("Voice offer already accepted", 409);
     let body; try { body = await req.json(); } catch { return error("JSON required"); }
+    if (!body || typeof body.sdp !== "string") return error("SDP required");
     if (c.voiceId || c.offerPending || c.finishing) return error("Voice offer already accepted", 409);
     c.offerPending = true;
     const result = await voice("/sessions", "POST", { owner, threadId: `phone:${c.id}`, sdp: body.sdp, instructions: instructions(c.brief) });
@@ -169,7 +170,7 @@ const local = Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostnam
   if (match) {
     const c = active.get(match[1]!);
     if (req.method === "DELETE") { if (!c) return error("Active call not found", 404); await finish(c, "completed", "Ended by owner"); return json({ ended: true }); }
-    if (req.method === "POST" && match[2]) { if (!c?.media) return error("Active call not found", 404); let b; try { b = await req.json(); } catch { return error("JSON required"); } if (Object.keys(b).length !== 1 || typeof b.shareableFact !== "string" || b.shareableFact.length > 2000) return error("One bounded explicitly shareable fact is required"); log(c.id, "approved-context", { shareableFact: b.shareableFact }); c.media.send(JSON.stringify({ type: "context", text: `Hara approved this additional shareable fact: ${b.shareableFact}` })); return json({ accepted: true }); }
+    if (req.method === "POST" && match[2]) { if (!c?.media) return error("Active call not found", 404); let b; try { b = await req.json(); } catch { return error("JSON required"); } if (!b || typeof b !== "object" || Object.keys(b).length !== 1 || typeof b.shareableFact !== "string" || b.shareableFact.length > 2000) return error("One bounded explicitly shareable fact is required"); log(c.id, "approved-context", { shareableFact: b.shareableFact }); c.media.send(JSON.stringify({ type: "context", text: `Hara approved this additional shareable fact: ${b.shareableFact}` })); return json({ accepted: true }); }
     if (req.method === "GET") { const row = db.query("SELECT * FROM calls WHERE id=?").get(match[1]!); return row ? json({ call: row, events: db.query("SELECT at,type,payload FROM events WHERE call_id=? ORDER BY id").all(match[1]!) }) : error("Call not found", 404); }
   }
   return error("Unknown phone operation", 404);
@@ -182,6 +183,7 @@ Bun.serve<{ call?: Call; side: "browser" | "provider" }>({ hostname: "127.0.0.1"
   if (!signedWebhook(req.headers.get("authorization"), provider.credentials.VONAGE_SIGNATURE_SECRET, Date.now(), rawBody)) return error("Signed Vonage webhook required", 403);
   const eventMatch = /^\/vonage\/events\/([^/]+)$/.exec(url.pathname);
   let body: Record<string, any>; try { body = JSON.parse(rawBody); } catch { return error("JSON required"); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return error("Webhook object required");
   if (eventMatch && req.method === "POST") {
     const id = eventMatch[1]!; const c = active.get(id);
     if (c?.providerId && body.uuid !== c.providerId) return error("Call identity mismatch", 403);
