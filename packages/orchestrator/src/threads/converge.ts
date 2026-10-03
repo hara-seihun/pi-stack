@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { oneKenanEnabled } from "../../../kenan-memory/dist/config.js";
+import { oneKenanEnabled } from "kenan-memory/config";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { CONVERGE_WORKER } from "./converge-worker.js";

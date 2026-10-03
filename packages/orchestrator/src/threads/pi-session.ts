@@ -20,9 +20,9 @@ import { isRateLimitError } from "../provider-errors.js";
 import usageLogger from "../extension/usage-logger.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
-import { memoryExtension } from "../../../kenan-memory/dist/tools.js";
-import { prepareMemoryEnvironment } from "../../../kenan-memory/dist/session.js";
-import { oneKenanEnabled } from "../../../kenan-memory/dist/config.js";
+import { memoryExtension } from "kenan-memory/tools";
+import { prepareMemoryEnvironment } from "kenan-memory/session";
+import { oneKenanEnabled } from "kenan-memory/config";
 import { createThreadClient } from "./http.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
@@ -108,7 +108,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           // usage evidence, service tier, the empty system prompt and context reporting for the owning controller.
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
-          extensionFactories: [routing, usageLogger, threadSpeed, rawModelContext, threadContext, ...memoryFactories],
+          extensionFactories: [routing, usageLogger, threadSpeed, rawModelContext, threadContext],
         } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, threadContext, modeTools(env), ...memoryFactories] } });
       if (isolated) { services.resourceLoader = isolated.resourceLoader; acceptedContext = JSON.parse(argument(options.args, "--orchestrator-context")!); }
       const errors = services.resourceLoader.getExtensions().errors;

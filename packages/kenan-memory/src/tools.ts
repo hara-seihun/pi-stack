@@ -21,16 +21,31 @@ export function memoryExtension(options: MemoryToolOptions) {
     if (!person || !threadId) throw new Error("One Kenan memory requires a verified person and thread session");
     const client = options.client ?? memoryClient({ url: options.env.PI_KENAN_MEMORY_URL, token: options.env.PI_KENAN_MEMORY_TOKEN });
     let turnId = randomUUID();
+    let finalReply = "";
+    const readTurns = new Map<string, ReadContext>();
     pi.on("turn_start", () => { turnId = randomUUID(); });
-    const context = (): ReadContext => ({ threadId, turnId, ...(options.env.PI_KENAN_MEMORY_ROOM_ID ? { roomId: options.env.PI_KENAN_MEMORY_ROOM_ID } : {}) });
-    const setting = () => ({ person, threadId, ...(options.env.PI_KENAN_MEMORY_ROOM_ID ? { roomId: options.env.PI_KENAN_MEMORY_ROOM_ID } : {}) });
+    pi.on("message_end", event => {
+      if (event.message.role === "assistant") finalReply = event.message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+    });
+    pi.on("agent_settled", async () => {
+      for (const readContext of readTurns.values()) {
+        const result = await client.request({ operation: "finalize-turn", context: readContext, reply: finalReply });
+        if (!result.ok) throw new Error(`Cannot finalize Kenan's disclosure account: ${result.message}`);
+        readTurns.delete(readContext.turnId);
+      }
+      finalReply = "";
+    });
+    const roomId = options.env.PI_REMOTE_ROOM_ID ?? options.env.PI_KENAN_MEMORY_ROOM_ID;
+    const context = (): ReadContext => ({ threadId, turnId, ...(roomId ? { roomId } : {}) });
+    const setting = () => ({ person, threadId, ...(roomId ? { roomId } : {}) });
     const request = async (input: MemoryRequest): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError: boolean }> => {
       const result: MemoryResult<any> = await client.request(input);
       const report = result.ok && result.value && "readReport" in result.value ? (result.value as MemoryRead<unknown>).readReport : undefined;
+      if (report?.touchedOtherPeople) readTurns.set(report.turnId, { threadId: report.threadId, turnId: report.turnId, ...(report.roomId ? { roomId: report.roomId } : {}) });
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result, ...(report ? { [MEMORY_READ_DETAIL]: report } : {}) }, isError: !result.ok };
     };
     pi.registerTool(defineTool({ name: "memory_search", label: "Search Kenan's memory",
-      description: "Search shared host memory. Results are for Kenan's discretion, not automatic disclosure. Stopped items are excluded.",
+      description: "Search shared host memory with ranked, tolerant natural-language terms. Use registered person IDs, not display names, for the optional about filter; omit it to search everyone. An empty query lists recent items. Results are for Kenan's discretion, not automatic disclosure. Stopped items are excluded.",
       parameters: Type.Object({ query: Type.String(), about: Type.Optional(strings), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
       execute: async (_id, input) => request({ operation: "search", ...input, context: context() }),
     }));
