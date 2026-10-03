@@ -4,7 +4,8 @@ import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
 import { oneKenanEnabled } from "./config.js";
-import { MEMORY_READ_DETAIL, type MemoryClient, type MemoryRead, type MemoryRequest, type MemoryResult, type ReadContext } from "./contract.js";
+import { prepareMemoryEnvironment } from "./session.js";
+import { KENAN_ROOT_DEFAULT_PORT, MEMORY_TOKEN_HEADER, MEMORY_READ_DETAIL, type MemoryClient, type MemoryRead, type MemoryRequest, type MemoryResult, type ReadContext } from "./contract.js";
 export const MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure"];
 const strings = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 });
 const optionalTime = Type.Optional(Type.String());
@@ -15,42 +16,71 @@ export interface MemoryToolOptions {
 }
 export function memoryExtension(options: MemoryToolOptions) {
   return (pi: ExtensionAPI) => {
-    if (!oneKenanEnabled(options.env)) return;
+    let initialized = false;
+    if (oneKenanEnabled(options.env) && options.env.PI_KENAN_MEMORY_TOKEN && options.env.PI_KENAN_MEMORY_PERSON && options.env.PI_KENAN_MEMORY_ROLE) {
+      registerMemoryTools(options, pi);
+      initialized = true;
+    }
+    pi.on("before_agent_start", async event => {
+      const names = new Set([...MEMORY_TOOL_NAMES, "ask_kenan"]);
+      if (!oneKenanEnabled(options.env)) {
+        if (initialized) pi.setActiveTools(pi.getActiveTools().filter(name => !names.has(name)));
+        return;
+      }
+      if (!initialized) {
+        if (!options.env.PI_KENAN_MEMORY_TOKEN || !options.env.PI_KENAN_MEMORY_PERSON || !options.env.PI_KENAN_MEMORY_ROLE)
+          await prepareMemoryEnvironment(options.env, options.env.PI_THREAD_ID!);
+        registerMemoryTools(options, pi);
+        initialized = true;
+      }
+      pi.setActiveTools([...new Set([...pi.getActiveTools(), ...pi.getAllTools().filter(tool => names.has(tool.name)).map(tool => tool.name)])]);
+      const guidance = readFileSync(new URL(options.env.PI_KENAN_MEMORY_ROLE === "root" ? "../discretion.md" : "../person.md", import.meta.url), "utf8");
+      return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
+    });
+  };
+}
+function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     const person = options.env.PI_KENAN_MEMORY_PERSON;
     const threadId = options.env.PI_THREAD_ID;
     if (!person || !threadId) throw new Error("One Kenan memory requires a verified person and thread session");
     const client = options.client ?? memoryClient({ url: options.env.PI_KENAN_MEMORY_URL, token: options.env.PI_KENAN_MEMORY_TOKEN });
+    const root = options.env.PI_KENAN_MEMORY_ROLE === "root";
+    const room = options.env.PI_REMOTE_ROOMS_RUNTIME === "1";
+    if (!root) {
+      pi.registerTool(defineTool({ name: "ask_kenan", label: "Ask Kenan",
+        description: "Ask privileged Kenan about cross-person memory or resources. Only his reply returns. Your authenticated session fixes who asks and the full room audience; you cannot set his prompt, model, tools or context.",
+        parameters: Type.Object({ request: Type.String({ minLength: 1, maxLength: 100_000 }) }),
+        execute: async (_id, input, signal) => {
+          try {
+            const url = options.env.PI_KENAN_ROOT_URL ?? `http://127.0.0.1:${options.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT}`;
+            const response = await fetch(`${url}/v1/ask`, { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN! },
+              body: JSON.stringify(input), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000) });
+            const result = await response.json() as any;
+            const reply = response.ok ? result.reply ?? (result.ok === true ? result.value?.reply : undefined) : undefined;
+            if (typeof reply !== "string") return { content: [{ type: "text" as const, text: "Kenan could not answer this request." }], details: undefined, isError: true };
+            return { content: [{ type: "text" as const, text: reply }], details: undefined };
+          } catch { return { content: [{ type: "text" as const, text: "Kenan's privileged context is unavailable." }], details: undefined, isError: true }; }
+        },
+      }));
+    }
+    if (room && !root) return;
     let turnId = randomUUID();
-    let finalReply = "";
-    const readTurns = new Map<string, ReadContext>();
     pi.on("turn_start", () => { turnId = randomUUID(); });
-    pi.on("message_end", event => {
-      if (event.message.role === "assistant") finalReply = event.message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-    });
-    pi.on("agent_settled", async () => {
-      for (const readContext of readTurns.values()) {
-        const result = await client.request({ operation: "finalize-turn", context: readContext, reply: finalReply });
-        if (!result.ok) throw new Error(`Cannot finalize Kenan's disclosure account: ${result.message}`);
-        readTurns.delete(readContext.turnId);
-      }
-      finalReply = "";
-    });
     const roomId = options.env.PI_REMOTE_ROOM_ID ?? options.env.PI_KENAN_MEMORY_ROOM_ID;
     const context = (): ReadContext => ({ threadId, turnId, ...(roomId ? { roomId } : {}) });
     const setting = () => ({ person, threadId, ...(roomId ? { roomId } : {}) });
     const request = async (input: MemoryRequest): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError: boolean }> => {
       const result: MemoryResult<any> = await client.request(input);
       const report = result.ok && result.value && "readReport" in result.value ? (result.value as MemoryRead<unknown>).readReport : undefined;
-      if (report?.touchedOtherPeople) readTurns.set(report.turnId, { threadId: report.threadId, turnId: report.turnId, ...(report.roomId ? { roomId: report.roomId } : {}) });
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result, ...(report ? { [MEMORY_READ_DETAIL]: report } : {}) }, isError: !result.ok };
     };
     pi.registerTool(defineTool({ name: "memory_search", label: "Search Kenan's memory",
-      description: "Search shared host memory with ranked, tolerant natural-language terms. Use registered person IDs, not display names, for the optional about filter; omit it to search everyone. An empty query lists recent items. Results are for Kenan's discretion, not automatic disclosure. Stopped items are excluded.",
+      description: root ? "Search unrestricted host memory for root Kenan's discretion. Ranked tolerant natural terms; about uses registered person IDs; empty query lists recent items. Stopped items excluded." : "Search your person's own memory and recipient-relevant action records. Ranked natural terms; about must be your verified person ID. Empty query lists accessible items. Use ask_kenan for cross-person questions; this direct view is not the whole account.",
       parameters: Type.Object({ query: Type.String(), about: Type.Optional(strings), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
       execute: async (_id, input) => request({ operation: "search", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_read", label: "Read Kenan's memory",
-      description: "Read memory items by ID for Kenan's judgment; do not repeat private contents merely because you read them.", parameters: Type.Object({ ids: strings }),
+      description: root ? "Read host memory for privileged Kenan's judgment; access is not permission to repeat private content." : "Read accessible own-person memory/action records by ID. Other-person or shared facts require ask_kenan.", parameters: Type.Object({ ids: strings }),
       execute: async (_id, input) => request({ operation: "read", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_write", label: "Remember",
@@ -73,7 +103,7 @@ export function memoryExtension(options: MemoryToolOptions) {
     }));
     pi.registerTool(defineTool({ name: "memory_disclosures", label: "What Kenan told people about me",
       description: "Read the disclosure log about the verified asking person. Answer from this record, preserving other people's confidences.",
-      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), about: Type.Optional(Type.String({ description: root ? "Person whose disclosure account to consult; defaults to authenticated requester." : "Your own verified person ID only; broader account requires ask_kenan." })) }),
       execute: async (_id, input) => request({ operation: "disclosures", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_log_disclosure", label: "Record a disclosure",
@@ -81,7 +111,4 @@ export function memoryExtension(options: MemoryToolOptions) {
       parameters: Type.Object({ text: Type.String(), about: strings, to: strings, memoryIds: Type.Optional(strings), occurredAt: optionalTime }),
       execute: async (_id, input) => request({ operation: "log-disclosure", disclosure: { ...input, setting: setting() } }),
     }));
-    const discretion = readFileSync(new URL("../discretion.md", import.meta.url), "utf8");
-    pi.on("before_agent_start", event => ({ systemPrompt: `${event.systemPrompt}\n\n${discretion}` }));
-  };
 }

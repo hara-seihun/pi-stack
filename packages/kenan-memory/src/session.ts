@@ -9,6 +9,8 @@ export async function prepareMemoryEnvironment(env: NodeJS.ProcessEnv, threadId:
   const result = await response.json() as MemoryResult<MemorySession>;
   if (!result.ok) throw new Error(`Cannot open Kenan memory session: ${result.message}`);
   if (result.value.threadId !== threadId || !result.value.person || !result.value.token) throw new Error("Invalid Kenan memory session response");
+  if (result.value.role !== "person") throw new Error("A user supervisor cannot acquire root memory");
+  env.PI_KENAN_MEMORY_ROLE = result.value.role;
   env.PI_KENAN_MEMORY_PERSON = result.value.person;
   env.PI_KENAN_MEMORY_TOKEN = result.value.token;
   env.PI_KENAN_MEMORY_URL = url;
