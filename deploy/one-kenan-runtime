@@ -1,0 +1,76 @@
+#!/usr/bin/python3
+"""Fixed privileged namespace join; drops every privilege before starting a Kenan runtime."""
+import fcntl
+import json
+import os
+import pathlib
+import pwd
+import stat
+import subprocess
+import sys
+
+CREDENTIALS={
+    'root':{'kenan-memory-root':'PI_KENAN_MEMORY_ROOT_TOKEN_FILE','kenan-root-admin':'PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE','kenan-root-consent':'PI_KENAN_ROOT_CONSENT_TOKEN_FILE'},
+    'memory':{'kenan-memory-auth':'PI_KENAN_MEMORY_AUTH_FILE'},
+    'journal':{'kenan-memory-publisher':'PI_KENAN_MEMORY_PUBLISHER_TOKEN_FILE'},
+}
+def private_config(path):
+    info=pathlib.Path(path).stat()
+    if info.st_uid!=0 or info.st_mode&0o022: raise RuntimeError('Runtime configuration must be root-owned and not writable by other identities')
+    return json.loads(pathlib.Path(path).read_text())
+def sealed_credentials(role,uid,gid,environment):
+    directory=environment.get('CREDENTIALS_DIRECTORY')
+    if not directory: raise RuntimeError('Missing systemd runtime credentials')
+    for name,variable in CREDENTIALS[role].items():
+        source=os.open(os.path.join(directory,name),os.O_RDONLY|os.O_NOFOLLOW)
+        try:
+            info=os.fstat(source)
+            if not stat.S_ISREG(info.st_mode) or info.st_size>1024*1024: raise RuntimeError('Invalid systemd runtime credential')
+            data=os.read(source,1024*1024+1)
+        finally: os.close(source)
+        fd=os.memfd_create(name,os.MFD_ALLOW_SEALING)
+        os.write(fd,data); os.lseek(fd,0,os.SEEK_SET); os.fchown(fd,uid,gid); os.fchmod(fd,0o400)
+        fcntl.fcntl(fd,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL)
+        os.set_inheritable(fd,True)
+        environment[variable]=f'/proc/self/fd/{fd}'
+    environment.pop('CREDENTIALS_DIRECTORY',None)
+def launch(role,config,pid,environment):
+    if os.geteuid()!=0: raise RuntimeError('The fixed namespace launcher requires systemd privileged execution')
+    if role not in CREDENTIALS: raise RuntimeError('Only root, memory and journal runtime modes exist')
+    user=pwd.getpwnam(config.get('executionUser','pi-kenan'))
+    if user.pw_uid==0: raise RuntimeError('Model runtime must never use root UID')
+    host=private_config(config.get('hostFile','/etc/pi-stack/host.json'))
+    if host.get('oneKenan') is not True: raise RuntimeError('One Kenan is disabled')
+    remote=config.get('remoteRoot','/srv/pi/pi-remote')
+    expected=os.fsencode(remote+'/server/one-kenan-custody.ts')
+    if pid<=1 or pathlib.Path(f'/proc/{pid}').stat().st_uid!=0 or expected not in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0'):
+        raise RuntimeError('Custody MainPID does not identify the fixed root helper')
+    namespace=os.open(f'/proc/{pid}/ns/mnt',os.O_RDONLY)
+    try:
+        if os.fstat(namespace).st_ino==os.stat('/proc/1/ns/mnt').st_ino: raise RuntimeError('Custody must have its own mount namespace')
+        # LoadCredential mounts belong to the consumer's old namespace. Pin them in sealed RAM before setns.
+        sealed_credentials(role,user.pw_uid,user.pw_gid,environment)
+        os.setns(namespace,0)
+    finally: os.close(namespace)
+    private=environment.get('PI_KENAN_PRIVATE_DIR','/var/lib/pi-kenan/private')
+    if role=='journal':
+        mounts=pathlib.Path('/proc/self/mountinfo').read_text()
+        if not any(line.split(' ')[4]==private and ' - fuse.gocryptfs ' in line for line in mounts.splitlines()): return
+    memory=config.get('memoryRuntime','/srv/pi/runtime/node_modules/kenan-memory')
+    source={
+      'root':config.get('rootRuntime',remote+'/kenan-root')+'/src/main.ts',
+      'memory':memory+'/src/main.ts',
+      'journal':memory+'/src/journal-cli.ts',
+    }[role]
+    bun=config.get('bun','/usr/local/bin/bun')
+    if not os.path.isabs(bun) or not os.path.isabs(source): raise RuntimeError('Runtime source must be an absolute host-owned path')
+    os.initgroups(user.pw_name,user.pw_gid); os.setgid(user.pw_gid); os.setuid(user.pw_uid)
+    if os.getuid()==0 or os.geteuid()==0: raise RuntimeError('Runtime privilege drop failed')
+    environment.update(USER=user.pw_name,LOGNAME=user.pw_name)
+    os.execve(bun,[bun,source,*(['drain','--all'] if role=='journal' else [])],environment)
+def main():
+    if len(sys.argv)!=2 or sys.argv[1] not in CREDENTIALS: raise SystemExit('Expected fixed root, memory or journal mode')
+    config=private_config(os.environ.get('PI_KENAN_CONFIG','/etc/pi-stack/one-kenan.json'))
+    pid=int(subprocess.check_output(['systemctl','show','--value','--property=MainPID','pi-kenan-custody.service'],text=True,timeout=5).strip())
+    launch(sys.argv[1],config,pid,dict(os.environ))
+if __name__=='__main__': main()

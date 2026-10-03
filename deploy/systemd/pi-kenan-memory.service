@@ -3,13 +3,11 @@ Description=Kenan's shared memory and disclosure log
 Requires=pi-kenan-custody.service
 BindsTo=pi-kenan-custody.service
 After=pi-kenan-custody.service
-JoinsNamespaceOf=pi-kenan-custody.service
 
 [Service]
 Type=simple
 User=pi-kenan
 Group=pi-kenan
-PrivateMounts=yes
 UMask=0077
 MemorySwapMax=0
 LimitCORE=0
@@ -21,7 +19,7 @@ Environment=PI_KENAN_ROOM_AUDIENCE_MODULE=/srv/pi/pi-remote/server/room-audience
 Environment=PI_REMOTE_ROOMS_DB=/var/lib/pi-remote/one-kenan/rooms.sqlite3
 LoadCredential=kenan-memory-auth:/etc/pi-stack/kenan-memory-auth.json
 ExecCondition=/usr/local/bin/bun -e "import { oneKenanEnabled } from '/srv/pi/kenan-memory/src/config.ts'; process.exit(oneKenanEnabled() ? 0 : 1)"
-ExecStart=/usr/local/bin/bun /srv/pi/kenan-memory/src/main.ts
+ExecStart=+@RUNTIME_LAUNCHER@ memory
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=10

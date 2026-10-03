@@ -1,0 +1,103 @@
+#!/usr/bin/python3
+"""Real runtime setns/drop-UID/late FUSE mount proof, temporary private namespaces only."""
+import json
+import os
+import pathlib
+import signal
+import shutil
+import subprocess
+import tempfile
+import time
+
+if os.geteuid()!=0: raise SystemExit('Run sudo deploy/one-kenan-namespace-rehearse; fixture-only')
+repo=pathlib.Path(__file__).resolve().parent.parent
+root=pathlib.Path(tempfile.mkdtemp(prefix='pi-kenan-namespace-fixture-')); children=[]
+try:
+    root.chmod(0o711)
+    server=root/'remote/server'; server.mkdir(parents=True)
+    runtime=root/'runtime/src';runtime.mkdir(parents=True)
+    shared=root/'shared';shared.mkdir();os.chown(shared,65534,65534)
+    cipher=root/'cipher';cipher.mkdir();os.chown(cipher,65534,65534)
+    ready=root/'ready';ready.mkdir();os.chown(ready,65534,65534)
+    credentials=root/'credentials';credentials.mkdir(mode=0o700)
+    (credentials/'kenan-memory-auth').write_text('fixture-only-credential');(credentials/'kenan-memory-auth').chmod(0o600)
+    (root/'host.json').write_text('{"oneKenan":true}');(root/'host.json').chmod(0o644)
+    (root/'fuse.conf').write_text('user_allow_other\n');(root/'fuse.conf').chmod(0o644)
+    (server/'one-kenan-custody.ts').write_text('''
+import { existsSync, writeFileSync } from "node:fs";
+const root=process.env.FIXTURE_ROOT!;
+writeFileSync(`${root}/custody-ready`,String(process.pid));
+while(!existsSync(`${root}/mount-now`))await Bun.sleep(10);
+console.log("Fixture custody late-mount requested");
+const init=Bun.spawn(["runuser","-u","nobody","--","gocryptfs","-q","-nosyslog","-scryptn","10","-init","--",`${root}/cipher`],{stdin:"pipe",stdout:"ignore",stderr:"ignore"});
+init.stdin.write("fixture-only-key\\n");init.stdin.end();if(await init.exited!==0)throw new Error("init failed");
+console.log("Fixture custody cipher initialized");
+const mount=Bun.spawn(["runuser","-u","nobody","--","gocryptfs","-fg","-q","-nosyslog","-allow_other","--",`${root}/cipher`,`${root}/shared`],{stdin:"pipe",stdout:"ignore",stderr:"ignore"});
+mount.stdin.write("fixture-only-key\\n");mount.stdin.end();
+try {
+  for(let i=0;i<1000;i++) {
+    const ready=Bun.spawn(["mountpoint","-q",`${root}/shared`],{stdout:"ignore",stderr:"ignore"});
+    if(await ready.exited===0)break;
+    if(i===999)throw new Error("FUSE fixture timed out");await Bun.sleep(10);
+  }
+  writeFileSync(`${root}/shared/proof.txt`,"late encrypted FUSE proof",{mode:0o644});
+  while(!existsSync(`${root}/finish`))await Bun.sleep(10);
+} finally {mount.kill();await mount.exited;}
+''')
+    (runtime/'main.ts').write_text('''
+import { existsSync,readFileSync,writeFileSync } from "node:fs";
+const root=process.env.FIXTURE_ROOT!;
+if(process.getuid!()!==65534 || process.geteuid!()!==65534)throw new Error("runtime remained root");
+if(readFileSync(process.env.PI_KENAN_MEMORY_AUTH_FILE!,"utf8")!=="fixture-only-credential")throw new Error("sealed credential missing after setns/dropUID");
+writeFileSync(`${root}/ready/waiter-started`,"joined before mount");
+for(let i=0;i<1000;i++) {
+  if(existsSync(`${root}/shared/proof.txt`)) {
+    if(readFileSync(`${root}/shared/proof.txt`,"utf8")!=="late encrypted FUSE proof")throw new Error("wrong file");
+    console.log(JSON.stringify({ok:true,runtimeUid:process.getuid!(),actualNamespaceJoin:true,observedLateFuseMount:true,sealedCredentialReadable:true}));process.exit(0);
+  }
+  await Bun.sleep(10);
+}
+throw new Error("Runtime did not see custody's later FUSE mount: "+readFileSync("/proc/self/mountinfo","utf8").split("\\n").filter(line=>line.includes(root)).join("\\n"));
+''')
+    for public in (root/'runtime',runtime): public.chmod(0o755)
+    (runtime/'main.ts').chmod(0o644)
+    config={'executionUser':'nobody','remoteRoot':str(root/'remote'),'memoryRuntime':str(root/'runtime'),'hostFile':str(root/'host.json'),'bun':shutil.which('bun')}
+    (root/'config.json').write_text(json.dumps(config))
+    (root/'launch.py').write_text('''
+import importlib.machinery,json,os,sys
+module=importlib.machinery.SourceFileLoader('fixed_runtime',sys.argv[1]).load_module()
+module.launch('memory',json.load(open(sys.argv[2])),int(sys.argv[3]),dict(os.environ))
+''')
+    env={**os.environ,'FIXTURE_ROOT':str(root),'CREDENTIALS_DIRECTORY':str(credentials),'PI_KENAN_PRIVATE_DIR':str(shared),'PYTHONDONTWRITEBYTECODE':'1'}
+    custody=subprocess.Popen(['unshare','--mount','--propagation','private','bash','-c',
+        'mount --bind "$1/fuse.conf" /etc/fuse.conf; exec "$2" "$1/remote/server/one-kenan-custody.ts"','fixture',str(root),shutil.which('bun')],env=env,start_new_session=True)
+    children.append(custody)
+    deadline=time.monotonic()+15
+    def until(path):
+        while not path.exists():
+            if custody.poll() is not None or time.monotonic()>deadline: raise RuntimeError('Fixture readiness failed')
+            time.sleep(.01)
+    until(root/'custody-ready'); pid=int((root/'custody-ready').read_text())
+    runtime_child=subprocess.Popen(['/usr/bin/python3',str(root/'launch.py'),str(repo/'deploy/one-kenan-runtime'),str(root/'config.json'),str(pid)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    children.append(runtime_child)
+    while not (ready/'waiter-started').exists():
+        if runtime_child.poll() is not None:
+            out,err=runtime_child.communicate();raise RuntimeError(err or out)
+        if time.monotonic()>deadline: raise RuntimeError('Joined waiter readiness timed out')
+        time.sleep(.01)
+    (root/'mount-now').write_text('go')
+    out,err=runtime_child.communicate(timeout=15)
+    if runtime_child.returncode!=0:
+        details=pathlib.Path(f'/proc/{pid}/mountinfo').read_text() if pathlib.Path(f'/proc/{pid}/mountinfo').exists() else 'custody exited'
+        raise RuntimeError(err+'\nCustody mountinfo fixture entries:\n'+'\n'.join(line for line in details.splitlines() if str(root) in line))
+    print(out,end='')
+    if (shared/'proof.txt').exists(): raise RuntimeError('Custody FUSE leaked into original namespace')
+    (root/'finish').write_text('done');custody.wait(timeout=5)
+    if custody.returncode!=0: raise RuntimeError('Custody fixture failed')
+finally:
+    for child in reversed(children):
+        if child.poll() is None:
+            if child is children[0]: os.killpg(child.pid,signal.SIGKILL)
+            else: child.kill()
+            child.wait(timeout=5)
+    shutil.rmtree(root)
