@@ -36,7 +36,7 @@ When Write is available and an eligible editable field has focus, the dot become
 
 Dragging the idle dot in either mode exposes labelled **Kenan**, **Mic**, and **Both** dismissal targets above the keyboard:
 
-- **Kenan** turns off the existing persistent `overlayVisible` preference, just like `overlay.hide`; it does not suppress Write. Use any Kenan show control above to restore it.
+- **Kenan** turns off the existing persistent `overlayVisible` preference, just like `overlay.hide`; it does not suppress Write. Replies and `overlay.say` respect this hidden choice rather than showing Kenan again. Use `overlay.show`, the settings toggle, or the notification's Show action to restore it explicitly.
 - **Mic** suppresses Write for the current field only. It returns when another field gains focus, or after leaving and refocusing the same field; Kenan's visibility preference is unchanged.
 - **Both** applies both independent dismissals.
 
