@@ -93,6 +93,20 @@ Use the same plan and transaction directory for every step. A second transaction
 adopt existing service accounts or overwrite existing additive config. Interrupted cutover
 requires rollback, not another cutover. Partial failure rolls back automatically.
 
+Fixed custody startup first confirms its mount namespace differs from the host's PID1
+namespace, makes its own propagation private, and lazily detaches only exact registered
+`fuse.gocryptfs` folder mountpoints inherited from personal services. It never unmounts the
+host namespace or signals a personal daemon. Custody then creates its own same-path owner
+mounts when validating keys; personal services retain their original live views.
+
+Existing registered `/run/pi-remote-keys/USER` credentials are collected on startup, without
+requiring people to log out or re-enter a key. Only root-owned private regular files in a
+root-owned private nonsymlink directory are admitted (`O_NOFOLLOW`, single hardlink, bounded
+size). Each key must successfully open its FUSE folder before encrypted custody retains it.
+No old key file is removed, and no key goes into argv/logs. `PI_REMOTE_KEY_DIR` selects a
+fixture-only directory in rehearsals. After reboot the empty `/run` still requires the first
+enrolled human login to reopen custody; a not-yet-collected key is captured on its next login.
+
 Cutover starts only `pi-kenan-access`, `pi-kenan-broker`, `pi-kenan-custody`,
 `pi-kenan-memory`, `pi-kenan-root`, `pi-rooms` and the journal timer. Custody starts sealed;
 the first successful enrolled login opens all enrolled folders in its private mount namespace.
@@ -143,6 +157,7 @@ and includes private credential/config restoration evidence; do not publish its 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-deploy.test.py
 sudo deploy/one-kenan-rehearse
+sudo deploy/one-kenan-fuse-rehearse
 ```
 
 The eight tests use temporary people, paths, configs and command stubs. The privileged rehearsal
@@ -152,4 +167,8 @@ handoff, dedicated broker ownership, private root credentials, unprivileged room
 exact flag/config/ACL restoration, data preservation, bounded partial-failure rollback,
 failed-stop gate retention, fixed-prompt installation and mask-safe additive ACLs. Printed nft rules prove old ports/gates are untouched. This is deployment
 transaction proof, not a claim that real systemd/FUSE or the complete product has been exercised;
-S5 custody and the integrator's encrypted staging stack own those acceptance tests.
+`one-kenan-fuse-rehearse` adds genuine gocryptfs proof: two active personal mounts inherited
+at the exact registered paths are replaced only inside a nested custody namespace; retained
+fixture keys bootstrap encrypted custody; root writes remain readable/writable by the original
+namespace after custody exits; an empty retained-key directory stays sealed until Bob logs in.
+The integrator's encrypted staging stack owns the complete-product acceptance tests.

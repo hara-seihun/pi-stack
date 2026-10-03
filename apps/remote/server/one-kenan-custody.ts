@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { KenanKeys } from "./one-kenan-keys";
-import { KenanMounts } from "./one-kenan-mounts";
+import { KenanMounts, detachInheritedCustodyMounts } from "./one-kenan-mounts";
+import { collectRetainedCustodyKeys } from "./one-kenan-retained-keys";
 import { listPersons } from "./persons";
 import { oneKenanConfig } from "./one-kenan";
 
@@ -28,7 +29,9 @@ const mounts = new KenanMounts({ userFor: person => person.user === "_kenan_stor
   forceOwner: { uid: identity("-u"), gid: identity("-g") } });
 const privateDir = process.env.PI_KENAN_PRIVATE_DIR ?? "/var/lib/pi-kenan/private";
 const sharedCipher = process.env.PI_KENAN_SHARED_CIPHER ?? "/var/lib/pi-kenan/.private.crypt";
-const keys = new KenanKeys(process.env.PI_KENAN_KEY_STORE ?? "/var/lib/pi-kenan/custody/keys.json", listPersons(), (person, key) => mounts.mount(person, key), async master => {
+const people = listPersons();
+await detachInheritedCustodyMounts(people);
+const keys = new KenanKeys(process.env.PI_KENAN_KEY_STORE ?? "/var/lib/pi-kenan/custody/keys.json", people, (person, key) => mounts.mount(person, key), async master => {
   const password = master.toString("hex");
   if (!existsSync(join(sharedCipher, "gocryptfs.conf"))) {
     mkdirSync(sharedCipher, { recursive: true, mode: 0o700 });
@@ -48,6 +51,8 @@ if (provider) {
   master.fill(0);
   if (!opened.ok) throw new Error(opened.error);
 }
+const retained = await collectRetainedCustodyKeys(keys, people);
+if (retained.rejected.length) console.warn(`Retained custody keys require a new successful login: ${retained.rejected.join(", ")}`);
 const service = Bun.serve({ unix: socket, async fetch(req) {
   const path = new URL(req.url).pathname;
   if (path === "/status" && req.method === "GET") return Response.json(keys.status());
