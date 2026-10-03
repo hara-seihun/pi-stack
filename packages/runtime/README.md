@@ -70,6 +70,46 @@ On September 18, 2026, native sessions `d916c1a9-0dad-4198-83d5-1142b8bf12a8` an
 
 Pi 0.87.1 owns the companion cut-selection repair. When trailing tool results alone exceed `keepRecentTokens`, Pi keeps their preceding assistant call instead of retaining the entire transcript and declining compaction. [`compaction-cut.test.mjs`](compaction-cut.test.mjs) guards that upstream contract; the extension's lifecycle test runs a complete parallel tool batch, native compaction and continuation inside one Pi run.
 
+## Prose compaction recovery
+
+[`patch-summary-recovery.mjs`](patch-summary-recovery.mjs) repairs default prose
+summarization in both SDK and bundled CLI copies. [`bounded-summary.js`](bounded-summary.js)
+keeps small requests unchanged. A `length` response gets one concise retry without
+chat reasoning; another incomplete response stays a failure, never a checkpoint.
+Large serialized conversations are folded sequentially through complete checkpoints,
+using a conservative UTF-8 byte budget after reserving output and framing space.
+Individual giant messages and Unicode are split without dropping source text.
+A provider input-overflow rejection halves the segment budget rather than replaying
+the same oversized request. Cancellation is checked at every request boundary, and
+recovery stops after 32 requests. Every attempt's usage contributes to the returned
+summary usage. The same helper covers ordinary history and split-turn prefixes;
+Codex's server-side checkpoint handler remains unchanged.
+
+Failed automatic prose compaction writes a native custom entry excluded from model
+context. Both automatic compaction and provider preparation honor that active-branch
+failure fence, including after reload or an account-alias change. A successful manual
+`/compact` or compact RPC appends the compaction boundary that clears it. Another model
+can proceed independently. Operator cancellation does not install a failure fence.
+Stored history and context edits are not deleted or rewritten.
+
+October 3, 2026: a long integration thread received Anthropic's
+`prompt is too long: 1221206 tokens > 1000000 maximum`. Overflow recovery omitted the
+failed attempt, but the default summarizer then hit its output cap and rejected the
+incomplete summary. The existing terminal-error guard skipped later compaction checks
+without blocking later provider requests, allowing unchanged oversized history to be
+resent. Prose summaries also inherited the chat's reasoning level inside the summary's
+fixed output allowance and had no recovery for output caps or oversized input.
+
+Deployment includes both repair files in its immutable dependency identity and applies
+the patch after compaction failure propagation. Focused mock regressions cover both
+source forms, complete Unicode coverage, input/output recovery, usage, cancellation,
+durable fencing, aliases and successful compaction boundaries, with no live sessions
+or credentials:
+
+```sh
+node --test packages/runtime/summary-recovery.test.mjs packages/runtime/compaction-errors.test.mjs packages/runtime/compaction-cut.test.mjs
+```
+
 ## Session crash durability
 
 Pi 0.87.1 closes JSONL files after writes without syncing them. A hard host reset can therefore persist a new gocryptfs file length without the complete authenticated final block, making every later read that reaches that block fail with `EIO`. [`patch-session-durability.mjs`](patch-session-durability.mjs) repairs both the SDK and bundled CLI copies. Appends are synced before returning, initial and fork writes are completed and synced as one file, and rewrites use a synced temporary file followed by an atomic rename and parent-directory sync. [`session-durability.test.mjs`](session-durability.test.mjs) checks both deployed source forms and their syntax.

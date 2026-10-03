@@ -21,10 +21,10 @@ for (const path of paths) test(`native failures reach Pi lifecycle and stop cont
   let aborted = 0;
   const session = {
     model: {}, settingsManager: { getCompactionSettings: () => ({}) },
-    _getSummarizationRequestAuth: async () => ({}), sessionManager: { getBranch: () => [] },
+    _getSummarizationRequestAuth: async () => ({}), sessionManager: { getBranch: () => [], appendCustomEntry() {} },
     _emit: event => events.push(event), _emitSessionCompactFailed: async event => failures.push(event),
     _extensionRunner: { hasHandlers: () => true, emit: async () => ({ cancel: true, error: "native idle-timeout" }) },
-    agent: { abort() { aborted++; }, async processEvents() {}, async runWithLifecycle(executor) { try { await executor(); } catch (error) { assistantFailures.push({ error, cancelled: false }); } } }, _resolveIdleWaitIfIdle() {},
+    agent: { abort() { aborted++; }, async processEvents() {}, async runWithLifecycle(executor) { try { await executor(); } catch (error) { assistantFailures.push({ error, cancelled: false }); } } }, _resolveIdleWaitIfIdle() {}, _assertSummaryRecovery() {},
   };
   assert.equal(await method.call(session, "threshold", false), false);
   assert.equal(aborted, 0, "provider failures must not cancel the agent");
