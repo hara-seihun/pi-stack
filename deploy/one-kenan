@@ -232,7 +232,7 @@ def install():
     root_uid,root_gid=user_identity(execution,shared); room_uid,room_gid=user_identity(room_user,rooms_home)
     record['rootUid']=root_uid; record['roomUid']=room_uid; save()
     for directory,uid,gid,mode in [(shared,0,0,0o711),(shared/'custody',0,0,0o700),(shared/'supervisor-capabilities',0,0,0o700),
-      (shared/'.private.crypt',root_uid,root_gid,0o700),(shared/'private',root_uid,root_gid,0o700),
+      (shared/'.private.crypt',root_uid,root_gid,0o700),(shared/'private',root_uid,root_gid,0o700),(shared/'home',root_uid,root_gid,0o700),
       (shared/'bun',root_uid,root_gid,0o700),(shared/'bun/install',root_uid,root_gid,0o700),(shared/'bun/install/cache',root_uid,root_gid,0o700),
       (shared/'bin',0,0,0o755),(rooms_home,room_uid,room_gid,0o700)]:
         directory.mkdir(parents=True,exist_ok=True,mode=mode); directory.chmod(mode)
