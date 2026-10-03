@@ -33,7 +33,9 @@ export function configuredThreadDestinations(destinations: ThreadDestination[], 
       defaultModel,
       ...configured.map(model => `${model.provider}/${model.id}`),
     ].map(resolve))];
-    return { ...destination, models, defaultModel };
+    const personalContext = destination.id === "personal" && !destination.raw && !destination.sandbox
+      ? { contextDir: destination.contextDir ?? "context" } : {};
+    return { ...destination, ...personalContext, models, defaultModel };
   });
 }
 

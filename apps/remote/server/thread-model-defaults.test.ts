@@ -21,6 +21,20 @@ test("built-in and newly registered destinations default to Astra and expose eac
   }
 });
 
+test("existing Personal profiles gain context by default without changing other destinations or explicit choices", () => {
+  const { contextDir, ...personal } = defaultThreadDestinations("private-workspace")[0]!;
+  expect(contextDir).toBe("context");
+  expect(configuredThreadDestinations([personal], [])[0]!.contextDir).toBe("context");
+  expect(personal).not.toHaveProperty("contextDir");
+  expect(configuredThreadDestinations([{ ...personal, contextDir: "references" }], [])[0]!.contextDir).toBe("references");
+  expect(configuredThreadDestinations([{ ...personal, contextDir: "" }], [])[0]!.contextDir).toBe("");
+  expect(configuredThreadDestinations([{ ...personal, raw: true }], [])[0]).not.toHaveProperty("contextDir");
+  expect(configuredThreadDestinations([{ ...personal, sandbox: true }], [])[0]).not.toHaveProperty("contextDir");
+  for (const destination of configuredThreadDestinations(defaultThreadDestinations(), [])) {
+    expect(destination).not.toHaveProperty("contextDir");
+  }
+});
+
 test("configured models join existing destinations and provider defaults follow configuration order", () => {
   const models = [{ provider: "custom", id: "z/default", name: "Default custom", icon: "🧪" }, { provider: "custom", id: "a-second", name: "Second", icon: "🔬" }] as ThreadModelMetadata[];
   const defaults = defaultThreadDestinations();
