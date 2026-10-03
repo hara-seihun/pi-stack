@@ -56,8 +56,12 @@ broker settings, not private contexts, packages, keys or root credentials.
 `{"path":"/absolute/path","owner":"original-user","recursive":true,"access":"rwX"}`.
 Registered encrypted folder ciphertext and mountpoint traversal are added automatically.
 ACL grants preserve all other principals' **effective** rights when expanding an ACL mask;
-original-owner default ACLs keep new ciphertext owner-accessible. The fixed root custody helper
-mounts each folder through its original owner. No file tree is re-owned, and no SSH directory
+original-owner default ACLs keep new ciphertext owner-accessible. Each cipher root also gets
+an explicit named original-owner `rwx` ACL: the forced-owner FUSE view needs that entry to
+validate the original daemon owner's access. The fixed root custody helper mounts each folder
+through its original owner with `-acl -allow_other -force_owner PI_KENAN_UID:GID`. Only the
+root FUSE view changes ownership; backing files and new ciphertext remain owned by the original
+daemon owner, and concurrent original personal mounts keep their unchanged view. No file tree is re-owned, and no SSH directory
 is included. Hara's own existing Converge tool keeps using her existing SSH identity.
 
 Optional `credentialTools` maps `pass-cli`, `mail-send`, `mail-search`, `github`, or
@@ -112,6 +116,8 @@ for repair rather than opening an ungated privileged listener. The original fron
 ## Units and data
 
 - `pi-kenan-custody.service`: root, fixed helper only, root-only socket `/run/pi-kenan/custody.sock`.
+  It deliberately has no `StateDirectory=pi-kenan`: systemd must not recursively re-own
+  the `pi-kenan`-owned `.private.crypt` and `private` directories when starting root custody.
 - `pi-kenan-root.service`: `pi-kenan`; joins custody's private namespace, reads
   `kenan-memory-root` and `kenan-root-admin` through systemd credentials. Admin capability is
   64 lowercase hexadecimal characters in `/var/lib/pi-kenan/root-admin-capability`.
