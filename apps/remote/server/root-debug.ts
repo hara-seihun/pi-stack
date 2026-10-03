@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { ROOT_ADMIN_HEADER, isMachineAdministrator, rootDebugRoute, rootSessionDenied, type RegisteredPerson } from "../../../packages/kenan-root/src/visibility";
+import { ROOT_ADMIN_HEADER, isMachineAdministrator, rootDebugRoute, rootSessionDenied, type RegisteredPerson } from "kenan-root/visibility";
 
 export interface RootDebugConfig { port: number; adminCapabilityFile: string }
 export function rootDebugConfig(env: NodeJS.ProcessEnv = process.env): RootDebugConfig | null {

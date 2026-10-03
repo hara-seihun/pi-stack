@@ -17,6 +17,7 @@ const jobs = [
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
   ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],
   ["Kenan memory", "npm", ["test", "--workspace=kenan-memory"]],
+  ["Root Kenan", "npm", ["test", "--workspace=kenan-root"]],
   ["remote", "npm", ["test", "--workspace=pi-remote"]],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],
   ["mcp-script", "npm", ["test", "--workspace=@hara-seihun/mcp-script"]],

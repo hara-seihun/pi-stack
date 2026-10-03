@@ -43,10 +43,13 @@ const login = oidcSettings ? new OidcLogin(oidcSettings) : null;
 const privateNetwork = readPrivateNetwork();
 const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
-const ONE_KENAN = oneKenanConfig();
+
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
 const operations = new Map<string, Promise<unknown>>();
-const rooms = oneKenanEnabled() ? new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/var/lib/pi-remote/one-kenan/rooms.sqlite3",
+let rooms: Rooms | null = null;
+function activeRooms(): Rooms | null {
+  if (!oneKenanEnabled()) { rooms?.close(); rooms = null; return null; }
+  return rooms ??= new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/var/lib/pi-remote/one-kenan/rooms.sqlite3",
   () => PEOPLE.map(({ user, displayName }) => ({ user, displayName })),
   async (owner, actor, path, method, body) => {
     const person = byUser.get(owner);
@@ -57,8 +60,9 @@ const rooms = oneKenanEnabled() ? new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/
     return proxy({ port: person?.port ?? Number(endpoint.port), user: actor }, origin,
       new Request(`http://router${path}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) }),
       new URL(`http://router${path}`), AbortSignal.timeout(10_000));
-  }) : null;
-if (rooms) setInterval(() => { void rooms.tick().catch(error => console.error("Room reconciliation failed", error)); }, 2_000);
+  });
+}
+setInterval(() => { const current = activeRooms(); if (current) void current.tick().catch(error => console.error("Room reconciliation failed", error)); }, 2_000);
 
 async function serialized<T>(person: Person, operation: () => Promise<T>): Promise<T> {
   const previous = operations.get(person.user) ?? Promise.resolve();
@@ -114,8 +118,9 @@ async function waitForSupervisor(person: Person): Promise<boolean> {
 type StartResult = { ok: true } | { ok: false; error: string; status: number };
 async function start(person: Person, key: string): Promise<StartResult> {
   const personal = await startPersonal(person, key);
-  if (personal.ok && ONE_KENAN && person.unlock) {
-    void custodyAuthenticate(ONE_KENAN, person.user, key).then(captured => {
+  const custody = oneKenanConfig();
+  if (personal.ok && custody && person.unlock) {
+    void custodyAuthenticate(custody, person.user, key).then(captured => {
       if (!captured.ok) console.error(`Kenan custody capture for ${person.user} did not finish: ${captured.error}`);
     });
   }
@@ -326,13 +331,16 @@ async function proxy(person: Pick<Person, "user" | "port">, origin: string, req:
 }
 
 const persons = login ? [] : PEOPLE.filter(person => person.auth !== "oidc").map(publicPerson);
-const lockedEnvironment = async () => ({
-  ...(ONE_KENAN ? { custody: { oneKenan: true, locked: (await custodyStatus(ONE_KENAN))?.locked ?? true,
+const lockedEnvironment = async () => {
+  const custody = oneKenanConfig();
+  return {
+  ...(custody ? { custody: { oneKenan: true, locked: (await custodyStatus(custody))?.locked ?? true,
     message: "Kenan holds the folder keys. After a restart, the first enrolled person to log in opens custody and every known folder." } } : {}),
   id: ENVIRONMENT_ID, name: ENVIRONMENT_NAME, requiresUnlock: true, persons, profiles: [],
   ...(login ? { authentication: { type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with Google" } satisfies HostAuthentication } : {}),
   capabilities: { voice: true, downloads: true, notifications: true, files: true },
-});
+  };
+};
 const locked = (user?: string) => Response.json({ error: "Unlock to continue", locked: true, ...(!user ? { choosePerson: true } : { user }), persons }, { status: 423 });
 
 for (const person of PEOPLE) {
@@ -398,6 +406,7 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
 }
 
 async function route(req: Request, url: URL): Promise<Response> {
+  activeRooms();
   if (url.pathname.startsWith("/calendar-feed/")) {
     const match = /^\/calendar-feed\/([a-z_][a-z0-9_-]*)\/([a-f0-9]{64})\.ics$/.exec(url.pathname);
     const person = match && PEOPLE.find(p => p.user === match[1]);
@@ -410,8 +419,9 @@ async function route(req: Request, url: URL): Promise<Response> {
   if (appUpdate) return appUpdate;
   if (url.pathname === "/v1/router-health") {
     const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
+    const custody = oneKenanConfig();
     return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key",
-      ...(ONE_KENAN ? { custody: await custodyStatus(ONE_KENAN) } : {}) });
+      ...(custody ? { custody: await custodyStatus(custody) } : {}) });
   }
   if (url.pathname === "/v1/network" && req.method === "GET") return Response.json(networkStatus(privateNetwork, req));
   const asset = webResponse(WEB_DIR, url.pathname, req.method, req);
