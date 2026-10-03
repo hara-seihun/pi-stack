@@ -119,7 +119,14 @@ pi_stack_prepare_dependencies() {
   if [[ -f $stamp && -f $hidden_lock ]]; then
     hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
     expected=$(printf '%s %s\n' "$key" "$hidden_hash")
-    if [[ $(<"$stamp") == "$expected" ]]; then
+    if [[ $(<"$stamp") == "$expected" ]] && node - "$root" <<'JS'
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.argv[2];
+const lock = JSON.parse(fs.readFileSync(path.join(root, 'node_modules/.package-lock.json'), 'utf8'));
+process.exit(Object.keys(lock.packages ?? {}).every(name => fs.existsSync(path.join(root, name, 'package.json'))) ? 0 : 1);
+JS
+    then
       export PI_STACK_DEPENDENCIES_READY=$key
       return
     fi

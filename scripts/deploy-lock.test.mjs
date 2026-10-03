@@ -52,13 +52,42 @@ test("one host deployment installs its shared dependency tree once", () => {
       npm() {
         printf 'called\\n' >> "$calls"
         mkdir -p "$root/node_modules"
-        : > "$root/node_modules/.package-lock.json"
+        printf '{}\\n' > "$root/node_modules/.package-lock.json"
       }
       pi_stack_prepare_dependencies "$root"
       pi_stack_prepare_dependencies "$root"
     `, "deploy-dependencies-test", helper, directory, calls], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(calls, "utf8"), "called\n");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a deleted nested dependency invalidates an otherwise matching receipt", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-"));
+  try {
+    writeFileSync(join(directory, "package.json"), "{}\n");
+    writeFileSync(join(directory, "package-lock.json"), "{}\n");
+    const calls = join(directory, "npm-calls");
+    const result = spawnSync("bash", ["-c", `
+      set -euo pipefail
+      source "$1"
+      root=$2
+      calls=$3
+      npm() {
+        printf 'called\\n' >> "$calls"
+        mkdir -p "$root/node_modules" "$root/apps/remote/node_modules/plugin"
+        printf '{}' > "$root/apps/remote/node_modules/plugin/package.json"
+        printf '{"packages":{"apps/remote/node_modules/plugin":{}}}' > "$root/node_modules/.package-lock.json"
+      }
+      pi_stack_prepare_dependencies "$root"
+      pi_stack_prepare_dependencies "$root"
+      rm -r "$root/apps/remote/node_modules"
+      pi_stack_prepare_dependencies "$root"
+    `, "deploy-dependencies-test", helper, directory, calls], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(calls, "utf8"), "called\ncalled\n");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
