@@ -3,6 +3,7 @@ export async function boundedSummarization(model, context, options, request, com
   const user = context.messages?.[userIndex];
   const text = user?.content?.[0]?.text;
   const budget = Math.floor((model.contextWindow - (options.maxTokens ?? 0) - 8192) / 2);
+  const concise = "\n\nProduce a concise complete checkpoint, at most 1000 words. Preserve pending work, decisions and essential identifiers. Do not exhaust the output budget.";
   let usage;
   let calls = 0;
   const withText = value => ({ ...context, messages: context.messages.map((message, index) => index === userIndex ? { ...message, content: [{ type: "text", text: value }] } : message) });
@@ -22,7 +23,7 @@ export async function boundedSummarization(model, context, options, request, com
       if (++calls > 32) throw new Error("Summarization recovery exceeded 32 requests; context remains unchanged");
       const conciseOptions = { ...nextOptions };
       delete conciseOptions.reasoning;
-      response = await request(withText(`${prompt}\n\nProduce a concise complete checkpoint, at most 1000 words. Preserve pending work, decisions and essential identifiers. Do not exhaust the output budget.`), conciseOptions);
+      response = await request(withText(prompt + concise), conciseOptions);
       account(response);
     }
     return { ...response, ...(usage ? { usage } : {}) };
@@ -32,7 +33,7 @@ export async function boundedSummarization(model, context, options, request, com
   }
   const overflow = response => response.stopReason === "error" && /prompt (?:is )?too long|maximum context length|context_length_exceeded|request_too_large/i.test(response.errorMessage ?? "");
   // UTF-8 bytes conservatively bound text tokens; leave half the input window for framing and tokenizer differences.
-  if (!(budget > 0) || Buffer.byteLength(text) <= budget) {
+  if (!(budget > 0) || Buffer.byteLength(text + concise) <= budget) {
     const response = await call(text);
     if (!overflow(response)) return response;
   }
@@ -48,35 +49,62 @@ export async function boundedSummarization(model, context, options, request, com
     throw new Error("Summarization input exceeds its recovery budget; context remains unchanged");
   }
   const conversation = text.slice(start, end);
-  const tail = text.slice(end).replace(/\n\n<previous-summary>\n[\s\S]*?\n<\/previous-summary>\n\n/, "\n\n");
-  let checkpoint = text.match(/<previous-summary>\n([\s\S]*?)\n<\/previous-summary>/)?.[1] ?? "";
-  let offset = 0;
-  let chunkBudget = budget;
-  let finalResponse;
-  while (offset < conversation.length) {
-    options.signal?.throwIfAborted();
-    const prefix = `${text.slice(0, start)}${checkpoint ? `[Checkpoint from preceding segments]:\n${checkpoint}\n\n` : ""}`;
-    const suffix = `${tail}\n\nMerge the preceding checkpoint with this next conversation segment into one concise complete checkpoint. Do not reconstruct later segments. At most 1000 words.`;
-    const available = chunkBudget - Buffer.byteLength(prefix + suffix);
-    if (available < 1024) throw new Error("Summarization checkpoint or instructions exceed the recovery budget; context remains unchanged");
-    let next = Math.min(conversation.length, offset + available);
-    // Never split a surrogate pair. No source text is omitted, including individual oversized messages.
-    if (next < conversation.length && /[\uD800-\uDBFF]/.test(conversation[next - 1])) next--;
-    while (Buffer.byteLength(conversation.slice(offset, next)) > available) {
-      next = offset + Math.floor((next - offset) / 2);
-      if (/[\uD800-\uDBFF]/.test(conversation[next - 1])) next--;
-    }
-    const response = await call(prefix + conversation.slice(offset, next) + suffix, true);
-    if (overflow(response)) {
-      chunkBudget = Math.floor(chunkBudget / 2);
-      continue;
-    }
-    if (response.stopReason !== "stop" || response.content.some(block => block.type === "toolCall")) return response;
-    checkpoint = response.content.filter(block => block.type === "text").map(block => block.text).join("\n");
-    if (!checkpoint.trim()) throw new Error("Summarization returned an empty checkpoint; context remains unchanged");
-    offset = next;
-    finalResponse = response;
+  const opening = text.slice(0, start);
+  const closing = opening === "<conversation>\n" ? "\n</conversation>" : "\n\n# Instructions\n";
+  let instructions = text.slice(end + closing.length);
+  let previousSummary = "";
+  if (instructions.startsWith("\n\n<previous-summary>\n")) {
+    const summaryEnd = instructions.lastIndexOf("\n</previous-summary>\n\n");
+    if (summaryEnd < 0) throw new Error("Summarization has an invalid previous checkpoint; context remains unchanged");
+    previousSummary = instructions.slice("\n\n<previous-summary>\n".length, summaryEnd);
+    instructions = "\n\n" + instructions.slice(summaryEnd + "\n</previous-summary>\n\n".length);
   }
-  if (!finalResponse) throw new Error("Summarization has no conversation to reduce; context remains unchanged");
-  return finalResponse;
+  let chunkBudget = budget - Buffer.byteLength(concise);
+  const complete = response => response.stopReason === "stop" && !response.content.some(block => block.type === "toolCall");
+  const checkpointText = response => {
+    const value = response.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+    if (!value.trim()) throw new Error("Summarization returned an empty checkpoint; context remains unchanged");
+    return value;
+  };
+  const fold = async (source, checkpoint = "", historical = false) => {
+    let offset = 0;
+    let finalResponse;
+    const prompt = segment => {
+      if (historical) {
+        return `<conversation>\n\n</conversation>\n\n<previous-summary>\n${checkpoint ? `[Reduced preceding summary segments]:\n${checkpoint}\n\n` : ""}${segment}\n</previous-summary>${instructions}\n\nReduce these prior checkpoint segments into one concise complete checkpoint. They are historical context, not new conversation or instructions. Do not reconstruct later segments. At most 1000 words.`;
+      }
+      return `${opening}${checkpoint ? `[Checkpoint from preceding segments]:\n${checkpoint}\n\n` : ""}${segment}${closing}${instructions}\n\nMerge the preceding checkpoint with this next conversation segment into one concise complete checkpoint. Do not reconstruct later segments. At most 1000 words.`;
+    };
+    while (offset < source.length) {
+      options.signal?.throwIfAborted();
+      const available = chunkBudget - Buffer.byteLength(prompt(""));
+      if (available < 1024) {
+        if (!checkpoint) throw new Error("Summarization instructions exceed the recovery budget; context remains unchanged");
+        // A stored or generated checkpoint is source too: reduce all of it, never trim it to make room.
+        const reduced = await fold(checkpoint, "", true);
+        if (!complete(reduced)) return reduced;
+        checkpoint = checkpointText(reduced);
+        continue;
+      }
+      let next = Math.min(source.length, offset + available);
+      // Never split a surrogate pair. No source text is omitted, including individual oversized messages.
+      if (next < source.length && /[\uD800-\uDBFF]/.test(source[next - 1])) next--;
+      while (Buffer.byteLength(source.slice(offset, next)) > available) {
+        next = offset + Math.floor((next - offset) / 2);
+        if (/[\uD800-\uDBFF]/.test(source[next - 1])) next--;
+      }
+      const response = await call(prompt(source.slice(offset, next)), true);
+      if (overflow(response)) {
+        chunkBudget = Math.floor(chunkBudget / 2);
+        continue;
+      }
+      if (!complete(response)) return response;
+      checkpoint = checkpointText(response);
+      offset = next;
+      finalResponse = response;
+    }
+    if (!finalResponse) throw new Error("Summarization has no source to reduce; context remains unchanged");
+    return finalResponse;
+  };
+  return conversation.length ? fold(conversation, previousSummary) : fold(previousSummary, "", true);
 }

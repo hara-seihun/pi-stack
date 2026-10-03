@@ -6,7 +6,12 @@ const helper = readFileSync(new URL("./bounded-summary.js", import.meta.url), "u
 
 export function patchSummaryRecovery(source) {
   const marker = "/* Pi Stack bounded summary recovery */";
-  if (source.includes(marker)) return source;
+  const installed = source.indexOf(marker);
+  if (installed >= 0) {
+    const boundary = source.slice(installed).search(/(?:export )?async function completeSummarization\(/);
+    if (boundary < 0) throw new Error("Installed Pi summarization wrapper changed");
+    return source.slice(0, installed) + `${marker}\n${helper}\n` + source.slice(installed + boundary);
+  }
   const pattern = /(?:export )?async function completeSummarization\(model,\s*context,\s*options,\s*streamFn,\s*retry,\s*callbacks\)/;
   const match = source.match(pattern);
   if (!match) throw new Error("Pinned Pi summarization request boundary changed");

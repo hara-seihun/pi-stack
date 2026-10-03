@@ -79,6 +79,13 @@ chat reasoning; another incomplete response stays a failure, never a checkpoint.
 Large serialized conversations are folded sequentially through complete checkpoints,
 using a conservative UTF-8 byte budget after reserving output and framing space.
 Individual giant messages and Unicode are split without dropping source text.
+An oversized stored previous summary is folded completely as historical checkpoint
+segments before new turns are consumed. Oversized generated checkpoints use that
+same reduction path; summary-only requests work too. Every source character is
+presented to a successful complete reduction, never trimmed to fit. Fixed instructions
+remain on every request and fail explicitly if they leave no segment space. Input
+budgets reserve the concise retry suffix as well as ordinary framing. Reapplying the
+deployment patch replaces an existing embedded helper with the current source.
 A provider input-overflow rejection halves the segment budget rather than replaying
 the same oversized request. Cancellation is checked at every request boundary, and
 recovery stops after 32 requests. Every attempt's usage contributes to the returned
@@ -99,6 +106,12 @@ incomplete summary. The existing terminal-error guard skipped later compaction c
 without blocking later provider requests, allowing unchanged oversized history to be
 resent. Prose summaries also inherited the chat's reasoning level inside the summary's
 fixed output allowance and had no recovery for output caps or oversized input.
+
+October 3 follow-up: Cross-Team Integration Updates carried a previous checkpoint
+larger than the summarization input budget. Conversation folding copied it into every
+segment prefix and failed before reading any new source. Bounded checkpoint reduction
+now handles both stored and newly generated oversized summaries under the same
+cancellation, usage and 32-request limits, without changing live native history.
 
 Deployment includes both repair files in its immutable dependency identity and applies
 the patch after compaction failure propagation. Focused mock regressions cover both
