@@ -3,13 +3,11 @@ Description=Root Kenan private request sessions
 Requires=pi-kenan-custody.service pi-kenan-access.service pi-kenan-broker.service
 BindsTo=pi-kenan-custody.service
 After=pi-kenan-custody.service pi-kenan-access.service pi-kenan-broker.service
-JoinsNamespaceOf=pi-kenan-custody.service
 
 [Service]
 Type=simple
 User=@EXECUTION_USER@
 Group=@EXECUTION_USER@
-PrivateMounts=yes
 EnvironmentFile=@KENAN_ENV_FILE@
 Environment=HOME=@STATE_DIR@/private
 Environment=PATH=@STATE_DIR@/bin:/usr/local/bin:/usr/bin:/bin
@@ -21,7 +19,7 @@ LoadCredential=kenan-root-consent:@ROOT_CONSENT_CAPABILITY_FILE@
 Environment=PI_KENAN_ROOT_CONSENT_TOKEN_FILE=%d/kenan-root-consent
 Environment=PI_KENAN_ROOT_ROUTER_URL=@ROOT_ROUTER_URL@
 ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
-ExecStart=@BUN@ @ROOT_RUNTIME@/src/main.ts
+ExecStart=+@RUNTIME_LAUNCHER@ root
 Restart=on-failure
 RestartSec=2
 KillMode=control-group

@@ -129,6 +129,21 @@ for repair rather than opening an ungated privileged listener. The original fron
 
 ## Units and data
 
+Mount namespace sharing is implemented by `/usr/local/libexec/pi-kenan-runtime`, not
+`JoinsNamespaceOf` (systemd's directive does not share mount namespaces). Root, memory and
+journal retain `User=pi-kenan` for credential ownership; `ExecStart=+` runs only the fixed
+root-owned launcher with one static role. It verifies custody's root MainPID and exact helper
+source, opens/pins that process's distinct mount namespace, calls `setns`, drops UID/GID/groups,
+and execs the host-configured role source as `pi-kenan`. It accepts no arbitrary command.
+
+Before joining, systemd credential contents are copied into sealed RAM-only memfds owned by
+the runtime UID, with their corresponding file environment variables pointing at inherited
+`/proc/self/fd/N`. This is necessary because the original systemd credential mounts may not
+exist in custody's namespace. No credential value goes into argv, environment, or disk copies.
+Root/memory wait for custody's encrypted FUSE mount *in that actual shared namespace*;
+journal checks that mount after joining and skips draining while sealed. `BindsTo` still stops
+consumers if custody stops. Future FUSE mounts made by custody are visible to joined runtimes.
+
 Custody, root, memory and journal units set `MemorySwapMax=0` and `LimitCORE=0`. Their
 private contexts and unlocked keys must not spill into the host's unencrypted swap or a core
 dump. Custody's owner-run gocryptfs children remain in its no-swap cgroup. This policy is
@@ -171,6 +186,7 @@ and includes private credential/config restoration evidence; do not publish its 
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-deploy.test.py
 sudo deploy/one-kenan-rehearse
 sudo deploy/one-kenan-fuse-rehearse
+sudo deploy/one-kenan-namespace-rehearse
 ```
 
 The nine tests use temporary people, paths, configs and command stubs. The privileged rehearsal
@@ -179,9 +195,12 @@ firewall or folder mount is touched. They prove preparation has no host effect, 
 handoff, dedicated broker ownership, private root credentials, unprivileged room isolation,
 exact flag/config/ACL restoration, data preservation, bounded partial-failure rollback,
 failed-stop gate retention, fixed-prompt installation and mask-safe additive ACLs. Printed nft rules prove old ports/gates are untouched. This is deployment
-transaction proof, not a claim that real systemd/FUSE or the complete product has been exercised;
+transaction proof, not a claim that the complete product has been exercised.
 `one-kenan-fuse-rehearse` adds genuine gocryptfs proof: two active personal mounts inherited
 at the exact registered paths are replaced only inside a nested custody namespace; retained
 fixture keys bootstrap encrypted custody; root writes remain readable/writable by the original
 namespace after custody exits; an empty retained-key directory stays sealed until Bob logs in.
-The integrator's encrypted staging stack owns the complete-product acceptance tests.
+The separate namespace rehearsal starts a real runtime under a dropped fixture UID before
+custody creates its FUSE mount: it then observes and reads the later mount, reads its sealed
+credential across setns/exec, and proves the original namespace never receives that mount.
+The integrator's staging stack owns the complete-product acceptance tests.
