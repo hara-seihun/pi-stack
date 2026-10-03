@@ -147,8 +147,14 @@ PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-cod
 The proof copies public runtime code for private-entrypoint instrumentation;
 shell test output is synthetic and no installed runtime files are changed.
 `deploy/runtime` runs this installed-tree proof before accepting each runtime
-release, then deletes preexisting `/tmp/pi-bash-*.log` files and records the count
-in the host release log. Active turns retain their original runtime until
+release, then uses [`deploy/clean-shell-spills.mjs`](../../deploy/clean-shell-spills.mjs)
+to delete preexisting regular `/tmp/pi-bash-*.log` files and record the actual
+removal count in the host release log. Cleanup filters names before inspecting
+files: unrelated stale SSHFS mounts in `/tmp` must not prevent publication.
+It leaves symlinks and directories alone, tolerates candidates removed concurrently,
+and propagates other filesystem errors. Focused cleanup checks:
+`node --test scripts/deploy-runtime.test.mjs`.
+Active turns retain their original runtime until
 settlement; reopen a shell/CLI session to select the new tree.
 
 ## Session crash durability

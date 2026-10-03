@@ -59,8 +59,7 @@ check_release() {
   PI_TEST_RUNTIME_ENTRY="file://$release/node_modules/@earendil-works/pi-coding-agent/dist/index.js" \
     node --test "$runtime_source/bash-spill.test.mjs"
   local spill_count
-  spill_count=$(find /tmp -maxdepth 1 -type f -name 'pi-bash-*.log' -printf '. ' | wc -w)
-  pi_stack_as_root find /tmp -maxdepth 1 -type f -name 'pi-bash-*.log' -delete
+  spill_count=$(pi_stack_as_root node "$root/deploy/clean-shell-spills.mjs" /tmp)
   printf 'shell output custody proof passed; removed %s preexisting /tmp/pi-bash-*.log files\n' "$spill_count"
   local doctor command
   for doctor in browser model-selection; do
