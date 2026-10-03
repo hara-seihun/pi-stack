@@ -1738,17 +1738,7 @@ function createWorkspace(database, args, statePath) {
     }
     const info = gitInfo(destination);
     if (info.checkoutType !== strategy) fail("pending checkout type changed");
-    if (strategy === "clone") {
-      const entries = readdirSync(destination).filter((entry) => entry !== ".git");
-      if (entries.length === 0 && !existsSync(path.join(destination, ".git", "index"))) {
-        if (mode === "review") git(destination, ["checkout", "--detach", sourceCommit]);
-        else {
-          const existing = command("git", ["-C", destination, "rev-parse", "--verify", `refs/heads/${branch}`]);
-          if (existing.status === 0 && existing.stdout !== sourceCommit) fail("pending checkout branch has different source");
-          git(destination, existing.status === 0 ? ["checkout", branch] : ["checkout", "-b", branch, sourceCommit]);
-        }
-      }
-    }
+    if (strategy === "clone") resumeCloneCheckout(destination, input, sourceCommit, upstream);
     const head = git(destination, ["rev-parse", "HEAD"]);
     const selectedBranch = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
     if (head !== sourceCommit || (mode === "writer" ? selectedBranch.stdout !== branch : selectedBranch.status === 0)) {
@@ -1766,6 +1756,71 @@ function createWorkspace(database, args, statePath) {
       .run(`creation retained: ${error.message}`, Date.now(), row.id);
     throw error;
   }
+}
+
+function resumeCloneCheckout(destination, input, sourceCommit, upstream) {
+  const head = git(destination, ["rev-parse", "HEAD"]);
+  const selected = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const correctBranch = input.mode === "review" ? selected.status !== 0 : selected.stdout === input.branch;
+  if (head === sourceCommit && correctBranch) return;
+  const refuse = reason => fail(`pending checkout cannot resume: ${reason}; preserve and repair it before resuming creation`);
+  const origin = repositoryLocation(git(destination, ["remote", "get-url", "origin"]), destination);
+  if (![input.repository, upstream.fetch].includes(origin)) refuse("origin differs from the creation request");
+  const unique = git(destination, ["rev-list", "--branches", "HEAD", "--not", "--remotes", sourceCommit]);
+  if (unique) refuse("commits absent from remote refs and reserved source");
+  const branch = command("git", ["-C", destination, "rev-parse", "--verify", `refs/heads/${input.branch}`]);
+  if (input.mode === "writer" && branch.status === 0 && branch.stdout !== sourceCommit) {
+    refuse("reserved branch has different source");
+  }
+  const entries = git(destination, ["ls-tree", "-rz", sourceCommit]).split("\0").filter(Boolean);
+  const tree = new Map(entries.map(entry => {
+    const [metadata, name] = entry.split(/\t(.*)/su);
+    const [mode, type, object] = metadata.split(" ");
+    return [name, { mode, type, object }];
+  }));
+  const index = git(destination, ["ls-files", "--stage", "-z"]).split("\0").filter(Boolean);
+  // A killed first checkout leaves no index, or the completed reserved tree, never arbitrary staging.
+  if (index.length && (index.length !== tree.size || index.some(entry => {
+    const [metadata, name] = entry.split(/\t(.*)/su);
+    const [mode, object, stage] = metadata.split(" ");
+    const expected = tree.get(name);
+    return stage !== "0" || expected?.mode !== mode || expected?.object !== object;
+  }))) refuse("index differs from the reserved tree");
+  const untracked = git(destination, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  if (untracked.split("\0").filter(Boolean).some(name => !tree.has(name))) {
+    refuse("untracked files are not creation leftovers");
+  }
+  const algorithm = git(destination, ["rev-parse", "--show-object-format"]);
+  const directories = new Set();
+  for (const [name, expected] of tree) {
+    const components = name.split("/");
+    for (let length = 1; length < components.length; length++) {
+      const parent = components.slice(0, length).join("/");
+      if (directories.has(parent)) continue;
+      directories.add(parent);
+      try {
+        if (!lstatSync(path.join(destination, parent)).isDirectory()) refuse(`non-directory at ${parent}`);
+      } catch (error) { if (error.code !== "ENOENT") throw error; }
+    }
+    const file = path.join(destination, name);
+    let stat;
+    try { stat = lstatSync(file); } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    if (expected.type !== "blob" || (expected.mode === "120000" ? !stat.isSymbolicLink() : !stat.isFile())) {
+      refuse(`file type differs at ${name}`);
+    }
+    const bytes = expected.mode === "120000" ? readlinkSync(file, { encoding: "buffer" }) : readFileSync(file);
+    const object = createHash(algorithm).update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+    if (object !== expected.object || (expected.mode !== "120000"
+      && Boolean(stat.mode & 0o111) !== (expected.mode === "100755"))) {
+      refuse(`file differs from the reserved tree at ${name}`);
+    }
+  }
+  git(destination, input.mode === "review"
+    ? ["checkout", "--force", "--detach", sourceCommit]
+    : ["checkout", "--force", "-B", input.branch, sourceCommit]);
 }
 
 function assertPendingClean(destination) {

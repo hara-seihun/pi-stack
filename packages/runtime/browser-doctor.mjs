@@ -40,11 +40,12 @@ const downloadContent = `browser-download-${randomUUID()}\n`;
 const downloadPath = join(directory, "browser-download.txt");
 const screenshotPath = join(directory, "browser-screenshot.png");
 const frameValue = `frame-fill-${randomUUID()}`;
-const reactSources = Object.fromEntries([
-  ["react", "react", "react.production.js"], ["react-dom", "react-dom", "react-dom.production.js"],
-  ["react-dom/client", "react-dom", "react-dom-client.production.js"], ["scheduler", "scheduler", "scheduler.production.js"],
-].map(([id, pkg, file]) => [id, readFileSync(join(dirname(selected.resolve(pkg)), "cjs", file), "utf8")]));
-const controlledDates = `<div id="date-probe"></div><script>
+function controlledDateProbe() {
+  const reactSources = Object.fromEntries([
+    ["react", "react", "react.production.js"], ["react-dom", "react-dom", "react-dom.production.js"],
+    ["react-dom/client", "react-dom", "react-dom-client.production.js"], ["scheduler", "scheduler", "scheduler.production.js"],
+  ].map(([id, pkg, file]) => [id, readFileSync(join(dirname(selected.resolve(pkg)), "cjs", file), "utf8")]));
+  return `<div id="date-probe"></div><script>
 (() => {
   const sources = ${JSON.stringify(reactSources).replaceAll("</script", "<\\/script")}, loaded = {};
   function require(id) { if (!loaded[id]) { const module = loaded[id] = { exports: {} }; new Function('module', 'exports', 'require', sources[id])(module, module.exports, require); } return loaded[id].exports; }
@@ -58,6 +59,8 @@ const controlledDates = `<div id="date-probe"></div><script>
   }
   createRoot(document.getElementById('date-probe')).render(React.createElement(Probe));
 })();</script>`;
+}
+let controlledDates;
 const server = createServer((req, res) => {
   if (req.url === "/download") {
     res.writeHead(200, {
@@ -78,7 +81,6 @@ let session;
 let accepted = false;
 let browserAttempted = !!values["session-file"];
 try {
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const agentDir = join(homedir(), ".pi/agent");
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
@@ -99,6 +101,8 @@ try {
   assert.equal(execFileSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 5000 }).trim(), `agent-browser ${browserVersion}`);
   const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
   assert.equal(tools.length, 1, "exactly one native browser tool must be active");
+  controlledDates = controlledDateProbe();
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const url = `http://127.0.0.1:${server.address().port}/`;
   const nativeRoot = dirname(selected.resolve("pi-agent-browser-native/package.json"));
   const { compileAgentBrowserQaPreset } = await import(pathToFileURL(join(nativeRoot, "dist/extensions/agent-browser/lib/input-modes/job.js")).href);

@@ -247,10 +247,13 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));chmodSync(join(deploy, "host"), 0o755);
     for (const name of ["release-checkout", "meeting-census", "native-prerequisites"]) copyFileSync(join(root, "deploy", name), join(deploy, name));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
-    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice"; touch "$release/server/voice/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
+    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
     writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
-    writeFileSync(join(deploy,"voice"),"#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$VOICE_TRACE\"\ncase $1 in --check) exit \"${VOICE_CHECK_EXIT:-0}\";; --activate) exit 0;; *) exit 64;; esac\n",{mode:0o755});
+    for (const service of ["voice", "phone"]) {
+      const key = service.toUpperCase();
+      writeFileSync(join(deploy, service), `#!/bin/sh\nprintf '%s\\n' "$1" >> "$${key}_TRACE"\ncase $1 in --check) exit "\${${key}_CHECK_EXIT:-0}";; --activate) exit 0;; *) exit 64;; esac\n`, { mode: 0o755 });
+    }
     mkdirSync(join(repository,"packages/runtime"),{recursive:true});
     writeFileSync(join(repository,"packages/runtime/browser-doctor.mjs"), "process.exit(Number(process.env.BROWSER_SMOKE_EXIT ?? 0));\n");
     // Activation hands the supervisor the selected release; its health then names that commit.
@@ -298,6 +301,7 @@ case $1 in
     printf '%s\\n' 'pi-model-broker.service loaded active running' 'pi-stack-model-broker@alice.service loaded active running' 'pi-remote@alice.service loaded active running' 'pi-orchestrator@alice.service loaded active running' 'pi-orchestrator@running-person.service loaded active running';;
   show)
     [ "\${DISCOVERY_EXIT:-0}" = 0 ] || exit "$DISCOVERY_EXIT"
+    case $2 in pi-stack-phone.service|pi-stack-voice.service) echo loaded; exit 0;; esac
     case $4 in
       pi-orchestrator@alice.service) echo "\${ALICE_UNIT_STATE:-enabled}";;
       pi-orchestrator@guest-person.service) echo "\${GUEST_UNIT_STATE:-${enableGuest ? "enabled-runtime" : "disabled"}}";;
@@ -305,7 +309,7 @@ case $1 in
     esac;;
   restart)
     case $2 in pi-orchestrator@*) exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
-  is-active|reset-failed) exit 0;;
+  is-active|reset-failed|stop) exit 0;;
   *) exit 64;;
 esac
 exit 0
@@ -330,6 +334,7 @@ printf 'Unexpected deployment HTTP request: %s\\n' "$*" >&2
 exit 64
 `, { mode: 0o755 });
     const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,VOICE_TRACE:join(directory,"voice.trace"),SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,HEALTH_TRACE:join(directory,"health.trace"),PI_REMOTE_PERSONS_DIR:personsDir,PI_REMOTE_ROUTER_PORT:"8788",PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
+    env.PHONE_TRACE = join(directory, "phone.trace");
     env.PERSON_READ_TRACE = personReadTrace;
     env.PI_STACK_ALLOW_LIVE_MEETING_RESTART = "0";
     env.MEETING_ROOMS = '{"rooms":[]}';
@@ -342,7 +347,7 @@ exit 64
       for (const destination of Object.values(destinations)) {
         assert.equal(existsSync(destination), false, "person preflight must precede component publication");
       }
-      for (const trace of [systemctlTrace, settingsTrace, activationTrace, env.VOICE_TRACE]) {
+      for (const trace of [systemctlTrace, settingsTrace, activationTrace, env.VOICE_TRACE, env.PHONE_TRACE]) {
         assert.equal(existsSync(trace), false, "person preflight must precede account and service changes");
       }
       chmodSync(config, 0o644);
@@ -362,6 +367,7 @@ exit 64
     assert.equal(existsSync(destinations.PI_STACK_REMOTE_DEST), false, "failed preparation cannot select Remote");
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed preparation cannot activate services");
     rmSync(env.VOICE_TRACE, { force: true });
+    rmSync(env.PHONE_TRACE, { force: true });
     rmSync(personReadTrace);
     installModelDoctor();
     const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env,cwd:directory});assert.equal(first.status,0,first.stderr);
@@ -381,6 +387,7 @@ exit 64
     assert.match(firstUnits,/^restart pi-remote-router\.service$/m);
     assert.match(firstUnits, /^restart pi-model-broker\.service pi-stack-model-broker@alice\.service$/m);
     assert.equal(readFileSync(env.VOICE_TRACE,"utf8"),"--check\n--activate\n");
+    assert.equal(readFileSync(env.PHONE_TRACE,"utf8"),"--check\n--activate\n");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
     assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
@@ -399,9 +406,11 @@ exit 64
       "disabled running daemons restart, but disabled inactive daemons stay stopped");
 
     rmSync(systemctlTrace,{force:true});
-    const voiceFailure=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,VOICE_CHECK_EXIT:"1"}});
-    assert.notEqual(voiceFailure.status,0);
-    assert.equal(existsSync(systemctlTrace),false,"Voice preflight blocks service activation");
+    for (const service of ["VOICE", "PHONE"]) {
+      const preflightFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, [`${service}_CHECK_EXIT`]: "75" } });
+      assert.equal(preflightFailure.status, 75, preflightFailure.stderr);
+      assert.equal(existsSync(systemctlTrace), false, `${service} preflight blocks service activation`);
+    }
     for (const failure of [{ BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
       const doctorFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ...failure } });
       assert.notEqual(doctorFailure.status, 0);
@@ -418,14 +427,23 @@ exit 64
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
     writeFileSync(join(repository,"release"),"broken\n");assert.equal(spawnSync("git",["-C",repository,"add","release"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","broken"]).status,0);
     for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }, { BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
-      rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});
+      rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});rmSync(env.PHONE_TRACE,{force:true});
       const broken=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,...failure}});assert.notEqual(broken.status,0);
       assert.match(broken.stderr,/returning Pi Remote to/);
       assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST),before);
       assert.equal(readFileSync(env.VOICE_TRACE,"utf8"),"--check\n--activate\n--activate\n");
+      assert.equal(readFileSync(env.PHONE_TRACE,"utf8"),"--check\n--activate\n--activate\n");
       assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\npi-remote@alice.service\n");
       assert.match(readFileSync(systemctlTrace,"utf8"),/reset-failed pi-remote@\*\.service/);
     }
+    rmSync(join(before, "server/phone/service.ts"));
+    rmSync(systemctlTrace);
+    rmSync(env.PHONE_TRACE);
+    const prePhoneRollback = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, SMOKE_EXIT: "1" } });
+    assert.equal(prePhoneRollback.status, 1, prePhoneRollback.stderr);
+    assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST), before);
+    assert.equal(readFileSync(env.PHONE_TRACE, "utf8"), "--check\n--activate\n");
+    assert.match(readFileSync(systemctlTrace, "utf8"), /^stop pi-stack-phone.service$/m);
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 

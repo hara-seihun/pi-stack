@@ -16,6 +16,10 @@ Android still loads its bundled root-relative pages and uses its configured boot
 
 Android phone browsers show a small dismissible **Get Kenan for Android** prompt, including before folder unlock. Download reads the current same-origin `/v1/app-update` manifest and navigates to `/v1/app-update/<release.fileName>` under the browser mount, retaining ingress cookies. It never uses a selected remote environment or a baked-in APK filename. Dismissal persists per browser mount. The installed app, iPhones and desktop browsers show no APK prompt; an Android APK cannot be installed on iOS.
 
+## Private network onboarding
+
+[`NetworkJoinPrompt`](src/network-join.tsx) reads public `GET /v1/network` through the shared fetch transport. The route always targets the bootstrap router without a folder-session header, including before unlock and while another environment is selected. Browser mount prefixes and Android ingress credentials still apply. Network status requests use the same request reporting as other API reads.
+
 ## Account sign-in
 
 An OAuth-enabled router advertises `environment.authentication` in the public chooser as `{ type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with Google" }`, with an empty person list. The client retains this host setting when authenticated environment responses omit it. The chooser request omits folder-session headers and person hints, but retains same-origin browser cookies so ingress sign-in remains effective.

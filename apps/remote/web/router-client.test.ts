@@ -58,6 +58,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
       expect(request.redirect).toBe("manual");
       if (rejectAccess) return json({ error: "Access token expired" }, 403);
     }
+    if (path === "/v1/network") return json({ network: { name: "Household", loginServer: "https://mesh.test" }, connected: false });
     if (path === "/v1/app-update") return json({ release: { fileName: "current.apk" } });
     if (path === "/v1/environment" && !request.headers.has("x-pi-remote-session")) return json({ persons: [{ user: "sybil", requiresUnlock: true }, { user: "guest", requiresUnlock: false }] });
     if (path === "/v1/auth/session") return json({ error: "Account sign-in is not configured" }, 404);
@@ -89,6 +90,12 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     let prompts = 0;
     client.registerUnlockHandler(async () => { prompts++; window.PiRemotePerson.set("sybil"); return "sybil-key"; });
     expect(calls).toHaveLength(0);
+    const network = await fetch("/v1/network");
+    expect(await network.json()).toMatchObject({ connected: false });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.path).toBe("/v1/network");
+    expect(calls[0]!.headers.has("x-pi-remote-session")).toBe(false);
+    expect(prompts).toBe(0);
     await client.piFetch("/v1/stream", { method: "POST", body: "{}" });
     expect(prompts).toBe(1);
     expect(calls.some(call => call.path === "/v1/auth/session")).toBe(!nativePlatform);
@@ -124,6 +131,11 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     await fetch("/v1/environment");
     expect(calls.at(-1)!.path).toBe("/v1/remotes/cloud/v1/environment");
     expect(calls.at(-1)!.headers.get("x-pi-remote-session")).toBe("token-1");
+    const networkCallCount = calls.length;
+    await fetch("/v1/network");
+    expect(calls).toHaveLength(networkCallCount + 1);
+    expect(calls.at(-1)!.path).toBe("/v1/network");
+    expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
     await native.fetchPersonChooser();
     expect(calls.at(-1)!.path).toBe("/v1/environment");
     expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
