@@ -12,7 +12,7 @@ test("built-in and newly registered destinations default to Astra and expose eac
   expect(home.map(destination => destination.raw)).toEqual([undefined, true, true]);
   expect(home.map(destination => destination.sandbox)).toEqual([undefined, undefined, true]);
   for (const destination of [...home, ...personal]) {
-    expect(destination.defaultModel).toBe("astra");
+    expect(destination.defaultModel).toBe("sol");
     expect(destination.thinkingLevel).toBe("high");
     expect(destination.models.slice(0, 3)).toEqual(["astra", "sol", "luna"]);
     expect(destination.models).toContain(destination.defaultModel);
@@ -54,7 +54,7 @@ test("configured models join existing destinations and provider defaults follow 
   expect(options.get("custom/z/default")?.icon).toBe("🧪");
   expect(() => threadModelOptions([{ provider: "custom", id: "plain", name: "No icon" } as ThreadModelMetadata])).toThrow("has no icon");
   const [home] = configuredThreadDestinations(defaults, models);
-  expect(home!.defaultModel).toBe("astra");
+  expect(home!.defaultModel).toBe("sol");
   expect(home!.models.slice(-2)).toEqual(["custom/z/default", "custom/a-second"]);
   expect(defaults[0]!.models).not.toContain("custom/z/default");
   const [work] = configuredThreadDestinations([{ ...defaults[0]!, id: "work", models: ["custom"], defaultModel: "custom" }], models);
@@ -112,11 +112,11 @@ test("unused and equally recent models retain configured order", () => {
 test("destination edits cannot change defaults for another person or workspace", () => {
   const destinations = defaultThreadDestinations("private");
   destinations[0]!.models.splice(0);
-  destinations[0]!.defaultModel = "sol";
+  destinations[0]!.defaultModel = "luna";
   expect(destinations[1]!.models).toContain("astra");
-  expect(destinations[1]!.defaultModel).toBe("astra");
+  expect(destinations[1]!.defaultModel).toBe("sol");
   expect(defaultThreadDestinations("another")[0]!.models).toContain("astra");
-  expect(defaultThreadDestinations("another")[0]!.defaultModel).toBe("astra");
+  expect(defaultThreadDestinations("another")[0]!.defaultModel).toBe("sol");
 });
 
 test("watch context choices are Markdown names on a full-context destination with a context folder", () => {

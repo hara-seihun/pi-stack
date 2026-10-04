@@ -42,8 +42,6 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
       <span className="inbox-main">
         <span className="inbox-title-line"><span className="inbox-title">{chat.title}</span>{session?.idleUnread && <span className="inbox-unread-dot" aria-label="Unread" title="Unread" />}{!titleOnly && <time className="inbox-time">{relativeTime(row.updatedAt)}</time>}</span>
         {showStatusLine && <span className="inbox-status-line">
-          {/* Every state has a word, "Working" included: a row whose state was left
-              to the section header read as "· Fable", a blank where the state goes. */}
           {status ? <StatusPill status={status} compact /> : null}
           {unread > 0 && <span className="inbox-unread">{unread} unread</span>}
           {room && <span className="inbox-meta">{room.members.map(member => member.displayName).join(", ")}</span>}

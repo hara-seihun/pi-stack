@@ -1,5 +1,6 @@
 export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
 import type { ThreadCreator } from "./caller.js";
+import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
 export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
@@ -37,6 +38,7 @@ export interface Thread {
   createdAt: number;
   updatedAt: number;
   pendingMessages: number;
+  executionActivity?: ExecutionActivitySnapshot & { activeTools: string[] };
   metadata?: Record<string, unknown>;
 }
 export interface ThreadQuestion {
@@ -115,7 +117,7 @@ export interface SendThread {
   replyTo?: string;
 }
 export function resolveDelivery(input: Pick<SendThread, "senderId" | "delivery">): Delivery {
-  return input.delivery ?? (input.senderId ? "steer" : "queue");
+  return input.delivery ?? "steer";
 }
 export interface ThreadList {
   id?: string;
@@ -182,6 +184,7 @@ export type ThreadControl =
   /** Unarchive a thread, or its whole subtree; `resume` continues the turns and held work its archive interrupted. */
   | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
+  | { threadId: string; action: "rename"; title: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   | { threadId: string; action: "cancelMessage"; messageId: string }
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }

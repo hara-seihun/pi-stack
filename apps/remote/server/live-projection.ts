@@ -1,6 +1,6 @@
-import type { Thread, ThreadState } from "pi-orchestrator/api";
+import { createExecutionActivity, executionWaitActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type Thread, type ThreadState } from "pi-orchestrator/api";
 import type { ToolProgress } from "./tool-progress";
-import type { Activity } from "./protocol";
+import type { Activity, Session } from "./protocol";
 
 export function runningChildParents(...sources: Iterable<Pick<Thread, "parentId" | "state">>[]): Set<string> {
   const parents = new Set<string>();
@@ -14,11 +14,28 @@ export function threadActivity(state: ThreadState, live?: LiveProjection, hasRun
   if (state === "idle" && hasRunningChildren) return "awaiting";
   if (state !== "running") return state;
   return live?.compacting ? "compacting" : live?.retrying ? "retrying"
-    : live?.activeTools.size ? "waiting_on_tool" : live?.thinkingActive ? "thinking" : state;
+    : live?.activeTools.size ? "waiting_on_tool" : live?.activity ?? (live?.thinkingActive ? "thinking" : "status_error");
+}
+
+export function projectThreadActivity(state: ThreadState, live?: LiveProjection, hasRunningChildren = false,
+  snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
+  const wait = state === "running" ? executionWaitActivity(metadata) : undefined;
+  const resuming = snapshot?.activity && !["waiting_for_capacity", "waiting_to_retry"].includes(snapshot.activity)
+    && (snapshot.lastActivityAt ?? 0) > (wait?.lastActivityAt ?? wait?.activitySince ?? Infinity);
+  if (wait && !resuming) snapshot = { ...wait, activeTools: [] };
+  const activity = snapshot ? state !== "running" ? threadActivity(state, undefined, hasRunningChildren) : snapshot.activity ?? "status_error"
+    : threadActivity(state, live, hasRunningChildren);
+  const evidence = snapshot ?? live;
+  return { activity,
+    activitySince: state === "running" ? evidence?.activitySince : undefined,
+    lastActivityAt: evidence?.lastActivityAt,
+    activityDetail: state === "running" ? evidence?.activityDetail : undefined,
+    executionError: typeof metadata?.executionError === "string" && (held || !wait) ? metadata.executionError : undefined,
+    activeTools: state === "running" ? snapshot?.activeTools ?? [...(live?.activeTools.values() ?? [])] : [] };
 }
 
 /** Disposable visual state. None of these fields admits or completes work. */
-export interface LiveProjection {
+export interface LiveProjection extends ExecutionActivity {
   sessionId: string;
   compacting: boolean;
   compactionContextHash: string | null;
@@ -35,16 +52,19 @@ export interface LiveProjection {
 }
 
 export function createLiveProjection(sessionId: string): LiveProjection {
-  return { sessionId, compacting: false, compactionContextHash: null, retrying: false,
+  return { ...createExecutionActivity(), sessionId, compacting: false, compactionContextHash: null, retrying: false,
     liveText: "", liveThinking: "", thinkingBlockStart: 0, thinkingActive: false,
     toolProgress: new Map(), pendingContextTextLength: 0, pendingContextThinkingLength: 0,
     pendingContextFinalization: null, activeTools: new Map() };
 }
 
 export function restoreLiveProjection(live: LiveProjection, snapshot: Record<string, any>): void {
-  live.liveText = live.liveText.slice(0, live.pendingContextTextLength) + String(snapshot.text ?? "");
-  live.liveThinking = live.liveThinking.slice(0, live.pendingContextThinkingLength) + String(snapshot.thinking ?? "");
-  live.thinkingActive = Boolean(snapshot.isThinking);
+  restoreExecutionActivity(live, snapshot);
+  live.compacting = live.activity === "compacting";
+  live.retrying = live.activity === "retrying";
+  if (typeof snapshot.text === "string") live.liveText = live.liveText.slice(0, live.pendingContextTextLength) + snapshot.text;
+  if (typeof snapshot.thinking === "string") live.liveThinking = live.liveThinking.slice(0, live.pendingContextThinkingLength) + snapshot.thinking;
+  live.thinkingActive = live.activity === "thinking";
   live.thinkingBlockStart = live.pendingContextThinkingLength;
   const tools = Array.isArray(snapshot.tools) ? snapshot.tools : [];
   live.activeTools = new Map(tools.map(tool => [String(tool.toolCallId), String(tool.toolName)]));
@@ -58,6 +78,7 @@ export function restoreLiveProjection(live: LiveProjection, snapshot: Record<str
 }
 
 export function settleLiveProjection(live: LiveProjection): void {
+  settleExecutionActivity(live);
   live.compacting = false;
   live.retrying = false;
   live.thinkingActive = false;

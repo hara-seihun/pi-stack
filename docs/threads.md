@@ -8,7 +8,7 @@ Pi is the only session engine. Astra, Sol, Luna, Fable and Opus are model choice
 
 A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. The [Sandbox profile](sandbox.md) adds a raw-context, four-tool execution boundary with a separate persistent workspace per thread. Its execution state describes only its own work. An idle parent with running children keeps execution state `idle`, but Remote displays `AWAITING` in the drawer, thread header and live activity indicator. This display includes direct children in either the person or fleet owner and returns to `IDLE` when the last running child settles. A held parent also remains idle; clients compose its held label from `thread.held`. Native transcripts remain authoritative history. Projections and live output are not additional conversation stores.
 
-`ThreadState` is exactly `idle | running`, defined in [`contracts.ts`](../packages/orchestrator/src/threads/contracts.ts). `running` includes pending input, admission, startup, execution and cancellation until confirmed. `idle` means the thread has no current work. The separate `held` boolean prevents queued input from starting. Stop leaves the thread `{ state: "idle", held: true }` after cancellation is confirmed, and resume clears `held`. Errors stay in details and execution outcomes; they do not add a lifecycle state.
+`ThreadState` is exactly `idle | running`, defined in [`contracts.ts`](../packages/orchestrator/src/threads/contracts.ts). `running` includes pending input, admission, startup, execution and cancellation until confirmed. `idle` means the thread has no current work. The separate `held` boolean prevents queued input from starting. Stop leaves the thread `{ state: "idle", held: true }` after cancellation is confirmed, and resume clears `held`. Errors stay in details and execution outcomes; they do not add a lifecycle state. Remote must not display this broad `running` flag as proof of work: its [execution status contract](../apps/remote/web/README.md#execution-status-is-evidence-not-reassurance) reports every owned pending-operation and runtime phase, treats missing instrumentation as a defect rather than a normal unknown state, and exposes elapsed phase time separately from the age of the latest activity update.
 
 A message moves through `queued`, `dispatched` and `done`. A held thread does not change a queued message's state. Clients use the thread's `held` field when they need a held-queue label. `insertedAt` records when Pi accepted the message and `landedAt` when it entered the agent's conversation. A prompt lands on acceptance. Pi holds a steer or follow-up in its queue until the next tool boundary, or starts a turn with it when the run has already settled, then starts it as a user message with exactly the text it was sent ([native adapter](../packages/orchestrator/docs/pi-sessions.md)); the thread service records `landed_at` when it observes that `message_start`. The timestamp lives on the work row, so compaction and restarts cannot return a delivered message to a client's queue. Remote's queue shows only pending messages that have not landed. `outcome` records `complete`, `failed` or `cancelled` after settlement. An execution is active exactly while `ended_at` is null; the execution table has no separate state column.
 
@@ -22,10 +22,10 @@ Humans and agents use the same thread API, with one delivery restriction:
 
 - Spawn always creates a fresh thread with a fresh context and initial assignment. Continuing an existing thread means sending it a message. A subagent may be ephemeral: it archives as soon as its last accepted assignment settles, after the parent notification and result are saved. Its transcript, files and other effects persist. Model-tool spawns default to ephemeral; set `ephemeral: false` when follow-up work is planned. Other API callers select it explicitly.
 - Agent-to-agent messages always use steer or hard steer. They default to steer. A request with `senderId` and `delivery: "queue"` is invalid.
-- Human messages default to queue and may explicitly use queue, steer or hard steer.
+- Human messages default to steer and may explicitly use queue, steer or hard steer.
 - Queue waits for the recipient's current execution to finish.
 - Steer delivers at a safe boundary after current tool calls without cancelling them.
-- Hard steer cancels current execution and its local tools, confirms cancellation, then runs the selected message first in the same conversation. Other pending messages retain their order. It does not cancel descendants or undo external effects.
+- Hard steer cancels current execution and its local tools, confirms cancellation, then runs the selected message first in the same conversation. Other pending messages retain their order, including steers already accepted into Pi's native queue but not yet entered into the conversation. Cancelling the turn returns those inputs to durable queued state with the same receipt, settings and prepared payload; landed inputs are never replayed. It does not cancel descendants or undo external effects.
 - Stop cancels current execution and holds pending messages. Its request explicitly selects this thread or this thread and descendants.
 - Resume releases held messages. With no pending messages it changes nothing and returns `no_pending_messages`.
 - An explicit new human or agent message to a held thread clears the hold and runs that message ahead of previously queued messages. Those messages retain their relative order.
@@ -83,6 +83,33 @@ A parent can call `thread_await` with one child ID or a group of direct child ID
 When a child's execution settles, commit its full outcome and final assistant message to execution/work receipts and a compact parent notification to the message queue. The parent sees `thread_idle`, the worker title, `complete`/`failed`/`cancelled`, final text or null, and any error. It receives no thinking, tool calls, provider metadata, usage or opaque fields. Its envelope retains the sender thread ID so the agent can send follow-up work. Native transcripts and stored execution results retain the original message for continuation and inspection. Dispatch and recovery also project queued reports prepared by an earlier release, preserving appended meeting context and receipt identity. Agent tool previews apply the same projection to pending reports.
 
 Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain queued when the parent is held. Idle is not proof that an assignment succeeded.
+
+## Model availability
+
+Machine → Models enables or disables offered models globally for everyone's new threads on the selected host. Only the host administrator (`fleetUser`) can edit; everyone else sees read-only enabled/disabled states. All Remote and Orchestrator person owners live-read the same `/var/lib/pi-stack/model-availability/policy.json` file. `PI_STACK_MODEL_AVAILABILITY_PATH` overrides the path for fixtures; there are no per-person overrides:
+
+```json
+{ "version": 1, "disabled": ["openai-codex/gpt-6-astra", "anthropic/claude-fable-5-1"] }
+```
+
+A missing file enables every model. Writes replace it atomically, preserving unrelated choices. A malformed or unreadable policy rejects new creation rather than silently enabling models. The policy is live-read at creation, so no restart is needed. Catalog names, physical IDs and numbered pool providers resolve to the same identity. Admission checks resolved settings before committing new roots or children, including CLI, direct thread APIs, scheduled work and private workers. Retrying a previously accepted creation retains its thread; imports and restored threads retain their state. Existing threads can continue, resume and change settings. Disabling never cancels them, changes their model or changes account availability; application completions and thread naming are unaffected. Existing child-model restrictions still apply when a model is enabled.
+
+The Remote dashboard always exposes `modelAvailability` and `canManageModels`; the latter is true only for the host administrator. Bootstrap start profiles omit disabled models. Administrator-only `PUT /v1/models/:id/availability` accepts `{ "enabled": true }` or `false` and returns `{ "models": [...] }`; provider/model IDs use encoded path segments. An open stale picker cannot bypass server admission. A disabled configured default is rejected when requested rather than silently substituting another model. Each host has one global policy shared by every person; both household machines are seeded with the requested disablements.
+
+## Explicit thread names
+
+Models can use `thread_control` with `{ "action": "rename", "title": "Chosen name" }`
+to rename their own thread; `threadId` selects another accessible thread. This uses
+the same durable owner as a person's title edit. Both `rename` and `update` with
+`title` persist `metadata.titleSource: "manual"`. The name stays pinned through
+new messages, controller restarts, archive/restore and automatic naming results
+already in flight. A later explicit rename replaces it and remains pinned.
+Blank or missing rename titles are rejected without changing the thread.
+
+Only the internal automatic naming path writes titles with `automaticTitle: true`;
+it records `titleSource: "auto"` and cannot overwrite a manual title. Untagged
+existing threads continue automatic naming until explicitly renamed. Title-source
+metadata cannot be changed through a metadata patch.
 
 ## Defaults
 

@@ -195,6 +195,10 @@
 }
 
 .machine-actions { display: grid; gap: var(--space-1); }
+.machine-models { margin-top: var(--space-3); }
+.machine-models .machine-action > span { min-width: 0; overflow-wrap: anywhere; }
+.machine-models .machine-action > strong { flex-shrink: 0; }
+.machine-action:disabled { cursor: wait; opacity: .65; }
 .machine-action {
   width: 100%;
   display: flex;

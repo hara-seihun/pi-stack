@@ -64,6 +64,7 @@ export const API = Object.freeze({
   files: route("GET", "/v1/files"), fileDownload: route("GET", "/v1/files/download"), fileDownloadHead: route("HEAD", "/v1/files/download"),
   speech: route("GET", "/v1/speech"), speechVoices: route("GET", "/v1/speech/engines/:engineId/voices"), speechUtterances: route("POST", "/v1/speech/utterances"), speechUtterance: route("GET", "/v1/speech/utterances/:utteranceId"), speechAudio: route("GET", "/v1/speech/utterances/:utteranceId/audio"),
   voice: route("GET", "/v1/voice"), voiceOffer: route("POST", "/v1/voice/offer"), voiceSessionUpdate: route("PATCH", "/v1/sessions/:sessionId/voice/:voiceId"), voiceSessionClose: route("DELETE", "/v1/sessions/:sessionId/voice/:voiceId"),
+  setModelAvailability: route("PUT", "/v1/models/:id/availability"),
   governorToggle: route("POST", "/v1/governor-controls/:provider/toggle"),
   actions: route("GET", "/v1/actions"), actionToggle: route("POST", "/v1/actions/:id/toggle"), uploadInit: route("POST", "/v1/uploads/init"), upload: route("PUT", "/v1/uploads/:id"), uploadComplete: route("POST", "/v1/uploads/:id/complete"), uploads: route("POST", "/v1/uploads"), removeUploads: route("DELETE", "/v1/uploads"),
   dismissError: route("POST", "/v1/errors/:errorId/dismiss"),

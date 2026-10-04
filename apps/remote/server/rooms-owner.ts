@@ -1,13 +1,16 @@
-import type { Room, RoomSnapshot } from "../shared/rooms";
+import type { Thread } from "pi-orchestrator/api";
+import { projectThreadActivity } from "./live-projection";
+import type { Room, RoomActivity, RoomSnapshot } from "../shared/rooms";
 import { roomInput, roomMembers, roomMetadata, readRoomInput } from "../shared/rooms";
 
-interface OwnedRoomThread { id: string; title: string; state: "idle" | "running"; held?: boolean; metadata?: Record<string, unknown> }
+interface OwnedRoomThread { id: string; title: string; state: "idle" | "running"; held?: boolean; metadata?: Record<string, unknown>; executionActivity?: Thread["executionActivity"] }
+interface RoomHistory { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown; error?: string; execution?: RoomActivity }
 interface RoomOwner {
   get(id: string): OwnedRoomThread | null;
   create(id: string, title: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   update(id: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   send(id: string, requestId: string, text: string): Promise<void>;
-  history(id: string): Promise<{ messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown; error?: string }>;
+  history(id: string): Promise<RoomHistory>;
   stop?(id: string): Promise<void>;
   answer?(id: string, questionId: string, sender: NonNullable<ReturnType<typeof roomMembers>>[number], body: any): Promise<void>;
   notify(id: string, receiptId: string, title: string, body: string, time: number): void;
@@ -15,9 +18,15 @@ interface RoomOwner {
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
 const fail = (error: string, status = 400) => Response.json({ error }, { status });
 
-export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown; error?: string }): RoomSnapshot {
+export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory): RoomSnapshot {
   const metadata = roomMetadata(thread.metadata?.room)!;
-  const room: Room = { ...metadata, title: thread.title };
+  const execution = source.execution ?? projectThreadActivity(thread.state, undefined, false, thread.executionActivity, thread.metadata, Boolean(thread.held));
+  const error = source.error ?? execution.executionError;
+  const activity: RoomActivity = execution.activity && execution.activity !== "status_error" && String(execution.activity) !== "running"
+    ? { ...execution, held: thread.held ?? false, ...(error ? { error } : {}) }
+    : { activity: "status_error", activityDetail: "Room owner did not report an execution phase", activeTools: execution.activeTools ?? [],
+      held: thread.held ?? false, error: error ?? "Room owner did not report an execution phase" };
+  const room: Room = { ...metadata, title: thread.title, state: thread.state, ...activity };
   const messages: RoomSnapshot["messages"] = [];
   const work: NonNullable<RoomSnapshot["work"]> = [];
   for (const [index, value] of source.messages.entries()) {
@@ -55,7 +64,7 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: { messages: 
     const id = typeof message.identity?.id === "string" ? message.identity.id : `${message.role}:${time}:${messages.length}`;
     messages.push({ id, time, sender: input?.sender ?? { user: "assistant", displayName: "Kenan" }, text: input?.text ?? text });
   }
-  return { room, state: thread.state, held: thread.held ?? false, ...(source.error ? { error: source.error } : {}), messages, live: source.live, questions: source.questions ?? [], work, thinking: source.thinking ?? "", context: source.context ?? null,
+  return { room, state: thread.state, ...activity, messages, live: source.live, questions: source.questions ?? [], work, thinking: source.thinking ?? "", context: source.context ?? null,
     notificationId: thread.state === "idle" ? messages.filter(message => message.sender.user === "assistant").at(-1)?.id ?? null : null };
 }
 
@@ -87,7 +96,10 @@ export async function handleRoomOwner(req: Request, owner: RoomOwner): Promise<R
   const metadata = roomMetadata(existing?.metadata?.room);
   if (!existing || !metadata || metadata.id !== id) return fail("Room not found", 404);
   if (!metadata.members.some(member => member.user === actor)) return fail("Room membership required", 403);
-  if (!action && req.method === "GET") return Response.json(publicRoomSnapshot(existing, await owner.history(id)));
+  if (!action && req.method === "GET") {
+    const history = await owner.history(id);
+    return Response.json(publicRoomSnapshot(owner.get(id) ?? existing, history));
+  }
   if (action === "members" && req.method === "POST") {
     const members = roomMembers(body?.members);
     if (!members || metadata.members.some(old => !members.some(member => member.user === old.user))) return fail("Only adding room members is supported");

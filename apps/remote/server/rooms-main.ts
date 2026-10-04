@@ -23,6 +23,6 @@ Object.assign(process.env, {
   PI_REMOTE_PRIVATE_DIR: join(data, "private-unused"),
   PI_REMOTE_WORKSPACES: JSON.stringify([{ id: "rooms", name: "Rooms", path: workspace }]),
   PI_REMOTE_THREAD_DESTINATIONS: JSON.stringify([{ id: "home", label: "ROOM", icon: "cloud", accent: "#f5f5f5", workspaceId: "rooms",
-    models: (process.env.PI_REMOTE_ROOMS_MODELS ?? "astra,sol,luna,fable,opus").split(","), defaultModel: process.env.PI_REMOTE_ROOMS_MODEL ?? "astra", thinkingLevel: "high" }]),
+    models: (process.env.PI_REMOTE_ROOMS_MODELS ?? "astra,sol,luna,fable,opus").split(","), defaultModel: process.env.PI_REMOTE_ROOMS_MODEL ?? "sol", thinkingLevel: "high" }]),
 });
 await import("./main");

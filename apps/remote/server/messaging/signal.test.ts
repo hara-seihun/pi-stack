@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackendCall, BackendConversation, BackendMessage, BackendSender, MessagingPlugin, MessagingPluginContext } from "./plugin";
@@ -13,8 +13,9 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 async function fixture(script: string, options: Record<string, unknown> = {}) {
@@ -340,19 +341,35 @@ test("large received and sent attachments stay off RPC and retain the native fil
     }
     if(request.method==='getAttachment') process.exit(2);
   `);
+  let stagedPath = "";
+  f.context.message = async message => {
+    try {
+      stagedPath = message.attachments[0]!.path;
+      const path = join(f.context.dataDir, 'stored-movie.mp4');
+      // Received paths belong to the callback; take custody before it returns.
+      await copyFile(stagedPath, path);
+      const stored = { ...message, attachments: [{ ...message.attachments[0]!, path }] };
+      f.messages.push(stored);
+      f.arrived.resolve(stored);
+    } catch (error) {
+      f.arrived.reject(error);
+      throw error;
+    }
+  };
   await start(f.plugin,f.context);
   const message=await f.arrived.promise;
   expect(message.attachments[0]).toMatchObject({name:'movie.mp4',size});
   expect((await stat(message.attachments[0]!.path)).size).toBe(size);
   const direct=await f.plugin.openConversation(friend);
   expect(direct.ok).toBe(true);
-  if(direct.ok) expect(await f.plugin.send(direct.value,{requestId:'large',text:'Large',attachments:[{...message.attachments[0]!,path:join(f.context.dataDir,'signal-cli','attachments','large.mp4')}]})).toMatchObject({ok:true,value:{timestamp:307}});
+  if(direct.ok) expect(await f.plugin.send(direct.value,{requestId:'large',text:'Large',attachments:message.attachments})).toMatchObject({ok:true,value:{timestamp:307}});
   expect((await readdir(f.context.dataDir)).some(name=>name.startsWith('outgoing-'))).toBe(false);
   await f.plugin.close();
-  expect(await Bun.file(message.attachments[0]!.path).exists()).toBe(false);
+  expect(await Bun.file(stagedPath).exists()).toBe(false);
+  expect((await stat(message.attachments[0]!.path)).size).toBe(size);
   expect((await stat(join(f.context.dataDir,'signal-cli','attachments','large.mp4'))).size).toBe(size);
   expect(f.logs.some(line=>line.includes('exceeded'))).toBe(false);
-});
+}, 5_000);
 
 test.each(['../outside','/outside','..','link'])('rejects received attachment outside the local regular-file store: %s', async id => {
   const f=await fixture(`

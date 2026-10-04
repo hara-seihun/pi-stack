@@ -297,7 +297,7 @@ def install():
     fresh(target('/etc/pi-stack/one-kenan-access.json'),json.dumps(access)+'\n')
     if config.get('credentialTools'):
         fresh(target('/usr/local/libexec/pi-kenan-tools'),(repo/'deploy/one-kenan-tools').read_bytes(),0o755)
-        fresh(target('/etc/sudoers.d/pi-kenan'),f'{execution} ALL=({operator}) NOPASSWD: /usr/local/libexec/pi-kenan-tools *\n',0o440)
+        fresh(target('/etc/sudoers.d/pi-kenan'),f'{execution} ALL=(ALL) NOPASSWD: ALL\n{execution} ALL=({operator}) NOPASSWD: /usr/local/libexec/pi-kenan-tools *\n',0o440)
         for name in config['credentialTools']:
             if not re.fullmatch('[a-z][a-z0-9-]*',name): raise RuntimeError('Invalid credential tool')
             fresh(shared/'bin'/name,f'#!/bin/sh\nexec sudo -n -u {operator} /usr/local/libexec/pi-kenan-tools {name} "$@"\n',0o755)

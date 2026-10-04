@@ -8,7 +8,7 @@ function worker(): Session {
   return {
     id: "bonsai", parentId: null, hasChildren: false, origin: "fleet", model: "openai-codex/gpt-6-sol",
     name: "bonsai-optimization", cwd: "/home", workspaceName: "Home", environment: "local",
-    state: "running", held: false, activity: "running", activeTools: [], provider: "openai",
+    state: "running", held: false, activity: "queued", activeTools: [], provider: "openai",
     createdAt: "2026-09-22T00:00:00.000Z", updatedAt: "2026-09-22T00:00:00.000Z", revision: 1,
     idleUnread: false, queuedMessages: [], archivedAt: null,
   };

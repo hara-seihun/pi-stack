@@ -1,5 +1,11 @@
+import type { Activity, Session } from "../server/protocol.js";
+
+export interface RoomActivity extends Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError" | "held">> {
+  activity?: Activity | "status_error";
+  error?: string;
+}
 export interface RoomMember { user: string; displayName: string }
-export interface Room {
+export interface Room extends RoomActivity {
   id: string;
   title: string;
   members: RoomMember[];
@@ -11,7 +17,7 @@ export interface Room {
 }
 export interface RoomMessage { id: string; sender: RoomMember; text: string; time: number }
 export interface RoomWork { id: string; kind: string; text: string; name?: string }
-export interface RoomSnapshot { room: Room; state: "idle" | "running"; messages: RoomMessage[]; live: string; notificationId: string | null; held?: boolean; error?: string; questions?: import("pi-orchestrator/api").ThreadQuestion[]; work?: RoomWork[]; thinking?: string; context?: unknown }
+export interface RoomSnapshot extends RoomActivity { room: Room; state: "idle" | "running"; messages: RoomMessage[]; live: string; notificationId: string | null; questions?: import("pi-orchestrator/api").ThreadQuestion[]; work?: RoomWork[]; thinking?: string; context?: unknown }
 
 export function roomMembers(value: unknown): RoomMember[] | null {
   if (!Array.isArray(value) || !value.length || value.length > 64) return null;
