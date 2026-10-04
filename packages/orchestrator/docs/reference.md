@@ -12,7 +12,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `wave`: Spawn a one-off batch from a declared lane [--count N] [--background].
 - `list`: List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR].
 - `read`: Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR].
-- `send`: Send to THREAD_ID with --prompt TEXT [--delivery steer|hardSteer]; agents steer by default, senderless sends queue by default.
+- `send`: Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]; steer by default, agents cannot queue.
 - `stop`: Stop THREAD_ID; --descendants also stops its descendants.
 - `pause / resume`: Set or clear the global launch halt; --ordinary controls only ordinary work.
 - `resume THREAD_ID`: Release a held thread's pending messages.
