@@ -2061,7 +2061,7 @@ function repairRun(requestId) {
     let result;
     try {
       result = commandResult(config.piCommand,
-        ["--print", "--mode", "json", "--model", "openai-codex/gpt-6-astra", "--thinking", "high",
+        ["--print", "--mode", "json", "--model", "openai-codex/gpt-6.1-sol", "--thinking", "high",
           "--session", repair.session, `@${repair.prompt}`],
         { cwd: repair.workspace && existsSync(repair.workspace) ? repair.workspace : dirname(repair.path),
           timeoutSeconds: policy.repairMs / 1000, stdio: ["ignore", fd, fd] });

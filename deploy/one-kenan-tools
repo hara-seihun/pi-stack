@@ -20,6 +20,7 @@ if name=='github' and (not args or args[0] not in ('api','repo','issue','pr','re
     raise SystemExit('The bridge does not expose GitHub authentication, aliases or extensions')
 if name=='git-credential' and args not in (['get'],['store'],['erase']): raise SystemExit('Expected a Git credential operation')
 command=commands[name]
+if isinstance(command,str): command=[command]
 if not isinstance(command,list) or not command or not pathlib.Path(command[0]).is_absolute(): raise SystemExit('Expected a root-configured absolute command')
 env={'HOME':operator.pw_dir,'USER':operator.pw_name,'LOGNAME':operator.pw_name,
      'PATH':f'{operator.pw_dir}/.local/bin:/usr/local/bin:/usr/bin:/bin',

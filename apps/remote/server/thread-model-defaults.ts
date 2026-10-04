@@ -95,6 +95,6 @@ export function defaultThreadDestinations(personalWorkspaceId?: string): ThreadD
     ...destination,
     thinkingLevel: "high",
     models: [...SHARED_THREAD_MODELS],
-    defaultModel: "astra",
+    defaultModel: "sol",
   }));
 }
