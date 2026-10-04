@@ -18,6 +18,7 @@ import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
+import { questionAnswerContext } from "./question-answer-context";
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
 import { oneKenanEnabled } from "kenan-memory/config";
@@ -677,6 +678,10 @@ function invalidateDisplayContext(sessionId: string) {
 }
 
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
+  return questionAnswerContext(threads, sessionId, baseStoredContext(sessionId));
+}
+
+function baseStoredContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
   const peer = peerInspections.get(sessionId);
   if (peer) {
     if (inspectedContexts.has(peer)) return inspectedContexts.get(peer)!;
@@ -1840,7 +1845,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); signalSync(); void refreshThreadNotifications(); }
+  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();

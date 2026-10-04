@@ -58,6 +58,21 @@ const ARCHIVE_RESUME_TEXT = "This thread was archived while it was working, whic
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const canonical = (value: any): any => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, canonical(value[key])])) : value;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+const questionAnswerBody = (row: Json, answer: Pick<AnswerThreadQuestion, "selectedSuggestionIds" | "text" | "dismissed">): string => {
+  if (answer.dismissed) return `Dismissed question ${row.id}: ${row.question}\nThe user skipped this question without selecting or authorizing any suggestion.`;
+  const choices = JSON.parse(row.suggestions) as ThreadQuestion["suggestions"];
+  return [`Answer to question ${row.id}: ${row.question}`, ...answer.selectedSuggestionIds.map(id => `- ${choices.find(choice => choice.id === id)!.text}`), ...(answer.text.trim() ? [answer.text] : [])].join("\n");
+};
+const mergeTimed = (items: Json[], additions: Json[]): Json[] => {
+  if (!additions.length) return items;
+  const result = [...items];
+  const time = (item: Json): number => typeof item.timestamp === "number" ? item.timestamp : Date.parse(item.timestamp ?? "") || 0;
+  for (const addition of additions) {
+    const next = result.findIndex(item => time(item) > time(addition));
+    result.splice(next < 0 ? result.length : next, 0, addition);
+  }
+  return result;
+};
 
 export class ThreadService implements ThreadApi {
   private readonly db: DatabaseSync;
@@ -228,7 +243,7 @@ export class ThreadService implements ThreadApi {
     if (!this.execution(id) && options.contextRevision === thread.revision) return good({ thread, pending: this.pending(id), ...(projection ? { live: projection.live } : {}) });
     try {
       const context = this.execution(id) && projection?.context ? projection.context : { source: "native-history", systemPrompt: "", tools: [], messages: readThreadHistory(thread.sessionFile).flatMap(entry => entry.type === "message" ? [entry.message] : entry.type === "custom_message" ? [{ role: "custom", content: entry.content, customType: entry.customType, details: entry.details }] : []) };
-      return good({ thread, pending: this.pending(id), context, ...(projection ? { live: projection.live } : {}) });
+      return good({ thread, pending: this.pending(id), context: { ...context, messages: this.projectQuestionAnswers(id, context.messages ?? []) }, ...(projection ? { live: projection.live } : {}) });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
   private message(row: Json): ThreadMessage { return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
@@ -449,6 +464,25 @@ export class ThreadService implements ThreadApi {
     const answer = JSON.parse(row.answer);
     return good({ question, answer: { text: answer.text, selectedSuggestions: question.suggestions.filter(choice => answer.selectedSuggestionIds.includes(choice.id)).map(choice => choice.text), dismissed: answer.dismissed === true, acceptedAt: row.accepted_at } });
   }
+  private rootConsentQuestion(thread: Thread, questionId: string): boolean {
+    return thread.metadata?.rootConsent === true && !!this.sql(`SELECT 1 FROM thread_request r,json_each(CASE WHEN r.kind='ask' THEN r.target ELSE '[]' END) q
+      WHERE r.kind='ask' AND r.id GLOB 'consent:*:question' AND q.value=? LIMIT 1`).get(questionId);
+  }
+  private questionAnswerHistory(threadId: string): Json[] {
+    if (this.get(threadId)?.metadata?.rootConsent !== true) return [];
+    const rows = this.sql(`SELECT q.* FROM thread_question q WHERE q.thread_id=? AND q.accepted_at IS NOT NULL
+      AND EXISTS(SELECT 1 FROM thread_request r,json_each(CASE WHEN r.kind='ask' THEN r.target ELSE '[]' END) ids WHERE r.kind='ask' AND r.id GLOB 'consent:*:question' AND ids.value=q.id)
+      ORDER BY q.accepted_at,q.rowid`).all(threadId) as Json[];
+    return rows.map(row => ({ type: "message", id: `question-answer:${row.id}`, parentId: null, source: "question-receipt",
+      timestamp: new Date(row.accepted_at).toISOString(), message: { role: "user", timestamp: row.accepted_at,
+        questionId: row.id, rootConsent: true, content: [{ type: "text", text: questionAnswerBody(row, JSON.parse(row.answer)) }] } }));
+  }
+  /** Display-only receipt projection; root consumes these answers, not the ordinary agent's input queue. */
+  projectQuestionAnswers(threadId: string, messages: Json[]): Json[] {
+    const receipts = this.questionAnswerHistory(threadId).map(entry => entry.message);
+    if (!receipts.length) return messages;
+    return mergeTimed(messages.filter(message => !receipts.some(receipt => message.rootConsent === true && message.questionId === receipt.questionId)), receipts);
+  }
   async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (typeof input.threadId !== "string" || typeof input.questionId !== "string"
@@ -468,23 +502,23 @@ export class ThreadService implements ThreadApi {
       if (row.accepted_at !== null) return row.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
       if (this.halts.has(input.threadId)) return bad("conflict", "Wait for cancellation confirmation before answering");
       const thread = this.get(input.threadId)!;
-      if (thread.held && thread.state === "running") {
+      const rootConsent = this.rootConsentQuestion(thread, row.id);
+      if (!rootConsent && thread.held && thread.state === "running") {
         const halted = await this.halt(thread.id); if (!halted.ok) return halted;
         const accepted = this.sql("SELECT answer,accepted_at FROM thread_question WHERE id=?").get(row.id) as Json;
         if (accepted.accepted_at !== null) return accepted.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
       }
-      const selected = input.selectedSuggestionIds.map(id => choices.find(choice => choice.id === id)!.text);
-      const body = input.dismissed
-        ? `Dismissed question ${row.id}: ${row.question}\nThe user skipped this question without selecting or authorizing any suggestion.`
-        : [`Answer to question ${row.id}: ${row.question}`, ...selected.map(text => `- ${text}`), ...(input.text.trim() ? [input.text] : [])].join("\n");
+      const body = questionAnswerBody(row, input);
       this.transaction(() => {
         const accepted = this.sql("UPDATE thread_question SET answer=?,accepted_at=? WHERE id=? AND accepted_at IS NULL").run(answer, Date.now(), row.id);
         if (!accepted.changes) throw new Error("Question acceptance raced another answer");
-        this.insertMessage(`question-answer:${row.id}`, { requestId: `question-answer:${row.id}`, threadId: input.threadId,
-          text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings, thread.held);
-        this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(input.threadId);
+        if (!rootConsent) {
+          this.insertMessage(`question-answer:${row.id}`, { requestId: `question-answer:${row.id}`, threadId: input.threadId,
+            text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings, thread.held);
+          this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(input.threadId);
+        }
       });
-      this.changed(input.threadId); this.wake(input.threadId);
+      this.changed(input.threadId); if (!rootConsent) this.wake(input.threadId);
       return good({ accepted: true, questionId: row.id });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
@@ -536,7 +570,7 @@ export class ThreadService implements ThreadApi {
     try {
       const limit = input.limit ?? 20, offset = input.offset ?? Number(input.cursor ?? 0);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) return bad("invalid_request", "Invalid history page");
-      const entries = visibleThreadHistory(thread.sessionFile) as Json[];
+      const entries = mergeTimed(visibleThreadHistory(thread.sessionFile) as Json[], this.questionAnswerHistory(input.threadId));
       if (input.entryId) { const entry = entries.find(entry => entry.id === input.entryId); return entry ? good({ entries: [entry] }) : bad("not_found", "Transcript entry not found"); }
       const selected = entries.slice(offset, offset + limit);
       return good({ entries: selected, ...(offset + selected.length < entries.length ? { nextCursor: String(offset + selected.length) } : {}) });

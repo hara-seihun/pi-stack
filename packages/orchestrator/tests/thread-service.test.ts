@@ -127,6 +127,80 @@ function fixture(root?: string, workersOnly = false) {
   return { directory, service, sessions };
 }
 
+it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch and retains its visible receipt across restart", async choice => {
+  const { service, directory, sessions } = fixture();
+  value(await service.start());
+  const thread = value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const questionId = value(await service.ask({ requestId: "consent:fixture:question", threadId: thread.id,
+    questions: [{ question: "May I share the meeting time?", suggestions: ["Yes, for this request", "No"] }] })).questionIds[0]!;
+  const answer = { threadId: thread.id, questionId, selectedSuggestionIds: choice === "dismiss" ? [] : [`${questionId}:${choice === "yes" ? 0 : 1}`],
+    text: choice === "yes" ? "Only the time." : "", ...(choice === "dismiss" ? { dismissed: true } : {}) };
+  const receipt = value(await service.answer(answer));
+  service.reconcile(); await turn(); await turn();
+  expect(sessions).toHaveLength(0);
+  expect(service.pending(thread.id)).toEqual([]);
+  expect(service.get(thread.id)).toMatchObject({ state: "idle", held: false, pendingMessages: 0 });
+  const state = value(await service.questionState(thread.id, questionId));
+  expect(state.answer).toMatchObject({ text: answer.text, dismissed: choice === "dismiss", acceptedAt: expect.any(Number) });
+  const history = value(await service.read({ threadId: thread.id })).entries;
+  expect(history).toMatchObject([{ id: `question-answer:${questionId}`, source: "question-receipt", message: { role: "user", questionId, rootConsent: true } }]);
+  if (choice === "dismiss") expect(JSON.stringify(history)).toContain("without selecting or authorizing any suggestion");
+  expect(value(await service.read({ threadId: thread.id, entryId: `question-answer:${questionId}` })).entries).toEqual(history);
+  const context = value(await service.inspect(thread.id)).context!;
+  const messages = context.messages as Record<string, any>[];
+  expect(messages).toHaveLength(1);
+  expect(service.projectQuestionAnswers(thread.id, messages)).toEqual(messages);
+  const conversation = [{ role: "user", timestamp: state.answer!.acceptedAt - 1, content: "Before" }, { role: "user", timestamp: state.answer!.acceptedAt + 1, content: "After" }];
+  expect(service.projectQuestionAnswers(thread.id, conversation)).toEqual([conversation[0], messages[0], conversation[1]]);
+  expect(conversation).toHaveLength(2);
+  await service.close();
+  const restored = fixture(directory);
+  value(await restored.service.start());
+  expect(value(await restored.service.answer(answer))).toEqual(receipt);
+  expect(value(await restored.service.questionState(thread.id, questionId))).toEqual(state);
+  expect(value(await restored.service.read({ threadId: thread.id })).entries).toEqual(history);
+  expect(await restored.service.answer({ ...answer, selectedSuggestionIds: [], dismissed: false, text: "Changed" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  restored.service.reconcile(); await turn(); await turn();
+  expect(restored.sessions).toHaveLength(0);
+  expect(value(await restored.service.questions(thread.id))).toEqual([]);
+});
+
+it("keeps ordinary inbox conversation and async questions working without steering root answers into their run", async () => {
+  const { service, directory, sessions } = fixture();
+  value(await service.start());
+  const thread = value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const rootQuestion = value(await service.ask({ requestId: "consent:fixture:question", threadId: thread.id, questions: [{ question: "Share the time?" }] })).questionIds[0]!;
+  value(await service.send({ requestId: "conversation", threadId: thread.id, text: "Ordinary conversation" }));
+  await waitFor(() => sessions[0]?.commands.some(command => command.type === "prompt") === true);
+  const inputs = () => sessions.flatMap(session => session.commands.filter(command => ["prompt", "steer", "follow_up"].includes(command.type)));
+  expect(inputs()).toHaveLength(1);
+  value(await service.answer({ threadId: thread.id, questionId: rootQuestion, selectedSuggestionIds: [], text: "Only the time." }));
+  service.reconcile(); await turn(); await turn();
+  expect(sessions).toHaveLength(1);
+  expect(inputs()).toHaveLength(1);
+  const ordinaryQuestion = value(await service.ask({ requestId: "ordinary-question", threadId: thread.id, questions: [{ question: "What next?" }] })).questionIds[0]!;
+  value(await service.answer({ threadId: thread.id, questionId: ordinaryQuestion, selectedSuggestionIds: [], text: "Continue." }));
+  await waitFor(() => inputs().length === 2);
+  expect(inputs()[1]).toMatchObject({ workId: `question-answer:${ordinaryQuestion}`, message: expect.stringContaining("Continue.") });
+  expect(service.pending(thread.id).map(message => message.id)).not.toContain(`question-answer:${rootQuestion}`);
+  expect(value(await service.inspect(thread.id)).context?.messages).toContainEqual(expect.objectContaining({ questionId: rootQuestion, rootConsent: true }));
+});
+
+it("does not release held or archived inbox work when a root consent answer is recorded", async () => {
+  const { service, directory, sessions } = fixture();
+  value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const questionId = value(await service.ask({ requestId: "consent:fixture:question", threadId: "inbox", questions: [{ question: "Share?" }] })).questionIds[0]!;
+  value(await service.send({ requestId: "held", threadId: "inbox", text: "Unrelated work" }));
+  value(await service.control({ threadId: "inbox", action: "stop", descendants: false }));
+  value(await service.control({ threadId: "inbox", action: "update", archived: true }));
+  value(await service.start());
+  value(await service.answer({ threadId: "inbox", questionId, selectedSuggestionIds: [], text: "No" }));
+  service.reconcile(); await turn(); await turn();
+  expect(sessions).toHaveLength(0);
+  expect(service.get("inbox")).toMatchObject({ held: true, state: "idle", metadata: { archived: true } });
+  expect(service.pending("inbox").map(message => message.id)).toEqual(["held"]);
+});
+
 it("rejects nonexistent built-in models before creating a thread or saving settings", async () => {
   const { service, directory, sessions } = fixture();
   const settings = { model: "openai-codex/missing-model" };
