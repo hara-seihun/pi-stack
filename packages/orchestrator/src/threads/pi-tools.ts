@@ -180,7 +180,7 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_read", label: "Read thread history",
-      description: "Read persisted native history without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
+      description: "Read persisted thread history, including root-consent answer receipts, without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
       parameters: Type.Object({ threadId: Type.String(), cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), entryId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
       execute: async (_id, input, signal) => {
         const value = await api(signal).read(input.entryId ? { threadId: input.threadId, entryId: input.entryId }

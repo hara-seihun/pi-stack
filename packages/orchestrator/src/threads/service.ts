@@ -472,6 +472,7 @@ export class ThreadService implements ThreadApi {
     if (this.get(threadId)?.metadata?.rootConsent !== true) return [];
     const rows = this.sql(`SELECT q.* FROM thread_question q WHERE q.thread_id=? AND q.accepted_at IS NOT NULL
       AND EXISTS(SELECT 1 FROM thread_request r,json_each(CASE WHEN r.kind='ask' THEN r.target ELSE '[]' END) ids WHERE r.kind='ask' AND r.id GLOB 'consent:*:question' AND ids.value=q.id)
+      AND NOT EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=q.thread_id AND w.id='question-answer:'||q.id)
       ORDER BY q.accepted_at,q.rowid`).all(threadId) as Json[];
     return rows.map(row => ({ type: "message", id: `question-answer:${row.id}`, parentId: null, source: "question-receipt",
       timestamp: new Date(row.accepted_at).toISOString(), message: { role: "user", timestamp: row.accepted_at,

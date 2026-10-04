@@ -165,6 +165,32 @@ it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch an
   expect(value(await restored.service.questions(thread.id))).toEqual([]);
 });
 
+it("does not project historical consent answers already owned by native message delivery", async () => {
+  const { service, directory } = fixture();
+  const thread = value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const oldQuestion = value(await service.ask({ requestId: "consent:previous:question", threadId: thread.id, questions: [{ question: "Share the time?" }] })).questionIds[0]!;
+  value(await service.answer({ threadId: thread.id, questionId: oldQuestion, selectedSuggestionIds: [], text: "Only the time." }));
+  const oldState = value(await service.questionState(thread.id, oldQuestion));
+  const oldText = `Answer to question ${oldQuestion}: Share the time?\nOnly the time.`;
+  value(service.importMessage({ id: `question-answer:${oldQuestion}`, threadId: thread.id, replyTo: oldQuestion,
+    text: oldText, state: "done", insertedAt: oldState.answer!.acceptedAt, outcome: "complete" }));
+  const nativeMessage = { role: "user", timestamp: oldState.answer!.acceptedAt, content: [{ type: "text", text: oldText }] };
+  const nativeEntry = { type: "message", id: "native-old-answer", parentId: null, timestamp: new Date(nativeMessage.timestamp).toISOString(), message: nativeMessage };
+  writeFileSync(thread.sessionFile, JSON.stringify(nativeEntry) + "\n");
+  const nextQuestion = value(await service.ask({ requestId: "consent:next:question", threadId: thread.id, questions: [{ question: "Share the location?" }] })).questionIds[0]!;
+  value(await service.answer({ threadId: thread.id, questionId: nextQuestion, selectedSuggestionIds: [], text: "No location." }));
+  const history = value(await service.read({ threadId: thread.id })).entries;
+  expect(history).toHaveLength(2);
+  expect(history[0]).toEqual(nativeEntry);
+  expect(history[1]).toMatchObject({ id: `question-answer:${nextQuestion}`, source: "question-receipt" });
+  expect(service.projectQuestionAnswers(thread.id, [nativeMessage])).toMatchObject([nativeMessage, { questionId: nextQuestion }]);
+  expect((value(await service.inspect(thread.id)).context!.messages as Record<string, unknown>[])).toHaveLength(2);
+  expect(value(await service.questionState(thread.id, oldQuestion))).toEqual(oldState);
+  await service.close();
+  const restored = fixture(directory);
+  expect(value(await restored.service.read({ threadId: thread.id })).entries).toEqual(history);
+});
+
 it("keeps ordinary inbox conversation and async questions working without steering root answers into their run", async () => {
   const { service, directory, sessions } = fixture();
   value(await service.start());
@@ -184,6 +210,11 @@ it("keeps ordinary inbox conversation and async questions working without steeri
   expect(inputs()[1]).toMatchObject({ workId: `question-answer:${ordinaryQuestion}`, message: expect.stringContaining("Continue.") });
   expect(service.pending(thread.id).map(message => message.id)).not.toContain(`question-answer:${rootQuestion}`);
   expect(value(await service.inspect(thread.id)).context?.messages).toContainEqual(expect.objectContaining({ questionId: rootQuestion, rootConsent: true }));
+  const read = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service }).find(tool => tool.name === "thread_read")!;
+  const recalled = await read.execute("own-permission", { threadId: thread.id }, new AbortController().signal, () => {}, {} as never);
+  expect(JSON.stringify(recalled)).toContain("Only the time.");
+  expect(JSON.stringify(recalled)).toContain(`question-answer:${rootQuestion}`);
+  expect(inputs()).toHaveLength(2);
 });
 
 it("does not release held or archived inbox work when a root consent answer is recorded", async () => {
