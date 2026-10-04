@@ -55,7 +55,7 @@ describe("thread controls", () => {
     expect(tree.map(node => node.session.id)).toEqual(["root", "lane"]);
     expect(tree[0].children.map(node => node.session.id).sort()).toEqual(["existing-worker", "fleet-worker"]);
     expect(isActiveWorker(session("stopped", { held: true }))).toBe(false);
-    expect(isActiveWorker(session("busy", { state: "running", activity: "running" }))).toBe(true);
+    expect(isActiveWorker(session("busy", { state: "running", activity: "queued" }))).toBe(true);
   });
   test("watch checks appear in Workers, not Chats, without losing ownership, selection or stop scope", () => {
     const watch = session("watch", { watchList: true, state: "running", idleUnread: true });

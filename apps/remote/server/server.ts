@@ -48,7 +48,7 @@ import {
   type PersonalUsage,
   readBrokerUsage,
 } from "pi-orchestrator/api";
-import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -73,6 +73,7 @@ import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
+import { observeExecutionActivity } from "pi-orchestrator/api";
 import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "./meet/handoff";
 import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
@@ -462,7 +463,15 @@ async function inspectThread(id: string, local: boolean) {
   while (peerInspections.size > 12) peerInspections.delete(peerInspections.keys().next().value!);
   ensureThreadView(db, id);
   if (changed) signalSync();
-  if (inspection.live) restoreLiveProjection(liveFor(id), inspection.live);
+  if (inspection.live) {
+    const live = liveFor(id);
+    const previous = JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]]);
+    restoreLiveProjection(live, inspection.live);
+    if (previous !== JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]])) {
+      signalSync();
+      signalLiveSync();
+    }
+  }
 }
 function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -930,8 +939,6 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
   const meta = { ...remotePlacement(thread, lookup), ...thread.metadata };
   const [provider, ...modelParts] = thread.settings.model.split("/");
   const model = { provider, modelId: modelParts.join("/") };
-  // A failed execution is a notice in the thread's own transcript and an unread
-  // marker on its row; it is not a second status the person has to dismiss.
   return { ...thread, name: thread.title, workspace_id: meta.workspaceId ?? thread.cwd,
     session_path: thread.sessionFile,
     initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
@@ -1267,8 +1274,7 @@ function publicSession(row: any,
     model: row.settings.model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
-    activity: threadActivity(row.state, live, hasRunningChildren),
-    activeTools: [...(live?.activeTools.values() ?? [])],
+    ...projectThreadActivity(row.state, live, hasRunningChildren, row.executionActivity, row.metadata, Boolean(row.held)),
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
     createdAt: row.created_at, updatedAt: row.updated_at, revision: row.revision,
     idleUnread: Boolean(row.idle_unread),
@@ -1559,9 +1565,18 @@ function handlePiEvent(sessionId: string, event: any) {
   try { phoneOverlay?.event(sessionId, event); } catch (cause) { console.error("phone overlay event failed", cause); }
   ensureThreadView(db, sessionId);
   const rt = liveFor(sessionId);
+  if (observeExecutionActivity(rt, event)) {
+    rt.compacting = rt.activity === "compacting";
+    rt.retrying = rt.activity === "retrying";
+    rt.thinkingActive = rt.activity === "thinking";
+    signalSync();
+    signalLiveSync();
+  }
+  if (event.type === "agent_end" || event.type === "agent_settled") settleLiveProjection(rt);
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
     restoreLiveProjection(rt, event.data.live);
     invalidateDisplayContext(sessionId);
+    signalSync();
     signalLiveSync();
     return;
   }
@@ -1931,8 +1946,8 @@ const meet = new MeetServer((id) => {
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    activity: threadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id)),
-    tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+    activity: projectThreadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id), row.executionActivity, row.metadata, Boolean(row.held)).activity,
+    tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
 
 
@@ -2008,12 +2023,15 @@ const server = Bun.serve<SocketData>({
             : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
           if (!storedContext(id)) await refreshThreadInspection(id);
           const context = storedContext(id);
+          const questions = unwrap(await directory.questions(id));
+          const current = threads.get(id)!;
           const settlement = threads.latestSettlement(id);
           const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
-          const failure = thread.state !== "running" && settlement?.outcome === "failed"
+          const failure = current.state !== "running" && settlement?.outcome === "failed"
             ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
           return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
-            context: context ? JSON.parse(context.document) : null, questions: unwrap(await directory.questions(id)) };
+            execution: projectThreadActivity(current.state, liveProjections.get(id), false, current.executionActivity, current.metadata, Boolean(current.held)),
+            context: context ? JSON.parse(context.document) : null, questions };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },
         answer: async (id, questionId, sender, body) => {

@@ -3,7 +3,7 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { ThreadState } from "pi-orchestrator/api";
+import type { ExecutionPhase, ThreadState } from "pi-orchestrator/api";
 import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
@@ -32,7 +32,7 @@ export type ContextSplice = {
   insertBase64: string;
 };
 
-export type Activity = ThreadState | "awaiting" | "thinking" | "compacting" | "retrying" | "waiting_on_tool";
+export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question"; body?: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
@@ -73,6 +73,10 @@ export interface Session {
   /** Halted with cancellation confirmed, holding its pending messages. */
   held: boolean;
   activity: Activity;
+  activitySince?: number;
+  lastActivityAt?: number;
+  activityDetail?: string;
+  executionError?: string;
   /** Every tool running right now, in the order they started. */
   activeTools: string[];
   provider: string;

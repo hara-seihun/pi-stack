@@ -50,8 +50,10 @@ class FakePiSession implements PiSession {
     this.commands.push(command);
     if (command.type === "prompt" || command.type === "steer") {
       if (typeof command.workId === "string") this.acceptedWorkIds.add(command.workId);
-      this.isStreaming = true;
-      this.output({ type: "agent_start" });
+      if (!this.isStreaming) {
+        this.isStreaming = true;
+        this.output({ type: "agent_start" });
+      }
     }
     if (command.type === "abort") {
       this.isStreaming = false;
@@ -127,6 +129,77 @@ function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServ
   services.push(service);
   return { directory, service, sessions };
 }
+
+it("projects phase timestamps to list and reconnect snapshots without stale thinking or tools", async () => {
+  const { service, directory, sessions } = fixture();
+  value(await service.start());
+  const thread = value(await service.spawn({ requestId: "activity", id: "activity", cwd: directory }));
+  value(await service.send({ requestId: "work", threadId: thread.id, text: "work" }));
+  await waitFor(() => sessions[0]?.commands.some(command => command.type === "prompt") === true);
+  const session = sessions[0]!;
+  session.emit({ type: "message_update", emittedAt: 10, assistantMessageEvent: { type: "thinking_delta", delta: "reason" } });
+  session.emit({ type: "message_update", emittedAt: 20, assistantMessageEvent: { type: "text_delta", delta: "answer" } });
+  expect(service.live(thread.id)).toMatchObject({ activity: "responding", isThinking: false, activitySince: 20 });
+  expect(service.snapshot().find(row => row.id === thread.id)?.executionActivity).toMatchObject({ activity: "responding", activitySince: 20 });
+  const before = value(await service.inspect(thread.id)).live;
+  await service.command(thread.id, { type: "get_state" });
+  expect(value(await service.inspect(thread.id)).live).toEqual(before);
+  session.emit({ type: "tool_execution_start", emittedAt: 30, toolCallId: "tool", toolName: "bash" });
+  expect(service.get(thread.id)?.executionActivity).toMatchObject({ activity: "waiting_on_tool", activeTools: ["bash"] });
+  session.emit({ type: "message_end", emittedAt: 35, message: { role: "toolResult", content: [] } });
+  expect(service.live(thread.id)?.activity).toBe("waiting_on_tool");
+  session.emit({ type: "tool_execution_end", emittedAt: 40, toolCallId: "tool" });
+  expect(service.live(thread.id)).toMatchObject({ activity: "preparing", activityDetail: "Integrating tool results", isThinking: false, tools: [] });
+  session.emit({ type: "message_update", emittedAt: 50, assistantMessageEvent: { type: "toolcall_delta" } });
+  expect(value(await service.inspect(thread.id)).live).toMatchObject({ activity: "preparing_tool", lastActivityAt: expect.any(Number) });
+  session.settle("done");
+  await waitFor(() => service.get(thread.id)?.state === "idle");
+  expect(service.get(thread.id)?.executionActivity?.activity).toBeUndefined();
+});
+
+it("reports queue, preparation, admission, runtime startup, model wait and cancellation at the owned await boundaries", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-phases-")); roots.push(directory);
+  const deferred = <T>() => { let resolve!: (value: T) => void; return { promise: new Promise<T>(done => { resolve = done; }), resolve: (value: T) => resolve(value) }; };
+  const prepared = deferred<Result<{ text: string; images: unknown[] }>>();
+  const admitted = deferred<Result<{ release(): void }>>();
+  const opened = deferred<void>();
+  const aborted = deferred<void>();
+  let session!: FakePiSession;
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+    prepareMessage: () => prepared.promise, admit: () => admitted.promise,
+    openSession: async (options, output) => {
+      await opened.promise;
+      session = new FakePiSession(options, output);
+      const command = session.command.bind(session);
+      session.command = async input => { if (input.type === "abort") await aborted.promise; await command(input); };
+      return session;
+    },
+  }); services.push(service);
+  const thread = value(await service.spawn({ requestId: "phase-thread", id: "phase-thread", cwd: directory }));
+  value(await service.send({ requestId: "phase-work", threadId: thread.id, text: "work" }));
+  expect(service.get(thread.id)?.executionActivity?.activity).toBe("queued");
+  value(await service.start());
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "preparing");
+  prepared.resolve({ ok: true, value: { text: "work", images: [] } });
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "admitting");
+  const admissionClock = service.get(thread.id)?.executionActivity?.activitySince;
+  expect(service.get(thread.id)?.executionActivity?.activitySince).toBe(admissionClock);
+  admitted.resolve({ ok: true, value: { release() {} } });
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "starting");
+  opened.resolve();
+  await waitFor(() => !!session?.commands.some(command => command.type === "prompt"));
+  expect(service.get(thread.id)?.executionActivity?.activity).toBe("preparing");
+  session.emit({ type: "model_request_start", emittedAt: Date.now() });
+  const waiting = service.get(thread.id)?.executionActivity;
+  session.emit({ type: "message_start", message: { role: "assistant" } });
+  await service.command(thread.id, { type: "get_state" });
+  expect(service.get(thread.id)?.executionActivity).toEqual(waiting);
+  const stopping = service.control({ threadId: thread.id, action: "stop", descendants: false });
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "cancelling");
+  expect(service.get(thread.id)?.state).toBe("running");
+  aborted.resolve();
+  expect(value(await stopping)).toMatchObject({ state: "idle", held: true });
+});
 
 it("pins self-renames through the model tool across automatic results and controller restarts", async () => {
   const { service, directory, sessions } = fixture();
@@ -1391,20 +1464,23 @@ describe("ThreadService", () => {
     const thread = value(await first.service.spawn({ requestId: "active", cwd: first.directory, message: "Already running" }));
     await waitFor(() => first.service.pending(thread.id)[0]?.landedAt != null);
     const native = first.sessions[0]!;
+    native.emit({ type: "message_update", emittedAt: 10, assistantMessageEvent: { type: "thinking_delta", delta: "reason" } });
     const accepted = new Map<string, PiCommand>();
     for (const id of ["landed", "first", "second"]) {
       value(await first.service.send({ requestId: id, threadId: thread.id, senderId: "worker", text: `Input ${id}` }));
       await waitFor(() => first.service.pending(thread.id).find(message => message.id === id)?.insertedAt != null);
       const command = native.commands.find(command => command.workId === id)!;
       if (id === "landed") {
-        native.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(command.message) }] } });
+        native.emit({ type: "message_start", inputWorkId: id, message: { role: "user", content: [{ type: "text", text: "Transformed by an input extension" }] } });
         expect(first.service.pending(thread.id).find(message => message.id === id)?.landedAt).toEqual(expect.any(Number));
       } else {
         expect(first.service.pending(thread.id).find(message => message.id === id)).toMatchObject({ state: "dispatched", insertedAt: expect.any(Number), landedAt: null });
         accepted.set(id, command);
       }
     }
+    expect(first.service.live(thread.id)).toMatchObject({ activity: "thinking", activitySince: 10, isThinking: true });
     expect(value(await first.service.control({ threadId: thread.id, action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(first.service.get(thread.id)?.executionActivity?.activity).toBeUndefined();
     expect(native.closed).toBe(true);
     expect(native.commands.filter(command => command.type === "abort")).toHaveLength(1);
     expect(first.service.pending(thread.id)).toMatchObject([{ id: "first", state: "queued", landedAt: null }, { id: "second", state: "queued", landedAt: null }]);
@@ -1418,9 +1494,11 @@ describe("ThreadService", () => {
     restored.service.reconcile(); await turn(); await turn();
     expect(restored.service.get(thread.id)).toMatchObject({ state: "idle", held: true });
     expect(restored.service.pending(thread.id)).toEqual(held);
+    expect(restored.service.get(thread.id)?.executionActivity?.activity).toBeUndefined();
     expect(restored.sessions).toHaveLength(0);
     value(await restored.service.control({ threadId: thread.id, action: "resume" }));
     await waitFor(() => restored.sessions[0]?.commands.some(command => command.workId === "second") === true);
+    expect(restored.service.live(thread.id)).toMatchObject({ activity: "preparing", isThinking: false, tools: [] });
     const replayed = restored.sessions[0]!.commands.filter(command => ["prompt", "steer"].includes(command.type));
     expect(replayed.map(command => command.workId)).toEqual(["first", "second"]);
     expect(replayed.map(command => command.type)).toEqual(["prompt", "steer"]);

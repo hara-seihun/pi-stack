@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createLiveProjection, runningChildParents, settleLiveProjection, threadActivity } from "./live-projection";
+import { createLiveProjection, projectThreadActivity, restoreLiveProjection, runningChildParents, settleLiveProjection, threadActivity } from "./live-projection";
 
 test("awaiting describes child work without inheriting progress or overriding the parent's execution", () => {
   const parent = createLiveProjection("parent");
@@ -27,6 +27,37 @@ test("running children from either owner keep a parent awaiting until the last o
   expect(threadActivity("idle", undefined, runningChildParents(local, fleet).has("parent"))).toBe("awaiting");
   fleet[0]!.state = "idle";
   expect(threadActivity("idle", undefined, runningChildParents(local, fleet).has("parent"))).toBe("idle");
+});
+
+test("local and fleet phase evidence survives reconnect without aging from reads", () => {
+  const live = createLiveProjection("thread");
+  const snapshot = { activity: "responding" as const, activitySince: 10, lastActivityAt: 20,
+    activityDetail: "Response text streaming", activeTools: [], text: "answer", tools: [] };
+  restoreLiveProjection(live, snapshot);
+  const local = projectThreadActivity("running", live);
+  expect(local).toEqual(projectThreadActivity("running", undefined, false, snapshot));
+  expect(local).toMatchObject({ activity: "responding", activitySince: 10, lastActivityAt: 20 });
+  live.thinkingActive = true;
+  live.compacting = true;
+  live.retrying = true;
+  live.activeTools.set("stale", "bash");
+  restoreLiveProjection(live, { text: "answer", thinking: "old", isThinking: false, tools: [] });
+  expect(threadActivity("running", live)).toBe("status_error");
+  expect(projectThreadActivity("idle", undefined, false, snapshot)).toEqual({ activity: "idle", activitySince: undefined,
+    lastActivityAt: 20, activityDetail: undefined, activeTools: [], executionError: undefined });
+  restoreLiveProjection(live, snapshot);
+  settleLiveProjection(live);
+  expect(threadActivity("running", live)).toBe("status_error");
+  expect(live.activitySince).toBeUndefined();
+});
+
+test("known waits carry evidence, suppress recovering startup errors but preserve cancellation failures", () => {
+  const metadata = { executionError: "prior failure", providerWait: { since: 10, retryAt: 1000, failure: "network connection failed" } };
+  expect(projectThreadActivity("running", undefined, false, undefined, metadata)).toMatchObject({
+    activity: "waiting_to_retry", activitySince: 10, lastActivityAt: 10, executionError: undefined });
+  expect(projectThreadActivity("running", undefined, false, undefined, metadata, true).executionError).toBe("prior failure");
+  expect(projectThreadActivity("running", undefined, false, undefined, { admissionWait: { since: 20 } })).toMatchObject({ activity: "waiting_for_capacity", activitySince: 20 });
+  expect(projectThreadActivity("idle", undefined, false, undefined, { executionError: "actual failure" }).executionError).toBe("actual failure");
 });
 
 test("settlement keeps final output until canonical context acknowledges it", () => {

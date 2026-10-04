@@ -14,7 +14,7 @@ globalThis.location ??= new URL("https://router.test/") as unknown as Location;
 
 const session = (id: string, patch: Partial<Session> = {}): Session => ({
   id, parentId: null, hasChildren: false, origin: "person", model: "model", name: id,
-  cwd: "/", workspaceName: "", environment: "local", state: "idle", held: false, activity: "idle", activeTools: [],
+  cwd: "/", workspaceName: "", environment: "local", state: "idle", held: false, activity: patch.state === "running" ? "queued" : "idle", activeTools: [],
   provider: "openai", createdAt: "", updatedAt: "2026-01-01T00:00:00Z", revision: 1, idleUnread: false,
   queuedMessages: [], archivedAt: null, ...patch,
 });
@@ -50,7 +50,7 @@ test("inbox ranks attention, then work, then quiet, mixing AI and human chats", 
 test("rooms share inbox ranking and row controls, and closing excludes only that room", () => {
   const rooms = [
     { id: "shared", title: "Shared", members: [{ user: "kenan", displayName: "Hara" }], current: true, updatedAt: 10, unreadCount: 2 },
-    { id: "working", title: "Working room", members: [], state: "running" as const, updatedAt: 20 },
+    { id: "working", title: "Working room", members: [], state: "running" as const, activity: "queued" as const, updatedAt: 20 },
     { id: "closed", title: "Closed room", members: [], current: false, unreadCount: 5 },
     { id: "question", title: "Question", members: [], pendingQuestions: 1, updatedAt: 30 },
   ];
@@ -113,12 +113,12 @@ test("the last worker settling clears waiting status in the inbox", () => {
   expect(markup).not.toContain('class="inbox-chip"');
 
   parent.state = "running";
-  expect(threadStatus(project())).toMatchObject({ key: "running", busy: true });
+  expect(threadStatus(project())).toMatchObject({ key: "reporting_error", busy: true });
 });
 
 test("status vocabulary covers every lifecycle and flag", () => {
   expect(threadStatus(session("a")).key).toBe("idle");
-  expect(threadStatus(session("a", { state: "running" }))).toMatchObject({ key: "running", label: "Working", busy: true });
+  expect(threadStatus(session("a", { state: "running" }))).toMatchObject({ key: "queued", label: "Queued for execution", busy: true });
   expect(threadStatus(session("a", { state: "running", activity: "thinking" })).key).toBe("thinking");
   expect(threadStatus(session("a", { state: "running", activity: "waiting_on_tool", activeTools: ["functions.agent_browser"] })).label).toBe("Running agent browser");
   expect(threadStatus(session("a", { state: "running", activity: "waiting_on_tool", activeTools: ["bash", "web_search"] }))).toMatchObject({ label: "Running bash and web search", short: "2 tools" });
@@ -147,13 +147,13 @@ test("the inbox keeps idle unread as Idle with a dot and gives multi-tool names 
   expect(toolsMarkup).toContain('title="bash, web search, agent browser"');
   expect(toolsMarkup).toContain("3 tools");
 
-  // A working thread says so. Leaving its word to the section header showed "· Fable": a blank where the state goes.
-  const working = inboxRows([session("busy", { state: "running", activity: "running" })], [], { ...messaging, conversations: [] })[0]!;
+  // Queued is an owned scheduling phase, not a claim of model progress.
+  const working = inboxRows([session("busy", { state: "running", activity: "queued" })], [], { ...messaging, conversations: [] })[0]!;
   const workingMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...working, chat: { ...working.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
-  expect(workingMarkup).toContain('data-status="running"');
-  expect(workingMarkup).toContain('class="status-label">Working</span>');
+  expect(workingMarkup).toContain('data-status="queued"');
+  expect(workingMarkup).toContain('class="status-label">Queued</span>');
   expect(workingMarkup).toMatch(/<span class="inbox-status-line"><span class="status-pill/);
 });
 
