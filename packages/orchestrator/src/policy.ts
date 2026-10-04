@@ -104,7 +104,15 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   // Unpaced admissions spread load first: concentrating live consulting on the least-spent account caused provider faults.
   choices.sort((a,b)=>budget!=="background"?load(a.accountId)-load(b.accountId)||a.spent-b.spent||a.accountId.localeCompare(b.accountId)
     :a.spent-b.spent||load(a.accountId)-load(b.accountId)||a.accountId.localeCompare(b.accountId));
-  return{assignment:choices[0],refusals};
+  const candidate=choices[0];
+  const affinityKey=profile==="thread"&&runId&&candidate
+    ? `thread-account-affinity:${JSON.stringify([runId,candidate.provider,candidate.model])}` : undefined;
+  const retained=affinityKey?store.control(affinityKey):undefined;
+  // Account-bound thinking and prompt caches survive an idle thread, not a move to a less busy sibling.
+  // Only already-admissible choices can retain affinity; explicit pins and all capacity checks still win.
+  const assignment=choices.find(choice=>choice.accountId===retained)??candidate;
+  if(affinityKey&&assignment)store.setControl(affinityKey,assignment.accountId);
+  return{assignment,refusals};
 }
 
 export function assignCompletion(store:Store,runId:string,profile:string,cfg:OrchestratorConfig,now=Date.now()):{assignment?:Assignment;refusals:Refusal[]}{
