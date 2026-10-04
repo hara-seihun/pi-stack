@@ -97,11 +97,14 @@ The existing cursor and Android native protocol are unchanged. Targets are `room
 client opens room routes and suppresses notifications for the visible room. The ordinary native
 completion target is suppressed to avoid a duplicate private-thread target.
 
-The router reconciles replies and delivery every two seconds. The directory caches room work state,
-activity time and pending-question count from creation, accepted sends/answers and these existing
-snapshot ticks. Directory polls never fan out to room snapshots. The room inbox and conversation
-refresh while the client is visible. These are narrow room requests, not another person's event
-stream. Member additions and sends serialize per room at the router. Turning the flag off preserves
+The router reconciles replies and delivery every two seconds. Room listing reads refresh only that
+person's visible rooms from their actual room execution owner. Scheduling/model/tool phases, held
+state, errors and progress clocks travel with the owner snapshot to both the directory and open
+conversation. Retrieval failure returns `status_error` with its cause and clears stale execution
+clocks/tools, rather than presenting cached running state as healthy. The directory persists inbox,
+unread, pending-question and last-message facts; execution phases and clocks remain with their
+runtime owner and are refreshed after restart. The room inbox and conversation refresh while the
+client is visible. These are narrow room requests, not another person's event stream. Member additions and sends serialize per room at the router. Turning the flag off preserves
 the directory, outbox and native histories. Snapshot history comes from the native branch, including
 pre-compaction messages, not only the current model context.
 

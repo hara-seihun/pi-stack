@@ -82,7 +82,7 @@ export function roomThreadStatus(room: Room | RoomSnapshot): ThreadStatus {
   return threadStatus({
     state: room.state ?? "idle", held: room.held ?? false, activity: room.activity ?? "idle",
     activeTools: room.activeTools ?? [], activitySince: room.activitySince, lastActivityAt: room.lastActivityAt,
-    activityDetail: room.activityDetail, executionError: room.error, idleUnread: false, archivedAt: null,
+    activityDetail: room.activityDetail, executionError: room.executionError ?? room.error, idleUnread: false, archivedAt: null,
   });
 }
 

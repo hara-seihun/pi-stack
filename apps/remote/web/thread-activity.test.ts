@@ -6,7 +6,7 @@ import { activityTiming, threadStatus, roomThreadStatus } from "./src/features/s
 import { StatusPill } from "./src/features/status/StatusPill";
 
 const running = (patch: Partial<Session> = {}) => ({
-  state: "running" as const, held: false, activity: "running" as const, activeTools: [], idleUnread: false, archivedAt: null, ...patch,
+  state: "running" as const, held: false, activity: "running" as Session["activity"], activeTools: [], idleUnread: false, archivedAt: null, ...patch,
 });
 
 test("missing owned phase or tool identity is an instrumentation defect, never a normal unknown state", () => {
