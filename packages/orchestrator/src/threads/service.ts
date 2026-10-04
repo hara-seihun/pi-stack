@@ -11,6 +11,7 @@ import { POOLED_ACCOUNT_WAIT, pooledRetryAvailability } from "../extension/routi
 import { modelBrokerUrl } from "../model-broker-contract.js";
 import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
+import { inputReceipts } from "./pi-input-receipts.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
@@ -547,7 +548,7 @@ export class ThreadService implements ThreadApi {
       });
       this.changed(thread.id);
       const runtime = this.runtimes.get(thread.id);
-      if (input.delivery === "hardSteer" && runtime?.commandRunning) void this.halt(thread.id).then(() => this.wake(thread.id));
+      if (input.delivery === "hardSteer" && (runtime || this.opening.has(thread.id) || this.execution(thread.id) || thread.metadata?.runnerReference)) void this.halt(thread.id).then(() => this.wake(thread.id));
       this.wake(thread.id); return good(message);
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
@@ -627,7 +628,7 @@ export class ThreadService implements ThreadApi {
     this.sql("UPDATE thread_work SET delivery=?,front=? WHERE id=?").run(delivery, delivery === "hardSteer" ? Date.now() : 0, messageId);
     if (delivery === "hardSteer") {
       this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(threadId);
-      if (this.runtimes.get(threadId)?.commandRunning) void this.halt(threadId).then(() => this.wake(threadId));
+      if (this.runtimes.has(threadId) || this.opening.has(threadId) || this.execution(threadId) || this.get(threadId)?.metadata?.runnerReference) void this.halt(threadId).then(() => this.wake(threadId));
     }
     this.changed(threadId); this.wake(threadId); return good({ ...this.message(work), delivery });
   }
@@ -776,7 +777,10 @@ export class ThreadService implements ThreadApi {
         // A rejected startup is not a failed cancellation: inspect the retained runner directly.
         await this.opening.get(id)?.catch(() => undefined);
         const runtime = this.runtimes.get(id) ?? await this.attach(id);
-        if (runtime) await this.rpc(runtime, { type: "abort" });
+        if (runtime) {
+          await this.rpc(runtime, { type: "abort" });
+          this.adoptLanded(id, await this.rpc(runtime, { type: "get_state" }));
+        } else this.adoptLanded(id, inputReceipts(readThreadHistory(this.get(id)!.sessionFile)));
         await this.finish(id, runtime, runtime?.outcome ?? "cancelled", runtime?.finalMessage ?? null);
         if (runtime) await this.retire(id, runtime);
         if (this.suspended || this.closed) return bad("unavailable", "Halt remains with the thread owner during handoff");
@@ -851,7 +855,18 @@ export class ThreadService implements ThreadApi {
   }
   private execution(id: string): Json | undefined { return this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NULL").get(id) as Json | undefined; }
   private busy(state: Json): boolean { return !!(state.isStreaming || state.isCompacting || state.isBashRunning || state.localTools > 0 || state.cancellationFailed || state.pendingCommandCount > 0 || state.pendingMessageCount > 0); }
+  private adoptLanded(id: string, state: Json): void {
+    if (this.suspended || this.closed || !Array.isArray(state.landedWorkIds)) return;
+    const landed = new Set(state.landedWorkIds);
+    const pending = (this.sql("SELECT id FROM thread_work WHERE thread_id=? AND status='dispatched' AND landed_at IS NULL").all(id) as { id: string }[]).filter(work => landed.has(work.id));
+    if (!pending.length) return;
+    this.transaction(() => {
+      for (const work of pending) this.sql("UPDATE thread_work SET landed_at=? WHERE id=? AND landed_at IS NULL").run(Date.now(), work.id);
+    });
+    this.changed(id);
+  }
   private adoptReference(id: string, state: Json): void {
+    this.adoptLanded(id, state);
     if (this.suspended || this.closed || typeof state.sessionFile !== "string" || !state.sessionFile) return;
     const changed = this.sql("UPDATE thread SET session_file=?,metadata=json_set(metadata,'$.nativeHistoryRequired',json('true')) WHERE id=? AND (session_file!=? OR json_extract(metadata,'$.nativeHistoryRequired') IS NOT 1)").run(state.sessionFile, id, state.sessionFile).changes;
     if (changed) this.changed(id);
@@ -1096,12 +1111,13 @@ export class ThreadService implements ThreadApi {
       const prompt = !runtime!.busy;
       await this.rpc(runtime!, { type: prompt ? "prompt" : "steer", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images ?? [] });
       const insertedAt = Date.now();
-      if (this.suspended || this.row(id)?.held) return;
+      if (this.suspended || this.row(id)?.held || this.halts.has(id) || this.runtimes.get(id) !== runtime) return;
       this.sql("UPDATE thread_work SET inserted_at=COALESCE(inserted_at,?),landed_at=CASE WHEN ? THEN COALESCE(landed_at,?) ELSE landed_at END WHERE id=? AND status='dispatched'").run(insertedAt, prompt ? 1 : 0, insertedAt, work.id);
       runtime!.busy = true; this.state(id, "running");
       for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_message_inserted", workId: work.id, executionId: runtime!.executionId, insertedAt, message: { ...this.message(work), insertedAt, state: "dispatched" } } });
       this.wake(id);
     } catch (error) {
+      if (this.halts.has(id) || this.runtimes.get(id) !== runtime) return;
       if (error instanceof NativeRejection && !this.suspended && runtime) {
         this.sql("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(error.message, id);
         await this.finish(id, runtime, "failed", null);
@@ -1149,8 +1165,11 @@ export class ThreadService implements ThreadApi {
     if(outcome==="failed"&&!this.row(id)?.held&&(isTransientFailure(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
       await this.waitForProvider(id,runtime,execution,failure);return;
     }
-    const thread = this.get(id)!, workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
+    const thread = this.get(id)!;
+    let workIds: string[] = [];
     this.transaction(() => {
+      if (outcome === "cancelled") this.sql("UPDATE thread_work SET status='queued',execution_id=NULL,inserted_at=NULL WHERE execution_id=? AND status='dispatched' AND landed_at IS NULL AND id!=?").run(execution.id, execution.work_id);
+      workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
       this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, Date.now(), execution.id);
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait','$.providerRetry') WHERE id=?").run(id);
