@@ -7,7 +7,6 @@ import { defaultSharedAuthPath } from "./auth/shared-oauth.js";
 import { parsePeerHosts } from "./auth/account-peers.js";
 
 const standard = catalogModel("sol")!;
-const sol = catalogModel("sol")!;
 
 function parsePort(value: unknown): number | undefined {
   if (value === undefined) return undefined;
