@@ -65,9 +65,11 @@ it("accounts fleet completions once while shared interactive sessions and provid
   try {
     const admitted = await fleet.admit(thread, thread.settings, false, "fleet-execution");
     if (!admitted.ok) throw new Error(admitted.error.message);
+    if (!admitted.value.env) throw new Error("Fleet admission did not supply its accounting environment");
+    const admittedEnvironment = admitted.value.env;
     try {
       await Promise.all([
-        scope.run(admitted.value.env, async () => {
+        scope.run(admittedEnvironment, async () => {
           const handlers = register();
           await Promise.resolve();
           // Dispatch to both consumers, as the shared runner does. The extension must leave this receipt to Fleet.
@@ -95,6 +97,7 @@ it("accounts fleet completions once while shared interactive sessions and provid
     const broker = new Fleet(store, { ...config, modelBrokerUrl: "http://127.0.0.1:2461" });
     const brokerAdmission = await broker.admit(thread, thread.settings, false, "broker-execution");
     if (!brokerAdmission.ok) throw new Error(brokerAdmission.error.message);
+    if (!brokerAdmission.value.env) throw new Error("Broker admission did not supply its accounting environment");
     try {
       scope.run(brokerAdmission.value.env, () => expect(register().has("message_end")).toBe(false));
       broker.event(thread.id, event);
