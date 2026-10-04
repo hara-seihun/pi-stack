@@ -1265,7 +1265,8 @@ describe("ThreadService", () => {
     await waitFor(() => service.pending(thread.id).find(message => message.id === "landed")?.insertedAt != null);
     const native = sessions[0]!;
     const landed = native.commands.find(command => command.workId === "landed")!;
-    native.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(landed.message) }] } });
+    native.emit({ type: "message_start", ...(action === "send" ? { inputWorkId: "landed" } : {}),
+      message: { role: "user", content: [{ type: "text", text: action === "send" ? "Input transformed by an extension" : String(landed.message) }] } });
     expect(service.pending(thread.id).find(message => message.id === "landed")?.landedAt).toEqual(expect.any(Number));
 
     const accepted = new Map<string, PiCommand>();

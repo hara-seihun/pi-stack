@@ -1019,7 +1019,10 @@ export class ThreadService implements ThreadApi {
       projection.live.isThinking = !!live.isThinking;
       if (Array.isArray(live.tools)) projection.live.tools = live.tools;
     }
-    if (event.type === "message_start" && (event.message as Json)?.role === "user") this.land(id, contentText((event.message as Json).content, ""));
+    if (event.type === "message_start" && (event.message as Json)?.role === "user") {
+      if (typeof event.inputWorkId === "string") this.adoptLanded(id, { landedWorkIds: [event.inputWorkId] });
+      else this.land(id, contentText((event.message as Json).content, ""));
+    }
     if (event.type === "response") {
       const waiter = runtime.waiters.get(String(event.id));
       if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); event.success === false ? waiter.reject(new NativeRejection(String(event.error ?? "Pi command rejected"))) : waiter.resolve(event.data ?? {}); }
