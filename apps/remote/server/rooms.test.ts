@@ -25,14 +25,23 @@ function fixture() {
   const questions = new Map<string, any[]>();
   const calls: { path: string; method: string }[] = [];
   let unavailable = false;
+  let statusUnavailable = false;
+  const sent = new Set<string>();
   const transport = async (owner: string, actor: string, path: string, method: string, body?: unknown) => {
     calls.push({ path, method });
     if (unavailable && path.endsWith("/notify")) return Response.json({}, { status: 503 });
+    if (statusUnavailable && method === "GET") return Response.json({}, { status: 503 });
     return handleRoomOwner(request(path, method, body, actor), {
       get: id => threads.get(id) ?? null,
       create: async (id, title, members) => { threads.set(id, { id, title, state: "idle", metadata: { room: { id, members } } }); history.set(id, []); },
       update: async (id, members) => { threads.get(id).metadata.room.members = members; },
-      send: async (id, receipt, text) => { inputs.push({ owner, actor, text }); history.get(id)!.push({ role: "user", timestamp: 10, content: text }); },
+      send: async (id, receipt, text) => {
+        if (sent.has(receipt)) return;
+        sent.add(receipt);
+        threads.get(id).state = "running";
+        threads.get(id).executionActivity = { activity: "queued", activitySince: 10, lastActivityAt: 10, activeTools: [] };
+        inputs.push({ owner, actor, text }); history.get(id)!.push({ role: "user", timestamp: 10, content: text });
+      },
       history: async id => ({ messages: history.get(id) ?? [], questions: questions.get(id) ?? [], live: "" }),
       stop: async id => { threads.get(id).state = "idle"; },
       answer: async (id, questionId) => { questions.set(id, (questions.get(id) ?? []).filter(question => question.id !== questionId)); threads.get(id).state = "running"; },
@@ -42,7 +51,7 @@ function fixture() {
   const rooms = new Rooms(path, () => people, transport); cleanup.push(() => rooms.close());
   const id = crypto.randomUUID();
   const create = () => rooms.handle(request("/v1/rooms", "POST", { requestId: id, title: "House", members: ["bob"] }), "alice");
-  return { rooms, id, create, path, threads, history, questions, calls, notices, inputs, transport, unavailable: (value: boolean) => { unavailable = value; } };
+  return { rooms, id, create, path, threads, history, questions, calls, notices, inputs, transport, unavailable: (value: boolean) => { unavailable = value; }, statusUnavailable: (value: boolean) => { statusUnavailable = value; } };
 }
 
 test("rooms are off unless the host explicitly opts in; reading doesn't create state", () => {
@@ -167,11 +176,13 @@ async function directoryRoom(rooms: Rooms, actor = "alice") {
 test("closing and reading are caller-local, durable and directory-only; new input reopens recipients", async () => {
   const f = fixture(); await f.create(); await f.rooms.tick();
   const before = await directoryRoom(f.rooms, "bob");
-  const calls = f.calls.length;
   for (const actor of ["alice", "bob"]) {
+    const calls = f.calls.length;
     expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/close`, "POST", {}), actor)).status).toBe(200);
+    expect(f.calls.length).toBe(calls);
     expect((await directoryRoom(f.rooms, actor)).current).toBe(false);
   }
+  const calls = f.calls.length;
   const read = await (await f.rooms.handle(request(`/v1/rooms/${f.id}/read`, "POST", {}), "bob")).json();
   expect(read.room).toMatchObject({ current: false, unreadCount: 0, updatedAt: before.updatedAt });
   expect(f.calls.length).toBe(calls);
@@ -182,6 +193,7 @@ test("closing and reading are caller-local, durable and directory-only; new inpu
   await restarted.handle(request(`/v1/rooms/${f.id}/prompt`, "POST", { requestId: receipt, text: "Back again" }), "alice");
   expect(await directoryRoom(restarted, "alice")).toMatchObject({ current: true, state: "running", unreadCount: 0 });
   expect(await directoryRoom(restarted, "bob")).toMatchObject({ current: true, state: "running", unreadCount: 1 });
+  f.threads.get(f.id).state = "idle";
   await restarted.tick();
   const lastActivity = (await directoryRoom(restarted)).updatedAt;
   await restarted.handle(request(`/v1/rooms/${f.id}/close`, "POST", {}), "alice");
@@ -224,6 +236,68 @@ test("tick caches work/questions; read leaves questions pending; only fresh repl
   f.history.get(f.id)!.push({ role: "assistant", timestamp: Date.now(), identity: { id: "reply-2" }, content: "One more thing" });
   await f.rooms.tick();
   expect(await directoryRoom(f.rooms)).toMatchObject({ current: true, unreadCount: 1 });
+});
+
+test("room owner transports owned phases, clocks, tools and failures without unrelated metadata", () => {
+  const id = crypto.randomUUID();
+  const thread = { id, title: "House", state: "running" as const, metadata: { room: { id, members: people.slice(0, 2) }, rootPrivate: "outside room" } };
+  for (const phase of ["queued", "admitting", "starting", "preparing", "thinking", "responding", "preparing_tool", "waiting_on_tool", "waiting_for_model", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry", "finishing", "cancelling", "recovering"]) {
+    const evidence = { activity: phase, activitySince: 100, lastActivityAt: 150, activityDetail: `Owned ${phase}`, activeTools: phase === "waiting_on_tool" ? ["bash", "read"] : [] };
+    const snapshot = publicRoomSnapshot({ ...thread, executionActivity: evidence as any }, { messages: [], live: "" });
+    expect(snapshot).toMatchObject(evidence);
+    expect(snapshot.room).toMatchObject(evidence);
+    expect(JSON.stringify(snapshot)).not.toContain("outside room");
+  }
+  const failed = publicRoomSnapshot({ ...thread, state: "idle", held: true, metadata: { ...thread.metadata, executionError: "Room startup failed" } }, { messages: [], live: "" });
+  expect(failed).toMatchObject({ held: true, executionError: "Room startup failed", error: "Room startup failed", activeTools: [] });
+  const live = publicRoomSnapshot(thread, { messages: [], live: "", execution: { activity: "waiting_on_tool", activeTools: ["bash"], activitySince: 90, lastActivityAt: 95 } });
+  expect(live).toMatchObject({ activity: "waiting_on_tool", activeTools: ["bash"], activitySince: 90, lastActivityAt: 95 });
+  expect(publicRoomSnapshot(thread, { messages: [], live: "" })).toMatchObject({ activity: "status_error", error: "Room owner did not report an execution phase" });
+});
+
+test("directory polling refreshes actual owner evidence after restart and reports retrieval failure instead of stale work", async () => {
+  const f = fixture(); await f.create();
+  const thread = f.threads.get(f.id);
+  thread.state = "running";
+  thread.executionActivity = { activity: "waiting_on_tool", activitySince: 10, lastActivityAt: 20, activityDetail: "Owned tools", activeTools: ["bash"] };
+  await f.rooms.tick();
+  expect(await directoryRoom(f.rooms)).toMatchObject(thread.executionActivity);
+  const restarted = new Rooms(f.path, () => people, f.transport); cleanup.push(() => restarted.close());
+  thread.executionActivity = { activity: "responding", activitySince: 30, lastActivityAt: 40, activityDetail: "Response text streaming", activeTools: [] };
+  expect(await directoryRoom(restarted)).toMatchObject(thread.executionActivity);
+  expect((await (await restarted.handle(request(`/v1/rooms/${f.id}`), "bob")).json())).toMatchObject({ ...thread.executionActivity, room: thread.executionActivity });
+  f.statusUnavailable(true);
+  await restarted.tick();
+  const failed = await directoryRoom(restarted);
+  expect(failed).toMatchObject({ activity: "status_error", error: "Room owner status retrieval failed: HTTP 503", activeTools: [] });
+  expect(failed.activitySince).toBeUndefined(); expect(failed.lastActivityAt).toBeUndefined();
+  thread.state = "idle"; thread.held = true; thread.metadata.executionError = "Room execution failed";
+  f.statusUnavailable(false);
+  expect(await directoryRoom(restarted)).toMatchObject({ state: "idle", activity: "idle", held: true, error: "Room execution failed", activeTools: [] });
+  const calls = f.calls.length;
+  expect((await (await restarted.handle(request("/v1/rooms"), "cara")).json()).rooms).toEqual([]);
+  expect(f.calls.length).toBe(calls);
+});
+
+test("owner status transport exceptions do not leave persisted running activity in a restarted directory", async () => {
+  const f = fixture(); await f.create();
+  f.threads.get(f.id).state = "running";
+  f.threads.get(f.id).executionActivity = { activity: "thinking", activitySince: 10, lastActivityAt: 20, activeTools: [] };
+  await f.rooms.tick();
+  const restarted = new Rooms(f.path, () => people, async () => { throw new Error("Private transport diagnostic"); }); cleanup.push(() => restarted.close());
+  const room = await directoryRoom(restarted);
+  expect(room).toMatchObject({ state: "running", activity: "status_error", error: "Room owner status retrieval failed", activeTools: [] });
+  expect(JSON.stringify(room)).not.toContain("Private transport diagnostic");
+});
+
+test("room owner rereads lifecycle after awaited history inspection", async () => {
+  const id = crypto.randomUUID();
+  let thread: any = { id, title: "House", state: "running", executionActivity: { activity: "thinking", activeTools: [] }, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const response = await handleRoomOwner(request(`/v1/room-owner/${id}`), {
+    get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
+    history: async () => { thread = { ...thread, state: "idle", held: true }; return { messages: [], live: "" }; },
+  });
+  expect(await response.json()).toMatchObject({ state: "idle", activity: "idle", held: true, activeTools: [] });
 });
 
 test("adding a member reopens existing recipients and invites the new recipient", async () => {

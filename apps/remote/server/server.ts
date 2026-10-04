@@ -1957,8 +1957,11 @@ const server = Bun.serve<SocketData>({
           const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
           const failure = thread.state !== "running" && settlement?.outcome === "failed"
             ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
+          const questions = unwrap(await directory.questions(id));
+          const current = threads.get(id)!;
           return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
-            context: context ? JSON.parse(context.document) : null, questions: unwrap(await directory.questions(id)) };
+            execution: projectThreadActivity(current.state, liveProjections.get(id), false, current.executionActivity, current.metadata, Boolean(current.held)),
+            context: context ? JSON.parse(context.document) : null, questions };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },
         answer: async (id, questionId, sender, body) => {

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Room, RoomMember, RoomSnapshot } from "../shared/rooms";
+import type { Room, RoomActivity, RoomMember, RoomSnapshot } from "../shared/rooms";
 
 export const ROOM_CUSTODIAN = "pi-rooms";
 interface StoredRoom extends Room {
@@ -23,6 +23,7 @@ export class Rooms {
   private db: Database;
   private busy = false;
   private locks = new Map<string, Promise<unknown>>();
+  private statuses = new Map<string, RoomActivity>();
   constructor(path: string, private people: () => RoomMember[], private transport: Transport) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
@@ -68,7 +69,8 @@ export class Rooms {
   }
   private visible(room: StoredRoom, actor: string, inbox = this.inbox(actor, room.id).get(room.id)!): Room {
     return { id: room.id, title: room.title, members: room.members, current: inbox.current !== 0,
-      updatedAt: room.updatedAt, state: room.state, unreadCount: inbox.unreadCount, pendingQuestions: room.pendingQuestions };
+      updatedAt: room.updatedAt, state: room.state, unreadCount: inbox.unreadCount, pendingQuestions: room.pendingQuestions,
+      ...(this.statuses.get(room.id) ?? this.statusFailure(room.id, "Room owner status has not been retrieved")) };
   }
   private setCurrent(id: string, actor: string, current: boolean) {
     this.db.query("INSERT INTO room_inbox(room,person,current) VALUES(?,?,?) ON CONFLICT(room,person) DO UPDATE SET current=excluded.current").run(id, actor, Number(current));
@@ -97,7 +99,35 @@ export class Rooms {
       }
     })();
   }
+  private statusFailure(id: string, detail: string): RoomActivity {
+    const status: RoomActivity = { activity: "status_error", activityDetail: detail, error: detail, activeTools: [] };
+    this.statuses.set(id, status);
+    return status;
+  }
+  private async refresh(room: StoredRoom, actor: string): Promise<Response> {
+    if (room.owner !== ROOM_CUSTODIAN) {
+      this.statusFailure(room.id, "Room status requires custody migration into the unprivileged room runtime");
+      return fail("This room needs custody migration into the unprivileged room runtime", 503);
+    }
+    try {
+      const response = await this.transport(room.owner, actor, `/v1/room-owner/${room.id}`, "GET");
+      if (!response.ok) {
+        const detail = `Room owner status retrieval failed: HTTP ${response.status}`;
+        this.statusFailure(room.id, detail);
+        return fail(detail, response.status);
+      }
+      const snapshot = await response.json() as RoomSnapshot;
+      this.reconcile(room, snapshot);
+      return Response.json({ ...snapshot, room: this.visible(this.get(room.id)!, actor) });
+    } catch {
+      this.statusFailure(room.id, "Room owner status retrieval failed");
+      return fail("Room owner status retrieval failed", 503);
+    }
+  }
   private reconcile(room: StoredRoom, snapshot: RoomSnapshot) {
+    const { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error } = snapshot;
+    if (!activity || activity === "running") this.statusFailure(room.id, "Room owner did not report an execution phase");
+    else this.statuses.set(room.id, { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error });
     this.db.transaction(() => {
       const questions = snapshot.questions ?? [];
       this.db.query("UPDATE rooms SET state=?,pendingQuestions=?,questionIds=? WHERE id=?")
@@ -114,9 +144,10 @@ export class Rooms {
   async handle(req: Request, actor: string): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === "/v1/rooms" && req.method === "GET") {
+      const visible = this.rows().filter(room => room.ready && room.members.some(member => member.user === actor));
+      await Promise.all(visible.map(room => this.serialized(room.id, () => this.refresh(this.get(room.id)!, actor))));
       const inbox = this.inbox(actor);
-      return Response.json({ rooms: this.rows().filter(room => room.ready && room.members.some(member => member.user === actor))
-        .map(room => this.visible(room, actor, inbox.get(room.id)!)), people: this.people() });
+      return Response.json({ rooms: visible.map(room => this.visible(this.get(room.id)!, actor, inbox.get(room.id)!)), people: this.people() });
     }
     let body: any;
     if (req.method !== "GET") { try { body = await req.json(); } catch { return fail("JSON required"); } }
@@ -140,6 +171,7 @@ export class Rooms {
             this.notice(room!, `room-invite:${id}`, "You were added to a room with Kenan", actor);
           })();
         }
+        await this.refresh(this.get(id)!, actor);
         void this.deliver();
         return Response.json({ room: this.visible(this.get(id)!, actor) }, { status: 201 });
       });
@@ -157,13 +189,7 @@ export class Rooms {
         return Response.json({ room: this.visible(room, actor) });
       }
       if (room.owner !== ROOM_CUSTODIAN) return fail("This room needs custody migration into the unprivileged room runtime", 503);
-      if (!action && req.method === "GET") {
-        const response = await this.transport(room.owner, actor, `/v1/room-owner/${id}`, "GET");
-        if (!response.ok) return response;
-        const snapshot = await response.json() as RoomSnapshot;
-        this.reconcile(room, snapshot);
-        return Response.json({ ...snapshot, room: this.visible(this.get(id)!, actor) });
-      }
+      if (!action && req.method === "GET") return this.refresh(room, actor);
       if (action === "members" && req.method === "POST") {
         const members = this.roster([...room.members.map(member => member.user), ...(Array.isArray(body?.members) ? body.members : [null])], actor);
         if (!members) return fail("Known host members required");
@@ -175,20 +201,20 @@ export class Rooms {
           room = { ...room!, members };
           for (const member of added) this.notice(room, `room-member:${id}:${member.user}`, `${member.displayName} joined the room`, actor);
         })();
+        await this.refresh(this.get(id)!, actor);
         void this.deliver();
         return Response.json({ room: this.visible(this.get(id)!, actor) });
       }
       if ((action === "abort" || action?.startsWith("questions/")) && req.method === "POST") {
         const response = await this.transport(room.owner, actor, `/v1/room-owner/${id}/${action}`, "POST", body);
         if (response.ok) {
-          if (action === "abort") this.db.query("UPDATE rooms SET state='idle' WHERE id=?").run(id);
-          else {
+          if (action !== "abort") {
             const questionId = action.split("/")[1]!;
             this.db.transaction(() => {
               const receipt = `room-answer:${id}:${questionId}`;
               if (this.activity(id, receipt)) {
                 const questions = (JSON.parse(room!.questionIds) as string[]).filter(id => id !== questionId);
-                this.db.query("UPDATE rooms SET state='running',pendingQuestions=?,questionIds=? WHERE id=?")
+                this.db.query("UPDATE rooms SET pendingQuestions=?,questionIds=? WHERE id=?")
                   .run(questions.length, JSON.stringify(questions), id);
                 this.setCurrent(id, actor, true);
               }
@@ -196,6 +222,7 @@ export class Rooms {
             })();
             void this.deliver();
           }
+          await this.refresh(this.get(id)!, actor);
         }
         return response;
       }
@@ -206,11 +233,11 @@ export class Rooms {
           this.db.transaction(() => {
             const receipt = `room-message:${id}:${body.requestId}`;
             if (this.activity(id, receipt)) {
-              this.db.query("UPDATE rooms SET state='running' WHERE id=?").run(id);
               this.setCurrent(id, actor, true);
             }
             this.notice(room!, receipt, `${room!.members.find(member => member.user === actor)!.displayName} sent a message`, actor);
           })();
+          await this.refresh(this.get(id)!, actor);
           void this.deliver();
         }
         return sent;
@@ -237,13 +264,9 @@ export class Rooms {
     if (this.busy) return;
     this.busy = true;
     try {
-      await Promise.all(this.rows().filter(room => room.ready && room.owner === ROOM_CUSTODIAN).map(room => this.serialized(room.id, async () => {
-        try {
-          const current = this.get(room.id)!;
-          const response = await this.transport(current.owner, current.members[0]!.user, `/v1/room-owner/${current.id}`, "GET");
-          if (!response.ok) { console.warn(`Room ${current.id}: HTTP ${response.status}`); return; }
-          this.reconcile(current, await response.json() as RoomSnapshot);
-        } catch (error) { console.warn(`Room ${room.id}: ${String(error)}`); }
+      await Promise.all(this.rows().filter(room => room.ready && room.owner === ROOM_CUSTODIAN).map(room => this.serialized(room.id, () => {
+        const current = this.get(room.id)!;
+        return this.refresh(current, current.members[0]!.user);
       })));
       await this.deliver();
     } finally { this.busy = false; }
