@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -270,16 +270,39 @@ test("runtime consumes completed checkout declarations, never concurrent npm/bui
   } finally { f.close(); }
 });
 
-test("the caller can still terminate preparation and its children", () => {
+test("the caller can still terminate preparation and its children", async () => {
   const f = preparationFixture();
+  let child;
   try {
-    const result = spawnSync(timeout, ["--kill-after=1s", "0.2s", join(f.repo, "deploy/prepare")], {
-      env: { ...f.env, WORK_SECONDS: "2" }, encoding: "utf8", timeout: 2000,
+    // Startup deliberately exceeds the former 200ms cancellation timer.
+    f.executable(join(f.repo, "deploy/retain"), "/bin/sleep 0.3");
+    f.commit();
+    f.executable(join(f.bin, "sleep"), `printf 'ready %s\\n' "$PPID"
+exec /bin/sleep "$@"`);
+    child = spawn(timeout, ["--kill-after=1s", "10s", join(f.repo, "deploy/prepare")], {
+      env: { ...f.env, WORK_SECONDS: "30" }, stdio: ["ignore", "pipe", "pipe"],
     });
-    assert.equal(result.status, 124, result.stderr);
-    assert.doesNotMatch(result.stdout, /prepared Pi stack/);
-    assert.doesNotMatch(readFileSync(f.env.TRACE, "utf8"), /deadline/);
-  } finally { f.close(); }
+    let stdout = "", stderr = "", terminated = false;
+    child.stdout.setEncoding("utf8").on("data", chunk => {
+      stdout += chunk;
+      if (!terminated && stdout.match(/^ready \d+$/gm)?.length === 2) {
+        terminated = true;
+        child.kill("SIGTERM");
+      }
+    });
+    child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+    const result = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    assert.equal(terminated, true, `both preparation children must start before cancellation: ${stderr}`);
+    assert.deepEqual(result, { code: 124, signal: null }, stderr);
+    assert.doesNotMatch(stdout, /prepared Pi stack/);
+    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["builds", "runtime", "write-engine"]);
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    f.close();
+  }
 });
 
 test("preparation still refuses dirty source", () => {

@@ -1,13 +1,53 @@
 import { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { WatchList, watchInterval, loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
+import {
+  WatchList,
+  watchInterval,
+  loadThreadModelCatalog,
+  threadSettingsMetadata,
+  modelBrokerUrl,
+  createWorkspaceAdmission,
+  ORCHESTRATOR_CATALOG,
+  OrchestratorClient,
+  CompletionClient,
+  type CompletionInput,
+  catalogAgentType,
+  createSharedImageGenerationService,
+  resolveDelivery,
+  ThreadService,
+  ModelAvailabilityStore,
+  modelAvailabilityPath,
+  modelAvailabilityKey,
+  ThreadDirectory,
+  createThreadClient,
+  importRemoteThreads,
+  createSharedPiSessionOpener,
+  threadHttp,
+  admissionFor,
+  callerResolver,
+  hostIdentityConfig,
+  threadCapability,
+  type CallerSource,
+  type ThreadCreator,
+  type ThreadInspection,
+  type Thread,
+  type ThreadMessage,
+  type PiEvent,
+  type Result,
+  type SharedImageGenerationService,
+  THREAD_MODES,
+  type ThreadModeName,
+  type PlanUsageSnapshot,
+  type PersonalUsage,
+  readBrokerUsage,
+} from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -156,6 +196,15 @@ if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
+const modelAvailability = new ModelAvailabilityStore(modelAvailabilityPath());
+function availableThreadModels() {
+  const policy = modelAvailability.disabled();
+  observeError(db, "model-availability", policy.ok ? null : policy.error.message);
+  const offered = new Set([...THREAD_DESTINATIONS.values()].flatMap(destination => destination.models));
+  return [...new Map([...THREAD_MODELS.values()].filter(model => offered.has(model.id)).map(model => [model.id, model])).values()]
+    .map(model => ({ id: model.id, label: model.label, icon: model.icon, accent: model.accent,
+      enabled: policy.ok && !policy.value.has(modelAvailabilityKey(`${model.provider}/${model.modelId}`)) }));
+}
 // Live meeting threads answer in the room, so their first call must be quick. On September 28, 2026,
 // astra at low thinking placed live-research placeholders 5.8 s after a request, against 11.1 s at
 // the destination's high default; Sara chose it over sol at medium.
@@ -200,6 +249,7 @@ function noteModelRecency(thread: Thread, lookup: ThreadLookup = liveThread): bo
 }
 function threadStartProfiles() {
   const history = [...modelRecency.values()];
+  const enabled = new Set(availableThreadModels().filter(model => model.enabled).map(model => model.id));
   return [...THREAD_DESTINATIONS.values()].map((destination) => {
     const contextSources = destinationContextSources(destination);
     return {
@@ -208,7 +258,7 @@ function threadStartProfiles() {
       icon: destination.icon,
       accent: destination.accent,
       defaultModel: destination.defaultModel,
-      models: recentThreadModels(destination, history, THREAD_MODELS).map((id) => {
+      models: recentThreadModels(destination, history, THREAD_MODELS).filter(id => enabled.has(id)).map((id) => {
         const model = THREAD_MODELS.get(id);
         if (!model) throw new Error(`Unknown thread model ${id} in profile ${destination.id}`);
         return { id: model.id, label: model.label, icon: model.icon, accent: model.accent };
@@ -269,6 +319,7 @@ const capability = threadCapability();
 const callers = callerResolver({ capability, host: hostIdentityConfig() });
 const threads = new ThreadService({
   capability,
+  admitNewThread: settings => modelAvailability.admit(settings.model),
   attachSession: runner.attachSession,
   databasePath: join(DATA, "threads.sqlite3"),
   sessionsDir: join(DATA, "threads"),
@@ -535,6 +586,8 @@ async function buildDashboard(): Promise<Dashboard> {
     actions,
     machine: readMachineUsage(),
     modelCounts: agents.models,
+    modelAvailability: availableThreadModels(),
+    canManageModels: HOST_ADMINISTRATOR,
     people: peopleUsage,
     allowance,
   };
@@ -562,6 +615,10 @@ function refreshDashboard(): Promise<void> {
   dashboardRefreshes = run;
   return run;
 }
+watchFile(modelAvailability.path, { persistent: false, interval: 1_000 }, () => {
+  signalSync();
+  if (!shuttingDown && dashboardSubscribers()) void refreshDashboard();
+});
 const dashboardTicker = setInterval(() => {
   if (!dashboardBusy && dashboardSubscribers()) void refreshDashboard();
 }, DASHBOARD_TICK_MS);
@@ -1018,8 +1075,17 @@ function namingError(id: string, message: string | null) {
   const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
   if (result.changes) signalSync();
 }
+function clearPinnedThreadNaming(sessionId: string): boolean {
+  if (threads.get(sessionId)?.metadata?.titleSource !== "manual") return false;
+  reservedNames.delete(sessionId);
+  if (ownsSupervisorLease()) {
+    db.query("UPDATE thread_views SET naming_request=NULL WHERE id=? AND naming_request IS NOT NULL").run(sessionId);
+    namingError(sessionId, null);
+  }
+  return true;
+}
 async function nameThread(sessionId: string): Promise<void> {
-  if (namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
+  if (clearPinnedThreadNaming(sessionId) || namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
   namingThreads.add(sessionId);
   try {
     const row = sessionRow.get(sessionId);
@@ -1029,7 +1095,7 @@ async function nameThread(sessionId: string): Promise<void> {
     const messageCount = Number(view.message_count ?? 0);
     let receipt = view.naming_request ? JSON.parse(view.naming_request) as NamingReceipt : null;
     const attemptedBefore = Number(view.naming_attempted_count ?? 0);
-    const step = namingStep({ name: row.name, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt });
+    const step = namingStep({ name: row.name, titleSource: row.metadata?.titleSource, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt });
     if (step === "idle") { reservedNames.delete(sessionId); return; }
     // Naming reads the conversation from the context mirror. Until the mirror holds this thread's
     // messages there is nothing to title, and an empty prompt is a request no completion owner
@@ -1047,6 +1113,7 @@ async function nameThread(sessionId: string): Promise<void> {
       let output: string;
       try { output = await localThreadName(messages); }
       catch (cause) {
+        if (clearPinnedThreadNaming(sessionId)) return;
         if (!(cause instanceof EngineReservedError)) throw cause;
         // Maintenance is not a naming failure. Leave the thread due, keep it out of the error feed and
         // let the reconcile tick try again after the lease.
@@ -1055,10 +1122,11 @@ async function nameThread(sessionId: string): Promise<void> {
         if (ownsSupervisorLease()) namingError(sessionId, null);
         return;
       }
+      if (clearPinnedThreadNaming(sessionId)) return;
       reservedNames.delete(sessionId);
       const title = generatedThreadName(output);
       if (!ownsSupervisorLease() || shuttingDown) return;
-      unwrap(threads.update(sessionId, { title }));
+      unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
       db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(messageCount, sessionId);
       signalSync();
       return;
@@ -1077,8 +1145,9 @@ async function nameThread(sessionId: string): Promise<void> {
     }
     const submitted = step === "generate";
     let result = submitted ? await namingClient.submit(receipt.requestId, receipt.input) : await namingClient.get(receipt.requestId);
+    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
     if (!result.ok && result.error.code === "not-found") result = await namingClient.submit(receipt.requestId, receipt.input);
-    if (!ownsSupervisorLease() || shuttingDown) return;
+    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
     const outcome = namingOutcome(result);
     if (outcome.kind === "pending") { namingError(sessionId, null); return; }
     if (outcome.kind === "failed") {
@@ -1089,11 +1158,11 @@ async function nameThread(sessionId: string): Promise<void> {
     }
     db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
     const title = generatedThreadName(outcome.text);
-    unwrap(threads.update(sessionId, { title }));
+    unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
     db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(receipt.messageCount, sessionId);
     signalSync();
   } catch (cause) {
-    if (ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
+    if (!clearPinnedThreadNaming(sessionId) && ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
   } finally { namingThreads.delete(sessionId); }
 }
 function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId); }
@@ -1106,8 +1175,9 @@ function reconcileThreadNames() {
   const live = new Set<string>();
   for (const thread of threads.snapshot({ archived: false })) {
     live.add(thread.id);
+    if (clearPinnedThreadNaming(thread.id)) { due.delete(thread.id); continue; }
     const view = views.get(thread.id);
-    if (namingStep({ name: thread.title, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
+    if (namingStep({ name: thread.title, titleSource: thread.metadata?.titleSource, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
       attemptedCount: Number(view?.naming_attempted_count ?? 0), hasReceipt: !!view?.naming_request }) !== "idle") due.add(thread.id);
   }
   // An archived or departed thread will never be named again, so its last failure is not something
@@ -1746,7 +1816,7 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   if (previous) return { response: JSON.parse(previous.response), status: previous.status };
   const response = name === "compact"
     ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
-    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, "queue");
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}));
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
@@ -1860,7 +1930,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
+  else { ensureThreadView(db, change.threadId); clearPinnedThreadNaming(change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();
@@ -2249,6 +2319,22 @@ const server = Bun.serve<SocketData>({
         await refreshDashboard();
         return json({ governors });
       } catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
+    }
+    const modelAvailabilityUpdate = API.setModelAvailability.match(req.method, url.pathname);
+    if (modelAvailabilityUpdate) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change global model availability", 403);
+      const model = THREAD_MODELS.get(modelAvailabilityUpdate.id);
+      if (!model || !availableThreadModels().some(option => option.id === model.id)) return error("Unknown offered model", 404);
+      let body: unknown;
+      try { body = await readBody(req); }
+      catch { return error("Expected JSON with an enabled boolean", 400); }
+      if (!body || typeof body !== "object" || !("enabled" in body) || typeof body.enabled !== "boolean") return error("enabled must be a boolean", 400);
+      const saved = modelAvailability.set(`${model.provider}/${model.modelId}`, body.enabled);
+      if (!saved.ok) return threadError(saved.error);
+      signalSync();
+      pushBootstrap();
+      await refreshDashboard();
+      return json({ models: availableThreadModels() });
     }
     if (API.actions.match(req.method, url.pathname)) {
       try { return json({ actions: await machineActions.refresh() }); }
@@ -2691,7 +2777,7 @@ const server = Bun.serve<SocketData>({
         const text = String(body.text ?? "").trim();
         if (!text) return error("Prompt is empty");
         if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        const delivery = body.delivery ?? "queue";
+        const delivery = resolveDelivery(body);
         if (!["queue", "steer", "hardSteer"].includes(delivery)) return error("delivery must be queue, steer or hardSteer");
 
         const roomImages = body.includeMeetingImages === true && row.meeting_id
@@ -2824,7 +2910,8 @@ pruneUploadTransfers();
 // A naming attempt that failed leaves the thread parked until its next message, which never comes for
 // a finished conversation. Starting the supervisor is new evidence — a repaired release, a reachable
 // engine, a restored account — so every thread still carrying its number gets one more attempt.
-for (const thread of threads.snapshot({ archived: false })) {
+for (const thread of threads.snapshot()) {
+  if (clearPinnedThreadNaming(thread.id) || thread.metadata?.archived) continue;
   if (unnamedThread(thread.title)) db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
 }
 
@@ -2844,6 +2931,7 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  unwatchFile(modelAvailability.path);
   watchList.stop();
   stopAutoArchive();
   clearInterval(uploadPruner);

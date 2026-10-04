@@ -28,7 +28,7 @@ it("preserves an agent caller as parent and uses its authorized directory",async
 });
 
 it.each([
-  {senderId:undefined,selected:undefined,expected:"queue"},
+  {senderId:undefined,selected:undefined,expected:"steer"},
   {senderId:"caller",selected:undefined,expected:"steer"},
   ...["queue","steer","hardSteer"].map(selected=>({senderId:undefined,selected,expected:selected})),
   ...["steer","hardSteer"].map(selected=>({senderId:"caller",selected,expected:selected})),

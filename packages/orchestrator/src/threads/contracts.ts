@@ -117,7 +117,7 @@ export interface SendThread {
   replyTo?: string;
 }
 export function resolveDelivery(input: Pick<SendThread, "senderId" | "delivery">): Delivery {
-  return input.delivery ?? (input.senderId ? "steer" : "queue");
+  return input.delivery ?? "steer";
 }
 export interface ThreadList {
   id?: string;
@@ -184,6 +184,7 @@ export type ThreadControl =
   /** Unarchive a thread, or its whole subtree; `resume` continues the turns and held work its archive interrupted. */
   | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
+  | { threadId: string; action: "rename"; title: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   | { threadId: string; action: "cancelMessage"; messageId: string }
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }

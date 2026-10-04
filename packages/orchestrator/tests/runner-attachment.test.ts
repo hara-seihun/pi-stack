@@ -130,7 +130,7 @@ it("attaches, forwards commands and owns detach/close without needing a cwd or a
   expect(requests).toHaveLength(3);
 });
 
-it("delivers multi-megabyte and multi-line output across arbitrary chunk boundaries in linear time", async () => {
+it("delivers multi-megabyte and multi-line output across arbitrary chunk boundaries with linear scan work", async () => {
   const { opener, reference } = fixture(), events: PiEvent[] = [];
   await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
   // 24 MiB of text in 64 KiB writes. Quadratic rescanning grows with the square of the line.
@@ -149,13 +149,26 @@ it("delivers multi-megabyte and multi-line output across arbitrary chunk boundar
     // Odd-sized writes split UTF-8 sequences and put several lines in one chunk.
     for (let offset = 0; offset < bytes.length; offset += 65_521) socket.write(bytes.subarray(offset, offset + 65_521));
   });
-  const began = performance.now();
-  const connection = await opener.attachSession(reference, event => { if (event.type === "runner_attached") return; events.push(event); if (events.length === 3) done(); }, () => {});
-  await received;
-  // Linear parsing takes ~125 ms here; the quadratic loop took ~770 ms.
-  expect(performance.now() - began).toBeLessThan(400);
+  // Count the newline search range, not wall time shared with other publication
+  // checks. A spy would retain every growing input in the quadratic regression.
+  const indexOf = String.prototype.indexOf;
+  let scanned = 0;
+  String.prototype.indexOf = function (search, position = 0) {
+    const end = indexOf.call(this, search, position);
+    if (search === "\n") scanned += Math.max(0, (end < 0 ? this.length : end + 1) - position);
+    return end;
+  };
+  try {
+    const connection = await opener.attachSession(reference, event => { if (event.type === "runner_attached") return; events.push(event); if (events.length === 3) done(); }, () => {});
+    expect(connection).not.toBeNull();
+    await received;
+  } finally {
+    String.prototype.indexOf = indexOf;
+  }
+  // Each output character is scanned once, plus the small control/attach frames.
+  expect(scanned).toBeGreaterThanOrEqual(lines.length);
+  expect(scanned).toBeLessThanOrEqual(lines.length + 1024);
   expect((events[0] as { text?: string }).text).toBe(big);
   expect(events.slice(1).map(event => event.type)).toEqual(["agent_end", "turn_end"]);
   expect(events[1]!.emittedAt).toBe(1_790_000_000_123);
-  void connection;
 });

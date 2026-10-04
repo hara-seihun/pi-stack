@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,6 +15,7 @@ import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
+import { inputReceipts } from "./pi-input-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, POOLED_ACCOUNT_WAIT, resolveSessionModel } from "../extension/routing.js";
@@ -75,6 +78,8 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
   return piEnvironmentScope.run(env, async () => {
     const execution = new PiExecution(() => settle());
+    const inputWork = new AsyncLocalStorage<string>();
+    const workMessages = new WeakMap<object, string>();
     const extensions = options.args.flatMap((arg, index) => arg === "--extension" ? [resolve(options.cwd, options.args[index + 1])] : []);
     const agentDir = env.PI_CODING_AGENT_DIR ?? getAgentDir();
     const raw = isRawSession(options.args);
@@ -155,6 +160,28 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
       observeProviderRequests(created.session, output);
       execution.bind(created.session);
+      const session = created.session, agent = session.agent;
+      const prompt = session.prompt.bind(session);
+      const promptWork = new WeakMap<object, string>();
+      session.prompt = (text, options) => {
+        const workId = (options && promptWork.get(options)) ?? inputWork.getStore();
+        if (!workId) return prompt(text, options);
+        if (options) promptWork.set(options, workId);
+        return inputWork.run(workId, () => prompt(text, options));
+      };
+      const remember = (message: { role: string }) => {
+        const workId = inputWork.getStore();
+        if (workId && message.role === "user") workMessages.set(message, workId);
+      };
+      const agentPrompt = agent.prompt.bind(agent) as typeof agent.prompt;
+      agent.prompt = (input: string | AgentMessage | AgentMessage[], images?: ImageContent[]) => {
+        if (typeof input !== "string") for (const message of Array.isArray(input) ? input : [input]) remember(message);
+        return typeof input === "string" ? agentPrompt(input, images) : agentPrompt(input);
+      };
+      for (const name of ["steer", "followUp"] as const) {
+        const enqueue = agent[name].bind(agent);
+        agent[name] = message => { remember(message); enqueue(message); };
+      }
       created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });
       return { ...created, services, diagnostics: services.diagnostics };
@@ -179,18 +206,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     let replacing = false;
     let closed = false;
     function branch() { return runtime.session.sessionManager.getBranch(); }
-    function receipts() {
-      const acceptedWorkIds = new Set<string>(), completedWorkIds = new Set<string>();
-      for (const entry of branch()) {
-        if (entry.type !== "custom") continue;
-        const data = entry.data as { workId?: string; workIds?: string[] } | undefined;
-        if (entry.customType === "thread_input" && data?.workId) acceptedWorkIds.add(data.workId);
-        if (entry.customType === "thread_rejected" && data?.workId) acceptedWorkIds.delete(data.workId);
-        if (entry.customType === "thread_settled") for (const id of data?.workIds ?? []) completedWorkIds.add(id);
-        if (entry.customType === "thread_resume" && data?.workId) completedWorkIds.delete(data.workId);
-      }
-      return { acceptedWorkIds: [...acceptedWorkIds], completedWorkIds: [...completedWorkIds] };
-    }
+    function receipts() { return inputReceipts(branch()); }
     function lastAssistant() {
       const entries = branch();
       const settled = [...entries].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_settled");
@@ -217,14 +233,17 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       const final = entries.slice(firstInput < 0 ? entries.length : firstInput + 1).reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
       const message = final?.type === "message" ? final.message : null;
       const outcome = cancelled ? "cancelled" : message?.role === "assistant" && ["error", "aborted"].includes(message.stopReason) ? "failed" : "complete";
-      const workIds = [...activeWork];
+      const landed = new Set(receipts().landedWorkIds);
+      const deferredWorkIds = cancelled ? [...activeWork].filter(id => !landed.has(id)) : [];
+      const workIds = [...activeWork].filter(id => !deferredWorkIds.includes(id));
+      if (deferredWorkIds.length) runtime.session.sessionManager.appendCustomEntry("thread_deferred", { workIds: deferredWorkIds });
       if (workIds.length) runtime.session.sessionManager.appendCustomEntry("thread_settled", { workIds, outcome, assistantEntryId: final?.id ?? null });
       checkpointPiSession(runtime.session.sessionManager);
       activeWork.clear();
       executionStart = undefined;
       // Cancellation discards Pi's deferred inputs without a response; release their dispatch order with the receipt.
       for (const id of [...pendingInputs.keys()]) acknowledge(id);
-      output({ type: "agent_settled", workIds, outcome, lastAssistantMessage: message });
+      output({ type: "agent_settled", workIds, deferredWorkIds, outcome, lastAssistantMessage: message });
       settleExecutionActivity(activity);
     }
     async function halt(): Promise<void> {
@@ -294,6 +313,14 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         if (event.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(event.method))) dialogs.add(String(event.id));
         if (event.type === "agent_start" && executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
         if (event.type === "agent_settled") { queueMicrotask(() => settle()); return; }
+        if (event.type === "message_start" && (event.message as { role?: string })?.role === "user") {
+          const workId = workMessages.get(event.message as object);
+          if (workId) {
+            runtime.session.sessionManager.appendCustomEntry("thread_landed", { workId });
+            checkpointPiSession(runtime.session.sessionManager);
+            event = { ...event, inputWorkId: workId };
+          }
+        }
         if (event.type === "message_end") checkpointPiSession(runtime.session.sessionManager);
         output(event);
       } });
@@ -344,7 +371,16 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             if (command.workId) {
               const workId = String(command.workId);
               const existing = receipts();
-              if (existing.acceptedWorkIds.includes(workId)) {
+              const redelivery = existing.deferredWorkIds.includes(workId) || existing.acceptedWorkIds.includes(workId)
+                && !existing.landedWorkIds.includes(workId) && !existing.completedWorkIds.includes(workId) && !activeWork.has(workId);
+              if (redelivery) {
+                const receipt = [...branch()].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_input" && (entry.data as { workId?: string }).workId === workId);
+                if (receipt?.type === "custom") {
+                  const original = receipt.data as { message: string; images?: unknown };
+                  command = { ...command, message: original.message, images: original.images };
+                }
+              }
+              if (existing.acceptedWorkIds.includes(workId) && !redelivery) {
                 const settled = [...branch()].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_settled" && (entry.data as {workIds?:string[]}).workIds?.includes(workId));
                 const last = lastAssistant();
                 const capacityResume = command.resumeProviderWait === true && settled?.type === "custom"
@@ -372,7 +408,9 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             if (command.type === "prompt" && (execution.active || !runtime.session.isIdle || executionStart !== undefined) && !(command.streamingBehavior && runtime.session.isStreaming)) { response(false, "Cannot overlap active Pi execution"); return; }
             if (command.workId) {
               const workId = String(command.workId);
-              runtime.session.sessionManager.appendCustomEntry("thread_input", { workId, message: command.message, images: command.images, delivery: command.type });
+              const original = branch().some(entry => entry.type === "custom" && entry.customType === "thread_input" && (entry.data as { workId?: string }).workId === workId);
+              runtime.session.sessionManager.appendCustomEntry(original ? "thread_redelivery" : "thread_input", original ? { workId }
+                : { workId, message: command.message, images: command.images, delivery: command.type, receiptVersion: 2 });
               if (executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
               activeWork.add(workId);
               checkpointPiSession(runtime.session.sessionManager);
@@ -420,7 +458,8 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
               output({ type: "compaction_end", commandId: command.id, success: false, error: String(error) });
               output({ type: "command_settled", commandId: command.id, response: event });
             });
-          } else await rpc.command(command);
+          } else if (inputCommands.has(command.type) && command.workId) await inputWork.run(String(command.workId), () => rpc.command(command));
+          else await rpc.command(command);
           checkpointPiSession(runtime.session.sessionManager);
         }),
         close: () => piEnvironmentScope.run(env, async () => {

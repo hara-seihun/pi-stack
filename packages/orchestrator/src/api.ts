@@ -24,6 +24,7 @@ export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, Th
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { ThreadService } from "./threads/service.js";
 export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";
+export { ModelAvailabilityStore, modelAvailabilityPath, modelAvailabilityKey } from "./threads/model-availability.js";
 export { threadSettingsMetadata } from "./threads/settings-metadata.js";
 export { THREAD_MODES, threadMode, type ThreadMode, type ThreadModeName } from "./threads/modes.js";
 export { loadThreadModelCatalog, type ThreadModelCatalog, type ThreadModelMetadata } from "./threads/model-catalog.js";

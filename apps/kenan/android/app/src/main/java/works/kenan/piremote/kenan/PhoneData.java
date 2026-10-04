@@ -133,11 +133,12 @@ public final class PhoneData {
     public static JSONObject capabilities(Context c) {
         DevicePolicyManager dpm = c.getSystemService(DevicePolicyManager.class);
         boolean owner = dpm != null && dpm.isDeviceOwnerApp(c.getPackageName());
+        boolean location = granted(c, Manifest.permission.ACCESS_COARSE_LOCATION) && granted(c, Manifest.permission.ACCESS_FINE_LOCATION);
         return json("allFiles", Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager(),
             "contacts", granted(c, Manifest.permission.READ_CONTACTS) && granted(c, Manifest.permission.WRITE_CONTACTS),
             "calendar", granted(c, Manifest.permission.READ_CALENDAR) && granted(c, Manifest.permission.WRITE_CALENDAR),
-            "location", granted(c, Manifest.permission.ACCESS_COARSE_LOCATION) || granted(c, Manifest.permission.ACCESS_FINE_LOCATION),
-            "backgroundLocation", Build.VERSION.SDK_INT < 29 || granted(c, Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+            "location", location,
+            "backgroundLocation", location && (Build.VERSION.SDK_INT < 29 || granted(c, Manifest.permission.ACCESS_BACKGROUND_LOCATION)),
             "sms", granted(c, Manifest.permission.READ_SMS) && granted(c, Manifest.permission.SEND_SMS),
             "callLog", granted(c, Manifest.permission.READ_CALL_LOG), "phone", granted(c, Manifest.permission.CALL_PHONE),
             "camera", granted(c, Manifest.permission.CAMERA), "microphone", granted(c, Manifest.permission.RECORD_AUDIO),

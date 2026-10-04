@@ -30,7 +30,7 @@ A failed execution is a notice in the thread's own transcript and an unread mark
 
 ## Messages and controls
 
-People send with `queue`, `steer` or `hardSteer`, and the composer defaults to `queue`. Agents steer or hard steer; queueing is not available to them, so an agent's message always reaches a boundary rather than waiting behind a turn. The service owns admission and dispatch receipts. A pending message is `queued` until the runtime takes it and `dispatched` after that; whether the thread is holding is the thread's fact, and the client words it.
+People send with `queue`, `steer` or `hardSteer`, and the composer defaults to `steer`. Agents steer or hard steer; queueing is not available to them, so an agent's message always reaches a boundary rather than waiting behind a turn. The service owns admission and dispatch receipts. A pending message is `queued` until the runtime takes it and `dispatched` after that; whether the thread is holding is the thread's fact, and the client words it.
 
 - Queue waits for the recipient's execution to finish.
 - Steer waits for the current local tools without cancelling them.
