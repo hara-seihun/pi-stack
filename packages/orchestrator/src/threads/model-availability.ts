@@ -1,11 +1,11 @@
-import { readFileSync, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, mkdirSync, writeFileSync, chmodSync, renameSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import type { Result } from "./contracts.js";
 
-export function modelAvailabilityPath(agentDir: string): string {
-  return join(agentDir, "model-availability.json");
+export function modelAvailabilityPath(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PI_STACK_MODEL_AVAILABILITY_PATH ?? "/var/lib/pi-stack/model-availability/policy.json";
 }
 
 export function modelAvailabilityKey(model: string): string {
@@ -54,7 +54,8 @@ export class ModelAvailabilityStore {
     const temporary = `${this.path}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dirname(this.path), { recursive: true });
-      writeFileSync(temporary, JSON.stringify({ version: 1, disabled: [...disabled].sort() }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+      writeFileSync(temporary, JSON.stringify({ version: 1, disabled: [...disabled].sort() }, null, 2) + "\n", { mode: 0o644, flag: "wx" });
+      chmodSync(temporary, 0o644);
       renameSync(temporary, this.path);
       return { ok: true, value: undefined };
     } catch (cause) {

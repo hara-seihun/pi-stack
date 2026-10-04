@@ -1,8 +1,8 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelAvailabilityStore } from "../src/threads/model-availability.js";
+import { ModelAvailabilityStore, modelAvailabilityPath } from "../src/threads/model-availability.js";
 import { ThreadService } from "../src/threads/service.js";
 import type { Result } from "../src/threads/contracts.js";
 
@@ -26,11 +26,18 @@ function service(root: string, store: ModelAvailabilityStore) {
   services.push(owner); return owner;
 }
 
-it("persists desired state across owners and closes physical and numbered-alias bypasses", () => {
+it("uses one host-global policy path with explicit fixture isolation", () => {
+  expect(modelAvailabilityPath({})).toBe("/var/lib/pi-stack/model-availability/policy.json");
+  expect(modelAvailabilityPath({ USER: "sybil", HOME: "/home/sybil", PI_AGENT_DIR: "/home/sybil/.pi/agent" })).toBe(modelAvailabilityPath({ USER: "kenan", HOME: "/home/kenan" }));
+  expect(modelAvailabilityPath({ PI_STACK_MODEL_AVAILABILITY_PATH: "/tmp/fixture.json" })).toBe("/tmp/fixture.json");
+});
+
+it("persists globally readable desired state across owners and closes physical and numbered-alias bypasses", () => {
   const { root, store } = fixture();
   value(store.admit("astra"));
   value(store.set("astra", false));
   value(store.set("anthropic-3/claude-fable-5-1", false));
+  expect(statSync(store.path).mode & 0o777).toBe(0o644);
   const other = new ModelAvailabilityStore(store.path);
   for (const model of ["astra", "ASTRA", "gpt-6-astra", "openai-codex/gpt-6-astra", "openai-codex-12/gpt-6-astra", "fable", "anthropic/claude-fable-5-1"])
     expect(other.admit(model)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
@@ -40,8 +47,8 @@ it("persists desired state across owners and closes physical and numbered-alias 
   expect(store.admit("fable").ok).toBe(false);
   value(other.set("astra", true));
   expect(JSON.parse(readFileSync(store.path, "utf8")).disabled).toEqual(["anthropic/claude-fable-5-1"]);
-  const separate = new ModelAvailabilityStore(join(root, "another-person.json"));
-  value(separate.admit("fable"));
+  const separateFixture = new ModelAvailabilityStore(join(root, "another-host.json"));
+  value(separateFixture.admit("fable"));
 });
 
 it("rejects fresh roots and children without changing existing threads or accepted request receipts", async () => {
@@ -52,6 +59,8 @@ it("rejects fresh roots and children without changing existing threads or accept
   expect(value(await owner.spawn(request)).id).toBe(existing.id);
   expect(await owner.spawn({ ...request, id: "rejected", requestId: "rejected" })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
   expect(owner.get("rejected")).toBeNull();
+  const anotherPersonOwner = service(join(root, "another-person"), new ModelAvailabilityStore(store.path));
+  expect(await anotherPersonOwner.spawn({ requestId: "global-rejected", cwd: root, settings: { model: "astra" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
   const settings = value(await owner.control({ threadId: existing.id, action: "settings", settings: { thinkingLevel: "low" } }));
   expect(settings.settings.model).toBe("openai-codex/gpt-6-astra");
   expect(settings.settings.thinkingLevel).toBe("low");

@@ -50,6 +50,21 @@ NODE
 }
 normalize_model_defaults
 
+reconcile_model_availability() {
+  local fleet path group
+  fleet=$(pi_stack_fleet_user)
+  [[ -n $fleet ]] || return 0
+  if [[ -n ${PI_STACK_ORCHESTRATOR_DEST:-} && -z ${PI_STACK_MODEL_AVAILABILITY_PATH:-} ]]; then return 0; fi
+  path=${PI_STACK_MODEL_AVAILABILITY_PATH:-/var/lib/pi-stack/model-availability/policy.json}
+  group=$(id -gn "$fleet")
+  pi_stack_as_root install -d -m 755 -o "$fleet" -g "$group" "$(dirname "$path")"
+  if [[ -e $path ]]; then
+    pi_stack_as_root chown "$fleet:$group" "$path"
+    pi_stack_as_root chmod 644 "$path"
+  fi
+}
+reconcile_model_availability
+
 # The fleet user's operator config names the lane manifest. A release whose
 # daemon cannot parse the live manifest must not be selected.
 validate_manifest() {

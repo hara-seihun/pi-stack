@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
@@ -155,7 +155,7 @@ if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
-const modelAvailability = new ModelAvailabilityStore(modelAvailabilityPath(AGENT_DIR));
+const modelAvailability = new ModelAvailabilityStore(modelAvailabilityPath());
 function availableThreadModels() {
   const policy = modelAvailability.disabled();
   observeError(db, "model-availability", policy.ok ? null : policy.error.message);
@@ -538,6 +538,7 @@ async function buildDashboard(): Promise<Dashboard> {
     machine: readMachineUsage(),
     modelCounts: agents.models,
     modelAvailability: availableThreadModels(),
+    canManageModels: HOST_ADMINISTRATOR,
     people: peopleUsage,
     allowance,
   };
@@ -565,6 +566,10 @@ function refreshDashboard(): Promise<void> {
   dashboardRefreshes = run;
   return run;
 }
+watchFile(modelAvailability.path, { persistent: false, interval: 1_000 }, () => {
+  signalSync();
+  if (!shuttingDown && dashboardSubscribers()) void refreshDashboard();
+});
 const dashboardTicker = setInterval(() => {
   if (!dashboardBusy && dashboardSubscribers()) void refreshDashboard();
 }, DASHBOARD_TICK_MS);
@@ -2246,6 +2251,7 @@ const server = Bun.serve<SocketData>({
     }
     const modelAvailabilityUpdate = API.setModelAvailability.match(req.method, url.pathname);
     if (modelAvailabilityUpdate) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change global model availability", 403);
       const model = THREAD_MODELS.get(modelAvailabilityUpdate.id);
       if (!model || !availableThreadModels().some(option => option.id === model.id)) return error("Unknown offered model", 404);
       let body: unknown;
@@ -2853,6 +2859,7 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  unwatchFile(modelAvailability.path);
   watchList.stop();
   stopAutoArchive();
   clearInterval(uploadPruner);

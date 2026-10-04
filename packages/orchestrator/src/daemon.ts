@@ -77,7 +77,7 @@ export class Daemon {
     this.opener=createSharedPiSessionOpener({dataDir,durable:true});
     this.callers=callerResolver({capability:this.capability,host:hostIdentityConfig()});
     this.threads=new ThreadService({workersOnly:true,databasePath:threadDatabasePath,sessionsDir:join(dataDir,"threads"),capability:this.capability,
-      admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath(config.agentDir)).admit(settings.model),
+      admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
       attachSession:this.opener.attachSession,
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
@@ -286,7 +286,7 @@ export class Daemon {
     if(!service){
       const dataDir=join(dirname(this.ledgerPath),"applications",id);
       service=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),capability:this.capability,
-        admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath(this.config.agentDir)).admit(settings.model),
+        admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
         attachSession:this.opener.attachSession,
         openSession:(options,output,exit)=>this.opener.openSession({...options,args:[...options.args,"--orchestrator-context",JSON.stringify(context)]},output,exit),
         environment:thread=>({...this.threadEnvironment(thread),PI_THREAD_API_URL:`http://127.0.0.1:${this.port}/v1/applications/${id}/threads`}),

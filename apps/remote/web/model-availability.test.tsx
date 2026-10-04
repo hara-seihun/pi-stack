@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ModelAvailabilityControls, setModelAvailability } from "./src/features/machine/Models";
+import { Models, ModelAvailabilityControls, setModelAvailability } from "./src/features/machine/Models";
 
 const models = [
   { id: "openai/gpt-astra", label: "Astra", icon: "openai", enabled: false },
@@ -32,18 +32,49 @@ test("availability sends an idempotent desired state and encoded provider/model 
   }
 });
 
-test("switches retain authoritative states during saves and failed updates", () => {
+test("administrator switches retain authoritative states during saves and failed updates", () => {
   const html = renderToStaticMarkup(createElement(ModelAvailabilityControls, {
     models,
+    canManage: true,
     changes: {
       [models[0]!.id]: { pending: true, error: "" },
       [models[1]!.id]: { pending: false, error: "Could not save model policy" },
     },
     onSet() {},
   }));
-  expect(html).toContain('role="switch" aria-label="Astra for new threads" aria-checked="false" aria-busy="true" disabled=""');
-  expect(html).toContain('role="switch" aria-label="Opus for new threads" aria-checked="true"');
+  expect(html).toContain('role="switch" aria-label="Astra for everyone&#x27;s new threads" aria-checked="false" aria-busy="true" disabled=""');
+  const switches = html.match(/<button[^>]*role="switch"[^>]*>/g)!;
+  expect(switches).toHaveLength(2);
+  expect(switches[1]).toContain('aria-checked="true"');
+  expect(switches[1]).not.toContain('disabled=""');
   expect(html).toContain("Disabled · Saving…");
   expect(html).toContain('role="alert">Could not save model policy');
   expect(html).toContain('aria-label="Dismiss Opus availability error"');
+});
+
+test("nonadministrators and missing capabilities show global states read-only", () => {
+  for (const canManage of [false, undefined]) {
+    const html = renderToStaticMarkup(createElement(Models, { models, canManage }));
+    const switches = html.match(/<button[^>]*role="switch"[^>]*>/g)!;
+    expect(switches).toHaveLength(2);
+    expect(switches[0]).toContain('aria-checked="false"');
+    expect(switches[1]).toContain('aria-checked="true"');
+    for (const control of switches) expect(control).toContain('disabled=""');
+  }
+});
+
+test("only administrator controls dispatch desired state changes", () => {
+  for (const canManage of [true, false, undefined]) {
+    const changes: Array<[string, boolean]> = [];
+    const view = ModelAvailabilityControls({
+      models,
+      canManage,
+      changes: {},
+      onSet: (id, enabled) => changes.push([id, enabled]),
+    });
+    for (const row of view.props.children[2].props.children) {
+      row.props.children[0].props.onClick();
+    }
+    expect(changes).toEqual(canManage ? [[models[0]!.id, true], [models[1]!.id, false]] : []);
+  }
 });

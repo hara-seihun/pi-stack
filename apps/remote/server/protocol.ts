@@ -290,8 +290,10 @@ export interface Dashboard {
   plans: PlanCard[];
   governors: GovernorControls | null;
   actions: MachineActionState[];
-  /** Person-owned availability for new threads; existing threads are unaffected. */
+  /** Host-global availability for everyone's new threads; existing threads are unaffected. */
   modelAvailability?: ModelAvailability[];
+  /** Only the host's administrator may change model availability. */
+  canManageModels?: boolean;
   machine: MachineUsage | null;
   modelCounts: AgentModelCount[];
   /** Null for everyone except the host's administrator. */
