@@ -25,6 +25,6 @@ export function StatusPill({ status, compact = false, children, className = "" }
     <span className="status-primary"><span className="status-label">{compact ? status.short : status.label}</span>
       {timing.elapsed && !(compact && timing.quiet) && <span className="status-elapsed">{timing.elapsed}</span>}{children}</span>
     {timing.quiet && <span className="status-quiet">{timing.quiet}</span>}
-    {!compact && status.key === "error" && status.title && <span className="status-error-detail">{status.title}</span>}
+    {!compact && (status.key === "error" || status.key === "reporting_error") && status.title && <span className="status-error-detail">{status.title}</span>}
   </span>;
 }

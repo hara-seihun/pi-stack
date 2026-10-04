@@ -5,16 +5,16 @@
 .status-quiet { color: var(--muted); font-weight: 400; white-space: normal; }
 .status-error-detail { font-weight: 400; white-space: normal; overflow-wrap: anywhere; }
 
-[data-status="running"] { --status-color: var(--status-held); }
+[data-status="queued"], [data-status="admitting"], [data-status="starting"], [data-status="preparing"], [data-status="finishing"], [data-status="cancelling"], [data-status="recovering"] { --status-color: var(--status-running); }
 [data-status="responding"], [data-status="preparing_tool"], [data-status="waiting_for_model"] { --status-color: var(--status-running); }
 [data-status="thinking"] { --status-color: var(--status-thinking); }
 [data-status="tool"] { --status-color: var(--status-tool); }
 [data-status="compacting"], [data-status="retrying"] { --status-color: var(--status-running); }
 [data-status="awaiting"] { --status-color: var(--status-awaiting); }
 [data-status="stopped"], [data-status="stopping"], [data-status="waiting_for_capacity"], [data-status="waiting_to_retry"] { --status-color: var(--status-held); }
-[data-status="error"] { --status-color: var(--danger); }
+[data-status="error"], [data-status="reporting_error"] { --status-color: var(--danger); }
 [data-status="idle"], [data-status="archived"] { --status-color: var(--status-idle); }
 [data-status="offline"] { --status-color: var(--status-offline); }
-.status-pill[data-status="error"], .status-pill[data-status="stopping"], .status-pill[data-status="waiting_for_capacity"], .status-pill[data-status="waiting_to_retry"], .status-pill[data-status="responding"], .status-pill[data-status="preparing_tool"], .status-pill[data-status="waiting_for_model"], .status-pill[data-status="running"], .status-pill[data-status="thinking"], .status-pill[data-status="tool"], .status-pill[data-status="compacting"], .status-pill[data-status="retrying"], .status-pill[data-status="awaiting"], .status-pill[data-status="stopped"] { color: var(--status-color); }
+.status-pill[data-status="queued"], .status-pill[data-status="admitting"], .status-pill[data-status="starting"], .status-pill[data-status="preparing"], .status-pill[data-status="finishing"], .status-pill[data-status="cancelling"], .status-pill[data-status="recovering"], .status-pill[data-status="reporting_error"], .status-pill[data-status="error"], .status-pill[data-status="stopping"], .status-pill[data-status="waiting_for_capacity"], .status-pill[data-status="waiting_to_retry"], .status-pill[data-status="responding"], .status-pill[data-status="preparing_tool"], .status-pill[data-status="waiting_for_model"], .status-pill[data-status="thinking"], .status-pill[data-status="tool"], .status-pill[data-status="compacting"], .status-pill[data-status="retrying"], .status-pill[data-status="awaiting"], .status-pill[data-status="stopped"] { color: var(--status-color); }
 .model-glyph { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 13px; line-height: 1; }
 .model-glyph.initial { background: var(--surface-3); color: var(--text); font-size: 11px; font-weight: 800; }

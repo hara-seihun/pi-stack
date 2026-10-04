@@ -2,21 +2,37 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "../server/protocol";
-import { activityTiming, threadStatus } from "./src/features/status/thread-status";
+import { activityTiming, threadStatus, roomThreadStatus } from "./src/features/status/thread-status";
 import { StatusPill } from "./src/features/status/StatusPill";
 
 const running = (patch: Partial<Session> = {}) => ({
   state: "running" as const, held: false, activity: "running" as const, activeTools: [], idleUnread: false, archivedAt: null, ...patch,
 });
 
-test("lifecycle alone and tool phase without a tool expose missing evidence", () => {
+test("missing owned phase or tool identity is an instrumentation defect, never a normal unknown state", () => {
   for (const session of [running(), running({ activity: "waiting_on_tool" })]) {
     const status = threadStatus(session);
-    expect(status.label).toBe("Activity unknown");
+    expect(status.key).toBe("reporting_error");
+    expect(status.attention).toBe(true);
     expect(status.title).toBeTruthy();
     expect(status.busy).toBe(true);
-    expect(status.label).not.toMatch(/Thinking|Working|Failed/);
+    expect(status.label).not.toMatch(/Thinking|Working|unknown/);
   }
+});
+
+test("every owned machine boundary has a distinct interpretable status", () => {
+  const phases: Session["activity"][] = ["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_tool", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"];
+  const statuses = phases.map(activity => threadStatus(running({ activity, activeTools: ["bash"] })));
+  expect(new Set(statuses.map(status => status.key)).size).toBe(phases.length);
+  for (const status of statuses) {
+    expect(status.attention).toBe(false);
+    expect(status.label).not.toMatch(/Working|unknown/);
+  }
+});
+
+test("room statuses use the room owner's evidence, including status retrieval failures", () => {
+  expect(roomThreadStatus({ id: "room", title: "Room", members: [], state: "running", activity: "waiting_for_model", activeTools: [] })).toMatchObject({ key: "waiting_for_model" });
+  expect(roomThreadStatus({ id: "room", title: "Room", members: [], state: "running", activity: "status_error", error: "Room owner cannot be reached" })).toMatchObject({ key: "reporting_error", attention: true });
 });
 
 test("reported generation and request waits remain distinct from executing tools", () => {

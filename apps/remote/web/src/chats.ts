@@ -5,7 +5,7 @@ import type { MessagingBackendInfo, MessagingConversation, MessagingSnapshot } f
 import type { Session, ThreadStart } from "./types";
 import { messagingAvatarUrl } from "./messaging-avatar";
 import { conversationThreads } from "./thread-state";
-import { attentionRank, threadStatus, UNKNOWN_ACTIVITY, type ThreadStatus } from "./features/status/thread-status";
+import { attentionRank, threadStatus, roomThreadStatus, type ThreadStatus } from "./features/status/thread-status";
 
 export type Chat =
   | { id: ChatId; kind: "ai"; title: string; icon: string; label: string; session: Session }
@@ -52,9 +52,9 @@ export function inboxRow(chat: Chat): InboxRow {
   if (chat.kind === "room") {
     const busy = chat.room.state === "running";
     const attention = (chat.room.unreadCount ?? 0) > 0 || (chat.room.pendingQuestions ?? 0) > 0;
-    const status: ThreadStatus = busy ? { ...UNKNOWN_ACTIVITY, attention }
-      : { key: "idle", label: "Idle", short: "Idle", busy, attention };
-    return { chat, section: attention ? "attention" : busy ? "working" : "quiet", status, rank: attention ? 3 : busy ? 10 : 22, updatedAt: chat.room.updatedAt ?? 0 };
+    const reported = roomThreadStatus(chat.room);
+    const status: ThreadStatus = { ...reported, attention: attention || reported.attention };
+    return { chat, section: status.attention ? "attention" : busy ? "working" : "quiet", status, rank: reported.attention ? attentionRank(reported) : attention ? 3 : busy ? 10 : 22, updatedAt: chat.room.updatedAt ?? 0 };
   }
   const { section, rank } = humanStatus(chat.conversation, chat.backend);
   return { chat, section, status: null, rank, updatedAt: chat.conversation.updatedAt || 0 };
