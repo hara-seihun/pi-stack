@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { phoneGrants, requestPhoneAccess } from "./src/phone-access";
+import { allPermissionsGranted, phoneGrants, requestPhoneAccess } from "./src/phone-access";
 import type { PhoneSetupStep, PhoneStatus } from "./src/native";
 
 function fixture(missing: PhoneSetupStep[]) {
@@ -44,6 +44,7 @@ test("denial and unavailable system screens do not stop remaining requests or cl
   };
   const result = await requestPhoneAccess(f.driver);
   expect(f.requests).toEqual(["sms", "contacts", "calendar"]);
+  expect(result.granted).toBe(false);
   expect(result.failures.sms).toContain("Restricted by Android");
   expect(result.status.capabilities.contacts).toBe(false);
   expect(result.status.capabilities.calendar).toBe(true);
@@ -66,4 +67,36 @@ test("unmount, stop or identity change while settings is open prevents any furth
   f.driver.request = async step => { f.requests.push(step); f.stop(); };
   expect((await requestPhoneAccess(f.driver)).completed).toBe(false);
   expect(f.requests).toEqual(["accessibility"]);
+});
+
+test("readiness requires every app grant including both accessibility services", async () => {
+  const f = fixture([]);
+  expect(allPermissionsGranted(f.status)).toBe(true);
+  for (const { step } of phoneGrants) {
+    f.status.capabilities[step] = false;
+    expect(allPermissionsGranted(f.status)).toBe(false);
+    f.status.capabilities[step] = true;
+  }
+  delete f.status.capabilities.writeAccessibility;
+  expect(allPermissionsGranted(f.status)).toBe(false);
+  f.status.capabilities.writeAccessibility = true;
+  expect((await requestPhoneAccess(f.driver)).granted).toBe(true);
+  expect(f.requests).toEqual([]);
+});
+
+test("Write settings return is awaited and denied Write access never becomes ready", async () => {
+  const f = fixture(["writeAccessibility", "notifications"]);
+  let returned!: () => void;
+  f.driver.request = async step => {
+    f.requests.push(step);
+    if (step === "writeAccessibility") await new Promise<void>(resolve => { returned = resolve; });
+    else f.status.capabilities[step] = true;
+  };
+  const result = requestPhoneAccess(f.driver);
+  await Promise.resolve(); await Promise.resolve();
+  expect(f.requests).toEqual(["writeAccessibility"]);
+  returned();
+  expect((await result).completed).toBe(true);
+  expect((await result).granted).toBe(false);
+  expect(f.requests).toEqual(["writeAccessibility", "notifications"]);
 });

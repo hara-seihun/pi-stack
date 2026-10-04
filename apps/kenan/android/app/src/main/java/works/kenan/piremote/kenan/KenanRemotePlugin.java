@@ -90,19 +90,11 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PluginMethod
     public void writeStatus(PluginCall call) {
-        android.view.accessibility.AccessibilityManager manager =
-            (android.view.accessibility.AccessibilityManager) getContext().getSystemService(android.content.Context.ACCESSIBILITY_SERVICE);
-        boolean accessibility = false;
-        for (android.accessibilityservice.AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(
-            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
-            if (info.getResolveInfo().serviceInfo.packageName.equals(getContext().getPackageName())
-                && info.getResolveInfo().serviceInfo.name.equals(WriteAccessibilityService.class.getName())) accessibility = true;
-        }
         call.resolve(new JSObject()
             .put("microphone", getPermissionState("microphone") == PermissionState.GRANTED)
-            .put("notification", Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED)
+            .put("notification", NativeAccess.notifications(getContext()))
             .put("overlay", Settings.canDrawOverlays(getContext()))
-            .put("accessibility", accessibility)
+            .put("accessibility", NativeAccess.accessibility(getContext(), WriteAccessibilityService.class))
             .put("battery", ((android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE))
                 .isIgnoringBatteryOptimizations(getContext().getPackageName()))
             .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true))
@@ -251,8 +243,9 @@ public final class KenanRemotePlugin extends Plugin {
                     } else requestPermissionForAlias(step, call, "phonePermission");
                     return;
                 }
-                case "accessibility" -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                    .putExtra(Intent.EXTRA_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneAccessibilityService.class).flattenToString()));
+                case "accessibility", "writeAccessibility" -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .putExtra(Intent.EXTRA_COMPONENT_NAME, new android.content.ComponentName(getContext(),
+                        step.equals("writeAccessibility") ? WriteAccessibilityService.class : PhoneAccessibilityService.class).flattenToString()));
                 case "notificationAccess" -> openPhoneSettings(call, new Intent(Build.VERSION.SDK_INT >= 30 ? Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS : Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
                     .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneNotificationService.class).flattenToString()));
                 case "overlay" -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -265,6 +258,8 @@ public final class KenanRemotePlugin extends Plugin {
                 }
                 case "usage" -> openPhoneSettings(call, new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
                 case "writeSettings" -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                case "installPackages" -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getContext().getPackageName())));
                 case "deviceAdmin" -> openPhoneSettings(call, new Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
                     .putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, new android.content.ComponentName(getContext(), PhoneAdminReceiver.class))
                     .putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Optional remote screen locking. Factory reset requires separate Device Owner provisioning, not this grant."));
@@ -435,7 +430,7 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PermissionCallback
     private void notificationPermission(PluginCall call) {
-        boolean granted = Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED;
+        boolean granted = NativeAccess.notifications(getContext());
         boolean enabled = granted && NotificationIdentity.get(getContext()).current() != null;
         getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", enabled).apply();
         if (enabled) startNotifications();
@@ -454,7 +449,7 @@ public final class KenanRemotePlugin extends Plugin {
             RemoteSession.Identity identity = state.current();
             if (identity == null || !identity.user.equals(call.getString("user", ""))
                 || !getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
-                || !androidx.core.app.NotificationManagerCompat.from(getContext()).areNotificationsEnabled()) {
+                || !NativeAccess.notifications(getContext())) {
                 call.resolve();
                 return;
             }
