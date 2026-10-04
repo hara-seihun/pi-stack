@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
 import { oneKenanEnabled } from "./config.js";
 import { prepareMemoryEnvironment } from "./session.js";
 import { infrastructureReason, reportInfrastructure, type InfrastructureReporter } from "./diagnostics.js";
-import { KENAN_ROOT_DEFAULT_PORT, MEMORY_TOKEN_HEADER, MEMORY_READ_DETAIL, type MemoryClient, type MemoryRead, type MemoryRequest, type MemoryResult, type ReadContext } from "./contract.js";
+import { KENAN_ROOT_DEFAULT_PORT, KENAN_REQUEST_HEADER, KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, MEMORY_READ_DETAIL, type MemoryClient, type MemoryRead, type MemoryRequest, type MemoryResult, type ReadContext } from "./contract.js";
 export const MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure"];
 const strings = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 });
 const optionalTime = Type.Optional(Type.String());
@@ -60,29 +60,45 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     const failure = (result: MemoryResult<unknown>) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result }, isError: true });
     if (!root) {
       pi.registerTool(defineTool({ name: "ask_kenan", label: "Ask Kenan",
-        description: "Ask privileged Kenan about cross-person memory or resources. Only his reply returns. Your authenticated session fixes who asks and the full room audience; you cannot set his prompt, model, tools or context.",
-        parameters: Type.Object({ request: Type.String({ minLength: 1, maxLength: 100_000 }) }),
-        execute: async (_id, input, signal) => {
+        description: "Ask privileged Kenan about cross-person memory or resources with {request}. A pending receipt returns a requestId; the chosen reply or safe terminal status arrives automatically in this thread, so continue other work. Optional recovery with {requestId} alone retrieves that same request without a new model session or repeating actions. Only his chosen reply or public request status returns. Your authenticated session fixes who asks and the full room audience; you cannot set his prompt, model, tools or context. Never resubmit an uncertain request.",
+        parameters: Type.Object({ request: Type.Optional(Type.String({ minLength: 1, maxLength: 100_000 })), requestId: Type.Optional(Type.String({ pattern: KENAN_REQUEST_ID_PATTERN })) }),
+        execute: async (id, input, signal): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> | undefined; isError?: boolean }> => {
+          if ((input.request === undefined) === (input.requestId === undefined) || input.requestId !== undefined && !new RegExp(KENAN_REQUEST_ID_PATTERN).test(input.requestId))
+            return failure({ ok: false, error: "invalid-request", message: "Supply either request to ask, or requestId alone to retrieve an existing request" });
           const session = await ensureSession();
           if (!session.ok) return failure(session);
           const started = performance.now();
           const report = options.report ?? reportInfrastructure;
-          const deadline = AbortSignal.timeout(options.rootTimeoutMs ?? 120_000);
+          const digest = createHash("sha256").update(JSON.stringify([options.env.PI_KENAN_MEMORY_PERSON, threadId, id])).digest("hex").slice(0, 32);
+          const requestId = input.requestId ?? `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20)}`;
+          const uncertain = (message: string) => {
+            const result = { ok: false as const, error: "unavailable" as const, message: `${message}. If recovery is needed, retrieve this request with ask_kenan({requestId:\"${requestId}\"}); do not resubmit the original request`, requestId };
+            return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result }, isError: true };
+          };
+          const deadline = AbortSignal.timeout(options.rootTimeoutMs ?? 20_000);
           const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
           try {
             const url = options.env.PI_KENAN_ROOT_URL ?? `http://127.0.0.1:${options.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT}`;
-            const response = await (options.rootTransport ?? fetch)(`${url}/v1/ask`, { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN! },
-              body: JSON.stringify(input), signal: combined });
+            if (combined.aborted) return uncertain("Kenan's privileged request was cancelled before submission");
+            const lookup = input.requestId !== undefined;
+            const response = await (options.rootTransport ?? fetch)(`${url}/v1/ask${lookup ? `/${requestId}` : ""}`, { method: lookup ? "GET" : "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN!, ...(!lookup ? { [KENAN_REQUEST_HEADER]: requestId } : {}) },
+              ...(!lookup ? { body: JSON.stringify({ request: input.request }) } : {}), signal: combined });
             if (!response.ok) {
               report({ component: "root-client", stage: "request", outcome: "failed", reason: "http-error", status: response.status, durationMs: Math.round(performance.now() - started) });
               await response.body?.cancel();
-              return failure({ ok: false, error: "unavailable", message: `Kenan's privileged context could not answer (HTTP ${response.status}); ordinary work can continue` });
+              return uncertain(`Kenan's privileged request is unavailable (HTTP ${response.status}); no action outcome is implied`);
             }
             const result = await response.json() as any;
+            if (result?.requestId === requestId && ["pending", "failed", "interrupted"].includes(result?.status)) {
+              const message = result.status === "pending" ? "Kenan accepted this request. The chosen reply or safe terminal status will arrive automatically in this thread; continue other work. requestId is for optional recovery, not resubmission" : "Kenan did not complete this request; actions may already have occurred. Do not resubmit it";
+              const receipt = { requestId, status: result.status, message };
+              report({ component: "root-client", stage: "request", outcome: "ok", status: response.status, durationMs: Math.round(performance.now() - started) });
+              return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], details: { rootRequest: receipt }, isError: result.status !== "pending" };
+            }
             const reply = result?.reply ?? (result?.ok === true ? result.value?.reply : undefined);
             if (typeof reply !== "string") {
               report({ component: "root-client", stage: "request", outcome: "failed", reason: "invalid-response", status: response.status, durationMs: Math.round(performance.now() - started) });
-              return failure({ ok: false, error: "unavailable", message: "Kenan's privileged context returned an invalid response; ordinary work can continue" });
+              return uncertain("Kenan's privileged context returned an invalid response");
             }
             report({ component: "root-client", stage: "request", outcome: "ok", status: response.status, durationMs: Math.round(performance.now() - started) });
             return { content: [{ type: "text" as const, text: reply }], details: undefined };
@@ -90,7 +106,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
             const reason = combined.aborted ? deadline.aborted ? "timeout" : "cancelled" : infrastructureReason(error);
             report({ component: "root-client", stage: "request", outcome: "failed", reason, durationMs: Math.round(performance.now() - started) });
             const message = reason === "timeout" ? "Kenan's privileged request timed out; its outcome is unknown" : combined.aborted ? "Kenan's privileged request was cancelled; its outcome is unknown" : "Kenan's privileged context is unavailable; ordinary work can continue";
-            return failure({ ok: false, error: "unavailable", message });
+            return uncertain(message);
           }
         },
       }));

@@ -2,7 +2,9 @@ import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Disclosure, DisclosureInput, ForgetMode, MemoryInput, MemoryItem, MemoryRead, ReadContext, MemoryRole, MemoryResult, MemorySession, RootAdmission, RootFinalizeReply, RootResumeConsent, RootLogConsent } from "./contract.js";
+import type { Disclosure, DisclosureInput, ForgetMode, MemoryInput, MemoryItem, MemoryRead, ReadContext, MemoryRole, MemoryResult, MemorySession, RootAdmission, RootFinalizeReply, RootResumeConsent, RootLogConsent, RootLogNotification, RootLogRequestStatus } from "./contract.js";
+
+import { kenanRequestNotice } from "./contract.js";
 
 export class MemoryStore {
   readonly db: Database;
@@ -163,6 +165,41 @@ export class MemoryStore {
         occurredAt: now, recordedBy: "kenan" };
       this.db.query("INSERT INTO disclosures(id,body) VALUES(?,?)").run(id, JSON.stringify(disclosure));
       return { ok: true, value: disclosure };
+    })();
+  }
+  logRequestStatus(input: RootLogRequestStatus): MemoryResult<{ id: string }> {
+    return this.db.transaction((): MemoryResult<{ id: string }> => {
+      const admission = this.rootAdmission(input.rootSessionId);
+      if (!admission) return { ok: false, error: "invalid-request", message: "Request status requires an admitted root session" };
+      const id = `request-status-${this.consentKey(input.rootSessionId, input.requestId)}`;
+      const text = kenanRequestNotice(input.requestId, input.status);
+      const prior = this.db.query("SELECT body FROM disclosures WHERE id=?").get(id) as { body: string } | null;
+      if (prior) return JSON.parse(prior.body).text === text ? { ok: true, value: { id } } : { ok: false, error: "invalid-request", message: "Request status was already recorded differently" };
+      const disclosure: Disclosure = { id, rootSessionId: input.rootSessionId, kind: "root-request-status", text, about: [...new Set([...admission.subjects, admission.person])], to: admission.recipients,
+        setting: { person: admission.person, threadId: admission.threadId, ...(admission.roomId ? { roomId: admission.roomId } : {}) }, occurredAt: new Date().toISOString(), recordedBy: "kenan" };
+      this.db.query("INSERT INTO disclosures(id,body) VALUES(?,?)").run(id, JSON.stringify(disclosure));
+      return { ok: true, value: { id } };
+    })();
+  }
+  logNotification(input: RootLogNotification): MemoryResult<{ id: string }> {
+    return this.db.transaction((): MemoryResult<{ id: string }> => {
+      const admission = this.rootAdmission(input.rootSessionId);
+      if (!admission) return { ok: false, error: "invalid-request", message: "Notification requires an admitted root session" };
+      const id = `notification-${this.consentKey(input.rootSessionId, input.notificationId)}`;
+      const prior = this.db.query("SELECT body FROM disclosures WHERE id=?").get(id) as { body: string } | null;
+      const about = [...new Set([...admission.subjects, admission.person, input.recipient, ...input.subjects])].sort();
+      if (prior) {
+        const old = JSON.parse(prior.body) as Disclosure & { obviouslyPrivate: boolean };
+        return old.text === input.text && old.to.length === 1 && old.to[0] === input.recipient && JSON.stringify(old.about) === JSON.stringify(about) && old.obviouslyPrivate === input.obviouslyPrivate
+          ? { ok: true, value: { id } }
+          : { ok: false, error: "invalid-request", message: "Notification ID already used with different content" };
+      }
+      const now = new Date().toISOString();
+      const setting = { person: admission.person, threadId: admission.threadId, ...(admission.roomId ? { roomId: admission.roomId } : {}) };
+      const disclosure: Disclosure & { obviouslyPrivate: boolean } = { id, rootSessionId: input.rootSessionId, kind: "root-notification", text: input.text, about, to: [input.recipient], setting, occurredAt: now, recordedBy: "kenan", obviouslyPrivate: input.obviouslyPrivate };
+      this.db.query("INSERT INTO disclosures(id,body) VALUES(?,?)").run(id, JSON.stringify(disclosure));
+      this.write(admission.person, { text: input.text, about, source: { actedFor: admission.person, action: "notification-queued", externalId: id }, setting, occurredAt: now, obviouslyPrivate: input.obviouslyPrivate });
+      return { ok: true, value: { id } };
     })();
   }
   resumeConsent(input: RootResumeConsent): MemoryResult<RootAdmission> {

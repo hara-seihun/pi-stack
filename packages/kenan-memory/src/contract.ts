@@ -29,7 +29,7 @@ export interface Disclosure extends DisclosureInput {
   id: string;
   occurredAt: string;
   recordedBy: PersonId;
-  kind?: "explicit" | "memory-read" | "root-reply" | "consent-question" | "consent-answer";
+  kind?: "explicit" | "memory-read" | "root-reply" | "consent-question" | "consent-answer" | "root-notification" | "root-request-status";
   consentId?: string;
   consentSubject?: PersonId;
   rootSessionId?: string;
@@ -86,6 +86,20 @@ export interface RootLogConsent {
   kind: "question" | "answer";
   text: string;
 }
+export interface RootLogNotification {
+  rootSessionId: string;
+  notificationId: string;
+  recipient: PersonId;
+  text: string;
+  subjects: PersonId[];
+  obviouslyPrivate: boolean;
+}
+export const KENAN_REQUEST_HEADER = "x-kenan-request-id";
+export const KENAN_REQUEST_ID_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
+export type KenanRequestStatus = "pending" | "failed" | "interrupted";
+export interface RootLogRequestStatus { rootSessionId: string; requestId: string; status: "failed" | "interrupted" }
+export const kenanRequestNotice = (requestId: string, status: "failed" | "interrupted") => `Kenan's request ${requestId} ${status === "interrupted" ? "was interrupted" : "failed"} before completion. Actions may already have occurred; do not repeat the original request. Its status can be retrieved with ask_kenan({requestId:\"${requestId}\"}).`;
+export type KenanRequestResponse = { reply: string } | { requestId: string; status: KenanRequestStatus };
 export interface RootFinalizeReply { rootSessionId: string; reply: string; subjects: PersonId[]; recipients?: PersonId[] }
 export type RoomAudienceResolver = (person: PersonId, threadId: string) => { roomId: string; people: PersonId[] } | undefined | Promise<{ roomId: string; people: PersonId[] } | undefined>;
 export const KENAN_ROOT_DEFAULT_PORT = 18821;
