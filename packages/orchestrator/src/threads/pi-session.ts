@@ -13,6 +13,7 @@ import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
+import { piWorkReceipts } from "./pi-work-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, POOLED_ACCOUNT_WAIT, resolveSessionModel } from "../extension/routing.js";
@@ -158,18 +159,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     let replacing = false;
     let closed = false;
     function branch() { return runtime.session.sessionManager.getBranch(); }
-    function receipts() {
-      const acceptedWorkIds = new Set<string>(), completedWorkIds = new Set<string>();
-      for (const entry of branch()) {
-        if (entry.type !== "custom") continue;
-        const data = entry.data as { workId?: string; workIds?: string[] } | undefined;
-        if (entry.customType === "thread_input" && data?.workId) acceptedWorkIds.add(data.workId);
-        if (entry.customType === "thread_rejected" && data?.workId) acceptedWorkIds.delete(data.workId);
-        if (entry.customType === "thread_settled") for (const id of data?.workIds ?? []) completedWorkIds.add(id);
-        if (entry.customType === "thread_resume" && data?.workId) completedWorkIds.delete(data.workId);
-      }
-      return { acceptedWorkIds: [...acceptedWorkIds], completedWorkIds: [...completedWorkIds] };
-    }
+    function receipts() { return piWorkReceipts(branch()); }
     function lastAssistant() {
       const entries = branch();
       const settled = [...entries].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_settled");
@@ -196,14 +186,16 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const final = entries.slice(firstInput < 0 ? entries.length : firstInput + 1).reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
       const message = final?.type === "message" ? final.message : null;
       const outcome = cancelled ? "cancelled" : message?.role === "assistant" && ["error", "aborted"].includes(message.stopReason) ? "failed" : "complete";
-      const workIds = [...activeWork];
+      const deferredWorkIds = cancelled ? receipts().unlandedWorkIds.filter(id => activeWork.has(id)) : [];
+      const workIds = [...activeWork].filter(id => !deferredWorkIds.includes(id));
+      for (const workId of deferredWorkIds) runtime.session.sessionManager.appendCustomEntry("thread_rejected", { workId, error: "Cancelled before landing; durable owner retains delivery" });
       if (workIds.length) runtime.session.sessionManager.appendCustomEntry("thread_settled", { workIds, outcome, assistantEntryId: final?.id ?? null });
       checkpointPiSession(runtime.session.sessionManager);
       activeWork.clear();
       executionStart = undefined;
       // Cancellation discards Pi's deferred inputs without a response; release their dispatch order with the receipt.
       for (const id of [...pendingInputs.keys()]) acknowledge(id);
-      output({ type: "agent_settled", workIds, outcome, lastAssistantMessage: message });
+      output({ type: "agent_settled", workIds, deferredWorkIds, outcome, lastAssistantMessage: message });
     }
     async function halt(): Promise<void> {
       const stopped = execution.halt(runtime.session, 20_000, () => settle(true));

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { readThreadHistory, visibleThreadHistory } from "pi-orchestrator/history";
 import { contentText } from "@earendil-works/pi-ai";
+import { piWorkReceipts } from "./pi-work-receipts.js";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
@@ -1149,8 +1150,16 @@ export class ThreadService implements ThreadApi {
     if(outcome==="failed"&&!this.row(id)?.held&&(isTransientFailure(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
       await this.waitForProvider(id,runtime,execution,failure);return;
     }
-    const thread = this.get(id)!, workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
+    const thread = this.get(id)!;
+    // A controller handoff can miss message_start; persisted native history is the delivery evidence.
+    const unlanded = this.sql("SELECT 1 FROM thread_work WHERE execution_id=? AND id!=? AND status!='done' AND landed_at IS NULL LIMIT 1").get(execution.id, execution.work_id);
+    const landed = unlanded ? piWorkReceipts(readThreadHistory(thread.sessionFile)).landedWorkIds : [];
+    let workIds: string[] = [];
     this.transaction(() => {
+      for (const workId of landed) this.sql("UPDATE thread_work SET landed_at=? WHERE id=? AND execution_id=? AND landed_at IS NULL").run(Date.now(), workId, execution.id);
+      // Native acceptance of a steer is queue custody, not delivery. Cancellation clears that queue.
+      this.sql("UPDATE thread_work SET status='queued',execution_id=NULL,inserted_at=NULL WHERE execution_id=? AND id!=? AND status!='done' AND landed_at IS NULL").run(execution.id, execution.work_id);
+      workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done' ORDER BY ordinal").all(execution.id) as { id: string }[]).map(work => work.id);
       this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, Date.now(), execution.id);
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait','$.providerRetry') WHERE id=?").run(id);

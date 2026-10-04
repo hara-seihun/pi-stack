@@ -326,6 +326,36 @@ it("halts a real shell inside a native prompt and acknowledges after one cancell
   expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, cancellationFailed: false, localTools: 0 } });
 }, 3000);
 
+it("returns aborted unlanded native steers to their owner and delivers the same IDs after the interrupt", async () => {
+  const f = await fixture(), toolStarted = deferred(), urgentStarted = deferred();
+  const urgentReply = createAssistantMessageEventStream(), requests: string[][] = [];
+  f.native.agent.streamFunction = (_model, context, options) => {
+    options?.signal?.throwIfAborted();
+    requests.push(userTexts(context));
+    if (requests.length === 1) return f.reply(f.message([{ type: "toolCall", id: "sleep", name: "bash", arguments: { command: "echo ready; sleep 30", timeout: 32 } }], "toolUse"));
+    if (requests.length === 2) { urgentStarted.resolve(); return urgentReply; }
+    return f.reply(f.message([{ type: "text", text: "All queued messages answered" }], "stop"));
+  };
+  f.native.subscribe(event => { if (event.type === "tool_execution_update") toolStarted.resolve(); });
+  expect(await f.command("prompt", { workId: "root", message: "initial work" })).toMatchObject({ success: true });
+  await toolStarted.promise;
+  const queued = ["agent", "notification", "human"];
+  for (const workId of queued) expect(await f.command("steer", { workId, message: `queued ${workId}` })).toMatchObject({ success: true });
+  expect(await f.command("abort")).toMatchObject({ success: true });
+  expect(f.events.find(event => event.type === "agent_settled")).toMatchObject({ workIds: ["root"], deferredWorkIds: queued, outcome: "cancelled" });
+  expect(await f.command("get_state")).toMatchObject({ data: { acceptedWorkIds: ["root"], completedWorkIds: ["root"], isStreaming: false } });
+  expect(await f.command("prompt", { workId: "urgent", message: "hard steer" })).toMatchObject({ success: true });
+  await urgentStarted.promise;
+  for (const workId of queued) expect(await f.command("steer", { workId, message: `queued ${workId}` })).toMatchObject({ success: true });
+  urgentReply.push({ type: "done", reason: "stop", message: f.message([{ type: "text", text: "Interrupt handled" }], "stop") });
+  urgentReply.end();
+  await f.waitFor(event => event.type === "agent_settled" && (event.workIds as string[]).includes("urgent"));
+  expect(requests).toHaveLength(3);
+  expect(requests[2]!.slice(-4)).toEqual(["hard steer", ...queued.map(id => `queued ${id}`)]);
+  for (const workId of queued) expect(f.events.filter(event => event.type === "message_start" && (event.message as any)?.role === "user" && userTexts({ messages: [event.message as any] })[0] === `queued ${workId}`)).toHaveLength(1);
+  expect(await f.command("get_state")).toMatchObject({ data: { completedWorkIds: ["root", "urgent", ...queued] } });
+}, 3000);
+
 it("rejects overlap during preflight and waits for that preflight before acknowledging halt", async () => {
   const f = await fixture(), entered = deferred(), finish = deferred();
   vi.spyOn(f.native.modelRuntime, "hasConfiguredAuth").mockReturnValue(false);

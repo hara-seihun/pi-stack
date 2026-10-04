@@ -73,6 +73,9 @@ class FakePiSession implements PiSession {
   }
 
   settleMessage(message: Record<string, unknown>): void {
+    if (message.stopReason !== "aborted") for (const command of this.commands.filter(command => command.type === "steer")) {
+      this.output({ type: "message_start", message: { role: "user", content: [{ type: "text", text: command.message }] } });
+    }
     this.lastAssistantMessage = message;
     const workId = [...this.acceptedWorkIds].at(-1);
     if (workId) this.completedWorkIds.add(workId);
@@ -1205,6 +1208,73 @@ describe("ThreadService", () => {
     sessions[1]!.settle("now done");
     await waitFor(() => sessions[2]?.commands.some(input => input.workId === "later") === true);
     await settle(sessions[2]!, service, thread.id);
+  });
+
+  it.each(["hardSteer", "stop"] as const)("retains unlanded steers and notifications across %s, without settling or losing their order", async action => {
+    const { service, directory, sessions } = fixture();
+    await service.start();
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "work" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const inputs = [
+      { requestId: "landed", text: "already read" },
+      { requestId: "agent", text: "worker progress", senderId: "worker" },
+      { requestId: "notification", text: JSON.stringify({ type: "thread_idle", title: "Worker", outcome: "complete", finalMessage: null }), source: "notification" as const },
+      { requestId: "human", text: "user follow-up" },
+    ];
+    for (const input of inputs) {
+      value(await service.send({ ...input, threadId: thread.id, delivery: "steer" }));
+      await waitFor(() => sessions[0]!.commands.some(command => command.workId === input.requestId));
+    }
+    const landed = sessions[0]!.commands.find(command => command.workId === "landed")!;
+    sessions[0]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: landed.message }] } });
+    const settlements: Record<string, any>[] = [];
+    service.subscribe(event => { if ("event" in event && event.event.type === "thread_settled") settlements.push(event.event); });
+    if (action === "hardSteer") {
+      value(await service.send({ requestId: "urgent", threadId: thread.id, text: "interrupt", delivery: "hardSteer" }));
+      await waitFor(() => sessions[1]?.commands.some(command => command.workId === "urgent") === true);
+    } else {
+      value(await service.control({ threadId: thread.id, action: "stop", descendants: false }));
+      expect(service.pending(thread.id).map(message => [message.id, message.state, message.insertedAt, message.landedAt])).toEqual([
+        ["agent", "queued", null, null], ["notification", "queued", null, null], ["human", "queued", null, null],
+      ]);
+      expect(service.get(thread.id)).toMatchObject({ held: true, state: "idle" });
+      value(await service.control({ threadId: thread.id, action: "resume" }));
+    }
+    expect(settlements[0]).toMatchObject({ outcome: "cancelled", workIds: ["active", "landed"] });
+    await waitFor(() => sessions[1]?.commands.some(command => command.workId === "human") === true);
+    expect(sessions[1]!.commands.filter(command => command.workId).map(command => command.workId)).toEqual([
+      ...(action === "hardSteer" ? ["urgent"] : []), "agent", "notification", "human",
+    ]);
+    expect(service.pending(thread.id).find(message => message.id === "landed")).toBeUndefined();
+    await settle(sessions[1]!, service, thread.id);
+    const db = new DatabaseSync(join(directory, "threads.sqlite"));
+    expect(db.prepare("SELECT id,status,outcome,landed_at FROM thread_work WHERE id IN ('agent','notification','human') ORDER BY ordinal").all()).toEqual([
+      { id: "agent", status: "done", outcome: "complete", landed_at: expect.any(Number) },
+      { id: "notification", status: "done", outcome: "complete", landed_at: expect.any(Number) },
+      { id: "human", status: "done", outcome: "complete", landed_at: expect.any(Number) },
+    ]);
+    db.close();
+  });
+
+  it("uses persisted native landing evidence when a controller missed message_start", async () => {
+    const { service, directory, sessions } = fixture();
+    await service.start();
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "work" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    value(await service.send({ requestId: "delivered", threadId: thread.id, text: "already delivered", delivery: "steer" }));
+    await waitFor(() => sessions[0]!.commands.some(command => command.workId === "delivered"));
+    const input = sessions[0]!.commands.find(command => command.workId === "delivered")!;
+    writeFileSync(thread.sessionFile, [
+      { type: "session", id: "session" },
+      { type: "custom", id: "receipt", customType: "thread_input", data: { workId: "delivered", delivery: "steer", message: input.message } },
+      { type: "message", id: "user", parentId: "receipt", message: { role: "user", content: [{ type: "text", text: input.message }] } },
+    ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    expect(service.pending(thread.id).find(message => message.id === "delivered")?.landedAt).toBeNull();
+    value(await service.control({ threadId: thread.id, action: "stop", descendants: false }));
+    expect(service.pending(thread.id)).toEqual([]);
+    const db = new DatabaseSync(join(directory, "threads.sqlite"));
+    expect(db.prepare("SELECT status,outcome,landed_at FROM thread_work WHERE id='delivered'").get()).toEqual({ status: "done", outcome: "cancelled", landed_at: expect.any(Number) });
+    db.close();
   });
 
   it("reconciles an unconfirmed halt instead of stranding its held queue", async () => {
