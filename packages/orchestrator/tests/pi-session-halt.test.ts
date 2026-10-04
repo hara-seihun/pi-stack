@@ -177,9 +177,15 @@ it("reports the actual outbound provider boundary and retains it on reconnect un
   response.write('data: {"id":"phase","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n');
   await f.waitFor(event => event.type === "message_start" && (event.message as any)?.role === "assistant");
   expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "waiting_for_model", activitySince: requestEvent.emittedAt } } });
+  let clock = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => ++clock);
   response.write('data: {"id":"phase","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}\n\n');
+  const start = await f.waitFor(event => (event.assistantMessageEvent as any)?.type === "text_start");
   const text = await f.waitFor(event => (event.assistantMessageEvent as any)?.type === "text_delta");
-  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "responding", activitySince: text.emittedAt, lastActivityAt: text.emittedAt } } });
+  expect(text.emittedAt).toBeGreaterThan(start.emittedAt as number);
+  const responding = await f.command("get_state");
+  expect(responding).toMatchObject({ data: { live: { activity: "responding", activitySince: start.emittedAt, lastActivityAt: text.emittedAt } } });
+  expect((await f.command("get_state")).data).toEqual(responding.data);
   response.end('data: {"id":"phase","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
   await f.waitFor(event => event.type === "agent_settled");
   expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, activitySince: undefined } } });
