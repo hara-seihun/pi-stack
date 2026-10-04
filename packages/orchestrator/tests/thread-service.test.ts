@@ -6,7 +6,7 @@ import { runnerHostEntry } from "../src/threads/runner-transport.js";
 import { DatabaseSync } from "node:sqlite";
 import { importRemoteThreads } from "../src/threads/import.js";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
-import { ThreadService } from "../src/threads/service.js";
+import { ThreadService, type ThreadServiceOptions } from "../src/threads/service.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 import { createThreadClient, threadHttp } from "../src/threads/http.js";
@@ -108,7 +108,7 @@ function expectReadableCompletion(text: string): void {
   }
 }
 
-function fixture(root?: string, workersOnly = false) {
+function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServiceOptions["prepareMessage"]) {
   const directory = root ?? mkdtempSync(join(tmpdir(), "thread-service-"));
   if (!root) roots.push(directory);
   const sessions: FakePiSession[] = [];
@@ -119,6 +119,7 @@ function fixture(root?: string, workersOnly = false) {
   };
   const service = new ThreadService({
     workersOnly,
+    prepareMessage,
     databasePath: join(directory, "threads.sqlite"),
     sessionsDir: join(directory, "sessions"),
     openSession,
@@ -1164,6 +1165,49 @@ describe("ThreadService", () => {
     expect(service.pending("gone")).toMatchObject([{ id: "next", state: "queued" }]);
   });
 
+  it("uses active-branch native landing receipts during cold Stop after owner crash", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-cold-receipts-")); roots.push(directory);
+    const openSession = vi.fn(async () => { throw new Error("Cold Stop must not initialize a session"); });
+    const admit = vi.fn(async () => { throw new Error("Cold Stop must not request admission"); });
+    const attachSession = vi.fn(async () => null);
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
+    const reference = { control: "/absent/runner.sock", socketPath: "/absent/session.sock" };
+    const sessionFile = join(directory, "crashed.jsonl");
+    value(service.importThread({ id: "crashed", title: "crashed", cwd: "/reclaimed/checkout", sessionFile, metadata: { runnerReference: reference }, settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
+    for (const id of ["active", "landed", "unlanded"]) value(service.importMessage({
+      id, threadId: "crashed", text: `Input ${id}`, state: "dispatched", executionId: "crashed-execution", insertedAt: 123,
+    }));
+    writeFileSync(sessionFile, [
+      { type: "session", id: "native-session", version: 3, timestamp: "2026-10-04T00:00:00.000Z", cwd: directory },
+      { type: "custom", id: "active-input", parentId: null, customType: "thread_input", data: { workId: "active", receiptVersion: 2 } },
+      { type: "custom", id: "active-landed", parentId: "active-input", customType: "thread_landed", data: { workId: "active" } },
+      { type: "custom", id: "steer-input", parentId: "active-landed", customType: "thread_input", data: { workId: "landed", receiptVersion: 2 } },
+      { type: "message", id: "steer-message", parentId: "steer-input", message: { role: "user", content: [{ type: "text", text: "Input landed" }], timestamp: 123 } },
+      { type: "custom", id: "steer-landed", parentId: "steer-message", customType: "thread_landed", data: { workId: "landed" } },
+      { type: "custom", id: "other-branch-landed", parentId: "active-landed", customType: "thread_landed", data: { workId: "unlanded" } },
+      { type: "custom", id: "undelivered-input", parentId: "steer-landed", customType: "thread_input", data: { workId: "unlanded", receiptVersion: 2 } },
+    ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    expect(service.pending("crashed")).toMatchObject([
+      { id: "active", state: "dispatched", landedAt: null },
+      { id: "landed", state: "dispatched", insertedAt: 123, landedAt: null },
+      { id: "unlanded", state: "dispatched", insertedAt: 123, landedAt: null },
+    ]);
+
+    expect(value(await service.control({ threadId: "crashed", action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(attachSession).toHaveBeenCalledWith(reference, expect.any(Function), expect.any(Function));
+    expect(openSession).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
+    expect(service.latestSettlement("crashed")?.outcome).toBe("cancelled");
+    expect(service.pending("crashed")).toMatchObject([{ id: "unlanded", state: "queued", landedAt: null }]);
+    const db = new DatabaseSync(join(directory, "threads.sqlite"));
+    try {
+      expect(db.prepare("SELECT id,status,outcome,landed_at FROM thread_work ORDER BY ordinal").all()).toEqual([
+        { id: "active", status: "done", outcome: "cancelled", landed_at: expect.any(Number) },
+        { id: "landed", status: "done", outcome: "cancelled", landed_at: expect.any(Number) },
+        { id: "unlanded", status: "queued", outcome: null, landed_at: null },
+      ]);
+    } finally { db.close(); }
+  });
+
   it("deduplicates halt and does not mark the thread idle before native acknowledgement", async () => {
     const { service, directory, sessions } = fixture();
     await service.start();
@@ -1205,6 +1249,157 @@ describe("ThreadService", () => {
     sessions[1]!.settle("now done");
     await waitFor(() => sessions[2]?.commands.some(input => input.workId === "later") === true);
     await settle(sessions[2]!, service, thread.id);
+  });
+
+  it.each(["send", "promoteMessage"] as const)("preserves accepted but unlanded steers when %s hard steers the thread", async action => {
+    let preparations = 0;
+    const prepareMessage = vi.fn<NonNullable<ThreadServiceOptions["prepareMessage"]>>(async (_thread, message) => ({
+      ok: true,
+      value: { text: `${message.text}\nPrepared context ${++preparations}`, images: [{ type: "image", data: `prepared-${message.id}`, mimeType: "image/png" }] },
+    }));
+    const { service, directory, sessions } = fixture(undefined, false, prepareMessage);
+    value(await service.start());
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "Already running" }));
+    await waitFor(() => service.pending(thread.id)[0]?.landedAt != null);
+    value(await service.send({ requestId: "landed", threadId: thread.id, text: "Already delivered" }));
+    await waitFor(() => service.pending(thread.id).find(message => message.id === "landed")?.insertedAt != null);
+    const native = sessions[0]!;
+    const landed = native.commands.find(command => command.workId === "landed")!;
+    native.emit({ type: "message_start", ...(action === "send" ? { inputWorkId: "landed" } : {}),
+      message: { role: "user", content: [{ type: "text", text: action === "send" ? "Input transformed by an extension" : String(landed.message) }] } });
+    expect(service.pending(thread.id).find(message => message.id === "landed")?.landedAt).toEqual(expect.any(Number));
+
+    const accepted = new Map<string, PiCommand>();
+    for (const id of ["first", "second"]) {
+      value(await service.send({ requestId: id, threadId: thread.id, senderId: "worker", text: `Undelivered ${id}` }));
+      await waitFor(() => service.pending(thread.id).find(message => message.id === id)?.insertedAt != null);
+      expect(service.pending(thread.id).find(message => message.id === id)).toMatchObject({ state: "dispatched", insertedAt: expect.any(Number), landedAt: null });
+      accepted.set(id, native.commands.find(command => command.workId === id)!);
+      if (id === "first") value(await service.send({ requestId: "later", threadId: thread.id, text: "Ordinary queued input", delivery: "queue" }));
+    }
+    if (action === "send") {
+      value(await service.send({ requestId: "now", threadId: thread.id, text: "Urgent replacement", delivery: "hardSteer" }));
+    } else {
+      value(await service.send({ requestId: "now", threadId: thread.id, text: "Urgent replacement", delivery: "queue" }));
+      value(await service.control({ threadId: thread.id, action: "promoteMessage", messageId: "now", delivery: "hardSteer" }));
+    }
+    await waitFor(() => sessions[1]?.commands.some(command => command.workId === "now") === true);
+    expect(native.closed).toBe(true);
+    expect(native.commands.filter(command => command.type === "abort")).toHaveLength(1);
+    expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
+    expect(service.pending(thread.id).map(message => message.id)).toEqual(["now", "first", "later", "second"]);
+    await waitFor(() => sessions[1]!.commands.some(command => command.workId === "second"));
+    const replayed = sessions[1]!.commands.filter(command => ["prompt", "steer"].includes(command.type));
+    expect(replayed.map(command => command.workId)).toEqual(["now", "first", "second"]);
+    for (const id of accepted.keys()) {
+      const replay = replayed.find(command => command.workId === id)!;
+      expect(replay).toMatchObject({ type: "steer", workId: id, message: accepted.get(id)!.message, images: accepted.get(id)!.images });
+      expect(prepareMessage.mock.calls.filter(([, message]) => message.id === id)).toHaveLength(1);
+      sessions[1]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replay.message) }] } });
+    }
+    sessions[1]!.settle("Urgent work and retained steers handled");
+    await waitFor(() => sessions[2]?.commands.some(command => command.workId === "later") === true);
+    await settle(sessions[2]!, service, thread.id);
+    const inputs = sessions.flatMap(session => session.commands.filter(command => ["prompt", "steer"].includes(command.type)));
+    expect(inputs.map(command => command.workId)).toEqual(["active", "landed", "first", "second", "now", "first", "second", "later"]);
+    expect(service.pending(thread.id)).toEqual([]);
+  });
+
+  it("lets hard-steer halt own settlement when abort rejects an in-flight steer acknowledgement", async () => {
+    const { service, directory, sessions } = fixture();
+    value(await service.start());
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "Already running" }));
+    await waitFor(() => service.pending(thread.id)[0]?.landedAt != null);
+    const native = sessions[0]!, command = native.command.bind(native);
+    let waiting: PiCommand | undefined;
+    native.command = async input => {
+      if (input.type === "steer") {
+        native.commands.push(input);
+        native.acceptedWorkIds.add(String(input.workId));
+        native.pendingMessageCount = 1;
+        waiting = input;
+        return;
+      }
+      if (input.type === "abort" && waiting) {
+        native.emit({ type: "response", id: waiting.id, command: "steer", success: false, error: "Input acknowledgement cancelled by abort" });
+        await turn();
+      }
+      await command(input);
+    };
+    value(await service.send({ requestId: "waiting", threadId: thread.id, text: "Accepted input awaiting acknowledgement" }));
+    await waitFor(() => !!waiting);
+    expect(service.pending(thread.id).find(message => message.id === "waiting")).toMatchObject({ state: "dispatched", insertedAt: null, landedAt: null });
+    value(await service.send({ requestId: "now", threadId: thread.id, text: "Urgent replacement", delivery: "hardSteer" }));
+    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "waiting") === true);
+    expect(native.closed).toBe(true);
+    expect(native.commands.filter(input => input.type === "abort")).toHaveLength(1);
+    expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
+    expect(service.get(thread.id)?.metadata?.executionError).toBeUndefined();
+    const replayed = sessions[1]!.commands.filter(input => ["prompt", "steer"].includes(input.type));
+    expect(replayed.map(input => input.workId)).toEqual(["now", "waiting"]);
+    expect(replayed[1]).toMatchObject({ type: "steer", workId: "waiting", message: waiting!.message, images: waiting!.images });
+    sessions[1]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replayed[1]!.message) }] } });
+    await settle(sessions[1]!, service, thread.id);
+    expect(service.pending(thread.id)).toEqual([]);
+    const db = new DatabaseSync(join(directory, "threads.sqlite"));
+    try {
+      expect(db.prepare("SELECT outcome FROM thread_execution ORDER BY created_at,rowid").all()).toEqual([{ outcome: "cancelled" }, { outcome: "complete" }]);
+    } finally { db.close(); }
+  });
+
+  it("holds accepted but unlanded steers across Stop and restart until resume", async () => {
+    let preparations = 0;
+    const prepareMessage = vi.fn<NonNullable<ThreadServiceOptions["prepareMessage"]>>(async (_thread, message) => ({
+      ok: true,
+      value: { text: `${message.text}\nPrepared context ${++preparations}`, images: [{ type: "image", data: `prepared-${message.id}`, mimeType: "image/png" }] },
+    }));
+    const first = fixture(undefined, false, prepareMessage);
+    value(await first.service.start());
+    const thread = value(await first.service.spawn({ requestId: "active", cwd: first.directory, message: "Already running" }));
+    await waitFor(() => first.service.pending(thread.id)[0]?.landedAt != null);
+    const native = first.sessions[0]!;
+    const accepted = new Map<string, PiCommand>();
+    for (const id of ["landed", "first", "second"]) {
+      value(await first.service.send({ requestId: id, threadId: thread.id, senderId: "worker", text: `Input ${id}` }));
+      await waitFor(() => first.service.pending(thread.id).find(message => message.id === id)?.insertedAt != null);
+      const command = native.commands.find(command => command.workId === id)!;
+      if (id === "landed") {
+        native.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(command.message) }] } });
+        expect(first.service.pending(thread.id).find(message => message.id === id)?.landedAt).toEqual(expect.any(Number));
+      } else {
+        expect(first.service.pending(thread.id).find(message => message.id === id)).toMatchObject({ state: "dispatched", insertedAt: expect.any(Number), landedAt: null });
+        accepted.set(id, command);
+      }
+    }
+    expect(value(await first.service.control({ threadId: thread.id, action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(native.closed).toBe(true);
+    expect(native.commands.filter(command => command.type === "abort")).toHaveLength(1);
+    expect(first.service.pending(thread.id)).toMatchObject([{ id: "first", state: "queued", landedAt: null }, { id: "second", state: "queued", landedAt: null }]);
+    const held = first.service.pending(thread.id);
+    first.service.reconcile(); await turn(); await turn();
+    expect(first.sessions).toHaveLength(1);
+    value(await first.service.close());
+
+    const restored = fixture(first.directory, false, prepareMessage);
+    value(await restored.service.start());
+    restored.service.reconcile(); await turn(); await turn();
+    expect(restored.service.get(thread.id)).toMatchObject({ state: "idle", held: true });
+    expect(restored.service.pending(thread.id)).toEqual(held);
+    expect(restored.sessions).toHaveLength(0);
+    value(await restored.service.control({ threadId: thread.id, action: "resume" }));
+    await waitFor(() => restored.sessions[0]?.commands.some(command => command.workId === "second") === true);
+    const replayed = restored.sessions[0]!.commands.filter(command => ["prompt", "steer"].includes(command.type));
+    expect(replayed.map(command => command.workId)).toEqual(["first", "second"]);
+    expect(replayed.map(command => command.type)).toEqual(["prompt", "steer"]);
+    for (const replay of replayed) {
+      const id = String(replay.workId);
+      expect(replay).toMatchObject({ workId: id, message: accepted.get(id)!.message, images: accepted.get(id)!.images });
+      expect(prepareMessage.mock.calls.filter(([, message]) => message.id === id)).toHaveLength(1);
+      restored.sessions[0]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replay.message) }] } });
+    }
+    await settle(restored.sessions[0]!, restored.service, thread.id);
+    expect(restored.service.pending(thread.id)).toEqual([]);
+    expect(restored.sessions).toHaveLength(1);
   });
 
   it("reconciles an unconfirmed halt instead of stranding its held queue", async () => {

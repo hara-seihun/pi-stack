@@ -25,7 +25,7 @@ Humans and agents use the same thread API, with one delivery restriction:
 - Human messages default to steer and may explicitly use queue, steer or hard steer.
 - Queue waits for the recipient's current execution to finish.
 - Steer delivers at a safe boundary after current tool calls without cancelling them.
-- Hard steer cancels current execution and its local tools, confirms cancellation, then runs the selected message first in the same conversation. Other pending messages retain their order. It does not cancel descendants or undo external effects.
+- Hard steer cancels current execution and its local tools, confirms cancellation, then runs the selected message first in the same conversation. Other pending messages retain their order, including steers already accepted into Pi's native queue but not yet entered into the conversation. Cancelling the turn returns those inputs to durable queued state with the same receipt, settings and prepared payload; landed inputs are never replayed. It does not cancel descendants or undo external effects.
 - Stop cancels current execution and holds pending messages. Its request explicitly selects this thread or this thread and descendants.
 - Resume releases held messages. With no pending messages it changes nothing and returns `no_pending_messages`.
 - An explicit new human or agent message to a held thread clears the hold and runs that message ahead of previously queued messages. Those messages retain their relative order.
