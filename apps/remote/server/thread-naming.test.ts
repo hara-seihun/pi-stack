@@ -74,6 +74,17 @@ describe("thread naming", () => {
     expect(namingStep({ name: "Named Thread", messageCount: 7, namedAtMessageCount: 0, attemptedCount: 7, hasReceipt: false })).toBe("idle");
   });
 
+  test("manual titles stay idle even when numbered, past an interval or carrying a receipt", () => {
+    for (const name of ["47", "Thread abcdef12", "Pinned Title"]) {
+      for (const hasReceipt of [false, true]) {
+        const view = { name, messageCount: 40, namedAtMessageCount: 0, attemptedCount: 0, hasReceipt };
+        expect(namingStep({ ...view, titleSource: "manual" })).toBe("idle");
+        expect(namingStep({ ...view, titleSource: "auto" })).toBe(hasReceipt ? "poll" : "generate");
+        expect(namingStep(view)).toBe(hasReceipt ? "poll" : "generate");
+      }
+    }
+  });
+
   test("a request ID names one prompt, so a filled-in mirror submits instead of conflicting", () => {
     const input = { model: "luna", prompt: "User: hello" };
     expect(namingRequestId("thread-1", 2, input)).toBe(namingRequestId("thread-1", 2, { ...input }));

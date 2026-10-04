@@ -95,10 +95,11 @@ export function namingOutcome(result: CompletionOutcome<CompletionRecord>): Nami
   return { kind: "failed", message: "error" in record ? record.error.message : `Completion ${record.state}.`, keepReceipt: false, regenerate: false };
 }
 
-export interface ThreadNamingView { name: string; messageCount: number; namedAtMessageCount: number; attemptedCount: number; hasReceipt: boolean }
+export interface ThreadNamingView { name: string; titleSource?: unknown; messageCount: number; namedAtMessageCount: number; attemptedCount: number; hasReceipt: boolean }
 /** What a naming tick owes this thread: finish the request it already submitted, ask for a title, or
  * nothing. Any thread that answers `generate` is due, whether or not its last attempt left a receipt. */
 export function namingStep(view: ThreadNamingView): "poll" | "generate" | "idle" {
+  if (view.titleSource === "manual") return "idle";
   if (view.hasReceipt) return "poll";
   return shouldNameThread(view.name, view.messageCount, view.namedAtMessageCount) && view.messageCount > view.attemptedCount ? "generate" : "idle";
 }
