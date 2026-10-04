@@ -96,6 +96,21 @@ A missing file enables every model. Writes replace it atomically, preserving unr
 
 The Remote dashboard always exposes `modelAvailability` and `canManageModels`; the latter is true only for the host administrator. Bootstrap start profiles omit disabled models. Administrator-only `PUT /v1/models/:id/availability` accepts `{ "enabled": true }` or `false` and returns `{ "models": [...] }`; provider/model IDs use encoded path segments. An open stale picker cannot bypass server admission. A disabled configured default is rejected when requested rather than silently substituting another model. Each host has one global policy shared by every person; both household machines are seeded with the requested disablements.
 
+## Explicit thread names
+
+Models can use `thread_control` with `{ "action": "rename", "title": "Chosen name" }`
+to rename their own thread; `threadId` selects another accessible thread. This uses
+the same durable owner as a person's title edit. Both `rename` and `update` with
+`title` persist `metadata.titleSource: "manual"`. The name stays pinned through
+new messages, controller restarts, archive/restore and automatic naming results
+already in flight. A later explicit rename replaces it and remains pinned.
+Blank or missing rename titles are rejected without changing the thread.
+
+Only the internal automatic naming path writes titles with `automaticTitle: true`;
+it records `titleSource: "auto"` and cannot overwrite a manual title. Untagged
+existing threads continue automatic naming until explicitly renamed. Title-source
+metadata cannot be changed through a metadata patch.
+
 ## Defaults
 
 Remote asks its naming model for one to three words. That is a style preference,

@@ -581,10 +581,12 @@ export class ThreadService implements ThreadApi {
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
 
-  update(id: string, patch: { title?: string; metadata?: Record<string, unknown>; archived?: boolean }): Result<Thread> {
+  update(id: string, patch: { title?: string; metadata?: Record<string, unknown>; archived?: boolean }, options: { automaticTitle?: boolean } = {}): Result<Thread> {
     if (this.suspended || this.closed) return bad("unavailable", "Thread controller is suspended");
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
-    if (patch.title !== undefined && !patch.title.trim()) return bad("invalid_request", "Thread title cannot be empty");
+    if (patch.title !== undefined && (typeof patch.title !== "string" || !patch.title.trim())) return bad("invalid_request", "Thread title must be a nonempty string");
+    if (patch.metadata && "titleSource" in patch.metadata && patch.metadata.titleSource !== thread.metadata?.titleSource) return bad("conflict", "Use title control instead of changing metadata.titleSource");
+    if (patch.title !== undefined && options.automaticTitle && thread.metadata?.titleSource === "manual") return good(thread);
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
     for (const key of ["context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
@@ -594,8 +596,8 @@ export class ThreadService implements ThreadApi {
     // Archiving an archived thread is a no-op rather than a fresh archivedAt: a
     // subtree cascade reaches the same thread from more than one owner.
     if (patch.archived && thread.metadata?.archived && patch.title === undefined && !patch.metadata) return good(thread);
-    const metadata = { ...thread.metadata, ...patch.metadata, ...(patch.archived === undefined ? {} : { archived: patch.archived, archivedAt: patch.archived ? new Date().toISOString() : null }) };
-    this.sql("UPDATE thread SET title=?,metadata=?,admission=?,held=CASE WHEN ? THEN 1 ELSE held END,state=CASE WHEN ? THEN 'idle' ELSE state END WHERE id=?").run(patch.title ?? thread.title, JSON.stringify(metadata), admission, patch.archived ? 1 : 0, patch.archived ? 1 : 0, id);
+    const metadata = { ...thread.metadata, ...patch.metadata, ...(patch.title === undefined ? {} : { titleSource: options.automaticTitle ? "auto" : "manual" }), ...(patch.archived === undefined ? {} : { archived: patch.archived, archivedAt: patch.archived ? new Date().toISOString() : null }) };
+    this.sql("UPDATE thread SET title=?,metadata=?,admission=?,held=CASE WHEN ? THEN 1 ELSE held END,state=CASE WHEN ? THEN 'idle' ELSE state END WHERE id=?").run(patch.title?.trim() ?? thread.title, JSON.stringify(metadata), admission, patch.archived ? 1 : 0, patch.archived ? 1 : 0, id);
     this.changed(id);
     if (patch.title !== undefined && this.runtimes.has(id)) void this.serial(id, async () => {
       const runtime = this.runtimes.get(id); if (!runtime || this.suspended) return;
@@ -653,6 +655,10 @@ export class ThreadService implements ThreadApi {
       const archived = this.update(input.threadId, { archived: true });
       if (archived.ok) for (const row of descendants) if (row.id !== input.threadId) this.update(row.id, { archived: true });
       return archived;
+    }
+    if (input.action === "rename") {
+      if (typeof input.title !== "string" || !input.title.trim()) return bad("invalid_request", "Rename requires a nonempty title");
+      return this.update(input.threadId, { title: input.title });
     }
     if (input.action === "update") {
       if (input.archived) { const stopped = await this.control({ threadId: input.threadId, action: "stop", descendants: true, reason: "archive" }); if (!stopped.ok) return stopped; }

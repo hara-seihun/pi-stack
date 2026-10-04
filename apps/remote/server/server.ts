@@ -1068,8 +1068,17 @@ function namingError(id: string, message: string | null) {
   const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
   if (result.changes) signalSync();
 }
+function clearPinnedThreadNaming(sessionId: string): boolean {
+  if (threads.get(sessionId)?.metadata?.titleSource !== "manual") return false;
+  reservedNames.delete(sessionId);
+  if (ownsSupervisorLease()) {
+    db.query("UPDATE thread_views SET naming_request=NULL WHERE id=? AND naming_request IS NOT NULL").run(sessionId);
+    namingError(sessionId, null);
+  }
+  return true;
+}
 async function nameThread(sessionId: string): Promise<void> {
-  if (namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
+  if (clearPinnedThreadNaming(sessionId) || namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
   namingThreads.add(sessionId);
   try {
     const row = sessionRow.get(sessionId);
@@ -1079,7 +1088,7 @@ async function nameThread(sessionId: string): Promise<void> {
     const messageCount = Number(view.message_count ?? 0);
     let receipt = view.naming_request ? JSON.parse(view.naming_request) as NamingReceipt : null;
     const attemptedBefore = Number(view.naming_attempted_count ?? 0);
-    const step = namingStep({ name: row.name, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt });
+    const step = namingStep({ name: row.name, titleSource: row.metadata?.titleSource, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt });
     if (step === "idle") { reservedNames.delete(sessionId); return; }
     // Naming reads the conversation from the context mirror. Until the mirror holds this thread's
     // messages there is nothing to title, and an empty prompt is a request no completion owner
@@ -1097,6 +1106,7 @@ async function nameThread(sessionId: string): Promise<void> {
       let output: string;
       try { output = await localThreadName(messages); }
       catch (cause) {
+        if (clearPinnedThreadNaming(sessionId)) return;
         if (!(cause instanceof EngineReservedError)) throw cause;
         // Maintenance is not a naming failure. Leave the thread due, keep it out of the error feed and
         // let the reconcile tick try again after the lease.
@@ -1105,10 +1115,11 @@ async function nameThread(sessionId: string): Promise<void> {
         if (ownsSupervisorLease()) namingError(sessionId, null);
         return;
       }
+      if (clearPinnedThreadNaming(sessionId)) return;
       reservedNames.delete(sessionId);
       const title = generatedThreadName(output);
       if (!ownsSupervisorLease() || shuttingDown) return;
-      unwrap(threads.update(sessionId, { title }));
+      unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
       db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(messageCount, sessionId);
       signalSync();
       return;
@@ -1127,8 +1138,9 @@ async function nameThread(sessionId: string): Promise<void> {
     }
     const submitted = step === "generate";
     let result = submitted ? await namingClient.submit(receipt.requestId, receipt.input) : await namingClient.get(receipt.requestId);
+    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
     if (!result.ok && result.error.code === "not-found") result = await namingClient.submit(receipt.requestId, receipt.input);
-    if (!ownsSupervisorLease() || shuttingDown) return;
+    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
     const outcome = namingOutcome(result);
     if (outcome.kind === "pending") { namingError(sessionId, null); return; }
     if (outcome.kind === "failed") {
@@ -1139,11 +1151,11 @@ async function nameThread(sessionId: string): Promise<void> {
     }
     db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
     const title = generatedThreadName(outcome.text);
-    unwrap(threads.update(sessionId, { title }));
+    unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
     db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(receipt.messageCount, sessionId);
     signalSync();
   } catch (cause) {
-    if (ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
+    if (!clearPinnedThreadNaming(sessionId) && ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
   } finally { namingThreads.delete(sessionId); }
 }
 function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId); }
@@ -1156,8 +1168,9 @@ function reconcileThreadNames() {
   const live = new Set<string>();
   for (const thread of threads.snapshot({ archived: false })) {
     live.add(thread.id);
+    if (clearPinnedThreadNaming(thread.id)) { due.delete(thread.id); continue; }
     const view = views.get(thread.id);
-    if (namingStep({ name: thread.title, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
+    if (namingStep({ name: thread.title, titleSource: thread.metadata?.titleSource, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
       attemptedCount: Number(view?.naming_attempted_count ?? 0), hasReceipt: !!view?.naming_request }) !== "idle") due.add(thread.id);
   }
   // An archived or departed thread will never be named again, so its last failure is not something
@@ -1902,7 +1915,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
+  else { ensureThreadView(db, change.threadId); clearPinnedThreadNaming(change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();
@@ -2879,7 +2892,8 @@ pruneUploadTransfers();
 // A naming attempt that failed leaves the thread parked until its next message, which never comes for
 // a finished conversation. Starting the supervisor is new evidence — a repaired release, a reachable
 // engine, a restored account — so every thread still carrying its number gets one more attempt.
-for (const thread of threads.snapshot({ archived: false })) {
+for (const thread of threads.snapshot()) {
+  if (clearPinnedThreadNaming(thread.id) || thread.metadata?.archived) continue;
   if (unnamedThread(thread.title)) db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
 }
 

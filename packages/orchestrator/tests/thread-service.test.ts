@@ -128,6 +128,39 @@ function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServ
   return { directory, service, sessions };
 }
 
+it("pins self-renames through the model tool across automatic results and controller restarts", async () => {
+  const { service, directory, sessions } = fixture();
+  value(await service.start());
+  const thread = value(await service.spawn({ requestId: "rename-self", cwd: directory, message: "Work" }));
+  await waitFor(() => sessions.length === 1 && sessions[0]!.isStreaming);
+  expect(value(service.update(thread.id, { title: "First generated title" }, { automaticTitle: true })).metadata?.titleSource).toBe("auto");
+  expect(value(service.update(thread.id, { title: "Later generated title" }, { automaticTitle: true })).title).toBe("Later generated title");
+  const tool = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service }).find(item => item.name === "thread_control")!;
+  const renamed = await tool.execute("rename-call", { action: "rename", title: "  My chosen title  " }, undefined, undefined, undefined as never);
+  expect(renamed.details).toMatchObject({ ok: true, value: { id: thread.id, title: "My chosen title", state: "running", metadata: { titleSource: "manual" } } });
+  const pinned = service.get(thread.id)!;
+  expect(value(service.update(thread.id, { title: "Stale in-flight result" }, { automaticTitle: true }))).toEqual(pinned);
+  await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "My chosen title"));
+  expect(await service.control({ threadId: thread.id, action: "rename", title: " " })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(await service.control({ threadId: thread.id, action: "rename" } as never)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(service.update(thread.id, { metadata: { titleSource: "auto" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  sessions[0]!.settle("Done");
+  await waitFor(() => service.get(thread.id)?.state === "idle");
+  await service.close();
+  const restored = fixture(directory).service;
+  value(await restored.start());
+  expect(value(restored.update(thread.id, { title: "Generated after restart" }, { automaticTitle: true }))).toMatchObject({ title: "My chosen title", metadata: { titleSource: "manual" } });
+  expect(value(await restored.control({ threadId: thread.id, action: "rename", title: "Next chosen title" })).title).toBe("Next chosen title");
+});
+
+it("pins human title updates, including accepting the current automatic title", async () => {
+  const { service, directory } = fixture();
+  const thread = value(await service.spawn({ requestId: "rename-human", cwd: directory }));
+  value(service.update(thread.id, { title: "Generated" }, { automaticTitle: true }));
+  expect(value(await service.control({ threadId: thread.id, action: "update", title: "Generated" })).metadata?.titleSource).toBe("manual");
+  expect(value(service.update(thread.id, { title: "New generated title" }, { automaticTitle: true })).title).toBe("Generated");
+});
+
 it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch and retains its visible receipt across restart", async choice => {
   const { service, directory, sessions } = fixture();
   value(await service.start());
