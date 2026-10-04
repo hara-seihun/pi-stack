@@ -335,7 +335,7 @@ function refreshThreadNotifications(): Promise<void> {
     const refresh = (async () => {
       do {
         notificationRefreshAgain.delete(owner.id);
-        await projectThreadNotifications(db, owner.id, owner.api);
+        await projectThreadNotifications(db, owner.id, owner.api, directory);
       } while (notificationRefreshAgain.has(owner.id));
     })()
       .then(() => { observeError(db, `notifications:${owner.id}`, null); if (notificationErrors.delete(owner.id)) signalSync(); })
@@ -1815,7 +1815,7 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   }
 }
 
-function notificationThread(id: string): { parentId: string | null } | null {
+function notificationThread(id: string): { parentId: string | null; role?: "conversation" | "worker" } | null {
   const thread = threads.get(id);
   if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
   return thread ?? (ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null);
