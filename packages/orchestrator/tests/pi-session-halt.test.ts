@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
@@ -63,6 +64,7 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     stream.end();
     return stream;
   };
+  const providerStream = native.agent.streamFunction;
   native.agent.streamFunction = () => reply(message([{ type: "text", text: "done" }], "stop"));
   const waitFor = (predicate: (event: PiEvent) => boolean): Promise<PiEvent> => new Promise(resolve => {
     const notify = () => { const event = events.find(predicate); if (event) { waiters.delete(notify); resolve(event); } };
@@ -73,7 +75,7 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     await session.command({ type, id, ...fields });
     return waitFor(event => event.type === "response" && event.id === id);
   };
-  return { session, native, events, command, waitFor, reply, message };
+  return { session, native, events, command, waitFor, reply, message, providerStream };
 }
 
 it.each([
@@ -121,6 +123,116 @@ it("reconnect state preserves observed streaming phase and production timestamps
   await f.waitFor(event => event.type === "agent_settled");
   expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, activitySince: undefined, isThinking: false, tools: [] } } });
 }, 3000);
+
+async function httpProviderFixture(extension = "") {
+  const arrivals: { response: ServerResponse; body: any }[] = [];
+  const waiters = new Set<() => void>();
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    arrivals.push({ response, body: JSON.parse(Buffer.concat(chunks).toString()) });
+    for (const waiter of waiters) waiter();
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const port = (server.address() as { port: number }).port;
+  const f = await fixture(undefined, `export default pi => {
+    pi.registerProvider("phase-fixture", { baseUrl: "http://127.0.0.1:${port}/v1", api: "openai-completions", apiKey: "not-a-credential",
+      models: [{ id: "phase-model", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 16384, maxTokens: 128 }] });
+    ${extension}
+  };`);
+  f.native.agent.state.model = f.native.modelRuntime.getModel("phase-fixture", "phase-model")!;
+  f.native.agent.streamFunction = f.providerStream;
+  f.native.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 0, provider: { maxRetries: 0 } }, cacheWarming: "off" });
+  const request = (index: number): Promise<typeof arrivals[number]> => new Promise(resolve => {
+    const notify = () => { if (arrivals[index]) { waiters.delete(notify); resolve(arrivals[index]!); } };
+    waiters.add(notify); notify();
+  });
+  const finish = (response: ServerResponse, delta: object, finishReason = "stop") => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: "phase", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\ndata: [DONE]\n\n`);
+  };
+  return { ...f, arrivals, request, finish };
+}
+
+it("reports the actual outbound provider boundary and retains it on reconnect until content", async () => {
+  const f = await httpProviderFixture();
+  await f.command("prompt", { workId: "http-phase", message: "real request" });
+  const { response, body } = await f.request(0);
+  expect(body.model).toBe("phase-model");
+  const requestEvent = f.events.find(event => event.type === "model_request_start")!;
+  expect(requestEvent).toMatchObject({ provider: "phase-fixture", modelId: "phase-model", sessionId: f.native.sessionId, emittedAt: expect.any(Number) });
+  const state = await f.command("get_state");
+  expect(state).toMatchObject({ data: { live: { activity: "waiting_for_model", activitySince: requestEvent.emittedAt, lastActivityAt: requestEvent.emittedAt } } });
+  expect((await f.command("get_state")).data).toEqual(state.data);
+  response.writeHead(200, { "content-type": "text/event-stream" });
+  response.write('data: {"id":"phase","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n');
+  await f.waitFor(event => event.type === "message_start" && (event.message as any)?.role === "assistant");
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "waiting_for_model", activitySince: requestEvent.emittedAt } } });
+  response.write('data: {"id":"phase","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}\n\n');
+  const text = await f.waitFor(event => (event.assistantMessageEvent as any)?.type === "text_delta");
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "responding", activitySince: text.emittedAt, lastActivityAt: text.emittedAt } } });
+  response.end('data: {"id":"phase","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  await f.waitFor(event => event.type === "agent_settled");
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, activitySince: undefined } } });
+}, 5000);
+
+it("starts a fresh observed request after tools and after a native provider retry", async () => {
+  const f = await httpProviderFixture(`pi.registerTool({ name: "phase_tool", label: "Phase", description: "Phase test",
+    parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "tool result" }], details: {} }) });`);
+  await f.command("prompt", { workId: "tools-and-retry", message: "use tool" });
+  f.finish((await f.request(0)).response, { tool_calls: [{ index: 0, id: "phase-call", type: "function", function: { name: "phase_tool", arguments: "{}" } }] }, "tool_calls");
+  const next = await f.request(1);
+  expect(f.events.filter(event => event.type === "model_request_start")).toHaveLength(2);
+  const end = f.events.findIndex(event => event.type === "tool_execution_end");
+  expect(f.events.findIndex((event, index) => index > end && event.type === "model_request_start")).toBeGreaterThan(end);
+  expect(next.body.messages.at(-1)).toMatchObject({ role: "tool", content: "tool result" });
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "waiting_for_model", tools: [] } } });
+  next.response.writeHead(503, { "content-type": "application/json" });
+  next.response.end(JSON.stringify({ error: { message: "Service unavailable", type: "server_error" } }));
+  const retried = await f.request(2);
+  expect(f.events.some(event => event.type === "auto_retry_start")).toBe(true);
+  expect(f.events.filter(event => event.type === "model_request_start")).toHaveLength(3);
+  const newest = f.events.filter(event => event.type === "model_request_start").at(-1)!;
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "waiting_for_model", activitySince: newest.emittedAt } } });
+  f.finish(retried.response, { content: "done" });
+  await f.waitFor(event => event.type === "agent_settled");
+}, 5000);
+
+it("rebinds the provider observer to runtime replacement and clears an aborted request", async () => {
+  const f = await httpProviderFixture();
+  const originalId = f.native.sessionId;
+  await f.command("new_session");
+  const replacement = captured.session!;
+  expect(replacement.sessionId).not.toBe(originalId);
+  replacement.agent.state.model = replacement.modelRuntime.getModel("phase-fixture", "phase-model")!;
+  replacement.settingsManager.applyOverrides({ retry: { enabled: false, provider: { maxRetries: 0 } }, cacheWarming: "off" });
+  await f.command("prompt", { workId: "replacement", message: "new runtime" });
+  await f.request(0);
+  expect(f.events.filter(event => event.type === "model_request_start")).toMatchObject([{ sessionId: replacement.sessionId }]);
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "waiting_for_model" } } });
+  expect(await f.command("abort")).toMatchObject({ success: true });
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, live: { activity: undefined, activitySince: undefined, tools: [] } } });
+}, 5000);
+
+it("does not report rejected admission or another session's provider requests", async () => {
+  const rejected = await httpProviderFixture(`pi.on("before_provider_request", () => { throw new Error("fixture-admission-refused"); });`);
+  rejected.native.settingsManager.applyOverrides({ retry: { enabled: false } });
+  await rejected.command("prompt", { workId: "reject", message: "rejected" });
+  await rejected.waitFor(event => event.type === "agent_settled");
+  expect(rejected.arrivals).toHaveLength(0);
+  expect(rejected.events.some(event => event.type === "model_request_start")).toBe(false);
+  expect(await rejected.command("get_state")).toMatchObject({ data: { live: { activity: undefined } } });
+  const other = await httpProviderFixture();
+  await other.command("prompt", { workId: "other", message: "another session" });
+  other.finish((await other.request(0)).response, { content: "done" });
+  await other.waitFor(event => event.type === "agent_settled");
+  expect(rejected.events.some(event => event.type === "model_request_start")).toBe(false);
+  const nested = other.native.modelRuntime.completeSimple(other.native.model!, { messages: [{ role: "user", content: "nested", timestamp: Date.now() }] });
+  other.finish((await other.request(1)).response, { content: "nested done" });
+  await nested;
+  expect(other.events.filter(event => event.type === "model_request_start")).toHaveLength(1);
+}, 5000);
 
 it("sandbox exposes exactly four tools without instructions, discovered extensions, or host shell RPC", async () => {
   const f = await fixture(undefined, `export default pi => { throw new Error("must not load sandbox extensions"); };`, {}, true, true);

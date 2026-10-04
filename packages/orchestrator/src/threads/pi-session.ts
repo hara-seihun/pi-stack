@@ -18,6 +18,7 @@ import { createSandboxTools } from "./pi-sandbox.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, POOLED_ACCOUNT_WAIT, resolveSessionModel } from "../extension/routing.js";
 import { isTransientFailure } from "../provider-errors.js";
 import usageLogger from "../extension/usage-logger.js";
+import { observeProviderRequests } from "../extension/provider-request-activity.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
 import { memoryExtension } from "kenan-memory/tools";
@@ -152,6 +153,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         customTools: room ? threadTools({ ...options, cwd, env }).filter(tool => tool.name === "request_user_input_async")
           : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
       if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
+      observeProviderRequests(created.session, output);
       execution.bind(created.session);
       created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });
