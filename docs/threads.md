@@ -84,6 +84,18 @@ When a child's execution settles, commit its full outcome and final assistant me
 
 Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain queued when the parent is held. Idle is not proof that an assignment succeeded.
 
+## Model availability
+
+Machine → Models enables or disables offered models for that person's new threads on the selected host. Remote and Orchestrator share `AGENT_DIR/model-availability.json` (`~/.pi/agent/model-availability.json` normally):
+
+```json
+{ "version": 1, "disabled": ["openai-codex/gpt-6-astra", "anthropic/claude-fable-5-1"] }
+```
+
+A missing file enables every model. Writes replace it atomically, preserving unrelated choices. A malformed or unreadable policy rejects new creation rather than silently enabling models. The policy is live-read at creation, so no restart is needed. Catalog names, physical IDs and numbered pool providers resolve to the same identity. Admission checks resolved settings before committing new roots or children, including CLI, direct thread APIs, scheduled work and private workers. Retrying a previously accepted creation retains its thread; imports and restored threads retain their state. Existing threads can continue, resume and change settings. Disabling never cancels them, changes their model or changes account availability; application completions and thread naming are unaffected. Existing child-model restrictions still apply when a model is enabled.
+
+The Remote dashboard exposes `modelAvailability`, while bootstrap start profiles omit disabled models. `PUT /v1/models/:id/availability` accepts `{ "enabled": true }` or `false` and returns `{ "models": [...] }`; provider/model IDs use encoded path segments. An open stale picker cannot bypass server admission. A disabled configured default is rejected when requested rather than silently substituting another model. Policies belong to each Unix person and host, not a shared household list.
+
 ## Defaults
 
 Remote asks its naming model for one to three words. That is a style preference,

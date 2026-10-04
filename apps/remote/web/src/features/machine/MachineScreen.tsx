@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Dashboard, Governor, GovernorProvider, GovernorState, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
 import { Sheet } from "../../app/Sheet";
+import { Models } from "./Models";
 import { iconUrl } from "../../chat-row";
 import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens, formatWeekReset } from "./format";
 import "./machine.css";
@@ -206,6 +207,7 @@ export function MachineScreen(props: MachineScreenProps) {
         <p className="machine-secondary">Subscription quota used, valued in dollars. Plan cards below show each provider separately.</p>
       </Card>}
       {dashboard?.plans.map((plan) => <Plan key={plan.id} plan={plan} modelCounts={props.modelCounts} />)}
+      {dashboard?.modelAvailability && <Card title="Models"><Models models={dashboard.modelAvailability} /></Card>}
       {dashboard?.allowance && <Allowance allowance={dashboard.allowance} />}
       {dashboard?.people && <People usage={dashboard.people} />}
       {dashboard?.governors && <Card title="Background launch pace">

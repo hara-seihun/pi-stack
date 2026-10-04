@@ -166,6 +166,16 @@ export interface ThreadStartModel {
   accent?: string;
 }
 
+export type ModelAvailability = ThreadStartModel & { enabled: boolean };
+
+export interface SetModelAvailabilityRequest {
+  enabled: boolean;
+}
+
+export interface SetModelAvailabilityResponse {
+  models: ModelAvailability[];
+}
+
 /** A Markdown file the destination offers as optional thread context, with its measured size. */
 export interface ThreadStartContext {
   /** Selection identity: folder basename or an absolute instruction-file path. */
@@ -280,6 +290,8 @@ export interface Dashboard {
   plans: PlanCard[];
   governors: GovernorControls | null;
   actions: MachineActionState[];
+  /** Person-owned availability for new threads; existing threads are unaffected. */
+  modelAvailability?: ModelAvailability[];
   machine: MachineUsage | null;
   modelCounts: AgentModelCount[];
   /** Null for everyone except the host's administrator. */

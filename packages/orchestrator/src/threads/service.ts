@@ -26,6 +26,7 @@ export interface ThreadServiceOptions {
   openSession: OpenPiSession;
   attachSession?: AttachPiSession;
   workersOnly?: boolean;
+  admitNewThread?: (settings: ThreadSettings) => Result<void>;
   environment?: (thread: Thread) => Record<string, string | undefined>;
   admit?: (thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string) => Promise<Result<ThreadAdmission>>;
   prepareMessage?: (thread: Thread, message: ThreadMessage) => Promise<Result<{ text: string; images?: unknown[] }>>;
@@ -380,6 +381,7 @@ export class ThreadService implements ThreadApi {
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
       if (input.metadata?.mode !== undefined && (!isThreadModeName(input.metadata.mode) || parent && input.metadata.mode !== parent.metadata?.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts, and a child keeps its parent's mode");
       const settings = resolveSpawnSettings(input.settings, parent, input.metadata?.mode); if (!settings.ok) return settings;
+      const available = this.options.admitNewThread?.(settings.value); if (available && !available.ok) return available;
       // Check local receipts first so retries of previously accepted children retain their identity.
       const workerOwner = parent && this.workerOwner?.(parent, input);
       if (workerOwner) return workerOwner.spawn(input);
