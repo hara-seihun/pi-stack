@@ -173,6 +173,30 @@ public class PhoneSetupTest {
         assertTrue(granted.result.getJSObject("capabilities").optBoolean("installPackages"));
         assertNull(SettingsLauncher.intent);
     }
+    @Test public void grantedNotificationAliasStillOpensSettingsWhenSystemNotificationsAreBlocked() {
+        Shadows.shadowOf(context().getSystemService(NotificationManager.class)).setNotificationsEnabled(false);
+        KenanRemotePlugin plugin = plugin();
+        assertEquals(com.getcapacitor.PermissionState.GRANTED, plugin.getPermissionState("notifications"));
+        Call call = new Call(new JSObject().put("step", "notifications"));
+        plugin.phoneSetup(call);
+        assertFalse(call.resolved);
+        assertNull(call.rejected);
+        assertEquals(Settings.ACTION_APP_NOTIFICATION_SETTINGS, SettingsLauncher.intent.getAction());
+        assertEquals(context().getPackageName(), SettingsLauncher.intent.getStringExtra(Settings.EXTRA_APP_PACKAGE));
+        assertEquals("phoneSettingsReturned", SettingsLauncher.callback);
+        ReflectionHelpers.callInstanceMethod(plugin, SettingsLauncher.callback,
+            ReflectionHelpers.ClassParameter.from(PluginCall.class, call),
+            ReflectionHelpers.ClassParameter.from(ActivityResult.class, new ActivityResult(android.app.Activity.RESULT_CANCELED, null)));
+        assertTrue(call.resolved);
+        assertFalse(call.result.getJSObject("capabilities").optBoolean("notifications"));
+        Shadows.shadowOf(context().getSystemService(NotificationManager.class)).setNotificationsEnabled(true);
+        SettingsLauncher.intent = null;
+        Call granted = new Call(new JSObject().put("step", "notifications"));
+        plugin.phoneSetup(granted);
+        assertTrue(granted.resolved);
+        assertTrue(granted.result.getJSObject("capabilities").optBoolean("notifications"));
+        assertNull(SettingsLauncher.intent);
+    }
     @Test public void revokedSystemNotificationsCannotRemainEnabled() {
         context().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", true).commit();
         Shadows.shadowOf(context().getSystemService(NotificationManager.class)).setNotificationsEnabled(false);
