@@ -1031,29 +1031,30 @@ describe("ThreadService", () => {
     expect(sessions).toHaveLength(0);
   });
 
-  it("defaults agent inputs to steer while retaining human queues and explicit choices", async () => {
+  it("defaults all inputs to steer while retaining explicit human queues and agent choices", async () => {
     const { directory, service } = fixture();
     const parent = value(await service.spawn({ requestId: "parent", cwd: directory, message: "Coordinate" }));
     const child = value(await service.spawn({ requestId: "child", cwd: directory, parentId: parent.id, message: "Assignment" }));
-    expect(service.pending(parent.id)[0]?.delivery).toBe("queue");
+    expect(service.pending(parent.id)[0]?.delivery).toBe("steer");
     expect(service.pending(child.id)[0]?.delivery).toBe("steer");
     const agent = { requestId: "agent", threadId: parent.id, senderId: child.id, text: "Progress" };
     expect(value(await service.send(agent)).delivery).toBe("steer");
     expect(value(await service.send({ ...agent, delivery: "steer" })).id).toBe("agent");
-    expect(value(await service.send({ requestId: "human", threadId: parent.id, text: "More work" })).delivery).toBe("queue");
+    expect(value(await service.send({ requestId: "human", threadId: parent.id, text: "More work" })).delivery).toBe("steer");
+    expect(value(await service.send({ requestId: "human-queue", threadId: parent.id, text: "Later work", delivery: "queue" })).delivery).toBe("queue");
     expect(await service.send({ ...agent, requestId: "queue", delivery: "queue" })).toMatchObject({ ok: false, error: { code: "invalid_request", message: expect.stringContaining("steer or hard steer") } });
     for (const delivery of ["steer", "hardSteer"] as const) {
       expect(value(await service.send({ ...agent, requestId: delivery, delivery })).delivery).toBe(delivery);
     }
   });
 
-  it("records a steer as landed only when Pi starts it as a user message", async () => {
+  it("steers a running thread by default and records landing only when Pi starts the user message", async () => {
     const { directory, service, sessions } = fixture();
     const thread = value(await service.spawn({ requestId: "root", cwd: directory, message: "Coordinate" }));
     await service.start();
     await waitFor(() => sessions[0]?.commands.some(command => command.type === "prompt") ?? false);
     expect(service.pending(thread.id)[0]?.landedAt).toEqual(expect.any(Number));
-    value(await service.send({ requestId: "steer", threadId: thread.id, text: "Result", delivery: "steer" }));
+    value(await service.send({ requestId: "steer", threadId: thread.id, text: "Result" }));
     await waitFor(() => sessions[0]!.commands.some(command => command.type === "steer"));
     const steer = service.pending(thread.id).find(message => message.id === "steer")!;
     expect(steer).toMatchObject({ state: "dispatched", insertedAt: expect.any(Number), landedAt: null });

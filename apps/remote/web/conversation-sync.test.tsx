@@ -52,6 +52,12 @@ test("cached idle transcript stays visible while the header updates, then idle r
   expect(ready).toContain("Cached conversation text");
 });
 
+test("a running conversation defaults to steer rather than waiting for the turn to finish", () => {
+  const html = render({ session: { ...session, state: "running" }, prompt: "Adjust the work" });
+  expect(html).toContain('aria-label="Change delivery. Current: Steer"');
+  expect(html).not.toContain('aria-label="Change delivery. Current: Queued"');
+});
+
 test("offline status and reconnect take precedence even while a refresh is pending", () => {
   const offline = render({ syncing: true, offline: "Connection lost" });
   expect(header(offline)).toContain('data-status="offline"');

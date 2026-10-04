@@ -7,7 +7,7 @@ import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
+import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, resolveDelivery, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -1676,7 +1676,7 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   if (previous) return { response: JSON.parse(previous.response), status: previous.status };
   const response = name === "compact"
     ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
-    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, "queue");
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}));
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
@@ -2522,7 +2522,7 @@ const server = Bun.serve<SocketData>({
         const text = String(body.text ?? "").trim();
         if (!text) return error("Prompt is empty");
         if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        const delivery = body.delivery ?? "queue";
+        const delivery = resolveDelivery(body);
         if (!["queue", "steer", "hardSteer"].includes(delivery)) return error("delivery must be queue, steer or hardSteer");
 
         const roomImages = body.includeMeetingImages === true && row.meeting_id

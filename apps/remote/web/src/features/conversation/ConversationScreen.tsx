@@ -19,7 +19,8 @@ import { QuestionsSheet } from "./questions";
 import type { ThreadQuestion } from "../../../../server/protocol";
 import "./conversation.css";
 
-export type Delivery = "queue" | "steer" | "hardSteer";
+import { resolveDelivery, type Delivery } from "../../../../../../packages/orchestrator/src/threads/contracts";
+export type { Delivery } from "../../../../../../packages/orchestrator/src/threads/contracts";
 
 export function BackIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>; }
 function InfoIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8v.2" /></svg>; }
@@ -90,14 +91,14 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
   const queued = session.queuedMessages.length;
   const action = composerAction(session, prompt);
-  const [delivery, setDelivery] = useState<Delivery>("queue");
+  const [delivery, setDelivery] = useState<Delivery>(resolveDelivery({}));
   const [questionsOpenFor, setQuestionsOpenFor] = useState<string | null>(null);
   useEffect(() => { if (questions.length === 0) setQuestionsOpenFor(null); }, [questions.length]);
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
   const modeToggleRef = useRef<HTMLButtonElement>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (!running) { setDelivery("queue"); setModeOpen(false); } }, [running, session.id]);
+  useEffect(() => { setDelivery(resolveDelivery({})); setModeOpen(false); }, [running, session.id]);
   useEffect(() => {
     if (!modeOpen) return;
     modeMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();

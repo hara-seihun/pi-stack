@@ -22,7 +22,7 @@ Humans and agents use the same thread API, with one delivery restriction:
 
 - Spawn always creates a fresh thread with a fresh context and initial assignment. Continuing an existing thread means sending it a message. A subagent may be ephemeral: it archives as soon as its last accepted assignment settles, after the parent notification and result are saved. Its transcript, files and other effects persist. Model-tool spawns default to ephemeral; set `ephemeral: false` when follow-up work is planned. Other API callers select it explicitly.
 - Agent-to-agent messages always use steer or hard steer. They default to steer. A request with `senderId` and `delivery: "queue"` is invalid.
-- Human messages default to queue and may explicitly use queue, steer or hard steer.
+- Human messages default to steer and may explicitly use queue, steer or hard steer.
 - Queue waits for the recipient's current execution to finish.
 - Steer delivers at a safe boundary after current tool calls without cancelling them.
 - Hard steer cancels current execution and its local tools, confirms cancellation, then runs the selected message first in the same conversation. Other pending messages retain their order. It does not cancel descendants or undo external effects.

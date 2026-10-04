@@ -106,7 +106,7 @@ export interface SendThread {
   replyTo?: string;
 }
 export function resolveDelivery(input: Pick<SendThread, "senderId" | "delivery">): Delivery {
-  return input.delivery ?? (input.senderId ? "steer" : "queue");
+  return input.delivery ?? "steer";
 }
 export interface ThreadList {
   id?: string;
