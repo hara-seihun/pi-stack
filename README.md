@@ -6,6 +6,7 @@ Pi Stack runs persistent agents through [Pi](https://github.com/badlogic/pi-mono
 
 - [`packages/runtime`](packages/runtime/README.md) pins Pi and owns the runtime extensions.
 - [`packages/orchestrator`](packages/orchestrator/README.md) schedules and hosts persistent agent work.
+- [`packages/kenan-memory`](packages/kenan-memory/README.md) owns optional shared host memory, discretion tools and the disclosure log.
 - [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, shared client, and context mirror extension.
 - [`apps/kenan`](apps/kenan/README.md) packages the shared client for Android.
 - [`skills`](skills/README.md) contains the shared first-party skills loaded by interactive and fleet agents.
@@ -45,6 +46,6 @@ Browser and Android clients switch endpoints through same-origin `/v1/remotes/<i
 
 ## Architecture
 
-[Unified threads](docs/threads.md) describes Orchestrator-owned conversations, shared Pi execution, messaging, cancellation and model defaults. Remote, fleet lanes and agents use the same thread operations.
+[Unified threads](docs/threads.md) describes Orchestrator-owned conversations, shared Pi execution, messaging, cancellation and model defaults. Remote, fleet lanes and agents use the same thread operations. The [personal watch list](docs/watch-list.md) lets agents maintain persistent checks and wakes an Opus 5.5 thread only when work is due.
 
-[`docs/architecture.md`](docs/architecture.md) describes repository boundaries, environment identity, Android state isolation, and the work-thread cutover.
+[`docs/architecture.md`](docs/architecture.md) describes repository boundaries, environment identity, Android state isolation, and the work-thread cutover. [One Kenan per machine](docs/one-kenan.md) owns the optional root runtime, fixture staging and reversible cutover. The flag-gated [action journal](docs/action-journal.md) captures outbound sends into Kenan's shared memory.

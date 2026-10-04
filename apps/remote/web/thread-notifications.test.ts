@@ -50,7 +50,8 @@ test("opening a thread dismisses across tabs and suppresses only that person and
   const first = new ThreadNotifications();
   const second = new ThreadNotifications();
   const key = threadNotificationKey("kenan", "local", "123");
-  await first.show(key, "Finished", () => {});
+  await first.show(key, "Question", () => {}, "Which option?");
+  expect(shown[0].options.body).toBe("Which option?");
   const visible = new AbortController();
   const viewing = second.view(key, visible.signal);
   expect(shown[0].closed).toBe(true);

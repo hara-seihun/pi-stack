@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Sandbox">
+  <defs>
+    <linearGradient id="sand" x1="6" y1="2" x2="18" y2="24" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f6dfad"/>
+      <stop offset="1" stop-color="#d8a65e"/>
+    </linearGradient>
+  </defs>
+  <circle cx="12" cy="12" r="11.5" fill="url(#sand)" stroke="#bd8c49"/>
+  <path d="m12 5 6 3.5-6 3.5-6-3.5Z" fill="#fff0ce"/>
+  <path d="M6 8.5v7l6 3.5v-7Z" fill="#e8b667"/>
+  <path d="M18 8.5v7L12 19v-7Z" fill="#bc803e"/>
+  <path d="m12 5 6 3.5v7L12 19l-6-3.5v-7Zm0 7 6-3.5M12 12 6 8.5M12 12v7" fill="none" stroke="#75512e" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

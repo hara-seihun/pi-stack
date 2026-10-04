@@ -84,11 +84,19 @@ public final class PhoneControlService extends Service {
             else active.stopSelf();
         });
     }
-    static void refresh() { PhoneControlService active = current; if (active != null) active.main.post(() -> { if (active.connection != null) active.connection.hello(); }); }
+    static void refresh() { PhoneControlService active = current; if (active != null) active.main.post(() -> {
+        if (active.connection != null) active.connection.hello();
+        active.updateNotice(active.connected ? "Phone control connected" : errorMessage.isEmpty() ? "Connecting through Pi Remote" : errorMessage);
+    }); }
+    static boolean sendOverlay(JSONObject frame) {
+        PhoneControlService active = current;
+        PhoneConnection source = active == null ? null : active.connection;
+        return active != null && active.connected && active.authorized() && source != null && source.send(frame);
+    }
     static JSONObject status(Context context) {
         try {
             SharedPreferences prefs = settings(context);
-            return new JSONObject().put("enabled", enabled(context)).put("connected", current != null && current.connected && enabled(context))
+            return new JSONObject().put("enabled", enabled(context)).put("overlay", KenanOverlay.isVisible(context)).put("connected", current != null && current.connected && enabled(context))
                 .put("deviceId", deviceId(context)).put("name", prefs.getString("name", Build.MODEL))
                 .put("environment", prefs.getString("environment", ""))
                 .put("error", errorCode.isEmpty() ? JSONObject.NULL : new JSONObject().put("code", errorCode).put("message", errorMessage))
@@ -114,6 +122,7 @@ public final class PhoneControlService extends Service {
                 .put("notificationListenerConnected", PhoneNotificationService.current != null)
                 .put("notifications", androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled())
                 .put("battery", ((PowerManager) context.getSystemService(POWER_SERVICE)).isIgnoringBatteryOptimizations(context.getPackageName()))
+                .put("overlay", android.provider.Settings.canDrawOverlays(context))
                 .put("camera", ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("microphone", ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("cameraCapture", false).put("microphoneCapture", false).put("clipboardRead", false)
@@ -138,6 +147,7 @@ public final class PhoneControlService extends Service {
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "disable".equals(intent.getAction())) { disable(this); return START_NOT_STICKY; }
+        if (intent != null && "overlay".equals(intent.getAction())) KenanOverlay.setVisible(this, !KenanOverlay.isVisible(this));
         if (stopping || !enabled(this)) { stopSelf(); return START_NOT_STICKY; }
         RemoteSession.Identity selected = NotificationIdentity.get(this).current();
         String chosen = settings(this).getString("environment", "");
@@ -163,6 +173,10 @@ public final class PhoneControlService extends Service {
         final PhoneConnection candidate = new PhoneConnection(this, identity, environment, this::authorized, new PhoneConnection.Events() {
             public void opened(PhoneConnection source) { main.post(() -> { if (source != connection || !source.valid()) return; connected = true; attempts = 0; errorCode = ""; errorMessage = ""; updateNotice("Phone control connected"); }); }
             public void command(PhoneConnection source, JSONObject frame) { main.post(() -> receive(source, frame)); }
+            public void overlayAck(PhoneConnection source, JSONObject frame) { main.post(() -> {
+                PhoneAccessibilityService service = PhoneAccessibilityService.current;
+                if (source == connection && source.valid() && authorized() && service != null) service.overlayAck(frame);
+            }); }
             public void closed(PhoneConnection source, String code, String message) { main.post(() -> { if (source == connection) lost(code, message); }); }
         });
         connection = candidate;
@@ -171,6 +185,8 @@ public final class PhoneControlService extends Service {
     private void lost(String code, String message) {
         if (!authorized()) return;
         connected = false; errorCode = code; errorMessage = message; updateNotice(message);
+        PhoneAccessibilityService service = PhoneAccessibilityService.current;
+        if (service != null) service.overlayDisconnected();
         if (code.equals("session_expired")) {
             NotificationIdentity.replace(this, "", ""); return;
         }
@@ -216,7 +232,7 @@ public final class PhoneControlService extends Service {
                     && coreArgs.optLong("durationMs", command.equals("ui.tap") ? 50 : 300) + System.currentTimeMillis() >= deadline) {
                     done.accept(PhoneResult.error("expired", "Gesture cannot finish before the command deadline")); return;
                 }
-                dispatch(command, coreArgs, done);
+                dispatch(command, coreArgs, deadline, () -> authorized() && source == connection && source.valid(), done);
             }
         };
         if (PhoneData.supports(command)) {
@@ -234,13 +250,13 @@ public final class PhoneControlService extends Service {
             }
         } else execute.run();
     }
-    private void dispatch(String command, JSONObject args, Consumer<PhoneResult> done) {
+    private void dispatch(String command, JSONObject args, long deadline, java.util.function.BooleanSupplier authorized, Consumer<PhoneResult> done) {
         try {
             if (command.equals("status")) { done.accept(PhoneResult.success(status(this))); return; }
-            if (command.startsWith("ui.") || command.equals("screen.capture")) {
+            if (command.startsWith("ui.") || command.startsWith("overlay.") || command.equals("screen.capture")) {
                 PhoneAccessibilityService service = PhoneAccessibilityService.current;
                 if (service == null) done.accept(PhoneResult.error("permission_denied", "Enable the Phone control accessibility service on the phone"));
-                else service.dispatch(command, args, done);
+                else service.dispatch(command, args, deadline, authorized, done);
                 return;
             }
             if (command.startsWith("notifications.")) {
@@ -278,8 +294,10 @@ public final class PhoneControlService extends Service {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent activity = PendingIntent.getActivity(this, NOTICE, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         PendingIntent disable = PendingIntent.getService(this, NOTICE, new Intent(this, PhoneControlService.class).setAction("disable"), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent overlay = PendingIntent.getService(this, NOTICE + 1, new Intent(this, PhoneControlService.class).setAction("overlay"), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Kenan phone control").setContentText(text).setOngoing(true).setContentIntent(activity)
+            .addAction(0, KenanOverlay.isVisible(this) ? "Hide Kenan" : "Show Kenan", overlay)
             .addAction(0, "Disable", disable).build();
     }
     private void updateNotice(String text) { getSystemService(NotificationManager.class).notify(NOTICE, notification(text)); }

@@ -58,6 +58,28 @@ test("a running conversation defaults to steer rather than waiting for the turn 
   expect(html).not.toContain('aria-label="Change delivery. Current: Queued"');
 });
 
+test("questions replace messaging, expose only the next answer, and preserve dictation and stop", () => {
+  const originalWindow = globalThis.window;
+  const originalStorage = globalThis.localStorage;
+  Object.assign(globalThis, { window: { PiRemotePerson: { get: () => "person" } }, localStorage: { getItem: () => null } });
+  try {
+    const html = render({ session: { ...session, state: "running" }, prompt: "Unsent message", questions: [
+      { id: "q1", threadId: "thread", question: "Which option?", createdAt: 1, suggestions: [{ id: "a", text: "Choice A" }], recommendedSuggestionId: "a" },
+      { id: "q2", threadId: "thread", question: "Second question", createdAt: 2, suggestions: [] },
+    ] });
+    expect(html).not.toContain('id="prompt"');
+    expect(html).not.toContain("Unsent message");
+    expect(html).toContain('aria-label="Submit answer"');
+    expect(html).toContain('aria-label="Start dictation"');
+    expect(html).toContain("Dismiss question");
+    expect(html).toContain("Stop thread");
+    expect(html).toContain("Recommended");
+    expect(html).not.toContain("Second question");
+    expect(html).not.toContain('checked=""');
+    expect(render({ prompt: "Unsent message" })).toContain("Unsent message");
+  } finally { Object.assign(globalThis, { window: originalWindow, localStorage: originalStorage }); }
+});
+
 test("offline status and reconnect take precedence even while a refresh is pending", () => {
   const offline = render({ syncing: true, offline: "Connection lost" });
   expect(header(offline)).toContain('data-status="offline"');

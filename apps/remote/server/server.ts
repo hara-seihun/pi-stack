@@ -7,7 +7,7 @@ import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, resolveDelivery, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
+import { WatchList, watchInterval, loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, resolveDelivery, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -18,8 +18,13 @@ import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
+import { questionAnswerContext } from "./question-answer-context";
 import { appendContextPatch, readContext } from "./context-journal";
-import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor } from "./database";
+import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
+import { oneKenanEnabled } from "kenan-memory/config";
+import { handleRoomOwner } from "./rooms-owner";
+import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
+import { readThreadHistory } from "pi-orchestrator/history";
 import { dismissError, observeError } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
@@ -34,9 +39,11 @@ import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
-import { contextFilesPrompt, listContextFiles, selectContextFiles } from "./thread-context-files";
+import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
+import { CalendarStore } from "./calendar";
+import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
@@ -91,6 +98,7 @@ if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_E
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
 const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
+const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
@@ -143,7 +151,7 @@ function assertContextMirrorLoadsLast() {
   }
 }
 
-assertContextMirrorLoadsLast();
+if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
@@ -163,11 +171,17 @@ const THREAD_DESTINATIONS = new Map(configuredThreadDestinations(destinationDefi
 const machineActions = new MachineActions();
 const speech = createSpeechService();
 
-/** The absolute context folder of a destination, or null when it offers none. */
-function destinationContextDir(destination: ThreadDestination | undefined): string | null {
-  if (!destination?.contextDir) return null;
+/** Optional context is owned by the destination's workspace and the supervisor's Unix account. */
+function destinationContextSources(destination: ThreadDestination | undefined): ContextFileSources | null {
+  if (!destination || destination.raw || destination.sandbox) return null;
   const workspace = workspaces.get(destination.workspaceId);
-  return workspace ? resolve(workspace.path, destination.contextDir) : null;
+  if (!workspace) return null;
+  const personal = destination.id === "personal";
+  if (!destination.contextDir && !personal) return null;
+  return {
+    ...(destination.contextDir ? { directory: resolve(workspace.path, destination.contextDir) } : {}),
+    ...(personal ? { agentsPaths: [...new Set([join(workspace.path, "AGENTS.md"), join(HOME, "AGENTS.md")])] } : {}),
+  };
 }
 
 // Which models each profile used most recently. Archived threads never move
@@ -186,7 +200,7 @@ function noteModelRecency(thread: Thread, lookup: ThreadLookup = liveThread): bo
 function threadStartProfiles() {
   const history = [...modelRecency.values()];
   return [...THREAD_DESTINATIONS.values()].map((destination) => {
-    const contextDir = destinationContextDir(destination);
+    const contextSources = destinationContextSources(destination);
     return {
       id: destination.id,
       label: destination.label,
@@ -198,7 +212,7 @@ function threadStartProfiles() {
         if (!model) throw new Error(`Unknown thread model ${id} in profile ${destination.id}`);
         return { id: model.id, label: model.label, icon: model.icon, accent: model.accent };
       }),
-      ...(contextDir ? { contexts: listContextFiles(contextDir) } : {}),
+      ...(contextSources ? { contexts: listContextFiles(contextSources) } : {}),
     };
   });
 }
@@ -268,16 +282,44 @@ unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "thread
 ensureSupervisorSchema(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
-const fleetUrl = configuredOrchestratorThreadUrl();
+const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 const namingUrl = modelBrokerUrl() ?? fleetUrl;
 const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
+/** Assigned once the phone broker exists; thread events can arrive earlier. */
+let phoneOverlay: PhoneOverlay | null = null;
 const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
 threads.setDirectory(directory, (parent, input) => {
   // Encrypted-folder sessions must retain their mount namespace and transcript custody.
   const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
   return privatePath(parent.cwd) || privatePath(input.cwd) ? undefined : fleet ?? undefined;
 });
+// Each watch item is checked in the destination it came from, with that destination's chosen context.
+const WATCH_DESTINATIONS = [...THREAD_DESTINATIONS.values()].filter(destination => !destination.raw && !destination.sandbox).map(destination => destination.id);
+const DEFAULT_WATCH_DESTINATION = process.env.PI_REMOTE_WATCH_DESTINATION
+  ?? (WATCH_DESTINATIONS.includes("home") ? "home" : WATCH_DESTINATIONS[0] ?? "home");
+const watchList = new WatchList({
+  databasePath: join(DATA, "threads.sqlite3"), threads,
+  intervalMs: watchInterval(process.env.PI_REMOTE_WATCH_INTERVAL_MS),
+  enabled: process.env.PI_REMOTE_WATCH_ENABLED !== "0",
+  destinations: WATCH_DESTINATIONS,
+  defaultDestination: DEFAULT_WATCH_DESTINATION,
+  destinationOf: threadId => {
+    const thread = threads.get(threadId);
+    const profileId = thread ? remotePlacement(thread, id => threads.get(id)).profileId : undefined;
+    return typeof profileId === "string" ? profileId : undefined;
+  },
+  placement: profileId => {
+    const destination = THREAD_DESTINATIONS.get(profileId);
+    if (!destination || destination.sandbox || destination.raw) return { ok: false, error: { code: "invalid_request", message: `Watch destination ${profileId} must be an offered full-context destination` } };
+    const admitted = workspaceAdmission.resolve(destination.workspaceId);
+    const contextFiles = watchContextFiles(destination.watchContextFiles, destinationContextSources(destination)?.directory);
+    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId, ...(contextFiles.length ? { contextFiles } : {}) } } }
+      : { ok: false, error: { code: "unavailable", message: admitted.error.message } };
+  },
+  onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
+});
+threads.setWatchList(watchList);
 const peerThreads = new Map<string, Thread>();
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
@@ -285,11 +327,17 @@ let peerError: string | null = null;
 const notificationErrors = new Map<string, string>();
 let peerRefresh: Promise<void> | null = null;
 const notificationRefreshes = new Map<string, Promise<void>>();
+const notificationRefreshAgain = new Set<string>();
 function refreshThreadNotifications(): Promise<void> {
   return Promise.all(directory.owners.map(owner => {
     const existing = notificationRefreshes.get(owner.id);
-    if (existing) return existing;
-    const refresh = projectThreadNotifications(db, owner.id, owner.api)
+    if (existing) { notificationRefreshAgain.add(owner.id); return existing; }
+    const refresh = (async () => {
+      do {
+        notificationRefreshAgain.delete(owner.id);
+        await projectThreadNotifications(db, owner.id, owner.api, directory);
+      } while (notificationRefreshAgain.has(owner.id));
+    })()
       .then(() => { observeError(db, `notifications:${owner.id}`, null); if (notificationErrors.delete(owner.id)) signalSync(); })
       .catch(cause => {
         const message = cause instanceof Error ? cause.message : String(cause);
@@ -327,7 +375,7 @@ async function refreshPeers() {
     for (const [id, thread] of next) peerThreads.set(id, thread);
     const lookup = cachedThreadLookup(next, id => threads.get(id) ?? null);
     for (const thread of updated) noteModelRecency(thread, lookup);
-    if (changed) signalSync();
+    if (changed) { signalSync(); void refreshThreadNotifications(); }
   })().catch(cause => {
     const message = cause instanceof Error ? cause.message : String(cause);
     observeError(db, "peer:fleet", message);
@@ -630,6 +678,10 @@ function invalidateDisplayContext(sessionId: string) {
 }
 
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
+  return questionAnswerContext(threads, sessionId, baseStoredContext(sessionId));
+}
+
+function baseStoredContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
   const peer = peerInspections.get(sessionId);
   if (peer) {
     if (inspectedContexts.has(peer)) return inspectedContexts.get(peer)!;
@@ -737,9 +789,8 @@ function chosenContextFiles(sessionId: string): string {
   const thread = threads.get(sessionId);
   const names = thread?.metadata?.contextFiles;
   if (!Array.isArray(names) || !names.length) return "";
-  const directory = destinationContextDir(THREAD_DESTINATIONS.get(String(thread!.metadata!.profileId ?? "")));
-  if (!directory) return "";
-  return contextFilesPrompt(directory, names.filter((name): name is string => typeof name === "string"));
+  const sources = destinationContextSources(THREAD_DESTINATIONS.get(String(thread!.metadata!.profileId ?? "")));
+  return contextFilesPrompt(sources, names.filter((name): name is string => typeof name === "string"));
 }
 
 function threadInstructions(sessionId: string, audience: "thread" | "voice" = "thread"): string {
@@ -748,6 +799,7 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
   return [
     audience === "thread" ? chosenContextFiles(sessionId) : "",
     meetingInstructions(sessionId, audience),
+    ROOMS_ENABLED ? roomInstructions(threads.get(sessionId)?.metadata?.room) : "",
     registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
     piReactions.session(sessionId).size ? `Message reactions, keyed by stable message ID: ${JSON.stringify(Object.fromEntries(piReactions.session(sessionId)))}` : "",
     slackReactions.instructions(),
@@ -960,7 +1012,7 @@ function namingError(id: string, message: string | null) {
   if (result.changes) signalSync();
 }
 async function nameThread(sessionId: string): Promise<void> {
-  if (namingThreads.has(sessionId) || shuttingDown) return;
+  if (namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
   namingThreads.add(sessionId);
   try {
     const row = sessionRow.get(sessionId);
@@ -1109,7 +1161,7 @@ function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archiv
   const parents = new Set(local.map(thread => thread.parentId));
   const runningParents = runningChildParents(local, peerThreads.values());
   const localIds = new Set(local.map(thread => thread.id));
-  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
+  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
     localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
 }
 function pendingMessages(id: string) {
@@ -1141,6 +1193,7 @@ function publicSession(row: any,
     id: row.id, parentId: row.parentId,
     hasChildren,
     origin,
+    watchList: row.metadata?.watchList === true,
     model: row.settings.model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
@@ -1162,7 +1215,7 @@ function publicSession(row: any,
 // hold, which it remembers on the ClientStream.
 
 function bootstrap(): Bootstrap {
-  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null };
+  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
 }
 
 let stateEncoded = "";
@@ -1256,7 +1309,7 @@ function pushNotifications(target?: ClientStream): void {
   for (const stream of target ? [target] : [...streams.values()]) {
     const cursor = stream.subscription.notificationsAfter;
     if (cursor === undefined || cursor === null) continue;
-    const feed = idleNotifications(db, cursor, id => threads.get(id) ?? null);
+    const feed = idleNotifications(db, cursor, notificationThread);
     if (!feed.notifications.length) continue;
     stream.subscription.notificationsAfter = feed.cursor;
     stream.send({ type: "notifications", feed });
@@ -1433,6 +1486,7 @@ async function rpc(id: string, type: string, body: Record<string, unknown> = {})
 
 function handlePiEvent(sessionId: string, event: any) {
   if (!ownsSupervisorLease()) return;
+  try { phoneOverlay?.event(sessionId, event); } catch (cause) { console.error("phone overlay event failed", cause); }
   ensureThreadView(db, sessionId);
   const rt = liveFor(sessionId);
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
@@ -1621,6 +1675,7 @@ function threadEnvironment(thread: Thread) {
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
     PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
+    ...(ROOMS_ENABLED && roomMetadata(thread.metadata?.room) ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
@@ -1739,6 +1794,13 @@ const handoffHistory: HandoffHistory = {
 };
 
 async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Promise<Result<{text: string; images?: unknown[]}>> {
+  const room = ROOMS_ENABLED && roomMetadata(thread.metadata?.room);
+  if (room && message.id.startsWith("question-answer:")) {
+    const stored = db.query("SELECT value FROM metadata WHERE key=?").get(`room-answer:${message.id}`) as { value: string } | null;
+    const sender = stored && roomMembers([JSON.parse(stored.value)])?.[0];
+    if (!sender) return { ok: false, error: { code: "unavailable", message: "Room question answer has no authenticated speaker" } };
+    return { ok: true, value: { text: roomInput(sender, message.text), images: message.images } };
+  }
   const meetingId = remotePlacement(thread).meetingId;
   if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
@@ -1751,6 +1813,12 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   } catch (cause) {
     return { ok: false, error: { code: "unavailable", message: cause instanceof Error ? cause.message : String(cause) } };
   }
+}
+
+function notificationThread(id: string): { parentId: string | null; role?: "conversation" | "worker" } | null {
+  const thread = threads.get(id);
+  if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
+  return thread ?? (ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null);
 }
 
 async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
@@ -1777,7 +1845,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); signalSync(); }
+  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();
@@ -1799,10 +1867,32 @@ const meet = new MeetServer((id) => {
 
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
+const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
+calendar.start();
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
 type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
-const phones = new PhoneBroker();
+const phones = new PhoneBroker({
+  overlayMessage: (device, message) => phoneOverlay!.message(device, message),
+  ready: device => phoneOverlay?.ready(device),
+});
+phoneOverlay = new PhoneOverlay({
+  thread: id => { const row = sessionRow.get(id) as any; return row ? { archived: Boolean(row.archived_at) } : null; },
+  create: async (message, device) => {
+    const destination = meetingDestination();
+    const id = crypto.randomUUID();
+    await insertThread(id, `Phone · ${device.name}`, destination, destination.defaultModel, null, message);
+    signalSync();
+    return id;
+  },
+  prompt: async (threadId, requestId, text) => { await enqueuePrompt(threadId, requestId, text, "steer"); },
+  send: (deviceId, command, args) => phones.send(deviceId, command, args),
+  online: deviceId => phones.online(deviceId),
+  load: () => (db.query("SELECT key,value FROM metadata WHERE key LIKE 'phone-overlay:%'").all() as Array<{ key: string; value: string }>)
+    .map(row => ({ deviceId: row.key.slice("phone-overlay:".length), threadId: row.value })),
+  save: (deviceId, threadId) => { db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`phone-overlay:${deviceId}`, threadId); },
+  log: message => console.warn(message),
+});
 const writeEndpoint = writeEngineEndpoint();
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({
@@ -1822,6 +1912,66 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (url.pathname.startsWith("/v1/room-owner/")) {
+      if (!ROOMS_ENABLED) return error("Not found", 404);
+      if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || resolved.kind !== "person" || resolved.via !== "router") return error("Rooms require the authenticated local router", 403);
+      return handleRoomOwner(req, {
+        get: id => threads.get(id) ?? null,
+        create: async (id, title, members) => {
+          const destination = meetingDestination();
+          if (destination.raw || destination.sandbox) throw new Error("Rooms require a full-context destination");
+          const admitted = workspaceAdmission.resolve(destination.workspaceId);
+          if (!admitted.ok) throw new Error(admitted.error.message);
+          unwrap(await directory.spawn({ id, requestId: id, title, cwd: admitted.value.cwd,
+            settings: { model: destination.defaultModel }, createdBy: { kind: "person", via: "router" },
+            metadata: { workspaceId: destination.workspaceId, profileId: destination.id, room: { id, members } } }));
+          ensureThreadView(db, id);
+        },
+        update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
+        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
+        history: async id => {
+          const thread = threads.get(id)!;
+          const messages = readThreadHistory(thread.sessionFile).map(entry => entry.type === "message"
+            ? { ...entry.message, identity: { id: `pi/${id}/${entry.id}` } }
+            : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
+          if (!storedContext(id)) await refreshThreadInspection(id);
+          const context = storedContext(id);
+          const settlement = threads.latestSettlement(id);
+          const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
+          const failure = thread.state !== "running" && settlement?.outcome === "failed"
+            ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
+          return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+            context: context ? JSON.parse(context.document) : null, questions: unwrap(await directory.questions(id)) };
+        },
+        stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },
+        answer: async (id, questionId, sender, body) => {
+          const key = `room-answer:question-answer:${questionId}`;
+          const previous = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
+          if (previous && JSON.parse(previous.value).user !== sender.user) throw new Error("Another room member already answered this question");
+          db.query("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)").run(key, JSON.stringify(sender));
+          const answered = await directory.answer({ threadId: id, questionId, selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
+          if (!answered.ok && !previous) db.query("DELETE FROM metadata WHERE key=?").run(key);
+          unwrap(answered);
+        },
+        notify: (id, receiptId, title, body, time) => {
+          const target = `room:${id}`;
+          db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`room-link:${target}`, "1");
+          recordIdleNotification(db, receiptId, { id: target, title }, time, { kind: "idle", body });
+          signalSync();
+        },
+      });
+    }
+    if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
+      const feed = url.pathname.startsWith("/v1/calendar/feed/");
+      if (!feed) {
+        const resolved = callers.resolve(caller);
+        if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Calendar access requires this person's authorized router or local caller", 403);
+      }
+      httpServer.timeout(req, 65);
+      return await calendar.handle(req);
+    }
     if (url.pathname === "/v1/phones" || url.pathname.startsWith("/v1/phones/")) {
       const connecting = !!API.phoneConnect.match(req.method, url.pathname);
       const resolved = callers.resolve(caller);
@@ -2204,7 +2354,7 @@ const server = Bun.serve<SocketData>({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications();
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, id => threads.get(id)) });
+      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
@@ -2282,7 +2432,7 @@ const server = Bun.serve<SocketData>({
         const model = String(body.model ?? destination.defaultModel);
         if (!destination.models.includes(model)) return error("Model not available at this destination");
         const id = String(body.sessionId ?? requestId);
-        const contextFiles = selectContextFiles(destinationContextDir(destination), body.contextFiles);
+        const contextFiles = selectContextFiles(destinationContextSources(destination), body.contextFiles);
         if (!contextFiles.ok) return error(contextFiles.error);
         const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
         if (!creator.ok) return error(creator.message, creator.status);
@@ -2305,7 +2455,7 @@ const server = Bun.serve<SocketData>({
       try {
         const body = await readBody(req);
         const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
-          selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text });
+          selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
         if (!result.ok) return threadError(result.error);
         if (questionReads.has(answerRequest.sessionId)) await questionReads.get(answerRequest.sessionId);
         for (const stream of sessionSubscribers(answerRequest.sessionId)) void sendQuestions(stream);
@@ -2345,6 +2495,7 @@ const server = Bun.serve<SocketData>({
     const id = sessionMatch.params.sessionId;
     const action = sessionMatch.action;
     const row = sessionRow.get(id) as any;
+    if (ROOMS_ENABLED && roomMetadata(row?.metadata?.room) && ["prompt", "fork", "command"].includes(action ?? "")) return error("Use the room API for room messages", 403);
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
     if (action === "unarchive" && req.method === "POST") {
@@ -2632,6 +2783,7 @@ refreshPlanUsageIfDue();
 void refreshPeers();
 
 unwrap(await threads.start());
+watchList.start();
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
 const stopAutoArchive = startAutoArchive(directory, AUTO_ARCHIVE_AFTER_MS, error => console.error("[supervisor] auto-archive failed", error), thread => Boolean((unreadThread.get(thread.id) as { idle_unread: number } | null)?.idle_unread),
   thread => typeof thread.metadata?.meetingId === "string" && meet.isLive(thread.metadata.meetingId));
@@ -2674,6 +2826,7 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  watchList.stop();
   stopAutoArchive();
   clearInterval(uploadPruner);
   clearInterval(namingReceipts);
@@ -2701,7 +2854,7 @@ const supervisorRelease = new SupervisorRelease({
     runner.detach();
   },
   detach: () => threads.detach(),
-  closeImages: async () => { speech?.close(); await messaging.close(); await closeImageGeneration(); },
+  closeImages: async () => { await calendar.close(); await watchList.close(); speech?.close(); await messaging.close(); await closeImageGeneration(); },
   stopServer: () => { server.stop(true); },
   closeDatabase: () => db.close(),
   exit: code => process.exit(code),

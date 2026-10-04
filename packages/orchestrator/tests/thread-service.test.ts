@@ -127,6 +127,111 @@ function fixture(root?: string, workersOnly = false) {
   return { directory, service, sessions };
 }
 
+it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch and retains its visible receipt across restart", async choice => {
+  const { service, directory, sessions } = fixture();
+  value(await service.start());
+  const thread = value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const questionId = value(await service.ask({ requestId: "consent:fixture:question", threadId: thread.id,
+    questions: [{ question: "May I share the meeting time?", suggestions: ["Yes, for this request", "No"] }] })).questionIds[0]!;
+  const answer = { threadId: thread.id, questionId, selectedSuggestionIds: choice === "dismiss" ? [] : [`${questionId}:${choice === "yes" ? 0 : 1}`],
+    text: choice === "yes" ? "Only the time." : "", ...(choice === "dismiss" ? { dismissed: true } : {}) };
+  const receipt = value(await service.answer(answer));
+  service.reconcile(); await turn(); await turn();
+  expect(sessions).toHaveLength(0);
+  expect(service.pending(thread.id)).toEqual([]);
+  expect(service.get(thread.id)).toMatchObject({ state: "idle", held: false, pendingMessages: 0 });
+  const state = value(await service.questionState(thread.id, questionId));
+  expect(state.answer).toMatchObject({ text: answer.text, dismissed: choice === "dismiss", acceptedAt: expect.any(Number) });
+  const history = value(await service.read({ threadId: thread.id })).entries;
+  expect(history).toMatchObject([{ id: `question-answer:${questionId}`, source: "question-receipt", message: { role: "user", questionId, rootConsent: true } }]);
+  if (choice === "dismiss") expect(JSON.stringify(history)).toContain("without selecting or authorizing any suggestion");
+  expect(value(await service.read({ threadId: thread.id, entryId: `question-answer:${questionId}` })).entries).toEqual(history);
+  const context = value(await service.inspect(thread.id)).context!;
+  const messages = context.messages as Record<string, any>[];
+  expect(messages).toHaveLength(1);
+  expect(service.projectQuestionAnswers(thread.id, messages)).toEqual(messages);
+  const conversation = [{ role: "user", timestamp: state.answer!.acceptedAt - 1, content: "Before" }, { role: "user", timestamp: state.answer!.acceptedAt + 1, content: "After" }];
+  expect(service.projectQuestionAnswers(thread.id, conversation)).toEqual([conversation[0], messages[0], conversation[1]]);
+  expect(conversation).toHaveLength(2);
+  await service.close();
+  const restored = fixture(directory);
+  value(await restored.service.start());
+  expect(value(await restored.service.answer(answer))).toEqual(receipt);
+  expect(value(await restored.service.questionState(thread.id, questionId))).toEqual(state);
+  expect(value(await restored.service.read({ threadId: thread.id })).entries).toEqual(history);
+  expect(await restored.service.answer({ ...answer, selectedSuggestionIds: [], dismissed: false, text: "Changed" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  restored.service.reconcile(); await turn(); await turn();
+  expect(restored.sessions).toHaveLength(0);
+  expect(value(await restored.service.questions(thread.id))).toEqual([]);
+});
+
+it("does not project historical consent answers already owned by native message delivery", async () => {
+  const { service, directory } = fixture();
+  const thread = value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const oldQuestion = value(await service.ask({ requestId: "consent:previous:question", threadId: thread.id, questions: [{ question: "Share the time?" }] })).questionIds[0]!;
+  value(await service.answer({ threadId: thread.id, questionId: oldQuestion, selectedSuggestionIds: [], text: "Only the time." }));
+  const oldState = value(await service.questionState(thread.id, oldQuestion));
+  const oldText = `Answer to question ${oldQuestion}: Share the time?\nOnly the time.`;
+  value(service.importMessage({ id: `question-answer:${oldQuestion}`, threadId: thread.id, replyTo: oldQuestion,
+    text: oldText, state: "done", insertedAt: oldState.answer!.acceptedAt, outcome: "complete" }));
+  const nativeMessage = { role: "user", timestamp: oldState.answer!.acceptedAt, content: [{ type: "text", text: oldText }] };
+  const nativeEntry = { type: "message", id: "native-old-answer", parentId: null, timestamp: new Date(nativeMessage.timestamp).toISOString(), message: nativeMessage };
+  writeFileSync(thread.sessionFile, JSON.stringify(nativeEntry) + "\n");
+  const nextQuestion = value(await service.ask({ requestId: "consent:next:question", threadId: thread.id, questions: [{ question: "Share the location?" }] })).questionIds[0]!;
+  value(await service.answer({ threadId: thread.id, questionId: nextQuestion, selectedSuggestionIds: [], text: "No location." }));
+  const history = value(await service.read({ threadId: thread.id })).entries;
+  expect(history).toHaveLength(2);
+  expect(history[0]).toEqual(nativeEntry);
+  expect(history[1]).toMatchObject({ id: `question-answer:${nextQuestion}`, source: "question-receipt" });
+  expect(service.projectQuestionAnswers(thread.id, [nativeMessage])).toMatchObject([nativeMessage, { questionId: nextQuestion }]);
+  expect((value(await service.inspect(thread.id)).context!.messages as Record<string, unknown>[])).toHaveLength(2);
+  expect(value(await service.questionState(thread.id, oldQuestion))).toEqual(oldState);
+  await service.close();
+  const restored = fixture(directory);
+  expect(value(await restored.service.read({ threadId: thread.id })).entries).toEqual(history);
+});
+
+it("keeps ordinary inbox conversation and async questions working without steering root answers into their run", async () => {
+  const { service, directory, sessions } = fixture();
+  value(await service.start());
+  const thread = value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const rootQuestion = value(await service.ask({ requestId: "consent:fixture:question", threadId: thread.id, questions: [{ question: "Share the time?" }] })).questionIds[0]!;
+  value(await service.send({ requestId: "conversation", threadId: thread.id, text: "Ordinary conversation" }));
+  await waitFor(() => sessions[0]?.commands.some(command => command.type === "prompt") === true);
+  const inputs = () => sessions.flatMap(session => session.commands.filter(command => ["prompt", "steer", "follow_up"].includes(command.type)));
+  expect(inputs()).toHaveLength(1);
+  value(await service.answer({ threadId: thread.id, questionId: rootQuestion, selectedSuggestionIds: [], text: "Only the time." }));
+  service.reconcile(); await turn(); await turn();
+  expect(sessions).toHaveLength(1);
+  expect(inputs()).toHaveLength(1);
+  const ordinaryQuestion = value(await service.ask({ requestId: "ordinary-question", threadId: thread.id, questions: [{ question: "What next?" }] })).questionIds[0]!;
+  value(await service.answer({ threadId: thread.id, questionId: ordinaryQuestion, selectedSuggestionIds: [], text: "Continue." }));
+  await waitFor(() => inputs().length === 2);
+  expect(inputs()[1]).toMatchObject({ workId: `question-answer:${ordinaryQuestion}`, message: expect.stringContaining("Continue.") });
+  expect(service.pending(thread.id).map(message => message.id)).not.toContain(`question-answer:${rootQuestion}`);
+  expect(value(await service.inspect(thread.id)).context?.messages).toContainEqual(expect.objectContaining({ questionId: rootQuestion, rootConsent: true }));
+  const read = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service }).find(tool => tool.name === "thread_read")!;
+  const recalled = await read.execute("own-permission", { threadId: thread.id }, new AbortController().signal, () => {}, {} as never);
+  expect(JSON.stringify(recalled)).toContain("Only the time.");
+  expect(JSON.stringify(recalled)).toContain(`question-answer:${rootQuestion}`);
+  expect(inputs()).toHaveLength(2);
+});
+
+it("does not release held or archived inbox work when a root consent answer is recorded", async () => {
+  const { service, directory, sessions } = fixture();
+  value(await service.spawn({ requestId: "inbox", id: "inbox", cwd: directory, metadata: { rootConsent: true } }));
+  const questionId = value(await service.ask({ requestId: "consent:fixture:question", threadId: "inbox", questions: [{ question: "Share?" }] })).questionIds[0]!;
+  value(await service.send({ requestId: "held", threadId: "inbox", text: "Unrelated work" }));
+  value(await service.control({ threadId: "inbox", action: "stop", descendants: false }));
+  value(await service.control({ threadId: "inbox", action: "update", archived: true }));
+  value(await service.start());
+  value(await service.answer({ threadId: "inbox", questionId, selectedSuggestionIds: [], text: "No" }));
+  service.reconcile(); await turn(); await turn();
+  expect(sessions).toHaveLength(0);
+  expect(service.get("inbox")).toMatchObject({ held: true, state: "idle", metadata: { archived: true } });
+  expect(service.pending("inbox").map(message => message.id)).toEqual(["held"]);
+});
+
 it("rejects nonexistent built-in models before creating a thread or saving settings", async () => {
   const { service, directory, sessions } = fixture();
   const settings = { model: "openai-codex/missing-model" };
@@ -291,6 +396,125 @@ it("records why a capacity refusal is waiting, keeps the work queued, and clears
   expect(service.get(thread.id)?.metadata?.admissionWait).toBeUndefined();
 });
 
+it("keeps provider-exhausted accepted work unsettled across restart and resumes the same work after capacity recovery",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-provider-wait-"));roots.push(directory);
+  const sessions:FakePiSession[]=[],release=vi.fn();
+  let available=true;
+  const admit=vi.fn(async(..._args:unknown[])=>available?{ok:true as const,value:{release}}:{ok:false as const,error:{code:"unavailable" as const,message:"anthropic-2: cooling until reset"}});
+  const openSession:OpenPiSession=async(options,output)=>{
+    const session=new FakePiSession(options,output);
+    if(sessions.length){session.acceptedWorkIds.add("accepted");session.completedWorkIds.add("accepted");session.lastAssistantMessage={role:"assistant",stopReason:"error",errorMessage:"429 account rate limit"};}
+    sessions.push(session);return session;
+  };
+  const options={databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit};
+  const service=new ThreadService(options);services.push(service);
+  value(service.importThread({id:"child",parentId:"parent",title:"child",cwd:directory,sessionFile:join(directory,"child.jsonl"),settings:{model:"anthropic/claude-opus-5-5",thinkingLevel:"high",speed:"standard"}}));
+  value(service.importMessage({id:"accepted",threadId:"child",text:"finish the real work"}));
+  await service.start();await waitFor(()=>sessions[0]?.isStreaming===true);
+  available=false;
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:"429 account rate limit"});
+  await waitFor(()=>sessions[0]!.closed&&service.get("child")?.metadata?.providerWait!==undefined);
+  expect(release).toHaveBeenCalledOnce();
+  expect(service.latestSettlement("child")).toBeNull();
+  expect(service.pending("child")).toMatchObject([{id:"accepted",state:"dispatched"}]);
+  expect(await service.command("child",{type:"get_state"})).toMatchObject({ok:true,value:{source:"thread-owner",isStreaming:false,threadState:"running",pendingWorkCount:1,providerWait:{workId:"accepted"}}});
+  expect(sessions).toHaveLength(1);
+  const db=new DatabaseSync(options.databasePath);
+  const executionId=db.prepare("SELECT id FROM thread_execution WHERE ended_at IS NULL").get()!.id;
+  expect(db.prepare("SELECT id FROM thread_work WHERE source='notification'").all()).toEqual([]);db.close();
+  service.reconcile();await turn();expect(sessions).toHaveLength(1);
+  value(await service.detach());
+  const reopened=new ThreadService(options);services.push(reopened);await reopened.start();await turn();
+  expect(sessions).toHaveLength(1);
+  expect(reopened.get("child")?.metadata?.providerWait).toBeDefined();
+  available=true;reopened.reconcile();await waitFor(()=>sessions[1]?.isStreaming===true);
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({workId:"accepted",resume:true,resumeProviderWait:true});
+  expect(sessions[1]!.options.args).toEqual(expect.arrayContaining(["anthropic","claude-opus-5-5","high"]));
+  expect(reopened.get("child")?.metadata?.providerWait).toBeUndefined();
+  sessions[1]!.settle("artifact delivered");await waitFor(()=>reopened.latestSettlement("child")!==null);
+  expect(reopened.latestSettlement("child")).toMatchObject({executionId,workId:"accepted",outcome:"complete"});
+  expect(admit.mock.calls.at(-1)?.[2]).toBe(false);
+  expect(admit.mock.calls.at(-1)?.[3]).toBe(executionId);
+});
+
+it.each([
+  ["stop", undefined, "complete"],
+  ["aborted", undefined, "cancelled"],
+  ["error", "400 invalid request", "failed"],
+])("reconciles a native terminal %s after a crash with stale provider waiting without replay", async (stopReason, errorMessage, outcome) => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-provider-terminal-crash-")); roots.push(directory);
+  const sessions: FakePiSession[] = [];
+  const finalMessage = { role: "assistant", content: [{ type: "text", text: "durable native result" }], stopReason, ...(errorMessage ? { errorMessage } : {}) };
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    admit: async () => ({ ok: true, value: { release() {} } }),
+    openSession: async (options, output) => {
+      const session = new FakePiSession(options, output);
+      session.acceptedWorkIds.add("accepted-crash");
+      session.completedWorkIds.add("accepted-crash");
+      session.lastAssistantMessage = finalMessage;
+      sessions.push(session); return session;
+    } }); services.push(service);
+  value(service.importThread({ id: "crashed", title: "crashed", cwd: directory,
+    sessionFile: join(directory, "crashed.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" },
+    metadata: { providerWait: { executionId: "original-execution", workId: "accepted-crash", retryAt: 0, broker: false } } }));
+  value(service.importMessage({ id: "accepted-crash", threadId: "crashed", text: "execute once",
+    state: "dispatched", executionId: "original-execution" }));
+  await service.start(); await waitFor(() => service.latestSettlement("crashed") !== null);
+  expect(service.latestSettlement("crashed")).toMatchObject({ executionId: "original-execution", workId: "accepted-crash", outcome, finalMessage });
+  expect(sessions).toHaveLength(1);
+  expect(sessions[0]!.commands.filter(command => command.type === "prompt")).toEqual([]);
+  expect(service.get("crashed")?.metadata?.providerWait).toBeUndefined();
+  expect(service.get("crashed")?.metadata?.admissionWait).toBeUndefined();
+  service.reconcile(); await turn(); expect(sessions).toHaveLength(1);
+});
+
+it("cold pooled startup without quota waits without consuming the startup failure budget",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-cold-capacity-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];let available=false;
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+    openSession:async(options,output)=>{if(!available)throw new Error("No eligible pooled account for anthropic/claude-opus-5-5");const session=new FakePiSession(options,output);sessions.push(session);return session;}});services.push(service);
+  await service.start();const thread=value(await service.spawn({requestId:"cold-capacity",cwd:directory,message:"work"}));
+  await waitFor(()=>service.get(thread.id)?.metadata?.admissionWait!==undefined);
+  for(let i=0;i<4;i++){service.reconcile();await turn();}
+  expect(service.get(thread.id)?.metadata?.startupFailure).toBeUndefined();expect(service.latestSettlement(thread.id)).toBeNull();
+  expect(service.pending(thread.id)).toMatchObject([{state:"queued"}]);
+  available=true;service.reconcile();await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settle("done");await waitFor(()=>service.latestSettlement(thread.id)!==null);
+});
+
+it("model-broker capacity waits respect a durable retry schedule rather than immediate re-admission",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-broker-wait-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+    openSession:async(options,output)=>{const session=new FakePiSession(options,output);sessions.push(session);return session;},
+    admit:async()=>({ok:true,value:{env:{PI_MODEL_BROKER_URL:"http://127.0.0.1:2461"},release(){}}})});services.push(service);
+  await service.start();const thread=value(await service.spawn({requestId:"broker-wait",cwd:directory,message:"work"}));
+  await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:"429 rate limit"});
+  await waitFor(()=>sessions[0]!.closed);
+  const wait=service.get(thread.id)!.metadata!.providerWait as {retryAt:number;broker:boolean};expect(wait.broker).toBe(true);
+  service.reconcile();await turn();service.reconcile();await turn();expect(sessions).toHaveLength(1);
+  vi.spyOn(Date,"now").mockReturnValue(wait.retryAt+1);service.reconcile();await waitFor(()=>sessions[1]?.isStreaming===true);
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({resumeProviderWait:true});
+  sessions[1]!.settle("done");await waitFor(()=>service.latestSettlement(thread.id)!==null);
+});
+
+it("stop cancels provider waiting without reopening or retrying a model",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-provider-stop-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];let available=true;
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+    openSession:async(options,output)=>{const session=new FakePiSession(options,output);sessions.push(session);return session;},
+    admit:async()=>available?{ok:true,value:{release(){}}}:{ok:false,error:{code:"unavailable",message:"quota exhausted"}}});services.push(service);
+  await service.start();const thread=value(await service.spawn({requestId:"stop-wait",cwd:directory,message:"work"}));
+  await waitFor(()=>sessions[0]?.isStreaming===true);available=false;
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:"429 quota exhausted"});
+  await waitFor(()=>sessions[0]!.closed);
+  value(await service.control({threadId:thread.id,action:"stop",descendants:false}));
+  available=true;service.reconcile();await turn();
+  expect(sessions).toHaveLength(1);expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
+  expect(service.get(thread.id)?.metadata?.providerWait).toBeUndefined();
+});
+
 it("settles a thread whose admission refusal can never succeed instead of waiting on it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-admission-reject-")); roots.push(directory);
   const sessions: FakePiSession[] = [];
@@ -307,12 +531,43 @@ it("settles a thread whose admission refusal can never succeed instead of waitin
   expect(sessions).toHaveLength(0);
 });
 
+it("waits out a transient compaction failure and resumes the same accepted work at its retry time", async () => {
+  const directory=mkdtempSync(join(tmpdir(),"thread-transient-wait-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];
+  const failure="Context rejected: Native compaction failed: Codex error: Our servers are currently overloaded. Context is unchanged. Automatic compaction retries after 2026-10-03T16:00:00.000Z; /compact or the compact RPC command retries now.";
+  const openSession:OpenPiSession=async(options,output)=>{
+    const session=new FakePiSession(options,output);
+    if(sessions.length){session.acceptedWorkIds.add("accepted");session.completedWorkIds.add("accepted");session.lastAssistantMessage={role:"assistant",stopReason:"error",errorMessage:failure};}
+    sessions.push(session);return session;
+  };
+  const options={databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit:async()=>({ok:true as const,value:{release(){}}})};
+  const service=new ThreadService(options);services.push(service);
+  value(service.importThread({id:"integrator",title:"integrator",cwd:directory,sessionFile:join(directory,"integrator.jsonl"),settings:{model:"openai-codex/gpt-6.1-sol",thinkingLevel:"high",speed:"standard"}}));
+  value(service.importMessage({id:"accepted",threadId:"integrator",text:"integrate the train"}));
+  let now=Date.parse("2026-10-03T15:53:00.000Z");vi.spyOn(Date,"now").mockImplementation(()=>now);
+  await service.start();await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:failure});
+  await waitFor(()=>sessions[0]!.closed&&service.get("integrator")?.metadata?.providerWait!==undefined);
+  expect(service.latestSettlement("integrator")).toBeNull();
+  expect(service.get("integrator")?.metadata?.providerWait).toMatchObject({attempts:1,retryAt:Date.parse("2026-10-03T16:00:00.000Z")});
+  service.reconcile();await turn();expect(sessions).toHaveLength(1);
+  now=Date.parse("2026-10-03T16:00:01.000Z");service.reconcile();
+  await waitFor(()=>sessions[1]?.isStreaming===true);
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({workId:"accepted",resume:true,resumeProviderWait:true});
+  sessions[1]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:failure.replace("16:00:00","16:00:30")});
+  await waitFor(()=>sessions[1]!.closed&&service.get("integrator")?.metadata?.providerWait!==undefined);
+  expect(service.get("integrator")?.metadata?.providerWait).toMatchObject({attempts:2,retryAt:now+60_000});
+  now+=60_000;service.reconcile();await waitFor(()=>sessions[2]?.isStreaming===true);
+  sessions[2]!.settle("integrated");await waitFor(()=>service.latestSettlement("integrator")!==null);
+  expect(service.latestSettlement("integrator")).toMatchObject({workId:"accepted",outcome:"complete"});
+  expect(service.get("integrator")?.metadata?.providerRetry).toBeUndefined();
+});
+
 it("retains native failure causes in settlement receipts without treating cancellation as failure", async () => {
   const f = fixture();
   await f.service.start();
   for (const [stopReason, errorMessage] of [
-    ["error", "Auto-compaction failed: Native compaction failed: exceeded request buffer limit while retrying upstream"],
-    ["error", "Context rejected: Native compaction failed: fetch failed. Retry with /compact."],
+    ["error", "Context rejected: An extension changed the Codex checkpoint's retained message boundary"],
     ["aborted", "This operation was aborted"],
   ]) {
     const thread = value(await f.service.spawn({ requestId: errorMessage, cwd: f.directory, message: "work" }));
@@ -558,7 +813,8 @@ async function settle(session: FakePiSession, service: ThreadService, threadId: 
 }
 
 describe("ThreadService", () => {
-  it("archives an ephemeral worker only after its final queued assignment, retaining its result", async () => {
+  it("archives an ephemeral worker only after its final queued assignment, retaining its result even when both settlements share a millisecond", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
     const { service, directory, sessions } = fixture();
     const root = value(await service.spawn({ requestId: "root", cwd: directory }));
     expect(await service.spawn({ requestId: "invalid-root", cwd: directory, ephemeral: true })).toMatchObject({ ok: false, error: { code: "invalid_request" } });

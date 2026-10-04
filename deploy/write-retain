@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Collect Write store entries only after a release has been accepted."""
+import errno
+import re
+import shutil
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+proc = Path(sys.argv[2]) if len(sys.argv) > 2 else Path('/proc')
+store = base.parent / '.pi-write'
+keep = set()
+pending = []
+
+
+def retain(path):
+    resolved = path.resolve()
+    try:
+        entry = store / resolved.relative_to(store).parts[0]
+    except (ValueError, IndexError):
+        return
+    if entry not in keep:
+        keep.add(entry)
+        pending.append(entry)
+
+
+for selected in (base, Path(str(base) + '.previous')):
+    if selected.is_symlink():
+        retain(selected)
+
+# An unreadable live map fails collection before anything is removed. Processes
+# exiting during the census are harmless; permission and I/O failures are not.
+pattern = re.compile(re.escape(str(store)) + r'/([^/\s\x00]+)')
+for process in proc.glob('[0-9]*'):
+    try:
+        observations = [process.joinpath('maps').read_text()]
+        if process.joinpath('cmdline').exists():
+            observations.append(process.joinpath('cmdline').read_bytes().decode(errors='replace'))
+        for name in ('cwd', 'exe'):
+            link = process / name
+            if link.is_symlink():
+                observations.append(str(link.readlink()))
+        for observation in observations:
+            for match in pattern.finditer(observation):
+                retain(store / match[1])
+    except OSError as error:
+        if error.errno not in (errno.ENOENT, errno.ESRCH):
+            raise
+
+while pending:
+    entry = pending.pop()
+    if entry.is_dir():
+        for link in entry.iterdir():
+            if link.is_symlink():
+                retain(link)
+
+for entry in store.iterdir():
+    if entry in keep:
+        continue
+    if entry.is_symlink() or not entry.is_dir():
+        entry.unlink()
+    else:
+        shutil.rmtree(entry)

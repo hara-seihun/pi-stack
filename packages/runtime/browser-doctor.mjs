@@ -40,6 +40,27 @@ const downloadContent = `browser-download-${randomUUID()}\n`;
 const downloadPath = join(directory, "browser-download.txt");
 const screenshotPath = join(directory, "browser-screenshot.png");
 const frameValue = `frame-fill-${randomUUID()}`;
+function controlledDateProbe() {
+  const reactSources = Object.fromEntries([
+    ["react", "react", "react.production.js"], ["react-dom", "react-dom", "react-dom.production.js"],
+    ["react-dom/client", "react-dom", "react-dom-client.production.js"], ["scheduler", "scheduler", "scheduler.production.js"],
+  ].map(([id, pkg, file]) => [id, readFileSync(join(dirname(selected.resolve(pkg)), "cjs", file), "utf8")]));
+  return `<div id="date-probe"></div><script>
+(() => {
+  const sources = ${JSON.stringify(reactSources).replaceAll("</script", "<\\/script")}, loaded = {};
+  function require(id) { if (!loaded[id]) { const module = loaded[id] = { exports: {} }; new Function('module', 'exports', 'require', sources[id])(module, module.exports, require); } return loaded[id].exports; }
+  const React = require('react'), { createRoot } = require('react-dom/client');
+  function Probe() {
+    const [date, setDate] = React.useState('2026-10-02'), [datetime, setDatetime] = React.useState('2026-10-02T23:00');
+    return React.createElement('section', null,
+      React.createElement('label', null, 'Controlled date', React.createElement('input', { id: 'controlled-date', type: 'date', value: date, onChange: e => setDate(e.target.value) })),
+      React.createElement('label', null, 'Controlled datetime', React.createElement('input', { id: 'controlled-datetime', type: 'datetime-local', value: datetime, onChange: e => setDatetime(e.target.value) })),
+      React.createElement('output', { id: 'controlled-state' }, JSON.stringify({ date, datetime })));
+  }
+  createRoot(document.getElementById('date-probe')).render(React.createElement(Probe));
+})();</script>`;
+}
+let controlledDates;
 const server = createServer((req, res) => {
   if (req.url === "/download") {
     res.writeHead(200, {
@@ -54,13 +75,12 @@ const server = createServer((req, res) => {
     res.end('<title>Frame probe</title><label>Frame input<input id="frame-input"></label>');
     return;
   }
-  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button><a href="/download" download>Download probe</a><iframe title="Secure payment input frame" src="http://localhost:${server.address().port}/frame"></iframe>`);
+  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button>${controlledDates}<a href="/download" download>Download probe</a><iframe title="Secure payment input frame" src="http://localhost:${server.address().port}/frame"></iframe>`);
 });
 let session;
 let accepted = false;
 let browserAttempted = !!values["session-file"];
 try {
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const agentDir = join(homedir(), ".pi/agent");
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
@@ -81,6 +101,8 @@ try {
   assert.equal(execFileSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 5000 }).trim(), `agent-browser ${browserVersion}`);
   const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
   assert.equal(tools.length, 1, "exactly one native browser tool must be active");
+  controlledDates = controlledDateProbe();
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const url = `http://127.0.0.1:${server.address().port}/`;
   const nativeRoot = dirname(selected.resolve("pi-agent-browser-native/package.json"));
   const { compileAgentBrowserQaPreset } = await import(pathToFileURL(join(nativeRoot, "dist/extensions/agent-browser/lib/input-modes/job.js")).href);
@@ -95,7 +117,7 @@ try {
     },
   });
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, frameEval: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, frameEval: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

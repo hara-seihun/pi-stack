@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { Fleet } from "../src/fleet.js";
 import { loadConfig } from "../src/config.js";
 import { Store } from "../src/store.js";
@@ -47,6 +47,25 @@ it("forces children but never bypasses exhausted quota, including root repair", 
     expect(root).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("provider quota exhausted") } });
     expect(store.control("repair-owner")).toBeUndefined();
   } finally { store.close(); }
+});
+
+it("waits for binding reset/cooldown evidence, not an unrelated model's exhausted quota",async()=>{
+  const store=Store.open(":memory:"),now=Date.now(),fleet=new Fleet(store,loadConfig("/missing"));
+  const clock=vi.spyOn(Date,"now").mockReturnValue(now);
+  store.upsertAccount({id:"anthropic-2",provider:"anthropic"});
+  store.recordMeter("anthropic-2","anthropic-7d_oi",100,now+86_400_000);
+  const settings={...thread.settings,model:"anthropic/claude-opus-5-5"};
+  try{
+    const opus=await fleet.admit(thread,settings,false,"same-execution");expect(opus.ok).toBe(true);if(opus.ok)await opus.value.release();
+    store.recordMeter("anthropic-2","anthropic-5h",100,now+3_600_000);
+    expect(await fleet.admit(thread,settings,false,"same-execution")).toMatchObject({ok:false,error:{retryAt:now+3_600_000}});
+    store.setCooldown("anthropic-2",now+2*3_600_000);
+    expect(await fleet.admit(thread,settings,false,"same-execution")).toMatchObject({ok:false,error:{retryAt:now+2*3_600_000}});
+    clock.mockReturnValue(now+1);
+    store.recordMeter("anthropic-2","anthropic-5h",0,now+3_600_000,now+1);store.setCooldown("anthropic-2",undefined);
+    const resumed=await fleet.admit(thread,settings,false,"same-execution");expect(resumed.ok).toBe(true);if(resumed.ok)await resumed.value.release();
+    expect(await fleet.admit(thread,{...settings,model:"anthropic/claude-fable-5-1"},false,"fable")).toMatchObject({ok:false,error:{message:expect.stringContaining("quota exhausted")}});
+  }finally{clock.mockRestore();store.close();}
 });
 
 it("owns root repair leases and recovers only recorded executions without isolated context", async () => {

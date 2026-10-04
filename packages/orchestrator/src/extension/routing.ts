@@ -11,7 +11,7 @@ import { pooledOnlyProvider } from "../auth/pooled-only.js";
 import { isRateLimitError, isRejectedTokenError, providerAccepted, rateLimitCooldownMs } from "../provider-errors.js";
 import { isCodexNotFoundError, repairProviderCredential, quarantineProviderCredential, type CredentialRepair } from "../auth/provider-rejection.js";
 import { withAnthropicFiles } from "../auth/anthropic-files-provider.js";
-import { chooseInteractiveAccount } from "../auth/account-selection.js";
+import { chooseInteractiveAccount, interactiveQuotaExhausted, interactiveRetryAvailability } from "../auth/account-selection.js";
 import { installImageGeneration } from "./image-generation.js";
 import { installProviderOperations } from "./provider-operation.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
@@ -27,6 +27,18 @@ type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 /** Families whose credentials live in shared custody rather than with a person. */
 const POOLED_FAMILIES=new Set(["openai-codex","anthropic"]);
 export const EXPLICIT_THREAD_MODEL_ENV="PI_THREAD_EXPLICIT_MODEL";
+export const POOLED_ACCOUNT_WAIT = "Pooled account round finished; awaiting account recovery";
+
+export function pooledRetryAvailability(model:string,env:NodeJS.ProcessEnv=process.env):{available:boolean;retryAt:number}{
+  const slash=model.indexOf("/"),family=baseProvider(model.slice(0,slash)),modelId=model.slice(slash+1);
+  const provider=builtinProviders().find(provider=>provider.id===family&&provider.auth.oauth);
+  if(!provider||!POOLED_FAMILIES.has(family))return {available:true,retryAt:Date.now()};
+  const store=Store.open(defaultLedgerPath(env));
+  try{
+    const auth=providerOAuth(provider,env.PI_ORCHESTRATOR_AUTH??defaultSharedAuthPath(defaultLedgerPath(env)));
+    return interactiveRetryAvailability(store,auth,family,modelId);
+  }finally{store.close();}
+}
 
 export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{return env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 
@@ -116,8 +128,8 @@ export default function routing(pi:ExtensionAPI):void{
     pi.setThinkingLevel(thinking);
     return true;
   };
-  // Admission may fall back to a cooling account; a rate-limit failover may not,
-  // because there the point is to leave the account that just refused the turn.
+  // Admission may probe inferred holds. Failover excludes every account refused
+  // in this round, even if it can probe an untried cooling sibling.
   const bind=async(ctx:ExtensionContext,exclude?:Set<string>,requested?:{family:string;modelId:string;thinking:ThinkingLevel},includeCooling=!exclude?.size):Promise<string|undefined>=>{
     const current=ctx.model,thinking=requested?.thinking??pi.getThinkingLevel();if(!current&&!requested)return;
     const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=await choose(family,modelId,exclude,includeCooling);
@@ -201,7 +213,8 @@ export default function routing(pi:ExtensionAPI):void{
     if(!ctx.model||!POOLED_FAMILIES.has(familyOf(ctx.model.provider)))return;
     const explicit=ctx.model?.provider&&/-\d+$/.test(ctx.model.provider)?store.account(ctx.model.provider):undefined;
     const retain=explicit&&allowsAccountUse(explicit,"interactive")
-      &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id);
+      &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id)
+      &&!interactiveQuotaExhausted(store,explicit.id,explicit.provider,ctx.model.id);
     const tierAllowed=retain&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(explicit.provider),explicit.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
     if(!retain||!tierAllowed){
       const bound=await bind(ctx);
@@ -239,14 +252,34 @@ export default function routing(pi:ExtensionAPI):void{
     requireSpeed(ctx);
     const current=store.account(ctx.model?.provider??"");
     const tierAllowed=current&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(current.provider),current.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
-    if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&!allowsAccountUse(current,"interactive")||!tierAllowed)){
+    if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&(!allowsAccountUse(current,"interactive")||interactiveQuotaExhausted(store,current.id,current.provider,ctx.model!.id))||!tierAllowed)){
       if(fleetAssigned)throw new Error(tierAllowed?`Account ${current.id} shared OAuth credential requires recovery before this assigned run can continue`:`Assigned account ${current.id} no longer advertises Astra ultrafast; refusing to downgrade`);
       const moved=await bind(ctx,new Set([current.id]),undefined,true);
-      if(!moved)throw new Error(`Account ${current.id} is unavailable for interactive agents; no shared account is available`);
+      if(!moved){
+        if(interactiveQuotaExhausted(store,current.id,current.provider,ctx.model!.id))return;
+        throw new Error(`Account ${current.id} is unavailable for interactive agents; no shared account is available`);
+      }
       reconcileLease(ctx);
     }
   });
   let unresolved:{failure:string;account:string;prompt:(failure:string,account:string)=>string}|undefined;
+  const refused=new Set<string>();
+  let refusalModel:string|undefined;
+  const round=(family:string,model:string)=>{
+    const key=`${family}/${model}`;
+    if(refusalModel!==key){refused.clear();refusalModel=key;}
+    return refused;
+  };
+  pi.on("before_agent_start",()=>{refused.clear();refusalModel=undefined;});
+  pi.on("message_end",event=>{
+    const message=event.message as any;
+    if(providerAccepted(message)){round(familyOf(message.provider),message.model).clear();unresolved=undefined;}
+  });
+  pi.on("before_provider_request",(_event,ctx)=>{
+    if(ctx.model&&(round(familyOf(ctx.model.provider),ctx.model.id).has(ctx.model.provider)
+      ||interactiveQuotaExhausted(store,ctx.model.provider,familyOf(ctx.model.provider),ctx.model.id)))
+      throw new Error(POOLED_ACCOUNT_WAIT);
+  });
   /**
    * Accounts repaired since their last successful request. A provider
    * that keeps refusing a freshly issued token is not going to be talked
@@ -300,13 +333,14 @@ export default function routing(pi:ExtensionAPI):void{
       }
     }
     const credentialUnavailable=!!shared.get(familyOf(failing))?.rejection(failing);
-    if(fleetAssigned||!credentialUnavailable&&!isRateLimitError(failure))return;
-    if(!credentialUnavailable&&store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure),{model:last.model});
-    // Rotate away from the refusing account; when every sibling is cooling, take the
-    // one nearest expiry rather than ending the turn. A cooldown is this machine's
-    // guess and the provider decides, so a rate limit stays weather the session
-    // rides out instead of a thread failure.
-    const moved=await bind(ctx,new Set([failing]),undefined,true);
+    if(!credentialUnavailable&&!isRateLimitError(failure))return;
+    const excluded=round(familyOf(failing),last.model??ctx.model.id);
+    excluded.add(failing);
+    if(!credentialUnavailable&&store.account(failing))store.transaction(()=>store.setCooldown(failing,
+      Math.max(store.account(failing)?.cooldownUntil??0,Date.now()+rateLimitCooldownMs(failure)),{model:last.model}));
+    if(fleetAssigned)return;
+    const moved=await bind(ctx,excluded,undefined,true);
+    if(!moved)pi.appendEntry("pooled-account-wait",{model:refusalModel,accounts:[...excluded],failure});
     if(moved&&!closed)unresolved={failure,account:moved,prompt:failoverPrompt};
   });
   pi.on("agent_before_settle",()=>{

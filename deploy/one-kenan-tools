@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+"""Fixed operator credential bridge, granted only to the root-Kenan service account."""
+import json
+import os
+import pathlib
+import pwd
+import sys
+
+config=json.loads(pathlib.Path('/etc/pi-stack/one-kenan.json').read_text())
+if json.loads(pathlib.Path(config.get('hostFile','/etc/pi-stack/host.json')).read_text()).get('oneKenan') is not True:
+    raise SystemExit('One Kenan is disabled')
+operator=pwd.getpwnam(config['brokerUser'])
+if os.geteuid()!=operator.pw_uid: raise SystemExit('Run only through the fixed operator sudo grant')
+if len(sys.argv)<2: raise SystemExit('Expected a configured credential tool')
+name,*args=sys.argv[1:]
+commands=config.get('credentialTools',{})
+if name not in ('pass-cli','mail-send','mail-search','github','git-credential') or name not in commands:
+    raise SystemExit('Credential tool is not configured')
+if name=='github' and (not args or args[0] not in ('api','repo','issue','pr','release','run','workflow')):
+    raise SystemExit('The bridge does not expose GitHub authentication, aliases or extensions')
+if name=='git-credential' and args not in (['get'],['store'],['erase']): raise SystemExit('Expected a Git credential operation')
+command=commands[name]
+if isinstance(command,str): command=[command]
+if not isinstance(command,list) or not command or not pathlib.Path(command[0]).is_absolute(): raise SystemExit('Expected a root-configured absolute command')
+env={'HOME':operator.pw_dir,'USER':operator.pw_name,'LOGNAME':operator.pw_name,
+     'PATH':f'{operator.pw_dir}/.local/bin:/usr/local/bin:/usr/bin:/bin',
+     'XDG_RUNTIME_DIR':f'/run/user/{operator.pw_uid}','DBUS_SESSION_BUS_ADDRESS':f'unix:path=/run/user/{operator.pw_uid}/bus'}
+for key in ('PI_REMOTE_SENDER_ID','PI_REMOTE_SESSION_ID','PI_THREAD_ID','PI_KENAN_ACTION_JOURNAL_DIR'):
+    if key in os.environ: env[key]=os.environ[key]
+os.execve(command[0],[*command,*args],env)

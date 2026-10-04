@@ -58,8 +58,11 @@ function accountReading(store:Store,account:Account,metric:PlanMetric,maxReading
     const declared=catalogMeter(meterId),reading=store.latestReading(account.id,meterId);
     if(!declared||!reading)return[];
     const left=clamp(100-reading.usedPercent);
+    const windowMs=declared.windowHours*3_600_000,shortWindow=declared.windowHours<24;
+    const current=now-reading.at<=Math.min(maxReadingAgeMs,shortWindow?windowMs:Infinity)
+      &&(!shortWindow||reading.resetAt===undefined||reading.resetAt>now);
     const expected=reading.resetAt&&reading.resetAt>now?clamp((reading.resetAt-now)*100/(declared.windowHours*3_600_000)):null;
-    return[{left,expected,at:reading.at,usage:{
+    return[{left,expected,at:reading.at,current,usage:{
       accountId:account.id,
       accountLabel:account.label?.trim()||account.id,
       state:"ready" as const,
@@ -73,7 +76,7 @@ function accountReading(store:Store,account:Account,metric:PlanMetric,maxReading
     }}];
   });
   const eligible=readings.filter((reading)=>reading.at<=now+60_000);
-  const fresh=eligible.filter((reading)=>now-reading.at<=maxReadingAgeMs);
+  const fresh=eligible.filter((reading)=>reading.current);
   if((!metric.requireAllMeters||fresh.length===metric.meters.length)&&fresh.length){
     return fresh.sort((a,b)=>a.left-b.left)[0]!;
   }

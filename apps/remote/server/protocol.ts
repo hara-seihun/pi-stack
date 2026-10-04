@@ -6,12 +6,16 @@
 import type { ThreadState } from "pi-orchestrator/api";
 import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
-export type ChatId = `ai:${string}` | `human:${string}`;
+export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
 
 export interface HostAuthentication { type: "oidc"; loginPath: "/v1/auth/login"; label: string }
+
+/** The coordination network this deployment expects clients to join, and whether the current request arrived over it. */
+export interface PrivateNetwork { id: string; name: string; loginServer: string }
+export type NetworkStatus = { network: PrivateNetwork; connected: boolean } | { network: null };
 
 export interface EnvironmentEndpoint {
   id: string;
@@ -30,7 +34,7 @@ export type ContextSplice = {
 
 export type Activity = ThreadState | "awaiting" | "thinking" | "compacting" | "retrying" | "waiting_on_tool";
 
-export interface IdleNotification { seq: number; sessionId: string; name: string; time: string }
+export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question"; body?: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
 
 export interface QueuedMessage {
@@ -57,6 +61,8 @@ export interface Session {
   parentId: string | null;
   hasChildren: boolean;
   origin: "person" | "fleet";
+  /** Scheduled watch checks belong in Workers without changing their owning supervisor. */
+  watchList?: boolean;
   model: string;
   name: string;
   color?: ThreadColor | null;
@@ -162,7 +168,10 @@ export interface ThreadStartModel {
 
 /** A Markdown file the destination offers as optional thread context, with its measured size. */
 export interface ThreadStartContext {
+  /** Selection identity: folder basename or an absolute instruction-file path. */
   name: string;
+  /** Optional friendly picker label, independent of selection identity. */
+  label?: string;
   tokens: number;
   bytes: number;
 }
@@ -174,7 +183,7 @@ export interface ThreadStart {
   accent?: string;
   defaultModel?: string;
   models: ThreadStartModel[];
-  /** Present only for destinations with a context folder; empty when the folder has no Markdown files. */
+  /** Present for destinations offering optional context; empty when no offered files are readable. */
   contexts?: ThreadStartContext[];
 }
 
@@ -187,6 +196,7 @@ export interface AgentModelCount {
 /** Facts every client needs once: where new threads can start and the
  * person's home. Sent with `hello` and again only when they change. */
 export interface Bootstrap {
+  rooms?: true;
   environmentId: string;
   home: string;
   threadStarts: ThreadStart[];

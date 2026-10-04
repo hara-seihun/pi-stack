@@ -14,25 +14,28 @@ export interface InstalledApp { revision: string; versionCode: number; applicati
 export interface AppUpdateCheck { update: AppUpdate | null; installed: InstalledApp }
 export interface AppUpdateInstall { status: "installer-opened" | "reloading"; revision?: string }
 export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
-export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "writeSettings" | "deviceAdmin";
+export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "overlay" | "writeSettings" | "deviceAdmin";
 export interface PhoneStatus {
   enabled: boolean;
   connected: boolean;
   deviceId: string;
   name: string;
   environment: string;
+  /** Kenan's dot is shown over other apps; absent on shells without the overlay. */
+  overlay?: boolean;
   error?: string | { code: string; message: string } | null;
   capabilities: Record<string, boolean | string | number | null>;
 }
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
-  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean }>;
-  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean }): Promise<void>;
+  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean; overlayEnabled?: boolean }>;
+  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean } | { step: "enabled"; enabled: boolean }): Promise<void>;
   writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
-  phoneSetup?(options: { step: PhoneSetupStep }): Promise<void>;
+  phoneSetup?(options: { step: PhoneSetupStep; instruction?: string }): Promise<PhoneStatus>;
+  phoneOverlay?(options: { visible: boolean }): Promise<PhoneStatus>;
   haptic?(options: { kind: string }): Promise<void>;
   keepAwake?(options: { enabled: boolean }): Promise<void>;
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
@@ -99,6 +102,7 @@ export const remote: RemoteBridge = !nativePlatform
         phoneStatus: () => capacitor.nativePromise("KenanRemote", "phoneStatus", {}),
         phoneConfigure: (options) => capacitor.nativePromise("KenanRemote", "phoneConfigure", options),
         phoneSetup: (options) => capacitor.nativePromise("KenanRemote", "phoneSetup", options),
+        phoneOverlay: (options) => capacitor.nativePromise("KenanRemote", "phoneOverlay", options),
         haptic: (options) => capacitor.nativePromise("KenanRemote", "haptic", options),
         keepAwake: (options) => capacitor.nativePromise("KenanRemote", "keepAwake", options),
         notifications: (options) => capacitor.nativePromise("KenanRemote", "notifications", options),
@@ -313,7 +317,7 @@ window.fetch = async (input, init) => {
     const operation = rootPath(path, root);
     const pathname = new URL(operation, location.href).pathname;
     const publicRoute = (pathname === API.environment.path() && !auth.session) || pathname === API.unlock.path()
-      || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
+      || pathname === API.network.path() || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
     const rootRoute = publicRoute || pathname === API.environments.path() || pathname === "/v1/lock" || pathname === "/v1/lock-status";
     const selected = rootRoute || !auth.session ? null : await getState();
     const target = rootRoute ? `${root}${operation}` : explicitTarget(path, root) ?? `${selected?.baseUrl ?? root}${operation}`;

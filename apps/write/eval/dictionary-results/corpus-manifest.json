@@ -1,0 +1,774 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "ami-1016",
+      "audio": "audio/ami-1016.wav",
+      "sha256": "e2f5cbdb2281323c84df2f467c5387dc987c33caabd96d61c9f047f3ca20d076",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 1016,
+        "audio_id": "AMI_EN2002a_H02_FEO072_0170421_0170824",
+        "meeting_id": "EN2002a",
+        "speaker_id": "FEO072",
+        "begin_time": 1704.2099609375,
+        "end_time": 1708.239990234375,
+        "transcript": "UM OH AND THE THE SEARCH INTERFACE",
+        "sha256": "cd244b061fb01829e73c983fe5e427e01d19b33a921df5c83138c6625b7816ce"
+      },
+      "verbatim": "UM OH AND THE THE SEARCH INTERFACE",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "Oh and the search interface.",
+      "expectation": "strict",
+      "tags": [
+        "filler",
+        "repeat",
+        "fragment",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "search interface"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-1025",
+      "audio": "audio/ami-1025.wav",
+      "sha256": "5a39d25ba34f35ed05dc7ef1f5f38b4bd635f5fd424e9680d4e9f070a19b84a2",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 1025,
+        "audio_id": "AMI_EN2002a_H02_FEO072_0137199_0137656",
+        "meeting_id": "EN2002a",
+        "speaker_id": "FEO072",
+        "begin_time": 1371.989990234375,
+        "end_time": 1376.56005859375,
+        "transcript": "I HAD TO I HAD TO UNDERSTAND HOW TO DO THE TRANSCRIPT HOW THEY DID THE TRANSCRIPT TO DO THE SUMMARY MYSELF",
+        "sha256": "b47015b61500e31b6bbd83272a60fc1f4dafcd1e66aca11a6839ebba49755e37"
+      },
+      "verbatim": "I HAD TO I HAD TO UNDERSTAND HOW TO DO THE TRANSCRIPT HOW THEY DID THE TRANSCRIPT TO DO THE SUMMARY MYSELF",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "I had to understand how to do the transcript, how they did the transcript, to do the summary myself.",
+      "expectation": "meaning",
+      "tags": [
+        "repeat",
+        "ambiguous-repair",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "understand"
+          ],
+          [
+            "transcript"
+          ],
+          [
+            "summary myself"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-1037",
+      "audio": "audio/ami-1037.wav",
+      "sha256": "d79173658b5a48e90ee5eb415d7cd2800ba394a2a4a47f6df2115ac2fb24df34",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 1037,
+        "audio_id": "AMI_EN2002a_H02_FEO072_0027270_0027918",
+        "meeting_id": "EN2002a",
+        "speaker_id": "FEO072",
+        "begin_time": 272.70001220703125,
+        "end_time": 279.17999267578125,
+        "transcript": "YEAH SO Y WHEN YOU RIGHT CLICK ON IT ONE ONE OPTION WILL BE GIVE ME ALL YOUR MEETINGS CHARACTERISE THE SPEAKER",
+        "sha256": "74a5596a996a12bea6a00a2511be9bc13019602423524ea88c370d1718695e66"
+      },
+      "verbatim": "YEAH SO Y WHEN YOU RIGHT CLICK ON IT ONE ONE OPTION WILL BE GIVE ME ALL YOUR MEETINGS CHARACTERISE THE SPEAKER",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "Yeah so when you right click on it, one option will be give me all your meetings, characterise the speaker.",
+      "expectation": "meaning",
+      "tags": [
+        "cutoff",
+        "repeat",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "right click"
+          ],
+          [
+            "all your meetings"
+          ],
+          [
+            "characterise the speaker",
+            "characterize the speaker"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-1040",
+      "audio": "audio/ami-1040.wav",
+      "sha256": "d325a717abe73c687e59fdf0591c861183d4d222161b8bd05f6e97aec6d1b02b",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 1040,
+        "audio_id": "AMI_EN2002a_H03_MEE071_0068460_0068785",
+        "meeting_id": "EN2002a",
+        "speaker_id": "MEE071",
+        "begin_time": 684.5999755859375,
+        "end_time": 687.8499755859375,
+        "transcript": "IT'S A BIT OF A CRIPPLE WITH JAVA'S WINDOWING TOOL KIT",
+        "sha256": "ae483859d2c13755b433f1025524af766254781e63fb89c54d36a6abb8d0eb95"
+      },
+      "verbatim": "IT'S A BIT OF A CRIPPLE WITH JAVA'S WINDOWING TOOL KIT",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "It's a bit of a cripple with Java's windowing tool kit.",
+      "expectation": "strict",
+      "tags": [
+        "dictionary-positive",
+        "technical-name"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Java's"
+          ],
+          [
+            "windowing tool kit",
+            "windowing toolkit"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": [
+        "Java"
+      ]
+    },
+    {
+      "id": "ami-4006",
+      "audio": "audio/ami-4006.wav",
+      "sha256": "65bd06a26c97a63b982eaf7a66f2f1033a6ad517e711d20066e4ec0d58566113",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 4006,
+        "audio_id": "AMI_EN2002d_H03_MEE073_0091487_0091840",
+        "meeting_id": "EN2002d",
+        "speaker_id": "MEE073",
+        "begin_time": 914.8699951171875,
+        "end_time": 918.4000244140625,
+        "transcript": "SOME PEOPLE ARE NO I KNOW SOME BALANCED PEOPLE",
+        "sha256": "16d04026a90e56082b25789d3a9f233fd1028274e6962f908bd953986fb870fb"
+      },
+      "verbatim": "SOME PEOPLE ARE NO I KNOW SOME BALANCED PEOPLE",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "I know some balanced people.",
+      "expectation": "meaning",
+      "tags": [
+        "self-correction",
+        "abandoned-clause",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "I know"
+          ],
+          [
+            "balanced people"
+          ]
+        ],
+        "forbidden": [
+          "some people are"
+        ]
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-4035",
+      "audio": "audio/ami-4035.wav",
+      "sha256": "bbb95cc9d830b5f38faf1686d380ea7155eee6ca05373c8e8877b836ff43dc3a",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 4035,
+        "audio_id": "AMI_EN2002d_H01_FEO072_0169906_0170600",
+        "meeting_id": "EN2002d",
+        "speaker_id": "FEO072",
+        "begin_time": 1699.06005859375,
+        "end_time": 1706.0,
+        "transcript": "WELL I WILL I WILL NEED YOUR SNIPPETS OF CODE OR IT'D BE GOOD IF I HAD THEM BY TOMORROW EVENING",
+        "sha256": "6deb9ad49ab88618c5f2d6af9bfa65d3727232b02fe99115bd83fcaadbdd55fa"
+      },
+      "verbatim": "WELL I WILL I WILL NEED YOUR SNIPPETS OF CODE OR IT'D BE GOOD IF I HAD THEM BY TOMORROW EVENING",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "Well I will need your snippets of code, or it'd be good if I had them by tomorrow evening.",
+      "expectation": "meaning",
+      "tags": [
+        "repeat",
+        "time-protection",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "snippets of code"
+          ],
+          [
+            "tomorrow evening"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-4062",
+      "audio": "audio/ami-4062.wav",
+      "sha256": "420da3dd2aa85dfb2e2be7705a1158fa342b6b5e446d916e6685487312edf14c",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 4062,
+        "audio_id": "AMI_EN2002d_H00_FEO070_0154016_0154252",
+        "meeting_id": "EN2002d",
+        "speaker_id": "FEO070",
+        "begin_time": 1540.1600341796875,
+        "end_time": 1542.52001953125,
+        "transcript": "WE'RE PLANNING ON HAVING A BIG PARTY ON THE TWENTY FOURTH",
+        "sha256": "7fdfff1759c1fc8f36f92f5664fc7fc28a23532b5a12dca7060de47b65b941b2"
+      },
+      "verbatim": "WE'RE PLANNING ON HAVING A BIG PARTY ON THE TWENTY FOURTH",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "We're planning on having a big party on the twenty fourth.",
+      "expectation": "meaning",
+      "tags": [
+        "date-protection",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "big party"
+          ],
+          [
+            "twenty fourth",
+            "24th",
+            "24"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-8056",
+      "audio": "audio/ami-8056.wav",
+      "sha256": "0da7c2ee5488bf3de9a8b5016cd5f0f8eb9da571edfdab1faabfb6c0191c3ff3",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 8056,
+        "audio_id": "AMI_IS1009a_H00_FIE088_0015168_0015754",
+        "meeting_id": "IS1009a",
+        "speaker_id": "FIE088",
+        "begin_time": 151.67999267578125,
+        "end_time": 157.5399932861328,
+        "transcript": "THIS THING WE ARE GONNA UM UH DESIGN IS A NEW REMOTE CONTROL",
+        "sha256": "eb895a04b24e3ce9d400e3507553eb92ed8d5283fd4f61480b84d42868b571cb"
+      },
+      "verbatim": "THIS THING WE ARE GONNA UM UH DESIGN IS A NEW REMOTE CONTROL",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "This thing we are gonna design is a new remote control.",
+      "expectation": "strict",
+      "tags": [
+        "filler",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "design"
+          ],
+          [
+            "new remote control"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-10014",
+      "audio": "audio/ami-10014.wav",
+      "sha256": "8b04fba78b936fd4d8708912da126483933d7888b3ef8c955a565c83bec276d0",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 10014,
+        "audio_id": "AMI_TS3003a_H00_MTD009PM_0011666_0012227",
+        "meeting_id": "TS3003a",
+        "speaker_id": "MTD009PM",
+        "begin_time": 116.66000366210938,
+        "end_time": 122.2699966430664,
+        "transcript": "WELL I DON'T KNOW IF YOU'VE NOTICED BUT UH WE'RE WORKING FOR REAL REACTION",
+        "sha256": "a9a76915be7f4385b8d4f770ed95d0f4db6f667e1ee9b67846ae01d2582e674e"
+      },
+      "verbatim": "WELL I DON'T KNOW IF YOU'VE NOTICED BUT UH WE'RE WORKING FOR REAL REACTION",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "Well I don't know if you've noticed, but we're working for Real Reaction.",
+      "expectation": "meaning",
+      "tags": [
+        "filler",
+        "dictionary-positive",
+        "uncommon-organisation-name",
+        "negation-protection"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "don't know",
+            "do not know"
+          ],
+          [
+            "working for Real Reaction"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": [
+        "Real Reaction"
+      ]
+    },
+    {
+      "id": "ami-10097",
+      "audio": "audio/ami-10097.wav",
+      "sha256": "503fb26d1f7f289a12f962709a4a238d958e1c0180c0ac29ff46e4e7a875cf73",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 10097,
+        "audio_id": "AMI_TS3003a_H00_MTD009PM_0130326_0130868",
+        "meeting_id": "TS3003a",
+        "speaker_id": "MTD009PM",
+        "begin_time": 1303.260009765625,
+        "end_time": 1308.6800537109375,
+        "transcript": "AND THEN YOU CAN OPERATE IT FROM THE THIRD OR TH OR SECOND FLOOR",
+        "sha256": "c061c0284c7c43b97de69cdc99362f492b9ddf2d140ccfc1ce528b8ea2efab15"
+      },
+      "verbatim": "AND THEN YOU CAN OPERATE IT FROM THE THIRD OR TH OR SECOND FLOOR",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "And then you can operate it from the third or second floor.",
+      "expectation": "meaning",
+      "tags": [
+        "cutoff",
+        "alternatives-not-correction",
+        "number-protection",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "third or second",
+            "3rd or 2nd"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-11045",
+      "audio": "audio/ami-11045.wav",
+      "sha256": "1fc7bf23e3e010943aba384650207139dae1c7c76360541e37137a01b77b971c",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 11045,
+        "audio_id": "AMI_TS3003c_H01_MTD011UID_0049675_0050406",
+        "meeting_id": "TS3003c",
+        "speaker_id": "MTD011UID",
+        "begin_time": 496.75,
+        "end_time": 504.05999755859375,
+        "transcript": "UM THE UH I FOUND SOME UH SOMETHING ABOUT UH SPEECH UH RECOGNITION",
+        "sha256": "df35a4c208263c21687af8bed92459d0ef8389218f2f73e570d994e64b47356b"
+      },
+      "verbatim": "UM THE UH I FOUND SOME UH SOMETHING ABOUT UH SPEECH UH RECOGNITION",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "I found something about speech recognition.",
+      "expectation": "meaning",
+      "tags": [
+        "filler",
+        "false-start",
+        "self-correction",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "I found"
+          ],
+          [
+            "something about"
+          ],
+          [
+            "speech recognition"
+          ]
+        ],
+        "forbidden": [
+          "some something"
+        ]
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "ami-11072",
+      "audio": "audio/ami-11072.wav",
+      "sha256": "e66cf806ba94e584a771c32ff9c9be70d7d930f6dc92587f0df755100b679745",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 11072,
+        "audio_id": "AMI_TS3003c_H03_MTD012ME_0121214_0121773",
+        "meeting_id": "TS3003c",
+        "speaker_id": "MTD012ME",
+        "begin_time": 1212.1400146484375,
+        "end_time": 1217.72998046875,
+        "transcript": "AND I THINK A VOICE RECOGNITION FUNCTION WOULD NOT MAKE THE REMOTE CONTROL MUCH EASIER TO USE",
+        "sha256": "5bf5a8575624a9ab75ef5b1d13994f214881d77243d34e005b6d1bff1d7a85ee"
+      },
+      "verbatim": "AND I THINK A VOICE RECOGNITION FUNCTION WOULD NOT MAKE THE REMOTE CONTROL MUCH EASIER TO USE",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "new-selection-not-in-prior-AMI-first-100-probe",
+      "target": "And I think a voice recognition function would not make the remote control much easier to use.",
+      "expectation": "strict",
+      "tags": [
+        "negation-protection",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "voice recognition"
+          ],
+          [
+            "would not make"
+          ],
+          [
+            "remote control"
+          ]
+        ],
+        "forbidden": []
+      },
+      "expected_terms": []
+    },
+    {
+      "id": "domain-kenan",
+      "audio": "audio/domain-kenan.wav",
+      "sha256": "0760b1f7aef6a62ad74d66a6bf76633cf6401d061f373ab8893825fa74923f71",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Send the file to Kenan."
+      },
+      "verbatim": "Send the file to Kenan.",
+      "target": "Send the file to Kenan.",
+      "expectation": "strict",
+      "expected_terms": [
+        "Kenan"
+      ],
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Send the file to Kenan"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "domain-kelana",
+      "audio": "audio/domain-kelana.wav",
+      "sha256": "7114384c145b958ecb134ad45e4aa5419895d98553dd3ff3eef4d06b41cd6423",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Kelana opens the file."
+      },
+      "verbatim": "Kelana opens the file.",
+      "target": "Kelana opens the file.",
+      "expectation": "strict",
+      "expected_terms": [
+        "Kelana"
+      ],
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Kelana opens the file"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "negative-canon",
+      "audio": "audio/negative-canon.wav",
+      "sha256": "a588183b0cc55c1b8d4fdc12d354ffd8141358f572bc6923ffee7662b7589533",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Send the file to Canon."
+      },
+      "verbatim": "Send the file to Canon.",
+      "target": "Send the file to Canon.",
+      "expectation": "strict",
+      "expected_terms": [],
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Send the file to Canon"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "negative-call-anna",
+      "audio": "audio/negative-call-anna.wav",
+      "sha256": "a6ff68392b30a144ebcd063743b5cb8784b88b59af2e05835daa5e5c64fdf116",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Call Anna tomorrow."
+      },
+      "verbatim": "Call Anna tomorrow.",
+      "target": "Call Anna tomorrow.",
+      "expectation": "strict",
+      "expected_terms": [],
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Call Anna tomorrow"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "replacement-positive",
+      "audio": "audio/replacement-positive.wav",
+      "sha256": "1de3991cee9cf5e80bc2405328bd751fb99149131e5c78be51a26d73759fc423",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Open lantern works."
+      },
+      "verbatim": "Open lantern works.",
+      "target": "Open lantern works.",
+      "expectation": "strict",
+      "expected_terms": [
+        "LanternWorks"
+      ],
+      "tags": [
+        "synthetic",
+        "dictionary-positive",
+        "dictionary-replacement"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "open"
+          ],
+          [
+            "lantern works",
+            "LanternWorks"
+          ]
+        ],
+        "forbidden": []
+      },
+      "dictionary_target": "Open LanternWorks."
+    },
+    {
+      "id": "replacement-negative",
+      "audio": "audio/replacement-negative.wav",
+      "sha256": "6e23cc2c06dfbb5709c7cfa351d2d5712c23697afe4543730e01a7fa4bf4c5a7",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "authored-diagnostic-not-holdout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Open the lantern and close the window."
+      },
+      "verbatim": "Open the lantern and close the window.",
+      "target": "Open the lantern and close the window.",
+      "expectation": "strict",
+      "expected_terms": [],
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Open the lantern and close the window"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "ami-25",
+      "audio": "audio/ami-25.wav",
+      "sha256": "63ce867aedbfb60c28b1243c164425fc4798e43c5579c68e7d4c3ab9039b2c83",
+      "source": {
+        "dataset": "edinburghcstr/ami",
+        "config": "ihm",
+        "split": "test",
+        "row": 25,
+        "audio_id": "AMI_EN2002a_H03_MEE071_0104146_0104463",
+        "meeting_id": "EN2002a",
+        "speaker_id": "MEE071",
+        "begin_time": 1041.4599609375,
+        "end_time": 1044.6300048828125,
+        "transcript": "SO EVEN IF IT DOESN'T WORK YOU CAN JIGGERY POKERY AROUND AND MAKE IT WORK",
+        "sha256": "f9e2cfc10dcc625596f95aa9cbae38c8a96d83e9fcf50bdcabca0565466b8d23"
+      },
+      "verbatim": "SO EVEN IF IT DOESN'T WORK YOU CAN JIGGERY POKERY AROUND AND MAKE IT WORK",
+      "kind": "natural-meeting",
+      "license": "CC-BY-4.0",
+      "exposure": "prior-seen-AMI-bias-probe-diagnostic-not-holdout",
+      "target": "So even if it doesn't work you can jiggery pokery around and make it work.",
+      "expectation": "meaning",
+      "expected_terms": [
+        "jiggery pokery"
+      ],
+      "tags": [
+        "dictionary-positive",
+        "uncommon-phrase",
+        "known-dictionary-failure",
+        "negation-protection"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "doesn't work",
+            "does not work"
+          ],
+          [
+            "jiggery pokery"
+          ],
+          [
+            "make it work"
+          ]
+        ],
+        "forbidden": []
+      }
+    }
+  ],
+  "dictionary": {
+    "words": [
+      "Java",
+      "Real Reaction",
+      "Kenan",
+      "Kelana",
+      "LanternWorks",
+      "jiggery pokery"
+    ],
+    "replacements": [
+      {
+        "from": "lantern works",
+        "to": "LanternWorks"
+      }
+    ]
+  },
+  "target_provenance": "AMI verbatim fields are unchanged source orthographic annotations; targets and meaning checks authored for this evaluation, not AMI cleanup gold."
+}

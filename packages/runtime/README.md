@@ -33,7 +33,28 @@ The current `agent-browser` package comes from Hara's immutable [browser repair 
 
 On 2026-09-05, a running worker retained a native extension requiring 0.34.0 while a release switched its shared executable to 0.36.0. The entrypoint now resolves both packages and pins the process's executable path when the extension loads. The 0.6.6 native package also includes upstream's stdout-spill ordering repair for large JSON diagnostics.
 
-That version's QA text predicate misses phrases split across React text nodes, including Pi Remote's client revision footer. [`patch-browser-qa.mjs`](patch-browser-qa.mjs) repairs the pinned dependency during [`deploy/runtime`](../../deploy/runtime). It joins visible text across adjacent nodes and inline markup, preserves block boundaries, and excludes hidden text. Its source participates in the immutable dependency key, and an upstream source change that no longer matches fails deployment. [`browser-doctor.mjs`](browser-doctor.mjs) compiles the installed QA predicate on every host release. Its disposable browser checks a heading split across spans, verifies a PNG screenshot and downloads a loopback attachment through a current `@ref`, requiring verified artifact metadata and exact file bytes before the release can activate.
+That version's QA text predicate misses phrases split across React text nodes, including Pi Remote's client revision footer. [`patch-browser-qa.mjs`](patch-browser-qa.mjs) repairs the pinned dependency during [`deploy/runtime`](../../deploy/runtime). It joins visible text across adjacent nodes and inline markup, preserves block boundaries, and excludes hidden text. Its source participates in the immutable dependency key, and an upstream source change that no longer matches fails deployment. [`browser-doctor.mjs`](browser-doctor.mjs) compiles the installed QA predicate on every host release. It validates the configured browser entrypoint before loading React probe assets or opening its loopback listener, so missing or duplicate browser sources report their own repair rather than an unrelated probe dependency error. Its disposable browser checks a heading split across spans, verifies a PNG screenshot and downloads a loopback attachment through a current `@ref`, requiring verified artifact metadata and exact file bytes before the release can activate.
+
+## Anthropic error tool-result content
+
+[`patch-anthropic-error-content.mjs`](patch-anthropic-error-content.mjs) normalizes
+error tool results to text at the Anthropic wire boundary, in both SDK and bundled
+CLI providers. Non-text blocks become MIME-labelled references to the preserved
+native tool-result history; existing text and the error flag stay intact. Successful
+tool results still carry images. No native history is mutated or deleted.
+Deployment hashes the patch into the immutable dependency identity.
+[`anthropic-error-content.test.mjs`](anthropic-error-content.test.mjs) checks both
+provider copies, mixed/image-only/text-only/empty errors, successful images,
+idempotence and native-history immutability.
+
+October 2, 2026: a failed browser batch included a successful screenshot alongside
+its failed scroll. Anthropic rejected every later turn with `all content must be
+type text if is_error is true`. The Comedy Review Study Synthesis thread was held
+through its owner, a complete repaired native file retained every entry with just
+the offending inline image replaced by a reference to its byte-preserved encrypted
+PNG, and the owner adopted that file using a serialized `switch_session` command.
+The original JSONL and per-entry/file SHA256 evidence remain in the person's
+private thread store. Opus and all user messages were retained.
 
 ## Codex transport framing
 
@@ -48,6 +69,102 @@ On September 18, 2026, native sessions `d916c1a9-0dad-4198-83d5-1142b8bf12a8` an
 [`patch-compaction-errors.mjs`](patch-compaction-errors.mjs) lets native compaction return a concrete failure through both Pi runtime copies. Failed between-turn compaction reaches the agent failure handler without aborting it. The context hook can return `{ error: string }` to reject a later request at its durable failure fence. Pi rejects that result outside extension exception logging, preserves the cause on the assistant and excludes both failures from ordinary chat retries. Actual cancellation retains its abort signal. The extension's [operation scope and durable attempt records](extensions/codex-compaction/operation.mjs) own progress deadlines and explicit recovery. The [incident and recovery contract](extensions/codex-compaction/README.md#september-12-timeout-incident) records the large-context replay.
 
 Pi 0.87.1 owns the companion cut-selection repair. When trailing tool results alone exceed `keepRecentTokens`, Pi keeps their preceding assistant call instead of retaining the entire transcript and declining compaction. [`compaction-cut.test.mjs`](compaction-cut.test.mjs) guards that upstream contract; the extension's lifecycle test runs a complete parallel tool batch, native compaction and continuation inside one Pi run.
+
+## Prose compaction recovery
+
+[`patch-summary-recovery.mjs`](patch-summary-recovery.mjs) repairs default prose
+summarization in both SDK and bundled CLI copies. [`bounded-summary.js`](bounded-summary.js)
+keeps small requests unchanged. A `length` response gets one concise retry without
+chat reasoning; another incomplete response stays a failure, never a checkpoint.
+Large serialized conversations are folded sequentially through complete checkpoints,
+using a conservative UTF-8 byte budget after reserving output and framing space.
+Individual giant messages and Unicode are split without dropping source text.
+An oversized stored previous summary is folded completely as historical checkpoint
+segments before new turns are consumed. Oversized generated checkpoints use that
+same reduction path; summary-only requests work too. Every source character is
+presented to a successful complete reduction, never trimmed to fit. Fixed instructions
+remain on every request and fail explicitly if they leave no segment space. Input
+budgets reserve the concise retry suffix as well as ordinary framing. Reapplying the
+deployment patch replaces an existing embedded helper with the current source.
+A provider input-overflow rejection halves the segment budget rather than replaying
+the same oversized request. Cancellation is checked at every request boundary, and
+recovery stops after 32 requests. Every attempt's usage contributes to the returned
+summary usage. The same helper covers ordinary history and split-turn prefixes;
+Codex's server-side checkpoint handler remains unchanged.
+
+Failed automatic prose compaction writes a native custom entry excluded from model
+context. Both automatic compaction and provider preparation honor that active-branch
+failure fence, including after reload or an account-alias change. A successful manual
+`/compact` or compact RPC appends the compaction boundary that clears it. Another model
+can proceed independently. Operator cancellation does not install a failure fence.
+Stored history and context edits are not deleted or rewritten.
+
+October 3, 2026: a long integration thread received Anthropic's
+`prompt is too long: 1221206 tokens > 1000000 maximum`. Overflow recovery omitted the
+failed attempt, but the default summarizer then hit its output cap and rejected the
+incomplete summary. The existing terminal-error guard skipped later compaction checks
+without blocking later provider requests, allowing unchanged oversized history to be
+resent. Prose summaries also inherited the chat's reasoning level inside the summary's
+fixed output allowance and had no recovery for output caps or oversized input.
+
+October 3 follow-up: Cross-Team Integration Updates carried a previous checkpoint
+larger than the summarization input budget. Conversation folding copied it into every
+segment prefix and failed before reading any new source. Bounded checkpoint reduction
+now handles both stored and newly generated oversized summaries under the same
+cancellation, usage and 32-request limits, without changing live native history.
+
+Deployment includes both repair files in its immutable dependency identity and applies
+the patch after compaction failure propagation. Focused mock regressions cover both
+source forms, complete Unicode coverage, input/output recovery, usage, cancellation,
+durable fencing, aliases and successful compaction boundaries, with no live sessions
+or credentials:
+
+```sh
+node --test packages/runtime/summary-recovery.test.mjs packages/runtime/compaction-errors.test.mjs packages/runtime/compaction-cut.test.mjs
+```
+
+## Shell output custody
+
+[`patch-bash-spill.mjs`](patch-bash-spill.mjs) keeps shell output in memory only.
+The shell executor and tool share Pi's byte-aware output accumulator and tail
+truncation; discarded output is never written to a temporary spill log. Tool descriptions, model-context messages and
+interactive displays report truncation without a full-output path. Deployment
+patches both the coding-agent SDK and bundled CLI, including the agent-core
+harness bash tool and shell collector, and hashes the patch into the immutable
+dependency-tree identity. Changed upstream anchors fail deployment.
+
+[`bash-spill.test.mjs`](bash-spill.test.mjs) runs actual local shell commands over
+the byte and line limits through both source forms, checks exact tail output,
+streaming updates, truncation notices and renderers, and covers cancellation,
+nonzero exit and the native environment harness. It asserts no spill logs appear.
+To prove an installed tree without patching it:
+
+```sh
+PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
+  node --test packages/runtime/bash-spill.test.mjs
+```
+
+The proof copies public runtime code for private-entrypoint instrumentation;
+shell test output is synthetic and no installed runtime files are changed.
+
+October 3, 2026: publication `PUB-aa1ead02f2677ab683a35c2f` failed on Converge
+because the executor evicted whole pipe chunks and derived truncation from only
+the remaining text. A large chunk followed by a short tail could discard part of
+the required tail and report `truncated: false`. The executor now uses the same
+UTF-8 byte-aware accumulator as the tool, retaining total-output accounting across
+evictions and flushing its decoder on completion or cancellation. Deterministic
+chunk partitions guard exact tails, flags, exit status and streaming in both SDK
+and bundled CLI forms. Reapplying the patch also upgrades already-patched trees.
+`deploy/runtime` runs this installed-tree proof before accepting each runtime
+release, then uses [`deploy/clean-shell-spills.mjs`](../../deploy/clean-shell-spills.mjs)
+to delete preexisting regular `/tmp/pi-bash-*.log` files and record the actual
+removal count in the host release log. Cleanup filters names before inspecting
+files: unrelated stale SSHFS mounts in `/tmp` must not prevent publication.
+It leaves symlinks and directories alone, tolerates candidates removed concurrently,
+and propagates other filesystem errors. Focused cleanup checks:
+`node --test scripts/deploy-runtime.test.mjs`.
+Active turns retain their original runtime until
+settlement; reopen a shell/CLI session to select the new tree.
 
 ## Session crash durability
 

@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { policy, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
+import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
 
 const config = loadPublicationConfig();
 const { repositoryUrl, canonicalRepository, stateRoot, installedCommand, userUnitRoot, targets, alertInbox } = config;
@@ -215,7 +216,7 @@ function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -228,7 +229,7 @@ function installFrom(sourceRoot, activate = true) {
   for (const name of modules) atomicWrite(join(dirname(installedCommand), name), readFileSync(join(sourceRoot, "deploy", name)), 0o644);
   atomicWrite(installedCommand, readFileSync(commandSource), 0o750);
   if (!activate) return;
-  const replacements = { "@PUBLICATION_COMMAND@": installedCommand, "@PUBLICATION_WAKE@": join(stateRoot, "wake"), "@PUBLICATION_PATH@": `${join(homedir(), ".local/bin")}:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin` };
+  const replacements = { "@PUBLICATION_COMMAND@": installedCommand, "@PUBLICATION_WAKE@": join(stateRoot, "wake"), "@PUBLICATION_PATH@": `${join(homedir(), ".local/bin")}:/usr/local/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin` };
   for (const name of unitNames) {
     let unit = readFileSync(join(sourceRoot, "deploy/systemd", name), "utf8");
     for (const [token, value] of Object.entries(replacements)) unit = unit.replaceAll(token, value);
@@ -364,6 +365,7 @@ function enqueue(requestId, sourceSha, sourceRef, reporterJson, repairedRequestI
     attempt: 0,
     failures: [],
     reporter: reporterJson && JSON.parse(reporterJson) ? validateReporter(JSON.parse(reporterJson)) : null,
+    ...(publicationJournalEnabled() ? { actionPerson: process.env.PI_KENAN_PERSON ?? process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "kenan" } : {}),
     ...(repairedRequestId ? { repairOf: repairedRequestId, repairId: repairId(repairedRequestId),
       repairDepth: (readRequest(repairedRequestId).repairDepth ?? 0) + 1 } : {}),
   };
@@ -1661,6 +1663,10 @@ export function processRequest(request) {
 
   try {
     checkCancellation(request);
+    if (!request.actionJournal) {
+      const ticket = beginPublication(request, targets);
+      if (ticket) { request.actionJournal = ticket; writeRequest(request); }
+    }
     let result = prepareCheckout(request, logPath);
     if (!result.ok) throw new Error(result.stderr.trim() || `checkout preparation exited ${result.status}`);
 
@@ -1817,6 +1823,8 @@ export function processRequest(request) {
     request.receipt = requestPath(request.requestId);
     delete request.failure;
     writeRequest(request);
+    finishPublication(request);
+    if (request.actionJournal) writeRequest(request);
     appendLog(logPath, `[${new Date().toISOString()}] published integration=${request.integrationSha}\n`);
     if (request.android) {
       rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
@@ -2053,7 +2061,7 @@ function repairRun(requestId) {
     let result;
     try {
       result = commandResult(config.piCommand,
-        ["--print", "--mode", "json", "--model", "openai-codex/gpt-6-astra", "--thinking", "high",
+        ["--print", "--mode", "json", "--model", "openai-codex/gpt-6.1-sol", "--thinking", "high",
           "--session", repair.session, `@${repair.prompt}`],
         { cwd: repair.workspace && existsSync(repair.workspace) ? repair.workspace : dirname(repair.path),
           timeoutSeconds: policy.repairMs / 1000, stdio: ["ignore", fd, fd] });

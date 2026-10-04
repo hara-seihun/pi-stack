@@ -11,6 +11,14 @@ import { SPEEDS } from "./speed.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
+const watchFields = {
+  what: Type.String({ minLength: 1, description: "What to check." }),
+  why: Type.String({ minLength: 1, description: "Why it matters." }),
+  how: Type.Optional(Type.String({ description: "Known way to check it." })),
+  cadenceMs: Type.Optional(Type.Integer({ minimum: 60000, description: "Repeat interval in milliseconds; omitted uses the person's default." })),
+  nextDueAt: Type.Optional(Type.Integer({ minimum: 0, description: "Next due time as Unix epoch milliseconds; new items default to now." })),
+  destination: Type.Optional(Type.String({ minLength: 1, description: "Destination whose workspace and chosen context check this item, such as personal or home; omitted on add uses this thread's own destination." })),
+};
 const settings = Type.Object({
   model: Type.Optional(Type.String()),
   thinkingLevel: Type.Optional(Type.Union(THINKING_LEVELS.map(value => Type.Literal(value)))),
@@ -53,6 +61,34 @@ export function threadTools(options: PiSessionOptions) {
     return "other";
   }
   return [
+    defineTool({
+      name: "watch_list_add", label: "Add to watch list",
+      description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with Opus 5.5, handles routine follow-ups and asks the person about major decisions. An empty list makes no model calls.",
+      parameters: Type.Object(watchFields),
+      execute: async (id, item, signal) => result(await api(signal).watch({ action: "add", item, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
+    defineTool({
+      name: "watch_list_update", label: "Update a watch item",
+      description: "Change a watch item's check, reason, method, timing or destination. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
+      parameters: Type.Object({ id: Type.String({ minLength: 1 }), patch: Type.Object({
+        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt, destination: watchFields.destination,
+        how: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+        cadenceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 60000 }), Type.Null()])),
+      }) }),
+      execute: async (id, input, signal) => result(await api(signal).watch({ action: "update", ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
+    defineTool({
+      name: "watch_list_remove", label: "Remove a watch item",
+      description: "Remove a resolved or no-longer-needed check from this person's watch list. List first to get its ID. Any agent may maintain the list.",
+      parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
+      execute: async (id, input, signal) => result(await api(signal).watch({ action: "remove", ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
+    defineTool({
+      name: "watch_list", label: "Read watch list",
+      description: "List this person's persistent shared watch items, including due times, cadence, provenance and the last checking thread. Does not start an agent.",
+      parameters: Type.Object({}),
+      execute: async (_id, _input, signal) => result(await api(signal).watch({ action: "list", threadId: options.threadId })),
+    }),
     defineTool({
       name: "request_user_input_async", label: "Ask the user asynchronously",
       description: "Post an array of questions for the human and continue working immediately. Put each independently answerable question in its own array item, with its own suggestions; use a one-item array for a single question. Each stays pending after this turn ends and across restarts. Suggestions are optional and may be any number; optionally recommend one by its zero-based index. The human can answer each question separately, choose any number of suggestions and add free text. Each answer arrives as a correlated ordinary user message at a safe turn boundary, without cancelling current work.",
@@ -144,7 +180,7 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_read", label: "Read thread history",
-      description: "Read persisted native history without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
+      description: "Read persisted thread history, including root-consent answer receipts, without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
       parameters: Type.Object({ threadId: Type.String(), cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), entryId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
       execute: async (_id, input, signal) => {
         const value = await api(signal).read(input.entryId ? { threadId: input.threadId, entryId: input.entryId }

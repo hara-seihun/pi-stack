@@ -33,7 +33,16 @@ export function configuredThreadDestinations(destinations: ThreadDestination[], 
       defaultModel,
       ...configured.map(model => `${model.provider}/${model.id}`),
     ].map(resolve))];
-    return { ...destination, models, defaultModel };
+    const personalContext = destination.id === "personal" && !destination.raw && !destination.sandbox
+      ? { contextDir: destination.contextDir ?? "context" } : {};
+    const icon = destination.id === "sandbox" && (!destination.icon || destination.icon === "raw") ? "sandbox" : destination.icon;
+    const resolved = { ...destination, ...personalContext, icon, models, defaultModel };
+    if (resolved.watchContextFiles !== undefined) {
+      if (!Array.isArray(resolved.watchContextFiles) || resolved.watchContextFiles.some(name => typeof name !== "string" || !/^[^/\\\0]+\.md$/i.test(name)))
+        throw new Error(`Thread profile ${destination.id}: watchContextFiles must be a list of Markdown file names`);
+      if (!resolved.contextDir || resolved.raw || resolved.sandbox) throw new Error(`Thread profile ${destination.id}: watchContextFiles needs a full-context destination with contextDir`);
+    }
+    return resolved;
   });
 }
 
@@ -66,6 +75,11 @@ export interface ThreadDestination {
   sandbox?: boolean;
   /** Folder inside the destination's workspace whose top-level Markdown files the picker offers as optional thread context. */
   contextDir?: string;
+  /**
+   * Context files (top-level Markdown names in `contextDir`) that watch-list checks for this destination load whole,
+   * as if chosen in the picker. Omitted means every top-level Markdown file there; destinations without `contextDir` load none.
+   */
+  watchContextFiles?: string[];
 }
 
 export function defaultThreadDestinations(personalWorkspaceId?: string): ThreadDestination[] {
@@ -75,12 +89,12 @@ export function defaultThreadDestinations(personalWorkspaceId?: string): ThreadD
     ]),
     { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home" },
     { id: "raw", label: "RAW", icon: "raw", accent: "#8b949e", workspaceId: "home", raw: true },
-    { id: "sandbox", label: "SANDBOX", icon: "raw", accent: "#d29922", workspaceId: "home", raw: true, sandbox: true },
+    { id: "sandbox", label: "SANDBOX", icon: "sandbox", accent: "#d29922", workspaceId: "home", raw: true, sandbox: true },
   ];
   return destinations.map(destination => ({
     ...destination,
     thinkingLevel: "high",
     models: [...SHARED_THREAD_MODELS],
-    defaultModel: "astra",
+    defaultModel: "sol",
   }));
 }

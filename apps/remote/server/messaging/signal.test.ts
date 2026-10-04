@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackendCall, BackendConversation, BackendMessage, BackendSender, MessagingPlugin, MessagingPluginContext } from "./plugin";
@@ -23,6 +23,7 @@ async function fixture(script: string, options: Record<string, unknown> = {}) {
   const binary = join(root, "signal-cli");
   await writeFile(binary, `#!${process.execPath}
 import { createInterface } from 'node:readline';
+import { mkdirSync, writeFileSync, readFileSync, openSync, ftruncateSync, closeSync, statSync, symlinkSync } from 'node:fs';
 const account = ${JSON.stringify(account)};
 const friend = ${JSON.stringify(friend)};
 const reply = (request, result) => process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result})+'\\n');
@@ -163,7 +164,7 @@ test("keeps child working state and temporary files inside the encrypted profile
 test("discovers contacts and groups, sends named attachments, and uses matching sent-sync IDs", async () => {
   const f = await fixture(`
     if(request.method==='send') {
-      if(request.params.recipient[0]!==friend || !request.params.attachments[0].includes('filename=hello.txt;base64,aGVsbG8=')) process.exit(2);
+      if(request.params.recipient[0]!==friend || !request.params.attachments[0].endsWith('/hello.txt') || readFileSync(request.params.attachments[0], 'utf8')!=='hello') process.exit(2);
       reply(request,{timestamp:202,results:[{type:'SUCCESS'}]});
       receive({sourceNumber:account,syncMessage:{sentMessage:{destinationUuid:friend,timestamp:202,message:request.params.message}}});
       return;
@@ -297,10 +298,12 @@ test("downloads received attachments into the profile and awaits the storage cal
   const f = await fixture(`
     if(request.method==='subscribeReceive') {
       reply(request,0);
-      incoming('Attached',303,{attachments:[{id:'file-id',filename:'note.txt',contentType:'text/plain'}]});
+      mkdirSync('attachments',{recursive:true});
+      writeFileSync('attachments/file-id.txt','secret');
+      incoming('Attached',303,{attachments:[{id:'file-id.txt',filename:'note.txt',contentType:'text/plain'}]});
       return;
     }
-    if(request.method==='getAttachment') return reply(request,{data:Buffer.from('secret').toString('base64')});
+    if(request.method==='getAttachment') process.exit(2);
   `);
   const stored = deferred<void>();
   const release = deferred<void>();
@@ -320,15 +323,68 @@ test("downloads received attachments into the profile and awaits the storage cal
   expect(await Bun.file(file).exists()).toBe(false);
 });
 
+test("large received and sent attachments stay off RPC and retain the native file", async () => {
+  const size = 110 * 1024 * 1024;
+  const f = await fixture(`
+    if(request.method==='subscribeReceive') {
+      reply(request,0);
+      mkdirSync('attachments',{recursive:true});
+      const fd=openSync('attachments/large.mp4','w',0o600);
+      ftruncateSync(fd,${size}); closeSync(fd);
+      incoming('Large',304,{attachments:[{id:'large.mp4',filename:'movie.mp4',contentType:'video/mp4',size:${size}}]});
+      return;
+    }
+    if(request.method==='send') {
+      if(JSON.stringify(request).length>4096 || !request.params.attachments[0].endsWith('/movie.mp4') || statSync(request.params.attachments[0]).size!==${size}) process.exit(2);
+      return reply(request,{timestamp:307,results:[{type:'SUCCESS'}]});
+    }
+    if(request.method==='getAttachment') process.exit(2);
+  `);
+  await start(f.plugin,f.context);
+  const message=await f.arrived.promise;
+  expect(message.attachments[0]).toMatchObject({name:'movie.mp4',size});
+  expect((await stat(message.attachments[0]!.path)).size).toBe(size);
+  const direct=await f.plugin.openConversation(friend);
+  expect(direct.ok).toBe(true);
+  if(direct.ok) expect(await f.plugin.send(direct.value,{requestId:'large',text:'Large',attachments:[{...message.attachments[0]!,path:join(f.context.dataDir,'signal-cli','attachments','large.mp4')}]})).toMatchObject({ok:true,value:{timestamp:307}});
+  expect((await readdir(f.context.dataDir)).some(name=>name.startsWith('outgoing-'))).toBe(false);
+  await f.plugin.close();
+  expect(await Bun.file(message.attachments[0]!.path).exists()).toBe(false);
+  expect((await stat(join(f.context.dataDir,'signal-cli','attachments','large.mp4'))).size).toBe(size);
+  expect(f.logs.some(line=>line.includes('exceeded'))).toBe(false);
+});
+
+test.each(['../outside','/outside','..','link'])('rejects received attachment outside the local regular-file store: %s', async id => {
+  const f=await fixture(`
+    if(request.method==='subscribeReceive') {
+      reply(request,0);
+      mkdirSync('attachments',{recursive:true});
+      writeFileSync('outside','private');
+      symlinkSync('../outside','attachments/link');
+      incoming('Bad',305,{attachments:[{id:${JSON.stringify(id)},filename:'note.txt',contentType:'text/plain'}]});
+      incoming('After',306);
+      return;
+    }
+    if(request.method==='getAttachment') process.exit(2);
+  `);
+  await start(f.plugin,f.context);
+  const message=await f.arrived.promise;
+  expect(message.text).toBe('After');
+  expect(f.messages).toHaveLength(1);
+  expect(f.statuses.some(s=>s.status==='error' && s.detail.includes('attachment'))).toBe(true);
+});
+
 test("close drains admitted attachment messages before terminating signal-cli", async () => {
   const f = await fixture(`
     if(request.method==='subscribeReceive') {
       reply(request,0);
       incoming('first',601);
-      incoming('second',602,{attachments:[{id:'file-id',filename:'note.txt',contentType:'text/plain'}]});
+      mkdirSync('attachments',{recursive:true});
+      writeFileSync('attachments/file-id.txt','drained');
+      incoming('second',602,{attachments:[{id:'file-id.txt',filename:'note.txt',contentType:'text/plain'}]});
       return;
     }
-    if(request.method==='getAttachment') return reply(request,{data:Buffer.from('drained').toString('base64')});
+    if(request.method==='getAttachment') process.exit(2);
   `);
   const first = deferred<void>();
   const release = deferred<void>();

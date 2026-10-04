@@ -25,6 +25,7 @@ fi
 if (( services )); then
   pi_stack_check_person_configs
   "$root/deploy/voice" --check
+  "$root/deploy/phone" --check
 fi
 # Activation restarts Pi Remote, which ends every live Meet room: the meeting bot stays
 # in the call with no voice, canvas or agent (a release at 06:40Z on 2026-09-29 cut a
@@ -60,8 +61,52 @@ if (( services )); then
   if [[ -n $daemon_units ]]; then mapfile -t daemons <<< "$daemon_units"; fi
 fi
 
+write_base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
+previous_write=$(readlink -f "$write_base" 2>/dev/null || true)
+write_was_active=0
+write_was_enabled=0
+write_started=0
+write_pid=""
+if (( write )); then
+  systemctl is-active --quiet pi-stack-write.service && write_was_active=1
+  systemctl is-enabled --quiet pi-stack-write.service && write_was_enabled=1
+fi
+restore_write() {
+  local status=$? candidate="$write_base.rollback.$$"
+  trap - EXIT TERM INT HUP
+  if (( status != 0 && write_started )); then
+    # Stop the readiness job before restoring: it must not restart the rejected
+    # engine after the selection has gone back. Queue the old unit immediately;
+    # cold rollback readiness cannot fit inside an already failed deadline.
+    if [[ -n $write_pid ]]; then
+      kill "$write_pid" 2>/dev/null || true
+      wait "$write_pid" 2>/dev/null || true
+    fi
+    echo 'release failed; restoring previous Write selection and service state' >&2
+    if [[ -n $previous_write && -d $previous_write ]]; then
+      pi_stack_as_root ln -s "$previous_write" "$candidate" &&
+        pi_stack_as_root mv -Tf "$candidate" "$write_base" || echo 'Write selection rollback failed' >&2
+    else
+      pi_stack_as_root rm -f "$write_base"
+    fi
+    if (( write_was_active )); then
+      pi_stack_as_root systemctl reset-failed pi-stack-write.service || true
+      pi_stack_as_root systemctl restart --no-block pi-stack-write.service || echo 'Write rollback restart failed' >&2
+    else
+      pi_stack_as_root systemctl stop --no-block pi-stack-write.service || echo 'Write rollback stop failed' >&2
+    fi
+    (( write_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-write.service || true
+    pi_stack_as_root rm -f "$candidate"
+  fi
+  exit "$status"
+}
+trap restore_write EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
 # Builds share checkout dependencies, not output directories. Prepare them
-# together while selecting the prepared Write engine on hosts that own it.
+# together while selecting and warming Write on hosts that own it.
 # The Write engine's 1.2 GB model is fetched by deploy/prepare, outside this
 # deadline; here it is only selected, and a missing preparation fails loudly.
 pi_stack_prepare_builds "$root" &
@@ -69,17 +114,18 @@ builds_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
 if (( write )); then
-  "$root/deploy/write-engine" --select &
+  # Join selection in this shell: an orphan selector must not overwrite a
+  # rollback after an independent build failure or signal.
+  write_started=1
+  "$root/deploy/write-engine" --select
+  "$root/deploy/write-service" --activate &
   write_pid=$!
 else
   echo 'Pi Stack Write: no pi-stack-write.service on this host; skipping the engine' >&2
-  true &
-  write_pid=$!
 fi
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1
 wait "$runtime_pid" || preparation_failed=1
-wait "$write_pid" || preparation_failed=1
 (( preparation_failed == 0 )) || exit 1
 
 expected=$(git -C "$root" rev-parse HEAD)
@@ -204,7 +250,7 @@ mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-bro
 if (( ${#brokers[@]} )); then
   pi_stack_as_root systemctl restart "${brokers[@]}" || activation_failed=1
 fi
-if { (( write )) && ! "$root/deploy/write-service" --activate; } || ! "$root/deploy/voice" --activate; then
+if ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then
   activation_failed=1
 elif [[ $previous_remote != "$expected" ]]; then
   activate_remote "$expected" || activation_failed=1
@@ -212,6 +258,17 @@ elif ! remote_matches_release "$expected"; then
   # Publication can finish before a deployment is interrupted. Reconcile a
   # selected release whose supervisors never received the activation handoff.
   activate_remote "$expected" || activation_failed=1
+fi
+
+# Refresh the additive gates before rolling the shared-room supervisor. Root,
+# memory and encrypted custody remain untouched by the ordinary host release.
+if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
+  activation_failed=1
+elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
+  pi_stack_as_root python3 "$root/deploy/one-kenan-activate" rooms --host "$PI_STACK_HOST_FILE" --expected "$expected" || activation_failed=1
+fi
+if (( write )); then
+  wait "$write_pid" || activation_failed=1
 fi
 
 # Then walk the front door the way the clients do. A release that locks a
@@ -233,11 +290,13 @@ if (( smoke_failed || doctor_failed )); then
       # start limit; the previous release cannot come back through a unit
       # systemd refuses to start.
       pi_stack_as_root systemctl reset-failed 'pi-remote@*.service' 2>/dev/null || true
-      if [[ -f $previous_remote_release/server/voice/service.ts ]]; then
-        "$root/deploy/voice" --activate || echo 'Voice rollback failed' >&2
-      else
-        pi_stack_as_root systemctl stop pi-stack-voice.service
-      fi
+      for service in voice phone; do
+        if [[ -f $previous_remote_release/server/$service/service.ts ]]; then
+          "$root/deploy/$service" --activate || echo "$service rollback failed" >&2
+        elif [[ $(systemctl show "pi-stack-$service.service" -p LoadState --value) == loaded ]]; then
+          pi_stack_as_root systemctl stop "pi-stack-$service.service"
+        fi
+      done
       activate_remote "$previous_remote" || true
       if [[ -x $previous_remote_release/deploy/smoke ]]; then
         "$previous_remote_release/deploy/smoke" || echo 'The restored release failed its own smoke check' >&2
@@ -245,5 +304,8 @@ if (( smoke_failed || doctor_failed )); then
     fi
     echo "Pi stack $expected is not accepted on this host" >&2
     exit 1
+fi
+if (( write )); then
+  "$root/deploy/write-engine" --retain || echo 'Write retention failed; retained store needs collection' >&2
 fi
 printf 'deployed Pi stack %s for %s\n' "$expected" "${users[*]}"

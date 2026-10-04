@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,11 +24,19 @@ export function versionCodeFromCommitCount(count) {
   return versionCode;
 }
 
-export function shellIdentity(git, revision) {
+// The compiled router URLs are native fields too: changing them must reach
+// installed apps as an APK, never as a web bundle that leaves the old URL in place.
+export function bootstrapConfiguration(properties) {
+  const value = key => (properties.match(new RegExp(`^[ \\t]*${key}[ \\t]*[=:][ \\t]*(.*)$`, "m"))?.[1] ?? "")
+    .replace(/\\(.)/g, "$1").trim().replace(/\/+$/, "");
+  return `router=${value("piRemoteRouterUrl")}\npublic=${value("piRemotePublicRouterUrl")}`;
+}
+
+export function shellIdentity(git, revision, bootstrap = "") {
   const entries = git("ls-tree", "-r", "--full-tree", revision, "--", ...SHELL_PATHS).split("\n").filter(Boolean)
     .filter(line => !SHELL_EXCLUDED.test(line.split("\t")[1] ?? ""));
   if (!entries.length) throw new Error("Android shell sources are missing from the revision.");
-  return createHash("sha256").update(entries.join("\n")).digest("hex").slice(0, 16);
+  return createHash("sha256").update(entries.join("\n")).update(`\n${bootstrap}`).digest("hex").slice(0, 16);
 }
 
 export function releaseInfo() {
@@ -42,7 +50,9 @@ export function releaseInfo() {
   const versionCode = versionCodeFromCommitCount(count);
   const { appId: applicationId } = JSON.parse(readFileSync(resolve(directory, "capacitor.config.json"), "utf8"));
   if (applicationId !== "works.kenan.piremote.kenan") throw new Error("Android application ID must keep matching the installed Kenan app.");
-  return { revision, versionCode, applicationId, shellId: shellIdentity(git, revision) };
+  const properties = resolve(directory, "android/local.properties");
+  const bootstrap = bootstrapConfiguration(existsSync(properties) ? readFileSync(properties, "utf8") : "");
+  return { revision, versionCode, applicationId, shellId: shellIdentity(git, revision, bootstrap) };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

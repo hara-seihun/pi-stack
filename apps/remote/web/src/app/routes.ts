@@ -5,16 +5,17 @@
 import { useEffect, useState } from "react";
 import type { ChatId } from "../chats";
 
-export type Tab = "chats" | "workers" | "files" | "machine";
+export type Tab = "chats" | "workers" | "files" | "calendar" | "machine";
 export type Panel = "inspector" | "queue" | "settings";
 
 export type Route =
   | { tab: "chats"; chat: ChatId | null; panel: Panel | null }
   | { tab: "workers"; thread: string | null; panel: Panel | null }
   | { tab: "files"; path: string | null }
+  | { tab: "calendar" }
   | { tab: "machine" };
 
-export const TABS: Tab[] = ["chats", "workers", "files", "machine"];
+export const TABS: Tab[] = ["chats", "workers", "calendar", "files", "machine"];
 const PANELS: Panel[] = ["inspector", "queue", "settings"];
 
 export function parseRoute(hash: string): Route {
@@ -24,11 +25,11 @@ export function parseRoute(hash: string): Route {
   switch (tab) {
     case "workers": return { tab, thread: rest[0] || null, panel: rest[0] ? panel(rest[1]) : null };
     case "files": return { tab, path: rest.length ? `/${rest.filter(Boolean).join("/")}` : null };
-    case "machine": return { tab };
+    case "calendar": case "machine": return { tab };
     case "chats": {
       const kind = rest[0];
       const id = rest[1];
-      const chat = (kind === "ai" || kind === "human") && id ? `${kind}:${id}` as ChatId : null;
+      const chat = (kind === "ai" || kind === "human" || kind === "room") && id ? `${kind}:${id}` as ChatId : null;
       return { tab: "chats", chat, panel: chat ? panel(rest[2]) : null };
     }
     default: return { tab: "chats", chat: null, panel: null };
@@ -45,6 +46,7 @@ export function formatRoute(route: Route): string {
     }
     case "workers": return route.thread ? `#/workers/${segment(route.thread)}${route.panel ? `/${route.panel}` : ""}` : "#/workers";
     case "files": return route.path ? `#/files/${route.path.split("/").filter(Boolean).map(segment).join("/")}` : "#/files";
+    case "calendar": return "#/calendar";
     case "machine": return "#/machine";
   }
 }
@@ -68,6 +70,7 @@ export function routeHome(route: Route): Route {
     case "chats": return { tab: "chats", chat: null, panel: null };
     case "workers": return { tab: "workers", thread: null, panel: null };
     case "files": return { tab: "files", path: null };
+    case "calendar": return { tab: "calendar" };
     case "machine": return { tab: "machine" };
   }
 }

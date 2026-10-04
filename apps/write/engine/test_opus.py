@@ -69,6 +69,7 @@ class EngineProtocolTest(unittest.IsolatedAsyncioTestCase):
         audio = FakeStream()
         engine.recognizer = SimpleNamespace(create_stream=lambda dictionary: audio)
         engine.tagger = None
+        engine.punctuator = None
         engine.slots = asyncio.Semaphore(2)
         with self.assertLogs('server', level='INFO') as logs:
             async with serve(engine.handle, '127.0.0.1', 0) as listener:
@@ -138,6 +139,7 @@ class DualBackendTest(unittest.IsolatedAsyncioTestCase):
         engine.recognizer = SimpleNamespace(create_stream=lambda dictionary: gpu)
         engine.cpu_recognizer = SimpleNamespace(create_stream=lambda dictionary: cpu)
         engine.tagger = None
+        engine.punctuator = None
         engine.slots = asyncio.Semaphore(2)
         engine.cpu_slots = asyncio.Semaphore(2)
         async with serve(engine.handle, '127.0.0.1', 0) as listener:
@@ -167,6 +169,7 @@ class SlowStepTest(unittest.IsolatedAsyncioTestCase):
         audio = FakeStream(delay=0.1)
         engine.recognizer = SimpleNamespace(create_stream=lambda dictionary: audio)
         engine.tagger = None
+        engine.punctuator = None
         engine.slots = asyncio.Semaphore(2)
         async with serve(engine.handle, '127.0.0.1', 0) as listener:
             port = listener.sockets[0].getsockname()[1]

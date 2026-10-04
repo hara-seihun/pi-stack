@@ -184,6 +184,10 @@ const registryPaths = new WeakMap();
 
 const REGISTRY_SCHEMA_VERSION = 1;
 
+function hasPendingIndex(database) {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='workspace_pending'").get() !== undefined;
+}
+
 function registrySchemaVersion(database) {
   const version = database.prepare("PRAGMA user_version").get().user_version;
   if (version > REGISTRY_SCHEMA_VERSION) fail(`workspace registry schema ${version} needs a newer agent-workspace`);
@@ -194,7 +198,10 @@ function initializeRegistry(database) {
   if (database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
     database.exec("PRAGMA journal_mode = WAL");
   }
-  if (registrySchemaVersion(database) === REGISTRY_SCHEMA_VERSION) return;
+  if (registrySchemaVersion(database) === REGISTRY_SCHEMA_VERSION) {
+    database.exec("CREATE INDEX IF NOT EXISTS workspace_pending ON workspace(root, path) WHERE state='creating'");
+    return;
+  }
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec(`
@@ -228,6 +235,7 @@ function initializeRegistry(database) {
       database.exec("ALTER TABLE workspace ADD COLUMN creation_request TEXT");
     }
     database.exec(`CREATE INDEX IF NOT EXISTS workspace_group ON workspace(group_id);
+      CREATE INDEX IF NOT EXISTS workspace_pending ON workspace(root, path) WHERE state='creating';
       PRAGMA user_version = ${REGISTRY_SCHEMA_VERSION}; COMMIT`);
   } catch (error) {
     database.exec("ROLLBACK");
@@ -241,7 +249,7 @@ function openRegistry(statePath = DEFAULT_STATE) {
   registryPaths.set(database, statePath);
   try {
     database.exec("PRAGMA busy_timeout = 5000");
-    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION ||
+    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION || !hasPendingIndex(database) ||
       database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
       withResourceLock(statePath, "registry-schema", () => initializeRegistry(database));
     }
@@ -1489,12 +1497,14 @@ function adoptCommand(database, args, statePath) {
 
 function assertCapacity(root, args, database, reservedPath) {
   mkdirSync(root, { recursive: true });
-  const pending = database?.prepare("SELECT path FROM workspace WHERE root=? AND state='creating'").all(root) ?? [];
-  const count = readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && path.join(root, entry.name) !== reservedPath).length +
-    pending.filter((record) => record.path !== reservedPath && !existsSync(record.path)).length;
   const maxCount = numberFlag(args, "max-count", DEFAULT_MAX_COUNT);
-  if (maxCount > 0 && count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
+  if (maxCount > 0) {
+    const pending = database?.prepare("SELECT path FROM workspace WHERE root=? AND state='creating'").all(root) ?? [];
+    const count = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && path.join(root, entry.name) !== reservedPath).length +
+      pending.filter((record) => record.path !== reservedPath && !existsSync(record.path)).length;
+    if (count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
+  }
   const stats = statfsSync(root);
   const freeGiB = stats.bavail * stats.bsize / 1024 ** 3;
   const minFreeGiB = numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB);
@@ -1591,12 +1601,31 @@ function cachedImmutableSource(mirror, repository, ref) {
 }
 
 function resolveSource(statePath, mirror, repository, upstream, ref) {
+  if (existsSync(repository)) {
+    const resolved = command("git", ["-C", repository, "rev-parse", "--verify", `${ref}^{commit}`]);
+    if (resolved.status !== 0) fail(`cannot resolve source ${ref}: ${resolved.stderr}`);
+    ref = resolved.stdout;
+  } else if (!/^[0-9a-f]{4,40}$/u.test(ref)) {
+    const candidates = [ref, `refs/heads/${ref}`, `refs/tags/${ref}`];
+    const advertised = run("git", ["ls-remote", "--exit-code", repository,
+      ...candidates.flatMap(candidate => [candidate, `${candidate}^{}`])]);
+    const refs = new Map(advertised.split("\n").map(line => {
+      const [commit, name] = line.split(/\s+/u);
+      return [name, commit];
+    }));
+    const named = candidates.find(candidate => refs.has(candidate));
+    if (named === undefined) fail(`cannot resolve source ${ref}; provide an exact remote ref or full commit`);
+    ref = refs.get(`${named}^{}`) ?? refs.get(named);
+  }
   const cached = cachedImmutableSource(mirror, repository, ref);
   if (cached !== null) return cached;
   return withResourceLock(statePath, `mirror:${mirror}`, () => {
     const shared = cachedImmutableSource(mirror, repository, ref);
     if (shared !== null) return shared;
     prepareMirror(mirror, repository, upstream);
+    if (/^[0-9a-f]{4,39}$/u.test(ref)) {
+      run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
+    }
     return fetchSource(mirror, repository, ref);
   });
 }
@@ -1617,7 +1646,6 @@ function prepareMirror(mirror, repository, upstream) {
     "--git-dir", mirror, "config", "--replace-all", "remote.origin.fetch",
     "+refs/heads/*:refs/remotes/origin/*",
   ]);
-  run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
 }
 
 function fetchSource(mirror, repository, ref) {
@@ -1631,6 +1659,20 @@ function fetchSource(mirror, repository, ref) {
   const sourceRef = sourceRefFor(repository, ref);
   run("git", ["--git-dir", mirror, "fetch", "--no-tags", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: 120_000 });
   return run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
+}
+
+function cloneSourceTag(statePath, mirror, sourceCommit) {
+  const name = `pi-workspace-source-${sourceCommit}`;
+  const ref = `refs/tags/${name}`;
+  const read = () => command("git", ["--git-dir", mirror, "rev-parse", "--verify", ref]);
+  const existing = read();
+  if (existing.status === 0 && existing.stdout === sourceCommit) return name;
+  return withResourceLock(statePath, `mirror:${mirror}`, () => {
+    const current = read();
+    if (current.status === 0 && current.stdout !== sourceCommit) fail(`clone source custody differs at ${ref}`);
+    if (current.status !== 0) run("git", ["--git-dir", mirror, "update-ref", ref, sourceCommit, ""]);
+    return name;
+  });
 }
 
 function createCommand(database, args, statePath) {
@@ -1703,46 +1745,146 @@ function createWorkspace(database, args, statePath) {
         else worktreeArgs.push("-b", branch, destination, sourceCommit);
         run("git", worktreeArgs);
       } else {
+        const sourceTag = cloneSourceTag(statePath, mirror, sourceCommit);
         run("git", ["clone", "--no-local", ...Object.entries(REFERENCE_CLONE_CONFIG)
           .flatMap(([name, value]) => ["--config", `${name}=${value}`]),
-          "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 40_000 });
+          "--config", `remote.origin.url=${repository}`, "--origin", "workspace-source",
+          "--reference-if-able", mirror, "--no-checkout", "--no-tags", "--single-branch", "--branch", sourceTag,
+          mirror, destination], { timeout: 40_000 });
       }
     }
     const info = gitInfo(destination);
     if (info.checkoutType !== strategy) fail("pending checkout type changed");
-    if (strategy === "clone") {
-      const entries = readdirSync(destination).filter((entry) => entry !== ".git");
-      if (entries.length === 0 && !existsSync(path.join(destination, ".git", "index"))) {
-        if (mode === "review") git(destination, ["checkout", "--detach", sourceCommit]);
-        else {
-          const existing = command("git", ["-C", destination, "rev-parse", "--verify", `refs/heads/${branch}`]);
-          if (existing.status === 0 && existing.stdout !== sourceCommit) fail("pending checkout branch has different source");
-          git(destination, existing.status === 0 ? ["checkout", branch] : ["checkout", "-b", branch, sourceCommit]);
-        }
-      }
-    }
+    if (strategy === "clone") resumeCloneCheckout(destination, input, sourceCommit, upstream);
     const head = git(destination, ["rev-parse", "HEAD"]);
     const selectedBranch = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
     if (head !== sourceCommit || (mode === "writer" ? selectedBranch.stdout !== branch : selectedBranch.status === 0)) {
       fail("pending checkout HEAD or branch differs from the reserved source");
     }
-    if (git(destination, ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"])) {
-      fail("pending checkout contains changes; preserve and repair them before resuming creation");
-    }
+    assertPendingClean(destination);
     if (strategy === "clone") {
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
+      git(destination, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
       configurePushUrl(["-C", destination], upstream);
+      const cloneSource = command("git", ["-C", destination, "config", "--local", "--get", "remote.workspace-source.url"]);
+      if (cloneSource.status === 0 && cloneSource.stdout === mirror) git(destination, ["remote", "remove", "workspace-source"]);
       maintainReferenceClone(destination, true);
     }
-    const now = Date.now();
-    database.prepare("UPDATE workspace SET repository=?, state='active', detail='creation completed', updated_at=?, lease_expires_at=? WHERE id=?")
-      .run(upstream.fetch, now, now + input.leaseSeconds * 1000, row.id);
-    print(recordBy(database, { id: row.id }), bool(args, "json"));
+    completeCreation(database, row.id, upstream.fetch, input.leaseSeconds, "creation completed", args);
   } catch (error) {
     database.prepare("UPDATE workspace SET detail=?, updated_at=? WHERE id=? AND state='creating'")
       .run(`creation retained: ${error.message}`, Date.now(), row.id);
     throw error;
   }
+}
+
+function resumeCloneCheckout(destination, input, sourceCommit, upstream) {
+  const head = git(destination, ["rev-parse", "HEAD"]);
+  const selected = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const correctBranch = input.mode === "review" ? selected.status !== 0 : selected.stdout === input.branch;
+  const refuse = reason => fail(`pending checkout cannot resume: ${reason}; preserve and repair it before resuming creation`);
+  const origin = repositoryLocation(git(destination, ["config", "--local", "--get", "remote.origin.url"]), destination);
+  if (![input.repository, upstream.fetch].includes(origin)) refuse("origin differs from the creation request");
+  if (head === sourceCommit && correctBranch && existsSync(path.join(destination, ".git", "index"))) return;
+  const unique = git(destination, ["rev-list", "--branches", "HEAD", "--not", "--remotes", sourceCommit]);
+  if (unique) refuse("commits absent from remote refs and reserved source");
+  const branch = command("git", ["-C", destination, "rev-parse", "--verify", `refs/heads/${input.branch}`]);
+  if (input.mode === "writer" && branch.status === 0 && branch.stdout !== sourceCommit) {
+    refuse("reserved branch has different source");
+  }
+  const entries = git(destination, ["ls-tree", "-rz", sourceCommit]).split("\0").filter(Boolean);
+  const tree = new Map(entries.map(entry => {
+    const [metadata, name] = entry.split(/\t(.*)/su);
+    const [mode, type, object] = metadata.split(" ");
+    return [name, { mode, type, object }];
+  }));
+  const index = git(destination, ["ls-files", "--stage", "-z"]).split("\0").filter(Boolean);
+  // A killed first checkout leaves no index, or the completed reserved tree, never arbitrary staging.
+  if (index.length && (index.length !== tree.size || index.some(entry => {
+    const [metadata, name] = entry.split(/\t(.*)/su);
+    const [mode, object, stage] = metadata.split(" ");
+    const expected = tree.get(name);
+    return stage !== "0" || expected?.mode !== mode || expected?.object !== object;
+  }))) refuse("index differs from the reserved tree");
+  const untracked = git(destination, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  if (untracked.split("\0").filter(Boolean).some(name => !tree.has(name))) {
+    refuse("untracked files are not creation leftovers");
+  }
+  const algorithm = git(destination, ["rev-parse", "--show-object-format"]);
+  const directories = new Set();
+  for (const [name, expected] of tree) {
+    const components = name.split("/");
+    for (let length = 1; length < components.length; length++) {
+      const parent = components.slice(0, length).join("/");
+      if (directories.has(parent)) continue;
+      directories.add(parent);
+      try {
+        if (!lstatSync(path.join(destination, parent)).isDirectory()) refuse(`non-directory at ${parent}`);
+      } catch (error) { if (error.code !== "ENOENT") throw error; }
+    }
+    const file = path.join(destination, name);
+    let stat;
+    try { stat = lstatSync(file); } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    if (expected.type !== "blob" || (expected.mode === "120000" ? !stat.isSymbolicLink() : !stat.isFile())) {
+      refuse(`file type differs at ${name}`);
+    }
+    const bytes = expected.mode === "120000" ? readlinkSync(file, { encoding: "buffer" }) : readFileSync(file);
+    const object = createHash(algorithm).update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+    if (object !== expected.object || (expected.mode !== "120000"
+      && Boolean(stat.mode & 0o111) !== (expected.mode === "100755"))) {
+      refuse(`file differs from the reserved tree at ${name}`);
+    }
+  }
+  git(destination, input.mode === "review"
+    ? ["checkout", "--force", "--detach", sourceCommit]
+    : ["checkout", "--force", "-B", input.branch, sourceCommit]);
+}
+
+function assertPendingClean(destination) {
+  const changes = git(destination, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  if (changes) fail(`pending checkout contains changes: ${changes.split("\n").slice(0, 8).join(" | ")}; preserve and repair them before resuming creation`);
+}
+
+function completeCreation(database, id, repository, leaseSeconds, detail, args) {
+  const now = Date.now();
+  database.prepare("UPDATE workspace SET repository=?, state='active', detail=?, updated_at=?, lease_expires_at=? WHERE id=? AND state='creating'")
+    .run(repository, detail, now, now + leaseSeconds * 1000, id);
+  print(recordBy(database, { id }), bool(args, "json"));
+}
+
+function finalizeCreationCommand(database, args, statePath) {
+  assertOnly(args, ["id", "path", "json"]);
+  const record = recordBy(database, selectorFrom(args));
+  if (record.state === "active") {
+    print(record, bool(args, "json"));
+    return;
+  }
+  if (record.state !== "creating") fail(`workspace cannot finalize creation from state ${record.state}`);
+  if (record.sourceCommit === null) fail("pending creation has no recorded source commit; repeat the original create command first");
+  const input = record.creation;
+  const info = gitInfo(record.path);
+  if (info.checkoutType !== input.strategy) fail("pending checkout type changed");
+  if (info.checkoutType === "worktree") {
+    const common = path.resolve(record.path, git(record.path, ["rev-parse", "--git-common-dir"]));
+    if (realpathSync(common) !== realpathSync(mirrorFor(statePath, input.repository))) fail("pending worktree has a different source mirror");
+  } else {
+    const upstream = repositoryRemotes(input.repository);
+    const origin = git(record.path, ["config", "--local", "--get", "remote.origin.url"]);
+    if (![input.repository, upstream.fetch].includes(repositoryLocation(origin, record.path))) {
+      fail("pending checkout origin differs from the creation request");
+    }
+  }
+  const ancestry = command("git", ["-C", record.path, "merge-base", "--is-ancestor", record.sourceCommit, info.head]);
+  if (ancestry.status !== 0) fail("pending checkout HEAD is not descended from the recorded source commit");
+  const branch = command("git", ["-C", record.path, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (input.mode === "writer" ? branch.status !== 0 : branch.status === 0) fail("pending checkout branch mode differs from the creation request");
+  assertPendingClean(record.path);
+  if (info.checkoutType === "clone") maintainReferenceClone(record.path, true);
+  completeCreation(database, record.id, info.repository ?? record.repository, input.leaseSeconds,
+    "creation finalized; existing HEAD, branches, remotes and ignored output preserved", args);
 }
 
 function cancelCreationCommand(database, args) {
@@ -1752,7 +1894,7 @@ function cancelCreationCommand(database, args) {
   // lstat also protects dangling symlinks. Cancellation never removes filesystem entries.
   try {
     lstatSync(record.path);
-    fail(`pending checkout exists; repeat the original create command to resume and preserve its source: ${record.path}`);
+    fail(`pending checkout exists; repeat the original create command or use finalize-creation for a clean descendant checkout: ${record.path}`);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -1955,6 +2097,7 @@ function help() {
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
   agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
   agent-workspace cancel-creation (--id ID|--path PATH)
+  agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
@@ -2006,18 +2149,19 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
       return;
     }
   }
-  if (!["status", "list", "maintain", "cancel-creation"].includes(commandName)
+  if (!["status", "list", "maintain", "cancel-creation", "finalize-creation"].includes(commandName)
     && (commandName !== "reconcile" || bool(args, "execute"))) drainGc(statePath);
   const database = openRegistry(statePath);
   try {
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
     else if (commandName === "adopt") adoptCommand(database, args, statePath);
-    else if (["heartbeat", "release", "cancel-creation"].includes(commandName)) {
+    else if (["heartbeat", "release", "cancel-creation", "finalize-creation"].includes(commandName)) {
       const record = recordBy(database, selectorFrom(args));
       withWorkspaceLock(database, record.path, () => {
         if (commandName === "heartbeat") heartbeatCommand(database, args);
         else if (commandName === "cancel-creation") cancelCreationCommand(database, args);
+        else if (commandName === "finalize-creation") finalizeCreationCommand(database, args, statePath);
         else releaseCommand(database, args, statePath);
       }, record.groupId);
     }

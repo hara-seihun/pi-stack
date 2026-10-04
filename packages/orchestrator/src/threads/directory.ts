@@ -1,5 +1,5 @@
 import { validateThreadAwait } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
@@ -9,6 +9,10 @@ export class ThreadDirectory implements ThreadApi {
   constructor(local: ThreadOwner, peers: readonly ThreadOwner[] = []) {
     this.owners = [local, ...peers];
     if (new Set(this.owners.map(owner => owner.id)).size !== this.owners.length) throw new Error("Thread owner IDs must be unique");
+  }
+  async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
+    const person = this.owners.find(owner => owner.id === "person");
+    return person ? person.api.watch(input) : { ok: false, error: { code: "unavailable", message: "This person has no unlocked watch list owner" } };
   }
   async owner(threadId: string): Promise<Result<ThreadOwner>> {
     if (!threadId) return error("invalid_request", "A thread ID is required");
@@ -31,6 +35,10 @@ export class ThreadDirectory implements ThreadApi {
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     const owner = await this.owner(threadId);
     return owner.ok ? owner.value.api.questions(threadId) : owner;
+  }
+  async questionState(threadId: string, questionId: string): Promise<Result<QuestionState>> {
+    const owner = await this.owner(threadId);
+    return owner.ok ? owner.value.api.questionState(threadId, questionId) : owner;
   }
   async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
     const owner = await this.owner(input.threadId);
@@ -161,6 +169,9 @@ export class ThreadDirectory implements ThreadApi {
       signal?.removeEventListener("abort", onAbort);
       controller.abort();
     }
+  }
+  async questionEvents(after = 0, limit = 100): Promise<Result<QuestionEvents>> {
+    return this.owners[0]!.api.questionEvents(after, limit);
   }
   async settlements(after = 0, limit = 100): Promise<Result<ThreadSettlements>> {
     return this.owners[0]!.api.settlements(after, limit);

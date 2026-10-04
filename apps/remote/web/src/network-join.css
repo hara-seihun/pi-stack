@@ -1,0 +1,23 @@
+.network-join {
+  position: fixed;
+  top: max(8px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 61;
+  width: min(460px, calc(100vw - 24px));
+  padding: 8px 12px;
+  border: 1px solid var(--accent, #6c8cff);
+  border-radius: 12px;
+  background: var(--panel, #171b22);
+  color: var(--text, #eef0f4);
+  box-shadow: 0 4px 16px #0005;
+  font-size: 13px;
+}
+.network-join-summary { display: flex; align-items: center; gap: 8px; }
+.network-join-summary span { flex: 1; }
+.network-join button { padding: 6px 10px; }
+.network-join-steps { margin-top: 8px; display: grid; gap: 8px; justify-items: start; }
+.network-join-steps ol { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.network-join-steps code { overflow-wrap: anywhere; }
+.network-join-download { font-weight: 600; }
+.network-join ~ .android-download { top: calc(max(8px, env(safe-area-inset-top)) + 56px); }

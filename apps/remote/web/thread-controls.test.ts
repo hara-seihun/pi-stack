@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { requestStop, runningDescendants, StopChoices, submitThreadControl } from "./src/thread-controls";
-import { composerAction, conversationThreads, working } from "./src/thread-state";
+import { composerAction, conversationThreads, workerThreads, working } from "./src/thread-state";
+import { inboxRows, selectionAfterSync } from "./src/chats";
+import { streamSessions } from "../server/stream-sessions";
 import { buildWorkerTree, isActiveWorker } from "./src/features/workers/tree-model";
 import { threadStatus } from "./src/features/status/thread-status";
 import type { Session } from "./src/types";
@@ -54,6 +56,30 @@ describe("thread controls", () => {
     expect(tree[0].children.map(node => node.session.id).sort()).toEqual(["existing-worker", "fleet-worker"]);
     expect(isActiveWorker(session("stopped", { held: true }))).toBe(false);
     expect(isActiveWorker(session("busy", { state: "running", activity: "running" }))).toBe(true);
+  });
+  test("watch checks appear in Workers, not Chats, without losing ownership, selection or stop scope", () => {
+    const watch = session("watch", { watchList: true, state: "running", idleUnread: true });
+    const worker = session("watch-worker", { parentId: watch.id, state: "running" });
+    const rows = [session("chat"), watch, worker, session("settled-watch", { watchList: true }),
+      session("archived-watch", { watchList: true, archivedAt: "2026-09-28T19:04:00Z" })];
+    const live = streamSessions(rows.filter(row => !row.archivedAt), watch.id);
+    const messaging = { version: 0, backends: [], conversations: [], calls: [] };
+    expect(inboxRows(live, [], messaging).map(row => row.chat.id)).toEqual(["ai:chat"]);
+    const workers = workerThreads(rows);
+    expect(workers.map(row => row.id)).toEqual(["watch", "watch-worker", "settled-watch"]);
+    const tree = buildWorkerTree(workers);
+    const root = tree.find(node => node.session.id === watch.id)!;
+    expect(root.session).toBe(watch);
+    expect(root.session.origin).toBe("person");
+    expect(root.session.idleUnread).toBe(true);
+    expect(root.children.map(node => node.session.id)).toEqual([worker.id]);
+    expect(selectionAfterSync("ai:watch", { sessions: live, messaging }, { sessions: live, messaging })).toBe("ai:watch");
+    const stopped: unknown[] = [], choices: Session[] = [];
+    requestStop(watch, (id, descendants) => stopped.push({ id, descendants }), row => choices.push(row));
+    expect(stopped).toEqual([{ id: watch.id, descendants: false }]);
+    requestStop({ ...watch, hasChildren: true }, () => {}, row => choices.push(row));
+    expect(choices).toHaveLength(1);
+    expect(runningDescendants(watch.id, workers)).toEqual([worker]);
   });
   test("resume exposes an empty-queue error instead of reporting success", async () => {
     await withThreadClient((async (url, init) => {

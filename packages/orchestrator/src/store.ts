@@ -13,6 +13,7 @@ export const SCHEMA_VERSION = 3;
 /** One broker principal's live spending grant, owned by the running model broker. */
 export interface BrokerGrant { accounts: string[]; models: string[] }
 const GRANT_PREFIX = "broker-grant:";
+const GRANT_OWNER_PREFIX = "broker-grant-owner:";
 const USAGE_HOUR_SCHEMA = `
 CREATE TABLE usage_hour (
   account_id TEXT NOT NULL,
@@ -211,12 +212,23 @@ export class Store {
     const value=this.control(`${GRANT_PREFIX}${principal}`);
     return value?JSON.parse(value) as BrokerGrant:undefined;
   }
-  publishBrokerGrants(grants: readonly (BrokerGrant&{principal:string})[]): void {
+  publishBrokerGrants(grants: readonly (BrokerGrant&{principal:string})[], owner?: string): void {
     this.transaction(()=>{
       const keep=new Set(grants.map((grant)=>`${GRANT_PREFIX}${grant.principal}`));
-      for(const grant of grants)this.setControl(`${GRANT_PREFIX}${grant.principal}`,JSON.stringify({accounts:grant.accounts,models:grant.models} satisfies BrokerGrant));
-      const stale=(this.db.prepare("SELECT key FROM control WHERE key>=? AND key<?").all(GRANT_PREFIX,`${GRANT_PREFIX}\uffff`) as {key:string}[]).filter((row)=>!keep.has(row.key));
-      for(const row of stale)this.db.prepare("DELETE FROM control WHERE key=?").run(row.key);
+      for(const grant of grants){
+        const key=`${GRANT_PREFIX}${grant.principal}`,ownerKey=`${GRANT_OWNER_PREFIX}${grant.principal}`;
+        const currentOwner=this.control(ownerKey);
+        if(this.control(key)!==undefined&&currentOwner!==owner)
+          throw new Error(`Broker principal ${grant.principal} belongs to another grant owner`);
+        this.setControl(key,JSON.stringify({accounts:grant.accounts,models:grant.models} satisfies BrokerGrant));
+        if(owner!==undefined)this.setControl(ownerKey,owner);
+      }
+      const stale=(this.db.prepare("SELECT key FROM control WHERE key>=? AND key<?").all(GRANT_PREFIX,`${GRANT_PREFIX}\uffff`) as {key:string}[])
+        .filter((row)=>!keep.has(row.key)&&this.control(`${GRANT_OWNER_PREFIX}${row.key.slice(GRANT_PREFIX.length)}`)===owner);
+      for(const row of stale){
+        this.db.prepare("DELETE FROM control WHERE key=?").run(row.key);
+        this.db.prepare("DELETE FROM control WHERE key=?").run(`${GRANT_OWNER_PREFIX}${row.key.slice(GRANT_PREFIX.length)}`);
+      }
     });
   }
 

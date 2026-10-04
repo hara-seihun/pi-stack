@@ -26,11 +26,13 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
   const { chat, status } = row;
   const session = chat.kind === "ai" ? chat.session : null;
   const conversation = chat.kind === "human" ? chat.conversation : null;
+  const room = chat.kind === "room" ? chat.room : null;
+  const unread = conversation?.unread ?? room?.unreadCount ?? 0;
   const [color, setColor] = useState<ThreadColor | null>(session?.color ?? null);
   useEffect(() => setColor(session?.color ?? null), [session?.color]);
   const colour = useThreadColor({ id: session?.id, name: chat.title, color: session?.color, onPreview: setColor });
   const titleOnly = selected && compactSelected;
-  const showStatusLine = !titleOnly && Boolean(session || conversation?.unread || status);
+  const showStatusLine = !titleOnly && Boolean(session || room || unread || status);
   const closeTitle = chat.kind === "ai" ? `Close ${chat.title}: stops it and its workers, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
   return <div className={`inbox-row${selected ? " selected" : ""}${titleOnly ? " title-only" : ""}`} data-section={row.section} style={threadColorStyle(color)}>
     {/* The press starts before the tap lands: that is when this thread's
@@ -42,7 +44,9 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
         {showStatusLine && <span className="inbox-status-line">
           {/* Every state has a word, "Working" included: a row whose state was left
               to the section header read as "· Fable", a blank where the state goes. */}
-          {status ? <StatusPill status={status} compact /> : conversation?.unread ? <span className="inbox-unread">{conversation.unread} unread</span> : null}
+          {status ? <StatusPill status={status} compact /> : null}
+          {unread > 0 && <span className="inbox-unread">{unread} unread</span>}
+          {room && <span className="inbox-meta">{room.members.map(member => member.displayName).join(", ")}</span>}
           {session && <span className="inbox-meta">{modelShortName(session.model)}</span>}
           {place && <span className="inbox-meta">{place}</span>}
           {session && session.queuedMessages.length > 0 && !session.held && <span className="inbox-chip">{session.queuedMessages.length} queued</span>}

@@ -113,20 +113,36 @@ pi_stack_dependency_key() {
 
 pi_stack_prepare_dependencies() {
   local root=$1 key stamp hidden_lock hidden_hash expected
-  key=$(pi_stack_dependency_key "$root")
+  key=$(pi_stack_dependency_key "$root") || return
+  (
+  # npm ci removes node_modules, so its lock must live outside that tree.
+  # Lock the checkout directory inode: aliases share custody without a lock file.
+  local dependency_lock
+  exec {dependency_lock}<"$root" || exit
+  flock "$dependency_lock" || exit
   stamp="$root/node_modules/.pi-stack-dependency-key"
   hidden_lock="$root/node_modules/.package-lock.json"
   if [[ -f $stamp && -f $hidden_lock ]]; then
     hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
     expected=$(printf '%s %s\n' "$key" "$hidden_hash")
-    if [[ $(<"$stamp") == "$expected" ]]; then
-      export PI_STACK_DEPENDENCIES_READY=$key
-      return
+    if [[ $(<"$stamp") == "$expected" ]] && node - "$root" <<'JS'
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.argv[2];
+const lock = JSON.parse(fs.readFileSync(path.join(root, 'node_modules/.package-lock.json'), 'utf8'));
+process.exit(Object.entries(lock.packages ?? {}).every(([name, spec]) =>
+  !name.split('/').includes('node_modules') || spec.optional || fs.existsSync(path.join(root, name, 'package.json'))
+) ? 0 : 1);
+JS
+    then
+      exit 0
     fi
   fi
-  (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund)
-  hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
-  printf '%s %s\n' "$key" "$hidden_hash" > "$stamp"
+  rm -f "$stamp" || exit
+  (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund) || exit
+  hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1) || exit
+  printf '%s %s\n' "$key" "$hidden_hash" > "$stamp" || exit
+  ) || return
   export PI_STACK_DEPENDENCIES_READY=$key
 }
 

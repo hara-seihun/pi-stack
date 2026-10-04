@@ -1,0 +1,23 @@
+{
+  "mode": "live-local-websocket-realtime-pcm-20ms-immediate-single-stream",
+  "asrThreads": 2,
+  "rewriteThreads": 4,
+  "sourceHashes": {
+    "apps/write/engine/benchmark_rewrite.py": "443fe9fe8ea7347677e1583f012586066cff174fdfd939a5b8dc860cfa501efb",
+    "apps/write/engine/dictionary_decoder.py": "0c30406588772ce6452c9791c4329f3ca6804ef1b8d1da6d01f790c52ec493e6",
+    "apps/write/engine/opus.py": "00dfef56c455facdfaff6a990219f2782a546f6b6ab84195bf03626ee90228e1",
+    "apps/write/engine/convert_fp32.py": "17cb6e0de5914ac9cc1aac919873016c8307296b58e471dfb76821dc69d51a32",
+    "apps/write/engine/nemotron.py": "0447d500e48d0758cd78fea795da1f052299239ad9df326df56a13446c1b1394",
+    "apps/write/engine/dictionary.py": "b40d774b200d709b3a1a442498e303faf551411b686d34d5b9105eebc0d807b8",
+    "apps/write/engine/server.py": "f895f30fd4db73c1e172725c957cec7149381f886f69782a40424e6a504bce95",
+    "apps/write/engine/rewrite.py": "7ea234934e2b6bff749c97e9f9fae03e97fabc14ae3651dc67793e8e7b7b024a",
+    "apps/write/engine/benchmark_rewrite_audio.py": "044ec8cc199c5cfb393ede144cee71325bd25603cde4d09f6437910c2d760302",
+    "apps/write/engine/gpu_encoder.py": "9c5b2c65c5c8921962853d946fd64b8fbcb303a304e96a86ab6f281b4553f7ea",
+    "apps/write/engine/cleanup/__init__.py": "ff0d8da114eae2e96f3736cc7e2610f3dd27e1704148f6f82471fa1b00ee1382",
+    "apps/write/engine/cleanup/punctuation.py": "2c80359d82a3cd0872c0c387181be6f4c6c4294229ea6845e063d81c8e4d47df",
+    "apps/write/eval/manifest.json": "c9b7004bbdfe8e93e674aff39c07ba0ff31ea22e56bbe37559874ede16d90df8",
+    "apps/write/eval/dictionary-final-heldout.json": "b689961618f7094c88a6b796f1a0280f2e284e917f160b658a1a7ec2e576c5ca"
+  },
+  "modelPin": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
+  "runtimePin": "llama.cpp b5377 24e86cae"
+}

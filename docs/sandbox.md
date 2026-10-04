@@ -42,7 +42,7 @@ To offer the profile to an existing person, add `sandbox` to `environment.PI_REM
 {
   "id": "sandbox",
   "label": "SANDBOX",
-  "icon": "raw",
+  "icon": "sandbox",
   "accent": "#d29922",
   "workspaceId": "home",
   "raw": true,

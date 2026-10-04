@@ -6,15 +6,17 @@ import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
 import { isRunContext } from "../isolated-context-contract.js";
-import { isModelConfigurationError } from "../provider-errors.js";
+import { isCompactionFailure, isModelConfigurationError, isRateLimitError, isTransientFailure, transientRetryAt } from "../provider-errors.js";
+import { POOLED_ACCOUNT_WAIT, pooledRetryAvailability } from "../extension/routing.js";
 import { modelBrokerUrl } from "../model-broker-contract.js";
 import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
+import { threadSettingsMetadata } from "./settings-metadata.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
+import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
 export interface ThreadAdmission { env?: Record<string, string | undefined>; settings?: ThreadSettings; release(): void | Promise<void> }
@@ -48,7 +50,7 @@ class NativeRejection extends Error {}
 class AdmissionWait extends Error {}
 interface Runtime {
   session: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings;
-  finalMessage?: Json; outcome?: WorkOutcome; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
+  finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
 const bad = <T = never>(code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed", message: string): Result<T> => ({ ok: false, error: { code, message } });
@@ -56,6 +58,21 @@ const ARCHIVE_RESUME_TEXT = "This thread was archived while it was working, whic
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const canonical = (value: any): any => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, canonical(value[key])])) : value;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+const questionAnswerBody = (row: Json, answer: Pick<AnswerThreadQuestion, "selectedSuggestionIds" | "text" | "dismissed">): string => {
+  if (answer.dismissed) return `Dismissed question ${row.id}: ${row.question}\nThe user skipped this question without selecting or authorizing any suggestion.`;
+  const choices = JSON.parse(row.suggestions) as ThreadQuestion["suggestions"];
+  return [`Answer to question ${row.id}: ${row.question}`, ...answer.selectedSuggestionIds.map(id => `- ${choices.find(choice => choice.id === id)!.text}`), ...(answer.text.trim() ? [answer.text] : [])].join("\n");
+};
+const mergeTimed = (items: Json[], additions: Json[]): Json[] => {
+  if (!additions.length) return items;
+  const result = [...items];
+  const time = (item: Json): number => typeof item.timestamp === "number" ? item.timestamp : Date.parse(item.timestamp ?? "") || 0;
+  for (const addition of additions) {
+    const next = result.findIndex(item => time(item) > time(addition));
+    result.splice(next < 0 ? result.length : next, 0, addition);
+  }
+  return result;
+};
 
 export class ThreadService implements ThreadApi {
   private readonly db: DatabaseSync;
@@ -70,6 +87,14 @@ export class ThreadService implements ThreadApi {
   private closed = false;
   private suspended = false;
   private directory?: ThreadApi;
+  private watchList?: import("./watch-list.js").WatchApi;
+  setWatchList(watchList: import("./watch-list.js").WatchApi): void { this.watchList = watchList; }
+  async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    if (this.watchList) return this.watchList.watch(input);
+    if (this.options.workersOnly && this.directory) return this.directory.watch(input);
+    return bad("unavailable", "This person has no unlocked watch list owner");
+  }
   private workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined;
   private routing = false;
   private transactionDepth = 0;
@@ -110,6 +135,8 @@ export class ThreadService implements ThreadApi {
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), question TEXT NOT NULL,
         suggestions TEXT NOT NULL, recommended_id TEXT, created_at INTEGER NOT NULL,
         answer TEXT, accepted_at INTEGER);
+      CREATE TABLE IF NOT EXISTS thread_question_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, question_id TEXT NOT NULL UNIQUE REFERENCES thread_question(id));
+      INSERT OR IGNORE INTO thread_question_event(question_id) SELECT id FROM thread_question WHERE accepted_at IS NULL ORDER BY created_at,rowid;
       CREATE INDEX IF NOT EXISTS thread_question_pending ON thread_question(thread_id,created_at) WHERE accepted_at IS NULL;
       DROP INDEX IF EXISTS thread_execution_active;
       UPDATE thread SET state='idle',held=1 WHERE state='stopped';
@@ -206,7 +233,7 @@ export class ThreadService implements ThreadApi {
   }
   live(id: string): Json | undefined { return this.projections.get(id)?.live; }
   latestSettlement(id: string): import("./contracts.js").ThreadSettlement | null {
-    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,id DESC LIMIT 1").get(id) as Json | undefined;
+    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,settlement_seq DESC,id DESC LIMIT 1").get(id) as Json | undefined;
     return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
   }
   async inspect(id: string, options: InspectOptions = {}): Promise<Result<ThreadInspection>> {
@@ -216,7 +243,7 @@ export class ThreadService implements ThreadApi {
     if (!this.execution(id) && options.contextRevision === thread.revision) return good({ thread, pending: this.pending(id), ...(projection ? { live: projection.live } : {}) });
     try {
       const context = this.execution(id) && projection?.context ? projection.context : { source: "native-history", systemPrompt: "", tools: [], messages: readThreadHistory(thread.sessionFile).flatMap(entry => entry.type === "message" ? [entry.message] : entry.type === "custom_message" ? [{ role: "custom", content: entry.content, customType: entry.customType, details: entry.details }] : []) };
-      return good({ thread, pending: this.pending(id), context, ...(projection ? { live: projection.live } : {}) });
+      return good({ thread, pending: this.pending(id), context: { ...context, messages: this.projectQuestionAnswers(id, context.messages ?? []) }, ...(projection ? { live: projection.live } : {}) });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
   private message(row: Json): ThreadMessage { return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
@@ -246,9 +273,9 @@ export class ThreadService implements ThreadApi {
   private admissionWait(id: string, error: ThreadError): void {
     if (this.suspended || this.closed) return;
     const existing = this.get(id)?.metadata?.admissionWait as Json | undefined;
-    const wait = { code: error.code, message: error.message, since: existing?.message === error.message ? existing.since : Date.now(), observedAt: Date.now() };
+    const wait = { code: error.code, message: error.message, since: existing?.message === error.message ? existing.since : Date.now(), observedAt: Date.now(), ...(error.retryAt ? { retryAt:error.retryAt } : {}) };
     this.sql("UPDATE thread SET metadata=json_set(metadata,'$.admissionWait',json(?)) WHERE id=?").run(JSON.stringify(wait), id);
-    if (existing?.message !== error.message) this.changed(id);
+    if (existing?.message !== error.message || existing?.retryAt !== error.retryAt) this.changed(id);
   }
   private clearAdmissionWait(id: string): void {
     if (this.suspended || this.closed) return;
@@ -270,6 +297,9 @@ export class ThreadService implements ThreadApi {
         if (this.closed || this.suspended || error instanceof AdmissionWait) return;
         if (this.runtimes.has(id) || this.row(id)?.held || this.halts.has(id)) throw error;
         const message = errorText(error);
+        if(/No eligible pooled account|(?:Saved|Pinned) model .*has no (?:eligible pooled|available) account/.test(message)){
+          this.admissionWait(id,{code:"unavailable",message});return;
+        }
         const work = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
         if (!work) throw error;
         const prior = this.get(id)?.metadata?.startupFailure as Json | undefined;
@@ -344,7 +374,7 @@ export class ThreadService implements ThreadApi {
       if (input.ephemeral && !parent) return bad("invalid_request", "Only subagents can be ephemeral");
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
-      if (parent && (parent.parentId || parent.role === "worker")) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
+      if (parent && (parent.parentId || parent.role === "worker" || parent.metadata?.watchList)) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
       if (parent?.metadata?.sandbox) return bad("invalid_request", "Sandbox threads cannot create workers");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
@@ -407,6 +437,7 @@ export class ThreadService implements ThreadApi {
           const suggestions = (question.suggestions ?? []).map((text, index) => ({ id: `${id}:${index}`, text }));
           this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)")
             .run(id, input.threadId, question.question, JSON.stringify(suggestions), question.recommendedSuggestionIndex === undefined ? null : suggestions[question.recommendedSuggestionIndex]!.id, now);
+          this.sql("INSERT INTO thread_question_event(question_id) VALUES(?)").run(id);
         });
         this.recordRequest(input.requestId, input, "ask", JSON.stringify(questionIds));
       });
@@ -414,42 +445,81 @@ export class ThreadService implements ThreadApi {
       return good({ accepted: true, questionIds });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
+  questionEvents(after = 0, limit = 100): Result<QuestionEvents> {
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid question cursor or limit");
+    const rows = this.sql(`SELECT e.seq,q.id AS questionId,q.thread_id AS threadId,q.question,q.created_at AS time,q.accepted_at
+      FROM thread_question_event e JOIN thread_question q ON q.id=e.question_id WHERE e.seq>? ORDER BY e.seq LIMIT ?`).all(after, limit) as Json[];
+    return good({ cursor: rows.at(-1)?.seq ?? after, items: rows.filter(row => row.accepted_at === null).map(({ accepted_at, ...row }) => row) as QuestionEvents["items"] });
+  }
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     if (!this.get(threadId)) return bad("not_found", "Thread not found");
     return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL ORDER BY created_at,rowid").all(threadId) as Json[]).map(row => this.question(row)));
+  }
+  async questionState(threadId: string, questionId: string): Promise<Result<QuestionState>> {
+    if (typeof threadId !== "string" || typeof questionId !== "string") return bad("invalid_request", "Thread and question IDs are required");
+    const row = this.sql("SELECT * FROM thread_question WHERE id=? AND thread_id=?").get(questionId, threadId) as Json | undefined;
+    if (!row) return bad("not_found", "Question not found in this thread");
+    const question = this.question(row);
+    if (row.accepted_at === null) return good({ question });
+    const answer = JSON.parse(row.answer);
+    return good({ question, answer: { text: answer.text, selectedSuggestions: question.suggestions.filter(choice => answer.selectedSuggestionIds.includes(choice.id)).map(choice => choice.text), dismissed: answer.dismissed === true, acceptedAt: row.accepted_at } });
+  }
+  private rootConsentQuestion(thread: Thread, questionId: string): boolean {
+    return thread.metadata?.rootConsent === true && !!this.sql(`SELECT 1 FROM thread_request r,json_each(CASE WHEN r.kind='ask' THEN r.target ELSE '[]' END) q
+      WHERE r.kind='ask' AND r.id GLOB 'consent:*:question' AND q.value=? LIMIT 1`).get(questionId);
+  }
+  private questionAnswerHistory(threadId: string): Json[] {
+    if (this.get(threadId)?.metadata?.rootConsent !== true) return [];
+    const rows = this.sql(`SELECT q.* FROM thread_question q WHERE q.thread_id=? AND q.accepted_at IS NOT NULL
+      AND EXISTS(SELECT 1 FROM thread_request r,json_each(CASE WHEN r.kind='ask' THEN r.target ELSE '[]' END) ids WHERE r.kind='ask' AND r.id GLOB 'consent:*:question' AND ids.value=q.id)
+      AND NOT EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=q.thread_id AND w.id='question-answer:'||q.id)
+      ORDER BY q.accepted_at,q.rowid`).all(threadId) as Json[];
+    return rows.map(row => ({ type: "message", id: `question-answer:${row.id}`, parentId: null, source: "question-receipt",
+      timestamp: new Date(row.accepted_at).toISOString(), message: { role: "user", timestamp: row.accepted_at,
+        questionId: row.id, rootConsent: true, content: [{ type: "text", text: questionAnswerBody(row, JSON.parse(row.answer)) }] } }));
+  }
+  /** Display-only receipt projection; root consumes these answers, not the ordinary agent's input queue. */
+  projectQuestionAnswers(threadId: string, messages: Json[]): Json[] {
+    const receipts = this.questionAnswerHistory(threadId).map(entry => entry.message);
+    if (!receipts.length) return messages;
+    return mergeTimed(messages.filter(message => !receipts.some(receipt => message.rootConsent === true && message.questionId === receipt.questionId)), receipts);
   }
   async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (typeof input.threadId !== "string" || typeof input.questionId !== "string"
       || !Array.isArray(input.selectedSuggestionIds) || input.selectedSuggestionIds.some(id => typeof id !== "string")
-      || new Set(input.selectedSuggestionIds).size !== input.selectedSuggestionIds.length || typeof input.text !== "string") {
+      || new Set(input.selectedSuggestionIds).size !== input.selectedSuggestionIds.length || typeof input.text !== "string"
+      || input.dismissed !== undefined && typeof input.dismissed !== "boolean"
+      || input.dismissed === true && (input.selectedSuggestionIds.length > 0 || input.text.trim().length > 0)) {
       return bad("invalid_request", "Answer requires unique selectedSuggestionIds and text");
     }
     try {
       const row = this.sql("SELECT * FROM thread_question WHERE id=? AND thread_id=?").get(input.questionId, input.threadId) as Json | undefined;
       if (!row) return bad("not_found", "Question not found in this thread");
       const choices = this.question(row).suggestions;
-      if (input.selectedSuggestionIds.some(id => !choices.some(choice => choice.id === id)) || !input.selectedSuggestionIds.length && !input.text.trim())
+      if (input.selectedSuggestionIds.some(id => !choices.some(choice => choice.id === id)) || !input.dismissed && !input.selectedSuggestionIds.length && !input.text.trim())
         return bad("invalid_request", "Select at least one known suggestion or provide nonblank text");
-      const answer = JSON.stringify({ selectedSuggestionIds: input.selectedSuggestionIds, text: input.text });
+      const answer = JSON.stringify({ selectedSuggestionIds: input.selectedSuggestionIds, text: input.text, ...(input.dismissed ? { dismissed: true } : {}) });
       if (row.accepted_at !== null) return row.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
       if (this.halts.has(input.threadId)) return bad("conflict", "Wait for cancellation confirmation before answering");
       const thread = this.get(input.threadId)!;
-      if (thread.held && thread.state === "running") {
+      const rootConsent = this.rootConsentQuestion(thread, row.id);
+      if (!rootConsent && thread.held && thread.state === "running") {
         const halted = await this.halt(thread.id); if (!halted.ok) return halted;
         const accepted = this.sql("SELECT answer,accepted_at FROM thread_question WHERE id=?").get(row.id) as Json;
         if (accepted.accepted_at !== null) return accepted.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
       }
-      const selected = input.selectedSuggestionIds.map(id => choices.find(choice => choice.id === id)!.text);
-      const body = [`Answer to question ${row.id}: ${row.question}`, ...selected.map(text => `- ${text}`), ...(input.text.trim() ? [input.text] : [])].join("\n");
+      const body = questionAnswerBody(row, input);
       this.transaction(() => {
         const accepted = this.sql("UPDATE thread_question SET answer=?,accepted_at=? WHERE id=? AND accepted_at IS NULL").run(answer, Date.now(), row.id);
         if (!accepted.changes) throw new Error("Question acceptance raced another answer");
-        this.insertMessage(`question-answer:${row.id}`, { requestId: `question-answer:${row.id}`, threadId: input.threadId,
-          text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings, thread.held);
-        this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(input.threadId);
+        if (!rootConsent) {
+          this.insertMessage(`question-answer:${row.id}`, { requestId: `question-answer:${row.id}`, threadId: input.threadId,
+            text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings, thread.held);
+          this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(input.threadId);
+        }
       });
-      this.changed(input.threadId); this.wake(input.threadId);
+      this.changed(input.threadId); if (!rootConsent) this.wake(input.threadId);
       return good({ accepted: true, questionId: row.id });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
@@ -501,7 +571,7 @@ export class ThreadService implements ThreadApi {
     try {
       const limit = input.limit ?? 20, offset = input.offset ?? Number(input.cursor ?? 0);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) return bad("invalid_request", "Invalid history page");
-      const entries = visibleThreadHistory(thread.sessionFile) as Json[];
+      const entries = mergeTimed(visibleThreadHistory(thread.sessionFile) as Json[], this.questionAnswerHistory(input.threadId));
       if (input.entryId) { const entry = entries.find(entry => entry.id === input.entryId); return entry ? good({ entries: [entry] }) : bad("not_found", "Transcript entry not found"); }
       const selected = entries.slice(offset, offset + limit);
       return good({ entries: selected, ...(offset + selected.length < entries.length ? { nextCursor: String(offset + selected.length) } : {}) });
@@ -739,7 +809,13 @@ export class ThreadService implements ThreadApi {
           if (saved?.response) return JSON.parse(saved.response) as Result<unknown>;
           receipt = !!prior.value;
         }
-        const execution = this.execution(id), settings = execution ? JSON.parse(execution.settings) : this.get(id)!.settings;
+        const execution = this.execution(id), thread=this.get(id)!, settings = execution ? JSON.parse(execution.settings) : thread.settings;
+        if(command.type==="get_state"&&!this.runtimes.has(id)&&!this.opening.has(id)&&!thread.metadata?.runnerReference&&(!execution||thread.metadata?.providerWait)){
+          return good({...threadSettingsMetadata(settings),source:"thread-owner",sessionFile:thread.sessionFile,sessionName:thread.title,
+            isStreaming:false,isCompacting:false,isBashRunning:false,localTools:0,pendingCommandCount:0,pendingMessageCount:0,
+            threadState:thread.state,pendingWorkCount:thread.pendingMessages,providerWait:thread.metadata?.providerWait,
+            lastAssistantMessage:this.latestSettlement(id)?.finalMessage??null});
+        }
         let runtime = await this.open(id, settings, !!execution);
         if (this.runtimes.get(id) !== runtime) runtime = await this.open(id, this.get(id)!.settings, false);
         const observing = ["get_state", "get_context", "get_messages", "get_session_stats", "get_available_models", "get_available_thinking_levels", "get_commands", "get_fork_messages", "set_session_name", "extension_ui_response"].includes(command.type);
@@ -816,12 +892,26 @@ export class ThreadService implements ThreadApi {
   private async openOwned(id: string, settings: ThreadSettings, recovering: boolean, extraEnv: Record<string, string | undefined>): Promise<Runtime> {
     const thread = this.get(id)!;
     const recoveredExecution = recovering ? this.execution(id) : undefined;
+    const providerWait = recoveredExecution && thread.metadata?.providerWait as Json | undefined;
+    if(providerWait?.broker && Date.now()<providerWait.retryAt)throw new AdmissionWait("Waiting for model-broker capacity retry");
+    const failure=String(providerWait?.failure??"");
+    if(providerWait && (!isRateLimitError(failure)||isCompactionFailure(failure)) && Date.now()<providerWait.retryAt)throw new AdmissionWait("Waiting to retry a transient provider failure");
+    if(providerWait && !this.options.admit){
+      const env={...process.env,...this.options.environment?.(thread)};
+      const ready=modelBrokerUrl(env)||!/^(?:anthropic|openai-codex)(?:-\d+)?\//.test(settings.model)?{available:Date.now()>=providerWait.retryAt,retryAt:providerWait.retryAt}:pooledRetryAvailability(settings.model,env);
+      if(!ready.available){
+        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.providerWait.retryAt',?) WHERE id=?").run(ready.retryAt,id);
+        this.admissionWait(id,{code:"unavailable",message:`Provider capacity unavailable for ${settings.model}; next known opportunity ${new Date(ready.retryAt).toISOString()}`});
+        throw new AdmissionWait("Provider capacity unavailable");
+      }
+    }
     let recoveredAdmission: ThreadAdmission | undefined;
     if (recoveredExecution && this.options.admit) {
-      const admitted = await this.options.admit(thread, settings, true, recoveredExecution.id);
+      const admitted = await this.options.admit(thread, settings, !providerWait, recoveredExecution.id);
       if (!admitted.ok) {
         if (admitted.error.code === "unavailable") {
           this.admissionWait(id, admitted.error);
+          if(providerWait&&admitted.error.retryAt)this.sql("UPDATE thread SET metadata=json_set(metadata,'$.providerWait.retryAt',?) WHERE id=?").run(admitted.error.retryAt,id);
           throw new AdmissionWait(admitted.error.message);
         }
         throw new Error(admitted.error.message);
@@ -842,11 +932,12 @@ export class ThreadService implements ThreadApi {
       PI_THREAD_DATABASE: this.options.databasePath,
       // Explicit false survives JSON transport and overrides older runners' launch environment.
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",
-      PI_THREAD_CAN_SPAWN: sandbox || thread.role === "worker" ? "0" : "1",
+      PI_THREAD_CAN_SPAWN: sandbox || thread.role === "worker" || thread.metadata?.watchList ? "0" : "1",
       PI_THREAD_MODE: isThreadModeName(thread.metadata?.mode) ? thread.metadata.mode : undefined,
       PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined };
     const brokerUrl = modelBrokerUrl(env);
     if (brokerUrl) env.PI_MODEL_BROKER_URL = brokerUrl;
+    runtime.broker=!!brokerUrl;
     this.runtimes.set(id, runtime);
     try {
       runtime.session = await this.options.openSession({ threadId: id, cwd: thread.cwd, sessionFile: thread.sessionFile,
@@ -860,12 +951,14 @@ export class ThreadService implements ThreadApi {
         runtime.executionId = execution.id;
         const accepted = new Set<string>(state.acceptedWorkIds ?? []), completed = new Set<string>(state.completedWorkIds ?? []);
         const works = this.sql("SELECT * FROM thread_work WHERE execution_id=? AND status!='done' ORDER BY ordinal").all(execution.id) as Json[];
-        if (!runtime.busy && completed.has(execution.work_id)) {
-          const last = state.lastAssistantMessage;
+        const last = state.lastAssistantMessage;
+        const capacityFailure = last?.stopReason === "error" && (isTransientFailure(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
+        if (!runtime.busy && completed.has(execution.work_id) && (!providerWait || !capacityFailure)) {
           await this.finish(id, runtime, last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete", last ?? null);
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
-          await this.rpc(runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null });
+          await this.rpc(runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null, ...(providerWait ? { resumeProviderWait: true } : {}) });
+          if(providerWait)this.sql("UPDATE thread SET metadata=json_set(json_remove(metadata,'$.providerWait','$.admissionWait'),'$.providerRetry',json(?)) WHERE id=?").run(JSON.stringify({executionId:providerWait.executionId,attempts:providerWait.attempts??1}),id);
           this.sql("UPDATE thread_work SET landed_at=COALESCE(landed_at,?) WHERE id=?").run(Date.now(), work.id);
           runtime.busy = true;
         }
@@ -1034,13 +1127,33 @@ export class ThreadService implements ThreadApi {
     this.sql("UPDATE thread SET state='idle',metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(error, id);
     this.changed(id);
   }
+  private async waitForProvider(id:string,runtime:Runtime|undefined,execution:Json,failure:string):Promise<void>{
+    const metadata=this.get(id)?.metadata, prior=metadata?.providerWait as Json|undefined, retried=metadata?.providerRetry as Json|undefined;
+    const attempts=(prior?.executionId===execution.id?prior!.attempts??1:retried?.executionId===execution.id?retried!.attempts??1:0)+1;
+    const wait={executionId:execution.id,workId:execution.work_id,failure,attempts,since:prior?.since??Date.now(),retryAt:transientRetryAt(failure,attempts),broker:runtime?.broker??prior?.broker??false};
+    this.sql("UPDATE thread SET state='running',metadata=json_set(metadata,'$.providerWait',json(?)) WHERE id=?").run(JSON.stringify(wait),id);
+    this.admissionWait(id,{code:"unavailable",message:`Accepted work is waiting for provider capacity: ${failure}`});
+    if(runtime){
+      runtime.busy=false;
+      if(runtime.lease){const lease=runtime.lease;runtime.lease=undefined;await lease.release();}
+      // Keep execution/work custody in SQLite, but retire the idle native runner.
+      runtime.executionId=undefined;
+      await this.retire(id,runtime);
+    }
+    this.changed(id);
+  }
   private async finish(id: string, runtime: Runtime | undefined, outcome: WorkOutcome, finalMessage: Json | null, error?: string): Promise<void> {
     if (this.suspended || this.closed) return;
+    const failure=error??finalMessage?.errorMessage??"";
     const execution = this.execution(id); if (!execution || runtime && runtime.executionId !== execution.id) { if (runtime) runtime.busy = false; return; }
+    if(outcome==="failed"&&!this.row(id)?.held&&(isTransientFailure(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
+      await this.waitForProvider(id,runtime,execution,failure);return;
+    }
     const thread = this.get(id)!, workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
     this.transaction(() => {
       this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, Date.now(), execution.id);
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait','$.providerRetry') WHERE id=?").run(id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
       if (thread.metadata?.ephemeral && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
         this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);

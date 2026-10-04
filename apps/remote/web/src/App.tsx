@@ -18,7 +18,8 @@ import { deliverIdleNotifications, readIdleCursor, takeNotificationTarget, retai
 import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
-import { working } from "./thread-state";
+import { useRooms, RoomConversation } from "./rooms";
+import { workerThreads, working } from "./thread-state";
 import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
 import type { ChatPickerHandle } from "./thread-start-menu";
@@ -32,6 +33,7 @@ import { MessagingConversations } from "./Messages";
 import { MessagingCallProvider, SignalCallButton } from "./messaging-call";
 import { RequestIndicator } from "./RequestIndicator";
 import { AndroidDownloadPrompt } from "./android-download";
+import { NetworkJoinPrompt } from "./network-join";
 import { beginSectionLoad } from "./in-flight";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
 import { shouldUndoClose, UndoCloses } from "./undo-closes";
@@ -59,6 +61,7 @@ const InspectorSheet = lazy(() => import("./features/inspector/InspectorSheet").
 const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
 const WorkersTree = lazy(() => import("./features/workers/WorkersTree").then(module => ({ default: module.WorkersTree })));
 const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
+const CalendarScreen = lazy(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
 const MachineTab = lazy(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
 
 function Loading({ label }: { label: string }) {
@@ -125,6 +128,7 @@ function UnlockDialog() {
   const [selectedUser, setSelectedUser] = useState("");
   const [key, setKey] = useState("");
   const [message, setMessage] = useState("");
+  const [custody, setCustody] = useState<{ locked: boolean; message: string } | null>(null);
   useEffect(() => {
     registerUnlockHandler(async (nextMessage) => {
       setMessage(nextMessage);
@@ -133,6 +137,7 @@ function UnlockDialog() {
         const response = await fetchPersonChooser();
         if (!response.ok) throw new Error(`Person chooser returned HTTP ${response.status}`);
         const result = await response.json();
+        setCustody(result?.environment?.custody ?? null);
         const nextPeople = result?.environment?.persons || result?.persons || [];
         const savedUser = window.PiRemotePerson?.get() || "";
         const nextUser = nextPeople.some((person: { user: string }) => person.user === savedUser) ? savedUser : nextPeople[0]?.user || "";
@@ -155,7 +160,8 @@ function UnlockDialog() {
   return <dialog ref={dialog} className="unlock-dialog" aria-labelledby="unlock-title" onCancel={event => event.preventDefault()}>
     <form className="unlock-form" onSubmit={submit}>
       <h2 id="unlock-title">Pi Remote</h2>
-      {requiresKey && <p>Your folder key stays on this device.</p>}
+      {requiresKey && <p>{custody ? "Your key proves who you are to Kenan; he retains folder custody." : "Your folder key stays on this device."}</p>}
+      {custody?.locked && <p role="status">Kenan's custody is locked after a restart. {custody.message}</p>}
       {people.length > 0 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={selectedUser} onChange={(event) => { setSelectedUser(event.target.value); setKey(""); window.PiRemotePerson?.set(event.target.value); }}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
       {requiresKey && <div className="unlock-field"><label htmlFor="unlock-key">Folder key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>}
       <DismissibleError className="unlock-error" message={message} />
@@ -175,7 +181,7 @@ export default function App() {
     window.addEventListener("pi-auth", authChanged);
     return () => { window.removeEventListener("pi-person", changed); window.removeEventListener("pi-auth", authChanged); };
   }, []);
-  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><AndroidDownloadPrompt /><RemoteApp key={`${person}:${lockGeneration}`} /></>;
+  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><NetworkJoinPrompt /><AndroidDownloadPrompt /><RemoteApp key={`${person}:${lockGeneration}`} /></>;
 }
 
 /**
@@ -201,6 +207,7 @@ function RemoteApp() {
     }
   }, [autoCollapseKey]);
   const { state, stateRef, patch } = useStableState();
+  const roomDirectory = useRooms(state.bootstrap?.rooms === true);
   const layout = useLayout();
   const route = useRoute();
   const routeChat = routeChatId(route);
@@ -212,6 +219,7 @@ function RemoteApp() {
   const showConversationIdentity = layout === "phone" || listSelection.key !== selectionKey || !listSelection.visible;
   const aiId = routeThreadId(route);
   const messagingActive = routeChat?.startsWith("human:") ?? false;
+  const roomId = state.bootstrap?.rooms && routeChat?.startsWith("room:") ? routeChat.slice(5) : null;
   const humanConversation = state.messaging.conversations.find(item => `human:${item.id}` === routeChat && item.current) ?? null;
   const [chatError, setChatError] = useState("");
   const [closing, setClosing] = useState<PendingCloses>(() => new Set());
@@ -322,7 +330,7 @@ function RemoteApp() {
     if (tab === "workers") navigate({ tab: "workers", thread: chat.slice(3), panel: null }, options);
     else navigate({ tab: "chats", chat, panel: null }, options);
   }, [route.tab]);
-  const openThreadId = useCallback((id: string, tab?: Tab) => openChat(`ai:${id}`, { tab }), [openChat]);
+  const openThreadId = useCallback((id: string, tab?: Tab) => openChat(id.startsWith("room:") ? id as ChatId : `ai:${id}`, { tab }), [openChat]);
   // Opening a thread from inside a panel used to close the panel and navigate
   // in the same tick. `history.back()` settles later, so its popstate landed
   // after the push and returned the person to the thread they came from: a
@@ -620,14 +628,19 @@ function RemoteApp() {
       patch(current => ({ discovered: [...current.sessions, ...current.discovered].some(session => session.id === chat.session.id) ? current.discovered : [...current.discovered, chat.session] }));
       if (chat.session.archivedAt) await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: chat.session.id }), {});
       if (signal?.aborted) return;
+      openChat(chat.id, { tab: chat.session.watchList ? "workers" : "chats" });
+    } else if (chat.kind === "room") {
+      if (chat.room.current === false) await api("POST", `/v1/rooms/${chat.room.id}/open`, {});
+      if (signal?.aborted) return;
       openChat(chat.id, { tab: "chats" });
+      await roomDirectory.refresh();
     } else {
       if (!chat.conversation.current) await api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: chat.conversation.backendId, target: chat.conversation.externalId });
       if (signal?.aborted) return;
       openChat(chat.id, { tab: "chats" });
       kick();
     }
-  }, [kick, openChat, patch]);
+  }, [kick, openChat, patch, roomDirectory.refresh]);
   const closeChat = useCallback(async (chat: Chat) => {
     if (undoCloses.isBusy(chat.id)) return;
     setClosing(current => withClose(current, chat.id));
@@ -638,22 +651,25 @@ function RemoteApp() {
     }
     const result = await undoCloses.close(chat, () => chat.kind === "ai"
       ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id }))
+      : chat.kind === "room" ? api("POST", `/v1/rooms/${chat.room.id}/close`, {})
       : api(API.messagingClose.method, API.messagingClose.path({ conversationId: chat.conversation.id })));
     if (result?.ok && chat.kind === "ai") cache.forgetThread(chat.session.id);
     if (!result?.ok) {
       setClosing(current => withoutClose(current, chat.id));
       if (result) setChatError(result.error);
     }
+    if (chat.kind === "room") await roomDirectory.refresh();
     kick();
-  }, [cache, kick, liveText, patch, route, stateRef, undoCloses]);
+  }, [cache, kick, liveText, patch, route, stateRef, undoCloses, roomDirectory.refresh]);
   const undoClose = useCallback(async () => {
     const chat = undoCloses.snapshot().entries.at(-1)?.chat;
     const result = await undoCloses.undo(item => item.kind === "ai"
       ? api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: item.session.id }), { descendants: true, resume: true })
+      : item.kind === "room" ? api("POST", `/v1/rooms/${item.room.id}/open`, {})
       : api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: item.conversation.backendId, target: item.conversation.externalId }));
     if (result?.ok && chat) setClosing(current => withoutClose(current, chat.id));
-    if (result) kick();
-  }, [kick, undoCloses]);
+    if (result) { if (chat?.kind === "room") await roomDirectory.refresh(); kick(); }
+  }, [kick, undoCloses, roomDirectory.refresh]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!undoCloses.snapshot().entries.length || undoCloses.snapshot().restoring || !shouldUndoClose(event)) return;
@@ -813,7 +829,16 @@ function RemoteApp() {
   const dashboard = state.dashboard;
   const threadStarts = useMemo(() => state.bootstrap?.threadStarts ?? [], [state.bootstrap]);
   const home = state.bootstrap?.home ?? "/";
-  const listedRows = useMemo(() => inboxRows(state.sessions, threadStarts, state.messaging), [state.sessions, threadStarts, state.messaging]);
+  const previousRooms = useRef(roomDirectory.rooms);
+  useEffect(() => {
+    const previous = { sessions: [], messaging: stateRef.current.messaging, rooms: previousRooms.current };
+    previousRooms.current = roomDirectory.rooms;
+    if (routeChat?.startsWith("room:") && selectionAfterSync(routeChat, previous, { ...previous, rooms: roomDirectory.rooms }) !== routeChat) {
+      patch({ selectedChatId: null });
+      navigate(routeHome(route), { replace: true });
+    }
+  }, [roomDirectory.rooms, routeChat, route, patch, stateRef]);
+  const listedRows = useMemo(() => inboxRows(state.sessions, threadStarts, state.messaging, roomDirectory.rooms), [state.sessions, threadStarts, state.messaging, roomDirectory.rooms]);
   useEffect(() => { setClosing(current => reconcileCloses(current, listedRows.map(row => row.chat.id))); }, [listedRows]);
   const rows = useMemo(() => hideClosing(listedRows, closing), [listedRows, closing]);
   const knownSessions = useMemo(() => {
@@ -841,18 +866,13 @@ function RemoteApp() {
   const modelCounts = useMemo(() => new Map((dashboard?.modelCounts ?? []).map((model) => [model.key, model.count])), [dashboard]);
   const images = useMemo(() => state.images ? new Map(state.images.images.map(image => [image.id, image])) : null, [state.images]);
   const humanBackend = state.messaging.backends.find(item => item.id === humanConversation?.backendId);
-  // The tree shows every thread that is a worker or has workers, including
-  // the person's own conversation roots that spawned them.
-  const workerSessions = useMemo(() => {
-    const live = knownSessions.filter(session => !session.archivedAt);
-    const parents = new Set(live.map(session => session.parentId).filter(Boolean));
-    return live.filter(session => session.parentId || session.origin === "fleet" || parents.has(session.id) || session.hasChildren);
-  }, [knownSessions]);
+  // Watch checks live alongside workers and the conversation roots that spawned them.
+  const workerSessions = useMemo(() => workerThreads(knownSessions), [knownSessions]);
   const showPlace = useMemo(() => new Set(state.sessions.map(session => `${session.environment}/${session.workspaceName}`)).size > 1, [state.sessions]);
   const attentionCount = rows.filter(row => row.section === "attention").length;
   const badges = {
     chats: { count: attentionCount || rows.length, attention: attentionCount > 0 },
-    workers: { count: workerSessions.filter(session => (session.parentId || session.origin === "fleet") && working(session)).length },
+    workers: { count: workerSessions.filter(session => (session.parentId || session.origin === "fleet" || session.watchList) && working(session)).length },
     machine: { count: state.ownerErrors.length + (state.offline ? 1 : 0), attention: true },
   };
   // A thread tool call names threads by id. The transcript shows what they are
@@ -883,10 +903,10 @@ function RemoteApp() {
   }), [knownSessions, openThreadId, discoverThreads]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "machine" || route.tab === "files" || !!routeChat;
+  const showDetail = route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || !!routeChat;
 
-  const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} />,
-    [threadStarts, state.messaging, selectChat, openThreadId, kick]);
+  const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
+    [threadStarts, state.messaging, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
   const debugTools = <div className="inspector-debug">
     <button type="button" className={voiceState === "idle" ? "" : voiceState} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceState === "live" ? "Hang up voice" : voiceState === "connecting" ? "Connecting voice…" : "Start voice"}</button>
     {voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}
@@ -894,7 +914,9 @@ function RemoteApp() {
     {voiceDetail && <p className="muted">{voiceDetail}</p>}
   </div>;
 
-  const conversation = selected && !messagingActive
+  const conversation = roomId
+    ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} showBack={layout === "phone"} showIdentity={showConversationIdentity} onRefresh={roomDirectory.refresh} />
+    : selected && !messagingActive
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
@@ -907,7 +929,7 @@ function RemoteApp() {
         ? <section className="empty-state"><strong>Opening…</strong></section>
         : <section className="empty-state"><strong>{route.tab === "workers" ? "Choose a worker" : "Choose a chat"}</strong></section>;
 
-  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
+  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
     : route.tab === "workers" ? <Suspense fallback={<Loading label="Loading workers…" />}><WorkersTree sessions={workerSessions} selectedId={aiId} compactSelected={layout !== "phone"} filter={workersFilter} onFilter={setWorkersFilter} onOpen={openWorker} onPrefetch={prefetchSession} onSelectedVisibleChange={onSelectedVisibleChange} /></Suspense>
     : null;
 
@@ -921,13 +943,15 @@ function RemoteApp() {
     return <Suspense fallback={<Loading label="Loading files…" />}><FilesScreen layout={mode} selectedPath={route.tab === "files" ? route.path : null} shortcuts={shortcuts} onAttach={selectedAiId(stateRef.current) ? path => void attachPath(path) : undefined} onSelect={path => navigate({ tab: "files", path }, { replace: mode === "split" || !path })} /></Suspense>;
   }
 
-  const detail = route.tab === "machine"
+  const detail = route.tab === "calendar"
+    ? <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>
+    : route.tab === "machine"
     ? <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>
     : route.tab === "files" ? filesScreen(layout === "phone" ? "stack" : "split")
     : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
 
-  const showTabs = route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
-  return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
+  const showTabs = route.tab === "calendar" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
+  return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
         <SpeechBar />

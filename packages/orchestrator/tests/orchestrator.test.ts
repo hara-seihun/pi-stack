@@ -51,7 +51,14 @@ describe("current orchestrator state",()=>{
 
   it("launches every Fable selection on Claude Fable 5.1",()=>{const anthropic=builtinProviders().find((provider)=>provider.id==="anthropic")!;const models=withCustomModels(anthropic).getModels();expect(models.some((model)=>model.id==="claude-fable-5")).toBe(true);expect(models.find((model)=>model.id==="claude-fable-5-1")?.cost.cacheRead).toBe(.25);expect(catalogModel("fable")?.model).toBe("claude-fable-5-1");});
 
-  it("defaults built-in scheduling to OpenAI and offers Opus by name",()=>{const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;expect(profiles.astra).toEqual([{provider:"openai-codex",model:"gpt-6-astra",thinking:"high"}]);expect(profiles.standard.map(candidate=>candidate.model)).toEqual(["gpt-6-astra","gpt-6.1-sol"]);expect(profiles.expert).toEqual(profiles.astra);expect([...profiles.standard,...profiles.expert].every(candidate=>candidate.provider==="openai-codex")).toBe(true);expect(profiles.opus).toEqual([{provider:"anthropic",model:"claude-opus-5-5",thinking:"high"}]);});
+  it("defaults built-in scheduling to Sol 6.1 while keeping Astra and Opus selectable",()=>{
+    const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;
+    expect(profiles.sol).toEqual([{provider:"openai-codex",model:"gpt-6.1-sol",thinking:"high"}]);
+    expect(profiles.standard).toEqual(profiles.sol);
+    expect(profiles.expert).toEqual(profiles.sol);
+    expect(profiles.astra).toEqual([{provider:"openai-codex",model:"gpt-6-astra",thinking:"high"}]);
+    expect(profiles.opus).toEqual([{provider:"anthropic",model:"claude-opus-5-5",thinking:"high"}]);
+  });
 
   it("continues a provider-truncated turn even when rejected tool calls follow it",()=>{
     const prompt=outputLimitContinuation([
@@ -82,9 +89,11 @@ describe("current orchestrator state",()=>{
     expect(usage.metrics.remaining?.percentLeft).toBe(35);
     expect(usage.metrics.remaining?.accounts).toEqual([
       {accountId:"openai-codex-1",accountLabel:"Primary",state:"ready",percentLeft:35,usedPercent:65,meterId:"codex-7d",windowHours:168,readingAt:new Date(now).toISOString(),resetAt:new Date(now+5*24*3_600_000).toISOString(),bankedResets:2,bankedResetsAt:new Date(now).toISOString(),bankedResetExpiresAt:new Date(now+30*24*3_600_000).toISOString()},
-      {accountId:"openai-codex-2",accountLabel:"openai-codex-2",state:"stale",percentLeft:10,usedPercent:90,meterId:"codex-5h",windowHours:5,readingAt:new Date(now-2*3_600_000).toISOString(),resetAt:null,bankedResets:null,bankedResetsAt:null,bankedResetExpiresAt:null},
+      {accountId:"openai-codex-2",accountLabel:"openai-codex-2",state:"unavailable",percentLeft:null,usedPercent:null,meterId:null,windowHours:null,readingAt:null,resetAt:null,bankedResets:null,bankedResetsAt:null,bankedResetExpiresAt:null},
       {accountId:"openai-codex-3",accountLabel:"No reading",state:"unavailable",percentLeft:null,usedPercent:null,meterId:null,windowHours:null,readingAt:null,resetAt:null,bankedResets:0,bankedResetsAt:new Date(now).toISOString(),bankedResetExpiresAt:null},
     ]);
+    expect(usage.metrics["five-hour"]?.percentLeft).toBe(70);
+    expect(usage.metrics["five-hour"]?.accounts[1]).toMatchObject({state:"stale",percentLeft:10,meterId:"codex-5h"});
     client.close();rmSync(root,{recursive:true});
   });
 
@@ -93,6 +102,7 @@ describe("current orchestrator state",()=>{
     const store=Store.open(ledger);
     for(const [id,all,scoped] of [["anthropic",100,73],["anthropic-2",96,63],["anthropic-3",100,83]] as const){
       store.upsertAccount({id,provider:"anthropic"});
+      store.recordMeter(id,"anthropic-5h",10,now+3_600_000,now);
       store.recordMeter(id,"anthropic-7d",all,now+3_600_000,now);
       store.recordMeter(id,"anthropic-7d_oi",scoped,now+3_600_000,now);
     }

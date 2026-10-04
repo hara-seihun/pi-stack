@@ -119,6 +119,192 @@ for (const stage of ["clone", "checkout"]) test(`creation resumes after interrup
   } finally { f.close(); }
 });
 
+for (const mode of ["writer", "review"]) {
+  for (const stage of ["complete", "clone", "checkout"]) {
+    test(`local ${mode} creation isolates the requested revision with ${stage} materialization`, () => {
+      const f = fixture();
+      try {
+        const reserved = git(f.source, "rev-parse", "main");
+        const unrelated = [];
+        for (const name of ["unpublished-one", "unpublished-two"]) {
+          git(f.source, "checkout", "-b", name, "main");
+          writeFileSync(path.join(f.source, `${name}.txt`), `${name}\n`);
+          git(f.source, "add", ".");
+          git(f.source, "commit", "-m", name);
+          unrelated.push(git(f.source, "rev-parse", "HEAD"));
+        }
+        git(f.source, "checkout", "--detach");
+        git(f.source, "commit", "--allow-empty", "-m", "unpublished detached HEAD");
+        unrelated.push(git(f.source, "rev-parse", "HEAD"));
+        const sourceRefs = git(f.source, "show-ref");
+        const args = ["create", "--root", f.workspaces, "--name", "isolated", "--repo", f.source,
+          "--ref", "main", "--mode", mode, "--min-free-gib", "0", "--json"];
+        let pending;
+        if (stage !== "complete") {
+          assert.throws(() => run(args, interruptCreation(f, stage)));
+          [pending] = JSON.parse(run(["status", "--json"], f.env)).records;
+          assert.equal(pending.sourceCommit, reserved);
+          assert.equal(git(pending.path, "rev-parse", "HEAD"), reserved);
+          assert.deepEqual([...new Set(git(pending.path, "for-each-ref", "--format=%(objectname)").split("\n"))], [reserved]);
+          git(f.source, "checkout", "main");
+          git(f.source, "commit", "--allow-empty", "-m", "advance requested ref after reservation");
+        }
+        const created = JSON.parse(run(args, f.env));
+        assert.equal(created.state, "active");
+        assert.equal(created.sourceCommit, reserved);
+        if (pending) assert.equal(created.id, pending.id);
+        assert.equal(git(created.path, "rev-parse", "HEAD"), reserved);
+        assert.equal(git(created.path, "branch", "--show-current"), mode === "writer" ? "agent/isolated" : "");
+        assert.deepEqual([...new Set(git(created.path, "for-each-ref", "--format=%(objectname)").split("\n"))], [reserved]);
+        assert.equal(git(created.path, "for-each-ref", "--format=%(refname)", "refs/heads"),
+          mode === "writer" ? "refs/heads/agent/isolated" : "");
+        assert.equal(git(created.path, "remote"), "origin");
+        assert.equal(git(created.path, "status", "--porcelain"), "");
+        assert.equal(git(created.path, "remote", "get-url", "origin"), f.remote);
+        assert.equal(git(created.path, "config", "--get", "remote.origin.fetch"), "+refs/heads/*:refs/remotes/origin/*");
+        for (const commit of unrelated) assert.equal(git(f.source, "rev-parse", `${commit}^{commit}`), commit);
+        if (stage === "complete") assert.equal(git(f.source, "show-ref"), sourceRefs);
+        git(created.path, "fetch", "origin");
+        assert.equal(git(created.path, "rev-parse", "origin/main"), reserved);
+      } finally { f.close(); }
+    });
+  }
+}
+
+for (const operation of ["resume-clone", "resume-checkout", "finalize"]) {
+  for (const differentOrigin of [false, true]) {
+    test(`${operation} ${differentOrigin ? "refuses a different stored origin" : "accepts the stored SSH origin"} under a global HTTPS rewrite`, () => {
+      const f = fixture();
+      try {
+        const repository = "git@github.com:workspace-fixture/repository.git";
+        const https = "https://github.com/workspace-fixture/repository.git";
+        const globalConfig = path.join(f.root, "gitconfig");
+        const env = { ...f.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: "1" };
+        execFileSync("git", ["config", "--file", globalConfig, `url.file://${f.remote}.insteadOf`, repository]);
+        const args = ["create", "--root", f.workspaces, "--name", "rewritten", "--repo", repository,
+          "--ref", git(f.source, "rev-parse", "HEAD"), "--min-free-gib", "0", "--json"];
+        assert.throws(() => run(args, { ...interruptCreation(f, operation === "resume-clone" ? "clone" : "checkout"), ...env }));
+        const [pending] = JSON.parse(run(["status", "--json"], env)).records;
+        writeFileSync(globalConfig, `[url "${https}"]\n\tinsteadOf = ${repository}\n`);
+        const destination = pending.path;
+        if (differentOrigin) git(destination, "remote", "set-url", "origin", "git@github.com:workspace-fixture/different.git");
+        const stored = git(destination, "config", "--local", "--get", "remote.origin.url");
+        if (!differentOrigin) {
+          assert.equal(stored, repository);
+          assert.equal(execFileSync("git", ["-C", destination, "remote", "get-url", "origin"], {
+            env: { ...process.env, ...env }, encoding: "utf8",
+          }).trim(), https);
+        }
+        const head = git(destination, "rev-parse", "HEAD");
+        const status = git(destination, "status", "--porcelain");
+        const retry = operation === "finalize" ? ["finalize-creation", "--id", pending.id, "--json"] : args;
+        if (differentOrigin) {
+          assert.throws(() => run(retry, env), /origin differs from the creation request/u);
+          assert.equal(git(destination, "rev-parse", "HEAD"), head);
+          assert.equal(git(destination, "status", "--porcelain"), status);
+          assert.equal(git(destination, "config", "--local", "--get", "remote.origin.url"), stored);
+          assert.equal(JSON.parse(run(["status", "--json"], env)).records[0].state, "creating");
+        } else {
+          const resumed = JSON.parse(run(retry, env));
+          assert.equal(resumed.id, pending.id);
+          assert.equal(resumed.state, "active");
+          assert.equal(git(destination, "rev-parse", "HEAD"), pending.sourceCommit);
+          assert.equal(git(destination, "status", "--porcelain"), "");
+          assert.equal(git(destination, "config", "--local", "--get", "remote.origin.url"), repository);
+        }
+      } finally { f.close(); }
+    });
+  }
+}
+
+function interruptedCheckout(f, name = "partial", mode = "writer") {
+  writeFileSync(path.join(f.source, "missing.txt"), "not yet materialized\n");
+  git(f.source, "add", ".");
+  git(f.source, "commit", "-m", "reserved tree");
+  const reserved = git(f.source, "rev-parse", "HEAD");
+  writeFileSync(path.join(f.source, "later.txt"), "main advanced\n");
+  git(f.source, "add", ".");
+  git(f.source, "commit", "-m", "main ahead of reserved source");
+  git(f.source, "push", "origin", "main");
+  const args = ["create", "--root", f.workspaces, "--name", name, "--repo", f.source,
+    "--ref", reserved, "--mode", mode, "--min-free-gib", "0", "--json"];
+  assert.throws(() => run(args, interruptCreation(f, "clone")));
+  const destination = path.join(f.workspaces, name);
+  // Model a checkout left by the former all-refs clone, before single-revision isolation.
+  const mainHead = git(f.source, "rev-parse", "main");
+  git(destination, "fetch", "--no-tags", "origin", "refs/heads/main:refs/remotes/origin/main");
+  git(destination, "update-ref", "refs/heads/main", mainHead);
+  git(destination, "symbolic-ref", "HEAD", "refs/heads/main");
+  // Git has written some reserved files but has not committed its index or HEAD update.
+  git(destination, "read-tree", "--empty");
+  writeFileSync(path.join(destination, "file.txt"), "source\n");
+  writeFileSync(path.join(destination, ".gitignore"), "ignored-output/\n");
+  return { args, destination, reserved };
+}
+
+for (const [mode, indexState] of [["writer", "empty"], ["review", "absent"], ["writer", "reserved"]]) test(`creation resumes a partially materialized reserved checkout in ${mode} mode with ${indexState} index`, () => {
+  const f = fixture();
+  try {
+    const { args, destination, reserved } = interruptedCheckout(f, "partial", mode);
+    const [pending] = JSON.parse(run(["status", "--json"], f.env)).records;
+    const mainHead = git(destination, "rev-parse", "HEAD");
+    assert.notEqual(mainHead, reserved);
+    assert.match(git(destination, "status", "--porcelain"), /D .*file.txt/u);
+    assert.match(git(destination, "status", "--porcelain"), /\?\? file.txt/u);
+    if (indexState === "absent") rmSync(path.join(destination, ".git", "index"));
+    if (indexState === "reserved") git(destination, "read-tree", reserved);
+    mkdirSync(path.join(destination, "ignored-output"));
+    writeFileSync(path.join(destination, "ignored-output", "proof"), "preserved\n");
+    const resumed = JSON.parse(run(args, f.env));
+    assert.equal(resumed.id, pending.id);
+    assert.equal(resumed.state, "active");
+    assert.equal(git(destination, "rev-parse", "HEAD"), reserved);
+    assert.equal(git(destination, "status", "--porcelain"), "");
+    assert.equal(readFileSync(path.join(destination, "ignored-output", "proof"), "utf8"), "preserved\n");
+    assert.equal(readFileSync(path.join(destination, ".gitignore"), "utf8"), "ignored-output/\n");
+    assert.equal(git(destination, "rev-parse", "main"), mainHead);
+    if (mode === "writer") assert.equal(git(destination, "branch", "--show-current"), "agent/partial");
+    else assert.equal(git(destination, "branch", "--show-current"), "");
+  } finally { f.close(); }
+});
+
+for (const change of ["edit", "untracked", "staged", "local-commit", "ignored-collision", "symlink"]) {
+  test(`interrupted checkout recovery preserves genuine ${change} work`, () => {
+    const f = fixture();
+    try {
+      const { args, destination } = interruptedCheckout(f);
+      if (change === "edit") writeFileSync(path.join(destination, "file.txt"), "unique edit\n");
+      if (change === "untracked") writeFileSync(path.join(destination, "notes.txt"), "unique notes\n");
+      if (change === "staged") {
+        writeFileSync(path.join(destination, "file.txt"), "unique staged edit\n");
+        git(destination, "add", "file.txt");
+      }
+      if (change === "local-commit") {
+        git(destination, "config", "user.name", "Test");
+        git(destination, "config", "user.email", "test@example.invalid");
+        git(destination, "add", "file.txt");
+        git(destination, "commit", "-m", "unique local work");
+      }
+      if (change === "ignored-collision") {
+        writeFileSync(path.join(destination, ".git", "info", "exclude"), ".gitignore\n");
+        writeFileSync(path.join(destination, ".gitignore"), "unique ignored collision\n");
+      }
+      if (change === "symlink") {
+        rmSync(path.join(destination, "file.txt"));
+        symlinkSync(path.join(f.source, "file.txt"), path.join(destination, "file.txt"));
+      }
+      const head = git(destination, "rev-parse", "HEAD");
+      const status = git(destination, "status", "--porcelain");
+      const index = git(destination, "ls-files", "--stage");
+      assert.throws(() => run(args, f.env), /pending checkout cannot resume/u);
+      assert.equal(git(destination, "rev-parse", "HEAD"), head);
+      assert.equal(git(destination, "status", "--porcelain"), status);
+      assert.equal(git(destination, "ls-files", "--stage"), index);
+      assert.equal(JSON.parse(run(["status", "--json"], f.env)).records[0].state, "creating");
+    } finally { f.close(); }
+  });
+}
+
 test("source preparation interruption leaves no destination reservation", () => {
   const f = fixture();
   try {
@@ -196,6 +382,116 @@ test("pending creation preserves edits and ignored output instead of deleting a 
     assert.equal(retained.action, "none");
     assert.equal(readFileSync(path.join(destination, "file.txt"), "utf8"), "unique source\n");
     assert.equal(readFileSync(path.join(destination, "ignored-output", "proof"), "utf8"), "retain\n");
+  } finally { f.close(); }
+});
+
+for (const mode of ["writer", "review"]) test(`completed interrupted ${mode} checkout preserves later file deletions`, () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "deleted", "--repo", f.source,
+      "--mode", mode, "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "checkout")));
+    const destination = path.join(f.workspaces, "deleted");
+    rmSync(path.join(destination, "file.txt"));
+    const status = git(destination, "status", "--porcelain");
+    assert.throws(() => run(args, f.env), /pending checkout contains changes/);
+    assert.equal(existsSync(path.join(destination, "file.txt")), false);
+    assert.equal(git(destination, "status", "--porcelain"), status);
+    assert.equal(JSON.parse(run(["status", "--json"], f.env)).records[0].state, "creating");
+  } finally { f.close(); }
+});
+
+test("interrupted creation resumes with ignored output without removing it", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "ignored", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "checkout")));
+    const destination = path.join(f.workspaces, "ignored");
+    mkdirSync(path.join(destination, "ignored-output"));
+    const output = path.join(destination, "ignored-output", "proof");
+    writeFileSync(output, "retain ignored work\n");
+    assert.equal(git(destination, "status", "--porcelain"), "");
+    assert.equal(JSON.parse(run(args, f.env)).state, "active");
+    assert.equal(readFileSync(output, "utf8"), "retain ignored work\n");
+    const release = JSON.parse(run(["release", "--path", destination, "--json"], f.env));
+    assert.match(release.inspection.reason, /unclassified ignored output/);
+    assert.equal(existsSync(output), true);
+  } finally { f.close(); }
+});
+
+test("finalize-creation adopts an interrupted clean descendant without losing work or peers", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--repo", f.source, "--min-free-gib", "0", "--json"];
+    const peer = JSON.parse(run([...args, "--name", "peer"], f.env));
+    const peerBefore = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env));
+    assert.throws(() => run([...args, "--name", "descendant"], interruptCreation(f, "checkout")));
+    const destination = path.join(f.workspaces, "descendant");
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const before = database.prepare("SELECT * FROM workspace WHERE path=?").get(destination);
+    database.close();
+    const finalize = ["finalize-creation", "--id", before.id, "--json"];
+    git(destination, "config", "user.name", "Test");
+    git(destination, "config", "user.email", "test@example.invalid");
+    git(destination, "branch", "-m", "renamed-after-interruption");
+    writeFileSync(path.join(destination, "file.txt"), "descendant work\n");
+    assert.throws(() => run(finalize, f.env), /pending checkout contains changes/);
+    git(destination, "commit", "-am", "work after interruption");
+    const head = git(destination, "rev-parse", "HEAD");
+    mkdirSync(path.join(destination, "ignored-output"));
+    const ignored = path.join(destination, "ignored-output", "proof");
+    writeFileSync(ignored, "ignored evidence\n");
+    git(destination, "remote", "set-url", "origin", path.join(f.root, "unrelated.git"));
+    assert.throws(() => run(finalize, f.env), /origin differs/);
+    git(destination, "remote", "set-url", "origin", f.source);
+    git(destination, "checkout", "--orphan", "unrelated");
+    git(destination, "commit", "-am", "unrelated root");
+    assert.throws(() => run(finalize, f.env), /not descended/);
+    git(destination, "checkout", "renamed-after-interruption");
+    git(destination, "branch", "-D", "unrelated");
+    // The original disposable source can already be gone when a task finishes.
+    rmSync(f.source, { recursive: true });
+    const finalized = JSON.parse(run(finalize, f.env));
+    assert.equal(finalized.id, before.id);
+    assert.equal(finalized.owner, before.owner);
+    assert.equal(finalized.sourceCommit, before.source_commit);
+    assert.equal(finalized.state, "active");
+    assert.deepEqual(JSON.parse(run(finalize, f.env)), finalized);
+    assert.equal(git(destination, "rev-parse", "HEAD"), head);
+    assert.equal(git(destination, "branch", "--show-current"), "renamed-after-interruption");
+    assert.equal(readFileSync(ignored, "utf8"), "ignored evidence\n");
+    const afterDb = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    assert.equal(afterDb.prepare("SELECT creation_request FROM workspace WHERE id=?").get(before.id).creation_request, before.creation_request);
+    afterDb.close();
+    assert.deepEqual(JSON.parse(run(["status", "--path", peer.path, "--json"], f.env)), peerBefore);
+    // Normal release still refuses unclassified ignored files and unpushed commits.
+    assert.notEqual(JSON.parse(run(["release", "--id", before.id, "--json"], f.env)).action, "released");
+    rmSync(path.join(destination, "ignored-output"), { recursive: true });
+    assert.notEqual(JSON.parse(run(["release", "--id", before.id, "--json"], f.env)).action, "released");
+    assert.equal(existsSync(destination), true);
+    git(destination, "remote", "add", "publish", f.remote);
+    git(destination, "push", "publish", "HEAD:refs/heads/descendant");
+    assert.equal(JSON.parse(run(["release", "--id", before.id, "--json"], f.env)).action, "released");
+    assert.equal(git(f.remote, "rev-parse", "refs/heads/descendant"), head);
+    assert.equal(existsSync(peer.path), true);
+  } finally { f.close(); }
+});
+
+test("finalize-creation validates the interrupted linked worktree mode and mirror", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "linked", "--repo", f.source,
+      "--strategy", "worktree", "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "worktree")));
+    const destination = path.join(f.workspaces, "linked");
+    const finalize = ["finalize-creation", "--path", destination, "--json"];
+    git(destination, "checkout", "--detach");
+    assert.throws(() => run(finalize, f.env), /branch mode differs/);
+    git(destination, "checkout", "agent/linked");
+    const record = JSON.parse(run(finalize, f.env));
+    assert.equal(record.checkoutType, "worktree");
+    assert.equal(record.state, "active");
   } finally { f.close(); }
 });
 
@@ -550,6 +846,59 @@ test("forty concurrent create and heartbeat clients share registry writes", asyn
   } finally { f.close(); }
 });
 
+test("concurrent local HEAD creates never refresh upstream and use immutable mirror custody", async () => {
+  const f = fixture();
+  try {
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const wrapper = path.join(bin, "git");
+    writeFileSync(wrapper, `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args.includes('fetch') && args.at(-1) === 'origin') {
+  console.error('local allocation attempted serialized upstream refresh'); process.exit(99);
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'});
+process.exit(result.status ?? 1);
+`);
+    chmodSync(wrapper, 0o755);
+    const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+    const create = ["create", "--root", f.workspaces, "--repo", f.source, "--min-free-gib", "0", "--json"];
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const records = await Promise.all(Array.from({ length: 24 }, async (_, index) =>
+      JSON.parse(await runAsync([...create, "--name", `local-${index}`], env))));
+    assert.equal(new Set(records.map(record => record.id)).size, 24);
+    for (const record of records) {
+      assert.equal(record.state, "active");
+      assert.equal(record.sourceCommit, commit);
+      assert.equal(git(record.path, "rev-parse", "HEAD"), commit);
+    }
+    const remoteRecords = await Promise.all(Array.from({ length: 24 }, async (_, index) =>
+      JSON.parse(await runAsync(["create", "--root", f.workspaces, "--repo", `file://${f.remote}`,
+        "--name", `remote-${index}`, "--min-free-gib", "0", "--json"], env))));
+    for (const record of remoteRecords) {
+      assert.equal(record.state, "active");
+      assert.equal(record.sourceCommit, commit);
+    }
+    git(f.source, "tag", "-a", "annotated-source", "-m", "tag source");
+    git(f.source, "push", "origin", "annotated-source");
+    const tagged = JSON.parse(run(["create", "--root", f.workspaces, "--repo", `file://${f.remote}`,
+      "--ref", "annotated-source", "--name", "tagged", "--min-free-gib", "0", "--json"], env));
+    assert.equal(tagged.sourceCommit, commit);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const plan = database.prepare("EXPLAIN QUERY PLAN SELECT path FROM workspace WHERE root=? AND state='creating'").all(f.workspaces);
+    assert.ok(plan.some(row => row.detail.includes("workspace_pending")));
+    database.close();
+    writeFileSync(path.join(f.source, "next.txt"), "unpushed next HEAD\n");
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "new local source");
+    const next = JSON.parse(run([...create, "--name", "next-head"], env));
+    assert.equal(next.sourceCommit, git(f.source, "rev-parse", "HEAD"));
+    assert.notEqual(next.sourceCommit, commit);
+  } finally { f.close(); }
+});
+
 test("Docker authority excludes only an ungranted foreign Unix socket", () => {
   const denied = (code = "EACCES") => { throw Object.assign(new Error(code), { code }); };
   const foreign = { uid: 1006, inspect: () => ({ uid: 0, isSocket: () => true }), writable: () => denied() };
@@ -809,6 +1158,7 @@ test("a registered linked worktree prevents release of its parent clone", () => 
       "create", "--root", f.workspaces, "--name", "parent", "--repo", f.remote,
       "--mode", "writer", "--min-free-gib", "0", "--json",
     ], f.env));
+    git(parent.path, "fetch", "origin");
     const childPath = path.join(f.workspaces, "child");
     git(parent.path, "worktree", "add", "-b", "child", childPath, "HEAD");
     const child = JSON.parse(run(["register", "--path", childPath, "--json"], f.env));
@@ -1119,6 +1469,7 @@ test("keeps a unique detached HEAD even when local branches are remote", () => {
       "create", "--root", f.workspaces, "--name", "detached-work", "--repo", f.remote,
       "--mode", "review", "--min-free-gib", "0", "--json",
     ], f.env));
+    git(created.path, "fetch", "origin");
     git(created.path, "config", "user.name", "Test");
     git(created.path, "config", "user.email", "test@example.invalid");
     writeFileSync(path.join(created.path, "file.txt"), "detached work\n");

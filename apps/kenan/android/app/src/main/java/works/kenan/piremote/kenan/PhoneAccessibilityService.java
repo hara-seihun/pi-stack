@@ -2,8 +2,8 @@ package works.kenan.piremote.kenan;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
-import android.graphics.ColorSpace;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.hardware.HardwareBuffer;
@@ -17,6 +17,8 @@ import java.io.ByteArrayOutputStream;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
+import android.view.accessibility.AccessibilityWindowInfo;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -26,25 +28,56 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     private long snapshot;
     private int remainingText;
     private boolean truncated;
-    @Override protected void onServiceConnected() { current = this; PhoneControlService.refresh(); }
+    private String foregroundPackage;
+    @Override protected void onServiceConnected() { current = this; ensureOverlay(); PhoneControlService.refresh(); }
+    private KenanOverlay ensureOverlay() {
+        KenanOverlay overlay = SharedOverlay.phone(this);
+        overlay.foreground(foregroundPackage);
+        return overlay;
+    }
+    void overlayAck(JSONObject frame) { if (SharedOverlay.current() != null) SharedOverlay.current().ack(frame); }
+    void overlayDisconnected() { if (SharedOverlay.current() != null) SharedOverlay.current().disconnected(); }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (isOverlayWindow(event.getWindowId())) return;
+        ensureOverlay();
+        for (AccessibilityWindowInfo window : getWindows()) if (window.getId() == event.getWindowId()
+            && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return;
+        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            CharSequence name = event.getPackageName();
+            if (name != null && !getPackageName().contentEquals(name)) {
+                foregroundPackage = name.toString();
+                if (SharedOverlay.current() != null) SharedOverlay.current().foreground(foregroundPackage);
+            }
+        }
         if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
             || event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) clearNodes();
     }
+    private boolean isOverlayWindow(int id) {
+        for (AccessibilityWindowInfo window : getWindows()) if (window.getId() == id)
+            return window.getType() == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY;
+        return false;
+    }
     static void invalidate() {
         PhoneAccessibilityService active = current;
-        if (active != null) new android.os.Handler(android.os.Looper.getMainLooper()).post(active::clearNodes);
+        if (active != null) new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            active.clearNodes(); if (SharedOverlay.current() != null) SharedOverlay.current().resetSession();
+        });
     }
-    @Override public void onInterrupt() { clearNodes(); }
-    @Override public void onDestroy() { if (current == this) current = null; clearNodes(); PhoneControlService.refresh(); super.onDestroy(); }
+    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); ensureOverlay(); }
+    @Override public void onInterrupt() { clearNodes(); closeOverlay(); }
+    private void closeOverlay() { SharedOverlay.detach(this); }
+    @Override public void onDestroy() { if (current == this) current = null; clearNodes(); closeOverlay(); PhoneControlService.refresh(); super.onDestroy(); }
 
     private void clearNodes() { for (AccessibilityNodeInfo node : nodes.values()) node.recycle(); nodes.clear(); }
-    void dispatch(String command, JSONObject args, Consumer<PhoneResult> done) {
+    void dispatch(String command, JSONObject args, long deadline, BooleanSupplier authorized, Consumer<PhoneResult> done) {
         try {
+            KenanOverlay visual = ensureOverlay();
+            if (command.startsWith("overlay.")) { done.accept(visual.command(command, args, this::nodeBounds)); return; }
+            if (command.startsWith("ui.")) visual.closePanel();
             switch (command) {
                 case "ui.tree" -> {
                     clearNodes(); snapshot++; remainingText = 500000; truncated = false;
-                    AccessibilityNodeInfo root = getRootInActiveWindow();
+                    AccessibilityNodeInfo root = appRoot();
                     if (root == null) { done.accept(PhoneResult.error("unavailable", "No accessible active window; unlock the phone if needed")); return; }
                     JSONObject tree = walk(root, "" + snapshot + ":0", 0);
                     done.accept(PhoneResult.success(new JSONObject().put("root", tree).put("nodes", nodes.size()).put("truncated", truncated || nodes.size() >= 1500)));
@@ -63,16 +96,28 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                     long duration = args.optLong("durationMs", command.equals("ui.tap") ? 50 : 300);
                     if (duration < 1 || duration > 10000) { done.accept(PhoneResult.error("invalid_args", "durationMs must be 1..10000")); return; }
                     Path path = new Path(); path.moveTo(x, y); if (!command.equals("ui.tap")) path.lineTo(x2, y2);
-                    boolean accepted = dispatchGesture(new GestureDescription.Builder().addStroke(
-                        new GestureDescription.StrokeDescription(path, 0, duration)).build(), new GestureResultCallback() {
-                            @Override public void onCompleted(GestureDescription gesture) { done.accept(PhoneResult.success(new JSONObject())); }
-                            @Override public void onCancelled(GestureDescription gesture) { done.accept(PhoneResult.error("unconfirmed", "Android cancelled the gesture")); }
-                        }, null);
-                    if (!accepted) done.accept(PhoneResult.error("unavailable", "Android refused the gesture"));
+                    boolean tap = command.equals("ui.tap");
+                    long delay = tap && deadline - System.currentTimeMillis() > duration + 250 ? 200 : 0;
+                    visual.moveToTarget(x, y, delay);
+                    Runnable inject = () -> {
+                        if (SharedOverlay.current() != visual || !authorized.getAsBoolean()) { done.accept(PhoneResult.error("disconnected", "Phone session changed before gesture")); return; }
+                        if (System.currentTimeMillis() + duration >= deadline) { done.accept(PhoneResult.error("expired", "Gesture cannot finish before the command deadline")); return; }
+                        visual.gesture(x, y, x2, y2, duration, tap);
+                        try {
+                            boolean accepted = dispatchGesture(new GestureDescription.Builder().addStroke(
+                                new GestureDescription.StrokeDescription(path, 0, duration)).build(), new GestureResultCallback() {
+                                    @Override public void onCompleted(GestureDescription gesture) { visual.gestureFinished(); done.accept(PhoneResult.success(new JSONObject())); }
+                                    @Override public void onCancelled(GestureDescription gesture) { visual.gestureFinished(); done.accept(PhoneResult.error("unconfirmed", "Android cancelled the gesture")); }
+                                }, null);
+                            if (!accepted) { visual.gestureFinished(); done.accept(PhoneResult.error("unavailable", "Android refused the gesture")); }
+                        } catch (RuntimeException failure) { visual.gestureFinished(); done.accept(PhoneResult.error("unavailable", failure.getMessage())); }
+                    };
+                    if (delay == 0) inject.run();
+                    else new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(inject, delay);
                 }
                 case "ui.text", "ui.action" -> {
                     String id = args.optString("nodeId", "");
-                    AccessibilityNodeInfo node = id.isEmpty() && command.equals("ui.text") ? focused() : nodes.get(id);
+                    AccessibilityNodeInfo node = id.isEmpty() ? focused() : nodes.get(id);
                     boolean owned = id.isEmpty();
                     try {
                         if (node == null || !node.refresh()) { done.accept(PhoneResult.error("stale_node", "Read ui.tree again or focus an editable field")); return; }
@@ -96,6 +141,8 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                             };
                             if (action == 0) { done.accept(PhoneResult.error("invalid_args", "Unknown node action")); return; }
                         }
+                        Rect bounds = new Rect(); node.getBoundsInScreen(bounds); visual.highlight(bounds);
+                        if (!authorized.getAsBoolean() || System.currentTimeMillis() >= deadline) { done.accept(PhoneResult.error("expired", "Action authorization or deadline expired")); return; }
                         done.accept(node.performAction(action, bundle) ? PhoneResult.success(new JSONObject())
                             : PhoneResult.error("unavailable", "Application refused the accessibility action"));
                     } finally { if (owned && node != null) node.recycle(); }
@@ -109,14 +156,52 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                     done.accept(action == 0 ? PhoneResult.error("invalid_args", "Unknown global action") : performGlobalAction(action)
                         ? PhoneResult.success(new JSONObject()) : PhoneResult.error("unavailable", "Android refused the global action"));
                 }
-                case "screen.capture" -> capture(done);
+                case "screen.capture" -> {
+                    visual.suspendCapture();
+                    android.view.Choreographer.getInstance().postFrameCallback(first ->
+                        android.view.Choreographer.getInstance().postFrameCallback(second -> {
+                            if (!authorized.getAsBoolean() || SharedOverlay.current() != visual || System.currentTimeMillis() >= deadline) {
+                                visual.restoreCapture(); done.accept(PhoneResult.error("expired", "Screenshot authorization or deadline expired")); return;
+                            }
+                            try { capture(result -> { visual.restoreCapture(); done.accept(result); }); }
+                            catch (RuntimeException failure) { visual.restoreCapture(); done.accept(PhoneResult.error("unavailable", failure.getMessage())); }
+                        }));
+                }
                 default -> done.accept(PhoneResult.error("unsupported", "Unknown accessibility command"));
             }
         } catch (SecurityException failure) { done.accept(PhoneResult.error("permission_denied", failure.getMessage())); }
         catch (Exception failure) { done.accept(PhoneResult.error("invalid_args", failure.getMessage() == null ? "Invalid accessibility arguments" : failure.getMessage())); }
     }
-    private AccessibilityNodeInfo focused() {
+    private Rect nodeBounds(String id) {
+        AccessibilityNodeInfo node = nodes.get(id);
+        if (node == null || !node.refresh()) return null;
+        Rect bounds = new Rect(); node.getBoundsInScreen(bounds); return bounds;
+    }
+    private AccessibilityNodeInfo appRoot() {
+        for (AccessibilityWindowInfo window : getWindows()) {
+            if (window.getType() == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+                || window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue;
+            if (window.isActive() || window.isFocused()) {
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root != null) return root;
+            }
+        }
+        AccessibilityNodeInfo fallback = null;
+        for (AccessibilityWindowInfo window : getWindows()) {
+            if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+            AccessibilityNodeInfo root = window.getRoot();
+            if (root == null) continue;
+            if (fallback == null || foregroundPackage != null && foregroundPackage.contentEquals(root.getPackageName() == null ? "" : root.getPackageName())) {
+                if (fallback != null) fallback.recycle(); fallback = root;
+            } else root.recycle();
+        }
+        if (fallback != null) return fallback;
         AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null && isOverlayWindow(root.getWindowId())) { root.recycle(); return null; }
+        return root;
+    }
+    private AccessibilityNodeInfo focused() {
+        AccessibilityNodeInfo root = appRoot();
         if (root == null) return null;
         try { return root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT); } finally { root.recycle(); }
     }

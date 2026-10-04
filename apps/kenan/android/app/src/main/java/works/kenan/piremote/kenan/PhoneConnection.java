@@ -15,6 +15,7 @@ final class PhoneConnection {
     interface Events {
         void opened(PhoneConnection connection);
         void command(PhoneConnection connection, JSONObject frame);
+        void overlayAck(PhoneConnection connection, JSONObject frame);
         void closed(PhoneConnection connection, String code, String message);
     }
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder().connectTimeout(7, TimeUnit.SECONDS)
@@ -55,6 +56,7 @@ final class PhoneConnection {
                         try {
                             JSONObject frame = new JSONObject(message);
                             if (frame.optString("type").equals("command")) events.command(PhoneConnection.this, frame);
+                            else if (frame.optString("type").equals("overlay.ack")) events.overlayAck(PhoneConnection.this, frame);
                         } catch (Exception invalid) { fail("protocol_error", "Malformed phone command"); }
                     }
                     @Override public void onFailure(WebSocket ws, Throwable error, Response response) {

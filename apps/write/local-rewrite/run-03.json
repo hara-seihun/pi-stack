@@ -1,0 +1,120 @@
+{
+  "meta": {
+    "load_ms": 1413.0971480044536,
+    "warmup": {
+      "text": "er, uh, er, I'm just a transcript cleanup tool. I don't know what I'm supposed to do, but I'm here to help.",
+      "error": null,
+      "latency_ms": 1926.7396579962224,
+      "generated_tokens": 32
+    },
+    "deployed_path": "/srv/pi/.pi-write/1587f12b3dd7c726f2182b42591db498a7166b50f5dbcba86b352e7d1b2a70b0",
+    "model": {
+      "repo": "adikuma/mumble-cleanup",
+      "revision": "499e8d060dccf9a8c24383f0cf7e7889dbcc6aa3",
+      "license": "Apache-2.0",
+      "base": "Qwen/Qwen2.5-0.5B-Instruct",
+      "training": "LoRA r16, synthetic single-turn dictation pairs; upstream report has unfilled accuracy/latency tables",
+      "cache": "/home/kenan/.cache/pi-write/local-rewrite/mumble-499e8d060dccf9a8c24383f0cf7e7889dbcc6aa3",
+      "files": {
+        "onnx/int8/model.onnx": "83ecc3ba5b114eac7ae61055cc7d8b199ea89e760eb46ac9f53409d87b75ec2b",
+        "tokenizer.json": "9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa"
+      },
+      "system_prompt": "You are a transcript cleanup tool. You receive raw speech to text output and return a cleaned version. Remove filler words and disfluencies (um, uh, er, ah, like as filler, you know), remove repeated words and false starts, and fix punctuation and capitalization. Do not reword, do not add anything the speaker did not say, and do not answer questions in the text. Output only the cleaned text.",
+      "eos_token_id": 151645,
+      "layers": 24,
+      "kv_heads": 2,
+      "head_dim": 64,
+      "max_prompt_tokens": 384,
+      "max_new_tokens": 128,
+      "threads": 2
+    },
+    "versions": {
+      "onnxruntime": "1.30.0",
+      "tokenizers": "0.23.2",
+      "numpy": "2.5.3"
+    }
+  },
+  "rows": [
+    {
+      "id": "DISFLUENCY_VALIDATION_000000",
+      "origin": "verbatim_text_validation_not_asr",
+      "input": "You know, it's someone who had [UH] killed two teenage boys here in San Diego as a matter of fact.",
+      "target": "It's someone who had killed two teenage boys here in San Diego as a matter of fact.",
+      "source_row": 0,
+      "baseline": {
+        "text": "It's someone who had killed two teenage boys here in San Diego, as a matter of fact.",
+        "latency_ms": 23.96353898802772,
+        "token_errors": 1,
+        "gold_tokens": 18,
+        "exact": false,
+        "required_content_pass": true
+      },
+      "candidate": {
+        "text": "It's someone who had [UH] killed two teenage boys here in San Diego as a matter of fact.",
+        "error": null,
+        "latency_ms": 1380.4105530143715,
+        "generated_tokens": 23,
+        "token_errors": 3,
+        "gold_tokens": 18,
+        "exact": false,
+        "required_content_pass": true
+      }
+    },
+    {
+      "id": "DISFLUENCY_VALIDATION_000126",
+      "origin": "verbatim_text_validation_not_asr",
+      "input": "Yeltsin's in tight with the old guard. So it may be trying to choose between the lesser of two evils, at this pointeger.",
+      "target": "Yeltsin's in tight with the old guard. So it may be trying to choose between the lesser of two evils, at this point.",
+      "source_row": 125,
+      "baseline": {
+        "text": "Yeltsin's in tight with the old guard. So it may be trying to choose between the lesser of two evils, at this pointeger.",
+        "latency_ms": 22.069631988415495,
+        "token_errors": 1,
+        "gold_tokens": 26,
+        "exact": false,
+        "required_content_pass": true
+      },
+      "candidate": {
+        "text": "Yeltsin's in tight with the old guard. So it may be trying to choose between the lesser of two evils, at this point.",
+        "error": null,
+        "latency_ms": 1649.9939920031466,
+        "generated_tokens": 29,
+        "token_errors": 0,
+        "gold_tokens": 26,
+        "exact": true,
+        "required_content_pass": true
+      }
+    },
+    {
+      "id": "authored-negation",
+      "origin": "authored",
+      "input": "um i do not want to delete the backups",
+      "target": "I do not want to delete the backups.",
+      "must_contain": [
+        "backups"
+      ],
+      "baseline": {
+        "text": "I do not want to delete the backups.",
+        "latency_ms": 11.051165987737477,
+        "token_errors": 0,
+        "gold_tokens": 9,
+        "exact": true,
+        "required_content_pass": true
+      },
+      "candidate": {
+        "text": "I don't want to delete the backups.",
+        "error": null,
+        "latency_ms": 665.0121299899183,
+        "generated_tokens": 9,
+        "token_errors": 2,
+        "gold_tokens": 9,
+        "exact": false,
+        "required_content_pass": true
+      },
+      "must_any_contain": [
+        "not",
+        "don't"
+      ]
+    }
+  ]
+}

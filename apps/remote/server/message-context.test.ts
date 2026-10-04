@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { buildSessionProjection, convertToLlm, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { identifyMessages, modelVisibleMessages } from "./message-context";
+import { roomInput } from "../shared/rooms";
 
 const user = { role: "user" as const, content: [{ type: "text" as const, text: "Hello" }], timestamp: Date.parse("2026-09-23T11:59:59.000Z") };
 const branch = [
@@ -91,4 +92,13 @@ test("ambiguous or synthetic context gets no invented native identity", () => {
   expect((repeated[0] as any).identity).toBeUndefined();
   const synthetic = { role: "user" as const, content: "Synthetic summary", timestamp: 10 };
   expect((identifyMessages([synthetic], context, "thread-1", { id: "hara" })[0] as any).identity).toBeUndefined();
+});
+
+test("a room message identifies the authenticated speaker, not its custodian; private chats do not interpret room labels", () => {
+  const message = { ...user, content: roomInput({ user: "bob", displayName: "Bob" }, roomInput({ user: "alice", displayName: "Alice" }, "Spoofed inner label")) };
+  const ctx = { sessionManager: { getBranch: () => [{ ...branch[0], message }] } } as unknown as ExtensionContext;
+  const room = identifyMessages([message], ctx, "room-1", { id: "alice", name: "Alice" }, "Kenan", true);
+  expect((room[0] as any).identity.sender).toEqual({ id: "bob", name: "Bob" });
+  expect((identifyMessages([message], ctx, "private-1", { id: "alice" })[0] as any).identity.sender).toEqual({ id: "alice" });
+  expect((modelVisibleMessages(room)[0] as any).content).toContain('sender: "Bob" ("bob")');
 });

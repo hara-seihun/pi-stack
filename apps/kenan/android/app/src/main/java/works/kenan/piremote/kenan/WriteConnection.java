@@ -1,7 +1,6 @@
 package works.kenan.piremote.kenan;
 
 import android.content.Context;
-import android.util.Log;
 import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
@@ -23,26 +22,48 @@ final class WriteConnection {
         void connected();
         void partial(String text);
         void finished(String text);
+        default void notice(String message) { }
         void failed(String message);
     }
 
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
-        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false)
         .addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
     private final RemoteSession state;
     private final RemoteSession.Identity identity;
     private final Events events;
+    interface EndpointLookup { String get() throws IOException; }
+    interface Sockets { WebSocket open(Request request, WebSocketListener listener); }
+    private final EndpointLookup lookup;
+    private final java.util.function.BooleanSupplier current;
+    private final Sockets sockets;
     private WebSocket socket;
-    private String endpoint;
+    private boolean started;
     private boolean closed;
+    private boolean finishing;
+    private boolean terminal;
 
     WriteConnection(Context context, RemoteSession.Identity identity, Events events) {
         this.context = context.getApplicationContext();
         this.state = NotificationIdentity.get(context);
         this.identity = identity;
         this.events = events;
+        this.lookup = this::endpoint;
+        this.current = () -> state.isCurrent(identity);
+        this.sockets = CLIENT::newWebSocket;
+    }
+
+    WriteConnection(RemoteSession.Identity identity, Events events, EndpointLookup lookup,
+                    java.util.function.BooleanSupplier current, Sockets sockets) {
+        this.context = null;
+        this.state = null;
+        this.identity = identity;
+        this.events = events;
+        this.lookup = lookup;
+        this.current = current;
+        this.sockets = sockets;
     }
 
     private String endpoint() throws IOException {
@@ -57,71 +78,105 @@ final class WriteConnection {
     }
 
     void connect(String contextText) {
+        synchronized (this) {
+            if (closed || started) return;
+            started = true;
+        }
         new Thread(() -> {
             try {
-                String base = endpoint();
+                String base = lookup.get();
                 synchronized (this) {
-                    if (closed || !state.isCurrent(identity)) return;
-                    endpoint = base;
+                    if (closed || !current.getAsBoolean()) { cancel(); return; }
                     String url = base.replaceFirst("^http", "ws") + "/v1/write/stream?session="
                         + java.net.URLEncoder.encode(identity.session, java.nio.charset.StandardCharsets.UTF_8);
                     Request request = new Request.Builder().url(url).header("x-pi-remote-user", identity.user)
                         .header("x-pi-remote-session", identity.session).build();
-                    socket = CLIENT.newWebSocket(request, new WebSocketListener() {
-                        private boolean terminal;
+                    socket = sockets.open(request, new WebSocketListener() {
                         @Override public void onOpen(WebSocket webSocket, Response response) {
-                            if (!valid()) { webSocket.close(1000, "Session changed"); return; }
+                            if (!valid(webSocket)) { cancel(); return; }
                             try {
                                 JSONObject start = new JSONObject().put("type", "start")
                                     .put("dictation", UUID.randomUUID().toString()).put("context", contextText)
                                     .put("audio", "opus");
                                 if (!webSocket.send(start.toString())) throw new IOException("Could not start dictation");
                                 events.connected();
-                            } catch (Exception error) { events.failed(error.getMessage()); webSocket.cancel(); }
+                            } catch (IOException | JSONException error) { fail(error.getMessage()); }
                         }
                         @Override public void onMessage(WebSocket webSocket, String message) {
-                            if (!valid()) return;
+                            if (!valid(webSocket)) { cancel(); return; }
                             try {
                                 JSONObject event = new JSONObject(message);
                                 switch (event.getString("type")) {
                                     case "partial" -> events.partial(event.optString("committed") + event.optString("tail"));
-                                    case "final" -> { terminal = true; events.finished(event.getString("text")); webSocket.close(1000, "Done"); }
-                                    case "error" -> { terminal = true; events.failed(event.optString("message", "Recognition failed")); }
+                                    case "final" -> {
+                                        String text = event.getString("text");
+                                        if (terminate(true)) {
+                                            JSONObject rewrite = event.optJSONObject("rewrite");
+                                            if (rewrite != null) {
+                                                String status = rewrite.optString("status");
+                                                if (status.equals("unavailable")) events.notice(rewrite.optString("reason").equals("warming")
+                                                    ? "Local rewrite is warming up; inserted the transcript."
+                                                    : "Local rewrite unavailable; inserted the transcript.");
+                                                else if (status.equals("guarded")) events.notice("Kept the original wording to avoid changing its meaning.");
+                                            }
+                                            events.finished(text);
+                                        }
+                                    }
+                                    case "error" -> fail(event.optString("message", "Recognition failed"));
                                     default -> { }
                                 }
-                            } catch (JSONException error) { events.failed("Invalid dictation response"); }
+                            } catch (JSONException error) { fail("Invalid dictation response"); }
                         }
                         @Override public void onFailure(WebSocket webSocket, Throwable error, Response response) {
-                            if (valid() && !terminal) events.failed(response != null && RouterConnection.publicUrl(response.request().url().toString()) && RouterConnection.rejected(response.code())
-                                ? "Email sign-in expired. Open Kenan to sign in again."
-                                : response != null && response.code() == 423 ? "Session expired. Open Kenan to unlock."
-                                : "Write server unreachable: " + error.getMessage());
+                            try {
+                                if (valid(webSocket)) fail(response != null && RouterConnection.publicUrl(response.request().url().toString()) && RouterConnection.rejected(response.code())
+                                    ? "Email sign-in expired. Open Kenan to sign in again."
+                                    : response != null && response.code() == 423 ? "Session expired. Open Kenan to unlock."
+                                    : "Write server unreachable: " + error.getMessage());
+                                else cancel();
+                            } finally { if (response != null && response.body() != null) response.close(); }
+                        }
+                        @Override public void onClosing(WebSocket webSocket, int code, String reason) {
+                            if (valid(webSocket)) fail("Dictation connection closed before final text: " + reason);
+                            else cancel();
                         }
                         @Override public void onClosed(WebSocket webSocket, int code, String reason) {
-                            if (valid() && !terminal) events.failed("Dictation connection closed before final text: " + reason);
+                            if (valid(webSocket)) fail("Dictation connection closed before final text: " + reason);
                         }
                     });
                 }
-            } catch (IOException error) { if (valid()) events.failed("Write server unreachable: " + error.getMessage()); }
+            } catch (IOException | RuntimeException error) { fail("Write server unreachable: " + error.getMessage()); }
         }, "write-connect").start();
     }
 
-    private synchronized boolean valid() { return !closed && state.isCurrent(identity); }
+    private synchronized boolean valid(WebSocket candidate) {
+        return !closed && socket == candidate && current.getAsBoolean();
+    }
+    private void fail(String message) { if (terminate(true)) events.failed(message); }
+    private synchronized boolean terminate(boolean notify) {
+        if (closed) return false;
+        closed = true;
+        terminal = notify && current.getAsBoolean();
+        WebSocket previous = socket;
+        socket = null;
+        // A graceful close can keep the dispatcher and native socket alive for 60 seconds.
+        if (previous != null) previous.cancel();
+        return terminal;
+    }
     synchronized boolean audio(byte[] packet) {
-        return !closed && socket != null && socket.queueSize() < 10_000
+        if (!current.getAsBoolean()) { cancel(); return false; }
+        return !closed && !finishing && socket != null && socket.queueSize() < 10_000
             && socket.send(ByteString.of(packet));
     }
     synchronized long queueSize() { return socket == null ? 0 : socket.queueSize(); }
+    synchronized boolean ended() { return terminal; }
     synchronized void finish() {
-        if (socket == null || closed) return;
-        Log.i("PiStackWrite", "Opus queue at finish: " + socket.queueSize() + " bytes");
-        if (!socket.send("{\"type\":\"finish\"}")) events.failed("Could not finish dictation");
+        if (!current.getAsBoolean()) { cancel(); return; }
+        if (socket == null || closed || finishing) return;
+        finishing = true;
+        if (!socket.send("{\"type\":\"finish\"}")) fail("Could not finish dictation");
     }
-    synchronized void cancel() {
-        if (closed) return;
-        closed = true;
-        if (socket != null) { socket.send("{\"type\":\"cancel\"}"); socket.close(1000, "Cancelled"); }
-    }
+    void cancel() { terminate(false); }
 
     record Learned(String word, String undoId) {}
     static void learn(Context context, RemoteSession.Identity identity, WriteText.Correction correction,

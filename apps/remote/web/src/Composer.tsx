@@ -22,7 +22,7 @@ export function resizeComposerPrompt(element: HTMLTextAreaElement, viewportHeigh
   element.style.overflowY = contentHeight > element.clientHeight ? "auto" : "hidden";
 }
 
-export function Composer({ value, onChange, onSend, placeholder, disabled, readOnly = false, attachmentDisabled = false, attachments, onRemove, onUpload, onPaste, onDraw, action = "send", before, actions, id, layoutKey }: {
+export function Composer({ value, onChange, onSend, placeholder, disabled, readOnly = false, attachmentDisabled = false, attachments, onRemove, onUpload, onPaste, onDraw, action = "send", before, afterPrompt, actions, id, layoutKey, hideAttachments = false, sendLabel = "Send message" }: {
   value: string;
   onChange(value: string): void;
   onSend(): void;
@@ -37,9 +37,12 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
   onDraw(): void;
   action?: "send" | "stop" | "resume";
   before?: ReactNode;
+  afterPrompt?: ReactNode;
   actions?: ReactNode;
   id?: string;
   layoutKey?: unknown;
+  hideAttachments?: boolean;
+  sendLabel?: string;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [writeState, setWriteState] = useState<"idle" | "starting" | "recording" | "finishing">("idle");
@@ -161,9 +164,10 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
           if (!disabled && writeState === "idle") { learn(); onSend(); }
         }
       }} />
+      {afterPrompt}
       </div>
       <div className="composer-actions">
-        <button type="button" className="composer-icon" aria-label="Attach files" title="Attach files" disabled={readOnly || attachmentDisabled} onClick={() => fileInput.current?.click()}>
+        {!hideAttachments && <><button type="button" className="composer-icon" aria-label="Attach files" title="Attach files" disabled={readOnly || attachmentDisabled} onClick={() => fileInput.current?.click()}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg>
         </button>
         <input ref={fileInput} type="file" multiple hidden disabled={readOnly || attachmentDisabled} onChange={chosen} />
@@ -172,11 +176,11 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
         </button>
         <input ref={imageInput} type="file" accept="image/*" multiple hidden disabled={readOnly || attachmentDisabled} onChange={chosen} />
         <button className="composer-icon" type="button" aria-label="Paste text document" disabled={readOnly || attachmentDisabled} onClick={onPaste}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button>
-        <button className="composer-icon drawing-toggle" type="button" aria-label="Draw a picture" title="Draw a picture" disabled={readOnly || attachmentDisabled} onClick={onDraw}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 13 7-9a1.5 1.5 0 0 0-2-2l-9 7 4 4Z"/><path d="M10 9c-3-1-5 1-5 4 0 2-1 3-3 4 4 3 10 2 11-3l1-1"/></svg></button>
+        <button className="composer-icon drawing-toggle" type="button" aria-label="Draw a picture" title="Draw a picture" disabled={readOnly || attachmentDisabled} onClick={onDraw}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 13 7-9a1.5 1.5 0 0 0-2-2l-9 7 4 4Z"/><path d="M10 9c-3-1-5 1-5 4 0 2-1 3-3 4 4 3 10 2 11-3l1-1"/></svg></button></>}
         <button type="button" className="composer-icon" aria-label={writeState === "idle" ? "Start dictation" : "Cancel dictation"} title={writeState === "idle" ? "Dictate" : "Cancel dictation"} disabled={readOnly} onClick={() => writeState === "idle" ? void start() : stop(true)}>{writeState === "idle" ? <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4m-4 0h8"/></svg> : "✗"}</button>
         {writeState !== "idle" && <button type="button" className="composer-icon" aria-label="Finish dictation" title="Finish dictation" disabled={writeState === "finishing"} onClick={() => stop(false)}>✓</button>}
         <span className="composer-spacer" />{actions}
-        <button id={id ? "action" : undefined} className={`composer-icon send${action === "stop" ? " abort" : action === "resume" ? " resume" : ""}`} type="submit" disabled={disabled} aria-label={action === "send" ? "Send message" : action === "stop" ? "Stop thread" : "Resume held messages"} title={action === "resume" ? "Resume: send the held messages" : undefined}>
+        <button id={id ? "action" : undefined} className={`composer-icon send${action === "stop" ? " abort" : action === "resume" ? " resume" : ""}`} type="submit" disabled={disabled} aria-label={action === "send" ? sendLabel : action === "stop" ? "Stop thread" : "Resume held messages"} title={action === "resume" ? "Resume: send the held messages" : undefined}>
           <svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg>
           <svg className="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
           <svg className="resume-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5-12-7.5Z"/></svg>

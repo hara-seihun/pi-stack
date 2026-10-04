@@ -264,6 +264,10 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
       return peer(socket);
     },
     async admit(operation, input, caller) {
+      if (operation === "watch") {
+        if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only edit the watch list as itself`);
+        if (caller.kind === "process") return refuse("Watch list access requires a thread capability or the Pi runtime");
+      }
       if (operation === "spawn") {
         const { createdBy: forwarded, ...request } = input as SpawnThread & { createdBy?: unknown };
         if (request.metadata && typeof request.metadata === "object" && "createdBy" in request.metadata) {
@@ -295,7 +299,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
 export function admissionFor(resolver: CallerResolver, source: CallerSource): (operation: string, input: Record<string, any>) => Promise<AdmissionResult> {
   let caller: ThreadCaller | { error: string } | undefined;
   return async (operation, input) => {
-    if (operation !== "spawn" && operation !== "send") return { ok: true, input };
+    if (operation !== "spawn" && operation !== "send" && operation !== "watch") return { ok: true, input };
     caller ??= resolver.resolve(source);
     if ("error" in caller) return { ok: false, status: 401, message: caller.error };
     return resolver.admit(operation, input, caller);

@@ -3,8 +3,13 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
-[[ $# == 0 || ( $# == 1 && $1 == --select ) ]] || { echo 'usage: deploy/write-engine [--select]' >&2; exit 64; }
+[[ $# == 0 || ( $# == 1 && ( $1 == --select || $1 == --retain ) ) ]] || { echo 'usage: deploy/write-engine [--select|--retain]' >&2; exit 64; }
 mode=${1:-prepare}
+base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
+if [[ $mode == --retain ]]; then
+  pi_stack_as_root python3 "$root/deploy/write-retain" "$base" "${PI_STACK_WRITE_PROC_ROOT:-/proc}"
+  exit
+fi
 # Only a host that declares the engine unit fetches its 1.2 GB model.
 if [[ $mode == prepare && ${PI_STACK_WRITE_ENGINE_FORCE:-0} != 1 ]] && [[ $(systemctl show pi-stack-write.service -p LoadState --value 2>/dev/null) != loaded ]]; then
   echo 'Pi Stack Write: no pi-stack-write.service on this host; nothing to prepare'
@@ -29,15 +34,22 @@ weights_key=$(cat "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha25
 environment_key=$(printf '%s\n%s\n%s\n' "$venv_key" "$weights_key" "$gpu_enabled:$gpu_key" | sha256sum | cut -d' ' -f1)
 cleanup_manifest="$source_dir/cleanup/model.json"
 cleanup_key=$(sha256sum "$cleanup_manifest" | cut -d' ' -f1)
-key=$( { echo "$environment_key"; echo "$cleanup_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
-base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
+punctuation_manifest="$source_dir/punctuation-model.json"
+punctuation_key=$(sha256sum "$punctuation_manifest" | cut -d' ' -f1)
+rewrite_key=$(cat "$root/apps/write/rewrite-runtime/runtime.json" "$root/apps/write/rewrite-runtime/model.json" "$root/apps/write/rewrite-runtime/install.py" "$root/deploy/write-rewrite-runtime" | sha256sum | cut -d' ' -f1)
+key=$( { echo "$environment_key"; echo "$cleanup_key"; echo "$punctuation_key"; echo "$rewrite_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
 store="$(dirname "$base")/.pi-write"
 environment="$store/venv-$venv_key"
 gpu_environment="$store/gpu-venv-$gpu_key"
 gpu_weights="$store/gpu-weights-$(sha256sum "$source_dir/gpu-model.json" | cut -d' ' -f1)"
 weights="$store/weights-$weights_key"
 cleanup_model="$store/cleanup-$cleanup_key"
+punctuation_model="$store/punctuation-$punctuation_key"
 tree="$store/$key"
+mapfile -t rewrite_paths < <("$root/deploy/write-rewrite-runtime" --paths "$store")
+[[ ${#rewrite_paths[@]} == 2 ]] || { echo 'Cannot resolve Write rewrite store paths' >&2; exit 65; }
+rewrite_runtime=${rewrite_paths[0]}
+rewrite_model=${rewrite_paths[1]}
 if [[ ! -f "$tree/ready" && $mode == --select ]]; then
   echo "PiStack Write engine is not prepared at $tree; run deploy/prepare first" >&2
   exit 66
@@ -52,6 +64,11 @@ fetch() { # URL DIGEST DESTINATION
   done
   pi_stack_download_artifact "$url" "$destination" "$digest"
 }
+if [[ $mode == --select ]]; then
+  "$root/deploy/write-rewrite-runtime" --check "$store" >/dev/null
+else
+  "$root/deploy/write-rewrite-runtime" "$store" >/dev/null
+fi
 if [[ ! -f "$environment/ready" ]]; then
   command -v uv >/dev/null || { echo 'PiStack Write requires uv' >&2; exit 1; }
   pi_stack_as_root install -d -m 0755 "$store" "$environment"
@@ -99,6 +116,34 @@ PY
   chmod -R a+rX "$cleanup_model"
   touch "$cleanup_model/ready"
 fi
+if [[ ! -f "$punctuation_model/ready" ]]; then
+  command -v curl >/dev/null || { echo 'PiStack Write punctuation requires curl' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$punctuation_model"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$punctuation_model"
+  "$environment/venv/bin/python" - "$punctuation_manifest" > "$punctuation_model/files.tsv" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+for name,digest in m['files'].items():
+    print(name,'https://huggingface.co/'+m['repository']+'/resolve/'+m['revision']+'/'+name,digest,sep='\t')
+PY
+  while IFS=$'\t' read -r file url digest; do
+    pi_stack_download_artifact "$url" "$punctuation_model/$file" "$digest"
+  done < "$punctuation_model/files.tsv"
+  chmod -R a+rX "$punctuation_model"
+  touch "$punctuation_model/ready"
+fi
+# A readiness stamp is not proof that the mandatory assets still match their pins.
+"$environment/venv/bin/python" - "$punctuation_manifest" "$punctuation_model" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+manifest=json.load(open(sys.argv[1]))
+for name,digest in manifest['files'].items():
+    path=Path(sys.argv[2])/name
+    with path.open('rb') as asset:
+        actual=hashlib.file_digest(asset,'sha256').hexdigest()
+    if actual != digest:
+        raise SystemExit('PiStack Write punctuation checksum mismatch: '+str(path))
+PY
 if [[ $gpu_enabled == 1 && ! -f "$gpu_environment/ready" ]]; then
   command -v uv >/dev/null || { echo 'PiStack Write GPU requires uv' >&2; exit 1; }
   pi_stack_as_root install -d -m 0755 "$gpu_environment"
@@ -136,41 +181,27 @@ if [[ ! -f "$tree/ready" ]]; then
   else
     ln -sfn "$environment/venv" "$tree/venv"
   fi
+  ln -sfn "$environment/venv" "$tree/conversion-venv"
   ln -sfn "$weights" "$tree/model"
   ln -sfn "$cleanup_model" "$tree/cleanup-model"
+  ln -sfn "$punctuation_model" "$tree/punctuation-model"
+  ln -sfn "$rewrite_runtime" "$tree/rewrite-runtime"
+  ln -sfn "$rewrite_model" "$tree/rewrite-model"
   for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
   chmod -R a+rX "$tree"
   touch "$tree/ready"
 fi
-[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" && -f "$tree/cleanup-model/joint-f32.onnx" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
+[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" && -f "$tree/cleanup-model/joint-f32.onnx" && $(readlink -f "$tree/punctuation-model") == "$punctuation_model" && -f "$tree/punctuation-model/punct_cap_seg_en.onnx" && -f "$tree/punctuation-model/spe_32k_lc_en.model" && $(readlink -f "$tree/rewrite-runtime") == "$rewrite_runtime" && -x "$tree/rewrite-runtime/llama-server" && $(readlink -f "$tree/rewrite-model") == "$rewrite_model" && -f "$tree/rewrite-model/model.gguf" ]] || { echo "Incomplete Write engine: $tree" >&2; exit 66; }
+echo "PiStack Write engine prepared: $key"
+[[ $mode == --select ]] || exit 0
 next="$base.next.$$"
 trap 'pi_stack_as_root rm -f "$next"' EXIT
 previous=$(readlink -f "$base" 2>/dev/null || true)
+if [[ $previous != "$tree" && -d $previous ]]; then
+  pi_stack_as_root ln -s "$previous" "$next"
+  pi_stack_as_root mv -Tf "$next" "$base.previous"
+fi
 pi_stack_as_root ln -s "$tree" "$next"
 pi_stack_as_root mv -Tf "$next" "$base"
-echo "PiStack Write engine ready: $key"
-# Keep the selected tree and the one it replaced (which the running unit may
-# still use, and which rollback selects), with everything they link to. Remove
-# every other store entry, so model and dependency changes do not accumulate.
-keep=()
-# The GPU tree links the superset ROCm venv, but preparation also uses this
-# small CPU environment for model conversion and manifest parsing. Retain it
-# so each source-only release does not re-fetch its managed Python runtime.
-[[ $gpu_enabled == 0 ]] || keep+=("$environment")
-for selected in "$tree" "$previous"; do
-  [[ -n $selected && -d $selected ]] || continue
-  keep+=("$(readlink -f "$selected")")
-  for link in "$selected"/venv "$selected"/model "$selected"/gpu-model "$selected"/cleanup-model; do
-    [[ -L $link ]] || continue
-    target=$(readlink -f "$link")
-    while [[ $(dirname "$target") != "$store" && $target != / ]]; do target=$(dirname "$target"); done
-    keep+=("$target")
-  done
-done
-# A running engine (or anything else) that maps files from an entry keeps it.
-while read -r used; do keep+=("$used"); done < <(pi_stack_as_root sh -c 'cat /proc/[0-9]*/maps 2>/dev/null' | grep -o "$store/[^/ ]*" | sort -u)
-for entry in "$store"/*; do
-  [[ -e $entry ]] || continue
-  printf '%s\n' "${keep[@]}" | grep -qxF "$(readlink -f "$entry")" && continue
-  pi_stack_as_root rm -rf -- "$entry"
-done
+echo "PiStack Write engine selected: $key"
+# Retention belongs to acceptance, never preparation or an unproven selection.

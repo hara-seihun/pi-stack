@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   const notifications = db.query("PRAGMA table_info(idle_notifications)").all() as Array<{ name: string }>;
   if (!notifications.some(column => column.name === "receipt_id")) db.exec("ALTER TABLE idle_notifications ADD COLUMN receipt_id TEXT");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idle_notifications_receipt ON idle_notifications(receipt_id)");
+  if (!notifications.some(column => column.name === "kind")) db.exec("ALTER TABLE idle_notifications ADD COLUMN kind TEXT NOT NULL DEFAULT 'idle'");
+  if (!notifications.some(column => column.name === "body")) db.exec("ALTER TABLE idle_notifications ADD COLUMN body TEXT NOT NULL DEFAULT 'Session is idle'");
   retireEventJournal(db);
 }
 
@@ -184,11 +186,11 @@ export function setThreadColor(db: Database, id: string, color: ThreadColor | nu
   })();
 }
 
-export function recordIdleNotification(db: Database, receiptId: string, thread: { id: string; title: string }, time: number): void {
+export function recordIdleNotification(db: Database, receiptId: string, thread: { id: string; title: string }, time: number, notice: { kind: "idle" | "question"; body: string } = { kind: "idle", body: "Session is idle" }): void {
   db.transaction(() => {
     ensureThreadView(db, thread.id);
-    const inserted = db.query("INSERT OR IGNORE INTO idle_notifications(session_id,name,time,receipt_id) VALUES(?,?,?,?)")
-      .run(thread.id, thread.title, new Date(time).toISOString(), receiptId);
+    const inserted = db.query("INSERT OR IGNORE INTO idle_notifications(session_id,name,time,receipt_id,kind,body) VALUES(?,?,?,?,?,?)")
+      .run(thread.id, thread.title, new Date(time).toISOString(), receiptId, notice.kind, notice.body);
     if (inserted.changes) db.query("UPDATE thread_views SET idle_unread=1 WHERE id=?").run(thread.id);
   })();
 }

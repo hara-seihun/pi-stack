@@ -166,7 +166,16 @@ for ledger in ledgers:
         continue
     try:
         db = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True, timeout=10)
-        rows = db.execute("SELECT DISTINCT release_path FROM run WHERE release_path IS NOT NULL AND state IN ('queued','starting','running')").fetchall()
+        columns = {row[1] for row in db.execute("PRAGMA table_info(run)")}
+        if "release_path" not in columns:
+            active = db.execute("SELECT 1 FROM run WHERE state IN ('queued','starting','running') LIMIT 1").fetchone()
+            if active:
+                raise sqlite3.DatabaseError("unfinished runs have no release_path; their release custody is unresolved")
+            # A retired, readable ledger with no resumable work pins nothing.
+            # Preserve its historical usage rather than migrating or deleting it.
+            rows = []
+        else:
+            rows = db.execute("SELECT DISTINCT release_path FROM run WHERE release_path IS NOT NULL AND state IN ('queued','starting','running')").fetchall()
         db.close()
     except sqlite3.Error as error:
         # An unreadable ledger could name any release; keep everything.

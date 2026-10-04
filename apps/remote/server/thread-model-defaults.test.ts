@@ -12,13 +12,38 @@ test("built-in and newly registered destinations default to Astra and expose eac
   expect(home.map(destination => destination.raw)).toEqual([undefined, true, true]);
   expect(home.map(destination => destination.sandbox)).toEqual([undefined, undefined, true]);
   for (const destination of [...home, ...personal]) {
-    expect(destination.defaultModel).toBe("astra");
+    expect(destination.defaultModel).toBe("sol");
     expect(destination.thinkingLevel).toBe("high");
     expect(destination.models.slice(0, 3)).toEqual(["astra", "sol", "luna"]);
     expect(destination.models).toContain(destination.defaultModel);
     expect(new Set(destination.models).size).toBe(destination.models.length);
     for (const id of destination.models) expect(catalogModel(id)).toBeDefined();
   }
+});
+
+test("existing Personal profiles gain context by default without changing other destinations or explicit choices", () => {
+  const { contextDir, ...personal } = defaultThreadDestinations("private-workspace")[0]!;
+  expect(contextDir).toBe("context");
+  expect(configuredThreadDestinations([personal], [])[0]!.contextDir).toBe("context");
+  expect(personal).not.toHaveProperty("contextDir");
+  expect(configuredThreadDestinations([{ ...personal, contextDir: "references" }], [])[0]!.contextDir).toBe("references");
+  expect(configuredThreadDestinations([{ ...personal, contextDir: "" }], [])[0]!.contextDir).toBe("");
+  expect(configuredThreadDestinations([{ ...personal, raw: true }], [])[0]).not.toHaveProperty("contextDir");
+  expect(configuredThreadDestinations([{ ...personal, sandbox: true }], [])[0]).not.toHaveProperty("contextDir");
+  for (const destination of configuredThreadDestinations(defaultThreadDestinations(), [])) {
+    expect(destination).not.toHaveProperty("contextDir");
+  }
+});
+
+test("persisted Sandbox destinations have a distinct icon without replacing custom images", () => {
+  const sandbox = defaultThreadDestinations().find(destination => destination.id === "sandbox")!;
+  const raw = defaultThreadDestinations().find(destination => destination.id === "raw")!;
+  expect(sandbox.icon).not.toBe(raw.icon);
+  for (const icon of ["raw", "", undefined]) {
+    expect(configuredThreadDestinations([{ ...sandbox, icon: icon as string }], [])[0]!.icon).toBe("sandbox");
+  }
+  expect(configuredThreadDestinations([{ ...sandbox, icon: "/custom-sandbox.png" }], [])[0]!.icon).toBe("/custom-sandbox.png");
+  expect(configuredThreadDestinations([raw], [])[0]!.icon).toBe("raw");
 });
 
 test("configured models join existing destinations and provider defaults follow configuration order", () => {
@@ -29,7 +54,7 @@ test("configured models join existing destinations and provider defaults follow 
   expect(options.get("custom/z/default")?.icon).toBe("🧪");
   expect(() => threadModelOptions([{ provider: "custom", id: "plain", name: "No icon" } as ThreadModelMetadata])).toThrow("has no icon");
   const [home] = configuredThreadDestinations(defaults, models);
-  expect(home!.defaultModel).toBe("astra");
+  expect(home!.defaultModel).toBe("sol");
   expect(home!.models.slice(-2)).toEqual(["custom/z/default", "custom/a-second"]);
   expect(defaults[0]!.models).not.toContain("custom/z/default");
   const [work] = configuredThreadDestinations([{ ...defaults[0]!, id: "work", models: ["custom"], defaultModel: "custom" }], models);
@@ -87,9 +112,19 @@ test("unused and equally recent models retain configured order", () => {
 test("destination edits cannot change defaults for another person or workspace", () => {
   const destinations = defaultThreadDestinations("private");
   destinations[0]!.models.splice(0);
-  destinations[0]!.defaultModel = "sol";
+  destinations[0]!.defaultModel = "luna";
   expect(destinations[1]!.models).toContain("astra");
-  expect(destinations[1]!.defaultModel).toBe("astra");
+  expect(destinations[1]!.defaultModel).toBe("sol");
   expect(defaultThreadDestinations("another")[0]!.models).toContain("astra");
-  expect(defaultThreadDestinations("another")[0]!.defaultModel).toBe("astra");
+  expect(defaultThreadDestinations("another")[0]!.defaultModel).toBe("sol");
+});
+
+test("watch context choices are Markdown names on a full-context destination with a context folder", () => {
+  const [personal, home, raw] = defaultThreadDestinations("private-workspace");
+  expect(configuredThreadDestinations([{ ...personal!, watchContextFiles: ["HARA.md", "KENAN.md"] }], [])[0]!.watchContextFiles).toEqual(["HARA.md", "KENAN.md"]);
+  expect(configuredThreadDestinations([personal!], [])[0]!.watchContextFiles).toBeUndefined();
+  expect(() => configuredThreadDestinations([{ ...personal!, watchContextFiles: ["reference/grants.md"] }], [])).toThrow("watchContextFiles");
+  expect(() => configuredThreadDestinations([{ ...personal!, watchContextFiles: "HARA.md" as never }], [])).toThrow("watchContextFiles");
+  expect(() => configuredThreadDestinations([{ ...home!, watchContextFiles: ["HARA.md"] }], [])).toThrow("contextDir");
+  expect(() => configuredThreadDestinations([{ ...raw!, contextDir: "context", watchContextFiles: ["HARA.md"] }], [])).toThrow("contextDir");
 });

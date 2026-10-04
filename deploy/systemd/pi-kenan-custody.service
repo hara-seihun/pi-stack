@@ -1,0 +1,24 @@
+[Unit]
+Description=Fixed Kenan key custody and owner-mounted encrypted folders
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=@KENAN_ENV_FILE@
+RuntimeDirectory=pi-kenan
+RuntimeDirectoryMode=0700
+PrivateMounts=yes
+ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
+ExecStart=@BUN@ @REMOTE_ROOT@/server/one-kenan-custody.ts
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+MemorySwapMax=0
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

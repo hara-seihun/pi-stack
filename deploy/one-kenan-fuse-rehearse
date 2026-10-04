@@ -1,0 +1,103 @@
+#!/usr/bin/python3
+"""Real same-path inherited FUSE replacement and retained-key proof, fixture namespaces only."""
+import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
+
+if os.geteuid()!=0: raise SystemExit('Run sudo deploy/one-kenan-fuse-rehearse; fixture paths only')
+repo=pathlib.Path(__file__).resolve().parent.parent
+root=pathlib.Path(tempfile.mkdtemp(prefix='pi-kenan-fuse-fixture-'))
+try:
+    root.chmod(0o711)
+    for name in ('one-kenan-keys.ts','one-kenan-mounts.ts','one-kenan-retained-keys.ts'):
+        (root/name).write_text((repo/'apps/remote/server'/name).read_text())
+    (root/'common.ts').write_text('''
+import { join } from "node:path";
+export const root=import.meta.dir;
+export const people=["alice","bob"].map(user=>({version:1 as const,user,displayName:user,port:19881,
+  unlock:{cipherDir:join(root,user,"cipher"),mountpoint:join(root,user,"private")},environment:{}}));
+export async function run(command:string[]) {
+  const child=Bun.spawn(command,{stdout:"pipe",stderr:"pipe"});
+  const [code,out,err]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
+  if(code!==0)throw new Error(`Fixture command failed ${command[0]}: ${err}`);
+  return out;
+}
+''')
+    (root/'outer.ts').write_text('''
+import { mkdirSync, writeFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { root,people,run } from "./common";
+import { KenanMounts } from "./one-kenan-mounts";
+const retained=join(root,"retained"); mkdirSync(retained,{mode:0o700});
+for(const person of people) {
+  mkdirSync(person.unlock.cipherDir,{recursive:true,mode:0o700});
+  mkdirSync(person.unlock.mountpoint,{recursive:true,mode:0o700});
+  await run(["chown","-R","65534:65534",join(root,person.user)]);
+  await run(["setfacl","-R","-m","u:65533:rwX,u:65534:rwX",join(root,person.user)]);
+  await run(["setfacl","-m","d:u:65533:rwx,d:u:65534:rwx",person.unlock.cipherDir]);
+  const init=Bun.spawn(["runuser","-u","nobody","--","gocryptfs","-q","-nosyslog","-scryptn","10","-init","--",person.unlock.cipherDir],{stdin:"pipe",stdout:"ignore",stderr:"pipe"});
+  init.stdin.write(`${person.user}-fixture-key\\n`); init.stdin.end();
+  if(await init.exited!==0)throw new Error("Fixture init failed");
+  writeFileSync(join(retained,person.user),`${person.user}-fixture-key`,{mode:0o600});
+}
+const personal=new KenanMounts({userFor:()=>"nobody"});
+try {
+  for(const person of people) {
+    if(!(await personal.mount(person,`${person.user}-fixture-key`)).ok)throw new Error("Personal fixture failed");
+    await run(["runuser","-u","nobody","--","bash","-c",'printf "personal live" > "$1/personal.txt"',"fixture",person.unlock.mountpoint]);
+  }
+  console.log(await run(["unshare","--mount","--propagation","private",process.execPath,join(root,"inner.ts")]));
+  for(const person of people) {
+    if(statSync(join(person.unlock.mountpoint,"proof.txt")).uid!==65534)throw new Error("Original namespace view owner changed");
+    if(!(await run(["runuser","-u","nobody","--","cat",join(person.unlock.mountpoint,"proof.txt")])).includes("UID65533"))throw new Error("Original namespace cannot read custody writes");
+    await run(["runuser","-u","nobody","--","bash","-c",'printf "still live" > "$1/after.txt"',"fixture",person.unlock.mountpoint]);
+    if(personal['children'].get(person.user)?.exitCode!==null)throw new Error("Original personal daemon stopped");
+  }
+  console.log(JSON.stringify({ok:true,samePathInheritedReplacement:true,originalNamespaceStillUsable:true,retainedKeysBootstrapped:true,realFuse:true}));
+} finally { await personal.close(); }
+''')
+    (root/'inner.ts').write_text('''
+import { readFileSync, statSync, readdirSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { root,people,run } from "./common";
+import { KenanMounts, inheritedCustodyMounts, detachInheritedCustodyMounts } from "./one-kenan-mounts";
+import { KenanKeys } from "./one-kenan-keys";
+import { collectRetainedCustodyKeys } from "./one-kenan-retained-keys";
+if(inheritedCustodyMounts(people).length!==2)throw new Error("Expected exact registered same-path inherited FUSE mounts");
+if(await detachInheritedCustodyMounts(people)!==2)throw new Error("Inherited detachment missed mount");
+if(inheritedCustodyMounts(people).length)throw new Error("Inherited mount remains");
+let mounts=new KenanMounts({userFor:()=>"nobody",forceOwner:{uid:65533,gid:65533}});
+let keys=new KenanKeys(join(root,"keys.json"),people,(person,key)=>mounts.mount(person,key));
+try {
+  if((await keys.authenticate("alice","wrong")).ok)throw new Error("Wrong key admitted");
+  const retained=join(root,"retained");
+  const collected=await collectRetainedCustodyKeys(keys,people,retained);
+  if(collected.collected.join(",")!=="alice,bob" || collected.rejected.length)throw new Error("Retained key bootstrap failed");
+  for(const person of people) {
+    if(!(await run(["setpriv","--reuid=65533","--regid=65533","--clear-groups","cat",join(person.unlock.mountpoint,"personal.txt")])).includes("personal live"))throw new Error("Custody lost inherited personal data");
+    await run(["setpriv","--reuid=65533","--regid=65533","--clear-groups","bash","-c",'umask 077; printf "UID65533" > "$1/proof.txt"',"fixture",person.unlock.mountpoint]);
+    if(statSync(join(person.unlock.mountpoint,"proof.txt")).uid!==65533)throw new Error("Root view has wrong owner");
+    if(readdirSync(person.unlock.cipherDir).some(name=>statSync(join(person.unlock.cipherDir,name)).uid!==65534))throw new Error("Backing ownership changed");
+  }
+  await mounts.close();
+  await detachInheritedCustodyMounts(people);
+  // A reboot clears /run retained keys; only an enrolled login may reopen custody.
+  for(const person of people)unlinkSync(join(retained,person.user));
+  mounts=new KenanMounts({userFor:()=>"nobody",forceOwner:{uid:65533,gid:65533}});
+  keys=new KenanKeys(join(root,"keys.json"),people,(person,key)=>mounts.mount(person,key));
+  if((await collectRetainedCustodyKeys(keys,people,retained)).collected.length || !keys.status().locked)throw new Error("Empty retained directory opened sealed custody");
+  if(!(await keys.authenticate("bob","bob-fixture-key")).ok)throw new Error("Bob cannot reopen all folders");
+  for(const person of people) {
+    if(!(await run(["setpriv","--reuid=65533","--regid=65533","--clear-groups","cat",join(person.unlock.mountpoint,"proof.txt")])).includes("UID65533"))throw new Error("Reboot lost private access/data");
+  }
+  if(readFileSync(join(root,"keys.json"),"utf8").includes("fixture-key"))throw new Error("Plaintext keys persisted");
+  console.log(JSON.stringify({ok:true,rootRuntimeUid:65533,originalOwnerUid:65534,detachedInherited:2,rebootFirstLogin:"bob",realFuse:true}));
+} finally { await mounts.close(); }
+''')
+    (root/'fuse.conf').write_text('user_allow_other\n'); (root/'fuse.conf').chmod(0o644)
+    subprocess.run(['unshare','--mount','--propagation','private','bash','-c',
+        'mount --bind "$1/fuse.conf" /etc/fuse.conf; exec "$2" "$1/outer.ts"','fixture',str(root),shutil.which('bun')],check=True,timeout=45)
+finally:
+    shutil.rmtree(root)

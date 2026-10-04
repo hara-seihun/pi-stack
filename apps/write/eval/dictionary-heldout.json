@@ -1,0 +1,379 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "fresh-kenan",
+      "audio": "audio/fresh-kenan.wav",
+      "sha256": "72834877d96ff2b68e6482b862aabe669b8670ad581d1738ef3db45d12777b3d",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please send twelve files to Kenan."
+      },
+      "verbatim": "Please send twelve files to Kenan.",
+      "target": "Please send twelve files to Kenan.",
+      "expected_terms": [
+        "Kenan"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please send twelve files to Kenan"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-jodie",
+      "audio": "audio/fresh-jodie.wav",
+      "sha256": "dfbcff6842124e29c58babecb2b617f4545026b4d93bdd5dfbe8b886d2cb750b",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please send twelve files to Jodie."
+      },
+      "verbatim": "Please send twelve files to Jodie.",
+      "target": "Please send twelve files to Jodie.",
+      "expected_terms": [
+        "Jodie"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please send twelve files to Jodie"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-qwen",
+      "audio": "audio/fresh-qwen.wav",
+      "sha256": "ea92a438154915f59c847b9d262e7c6888e8619e7d9b3327aa50f211e1f7b9d7",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please send twelve files to Qwen."
+      },
+      "verbatim": "Please send twelve files to Qwen.",
+      "target": "Please send twelve files to Qwen.",
+      "expected_terms": [
+        "Qwen"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please send twelve files to Qwen"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-tailscale",
+      "audio": "audio/fresh-tailscale.wav",
+      "sha256": "3b336b2edec3b95722f2d3aaee1a61df55e712c6bd9e83773ce00f2a600eb671",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Do not disable Tailscale on the twenty fourth."
+      },
+      "verbatim": "Do not disable Tailscale on the twenty fourth.",
+      "target": "Do not disable Tailscale on the twenty fourth.",
+      "expected_terms": [
+        "Tailscale"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Do not disable Tailscale on the twenty fourth"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-canon",
+      "audio": "audio/fresh-canon.wav",
+      "sha256": "44847d190583ba9fe01dfaf899da3091117c51dbca4c6e379d5385ecb7453bbb",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please send twelve files to Canon."
+      },
+      "verbatim": "Please send twelve files to Canon.",
+      "target": "Please send twelve files to Canon.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please send twelve files to Canon"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-call-anna",
+      "audio": "audio/fresh-call-anna.wav",
+      "sha256": "0ff99f42c7ff302d95849c70c4df091b0ed4d8e227bfc5dce85fb027dd414e4d",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please call Anna about twelve files."
+      },
+      "verbatim": "Please call Anna about twelve files.",
+      "target": "Please call Anna about twelve files.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please call Anna about twelve files"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-quinn",
+      "audio": "audio/fresh-quinn.wav",
+      "sha256": "cac74f42dd0e369af3f4119a8830654b0842aa5f5078b38d10c6d925efa576ce",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please send twelve files to Quinn."
+      },
+      "verbatim": "Please send twelve files to Quinn.",
+      "target": "Please send twelve files to Quinn.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please send twelve files to Quinn"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-tall-scale",
+      "audio": "audio/fresh-tall-scale.wav",
+      "sha256": "192650d3a718cf7e16bb611412add558b0de0ee5e26778884dbc0010537fde24",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Do not remove the tall scale on the twenty fourth."
+      },
+      "verbatim": "Do not remove the tall scale on the twenty fourth.",
+      "target": "Do not remove the tall scale on the twenty fourth.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Do not remove the tall scale on the twenty fourth"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-replacement",
+      "audio": "audio/fresh-replacement.wav",
+      "sha256": "9331592432ad66563d4e70334aa8e98b2c4ebfdcbbc2f16843d00de1f0e4ffe3",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please open the letter box."
+      },
+      "verbatim": "Please open the letter box.",
+      "target": "Please open the letter box.",
+      "expected_terms": [
+        "LetterBox"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "please open"
+          ],
+          [
+            "letter box",
+            "LetterBox"
+          ]
+        ],
+        "forbidden": []
+      },
+      "dictionary_target": "Please open the LetterBox."
+    },
+    {
+      "id": "fresh-replacement-negative",
+      "audio": "audio/fresh-replacement-negative.wav",
+      "sha256": "5e56d23f46833bf11719f9a55ce9f84e561264375eda1d15d28e05b0ff51a343",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please open the letter and close the window."
+      },
+      "verbatim": "Please open the letter and close the window.",
+      "target": "Please open the letter and close the window.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please open the letter and close the window"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "fresh-quotation",
+      "audio": "audio/fresh-quotation.wav",
+      "sha256": "d69f5450e172d4a943b17bed826f50c38f9cc3cd2e9efd0dae4d6d5b60874f96",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "fresh-heldout-synthetic-declared-before-recognition",
+      "split": "fresh-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "He said open quote do not send twelve files to Jodie close quote."
+      },
+      "verbatim": "He said open quote do not send twelve files to Jodie close quote.",
+      "target": "He said \u201cdo not send twelve files to Jodie.\u201d",
+      "expected_terms": [
+        "Jodie"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "do not send twelve files to Jodie"
+          ]
+        ],
+        "forbidden": []
+      }
+    }
+  ],
+  "dictionary": {
+    "words": [
+      "Kenan",
+      "Kelana",
+      "Jodie",
+      "Qwen",
+      "Tailscale",
+      "LetterBox"
+    ],
+    "replacements": [
+      {
+        "from": "letter box",
+        "to": "LetterBox"
+      }
+    ]
+  }
+}

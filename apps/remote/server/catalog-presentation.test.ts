@@ -31,6 +31,28 @@ describe("plan cards", () => {
     expect(weekly?.description).not.toContain("91%");
   });
 
+  test("keeps five-hour and weekly limits independent for both providers", () => {
+    const account: PlanAccountUsage = { accountId: "anthropic-1", accountLabel: "Primary", state: "ready", percentLeft: 10, usedPercent: 90, meterId: "anthropic-5h", windowHours: 5, readingAt: "2026-10-03T04:00:00.000Z", resetAt: "2026-10-03T05:00:00.000Z", bankedResets: null, bankedResetsAt: null, bankedResetExpiresAt: null };
+    const usage = snapshot({
+      "five-hour": { percentLeft: 10, cachePercent: null, accounts: [account] },
+      weekly: { percentLeft: 90, cachePercent: null },
+    });
+    const cards = planCards({ ...usage, plans: { ...usage.plans, openai: {
+      state: "ready", planCount: 1, checkedCount: 1, metrics: {
+        "five-hour": { percentLeft: 80, expectedPercentLeft: null, paceDelta: null, cachePercent: null, accounts: [] },
+        remaining: { percentLeft: 20, expectedPercentLeft: null, paceDelta: null, cachePercent: null, accounts: [] },
+      },
+    } } });
+    const anthropic = cards.find(card => card.id === "anthropic")!;
+    const openai = cards.find(card => card.id === "openai")!;
+    expect(anthropic.metrics.find(metric => metric.id === "five-hour")).toMatchObject({
+      text: "10% remaining", description: "5-hour quota · all models", accounts: [account],
+    });
+    expect(anthropic.metrics.find(metric => metric.id === "weekly")?.text).toBe("90% remaining");
+    expect(openai.metrics.find(metric => metric.id === "five-hour")).toMatchObject({ text: "80% remaining", description: "5-hour quota · all models" });
+    expect(openai.metrics.find(metric => metric.id === "remaining")).toMatchObject({ text: "20% remaining", description: "7-day quota · all models" });
+  });
+
   test("keeps the exact remaining amount and pace in one value", () => {
     const cards = planCards(snapshot({ weekly: { percentLeft: 62.5, paceDelta: -3.2, cachePercent: null } }, "partial"));
     const anthropic = cards.find((card) => card.id === "anthropic");
@@ -42,6 +64,17 @@ describe("plan cards", () => {
     const account: PlanAccountUsage = { accountId: "anthropic-1", accountLabel: "Primary", state: "ready", percentLeft: 62, usedPercent: 38, meterId: "anthropic-7d", windowHours: 168, readingAt: "2026-09-20T12:00:00.000Z", resetAt: "2026-09-25T12:00:00.000Z", bankedResets: 3, bankedResetsAt: "2026-09-20T12:00:00.000Z", bankedResetExpiresAt: "2026-10-20T12:00:00.000Z" };
     const cards = planCards(snapshot({ weekly: { percentLeft: 62, cachePercent: null, accounts: [account] } }));
     expect(cards.find((card) => card.id === "anthropic")?.metrics.find((metric) => metric.id === "weekly")?.accounts).toEqual([account]);
+  });
+
+  test("does not use a weekly reading as the missing five-hour allowance", () => {
+    const account: PlanAccountUsage = { accountId: "anthropic-1", accountLabel: "Primary", state: "unavailable", percentLeft: null, usedPercent: null, meterId: null, windowHours: null, readingAt: null, resetAt: null, bankedResets: null, bankedResetsAt: null, bankedResetExpiresAt: null };
+    const cards = planCards(snapshot({
+      "five-hour": { percentLeft: null, cachePercent: null, accounts: [account] },
+      weekly: { percentLeft: 90, cachePercent: null },
+    }, "partial"));
+    const anthropic = cards.find(card => card.id === "anthropic")!;
+    expect(anthropic.metrics.find(metric => metric.id === "five-hour")).toMatchObject({ text: "—", accounts: [account] });
+    expect(anthropic.metrics.find(metric => metric.id === "weekly")?.text).toBe("90% remaining");
   });
 
   test("says nothing about caching when plan usage has not loaded", () => {

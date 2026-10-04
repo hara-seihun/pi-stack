@@ -17,7 +17,7 @@ export function routeHasDetail(route: Route): boolean {
     case "chats": return route.chat !== null;
     case "workers": return route.thread !== null;
     case "files": return route.path !== null;
-    case "machine": return false;
+    case "calendar": case "machine": return false;
   }
 }
 

@@ -34,6 +34,7 @@ test.each([false, true])("cold settings read/write needs neither a workspace nor
   expect(settings.models.some(model => model.id === settings.model.id && model.provider === settings.model.provider)).toBe(true);
   expect(settings.thinkingLevels).toContain("high");
   expect(service.pending("cold")).toEqual(pending);
+  expect(await service.command("cold",{type:"get_state"})).toMatchObject({ok:true,value:{source:"thread-owner",isStreaming:false,model:{provider:"anthropic",id:"claude-fable-5-1"},thinkingLevel:"high",threadState:before.state}});
   expect(openSession).not.toHaveBeenCalled();
   expect(admit).not.toHaveBeenCalled();
 });

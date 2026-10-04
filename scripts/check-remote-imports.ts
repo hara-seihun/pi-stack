@@ -10,6 +10,7 @@ for (const resource of [
   "deploy/release-checkout",
   "deploy/meeting-census",
   "deploy/smoke",
+  "deploy/one-kenan-activate",
   "skills/livedev/SKILL.md",
   "server/voice/delegation-policy.md",
   "server/meet/transcriber.ts",
@@ -19,11 +20,17 @@ for (const resource of [
   "web/dist/meet-adapter.js",
   "web/dist/voice.html",
   "web/dist/kenan.png",
+  "kenan-root/package.json",
+  "kenan-root/instructions.md",
+  "kenan-root/src/main.ts",
 ]) {
   if (!statSync(join(release, resource)).isFile()) throw new Error(`Missing Pi Remote release resource: ${resource}`);
 }
 const result = await Bun.build({
-  entrypoints: ["main.ts", "router.ts", "person-cli.ts", "voice/service.ts"].map(name => join(release, "server", name)),
+  entrypoints: [
+    ...["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts"].map(name => join(release, "server", name)),
+    join(release, "kenan-root/src/main.ts"),
+  ],
   target: "bun",
   write: false,
   plugins: [{

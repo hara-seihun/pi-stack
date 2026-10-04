@@ -40,7 +40,7 @@ export function threadStartReducer(state: ThreadStartState, event: ThreadStartEv
       if (!choice) return state;
       const destination = state.kind === "destinations" ? state.starts.find((start) => start.id === event.id) : null;
       if (destination?.models.length) {
-        return { kind: "models", starts: state.starts, destination, origin: event.origin, contexts: [] };
+        return { kind: "models", starts: state.starts, destination, origin: event.origin, contexts: destination.contexts?.map((context) => context.name) ?? [] };
       }
       return { kind: "creating", selection: state, request: {
         requestId: event.requestId, sessionId: event.sessionId,

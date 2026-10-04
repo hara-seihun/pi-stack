@@ -88,11 +88,15 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   plans: [
     {
       id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR, monthlyUsd: 200, quotaMeter: "codex-7d",
-      metrics: [{ id: "remaining", model: "astra", meters: ["codex-5h", "codex-7d"] }],
+      metrics: [
+        { id: "five-hour", model: "astra", label: "5h", name: "All models", meters: ["codex-5h"] },
+        { id: "remaining", model: "astra", label: "W", name: "All models", meters: ["codex-7d"] },
+      ],
     },
     {
       id: "anthropic", label: "Anthropic", icon: "anthropic", provider: "anthropic", maxReadingAgeMs: 14 * DAY, monthlyUsd: 250, quotaMeter: "anthropic-7d",
       metrics: [
+        { id: "five-hour", model: "opus", label: "5h", name: "All models including Opus", meters: ["anthropic-5h"] },
         { id: "fable", model: "fable", label: "F", name: "Fable weekly", meters: ["anthropic-7d", "anthropic-7d_oi"], requireAllMeters: true },
         { id: "weekly", model: "opus", label: "W", name: "Weekly, all models including Opus", meters: ["anthropic-7d"] },
       ],

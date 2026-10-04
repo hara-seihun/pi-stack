@@ -2,7 +2,7 @@ export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
 import type { ThreadCreator } from "./caller.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; requestId?: string };
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
@@ -63,8 +63,17 @@ export interface AnswerThreadQuestion {
   questionId: string;
   selectedSuggestionIds: string[];
   text: string;
+  dismissed?: boolean;
 }
 export interface QuestionReceipt { accepted: true; questionId: string }
+export interface QuestionState {
+  question: ThreadQuestion;
+  answer?: { text: string; selectedSuggestions: string[]; dismissed: boolean; acceptedAt: number };
+}
+export interface QuestionEvents {
+  cursor: number;
+  items: Array<{ seq: number; questionId: string; threadId: string; question: string; time: number }>;
+}
 export interface ThreadMessage {
   id: string;
   threadId: string;
@@ -178,8 +187,11 @@ export type ThreadControl =
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
   | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };
 export interface ThreadApi {
+  watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;
   questions(threadId: string): Promise<Result<ThreadQuestion[]>>;
+  questionState(threadId: string, questionId: string): Promise<Result<QuestionState>>;
+  questionEvents(after?: number, limit?: number): Result<QuestionEvents> | Promise<Result<QuestionEvents>>;
   answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>>;
   spawn(input: SpawnThread): Promise<Result<Thread>>;
   send(input: SendThread): Promise<Result<ThreadMessage>>;

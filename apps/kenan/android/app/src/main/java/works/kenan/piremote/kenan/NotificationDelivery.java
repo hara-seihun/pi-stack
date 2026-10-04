@@ -71,14 +71,16 @@ final class NotificationDelivery {
             NotificationSequence sequence = new NotificationSequence(cursor, seen);
             JSONArray events = feed.getJSONArray("notifications");
             if (events.length() > 0) context.getSystemService(NotificationManager.class).createNotificationChannel(
-                new NotificationChannel(CHANNEL, "Session idle", NotificationManager.IMPORTANCE_HIGH));
+                new NotificationChannel(CHANNEL, "Agent updates and questions", NotificationManager.IMPORTANCE_HIGH));
             for (int i = 0; i < events.length(); i++) {
                 JSONObject event = events.getJSONObject(i);
                 long seq = event.getLong("seq");
                 if (!sequence.accept(seq, next, stream)) continue;
                 String session = event.getString("sessionId");
                 String thread = ThreadNotifications.key(identity.user, environment, session);
-                String title = name + " · " + event.getString("name");
+                boolean question = "question".equals(event.optString("kind"));
+                String title = name + " · " + event.getString("name") + (question ? " · Question" : "");
+                String body = event.optString("body", "Session is idle");
                 Intent open = new Intent(context, MainActivity.class)
                     .setAction("idle:" + thread + ":" + seq)
                     .putExtra("environment", environment).putExtra("sessionId", session).putExtra("user", identity.user)
@@ -89,12 +91,13 @@ final class NotificationDelivery {
                     .setSmallIcon(R.drawable.ic_notification)
                     .setLargeIcon(android.graphics.BitmapFactory.decodeResource(context.getResources(), R.mipmap.ic_launcher_foreground))
                     .addExtras(ThreadNotifications.extras(thread))
-                    .setContentTitle(title).setContentText("Session is idle")
-                    .setContentIntent(target).setAutoCancel(true).setOnlyAlertOnce(true)
+                    .setContentTitle(title).setContentText(body)
+                    .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
+                    .setContentIntent(target).setAutoCancel(true).setOnlyAlertOnce(!question)
                     .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).build();
                 ThreadNotifications.deliver(context, thread, notification, new JSONObject()
                     .put("user", identity.user).put("environment", environment)
-                    .put("sessionId", session).put("title", title).put("seq", seq));
+                    .put("sessionId", session).put("title", title).put("body", body).put("seq", seq));
             }
             sequence.settle(next, stream);
             JSONArray stored = new JSONArray();
