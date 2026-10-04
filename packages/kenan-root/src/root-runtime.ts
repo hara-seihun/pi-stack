@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import type { ConsentInput, ConsentRequest } from "./consent.js";
+import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
 import { join, isAbsolute } from "node:path";
 import type { RootAdmission, MemoryResult } from "kenan-memory/contract";
 import { infrastructureReason, reportInfrastructure, type InfrastructureEvent, type InfrastructureReason, type InfrastructureReporter } from "kenan-memory/diagnostics";
@@ -21,12 +21,12 @@ export interface RootConfig {
   brokerUrl: string;
   people?: { person: string; displayName: string }[];
 }
-export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest }
+export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest }
 export interface RootSession { prompt(text: string): Promise<void>; reply(): string | undefined; subjects?(): string[]; dispose(): void }
 export type RootSessionFactory = (spec: RootSessionSpec) => Promise<RootSession>;
 export type RootExecution = { reply: string; subjects: string[] };
 export type RootExecutor = (admission: RootAdmission, request: string) => Promise<MemoryResult<RootExecution>>;
-export const ROOT_TOOLS = ["read", "write", "edit", "bash", "memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "root_request_consent", "root_reply"];
+export const ROOT_TOOLS = ["read", "write", "edit", "bash", "memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "root_request_consent", "root_notify", "root_reply"];
 
 export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/pi-stack/kenan-root.json"): RootConfig {
   const config = JSON.parse(readFileSync(path, "utf8")) as RootConfig;
@@ -39,7 +39,7 @@ export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/
   return config;
 }
 
-export function createRootExecutor(config: RootConfig, options: { factory?: RootSessionFactory; env?: NodeJS.ProcessEnv; prompt?: string; report?: InfrastructureReporter; consent?: (admission: RootAdmission, request: string, input: ConsentInput) => ReturnType<ConsentRequest> } = {}): RootExecutor {
+export function createRootExecutor(config: RootConfig, options: { factory?: RootSessionFactory; env?: NodeJS.ProcessEnv; prompt?: string; report?: InfrastructureReporter; consent?: (admission: RootAdmission, request: string, input: ConsentInput) => ReturnType<ConsentRequest>; notify?: (admission: RootAdmission, toolCallId: string, input: NotificationInput) => ReturnType<NotificationRequest> } = {}): RootExecutor {
   const hostPrompt = options.prompt ?? readFileSync(config.promptFile, "utf8");
   const factory = options.factory ?? createFixedSession;
   const baseEnv = { ...process.env, ...options.env };
@@ -68,7 +68,8 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
         rootSessionId: admission.rootSessionId, recipients: admission.recipients, roomId: admission.roomId, createdAt: new Date().toISOString() })+'\n', { mode: 0o600 });
       stage = "create-session";
       session = await factory({ id: admission.rootSessionId, person: admission.person, recipients: [...admission.recipients], prompt,
-        request, config, directory, env, requestConsent: options.consent ? input => options.consent!(admission, request, input) : undefined });
+        request, config, directory, env, requestConsent: options.consent ? input => options.consent!(admission, request, input) : undefined,
+        notify: options.notify ? (toolCallId, input) => options.notify!(admission, toolCallId, input) : undefined });
       stage = "model-turn";
       await session.prompt(`A person asked Kenan the following. Consider it on its merits and answer only what you choose to disclose.\n\n${JSON.stringify({ request })}`);
       const reply = session.reply();
@@ -118,9 +119,13 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
       parameters: Type.Object({ subject: Type.String({ minLength: 1 }), question: Type.String({ minLength: 1, maxLength: 16000 }) }),
       execute: async (_id, input) => { const result = spec.requestConsent ? await spec.requestConsent(input) : { ok: false, message: "Consent delivery is unavailable; nobody was asked" };
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} }; } });
+    const notificationTool = defineTool({ name: "root_notify", label: "Notify a person", description: "Send exact chosen text to a registered person's own inbox through the authenticated router. The durable outbox handles unavailable supervisors and retries the same delivery identity. queued:true means custody, delivered:true means the recipient inbox acknowledged it. Never use guessed supervisor ports or raw shell sends. Include all people discussed and classify intimate content as private.",
+      parameters: Type.Object({ recipient: Type.String({ minLength: 1 }), text: Type.String({ minLength: 1, maxLength: 24000 }), subjects: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 }), obviouslyPrivate: Type.Boolean() }),
+      execute: async (id, input) => { const result = spec.notify ? await spec.notify(id, input) : { ok: false, message: "Notification delivery is unavailable; nothing was queued" };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} }; } });
     const { session } = await createAgentSessionFromServices({ services,
       sessionManager: SessionManager.create(spec.config.cwd, spec.directory), model,
-      thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, consentTool, replyTool] });
+      thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, consentTool, notificationTool, replyTool] });
     const resources = services.resourceLoader;
     const names = session.agent.state.tools.map(tool => tool.name);
     if (resources.getSystemPrompt() !== spec.prompt || resources.getAgentsFiles().agentsFiles.length || resources.getSkills().skills.length || resources.getAppendSystemPrompt().length) {

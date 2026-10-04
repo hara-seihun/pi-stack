@@ -28,14 +28,14 @@ export function rootConsentHandler(options: RootConsentOptions): (request: Reque
     if (!path.startsWith(CONSENT_PREFIX)) return null;
     const expected = options.capability(), supplied = request.headers.get(ROOT_CONSENT_HEADER);
     if (!expected || !supplied || !/^[a-f0-9]{64}$/.test(expected) || !/^[a-f0-9]{64}$/.test(supplied) || supplied.length !== expected.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return new Response("Not found", { status: 404 });
-    if (request.method !== "POST" || !["question", "answer", "reply"].includes(path.slice(CONSENT_PREFIX.length))) return new Response("Not found", { status: 404 });
+    if (request.method !== "POST" || !["question", "answer", "reply", "notify"].includes(path.slice(CONSENT_PREFIX.length))) return new Response("Not found", { status: 404 });
     const raw = await request.text();
     if (Buffer.byteLength(raw) > 32_768) return failed("Consent request too large", 413);
     let body: Record<string, unknown>;
     try { body = JSON.parse(raw); } catch { return failed("Expected a consent object", 400); }
     if (!body || typeof body !== "object" || Array.isArray(body) || !consentIdValid(body.consentId)) return failed("Invalid consent identity", 400);
     const operation = path.slice(CONSENT_PREFIX.length), id = body.consentId;
-    const user = operation === "reply" ? body.person : body.subject;
+    const user = operation === "reply" || operation === "notify" ? body.person : body.subject;
     const person = options.persons().find(person => person.user === user);
     if (!person && !(operation === "reply" && user === "pi-rooms")) return failed("Consent recipient is not registered", 400);
     const origin = person ? `http://127.0.0.1:${person.port}` : options.roomsOrigin ?? "http://127.0.0.1:18822";
@@ -43,6 +43,17 @@ export function rootConsentHandler(options: RootConsentOptions): (request: Reque
     if (local.protocol !== "http:" || local.hostname !== "127.0.0.1" || local.pathname !== "/" || local.username || local.password || local.search || local.hash) return failed("Consent owner is not local");
     const api = options.client?.(String(user), origin) ?? createThreadClient(`${origin}/v1/threads`, fetch, { timeoutMs: 5_000 });
     try {
+      if (operation === "notify") {
+        if (!exact(body, ["consentId", "person", "text"]) || !text(body.text) || !person) return failed("Invalid notification", 400);
+        const threadId = consentInboxId(`notification:${id}`);
+        const cwd = String(person.environment.PI_REMOTE_PRIVATE_DIR ?? person.unlock?.mountpoint ?? person.environment.HOME ?? "");
+        if (!cwd.startsWith("/")) return failed("Notification inbox has no private workspace");
+        const spawned = await api.spawn({ requestId: `notification:${id}:inbox`, id: threadId, title: "Kenan: update", cwd,
+          metadata: { workspaceId: String(person.environment.PI_REMOTE_PRIVATE_ID ?? "personal"), profileId: "personal" } });
+        if (!spawned.ok) return failed("Recipient's inbox could not accept the notification");
+        const delivered = await api.send({ requestId: `notification:${id}:message`, threadId, senderId: "kenan-root", text: body.text, delivery: "steer", source: "notification" });
+        return delivered.ok ? Response.json({ ok: true, value: { accepted: true, threadId } }) : failed("Notification was not acknowledged by its recipient");
+      }
       if (operation === "question") {
         if (!exact(body, ["consentId", "subject", "text"]) || !text(body.text) || !person) return failed("Invalid consent question", 400);
         const threadId = consentInboxId(id);
