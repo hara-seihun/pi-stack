@@ -140,6 +140,11 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
       </div>
       <dl className="inspector-facts">
         <Row label="Status"><StatusPill status={status} /></Row>
+        {session.state === "running" && <>
+          {status.title && <Row label="Phase evidence">{status.title}</Row>}
+          <Row label="Phase started">{session.activitySince ? formatTime(new Date(session.activitySince).toISOString()) : "Not reported"}</Row>
+          <Row label="Last activity">{session.lastActivityAt ? formatTime(new Date(session.lastActivityAt).toISOString()) : "Not reported"}</Row>
+        </>}
         <Row label="Model">{session.model}</Row>
         {!session.model.includes("/") && <Row label="Provider">{session.provider}</Row>}
         <Row label="Environment">{session.environment}</Row>

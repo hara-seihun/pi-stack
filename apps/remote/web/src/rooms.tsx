@@ -5,6 +5,8 @@ import { ChatMessage, agentAvatar } from "./chat-message";
 import { Composer } from "./Composer";
 import { ConversationView } from "./ConversationView";
 import { ConversationHeader } from "./features/conversation/ConversationScreen";
+import { StatusPill } from "./features/status/StatusPill";
+import { UNKNOWN_ACTIVITY } from "./features/status/thread-status";
 import { QuestionDrafts, answerIsValid, toggleSuggestion } from "./features/conversation/question-drafts";
 import { Markdown } from "./context";
 import { DismissibleError } from "./dismissible-error";
@@ -208,7 +210,7 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
   return <section className="conversation-screen room-conversation" aria-label={snapshot?.room.title ?? "Room"}>
     <ConversationHeader title={snapshot?.room.title ?? "Opening room…"} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={() => setDetails(value => !value)}
       meta={<span className="conversation-meta">{snapshot?.room.members.map(member => member.displayName).join(", ")}{snapshot ? " · Kenan" : ""}</span>}
-      status={running ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Replying…</span> : undefined}
+      status={running ? <StatusPill status={UNKNOWN_ACTIVITY} /> : undefined}
       trailing={running && (question || text.trim()) ? <button type="button" className="header-action" disabled={pending} onClick={() => void stop()}>Stop thread</button> : null} />
     {details && <section className="room-details" aria-label="Conversation details">
       <div className="room-details-heading"><strong>People</strong><button type="button" className="header-chip" disabled={!snapshot || running || pending} onClick={() => setAdding(value => !value)}>Add people</button></div>

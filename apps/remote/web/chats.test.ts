@@ -118,7 +118,7 @@ test("the last worker settling clears waiting status in the inbox", () => {
 
 test("status vocabulary covers every lifecycle and flag", () => {
   expect(threadStatus(session("a")).key).toBe("idle");
-  expect(threadStatus(session("a", { state: "running" }))).toMatchObject({ key: "running", label: "Working", busy: true });
+  expect(threadStatus(session("a", { state: "running" }))).toMatchObject({ key: "running", label: "Activity unknown", busy: true });
   expect(threadStatus(session("a", { state: "running", activity: "thinking" })).key).toBe("thinking");
   expect(threadStatus(session("a", { state: "running", activity: "waiting_on_tool", activeTools: ["functions.agent_browser"] })).label).toBe("Running agent browser");
   expect(threadStatus(session("a", { state: "running", activity: "waiting_on_tool", activeTools: ["bash", "web_search"] }))).toMatchObject({ label: "Running bash and web search", short: "2 tools" });
@@ -147,13 +147,13 @@ test("the inbox keeps idle unread as Idle with a dot and gives multi-tool names 
   expect(toolsMarkup).toContain('title="bash, web search, agent browser"');
   expect(toolsMarkup).toContain("3 tools");
 
-  // A working thread says so. Leaving its word to the section header showed "· Fable": a blank where the state goes.
+  // A running lifecycle without a reported phase must not imply observed progress.
   const working = inboxRows([session("busy", { state: "running", activity: "running" })], [], { ...messaging, conversations: [] })[0]!;
   const workingMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...working, chat: { ...working.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
   expect(workingMarkup).toContain('data-status="running"');
-  expect(workingMarkup).toContain('class="status-label">Working</span>');
+  expect(workingMarkup).toContain('class="status-label">Activity unknown</span>');
   expect(workingMarkup).toMatch(/<span class="inbox-status-line"><span class="status-pill/);
 });
 
