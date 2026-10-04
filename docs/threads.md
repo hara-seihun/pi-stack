@@ -84,6 +84,18 @@ When a child's execution settles, commit its full outcome and final assistant me
 
 Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain queued when the parent is held. Idle is not proof that an assignment succeeded.
 
+## Model availability
+
+Machine → Models enables or disables offered models globally for everyone's new threads on the selected host. Only the host administrator (`fleetUser`) can edit; everyone else sees read-only enabled/disabled states. All Remote and Orchestrator person owners live-read the same `/var/lib/pi-stack/model-availability/policy.json` file. `PI_STACK_MODEL_AVAILABILITY_PATH` overrides the path for fixtures; there are no per-person overrides:
+
+```json
+{ "version": 1, "disabled": ["openai-codex/gpt-6-astra", "anthropic/claude-fable-5-1"] }
+```
+
+A missing file enables every model. Writes replace it atomically, preserving unrelated choices. A malformed or unreadable policy rejects new creation rather than silently enabling models. The policy is live-read at creation, so no restart is needed. Catalog names, physical IDs and numbered pool providers resolve to the same identity. Admission checks resolved settings before committing new roots or children, including CLI, direct thread APIs, scheduled work and private workers. Retrying a previously accepted creation retains its thread; imports and restored threads retain their state. Existing threads can continue, resume and change settings. Disabling never cancels them, changes their model or changes account availability; application completions and thread naming are unaffected. Existing child-model restrictions still apply when a model is enabled.
+
+The Remote dashboard always exposes `modelAvailability` and `canManageModels`; the latter is true only for the host administrator. Bootstrap start profiles omit disabled models. Administrator-only `PUT /v1/models/:id/availability` accepts `{ "enabled": true }` or `false` and returns `{ "models": [...] }`; provider/model IDs use encoded path segments. An open stale picker cannot bypass server admission. A disabled configured default is rejected when requested rather than silently substituting another model. Each host has one global policy shared by every person; both household machines are seeded with the requested disablements.
+
 ## Defaults
 
 Remote asks its naming model for one to three words. That is a style preference,
