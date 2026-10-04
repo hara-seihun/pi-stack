@@ -12,9 +12,12 @@ export interface ConsentQuestionReceipt { threadId: string; questionId: string }
 export interface ConsentAnswerQuery { consentId: string; subject: string; threadId: string; questionId: string }
 export interface ConsentAnswerReceipt { question: string; answer?: { text: string; selectedSuggestions: string[]; dismissed: boolean; acceptedAt: number } }
 export interface ConsentReply { consentId: string; person: string; threadId: string; reply: string }
+export interface RootNotification { consentId: string; person: string; text: string }
+export interface NotificationReceipt { accepted: true; threadId: string }
 export type ConsentResult<T> = { ok: true; value: T } | { ok: false; message: string };
 export interface ConsentBridge {
   question(input: ConsentQuestion): Promise<ConsentResult<ConsentQuestionReceipt>>;
   answer(input: ConsentAnswerQuery): Promise<ConsentResult<ConsentAnswerReceipt>>;
   reply(input: ConsentReply): Promise<ConsentResult<{ accepted: true }>>;
+  notify?(input: RootNotification): Promise<ConsentResult<NotificationReceipt>>;
 }

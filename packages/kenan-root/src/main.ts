@@ -3,6 +3,7 @@ import { join, resolve, sep } from "node:path";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { KENAN_ROOT_DEFAULT_PORT } from "kenan-memory/contract";
 import { rootService, type RootReleaseState } from "./service.js";
+import { RootRequestStore } from "./requests.js";
 import { createRootExecutor, readRootConfig } from "./root-runtime.js";
 import { awaitPrivateMount } from "kenan-memory/private-store";
 import { RootConsentManager, createConsentBridge, rootMemoryRpc } from "./consent.js";
@@ -22,20 +23,29 @@ const consentCapability = credential("PI_KENAN_ROOT_CONSENT_TOKEN_FILE", "kenan-
 for (const path of [config.cwd, config.agentDir, config.sessionsDir]) mkdirSync(path, { recursive: true, mode: 0o700 });
 const memoryUrl = process.env.PI_KENAN_MEMORY_URL ?? "http://127.0.0.1:18820";
 let consent: RootConsentManager;
-const executor = createRootExecutor(config, { consent: (admission, request, input) => consent.request(admission, request, input) });
+const executor = createRootExecutor(config, { consent: (admission, request, input) => consent.request(admission, request, input),
+  notify: (admission, toolCallId, input) => consent.notify(admission, toolCallId, input) });
 const consentStore = resolve(process.env.PI_KENAN_ROOT_CONSENT_STORE ?? join(privateDir, "root/consent.sqlite3"));
 if (!consentStore.startsWith(resolve(privateDir) + sep)) throw new Error("Root consent must remain inside the mounted encrypted private store");
+const bridge = createConsentBridge(process.env.PI_KENAN_ROOT_ROUTER_URL ?? "http://127.0.0.1:8788", consentCapability);
 consent = new RootConsentManager(consentStore, {
-  bridge: createConsentBridge(process.env.PI_KENAN_ROOT_ROUTER_URL ?? "http://127.0.0.1:8788", consentCapability),
+  bridge,
   memory: rootMemoryRpc(memoryUrl, memoryRootToken), executor, enabled: oneKenanEnabled });
 const releaseState: RootReleaseState = { quiescing: false, consentActive: false };
 const timer = setInterval(async () => {
   if (releaseState.consentActive || releaseState.quiescing || closing.signal.aborted) return;
   releaseState.consentActive = true;
-  try { const result = await consent.drain(); if (result.errors) console.error(`Root consent: ${result.errors} pending exchanges require retry; state retained`); }
+  try {
+    const [result, requests] = await Promise.all([consent.drain(), handle.drain()]);
+    if (result.errors) console.error(`Root consent: ${result.errors} pending exchanges require retry; state retained`);
+    if (requests.errors) console.error(`Root requests: ${requests.errors} pending replies require retry; state retained`);
+  }
   finally { releaseState.consentActive = false; }
 }, 2_000);
-const handle = rootService({ enabled: oneKenanEnabled, memoryUrl,
+const requestStorePath = resolve(process.env.PI_KENAN_ROOT_REQUEST_STORE ?? join(privateDir, "root/requests.sqlite3"));
+if (!requestStorePath.startsWith(resolve(privateDir) + sep)) throw new Error("Root requests must remain inside the mounted encrypted private store");
+const requestStore = new RootRequestStore(requestStorePath);
+const handle = rootService({ enabled: oneKenanEnabled, memoryUrl, requestStore, bridge,
   memoryRootToken, adminCapability, sessionsDir: config.sessionsDir, executor,
   releaseCommit: process.env.PI_STACK_RELEASE_COMMIT, releaseState });
 const server = Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT), idleTimeout: 255,

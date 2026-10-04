@@ -4,10 +4,16 @@ import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { MEMORY_TOKEN_HEADER, type RootAdmission, type MemoryResult } from "kenan-memory/contract";
 import type { RootExecutor, RootExecution } from "./root-runtime.js";
-import { CONSENT_PREFIX, ROOT_CONSENT_HEADER, type ConsentBridge, type ConsentResult, type ConsentQuestionReceipt } from "./consent-contract.js";
+import { CONSENT_PREFIX, ROOT_CONSENT_HEADER, type ConsentBridge, type ConsentResult, type ConsentQuestionReceipt, consentInboxId } from "./consent-contract.js";
 
 export interface ConsentInput { subject: string; question: string }
 export type ConsentRequest = (input: ConsentInput) => Promise<ConsentResult<{ delivered: true; consentId: string }>>;
+export interface NotificationInput { recipient: string; text: string; subjects: string[]; obviouslyPrivate: boolean }
+export type NotificationRequest = (toolCallId: string, input: NotificationInput) => Promise<ConsentResult<{ queued: true; delivered: boolean; notificationId: string }>>;
+interface PendingNotification {
+  id: string; rootSessionId: string; input: NotificationInput;
+  state: "queued" | "logged" | "delivered" | "failed"; lastError?: string;
+}
 type StoredAdmission = Omit<RootAdmission, "memoryToken">;
 interface PendingConsent {
   id: string; original: StoredAdmission; request: string; subject: string; question: string;
@@ -21,7 +27,9 @@ export function rootMemoryRpc(url: string, token: string, transport: typeof fetc
     try {
       const response = await transport(new URL(path, url), { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: token }, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
       const result = await response.json();
-      return response.ok && result?.ok === true ? result : { ok: false, error: "unavailable", message: "Root consent accounting is unavailable" };
+      if (response.ok && result?.ok === true) return result;
+      if (result?.ok === false && ["invalid-request", "unauthenticated"].includes(result.error)) return { ok: false, error: result.error, message: "Root accounting rejected this operation" };
+      return { ok: false, error: "unavailable", message: "Root consent accounting is unavailable" };
     } catch { return { ok: false, error: "unavailable", message: "Root consent accounting is unavailable" }; }
   };
 }
@@ -35,7 +43,7 @@ export function createConsentBridge(url: string, token: string, transport: typeo
       return response.ok && result?.ok === true ? result : { ok: false, message: "Consent delivery was not acknowledged; the durable outbox will retry" };
     } catch { return { ok: false, message: "Consent delivery was not acknowledged; the durable outbox will retry" }; }
   };
-  return { question: input => rpc("question", input), answer: input => rpc("answer", input), reply: input => rpc("reply", input) };
+  return { question: input => rpc("question", input), answer: input => rpc("answer", input), reply: input => rpc("reply", input), notify: input => rpc("notify", input) };
 }
 
 export class RootConsentManager {
@@ -45,7 +53,7 @@ export class RootConsentManager {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true, strict: true });
     chmodSync(path, 0o600);
-    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS root_consent(id TEXT PRIMARY KEY,data TEXT NOT NULL,state TEXT NOT NULL,updated_at INTEGER NOT NULL)");
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS root_consent(id TEXT PRIMARY KEY,data TEXT NOT NULL,state TEXT NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS root_notification(id TEXT PRIMARY KEY,data TEXT NOT NULL,state TEXT NOT NULL,updated_at INTEGER NOT NULL)");
   }
   close(): void { this.db.close(); }
   private get(id: string): PendingConsent { return JSON.parse((this.db.query("SELECT data FROM root_consent WHERE id=?").get(id) as { data: string }).data); }
@@ -84,10 +92,59 @@ export class RootConsentManager {
     row.receipt = delivered.value; row.state = "waiting"; delete row.lastError; this.save(row);
     return { ok: true, value: undefined };
   }
+  private saveNotification(row: PendingNotification): void {
+    this.db.query("INSERT INTO root_notification(id,data,state,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,state=excluded.state,updated_at=excluded.updated_at").run(row.id, JSON.stringify(row), row.state, Date.now());
+  }
+  async notify(admission: RootAdmission, toolCallId: string, input: NotificationInput): ReturnType<NotificationRequest> {
+    if (!this.options.enabled()) return { ok: false, message: "Root notifications are disabled; nothing was queued" };
+    if (!toolCallId || !/^[a-z_][a-z0-9_-]{0,31}$/.test(input.recipient) || !input.text.trim() || Buffer.byteLength(input.text) > 24_000
+      || !Array.isArray(input.subjects) || !input.subjects.length || input.subjects.length > 100 || input.subjects.some(id => !/^[a-z_][a-z0-9_-]{0,31}$/.test(id)) || typeof input.obviouslyPrivate !== "boolean")
+      return { ok: false, message: "Notification requires a registered recipient, exact text, subjects and privacy classification" };
+    const id = consentInboxId(`notification:${admission.rootSessionId}:${toolCallId}`);
+    return this.serial(id, async () => {
+      const stored = this.db.query("SELECT data FROM root_notification WHERE id=?").get(id) as { data: string } | null;
+      const row: PendingNotification = stored ? JSON.parse(stored.data) : { id, rootSessionId: admission.rootSessionId, input, state: "queued" };
+      if (JSON.stringify(row.input) !== JSON.stringify(input)) return { ok: false, message: "This notification identity already belongs to different content" };
+      if (!stored) this.saveNotification(row);
+      try {
+        const result = await this.advanceNotification(row);
+        if (!result.ok) { row.lastError = result.message; this.saveNotification(row); }
+      } catch { row.lastError = "Notification reconciliation failed; durable custody retained"; this.saveNotification(row); }
+      if (row.state === "failed") return { ok: false, message: row.lastError ?? "Notification was rejected; nothing was delivered" };
+      return { ok: true, value: { queued: true, delivered: row.state === "delivered", notificationId: id } };
+    });
+  }
+  private async advanceNotification(row: PendingNotification): Promise<ConsentResult<void>> {
+    if (row.state === "queued") {
+      const logged = await this.options.memory("/v1/root/log-notification", { rootSessionId: row.rootSessionId, notificationId: row.id, ...row.input });
+      if (!logged.ok) {
+        if (logged.error === "invalid-request" || logged.error === "unauthenticated") row.state = "failed";
+        return { ok: false, message: logged.message };
+      }
+      row.state = "logged"; delete row.lastError; this.saveNotification(row);
+    }
+    if (row.state === "logged") {
+      if (!this.options.bridge.notify) return { ok: false, message: "Notification delivery bridge is unavailable" };
+      const sent = await this.options.bridge.notify({ consentId: row.id, person: row.input.recipient, text: row.input.text });
+      if (!sent.ok) return sent;
+      row.state = "delivered"; delete row.lastError; this.saveNotification(row);
+    }
+    return { ok: true, value: undefined };
+  }
   async drain(): Promise<{ pending: number; delivered: number; errors: number }> {
+    const notifications = this.db.query("SELECT id FROM root_notification WHERE state IN ('queued','logged') ORDER BY updated_at LIMIT 32").all() as { id: string }[];
+    let notificationDelivered = 0, notificationErrors = 0;
+    if (this.options.enabled()) await Promise.all(notifications.map(({ id }) => this.serial(id, async () => {
+      const row: PendingNotification = JSON.parse((this.db.query("SELECT data FROM root_notification WHERE id=?").get(id) as { data: string }).data);
+      try {
+        const result = await this.advanceNotification(row);
+        if (!result.ok) { row.lastError = result.message; this.saveNotification(row); notificationErrors++; }
+        else if (row.state === "delivered") notificationDelivered++;
+      } catch { row.lastError = "Notification reconciliation failed; durable custody retained"; this.saveNotification(row); notificationErrors++; }
+    })));
     const rows = this.db.query("SELECT id FROM root_consent WHERE state!='delivered' ORDER BY updated_at LIMIT 32").all() as { id: string }[];
-    let delivered = 0, errors = 0;
-    if (!this.options.enabled()) return { pending: rows.length, delivered, errors };
+    let delivered = notificationDelivered, errors = notificationErrors;
+    if (!this.options.enabled()) return { pending: rows.length + notifications.length, delivered, errors };
     for (const { id } of rows) await this.serial(id, async () => {
       const row = this.get(id);
       try {
@@ -96,7 +153,7 @@ export class RootConsentManager {
         else if (row.state === "delivered") delivered++;
       } catch { row.lastError = "Consent reconciliation failed; the durable record is retained"; this.save(row); errors++; }
     });
-    return { pending: rows.length - delivered, delivered, errors };
+    return { pending: rows.length + notifications.length - delivered, delivered, errors };
   }
   private async advance(row: PendingConsent): Promise<ConsentResult<void>> {
     if (row.state === "queued") return this.dispatch(row);

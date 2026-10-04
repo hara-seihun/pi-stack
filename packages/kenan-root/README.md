@@ -4,15 +4,25 @@
 
 ## Admission and outgoing replies
 
-`POST /v1/ask` accepts only `{request:string}` and the minted person's `x-kenan-memory-session` capability. The memory service authenticates person/thread and, for rooms, the current full roster. Each consultation starts a fresh native session with host-owned model, prompt and exact toolset. Requests cannot select those resources or claim identity. `root_reply` chooses the sole outgoing text; exact disclosure accounting must acknowledge before `{reply}` returns. Native histories live outside every ordinary ThreadDirectory. [Separate admin admission](src/visibility.ts) protects list/transcript debugging.
+`POST /v1/ask` accepts only `{request:string}` and the minted person's `x-kenan-memory-session` capability. The memory service authenticates person/thread and, for rooms, the current full roster. Each new consultation starts one fresh native session with host-owned model, prompt and exact toolset; retrieval never starts another. Requests cannot select those resources or claim identity. `root_reply` chooses the sole outgoing text; exact disclosure accounting must acknowledge before `{reply}` returns. Native histories live outside every ordinary ThreadDirectory. [Separate admin admission](src/visibility.ts) protects list/transcript debugging.
 
 Root configuration is `PI_KENAN_ROOT_CONFIG` (default `/etc/pi-stack/kenan-root.json`), root-owned and not group/world writable. Required fields are version/provider/model/thinkingLevel/cwd/agentDir/sessionsDir/promptFile/brokerUrl. Root HTTP is loopback `PI_KENAN_ROOT_PORT`, default 18821; memory is `PI_KENAN_MEMORY_URL`, default loopback18820. Provider traffic uses the explicit host model broker. Startup waits for the real encrypted `PI_KENAN_PRIVATE_DIR` gocryptfs mount; no plaintext fallback is opened.
 
 `GET /v1/health` reports `releaseCommit` pinned at process startup and `releaseProtocol:1`. Authenticated `POST /v1/admin/release` returns 409 while an ask or consent reconciliation is active; otherwise it atomically fences both new asks and consent reconciliation. `DELETE` unfences it. The separate admin capability is required for both operations. Release activation never infers idle from an open TCP listener.
 
-Operational `Kenan infrastructure` logs contain only component, stage, outcome, elapsed milliseconds, bounded reason and HTTP status. Request text, reply text, exception messages/stacks, credentials and person/thread/session identities never enter these logs. A 120-second client deadline is a timed-out request with unknown outcome, not evidence that the root daemon is down; it is not automatically replayed.
+Operational `Kenan infrastructure` logs contain only component, stage, outcome, elapsed milliseconds, bounded reason and HTTP status. Request text, reply text, exception messages/stacks, credentials and person/thread/session identities never enter these logs. The client's 20-second transport deadline bounds acceptance or retrieval, not the model's work. A lost acknowledgement is not evidence of failure and never authorizes automatic replay.
 
 Systemd credentials `kenan-memory-root`, `kenan-root-admin`, `kenan-root-consent` have distinct authority. Explicit file overrides are `PI_KENAN_MEMORY_ROOT_TOKEN_FILE`, `PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE`, `PI_KENAN_ROOT_CONSENT_TOKEN_FILE`. Never pass their values as arguments or put them in transcript text.
+
+## Durable ask lifecycle
+
+New clients attach `x-kenan-request-id`, an opaque UUID stable for the authenticated thread's tool call. Root commits admission to [the request store](src/requests.ts) before starting any executor and promptly returns `202 {requestId,status:'pending'}`. A repeated POST with the same text/ID retrieves the same operation; changed text is refused. Headerless callers retain their synchronous reply behavior during rollout.
+
+`GET /v1/ask/:requestId` uses the same person-session capability. A root-only memory authorization check validates the original person/thread and current entire room audience without admitting a new root session. Only `{reply}` or `{requestId,status:'pending'|'failed'|'interrupted'}` leaves this endpoint—never native session IDs, contexts, traces or private error text. Unknown and unauthorized lookups have the same 404 response.
+
+`PI_KENAN_ROOT_REQUEST_STORE` defaults to `private/root/requests.sqlite3` and must stay inside the mounted encrypted private directory. It holds authenticated admission metadata **without memory tokens**, a request digest, lifecycle state and the sole chosen reply. The SQLite store uses full synchronous commits. A daemon restart marks executing requests interrupted; POST, GET and reconciliation never repeat their model or side effects. A persisted chosen reply can retry disclosure finalization without a model.
+
+Completed asynchronous replies enter a durable outbox and arrive automatically in the originating person's thread through the authenticated router reply bridge. Every delivery attempt rechecks the current full audience and exact disclosure accounting. Failed/interrupted requests deliver a fixed generic operational notice with request ID, not a private failure explanation or invented answer. These notices are separately logged and audience-checked. The two-second reconciler owns retry; callers continue other work rather than polling. Stable request/message IDs survive refused connections, disconnects and lost delivery acknowledgements. Delivery respects held threads and the router's archived-thread rules. Release admission fences this reconciliation as well as asks and consent.
 
 ## Async subject consent
 
@@ -24,8 +34,12 @@ The foreground root daemon reconciles encrypted `PI_KENAN_ROOT_CONSENT_STORE` (d
 
 All boundary operations have stable identities. Interrupted delivery and lost acknowledgements replay the same question/message, not new ones. Completed root decisions are persisted before delivery and never rerun. Pending exchanges survive root executor release and daemon restart. Disabling the flag stops reconciliation; rollback preserves encrypted pending state.
 
+## Durable notifications
+
+`root_notify({recipient,text,subjects,obviouslyPrivate})` selects exact text for one registered recipient. The router's narrow `/v1/root-consent/notify` bridge owns delivery; no model reconstructs supervisor endpoints or guesses private ports. The encrypted `consent.sqlite3` notification outbox commits custody before returning `queued:true`. Queued is not delivered: only an acknowledged delivery marks it delivered. Root-only `/v1/root/log-notification` commits idempotent exact disclosure/action accounting before the stable-ID send. Private actions remain private; nonprivate recipient-relevant actions are visible through that person's memory. Refused connections, restarts and lost acknowledgements retry the same message without another model decision.
+
 ## Proofs
 
-- `bun test packages/kenan-root/tests`: fixed resources, reply boundary/admin isolation, real memory + real subject ThreadService consent, restart, lost ACK, forged capability and failed-delivery honesty.
+- `bun test packages/kenan-root/tests`: fixed resources, reply boundary/admin isolation, durable request custody/status/automatic delivery, interrupted-execution nonreplay, real memory + real subject ThreadService consent/notifications, restart, lost ACK, forged capability and failed-delivery honesty.
 - `deploy/one-kenan-fuse-rehearse`: bounded privileged real FUSE fixture, not live mounts or real keys.
 - Integrator native staging exercises actual host-catalog Sol/Opus sessions and the complete consent path.

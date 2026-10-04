@@ -38,7 +38,9 @@ Questions survive the agent's turn ending and owner restarts. Answering removes 
 
 ## Transport and custody
 
-The owning thread database stores questions and answer receipts. Remote is a client of that owner, not another question store. The model's original tool call and the eventual human answer remain in native Pi history.
+The owning thread database stores questions and answer receipts. Remote is a client of that owner, not another question store. For ordinary async questions, the model's original tool call and the eventual human answer remain in native Pi history.
+
+Root permission questions in a marked `rootConsent` inbox are owned by the existing `consent:ID:question` ask receipt. Their answers stay in the owner's durable question record and are projected as visible, correlated user receipts in history reads and the Remote transcript, including over a previously captured local context. They are not ordinary Pi work and do not start or steer the subject's agent; RootConsentManager reads the receipt and owns continuation. Dismissal grants nothing. The answer does not unhold unrelated work or restore an archived inbox. Subsequent ordinary inbox conversation and its own async questions still use normal delivery.
 
 - `GET /v1/sessions/:sessionId/questions` returns `{questions}` with pending questions.
 - `POST /v1/sessions/:sessionId/questions/:questionId/answer` accepts `{selectedSuggestionIds, text}` or `{selectedSuggestionIds: [], text: "", dismissed: true}` and returns `{accepted: true, questionId}`.

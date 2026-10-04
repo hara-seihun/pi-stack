@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type RootResumeConsent, type RootLogConsent } from "./contract.js";
+import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
 import { MemoryStore } from "./store.js";
 import { validateRequest } from "./validation.js";
 export interface MemoryAuth {
@@ -48,7 +48,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
     try {
       if (!options.enabled()) return send(503, { ok: false, error: "disabled", message: "One Kenan is disabled on this host" });
       if (request.method === "GET" && request.url === "/v1/health") return send(200, { ok: true, service: "kenan-memory", releaseCommit: options.releaseCommit ?? null });
-      if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent"].includes(request.url ?? ""))
+      if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/log-notification", "/v1/root/log-request-status"].includes(request.url ?? ""))
         return send(404, { ok: false, error: "invalid-request", message: "Unknown memory route" });
       const caller = principal(request);
       if (!caller) return denied("Memory access requires a verified local identity");
@@ -59,6 +59,36 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
       if (request.url?.startsWith("/v1/root/")) {
         if (caller.kind !== "root-service") return denied("This operation belongs to the root Kenan service");
         if (!object(input)) return invalid("Root operation must be an object");
+        if (request.url === "/v1/root/authorize-request") {
+          if (!fields(input, ["callerToken", "rootSessionId"]) || typeof input.callerToken !== "string" || typeof input.rootSessionId !== "string") return invalid("Invalid request authorization");
+          const session = store.resolveSession(input.callerToken);
+          const admitted = store.rootAdmission(input.rootSessionId);
+          if (!session || session.role !== "person" || !admitted || session.person !== admitted.person || session.threadId !== admitted.threadId) return denied("Request is unavailable to this session");
+          const current = await options.roomAudience?.(session.person, session.threadId);
+          if (admitted.roomId || current || session.person === "pi-rooms") {
+            if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0")) return denied("Request is unavailable to this audience");
+          }
+          return send(200, { ok: true, value: { authorized: true } });
+        }
+        if (request.url === "/v1/root/log-request-status") {
+          if (!fields(input, ["rootSessionId", "requestId", "status"]) || typeof input.rootSessionId !== "string" || typeof input.requestId !== "string" || !new RegExp(KENAN_REQUEST_ID_PATTERN).test(input.requestId) || !["failed", "interrupted"].includes(input.status)) return invalid("Invalid root request status");
+          const admitted = store.rootAdmission(input.rootSessionId);
+          if (!admitted) return denied("Request is unavailable");
+          if (admitted.roomId) {
+            const current = await options.roomAudience?.(admitted.person, admitted.threadId);
+            if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0")) return denied("The original room audience changed");
+          }
+          const result = store.logRequestStatus(input as RootLogRequestStatus);
+          return send(result.ok ? 200 : 400, result);
+        }
+        if (request.url === "/v1/root/log-notification") {
+          if (!fields(input, ["rootSessionId", "notificationId", "recipient", "text", "subjects", "obviouslyPrivate"])
+            || typeof input.rootSessionId !== "string" || !input.rootSessionId || typeof input.notificationId !== "string" || !input.notificationId || input.notificationId.length > 200
+            || typeof input.recipient !== "string" || input.recipient === "pi-rooms" || ![...auth.supervisors.map(entry => entry.person), ...Object.values(auth.uidPersons ?? {})].includes(input.recipient)
+            || typeof input.text !== "string" || !input.text.trim() || input.text.length > 100_000 || !strings(input.subjects) || typeof input.obviouslyPrivate !== "boolean") return invalid("Invalid root notification");
+          const result = store.logNotification(input as RootLogNotification);
+          return send(result.ok ? 200 : 400, result);
+        }
         if (["/v1/root/resume-consent", "/v1/root/log-consent"].includes(request.url!)) {
           const resume = request.url === "/v1/root/resume-consent";
           const allowed = resume ? ["rootSessionId", "subject", "question", "answer", "consentId"] : ["rootSessionId", "consentId", "subject", "kind", "text"];
@@ -95,7 +125,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
         const admitted = store.rootAdmission(input.rootSessionId);
         if (admitted?.roomId) {
           const current = await options.roomAudience?.(admitted.person, admitted.threadId);
-          if (!current || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0")) return denied("The room audience changed before the reply; ask again");
+          if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0")) return denied("The room audience changed before the reply; ask again");
         }
         const result = store.finalizeRootReply({ rootSessionId: input.rootSessionId, reply: input.reply, subjects: input.subjects, ...(input.recipients ? { recipients: input.recipients } : {}) });
         return send(result.ok ? 200 : result.error === "unauthenticated" ? 403 : 400, result);

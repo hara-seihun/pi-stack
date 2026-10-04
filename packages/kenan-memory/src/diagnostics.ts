@@ -1,7 +1,7 @@
 export type InfrastructureReason = "timeout" | "cancelled" | "connection-refused" | "connection-reset" | "invalid-response" | "http-error" | "unexpected" | "resources-unavailable" | "model-unavailable" | "prompt-invariant" | "toolset-invariant" | "no-reply";
 export interface InfrastructureEvent {
   component: "root-client" | "root-service" | "root-executor";
-  stage: "request" | "admit" | "finalize" | "persist-admission" | "create-session" | "model-turn" | "persist-reply" | "dispose";
+  stage: "request" | "admit" | "authorize" | "request-status" | "finalize" | "persist-admission" | "create-session" | "model-turn" | "persist-reply" | "dispose";
   outcome: "ok" | "failed";
   durationMs: number;
   reason?: InfrastructureReason;

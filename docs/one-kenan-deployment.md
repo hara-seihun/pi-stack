@@ -263,7 +263,43 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-activate.test.py
 node --test scripts/one-kenan-access-release.test.mjs
 ```
 
-The helper accepts custom listener/runtime paths from the root-owned `/etc/pi-stack/one-kenan.json`; `--config` overrides that file. It never opens private stores, sessions or encrypted custody. Disabled hosts change nothing. `check` refuses the pre-protocol root generation with exit 75: that generation exposes neither active asks nor consent reconciliation, so its first replacement requires an administrator-owned controlled idle migration. Installing this helper is not permission to terminate an unknown active request.
+The helper accepts custom listener/runtime paths from the root-owned `/etc/pi-stack/one-kenan.json`; `--config` overrides that file. Ordinary activation/proof never opens private stores, sessions or encrypted custody; first migration reads only the aggregate lifecycle counts described below. Disabled hosts change nothing. Activation runs in PID 1's mount namespace and holds an administrator-only activation lock. `check` refuses the pre-protocol root generation with exit 75: that generation exposes neither active asks nor consent reconciliation. Use the explicit controlled idle migration below, never a blind restart.
+
+### First pre-protocol migration
+
+`migrate` supports the inspected startup source `1cd80555c5ce5b8f51e8e467fb6d598fcebcf73e` only. The administrator attests that source and the **previously inspected** live root MainPID; it refuses a changed PID, a protocol-enabled root, or different public source hashes. Keep that release's public Remote/runtime sources available through publication. No private session, transcript, prompt, request, reply, token value or consent body is inspected. SQLite probes issue only two `COUNT(*)` queries, in read-only/query-only mode inside the runtime mount namespace.
+
+After publication has selected the target commit, run from its release checkout:
+
+```sh
+# Use the new launcher BEFORE either consumer starts: it pins source and sets startup commit.
+sudo nsenter -t 1 -m -- install -m 755 deploy/one-kenan-runtime /usr/local/libexec/pi-kenan-runtime
+# Keep the configured administrator prompt current separately; migration never replaces it.
+sudo nsenter -t 1 -m -- python3 /ABSOLUTE/RELEASE/deploy/one-kenan-activate migrate \
+  --host /etc/pi-stack/host.json --expected TARGET_COMMIT \
+  --preprotocol-commit 1cd80555c5ce5b8f51e8e467fb6d598fcebcf73e \
+  --preprotocol-pid INSPECTED_ROOT_MAINPID
+sudo nsenter -t 1 -m -- python3 /ABSOLUTE/RELEASE/deploy/one-kenan-activate proof \
+  --host /etc/pi-stack/host.json --expected TARGET_COMMIT
+
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-activate.test.py
+sudo unshare --net -- python3 scripts/one-kenan-activate.test.py --network-rehearsal
+```
+
+The helper installs its own `inet pi_kenan_migration` nft table, rejecting new root-listener TCP SYNs without interrupting already accepted connections. Only the helper's root-only `SO_MARK` health/control sockets bypass that fence; there is no inspector/debug listener. Existing people, room services, custody and the host flag stay unchanged.
+
+It requires **all five counts to be zero**: root-role memory sessions (including disconnected model requests), undelivered consents, non-listening/non-TIME_WAIT root listener sockets, the root process's own connected TCP sockets (including outbound model/admission/consent calls), and descendant processes in the root cgroup. Under fenced admission, it freezes the root cgroup and repeats the counts before any restart. These source invariants ensure every admitted model retains a root token until disposal/finalization, and independent consent execution remains an undelivered row. Any nonzero count defers with sanitized counts and exit 75; historic failed tokens and waiting consent are retained, not declared idle or deleted. A socket-only check is not sufficient.
+
+With idle established, memory's infinite stop timeout lets accepted HTTP finish before SQLite closes. The helper replaces memory, thaws the idle root for its normal SIGTERM, replaces root, rolls rooms and proves each startup commit. Thaw and fence removal run on every normal failure; failed/pending readiness never claims success. The whole operation has a 40-second readiness budget, not a forced-kill budget.
+
+After a killed operator process or machine-level interruption, recover the **migration-only** fence and freezer explicitly, preserving any pending work:
+
+```sh
+sudo systemctl thaw pi-kenan-root.service
+sudo nft delete table inet pi_kenan_migration
+```
+
+Do not remove the ordinary `pi_one_kenan` listener-UID gates, restart custody, delete admission tokens/consent, or signal live Bun with `SIGUSR1`: the installed Bun 1.4.2 terminated on that signal in a disposable fixture. Inspect service readiness before retrying. A stale migration table is refused rather than overwritten.
 
 New root generations expose startup `releaseCommit` and `releaseProtocol:1`. The separately authenticated `POST /v1/admin/release` atomically refuses busy asks/consent continuations or gates new admission; `DELETE` releases the gate. Activation restarts only stale memory/root consumers while root is quiescent, lets memory finish accepted requests before closing SQLite, and never restarts custody. Root/memory/journal launchers pin their source and record the selected commit before dropping privilege. Sealed custody or readiness that exceeds the bounded activation deadline remains pending, never a completed release.
 
