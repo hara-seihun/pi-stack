@@ -47,7 +47,7 @@ test("reported generation and request waits remain distinct from executing tools
 test("phase age and lack of updates are separate, and observation time never implies failure", () => {
   const status = threadStatus(running({ activity: "thinking", activitySince: 1_000, lastActivityAt: 60_000 }));
   expect(activityTiming(status, 65_000)).toEqual({ elapsed: "1m 4s" });
-  expect(activityTiming(status, 80_000)).toEqual({ elapsed: "1m 19s", quiet: "No activity update for 20s" });
+  expect(activityTiming(status, 80_000)).toEqual({ elapsed: "1m 19s", quiet: "20s" });
   expect(status.key).toBe("thinking");
   expect(activityTiming(status, 500)).toEqual({ elapsed: "0s" });
   expect(activityTiming(threadStatus(running()), 80_000)).toEqual({});
@@ -75,7 +75,7 @@ test("confirmed failure and pending cancellation are not confused with idle or s
 test("lack of activity updates is visible in dense rows, not hidden in a desktop tooltip", () => {
   const status = threadStatus(running({ activity: "waiting_on_tool", activeTools: ["bash"], activitySince: Date.now() - 70_000, lastActivityAt: Date.now() - 60_000 }));
   const markup = renderToStaticMarkup(createElement(StatusPill, { status, compact: true }));
-  expect(markup).toContain('class="status-quiet">No activity update for');
+  expect(markup).toMatch(/class="status-quiet">\d+[smh](?: \d+[sm])?<\/span>/);
   expect(markup).toContain('data-status="tool"');
   expect(markup).not.toContain("Failed");
 });

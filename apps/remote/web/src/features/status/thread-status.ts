@@ -114,6 +114,6 @@ export function activityTiming(status: ThreadStatus, now: number): { elapsed?: s
   return {
     ...(status.since ? { elapsed: elapsed(status.since, now) } : {}),
     ...(status.lastActivityAt && now - status.lastActivityAt >= 15_000
-      ? { quiet: `No activity update for ${elapsed(status.lastActivityAt, now)}` } : {}),
+      ? { quiet: elapsed(status.lastActivityAt, now) } : {}),
   };
 }
