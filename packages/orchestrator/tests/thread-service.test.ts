@@ -6,7 +6,7 @@ import { runnerHostEntry } from "../src/threads/runner-transport.js";
 import { DatabaseSync } from "node:sqlite";
 import { importRemoteThreads } from "../src/threads/import.js";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
-import { ThreadService } from "../src/threads/service.js";
+import { ThreadService, type ThreadServiceOptions } from "../src/threads/service.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 import { createThreadClient, threadHttp } from "../src/threads/http.js";
@@ -108,7 +108,7 @@ function expectReadableCompletion(text: string): void {
   }
 }
 
-function fixture(root?: string, workersOnly = false) {
+function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServiceOptions["prepareMessage"]) {
   const directory = root ?? mkdtempSync(join(tmpdir(), "thread-service-"));
   if (!root) roots.push(directory);
   const sessions: FakePiSession[] = [];
@@ -119,6 +119,7 @@ function fixture(root?: string, workersOnly = false) {
   };
   const service = new ThreadService({
     workersOnly,
+    prepareMessage,
     databasePath: join(directory, "threads.sqlite"),
     sessionsDir: join(directory, "sessions"),
     openSession,
@@ -1205,6 +1206,114 @@ describe("ThreadService", () => {
     sessions[1]!.settle("now done");
     await waitFor(() => sessions[2]?.commands.some(input => input.workId === "later") === true);
     await settle(sessions[2]!, service, thread.id);
+  });
+
+  it.each(["send", "promoteMessage"] as const)("preserves accepted but unlanded steers when %s hard steers the thread", async action => {
+    let preparations = 0;
+    const prepareMessage = vi.fn<NonNullable<ThreadServiceOptions["prepareMessage"]>>(async (_thread, message) => ({
+      ok: true,
+      value: { text: `${message.text}\nPrepared context ${++preparations}`, images: [{ type: "image", data: `prepared-${message.id}`, mimeType: "image/png" }] },
+    }));
+    const { service, directory, sessions } = fixture(undefined, false, prepareMessage);
+    value(await service.start());
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "Already running" }));
+    await waitFor(() => service.pending(thread.id)[0]?.landedAt != null);
+    value(await service.send({ requestId: "landed", threadId: thread.id, text: "Already delivered" }));
+    await waitFor(() => service.pending(thread.id).find(message => message.id === "landed")?.insertedAt != null);
+    const native = sessions[0]!;
+    const landed = native.commands.find(command => command.workId === "landed")!;
+    native.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(landed.message) }] } });
+    expect(service.pending(thread.id).find(message => message.id === "landed")?.landedAt).toEqual(expect.any(Number));
+
+    const accepted = new Map<string, PiCommand>();
+    for (const id of ["first", "second"]) {
+      value(await service.send({ requestId: id, threadId: thread.id, senderId: "worker", text: `Undelivered ${id}` }));
+      await waitFor(() => service.pending(thread.id).find(message => message.id === id)?.insertedAt != null);
+      expect(service.pending(thread.id).find(message => message.id === id)).toMatchObject({ state: "dispatched", insertedAt: expect.any(Number), landedAt: null });
+      accepted.set(id, native.commands.find(command => command.workId === id)!);
+      if (id === "first") value(await service.send({ requestId: "later", threadId: thread.id, text: "Ordinary queued input", delivery: "queue" }));
+    }
+    if (action === "send") {
+      value(await service.send({ requestId: "now", threadId: thread.id, text: "Urgent replacement", delivery: "hardSteer" }));
+    } else {
+      value(await service.send({ requestId: "now", threadId: thread.id, text: "Urgent replacement", delivery: "queue" }));
+      value(await service.control({ threadId: thread.id, action: "promoteMessage", messageId: "now", delivery: "hardSteer" }));
+    }
+    await waitFor(() => sessions[1]?.commands.some(command => command.workId === "now") === true);
+    expect(native.closed).toBe(true);
+    expect(native.commands.filter(command => command.type === "abort")).toHaveLength(1);
+    expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
+    expect(service.pending(thread.id).map(message => message.id)).toEqual(["now", "first", "later", "second"]);
+    await waitFor(() => sessions[1]!.commands.some(command => command.workId === "second"));
+    const replayed = sessions[1]!.commands.filter(command => ["prompt", "steer"].includes(command.type));
+    expect(replayed.map(command => command.workId)).toEqual(["now", "first", "second"]);
+    for (const id of accepted.keys()) {
+      const replay = replayed.find(command => command.workId === id)!;
+      expect(replay).toMatchObject({ type: "steer", workId: id, message: accepted.get(id)!.message, images: accepted.get(id)!.images });
+      expect(prepareMessage.mock.calls.filter(([, message]) => message.id === id)).toHaveLength(1);
+      sessions[1]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replay.message) }] } });
+    }
+    sessions[1]!.settle("Urgent work and retained steers handled");
+    await waitFor(() => sessions[2]?.commands.some(command => command.workId === "later") === true);
+    await settle(sessions[2]!, service, thread.id);
+    const inputs = sessions.flatMap(session => session.commands.filter(command => ["prompt", "steer"].includes(command.type)));
+    expect(inputs.map(command => command.workId)).toEqual(["active", "landed", "first", "second", "now", "first", "second", "later"]);
+    expect(service.pending(thread.id)).toEqual([]);
+  });
+
+  it("holds accepted but unlanded steers across Stop and restart until resume", async () => {
+    let preparations = 0;
+    const prepareMessage = vi.fn<NonNullable<ThreadServiceOptions["prepareMessage"]>>(async (_thread, message) => ({
+      ok: true,
+      value: { text: `${message.text}\nPrepared context ${++preparations}`, images: [{ type: "image", data: `prepared-${message.id}`, mimeType: "image/png" }] },
+    }));
+    const first = fixture(undefined, false, prepareMessage);
+    value(await first.service.start());
+    const thread = value(await first.service.spawn({ requestId: "active", cwd: first.directory, message: "Already running" }));
+    await waitFor(() => first.service.pending(thread.id)[0]?.landedAt != null);
+    const native = first.sessions[0]!;
+    const accepted = new Map<string, PiCommand>();
+    for (const id of ["landed", "first", "second"]) {
+      value(await first.service.send({ requestId: id, threadId: thread.id, senderId: "worker", text: `Input ${id}` }));
+      await waitFor(() => first.service.pending(thread.id).find(message => message.id === id)?.insertedAt != null);
+      const command = native.commands.find(command => command.workId === id)!;
+      if (id === "landed") {
+        native.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(command.message) }] } });
+        expect(first.service.pending(thread.id).find(message => message.id === id)?.landedAt).toEqual(expect.any(Number));
+      } else {
+        expect(first.service.pending(thread.id).find(message => message.id === id)).toMatchObject({ state: "dispatched", insertedAt: expect.any(Number), landedAt: null });
+        accepted.set(id, command);
+      }
+    }
+    expect(value(await first.service.control({ threadId: thread.id, action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(native.closed).toBe(true);
+    expect(native.commands.filter(command => command.type === "abort")).toHaveLength(1);
+    expect(first.service.pending(thread.id)).toMatchObject([{ id: "first", state: "queued", landedAt: null }, { id: "second", state: "queued", landedAt: null }]);
+    const held = first.service.pending(thread.id);
+    first.service.reconcile(); await turn(); await turn();
+    expect(first.sessions).toHaveLength(1);
+    value(await first.service.close());
+
+    const restored = fixture(first.directory, false, prepareMessage);
+    value(await restored.service.start());
+    restored.service.reconcile(); await turn(); await turn();
+    expect(restored.service.get(thread.id)).toMatchObject({ state: "idle", held: true });
+    expect(restored.service.pending(thread.id)).toEqual(held);
+    expect(restored.sessions).toHaveLength(0);
+    value(await restored.service.control({ threadId: thread.id, action: "resume" }));
+    await waitFor(() => restored.sessions[0]?.commands.some(command => command.workId === "second") === true);
+    const replayed = restored.sessions[0]!.commands.filter(command => ["prompt", "steer"].includes(command.type));
+    expect(replayed.map(command => command.workId)).toEqual(["first", "second"]);
+    expect(replayed.map(command => command.type)).toEqual(["prompt", "steer"]);
+    for (const replay of replayed) {
+      const id = String(replay.workId);
+      expect(replay).toMatchObject({ workId: id, message: accepted.get(id)!.message, images: accepted.get(id)!.images });
+      expect(prepareMessage.mock.calls.filter(([, message]) => message.id === id)).toHaveLength(1);
+      restored.sessions[0]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replay.message) }] } });
+    }
+    await settle(restored.sessions[0]!, restored.service, thread.id);
+    expect(restored.service.pending(thread.id)).toEqual([]);
+    expect(restored.sessions).toHaveLength(1);
   });
 
   it("reconciles an unconfirmed halt instead of stranding its held queue", async () => {
