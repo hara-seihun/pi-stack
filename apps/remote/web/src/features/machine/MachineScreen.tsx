@@ -17,9 +17,7 @@ export type MachineScreenProps = {
   onDismissOwnerError(id: string): void;
   onReconnect(): void;
   environment: ReactNode;
-  notifications: ReactNode;
-  write: ReactNode;
-  phone: ReactNode;
+  permissions: ReactNode;
   appUpdate: ReactNode;
   clientRevision: string;
 };
@@ -229,9 +227,7 @@ export function MachineScreen(props: MachineScreenProps) {
       </div></Card>}
       <Host machine={dashboard?.machine ?? null} />
       <Card title="Environment">{props.environment}</Card>
-      <Card title="Notifications">{props.notifications}</Card>
-      {props.phone && <Card title="Phone control">{props.phone}</Card>}
-      {props.write && <Card title="Pi Stack Write">{props.write}</Card>}
+      <Card title="Permissions">{props.permissions}</Card>
       <Card title="App">{props.appUpdate}<dl className="machine-app-detail"><dt>Revision</dt><dd title={props.clientRevision}>{props.clientRevision.slice(0, 12)}</dd><dt>Connection</dt><dd>{props.offline ? <><span>{props.offline}</span><button type="button" onClick={props.onReconnect}>Reconnect</button></> : props.syncing ? "Syncing" : "Connected"}</dd></dl></Card>
       {props.ownerErrors.length > 0 && <Card title="Owner errors"><ul className="machine-errors">{props.ownerErrors.map((error) => <li key={error.id}><span><strong>{error.owner}</strong>{error.message}</span><button type="button" onClick={() => props.onDismissOwnerError(error.id)}>Dismiss</button></li>)}</ul></Card>}
     </div>

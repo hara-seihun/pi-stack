@@ -14,7 +14,7 @@ export interface InstalledApp { revision: string; versionCode: number; applicati
 export interface AppUpdateCheck { update: AppUpdate | null; installed: InstalledApp }
 export interface AppUpdateInstall { status: "installer-opened" | "reloading"; revision?: string }
 export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
-export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "overlay" | "writeSettings" | "deviceAdmin";
+export type PhoneSetupStep = "accessibility" | "writeAccessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "overlay" | "writeSettings" | "deviceAdmin" | "installPackages";
 export interface PhoneStatus {
   enabled: boolean;
   connected: boolean;

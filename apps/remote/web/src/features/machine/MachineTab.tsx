@@ -5,19 +5,16 @@
 import { AppUpdateControl } from "../../app-update";
 import { EnvironmentControl } from "../../EnvironmentControl";
 import { NotificationControl } from "../../notification-control";
-import { WriteSetup } from "../../write-setup";
-import { PhoneSetup } from "../../phone-setup";
+import { PermissionsSetup } from "../../permissions-setup";
 import { nativePlatform } from "../../native";
 import { MachineScreen, type MachineScreenProps } from "./MachineScreen";
 
-export type MachineTabProps = Omit<MachineScreenProps, "environment" | "notifications" | "write" | "phone" | "appUpdate" | "clientRevision">;
+export type MachineTabProps = Omit<MachineScreenProps, "environment" | "permissions" | "appUpdate" | "clientRevision">;
 
 export function MachineTab(screen: MachineTabProps) {
   return <MachineScreen {...screen}
     environment={<EnvironmentControl />}
-    notifications={<NotificationControl />}
-    write={<WriteSetup />}
-    phone={nativePlatform ? <PhoneSetup /> : null}
+    permissions={nativePlatform ? <PermissionsSetup /> : <NotificationControl />}
     appUpdate={<AppUpdateControl />}
     clientRevision={__PI_REMOTE_REVISION__} />;
 }
