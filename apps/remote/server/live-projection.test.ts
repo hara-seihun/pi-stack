@@ -42,12 +42,12 @@ test("local and fleet phase evidence survives reconnect without aging from reads
   live.retrying = true;
   live.activeTools.set("stale", "bash");
   restoreLiveProjection(live, { text: "answer", thinking: "old", isThinking: false, tools: [] });
-  expect(threadActivity("running", live)).toBe("running");
+  expect(threadActivity("running", live)).toBe("status_error");
   expect(projectThreadActivity("idle", undefined, false, snapshot)).toEqual({ activity: "idle", activitySince: undefined,
     lastActivityAt: 20, activityDetail: undefined, activeTools: [], executionError: undefined });
   restoreLiveProjection(live, snapshot);
   settleLiveProjection(live);
-  expect(threadActivity("running", live)).toBe("running");
+  expect(threadActivity("running", live)).toBe("status_error");
   expect(live.activitySince).toBeUndefined();
 });
 

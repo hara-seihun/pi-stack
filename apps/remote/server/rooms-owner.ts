@@ -22,7 +22,7 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory)
   const metadata = roomMetadata(thread.metadata?.room)!;
   const execution = source.execution ?? projectThreadActivity(thread.state, undefined, false, thread.executionActivity, thread.metadata, Boolean(thread.held));
   const error = source.error ?? execution.executionError;
-  const activity: RoomActivity = execution.activity && execution.activity !== "running"
+  const activity: RoomActivity = execution.activity && execution.activity !== "status_error" && String(execution.activity) !== "running"
     ? { ...execution, held: thread.held ?? false, ...(error ? { error } : {}) }
     : { activity: "status_error", activityDetail: "Room owner did not report an execution phase", activeTools: execution.activeTools ?? [],
       held: thread.held ?? false, error: error ?? "Room owner did not report an execution phase" };

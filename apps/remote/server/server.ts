@@ -1876,8 +1876,8 @@ const meet = new MeetServer((id) => {
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    activity: threadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id)),
-    tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+    activity: projectThreadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id), row.executionActivity, row.metadata, Boolean(row.held)).activity,
+    tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
 
 
@@ -1953,12 +1953,12 @@ const server = Bun.serve<SocketData>({
             : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
           if (!storedContext(id)) await refreshThreadInspection(id);
           const context = storedContext(id);
-          const settlement = threads.latestSettlement(id);
-          const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
-          const failure = thread.state !== "running" && settlement?.outcome === "failed"
-            ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
           const questions = unwrap(await directory.questions(id));
           const current = threads.get(id)!;
+          const settlement = threads.latestSettlement(id);
+          const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
+          const failure = current.state !== "running" && settlement?.outcome === "failed"
+            ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
           return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
             execution: projectThreadActivity(current.state, liveProjections.get(id), false, current.executionActivity, current.metadata, Boolean(current.held)),
             context: context ? JSON.parse(context.document) : null, questions };

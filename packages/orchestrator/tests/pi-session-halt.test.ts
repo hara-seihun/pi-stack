@@ -106,7 +106,7 @@ it("reconnect state preserves observed streaming phase and production timestamps
   const stream = createAssistantMessageEventStream();
   f.native.agent.streamFunction = () => stream;
   await f.command("prompt", { workId: "phase", message: "stream" });
-  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, isThinking: false } } });
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "preparing", isThinking: false } } });
   const partial = f.message([{ type: "thinking", thinking: "reason" }], "stop");
   stream.push({ type: "start", partial });
   stream.push({ type: "thinking_delta", contentIndex: 0, delta: "reason", partial });

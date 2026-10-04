@@ -146,12 +146,56 @@ it("projects phase timestamps to list and reconnect snapshots without stale thin
   session.emit({ type: "message_end", emittedAt: 35, message: { role: "toolResult", content: [] } });
   expect(service.live(thread.id)?.activity).toBe("waiting_on_tool");
   session.emit({ type: "tool_execution_end", emittedAt: 40, toolCallId: "tool" });
-  expect(service.live(thread.id)).toMatchObject({ activity: undefined, isThinking: false, tools: [] });
+  expect(service.live(thread.id)).toMatchObject({ activity: "preparing", activityDetail: "Integrating tool results", isThinking: false, tools: [] });
   session.emit({ type: "message_update", emittedAt: 50, assistantMessageEvent: { type: "toolcall_delta" } });
   expect(value(await service.inspect(thread.id)).live).toMatchObject({ activity: "preparing_tool", lastActivityAt: expect.any(Number) });
   session.settle("done");
   await waitFor(() => service.get(thread.id)?.state === "idle");
   expect(service.get(thread.id)?.executionActivity?.activity).toBeUndefined();
+});
+
+it("reports queue, preparation, admission, runtime startup, model wait and cancellation at the owned await boundaries", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-phases-")); roots.push(directory);
+  const deferred = <T>() => { let resolve!: (value: T) => void; return { promise: new Promise<T>(done => { resolve = done; }), resolve: (value: T) => resolve(value) }; };
+  const prepared = deferred<Result<{ text: string; images: unknown[] }>>();
+  const admitted = deferred<Result<{ release(): void }>>();
+  const opened = deferred<void>();
+  const aborted = deferred<void>();
+  let session!: FakePiSession;
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+    prepareMessage: () => prepared.promise, admit: () => admitted.promise,
+    openSession: async (options, output) => {
+      await opened.promise;
+      session = new FakePiSession(options, output);
+      const command = session.command.bind(session);
+      session.command = async input => { if (input.type === "abort") await aborted.promise; await command(input); };
+      return session;
+    },
+  }); services.push(service);
+  const thread = value(await service.spawn({ requestId: "phase-thread", id: "phase-thread", cwd: directory }));
+  value(await service.send({ requestId: "phase-work", threadId: thread.id, text: "work" }));
+  expect(service.get(thread.id)?.executionActivity?.activity).toBe("queued");
+  value(await service.start());
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "preparing");
+  prepared.resolve({ ok: true, value: { text: "work", images: [] } });
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "admitting");
+  const admissionClock = service.get(thread.id)?.executionActivity?.activitySince;
+  expect(service.get(thread.id)?.executionActivity?.activitySince).toBe(admissionClock);
+  admitted.resolve({ ok: true, value: { release() {} } });
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "starting");
+  opened.resolve();
+  await waitFor(() => !!session?.commands.some(command => command.type === "prompt"));
+  expect(service.get(thread.id)?.executionActivity?.activity).toBe("preparing");
+  session.emit({ type: "model_request_start", emittedAt: Date.now() });
+  const waiting = service.get(thread.id)?.executionActivity;
+  session.emit({ type: "message_start", message: { role: "assistant" } });
+  await service.command(thread.id, { type: "get_state" });
+  expect(service.get(thread.id)?.executionActivity).toEqual(waiting);
+  const stopping = service.control({ threadId: thread.id, action: "stop", descendants: false });
+  await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "cancelling");
+  expect(service.get(thread.id)?.state).toBe("running");
+  aborted.resolve();
+  expect(value(await stopping)).toMatchObject({ state: "idle", held: true });
 });
 
 it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch and retains its visible receipt across restart", async choice => {

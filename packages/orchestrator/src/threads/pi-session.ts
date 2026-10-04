@@ -25,7 +25,7 @@ import { memoryExtension } from "kenan-memory/tools";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
 import { createThreadClient } from "./http.js";
-import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity } from "./execution-activity.js";
+import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity, settleExecutionActivity } from "./execution-activity.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
 const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
@@ -225,6 +225,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       // Cancellation discards Pi's deferred inputs without a response; release their dispatch order with the receipt.
       for (const id of [...pendingInputs.keys()]) acknowledge(id);
       output({ type: "agent_settled", workIds, outcome, lastAssistantMessage: message });
+      settleExecutionActivity(activity);
     }
     async function halt(): Promise<void> {
       const stopped = execution.halt(runtime.session, 20_000, () => settle(true));

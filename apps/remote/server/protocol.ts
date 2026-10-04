@@ -32,7 +32,7 @@ export type ContextSplice = {
   insertBase64: string;
 };
 
-export type Activity = ThreadState | "awaiting" | ExecutionPhase;
+export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question"; body?: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }

@@ -14,14 +14,16 @@ export function threadActivity(state: ThreadState, live?: LiveProjection, hasRun
   if (state === "idle" && hasRunningChildren) return "awaiting";
   if (state !== "running") return state;
   return live?.compacting ? "compacting" : live?.retrying ? "retrying"
-    : live?.activeTools.size ? "waiting_on_tool" : live?.activity ?? (live?.thinkingActive ? "thinking" : state);
+    : live?.activeTools.size ? "waiting_on_tool" : live?.activity ?? (live?.thinkingActive ? "thinking" : "status_error");
 }
 
 export function projectThreadActivity(state: ThreadState, live?: LiveProjection, hasRunningChildren = false,
   snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
   const wait = state === "running" ? executionWaitActivity(metadata) : undefined;
-  if (wait) snapshot = { ...wait, activeTools: [] };
-  const activity = snapshot ? state !== "running" ? threadActivity(state, undefined, hasRunningChildren) : snapshot.activity ?? state
+  const resuming = snapshot?.activity && !["waiting_for_capacity", "waiting_to_retry"].includes(snapshot.activity)
+    && (snapshot.lastActivityAt ?? 0) > (wait?.lastActivityAt ?? wait?.activitySince ?? Infinity);
+  if (wait && !resuming) snapshot = { ...wait, activeTools: [] };
+  const activity = snapshot ? state !== "running" ? threadActivity(state, undefined, hasRunningChildren) : snapshot.activity ?? "status_error"
     : threadActivity(state, live, hasRunningChildren);
   const evidence = snapshot ?? live;
   return { activity,

@@ -126,7 +126,7 @@ export class Rooms {
   }
   private reconcile(room: StoredRoom, snapshot: RoomSnapshot) {
     const { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error } = snapshot;
-    if (!activity || activity === "running") this.statusFailure(room.id, "Room owner did not report an execution phase");
+    if (!activity || String(activity) === "running") this.statusFailure(room.id, "Room owner did not report an execution phase");
     else this.statuses.set(room.id, { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error });
     this.db.transaction(() => {
       const questions = snapshot.questions ?? [];
