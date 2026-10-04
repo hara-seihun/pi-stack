@@ -60,6 +60,7 @@ export const API = Object.freeze({
   messagingMuteCall: route("POST", "/v1/messaging/calls/:callId/mute"),
   messagingCallAudio: route("GET", "/v1/messaging/calls/:callId/audio"),
   fileInfo: route("GET", "/v1/files/info"),
+  fileEdit: route("GET", "/v1/files/edit"), fileSave: route("PUT", "/v1/files/edit"),
   files: route("GET", "/v1/files"), fileDownload: route("GET", "/v1/files/download"), fileDownloadHead: route("HEAD", "/v1/files/download"),
   speech: route("GET", "/v1/speech"), speechVoices: route("GET", "/v1/speech/engines/:engineId/voices"), speechUtterances: route("POST", "/v1/speech/utterances"), speechUtterance: route("GET", "/v1/speech/utterances/:utteranceId"), speechAudio: route("GET", "/v1/speech/utterances/:utteranceId/audio"),
   voice: route("GET", "/v1/voice"), voiceOffer: route("POST", "/v1/voice/offer"), voiceSessionUpdate: route("PATCH", "/v1/sessions/:sessionId/voice/:voiceId"), voiceSessionClose: route("DELETE", "/v1/sessions/:sessionId/voice/:voiceId"),

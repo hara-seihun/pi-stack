@@ -251,6 +251,25 @@ test("header and query changes never inherit an already-unlocked owner's identit
   expect((await request("/v1/sessions", owner, "kenan")).status).toBe(200);
 });
 
+test("file editing uses the existing person-bound router authorization for reads and saves", async () => {
+  const sybil = await token("sybil");
+  const before = remoteCalls;
+  for (const method of ["GET", "PUT"]) {
+    for (const prefix of ["", "/v1/remotes/lab"]) {
+      const url = `${base}${prefix}/v1/files/edit?path=%2Ftmp%2Ffixture.md`;
+      const init = method === "PUT" ? { method, body: JSON.stringify({ path: "/tmp/fixture.md", content: "attempt", revision: "a".repeat(64) }) } : { method };
+      expect((await fetch(url, { ...init, headers: { "x-pi-remote-user": "kenan", "content-type": "application/json" } })).status).toBe(423);
+      expect((await fetch(url, { ...init, headers: { "x-pi-remote-user": "kenan", "x-pi-remote-session": sybil, "content-type": "application/json" } })).status).toBe(403);
+    }
+  }
+  expect(remoteCalls).toBe(before);
+  const allowed = await fetch(`${base}/v1/files/edit`, { method: "PUT", headers: {
+    "x-pi-remote-session": sybil, "content-type": "application/json",
+  }, body: JSON.stringify({ path: "/tmp/fixture.md", content: "permitted", revision: "a".repeat(64) }) });
+  expect(allowed.status).toBe(200);
+  expect((await allowed.json()).user).toBe("sybil");
+});
+
 test("each person's discovery is policy controlled; open guests receive no remote authority", async () => {
   for (const user of ["kenan", "sybil", "jodie", "guest"]) {
     const response = await request("/v1/environments", await token(user), user);

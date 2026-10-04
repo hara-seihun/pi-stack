@@ -72,7 +72,7 @@ Workers presents the thread tree, including fleet threads and children from the 
 
 Files is a lazy tree rooted at `/`. Opening a folder requests only that directory, dotfiles remain visible, and selecting a regular file opens its preview.
 
-Files has a path bar, shortcuts and previews for text, Markdown, images and PDFs. Download, Copy path and Attach to current chat are available from the file preview. Headless Tree supplies keyboard and screen-reader tree behavior, while TanStack Virtual keeps directories such as `/nix/store` from creating tens of thousands of DOM rows.
+Files has a path bar, shortcuts and previews for text, Markdown, images and PDFs. Download, Copy path and Attach to current chat are available from the file preview. Text and Markdown offer [Edit and Save](docs/file-editing.md), using existing Unix write permissions and stale-edit rejection. Inode-preserving saves retain shared links, ownership and ACLs; locked backup/rollback handles ordinary failures, not crash-atomicity or noncooperating writers. Headless Tree supplies keyboard and screen-reader tree behavior, while TanStack Virtual keeps directories such as `/nix/store` from creating tens of thousands of DOM rows.
 
 Each Pi runtime also loads `server/thread-context.ts`. On a new thread's first request, the extension puts the machine-alert inbox path, file count and at most ten filenames into context. It never loads alert bodies or deletes files; the owning repair resolves each alert before removing it. Pi fires `before_agent_start` before persisting the incoming user message, so the extension checks for no prior conversation rather than one prior user message. A title, hard steer, process replacement or model change cannot make an existing conversation new. There is no thread-initialization tool. It also tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes an inline picture, audio or video player, embedded PDF or text preview in both clients, as [inline files](docs/inline-images.md#existing-files) describes, or a normal link for other types; the session-scoped endpoint streams the file from the thread's host with range support. It also describes [background inline images](docs/inline-images.md): assistant replies declare image prompts with thread-scoped IDs and optional image references. The supervisor owns generation and dependency ordering after the agent finishes. Both clients show a generating placeholder, the finished image or an error.
 
@@ -149,7 +149,7 @@ Android's [notification service](../kenan/android/app/src/main/java/works/kenan/
 ## Requirements
 
 - [Bun](https://bun.sh/), `jq`, and `gocryptfs` for encrypted folders
-- Node.js and util-linux `flock` on the supervisor's `PATH`, and the pinned Pi SDK in the deployed dependency tree
+- Node.js, Python 3 (for inode-preserving Files edits) and util-linux `flock` on the supervisor's `PATH`, and the pinned Pi SDK in the deployed dependency tree
 - `PI_REMOTE_THREAD_NAMING_MODEL` set to an explicit OpenAI Pi model selection or a `local/ENGINE/MODEL` engine from `~/.pi/agent/local-models.json`
 - `apps/remote` installed as Pi's final configured package
 - the root npm workspaces installed and Pi Orchestrator built
