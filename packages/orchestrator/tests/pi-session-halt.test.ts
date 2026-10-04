@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { openPiSession } from "../src/threads/pi-session.js";
 import type { PiEvent } from "../src/threads/contracts.js";
 
@@ -44,12 +44,11 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     args.push("--extension", path);
   }
   const waiters = new Set<() => void>();
-  const session = await openPiSession({ cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", ...env }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") }, event => {
-    events.push(event);
-    for (const notify of waiters) notify();
-  }, () => {});
+  const options = { cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", ...env }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") };
+  const output = (event: PiEvent) => { events.push(event); for (const notify of waiters) notify(); };
+  let session = await openPiSession(options, output, () => {});
   cleanups.push(async () => { await session.command({ type: "abort", id: "cleanup" }); await session.close(); rmSync(cwd, { recursive: true, force: true }); });
-  const native = captured.session!;
+  let native = captured.session!;
   const model = native.modelRuntime.getModel("anthropic", "claude-sonnet-4-5")!;
   native.agent.state.model = model;
   vi.spyOn(native.modelRuntime, "hasConfiguredAuth").mockReturnValue(true);
@@ -73,7 +72,16 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     await session.command({ type, id, ...fields });
     return waitFor(event => event.type === "response" && event.id === id);
   };
-  return { session, native, events, command, waitFor, reply, message };
+  const reopen = async () => {
+    await session.close();
+    captured.prepare = undefined;
+    session = await openPiSession(options, output, () => {});
+    native = captured.session!;
+    native.agent.state.model = model;
+    vi.spyOn(native.modelRuntime, "hasConfiguredAuth").mockReturnValue(true);
+    native.agent.streamFunction = () => reply(message([{ type: "text", text: "done" }], "stop"));
+  };
+  return { get session() { return session; }, get native() { return native; }, events, command, waitFor, reply, message, reopen };
 }
 
 it.each([
@@ -203,6 +211,103 @@ function userTexts(context: { messages: { role: string; content: unknown }[] }) 
     : (message.content as { type: string; text?: string }[]).filter(part => part.type === "text").map(part => part.text).join(""));
 }
 
+const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=" };
+function cancellableReply(f: Awaited<ReturnType<typeof fixture>>, signal?: AbortSignal) {
+  const stream = createAssistantMessageEventStream();
+  signal?.addEventListener("abort", () => {
+    stream.push({ type: "error", reason: "aborted", error: f.message([], "aborted") });
+    stream.end();
+  }, { once: true });
+  return stream;
+}
+
+it.each(["steer", "follow_up"])("retains accepted unlanded %s for exact redelivery after abort and reopen", async delivery => {
+  const f = await fixture(), started = deferred();
+  f.native.agent.streamFunction = (_model, _context, options) => {
+    started.resolve();
+    return cancellableReply(f, options?.signal);
+  };
+  expect(await f.command("prompt", { workId: "root", message: "root" })).toMatchObject({ success: true });
+  await started.promise;
+  const original = { workId: "waiting", message: "  exact original\ninput  ", images: [image] };
+  expect(await f.command(delivery, original)).toMatchObject({ success: true });
+  expect(await f.command("get_state")).toMatchObject({ data: { acceptedWorkIds: ["root", "waiting"], landedWorkIds: ["root"], completedWorkIds: [] } });
+  expect(await f.command("abort")).toMatchObject({ success: true });
+  expect(f.events.filter(event => event.type === "agent_settled")).toMatchObject([
+    { outcome: "cancelled", workIds: ["root"], deferredWorkIds: ["waiting"] },
+  ]);
+  const path = f.native.sessionFile!;
+  expect(readFileSync(path, "utf8")).toContain('"customType":"thread_deferred"');
+  await f.reopen();
+  expect(await f.command("get_state")).toMatchObject({ data: {
+    acceptedWorkIds: ["root"], landedWorkIds: ["root"], completedWorkIds: ["root"], deferredWorkIds: ["waiting"],
+  } });
+  f.native.settingsManager.applyOverrides({ images: { autoResize: false } });
+  const requests: unknown[] = [];
+  f.native.agent.streamFunction = (_model, context) => { requests.push(context.messages); return f.reply(f.message([{ type: "text", text: "redelivered" }], "stop")); };
+  expect(await f.command("prompt", { ...original, resume: true, message: "must not replace original", images: [] })).toMatchObject({ success: true });
+  await f.waitFor(event => event.type === "agent_settled" && (event.workIds as string[]).includes("waiting"));
+  expect(requests).toHaveLength(1);
+  const users = f.native.messages.filter(message => message.role === "user");
+  expect(users).toHaveLength(2);
+  expect(users.at(-1)).toMatchObject({ content: [{ type: "text", text: original.message }, image] });
+  expect(f.native.messages.some(message => message.role === "custom" && message.customType === "thread_recovery")).toBe(false);
+  expect(await f.command("get_state")).toMatchObject({ data: { completedWorkIds: ["root", "waiting"], landedWorkIds: ["root", "waiting"], deferredWorkIds: [] } });
+  expect(await f.command("prompt", original)).toMatchObject({ data: { alreadyAccepted: true, completed: true } });
+  expect(requests).toHaveLength(1);
+}, 3000);
+
+it("cancels a landed steer without replay, including identical input text and extension transformations", async () => {
+  const f = await fixture(undefined, `export default pi => pi.on("input", event => ({ action: "transform", text: "transformed: " + event.text }));`);
+  const first = createAssistantMessageEventStream(), started = deferred(), second = deferred();
+  let requests = 0;
+  f.native.agent.streamFunction = (_model, _context, options) => {
+    if (++requests === 1) { started.resolve(); return first; }
+    second.resolve();
+    return cancellableReply(f, options?.signal);
+  };
+  expect(await f.command("prompt", { workId: "root", message: "identical" })).toMatchObject({ success: true });
+  await started.promise;
+  expect(await f.command("steer", { workId: "landed", message: "identical" })).toMatchObject({ success: true });
+  first.push({ type: "done", reason: "stop", message: f.message([{ type: "text", text: "first" }], "stop") });
+  first.end();
+  await second.promise;
+  expect(await f.command("get_state")).toMatchObject({ data: { landedWorkIds: ["root", "landed"] } });
+  expect(f.events.filter(event => event.type === "message_start" && (event.message as { role?: string })?.role === "user").map(event => event.inputWorkId)).toEqual(["root", "landed"]);
+  expect(await f.command("abort")).toMatchObject({ success: true });
+  expect(f.events.filter(event => event.type === "agent_settled")).toMatchObject([{ outcome: "cancelled", workIds: ["root", "landed"], deferredWorkIds: [] }]);
+  await f.reopen();
+  const stream = vi.fn(f.native.agent.streamFunction);
+  f.native.agent.streamFunction = stream;
+  expect(await f.command("get_state")).toMatchObject({ data: { landedWorkIds: ["root", "landed"], completedWorkIds: ["root", "landed"] } });
+  expect(await f.command("steer", { workId: "landed", message: "identical", resume: true })).toMatchObject({ data: { alreadyAccepted: true, completed: true } });
+  expect(stream).not.toHaveBeenCalled();
+  expect(f.native.messages.filter(message => message.role === "user")).toHaveLength(2);
+}, 3000);
+
+it("repairs historical cancellation receipts without replaying landed native user history", async () => {
+  const f = await fixture();
+  const manager = f.native.sessionManager;
+  manager.appendCustomEntry("thread_input", { workId: "old-root", message: "root", delivery: "prompt" });
+  manager.appendMessage({ role: "user", content: [{ type: "text", text: "root" }], timestamp: 1 });
+  manager.appendCustomEntry("thread_input", { workId: "old-landed", message: "landed", delivery: "steer" });
+  manager.appendMessage({ role: "user", content: "landed", timestamp: 2 });
+  manager.appendCustomEntry("thread_input", { workId: "old-waiting", message: "waiting", images: [image], delivery: "steer" });
+  manager.appendCustomEntry("thread_settled", { workIds: ["old-root", "old-landed", "old-waiting"], outcome: "cancelled", assistantEntryId: null });
+  await f.reopen();
+  expect(await f.command("get_state")).toMatchObject({ data: {
+    acceptedWorkIds: ["old-root", "old-landed"], landedWorkIds: ["old-root", "old-landed"], completedWorkIds: ["old-root", "old-landed"], deferredWorkIds: ["old-waiting"],
+  } });
+  expect(await f.command("steer", { workId: "old-landed", message: "do not replay" })).toMatchObject({ data: { alreadyAccepted: true, completed: true } });
+  f.native.settingsManager.applyOverrides({ images: { autoResize: false } });
+  expect(await f.command("prompt", { workId: "old-waiting", message: "wrong", images: [], resume: true })).toMatchObject({ success: true });
+  await f.waitFor(event => event.type === "agent_settled" && (event.workIds as string[]).includes("old-waiting"));
+  expect(f.native.messages.filter(message => message.role === "user").at(-1)).toMatchObject({ content: [{ type: "text", text: "waiting" }, image] });
+  expect(await f.command("get_state")).toMatchObject({ data: { deferredWorkIds: [], completedWorkIds: ["old-root", "old-landed", "old-waiting"] } });
+  const persisted = SessionManager.open(f.native.sessionFile!).getBranch();
+  expect(persisted.filter(entry => entry.type === "custom" && entry.customType === "thread_input")).toHaveLength(3);
+}, 3000);
+
 it("answers a steer that the controller sends after native settlement instead of stranding it in Pi's queue", async () => {
   const f = await fixture();
   const requests: string[][] = [];
@@ -263,7 +368,8 @@ it("answers a steer that arrives while Pi is emitting settlement, and settles it
   const settled = await f.waitFor(event => event.type === "agent_settled");
   expect(settled).toMatchObject({ workIds: ["root", "window"], outcome: "complete", lastAssistantMessage: { content: [{ text: "reply 2" }] } });
   expect(calls).toBe(2);
-  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0 } });
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0, landedWorkIds: ["root", "window"] } });
+  expect(f.events.filter(event => event.type === "message_start" && (event.message as { role?: string })?.role === "user").map(event => event.inputWorkId)).toEqual(["root", "window"]);
 }, 3000);
 
 it("orders concurrent steers to an idle session into one run rather than overlapping runs", async () => {
@@ -389,6 +495,6 @@ it("dismisses a native extension dialog before acknowledging prompt cancellation
   await f.session.command({ type: "prompt", id: "dialog", workId: "dialog", message: "/dialog" });
   await f.waitFor(event => event.type === "extension_ui_request");
   expect(await f.command("abort")).toMatchObject({ success: true });
-  expect(f.events.filter(event => event.type === "agent_settled")).toMatchObject([{ workIds: ["dialog"], outcome: "cancelled" }]);
-  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, completedWorkIds: ["dialog"] } });
+  expect(f.events.filter(event => event.type === "agent_settled")).toMatchObject([{ workIds: [], deferredWorkIds: ["dialog"], outcome: "cancelled" }]);
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, completedWorkIds: [], deferredWorkIds: ["dialog"] } });
 }, 3000);
