@@ -127,6 +127,33 @@ function fixture(root?: string, workersOnly = false) {
   return { directory, service, sessions };
 }
 
+it("projects phase timestamps to list and reconnect snapshots without stale thinking or tools", async () => {
+  const { service, directory, sessions } = fixture();
+  value(await service.start());
+  const thread = value(await service.spawn({ requestId: "activity", id: "activity", cwd: directory }));
+  value(await service.send({ requestId: "work", threadId: thread.id, text: "work" }));
+  await waitFor(() => sessions[0]?.commands.some(command => command.type === "prompt") === true);
+  const session = sessions[0]!;
+  session.emit({ type: "message_update", emittedAt: 10, assistantMessageEvent: { type: "thinking_delta", delta: "reason" } });
+  session.emit({ type: "message_update", emittedAt: 20, assistantMessageEvent: { type: "text_delta", delta: "answer" } });
+  expect(service.live(thread.id)).toMatchObject({ activity: "responding", isThinking: false, activitySince: 20 });
+  expect(service.snapshot().find(row => row.id === thread.id)?.executionActivity).toMatchObject({ activity: "responding", activitySince: 20 });
+  const before = value(await service.inspect(thread.id)).live;
+  await service.command(thread.id, { type: "get_state" });
+  expect(value(await service.inspect(thread.id)).live).toEqual(before);
+  session.emit({ type: "tool_execution_start", emittedAt: 30, toolCallId: "tool", toolName: "bash" });
+  expect(service.get(thread.id)?.executionActivity).toMatchObject({ activity: "waiting_on_tool", activeTools: ["bash"] });
+  session.emit({ type: "message_end", emittedAt: 35, message: { role: "toolResult", content: [] } });
+  expect(service.live(thread.id)?.activity).toBe("waiting_on_tool");
+  session.emit({ type: "tool_execution_end", emittedAt: 40, toolCallId: "tool" });
+  expect(service.live(thread.id)).toMatchObject({ activity: undefined, isThinking: false, tools: [] });
+  session.emit({ type: "message_update", emittedAt: 50, assistantMessageEvent: { type: "toolcall_delta" } });
+  expect(value(await service.inspect(thread.id)).live).toMatchObject({ activity: "preparing_tool", lastActivityAt: expect.any(Number) });
+  session.settle("done");
+  await waitFor(() => service.get(thread.id)?.state === "idle");
+  expect(service.get(thread.id)?.executionActivity?.activity).toBeUndefined();
+});
+
 it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch and retains its visible receipt across restart", async choice => {
   const { service, directory, sessions } = fixture();
   value(await service.start());

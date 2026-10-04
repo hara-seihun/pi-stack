@@ -16,6 +16,7 @@ import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy,
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
+import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity } from "./execution-activity.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
@@ -98,7 +99,7 @@ export class ThreadService implements ThreadApi {
   private workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined;
   private routing = false;
   private transactionDepth = 0;
-  private readonly projections = new Map<string, { context?: Json; live: Json }>();
+  private readonly projections = new Map<string, { context?: Json; live: Json; activity: ExecutionActivity }>();
   // Compiling SQL is the expensive half of a small query, and the supervisor
   // reads threads thousands of times a second while projecting its inbox. The
   // schema is settled before the first cached statement, so a statement can
@@ -166,9 +167,14 @@ export class ThreadService implements ThreadApi {
   private row(id: string): Json | undefined { return this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t WHERE id=?`).get(id) as Json | undefined; }
   private project(row: Json): Thread {
     const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
-    return { id: row.id, parentId: row.parent_id, role: this.options.workersOnly || row.parent_id ? "worker" : "conversation", title: row.title, cwd: row.cwd, sessionFile: row.session_file,
+    const projection = this.projections.get(row.id);
+    const metadata = JSON.parse(row.metadata);
+    const wait = row.state === "running" ? executionWaitActivity(metadata) : undefined;
+    const executionActivity = wait ? { ...wait, activeTools: [] } : projection ? { ...executionActivitySnapshot(projection.activity),
+      activeTools: row.state === "running" ? projection.live.tools.map((tool: Json) => String(tool.toolName)) : [] } : undefined;
+    return { executionActivity, id: row.id, parentId: row.parent_id, role: this.options.workersOnly || row.parent_id ? "worker" : "conversation", title: row.title, cwd: row.cwd, sessionFile: row.session_file,
       settings: JSON.parse(row.settings), admission: row.admission, state: row.state, held: !!row.held, revision: row.revision,
-      createdAt: row.created_at, updatedAt: row.updated_at, pendingMessages: pending, metadata: JSON.parse(row.metadata) };
+      createdAt: row.created_at, updatedAt: row.updated_at, pendingMessages: pending, metadata };
   }
   get(id: string): Thread | null { const row = this.row(id); return row ? this.project(row) : null; }
   /** Every thread, or with `archived: false` only the ones still in play; archived threads outnumber live ones many times over on a long-lived account. */
@@ -266,6 +272,11 @@ export class ThreadService implements ThreadApi {
   }
   private state(id: string, state: Thread["state"]): void {
     if (this.suspended || this.closed) return;
+    const projection = this.projections.get(id);
+    if (state !== "running" && projection) {
+      settleExecutionActivity(projection.activity);
+      Object.assign(projection.live, executionActivitySnapshot(projection.activity), { isThinking: false, tools: [] });
+    }
     const changed = this.sql("UPDATE thread SET state=?,metadata=CASE WHEN ?='running' THEN json_remove(metadata,'$.executionError') ELSE metadata END WHERE id=? AND (state!=? OR (?='running' AND json_extract(metadata,'$.executionError') IS NOT NULL))").run(state, state, id, state, state).changes;
     if (changed) this.changed(id);
   }
@@ -305,7 +316,8 @@ export class ThreadService implements ThreadApi {
         const prior = this.get(id)?.metadata?.startupFailure as Json | undefined;
         const attempts = prior && prior.workId === work ? Number(prior.attempts) + 1 : 1;
         const permanent = isModelConfigurationError(message) || /Pi cwd admission rejected|Invalid recorded (?:runner|isolated)|Compiled thread runner is missing/.test(message);
-        const failure = { workId: work, attempts, error: message, retryAt: Date.now() + Math.min(attempts * 5_000, 30_000) };
+        const failure = { workId: work, attempts, error: message, since: prior && prior.workId === work ? prior.since ?? Date.now() : Date.now(),
+          lastActivityAt: Date.now(), retryAt: Date.now() + Math.min(attempts * 5_000, 30_000) };
         this.sql("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure',json(?),'$.executionError',?) WHERE id=?").run(JSON.stringify(failure), message, id);
         this.changed(id);
         if (permanent || attempts >= 3) await this.rejectStartup(id, message);
@@ -977,8 +989,9 @@ export class ThreadService implements ThreadApi {
     if (this.runtimes.get(id) !== runtime || this.closed || this.suspended) return;
     // Runner events carry their production time; in-process sessions are stamped here.
     if (typeof event.emittedAt !== "number") event.emittedAt = Date.now();
-    const projection = this.projections.get(id) ?? { live: { text: "", thinking: "", isThinking: false, tools: [] } };
+    const projection = this.projections.get(id) ?? { live: { text: "", thinking: "", isThinking: false, tools: [] }, activity: createExecutionActivity() };
     this.projections.set(id, projection);
+    observeExecutionActivity(projection.activity, event);
     if (event.type === "context_update" && event.context) {
       projection.context = event.context as Json;
       const text = (message: Json) => (message.content ?? []).filter((part: Json) => part.type === "text").map((part: Json) => part.text).join("");
@@ -989,21 +1002,24 @@ export class ThreadService implements ThreadApi {
     if (event.type === "message_update") {
       const update = event.assistantMessageEvent as Json;
       if (update?.type === "text_delta") projection.live.text += String(update.delta ?? "");
-      if (update?.type === "thinking_start" || update?.type === "thinking_delta") projection.live.isThinking = true;
       if (update?.type === "thinking_delta") projection.live.thinking += String(update.delta ?? "");
-      if (update?.type === "thinking_end") projection.live.isThinking = false;
     }
-    if (event.type === "message_end") projection.live.isThinking = false;
-    if (event.type === "tool_execution_start") projection.live.tools.push({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
-    if (event.type === "tool_execution_update") { const tool = projection.live.tools.find((tool: Json) => tool.toolCallId === event.toolCallId); if (tool) tool.output = event.partialResult; }
+    if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+      let tool = projection.live.tools.find((tool: Json) => tool.toolCallId === event.toolCallId);
+      if (!tool) { tool = { toolCallId: event.toolCallId, toolName: event.toolName, args: event.args }; projection.live.tools.push(tool); }
+      if (event.type === "tool_execution_update") tool.output = event.partialResult;
+    }
     if (event.type === "tool_execution_end") projection.live.tools = projection.live.tools.filter((tool: Json) => tool.toolCallId !== event.toolCallId);
     if (event.type === "response" && event.command === "get_state" && event.success && (event.data as Json)?.live) {
       const live = (event.data as Json).live;
       if (live.text || !projection.live.text) projection.live.text = live.text ?? "";
       if (live.thinking || !projection.live.thinking) projection.live.thinking = live.thinking ?? "";
-      projection.live.isThinking = !!live.isThinking;
+      restoreExecutionActivity(projection.activity, live);
       if (Array.isArray(live.tools)) projection.live.tools = live.tools;
     }
+    projection.live.isThinking = projection.activity.activity === "thinking";
+    Object.assign(projection.live, executionActivitySnapshot(projection.activity));
+    if (event.type === "agent_end" || event.type === "agent_settled") projection.live.tools = [];
     if (event.type === "message_start" && (event.message as Json)?.role === "user") this.land(id, contentText((event.message as Json).content, ""));
     if (event.type === "response") {
       const waiter = runtime.waiters.get(String(event.id));
@@ -1130,7 +1146,7 @@ export class ThreadService implements ThreadApi {
   private async waitForProvider(id:string,runtime:Runtime|undefined,execution:Json,failure:string):Promise<void>{
     const metadata=this.get(id)?.metadata, prior=metadata?.providerWait as Json|undefined, retried=metadata?.providerRetry as Json|undefined;
     const attempts=(prior?.executionId===execution.id?prior!.attempts??1:retried?.executionId===execution.id?retried!.attempts??1:0)+1;
-    const wait={executionId:execution.id,workId:execution.work_id,failure,attempts,since:prior?.since??Date.now(),retryAt:transientRetryAt(failure,attempts),broker:runtime?.broker??prior?.broker??false};
+    const wait={executionId:execution.id,workId:execution.work_id,failure,attempts,since:prior?.since??Date.now(),lastActivityAt:Date.now(),retryAt:transientRetryAt(failure,attempts),broker:runtime?.broker??prior?.broker??false};
     this.sql("UPDATE thread SET state='running',metadata=json_set(metadata,'$.providerWait',json(?)) WHERE id=?").run(JSON.stringify(wait),id);
     this.admissionWait(id,{code:"unavailable",message:`Accepted work is waiting for provider capacity: ${failure}`});
     if(runtime){

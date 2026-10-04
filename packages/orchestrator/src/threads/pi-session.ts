@@ -24,6 +24,7 @@ import { memoryExtension } from "kenan-memory/tools";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
 import { createThreadClient } from "./http.js";
+import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity } from "./execution-activity.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
 const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
@@ -32,7 +33,25 @@ type SharedRpc = (runtime: AgentSessionRuntime, io: { output(event: PiEvent): vo
 const inputCommands = new Set(["prompt", "steer", "follow_up"]);
 const retry = { enabled: true, maxRetries: 6, baseDelayMs: 5_000 };
 
-export const openPiSession: OpenPiSession = async (options, output, exit) => {
+export const openPiSession: OpenPiSession = async (options, emitOutput, exit) => {
+  const activity = createExecutionActivity();
+  const liveTools = new Map<string, Record<string, unknown>>();
+  const output = (event: PiEvent) => {
+    if (typeof event.emittedAt !== "number") event.emittedAt = Date.now();
+    observeExecutionActivity(activity, event);
+    if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+      const id = String(event.toolCallId);
+      liveTools.set(id, { ...liveTools.get(id), toolCallId: id, toolName: event.toolName,
+        ...(event.type === "tool_execution_start" ? { args: event.args } : { output: event.partialResult }) });
+    }
+    for (const id of liveTools.keys()) if (!activity.activityTools.has(id)) liveTools.delete(id);
+    if (event.type === "response" && event.command === "get_state" && event.success) {
+      const data = event.data as Record<string, any>;
+      event = { ...event, data: { ...data, live: { ...data?.live, ...executionActivitySnapshot(activity),
+        isThinking: activity.activity === "thinking", tools: [...liveTools.values()] } } };
+    }
+    emitOutput(event);
+  };
   const admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
   options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_ID: options.threadId,

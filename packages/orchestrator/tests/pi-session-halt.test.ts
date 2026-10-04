@@ -99,6 +99,29 @@ it.each([
   expect(f.events.indexOf(updates[1]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
 }, 3000);
 
+it("reconnect state preserves observed streaming phase and production timestamps", async () => {
+  const f = await fixture();
+  const stream = createAssistantMessageEventStream();
+  f.native.agent.streamFunction = () => stream;
+  await f.command("prompt", { workId: "phase", message: "stream" });
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, isThinking: false } } });
+  const partial = f.message([{ type: "thinking", thinking: "reason" }], "stop");
+  stream.push({ type: "start", partial });
+  stream.push({ type: "thinking_delta", contentIndex: 0, delta: "reason", partial });
+  const reasoning = await f.waitFor(event => (event.assistantMessageEvent as any)?.type === "thinking_delta");
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "thinking", isThinking: true, lastActivityAt: reasoning.emittedAt } } });
+  const answer = f.message([{ type: "text", text: "answer" }], "stop");
+  stream.push({ type: "text_delta", contentIndex: 0, delta: "answer", partial: answer });
+  const text = await f.waitFor(event => (event.assistantMessageEvent as any)?.type === "text_delta");
+  const first = await f.command("get_state");
+  expect(first).toMatchObject({ data: { live: { activity: "responding", isThinking: false, activitySince: text.emittedAt, lastActivityAt: text.emittedAt } } });
+  expect((await f.command("get_state")).data).toEqual(first.data);
+  stream.push({ type: "done", reason: "stop", message: answer });
+  stream.end();
+  await f.waitFor(event => event.type === "agent_settled");
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, activitySince: undefined, isThinking: false, tools: [] } } });
+}, 3000);
+
 it("sandbox exposes exactly four tools without instructions, discovered extensions, or host shell RPC", async () => {
   const f = await fixture(undefined, `export default pi => { throw new Error("must not load sandbox extensions"); };`, {}, true, true);
   expect(f.native.getActiveToolNames().sort()).toEqual(["bash", "edit", "read", "write"]);
