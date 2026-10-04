@@ -1165,6 +1165,49 @@ describe("ThreadService", () => {
     expect(service.pending("gone")).toMatchObject([{ id: "next", state: "queued" }]);
   });
 
+  it("uses active-branch native landing receipts during cold Stop after owner crash", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-cold-receipts-")); roots.push(directory);
+    const openSession = vi.fn(async () => { throw new Error("Cold Stop must not initialize a session"); });
+    const admit = vi.fn(async () => { throw new Error("Cold Stop must not request admission"); });
+    const attachSession = vi.fn(async () => null);
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
+    const reference = { control: "/absent/runner.sock", socketPath: "/absent/session.sock" };
+    const sessionFile = join(directory, "crashed.jsonl");
+    value(service.importThread({ id: "crashed", title: "crashed", cwd: "/reclaimed/checkout", sessionFile, metadata: { runnerReference: reference }, settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
+    for (const id of ["active", "landed", "unlanded"]) value(service.importMessage({
+      id, threadId: "crashed", text: `Input ${id}`, state: "dispatched", executionId: "crashed-execution", insertedAt: 123,
+    }));
+    writeFileSync(sessionFile, [
+      { type: "session", id: "native-session", version: 3, timestamp: "2026-10-04T00:00:00.000Z", cwd: directory },
+      { type: "custom", id: "active-input", parentId: null, customType: "thread_input", data: { workId: "active", receiptVersion: 2 } },
+      { type: "custom", id: "active-landed", parentId: "active-input", customType: "thread_landed", data: { workId: "active" } },
+      { type: "custom", id: "steer-input", parentId: "active-landed", customType: "thread_input", data: { workId: "landed", receiptVersion: 2 } },
+      { type: "message", id: "steer-message", parentId: "steer-input", message: { role: "user", content: [{ type: "text", text: "Input landed" }], timestamp: 123 } },
+      { type: "custom", id: "steer-landed", parentId: "steer-message", customType: "thread_landed", data: { workId: "landed" } },
+      { type: "custom", id: "other-branch-landed", parentId: "active-landed", customType: "thread_landed", data: { workId: "unlanded" } },
+      { type: "custom", id: "undelivered-input", parentId: "steer-landed", customType: "thread_input", data: { workId: "unlanded", receiptVersion: 2 } },
+    ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    expect(service.pending("crashed")).toMatchObject([
+      { id: "active", state: "dispatched", landedAt: null },
+      { id: "landed", state: "dispatched", insertedAt: 123, landedAt: null },
+      { id: "unlanded", state: "dispatched", insertedAt: 123, landedAt: null },
+    ]);
+
+    expect(value(await service.control({ threadId: "crashed", action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(attachSession).toHaveBeenCalledWith(reference, expect.any(Function), expect.any(Function));
+    expect(openSession).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
+    expect(service.latestSettlement("crashed")?.outcome).toBe("cancelled");
+    expect(service.pending("crashed")).toMatchObject([{ id: "unlanded", state: "queued", landedAt: null }]);
+    const db = new DatabaseSync(join(directory, "threads.sqlite"));
+    try {
+      expect(db.prepare("SELECT id,status,outcome,landed_at FROM thread_work ORDER BY ordinal").all()).toEqual([
+        { id: "active", status: "done", outcome: "cancelled", landed_at: expect.any(Number) },
+        { id: "landed", status: "done", outcome: "cancelled", landed_at: expect.any(Number) },
+        { id: "unlanded", status: "queued", outcome: null, landed_at: null },
+      ]);
+    } finally { db.close(); }
+  });
+
   it("deduplicates halt and does not mark the thread idle before native acknowledgement", async () => {
     const { service, directory, sessions } = fixture();
     await service.start();
@@ -1259,6 +1302,48 @@ describe("ThreadService", () => {
     const inputs = sessions.flatMap(session => session.commands.filter(command => ["prompt", "steer"].includes(command.type)));
     expect(inputs.map(command => command.workId)).toEqual(["active", "landed", "first", "second", "now", "first", "second", "later"]);
     expect(service.pending(thread.id)).toEqual([]);
+  });
+
+  it("lets hard-steer halt own settlement when abort rejects an in-flight steer acknowledgement", async () => {
+    const { service, directory, sessions } = fixture();
+    value(await service.start());
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "Already running" }));
+    await waitFor(() => service.pending(thread.id)[0]?.landedAt != null);
+    const native = sessions[0]!, command = native.command.bind(native);
+    let waiting: PiCommand | undefined;
+    native.command = async input => {
+      if (input.type === "steer") {
+        native.commands.push(input);
+        native.acceptedWorkIds.add(String(input.workId));
+        native.pendingMessageCount = 1;
+        waiting = input;
+        return;
+      }
+      if (input.type === "abort" && waiting) {
+        native.emit({ type: "response", id: waiting.id, command: "steer", success: false, error: "Input acknowledgement cancelled by abort" });
+        await turn();
+      }
+      await command(input);
+    };
+    value(await service.send({ requestId: "waiting", threadId: thread.id, text: "Accepted input awaiting acknowledgement" }));
+    await waitFor(() => !!waiting);
+    expect(service.pending(thread.id).find(message => message.id === "waiting")).toMatchObject({ state: "dispatched", insertedAt: null, landedAt: null });
+    value(await service.send({ requestId: "now", threadId: thread.id, text: "Urgent replacement", delivery: "hardSteer" }));
+    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "waiting") === true);
+    expect(native.closed).toBe(true);
+    expect(native.commands.filter(input => input.type === "abort")).toHaveLength(1);
+    expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
+    expect(service.get(thread.id)?.metadata?.executionError).toBeUndefined();
+    const replayed = sessions[1]!.commands.filter(input => ["prompt", "steer"].includes(input.type));
+    expect(replayed.map(input => input.workId)).toEqual(["now", "waiting"]);
+    expect(replayed[1]).toMatchObject({ type: "steer", workId: "waiting", message: waiting!.message, images: waiting!.images });
+    sessions[1]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replayed[1]!.message) }] } });
+    await settle(sessions[1]!, service, thread.id);
+    expect(service.pending(thread.id)).toEqual([]);
+    const db = new DatabaseSync(join(directory, "threads.sqlite"));
+    try {
+      expect(db.prepare("SELECT outcome FROM thread_execution ORDER BY created_at,rowid").all()).toEqual([{ outcome: "cancelled" }, { outcome: "complete" }]);
+    } finally { db.close(); }
   });
 
   it("holds accepted but unlanded steers across Stop and restart until resume", async () => {
