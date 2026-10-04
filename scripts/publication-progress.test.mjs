@@ -465,9 +465,15 @@ test("repair-result completes an interrupted repair once without launching anoth
   assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), f.request);
 });
 
-test("assigned repair at the automatic depth limit transfers real source custody without restarting agents", t => {
+test("assigned repair transfers real source custody despite an offline requester and the automatic depth limit", t => {
   const f = repairFixture(t, "blocked");
-  const request = { ...f.request, repairDepth: policy.maxRepairDepth };
+  const reporter = { url: "http://127.0.0.1:18791", sessionId: "144b647b-dd8e-53e0-a9b7-5f398b7e49e5" };
+  const request = { ...f.request, reporter, repairDepth: policy.maxRepairDepth };
+  const curlLog = join(f.root, "curl.log");
+  executable(join(f.bin, "curl"), `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(curlLog)}
+exit 7
+`);
   writeJson(f.requestPath, request);
   const remote = join(f.root, "hara-seihun", "pi-stack.git");
   mkdirSync(join(f.root, "hara-seihun"));
@@ -504,6 +510,8 @@ esac
   assert.equal(successor.sourceSha, f.repairedSha);
   assert.equal(successor.repairOf, requestId);
   assert.equal(successor.repairDepth, policy.maxRepairDepth + 1);
+  assert.deepEqual(successor.reporter, reporter);
+  assert.equal(existsSync(curlLog), false, "notification transport cannot gate source custody");
   assert.equal(run("git", ["rev-parse", successor.sourceRef], { cwd: remote }).stdout.trim(), f.repairedSha);
   assert.equal(runPublication(f.root, f.bin, "repair-result", environment).status, 0);
   assert.equal(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8").trim().split("\n").length, 2);

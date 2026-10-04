@@ -302,8 +302,8 @@ function submit(sourceArgument, repairedRequestId) {
     }
   }
   assertSourceRootsOnMain(sourceRoot, sourceSha);
-  const reporter = repaired?.reporter ?? requesterFromEnvironment();
-  if (reporter) remoteJson(reporter, "", "GET");
+  const requester = repaired?.reporter ?? requesterFromEnvironment();
+  const reporter = requester ? validateReporter(requester) : null;
   const requestId = `PUB-${repaired ? createHash("sha256").update(`repair:${repairedRequestId}`).digest("hex").slice(0, 24) : randomUUID().replaceAll("-", "").slice(0, 24)}`;
   if (existsSync(requestPath(requestId))) {
     const existing = readRequest(requestId);

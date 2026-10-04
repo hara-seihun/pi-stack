@@ -15,6 +15,7 @@ for (const resource of [
   "server/voice/delegation-policy.md",
   "server/meet/transcriber.ts",
   "server/write.ts",
+  "server/file-edit.py",
   "web/dist/index.html",
   "web/dist/meet.html",
   "web/dist/meet-adapter.js",
@@ -26,6 +27,8 @@ for (const resource of [
 ]) {
   if (!statSync(join(release, resource)).isFile()) throw new Error(`Missing Pi Remote release resource: ${resource}`);
 }
+const editorRuntime = Bun.spawnSync(["python3", "-c", "import fcntl, os; assert hasattr(os, 'pread') and hasattr(os, 'pwrite')"], { timeout: 5_000 });
+if (editorRuntime.exitCode !== 0) throw new Error(`Files editor Python runtime unavailable: ${editorRuntime.stderr.toString()}`);
 const result = await Bun.build({
   entrypoints: [
     ...["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts"].map(name => join(release, "server", name)),
