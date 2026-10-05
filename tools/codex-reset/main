@@ -15,9 +15,9 @@
 // allowance without waiting for the next sampler pass.
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { request } from "node:https";
-import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 // Hosts differ in where the orchestrator keeps its state: a system service
 // owns /var/lib/pi-orchestrator, a user service owns the per-account path
@@ -124,7 +124,7 @@ function call(path, credential, method = "GET", body) {
 function availableCredits(value) {
   const credits = Array.isArray(value?.credits) ? value.credits : [];
   return credits
-    .filter((credit) => (credit?.status ?? "available") === "available" && typeof credit?.id === "string")
+    .filter((credit) => (credit?.status ?? "available") === "available" && typeof credit?.id === "string" && (credit.expires_at === undefined || Date.parse(credit.expires_at) > Date.now()))
     .sort((a, b) => Date.parse(a.expires_at ?? "9999-12-31") - Date.parse(b.expires_at ?? "9999-12-31"));
 }
 
@@ -143,7 +143,7 @@ function usageWindows(value, now) {
         : typeof window.reset_after_seconds === "number"
           ? now + window.reset_after_seconds * 1000
           : undefined;
-    return [{ meterId, usedPercent: Math.round(Math.max(0, Math.min(100, window.used_percent))), resetAt }];
+    return [{ meterId, usedPercent: Math.max(0, Math.min(100, window.used_percent)), resetAt }];
   });
 }
 
@@ -215,13 +215,19 @@ async function settledUsage(credential, previousWeekly) {
 
 async function redeem(row, credential, ledger) {
   const credit = row.credits[0];
+  const { claimCodexReset, recordCodexResetResult, confirmCodexReset } = await import(pathToFileURL(join(dirname(STORE_MODULE), "codex-resets.js")).href);
+  const weekly = row.windows.find((window) => window.meterId === "codex-7d");
+  const attempt = claimCodexReset(ledger, row.alias, credit.id, weekly?.resetAt);
+  if (!attempt) return { alias: row.alias, outcome: "skipped", reason: "redemption already attempted; awaiting provider quota evidence" };
   const consumed = await call("wham/rate-limit-reset-credits/consume", credential, "POST", {
     credit_id: credit.id,
-    redeem_request_id: randomUUID(),
+    redeem_request_id: attempt.requestId,
     account_id: credential.accountId,
   });
   const code = typeof consumed.value?.code === "string" ? consumed.value.code : `http_${consumed.status}`;
-  if (code !== "reset" && code !== "already_redeemed") return { alias: row.alias, outcome: code, status: consumed.status };
+  const accepted = consumed.status >= 200 && consumed.status < 300 && (code === "reset" || code === "already_redeemed");
+  recordCodexResetResult(ledger, row.alias, attempt, accepted, accepted ? "awaiting provider quota drop" : `reset HTTP ${consumed.status}`);
+  if (!accepted) return { alias: row.alias, outcome: code, status: consumed.status };
 
   // The usage endpoint serves the pre-reset percent for up to a minute after a
   // redemption. Recording that reading would put a stale exhausted meter in the
@@ -229,8 +235,9 @@ async function redeem(row, credential, ledger) {
   const { now, windows } = await settledUsage(credential, row.weeklyUsedPercent);
   if (ledger) {
     ledger.transaction(() => {
-      ledger.setCooldown(row.alias);
-      for (const window of windows) ledger.recordReading(row.alias, window.meterId, { at: now, usedPercent: window.usedPercent, resetAt: window.resetAt });
+      const weekly = windows.find((window) => window.meterId === "codex-7d");
+      if (weekly) confirmCodexReset(ledger, row.alias, weekly.usedPercent, now);
+      for (const window of windows) ledger.recordReading(row.alias, window.meterId, { at: now, usedPercent: Math.round(window.usedPercent), resetAt: window.resetAt });
     });
   }
   const after = await call("wham/rate-limit-reset-credits", credential);
