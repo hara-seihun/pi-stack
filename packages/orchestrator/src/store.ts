@@ -300,7 +300,9 @@ export class Store {
   }
 
   recordMeter(accountId:string,meterId:string,usedPercent:number,resetAt:number|undefined,observedAt=Date.now()): void {
-    this.db.prepare("INSERT OR IGNORE INTO meter VALUES(?,?,?,?,?)").run(accountId,meterId,observedAt,usedPercent,resetAt??null);
+    this.db.prepare(`INSERT INTO meter(account_id,meter_id,observed_at,used_percent,reset_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(account_id,meter_id,observed_at) DO UPDATE SET used_percent=excluded.used_percent,reset_at=excluded.reset_at`)
+      .run(accountId,meterId,observedAt,usedPercent,resetAt??null);
     this.db.prepare("DELETE FROM meter WHERE account_id=? AND meter_id=? AND observed_at<?")
       .run(accountId,meterId,observedAt-24*3_600_000);
   }

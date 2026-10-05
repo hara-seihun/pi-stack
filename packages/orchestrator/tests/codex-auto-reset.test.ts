@@ -8,7 +8,7 @@ import { claimCodexReset, codexResetAttempt } from "../src/codex-resets.js";
 import { Store } from "../src/store.js";
 
 const cleanups: (() => void)[] = [];
-afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
+afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); vi.restoreAllMocks(); });
 function fixture(autoReset = true) {
   const root = mkdtempSync(join(tmpdir(), "codex-auto-reset-")), path = join(root, "auth.json");
   const store = Store.open(":memory:"), accountId = "openai-codex-2";
@@ -46,6 +46,8 @@ it.each(["off", "fractional", "five-hour", "no-credit", "disabled"])("does not s
 });
 
 it("reserves the oldest live credit once across concurrent samplers and restart, and waits for quota recovery", async () => {
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
   const f = fixture();
   f.store.setCooldown(f.accountId, Date.now() + 3600000);
   await Promise.all([f.sampler().sampleAccount(f.accountId), f.sampler().sampleAccount(f.accountId)]);
