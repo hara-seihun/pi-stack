@@ -21,13 +21,22 @@ test("missing owned phase or tool identity is an instrumentation defect, never a
 });
 
 test("every owned machine boundary has a distinct interpretable status", () => {
-  const phases: Session["activity"][] = ["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_tool", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"];
+  const phases: Session["activity"][] = ["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_tool", "waiting_on_agents", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"];
   const statuses = phases.map(activity => threadStatus(running({ activity, activeTools: ["bash"] })));
   expect(new Set(statuses.map(status => status.key)).size).toBe(phases.length);
   for (const status of statuses) {
     expect(status.attention).toBe(false);
     expect(status.label).not.toMatch(/Working|unknown/);
   }
+});
+
+test("durable waiting names its dependency without pretending it is silent model execution", () => {
+  const status = threadStatus(running({ state: "idle", activity: "awaiting", activitySince: 1000, activityDetail: "Publication worker", lastActivityAt: 1000 }));
+  expect(status).toMatchObject({ key: "awaiting", label: "Waiting on agents", title: "Publication worker", since: 1000 });
+  expect(activityTiming(status, 80000)).toEqual({ elapsed: "1m 19s" });
+  expect(threadStatus(running({ state: "idle", activity: "awaiting", held: true })).key).toBe("stopped");
+  expect(threadStatus(running({ state: "idle", activity: "awaiting", archivedAt: "2026-10-05" })).key).toBe("archived");
+  expect(threadStatus(running({ activity: "waiting_for_capacity" })).key).toBe("waiting_for_capacity");
 });
 
 test("room statuses use the room owner's evidence, including status retrieval failures", () => {

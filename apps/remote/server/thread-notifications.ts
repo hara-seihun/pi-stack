@@ -26,7 +26,7 @@ function conversation(thread: Thread): boolean {
 }
 
 function busy(thread: Thread): boolean {
-  return !thread.held && (thread.state === "running" || thread.pendingMessages > 0);
+  return !thread.held && (thread.state === "running" || thread.pendingMessages > 0 || !!thread.waitingOnAgents || !!thread.metadata?.agentWait);
 }
 
 async function descendantsIdle(api: Pick<ThreadApi, "list" | "questions">, root: string): Promise<boolean> {

@@ -107,14 +107,24 @@ describe("thread controls", () => {
     });
   });
 
+  test("idle waiting and scheduled work can be stopped without claiming a native execution exists", () => {
+    for (const parent of [session("waiting", { activity: "awaiting" }), session("timer", { wakeSchedule: { cadenceMs: 60000, nextDueAt: 1000, reason: "Job" } })]) {
+      expect(working(parent)).toBe(false);
+      expect(composerAction(parent, "")).toBe("stop");
+      expect(composerAction(parent, "Continue")).toBe("send");
+      expect(composerAction({ ...parent, held: true }, "")).toBe("send");
+    }
+  });
+
   test("an awaiting parent displays child activity but remains available for messages", () => {
     const parent = session("parent", { hasChildren: true, idleUnread: true, activity: "awaiting" });
     const child = session("child", { parentId: parent.id, state: "running", activity: "thinking" });
     expect(working(parent)).toBe(false);
     expect(working(child)).toBe(true);
-    expect(threadStatus(parent)).toMatchObject({ key: "awaiting", label: "Waiting on workers", busy: true });
+    expect(threadStatus(parent)).toMatchObject({ key: "awaiting", label: "Waiting on agents", busy: true });
     expect(threadStatus(child)).toMatchObject({ key: "thinking", busy: true });
-    expect(composerAction(parent, "")).toBe("send");
+    expect(composerAction(parent, "")).toBe("stop");
+    expect(composerAction(parent, "Continue")).toBe("send");
     expect(working({ ...child, state: "idle", held: true })).toBe(false);
   });
 

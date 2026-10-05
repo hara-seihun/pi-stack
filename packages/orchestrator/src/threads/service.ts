@@ -134,6 +134,7 @@ export class ThreadService implements ThreadApi {
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), work_id TEXT NOT NULL,
         settings TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER, settlement_seq INTEGER UNIQUE, outcome TEXT, final_message TEXT, error TEXT);
       CREATE TABLE IF NOT EXISTS thread_request (id TEXT PRIMARY KEY, hash TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, response TEXT);
+      CREATE TABLE IF NOT EXISTS thread_wake (thread_id TEXT PRIMARY KEY REFERENCES thread(id), generation TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS thread_question (
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), question TEXT NOT NULL,
         suggestions TEXT NOT NULL, recommended_id TEXT, created_at INTEGER NOT NULL,
@@ -165,7 +166,7 @@ export class ThreadService implements ThreadApi {
       catch (error) { this.db.exec(depth ? `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}` : "ROLLBACK"); throw error; }
     } finally { this.transactionDepth--; }
   }
-  private static readonly THREAD_COLUMNS = "t.*,(SELECT count(*) FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
+  private static readonly THREAD_COLUMNS = "t.*,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT w.landed_at FROM thread_wake s JOIN thread_work w ON w.id=json_extract(s.data,'$.lastMessageId') WHERE s.thread_id=t.id) wake_landed_at,(SELECT count(*) FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
   private row(id: string): Json | undefined { return this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t WHERE id=?`).get(id) as Json | undefined; }
   private project(row: Json): Thread {
     const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
@@ -181,7 +182,7 @@ export class ThreadService implements ThreadApi {
         activitySince: row.queued_at ?? row.active_execution_at ?? row.updated_at,
         activityDetail: fallback === "queued" ? "Waiting for execution dispatch" : fallback === "recovering" ? "Reattaching the retained execution" : "Awaiting cancellation confirmation" }),
         activeTools: projection?.live.tools.map((tool: Json) => String(tool.toolName)) ?? [] };
-    return { executionActivity, id: row.id, parentId: row.parent_id, role: this.options.workersOnly || row.parent_id ? "worker" : "conversation", title: row.title, cwd: row.cwd, sessionFile: row.session_file,
+    return { executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: { ...JSON.parse(row.wake_data), ...(row.wake_landed_at ? { lastLandedAt: row.wake_landed_at } : {}), deferredReason: metadata.archived ? "archived" : row.held ? "stopped" : row.state === "running" ? "busy" : undefined } } : {}), id: row.id, parentId: row.parent_id, role: this.options.workersOnly || row.parent_id ? "worker" : "conversation", title: row.title, cwd: row.cwd, sessionFile: row.session_file,
       settings: JSON.parse(row.settings), admission: row.admission, state: row.state, held: !!row.held, revision: row.revision,
       createdAt: row.created_at, updatedAt: row.updated_at, pendingMessages: pending, metadata };
   }
@@ -360,6 +361,7 @@ export class ThreadService implements ThreadApi {
   reconcile(): void {
     if (!this.started || this.closed || this.suspended) return;
     void this.routeNotifications();
+    this.deliverScheduledWakes();
     const rows = this.sql("SELECT id,held FROM thread WHERE state='running' OR EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=thread.id AND e.ended_at IS NULL) OR (held=0 AND EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done'))").all() as { id: string; held: number }[];
     for (const row of rows) {
       if (row.held) void this.halt(row.id);
@@ -368,6 +370,89 @@ export class ThreadService implements ThreadApi {
     for (const [id, runtime] of this.runtimes) if (!runtime.busy && !runtime.executionId && !this.operations.has(id) && !this.halts.has(id) && !this.opening.has(id)) void this.serial(id, () => this.retire(id, runtime)).catch(error => {
       if (!this.suspended && !this.closed) { this.sql("UPDATE thread SET metadata=json_set(metadata,'$.cleanupError',?) WHERE id=?").run(errorText(error), id); this.changed(id); }
     });
+  }
+
+  async agentWait(input: import("./contracts.js").AgentWaitRequest): Promise<Result<Thread>> {
+    const prior = this.request(input?.requestId, input, "agent-wait"); if (!prior.ok) return prior;
+    const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found in this owner");
+    if (prior.value) return good(thread);
+    if (!["set", "clear"].includes(input.action)) return bad("invalid_request", "Waiting action must be set or clear");
+    let resultAlreadyArrived = false;
+    if (input.action === "set") {
+      if (thread.held || thread.metadata?.archived || thread.metadata?.raw) return bad("unavailable", "Waiting requires an unheld, unarchived normal thread");
+      if (typeof input.reason !== "string" || !input.reason.trim()) return bad("invalid_request", "Waiting requires a reason");
+      const ids = input.threadIds ?? [];
+      if (!Array.isArray(ids) || ids.length > 100) return bad("invalid_request", "At most 100 child dependencies are supported");
+      if (ids.length) {
+        const settled = await (this.directory ?? this).await({ parentId: thread.id, threadIds: ids, after: input.after, timeoutMs: 0 });
+        if (!settled.ok) return settled;
+        // A result accepted before registration must not be hidden by a new wait.
+        resultAlreadyArrived = settled.value.settlement !== null;
+      } else if (input.after !== undefined && (!input.after || typeof input.after !== "object" || Array.isArray(input.after)
+        || Object.values(input.after).some(cursor => !Number.isSafeInteger(cursor) || cursor < 0))) return bad("invalid_request", "Invalid dependency cursors");
+    }
+    const accepted = this.request(input.requestId, input, "agent-wait"); if (!accepted.ok) return accepted;
+    if (accepted.value) return good(this.get(thread.id)!);
+    const current = this.get(thread.id)!;
+    if (input.action === "set" && (current.held || current.metadata?.archived)) return bad("unavailable", "Thread was stopped while registering its wait");
+    this.transaction(() => {
+      const resultQueued = input.action === "set" && this.pending(thread.id).some(message => message.source === "notification" && !message.landedAt && message.senderId && input.threadIds?.includes(message.senderId));
+      if (input.action === "set" && !resultQueued && !resultAlreadyArrived) {
+        const wait: import("./contracts.js").AgentWait = { reason: input.reason.trim(), threadIds: input.threadIds ?? [], after: input.after ?? {}, since: Date.now() };
+        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.agentWait',json(?)) WHERE id=?").run(JSON.stringify(wait), thread.id);
+      } else this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
+      this.recordRequest(input.requestId, input, "agent-wait", thread.id);
+    });
+    this.changed(thread.id);
+    return good(this.get(thread.id)!);
+  }
+  async wakeSchedule(input: import("./contracts.js").ThreadWakeRequest): Promise<Result<import("./contracts.js").ThreadWakeSchedule | null>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    const thread = this.get(input?.threadId); if (!thread) return bad("not_found", "Thread not found in this owner");
+    if (input.action === "list") return good(thread.wakeSchedule ?? null);
+    if (input.action !== "set" && input.action !== "cancel") return bad("invalid_request", "Wake action must be set, list or cancel");
+    const prior = this.request(input.requestId, input, "thread-wake"); if (!prior.ok) return prior;
+    if (prior.value) return good(thread.wakeSchedule ?? null);
+    if (input.action === "set" && (typeof input.reason !== "string" || !input.reason.trim()
+      || !Number.isSafeInteger(input.cadenceMs) || input.cadenceMs < 60_000
+      || input.nextDueAt !== undefined && (!Number.isSafeInteger(input.nextDueAt) || input.nextDueAt < 0))) return bad("invalid_request", "Wake requires reason, cadenceMs >= 60000 and a nonnegative epoch nextDueAt");
+    if (input.action === "set" && (thread.held || thread.metadata?.archived || thread.metadata?.raw)) return bad("unavailable", "Wake scheduling requires an unheld, unarchived normal thread");
+    this.transaction(() => {
+      if (input.action === "set") {
+        const { deferredReason: _deferred, lastLandedAt: _landed, ...previous } = thread.wakeSchedule ?? {};
+        const schedule: import("./contracts.js").ThreadWakeSchedule = { ...previous, reason: input.reason.trim(), cadenceMs: input.cadenceMs, nextDueAt: input.nextDueAt ?? Date.now() + input.cadenceMs };
+        this.sql("INSERT INTO thread_wake(thread_id,generation,data) VALUES(?,?,?) ON CONFLICT(thread_id) DO UPDATE SET data=excluded.data").run(thread.id, randomUUID(), JSON.stringify(schedule));
+      } else {
+        const message = thread.wakeSchedule?.lastMessageId;
+        if (message) this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE id=? AND thread_id=? AND status='queued'").run(message, thread.id);
+        this.sql("DELETE FROM thread_wake WHERE thread_id=?").run(thread.id);
+        this.sql("UPDATE thread SET state='idle',metadata=json_remove(metadata,'$.admissionWait') WHERE id=? AND NOT EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=thread.id AND e.ended_at IS NULL) AND NOT EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done')").run(thread.id);
+      }
+      this.recordRequest(input.requestId, input, "thread-wake", thread.id);
+    });
+    this.changed(thread.id);
+    return good(this.get(thread.id)!.wakeSchedule ?? null);
+  }
+  private deliverScheduledWakes(): void {
+    const now = Date.now();
+    const due = this.sql(`SELECT s.thread_id,s.generation,s.data FROM thread_wake s JOIN thread t ON t.id=s.thread_id
+      WHERE json_extract(s.data,'$.nextDueAt')<=? AND t.state='idle' AND t.held=0
+      AND json_extract(t.metadata,'$.archived') IS NOT 1
+      AND NOT EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL)
+      AND NOT EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done')`).all(now) as Json[];
+    for (const row of due) {
+      if (this.operations.has(row.thread_id) || this.halts.has(row.thread_id) || this.opening.has(row.thread_id)) continue;
+      const thread = this.get(row.thread_id)!;
+      const schedule = JSON.parse(row.data) as import("./contracts.js").ThreadWakeSchedule;
+      const receipt = `thread-wake:${row.generation}:${schedule.nextDueAt}`;
+      this.transaction(() => {
+        this.insertMessage(receipt, { requestId: receipt, threadId: thread.id, senderId: thread.id, source: "notification", delivery: "steer",
+          text: `Scheduled wake check for this existing thread: ${schedule.reason}\nRead current dependency evidence. Continue useful work, cancel thread_wake when resolved, or return to thread_wait without polling.` }, thread.settings);
+        this.sql("UPDATE thread SET state='running',metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
+        this.sql("UPDATE thread_wake SET data=? WHERE thread_id=?").run(JSON.stringify({ ...schedule, nextDueAt: now + schedule.cadenceMs, lastDueAt: schedule.nextDueAt, lastDeliveredAt: now, lastMessageId: receipt }), thread.id);
+      });
+      this.changed(thread.id);
+    }
   }
 
   private request(id: string, value: unknown, kind: string): Result<string | null> {
@@ -382,6 +467,10 @@ export class ThreadService implements ThreadApi {
   }
   private recordRequest(id: string, value: unknown, kind: string, target: string): void { this.sql("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,?,?,?)").run(id, digest(value), kind, target); }
   private insertMessage(id: string, input: SendThread, settings: ThreadSettings, front = false): ThreadMessage {
+    const wait = this.get(input.threadId)?.metadata?.agentWait as import("./contracts.js").AgentWait | undefined;
+    if (wait && (input.source !== "notification" || input.senderId && wait.threadIds.includes(input.senderId))) {
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(input.threadId);
+    }
     this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
       .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), resolveDelivery(input), input.source ?? "explicit", input.replyTo ?? null, front ? Date.now() : 0, JSON.stringify(settings), Date.now());
     return this.message(this.sql("SELECT * FROM thread_work WHERE id=?").get(id) as Json);
@@ -405,6 +494,7 @@ export class ThreadService implements ThreadApi {
       if (input.ephemeral !== undefined && typeof input.ephemeral !== "boolean") return bad("invalid_request", "ephemeral must be a boolean");
       if (input.ephemeral && !parent) return bad("invalid_request", "Only subagents can be ephemeral");
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
+      if (input.metadata && "agentWait" in input.metadata) return bad("invalid_request", "Use agentWait instead of setting wait metadata");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (parent && (parent.parentId || parent.role === "worker" || parent.metadata?.watchList)) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
       if (parent?.metadata?.sandbox) return bad("invalid_request", "Sandbox threads cannot create workers");
@@ -595,7 +685,7 @@ export class ThreadService implements ThreadApi {
     if (input.archived === false) clauses.push("json_extract(t.metadata,'$.archived') IS NOT 1");
     else if (input.archived === true) clauses.push("json_extract(t.metadata,'$.archived') IS 1");
     if (input.cursor !== undefined) { clauses.push("t.id>?"); values.push(input.cursor); }
-    const rows = this.sql(`SELECT t.*,(SELECT count(*) FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done') pending_count FROM thread t ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY t.id LIMIT ?`).all(...values, limit + 1) as Json[];
+    const rows = this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY t.id LIMIT ?`).all(...values, limit + 1) as Json[];
     const page = rows.map(row => this.project(row));
     return good({ threads: page.slice(0, limit), ...(page.length > limit ? { nextCursor: page[limit - 1]!.id } : {}) });
   }
@@ -618,7 +708,7 @@ export class ThreadService implements ThreadApi {
     if (patch.metadata && "titleSource" in patch.metadata && patch.metadata.titleSource !== thread.metadata?.titleSource) return bad("conflict", "Use title control instead of changing metadata.titleSource");
     if (patch.title !== undefined && options.automaticTitle && thread.metadata?.titleSource === "manual") return good(thread);
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["agentWait", "context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
     const admission = patch.metadata && "mode" in patch.metadata ? threadMode(patch.metadata.mode)!.admission : thread.admission;
@@ -678,7 +768,7 @@ export class ThreadService implements ThreadApi {
         const thread = this.project(row);
         if (thread.metadata?.archived) continue;
         const runtime = this.runtimes.get(thread.id);
-        if (thread.updatedAt >= input.inactiveBefore || thread.state !== "idle" || thread.pendingMessages > 0 || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id) || this.execution(thread.id) || runtime?.busy || runtime?.commandRunning || this.operations.has(thread.id) || this.halts.has(thread.id)) return good(current);
+        if (thread.metadata?.agentWait || thread.wakeSchedule || thread.updatedAt >= input.inactiveBefore || thread.state !== "idle" || thread.pendingMessages > 0 || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id) || this.execution(thread.id) || runtime?.busy || runtime?.commandRunning || this.operations.has(thread.id) || this.halts.has(thread.id)) return good(current);
       }
       // No await/stop between the authoritative check and mutation: new work cannot race it.
       // The whole subtree goes together; a finished worker without its conversation is noise in every list.
@@ -1116,6 +1206,7 @@ export class ThreadService implements ThreadApi {
       });
     }
   }
+  private queuedWork(id: string): boolean { return !!this.sql("SELECT 1 FROM thread_work WHERE id=? AND status='queued'").get(id); }
   private async drain(id: string): Promise<void> {
     if (this.suspended || this.closed) return;
     const thread = this.get(id); if (!thread || this.row(id)?.held || this.halts.has(id) || this.closed) return;
@@ -1136,7 +1227,7 @@ export class ThreadService implements ThreadApi {
       if (!execution) this.phase(id, "preparing", "Preparing queued input and attachments");
       const prepared = this.options.prepareMessage ? await this.options.prepareMessage(thread, this.message(work)) : good({ text: work.text as string, images: JSON.parse(work.images) as unknown[] });
       if (!prepared.ok) throw new Error(prepared.error.message);
-      if (this.suspended || this.row(id)?.held || this.halts.has(id)) return;
+      if (this.suspended || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id)) return;
       work.prepared = JSON.stringify(prepared.value);
       this.sql("UPDATE thread_work SET prepared=? WHERE id=? AND prepared IS NULL").run(work.prepared, work.id);
     }
@@ -1144,6 +1235,7 @@ export class ThreadService implements ThreadApi {
       const settings = JSON.parse(work.settings) as ThreadSettings, executionId = randomUUID();
       this.phase(id, "admitting", "Acquiring a model account");
       const admission = this.options.admit ? await this.options.admit(thread, settings, false, executionId) : good<ThreadAdmission>({ release() {} });
+      if (!this.queuedWork(work.id)) { if (admission.ok) await admission.value.release(); return; }
       if (!admission.ok) {
         // Capacity refusals are retried by reconcile; anything else will refuse identically forever.
         if (admission.error.code !== "unavailable") { await this.rejectStartup(id, admission.error.message); return; }
@@ -1157,7 +1249,7 @@ export class ThreadService implements ThreadApi {
       catch (error) { await admission.value.release(); throw error; }
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.startupFailure') WHERE id=?").run(id);
       runtime.lease = admission.value;
-      if (this.suspended || this.row(id)?.held || this.halts.has(id)) { await admission.value.release(); runtime.lease = undefined; await this.retire(id, runtime); return; }
+      if (this.suspended || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id)) { await admission.value.release(); runtime.lease = undefined; await this.retire(id, runtime); return; }
       this.transaction(() => {
         this.sql("INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, id, work.id, JSON.stringify(admission.value.settings ?? settings), Date.now());
         this.sql("UPDATE thread_work SET status='dispatched',execution_id=? WHERE id=?").run(executionId, work.id);
@@ -1234,7 +1326,7 @@ export class ThreadService implements ThreadApi {
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait','$.providerRetry') WHERE id=?").run(id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
-      if (thread.metadata?.ephemeral && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
+      if (thread.metadata?.ephemeral && !thread.metadata.agentWait && !thread.wakeSchedule && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
         this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
       }
       if (thread.parentId) {

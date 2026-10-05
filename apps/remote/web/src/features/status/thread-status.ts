@@ -49,6 +49,7 @@ function executionStatus(session: Pick<Session, "activity" | "activeTools">): Th
     case "waiting_for_model": return { key: "waiting_for_model", label: "Waiting for model", short: "Waiting for model", busy: true, attention: false };
     case "waiting_for_capacity": return { key: "waiting_for_capacity", label: "Waiting for capacity", short: "Waiting for capacity", busy: true, attention: false };
     case "waiting_to_retry": return { key: "waiting_to_retry", label: "Waiting to retry", short: "Waiting to retry", busy: true, attention: false };
+    case "waiting_on_agents": return { key: "awaiting", label: "Waiting on agents", short: "Waiting on agents", busy: true, attention: false };
     case "waiting_on_tool": return toolStatus(session.activeTools);
     case "compacting": return { key: "compacting", label: "Compacting context", short: "Compacting", busy: true, attention: false };
     case "retrying": return { key: "retrying", label: "Retrying model request", short: "Retrying", busy: true, attention: false };
@@ -73,7 +74,8 @@ export function threadStatus(session: StatusSession): ThreadStatus {
       ...(session.activityDetail ? { title: [status.title, session.activityDetail].filter(Boolean).join(" · ") } : {}),
     };
   }
-  if (session.activity === "awaiting") return { key: "awaiting", label: "Waiting on workers", short: "Workers", busy: true, attention: false };
+  if (session.activity === "awaiting") return { key: "awaiting", label: "Waiting on agents", short: "Waiting on agents", busy: true, attention: false,
+    since: session.activitySince, title: session.activityDetail };
   return { key: "idle", label: "Idle", short: "Idle", busy: false, attention: session.idleUnread };
 }
 
@@ -113,7 +115,7 @@ export function activityTiming(status: ThreadStatus, now: number): { elapsed?: s
   if (!status.busy) return {};
   return {
     ...(status.since ? { elapsed: elapsed(status.since, now) } : {}),
-    ...(status.lastActivityAt && now - status.lastActivityAt >= 15_000
+    ...(status.key !== "awaiting" && status.lastActivityAt && now - status.lastActivityAt >= 15_000
       ? { quiet: elapsed(status.lastActivityAt, now) } : {}),
   };
 }

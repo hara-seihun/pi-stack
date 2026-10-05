@@ -20,7 +20,7 @@ export function workerThreads(sessions: Session[]) {
  * empty, otherwise Send. */
 export function composerAction(session: Session | null, draft: string): "send" | "stop" | "resume" {
   if (draft.trim()) return "send";
-  if (activeThread(session)) return "stop";
+  if (activeThread(session) || session && !session.held && !session.archivedAt && (session.waitingOnAgents || session.wakeSchedule || session.activity === "awaiting")) return "stop";
   if (session?.held && session.queuedMessages?.length) return "resume";
   return "send";
 }

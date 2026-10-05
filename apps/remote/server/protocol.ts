@@ -3,7 +3,7 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { ExecutionPhase, ThreadState } from "pi-orchestrator/api";
+import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState } from "pi-orchestrator/api";
 import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
@@ -77,6 +77,8 @@ export interface Session {
   activitySince?: number;
   lastActivityAt?: number;
   activityDetail?: string;
+  waitingOnAgents?: AgentWait;
+  wakeSchedule?: ThreadWakeSchedule;
   executionError?: string;
   /** Every tool running right now, in the order they started. */
   activeTools: string[];

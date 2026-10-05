@@ -120,6 +120,24 @@ test("completion is deferred while a child runs, survives restart, and is rechec
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("durable agent waits are not completion notifications even after their native turn settles", async () => {
+  const db = database();
+  const wait = { reason: "Need durable result", threadIds: [], after: {}, since: 1000 };
+  const root = thread("root", { waitingOnAgents: wait });
+  const api = apiFor([root], [settlement("root")]);
+  await projectThreadNotifications(db, "person", api);
+  expect(noticeCount(db)).toBe(0);
+  delete root.waitingOnAgents;
+  const child = thread("child", { parentId: "root", role: "worker", waitingOnAgents: wait });
+  const tree = apiFor([root, child]);
+  await projectThreadNotifications(db, "person", api, tree);
+  expect(noticeCount(db)).toBe(0);
+  delete child.waitingOnAgents;
+  await projectThreadNotifications(db, "person", api, tree);
+  expect(noticeCount(db)).toBe(1);
+  db.close();
+});
+
 test("paginated, nested cross-owner descendants gate completion but unrelated running threads do not", async () => {
   const db = database();
   const root = thread("root");
