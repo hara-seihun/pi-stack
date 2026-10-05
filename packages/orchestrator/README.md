@@ -144,6 +144,8 @@ Repair threads retain forced admission and full Pi context. Fleet admission hold
 
 ## Focused model checks
 
+Vitest's [test setup](tests/setup.ts) gives each test file a temporary home and removes inherited Orchestrator, broker and agent-directory settings. Default config, ledger and shared OAuth paths therefore belong to fixtures, never the running host; individual tests can still set explicit environment overrides. This also prevents a quarantined production credential from refusing a synthetic admission. Temporary homes are removed when each file finishes.
+
 Run `npm test --workspace=pi-orchestrator -- tests/catalog-config.test.ts tests/routing-runtime.test.ts` to check model selection and routing. The npm lifecycle prepares the shared RPC runtime before Vitest runs. Provider assertions use `nativeProviders`, which includes the custom definitions, rather than the upstream catalog alone. Fresh-session fixtures load the same `models.json` definitions deployed to each account before selecting a model; pin and model-switch cases resolve current choices through `catalogModel` instead of constructing versioned IDs. Explicit historical model IDs in resume fixtures remain intentional.
 
 ## Operations
