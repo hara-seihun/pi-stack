@@ -97,7 +97,7 @@ class Host:
                 return response.status, json.loads(response.read(16384))
         except urllib.error.HTTPError as error:
             return error.code, {}
-        except (urllib.error.URLError, TimeoutError):
+        except (OSError, http.client.HTTPException, ValueError):
             return 0, {}
     def validate_migration(self, args):
         if args.preprotocol_commit != MIGRATION_SOURCE or not args.preprotocol_pid or args.preprotocol_pid < 1:
