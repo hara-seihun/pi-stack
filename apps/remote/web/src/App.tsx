@@ -20,7 +20,7 @@ import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
 import { useRooms, RoomConversation } from "./rooms";
 import { workerThreads, working } from "./thread-state";
-import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl, ThreadStopDialog } from "./thread-controls";
+import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
 import type { ChatPickerHandle } from "./thread-start-menu";
 import type { Attachment, Bootstrap, ContextEntry, Dashboard, QueuedMessage, Session, SlashCommand } from "./types";
@@ -231,7 +231,6 @@ function RemoteApp() {
   const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [stopTarget, setStopTarget] = useState<Session | null>(null);
   const [closeConfirm, setCloseConfirm] = useState<{ chat: Chat; running: number } | null>(null);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
   const [pendingQuestions, setPendingQuestions] = useState<{ sessionId: string; questions: ThreadQuestion[] } | null>(null);
@@ -370,7 +369,6 @@ function RemoteApp() {
     const candidate = discovered ?? [...stateRef.current.sessions, ...stateRef.current.discovered].find(item => item.id === id);
     if (candidate?.archivedAt) await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: id }), {});
     if (signal?.aborted || generation !== selectionGeneration.current) return;
-    setStopTarget(null);
     setPasteSessionId(null);
     liveText.reset();
     const remembered = cache.thread(id);
@@ -403,7 +401,7 @@ function RemoteApp() {
     if (routeChat === stateRef.current.selectedChatId) return;
     if (!routeChat) { liveText.reset(); patch({ selectedChatId: null, transcript: null, images: null }); return; }
     if (routeChat.startsWith("ai:")) void selectThread(routeChat.slice(3)).catch(cause => { finishSection(`thread:${routeChat.slice(3)}`); setChatError(String(cause)); });
-    else { setStopTarget(null); setPasteSessionId(null); liveText.reset(); patch({ selectedChatId: routeChat, transcript: null, images: null, slashCommands: [] }); kick(); }
+    else { setPasteSessionId(null); liveText.reset(); patch({ selectedChatId: routeChat, transcript: null, images: null, slashCommands: [] }); kick(); }
   }, [routeChat, selectThread, patch, kick, liveText, stateRef]);
 
   useEffect(() => {
@@ -767,12 +765,11 @@ function RemoteApp() {
     setControlError(null);
     try {
       await submitThreadControl(action === "stop" ? { threadId: sessionId, action, descendants } : { threadId: sessionId, action });
-      setStopTarget(null);
     } catch (error) {
       setControlError({ sessionId, message: error instanceof Error ? error.message : String(error) });
     } finally { setPending(false); kick(); }
   };
-  const stopThread = (session: Session) => requestStop(session, (id, descendants) => { void controlThread(id, "stop", descendants); }, target => { setControlError(null); setStopTarget(target); });
+  const stopThread = (session: Session) => requestStop(session, (id, descendants) => { void controlThread(id, "stop", descendants); });
 
   const send = async (delivery: Delivery) => {
     const session = selectedSession();
@@ -919,7 +916,7 @@ function RemoteApp() {
     : selected && !messagingActive
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
-        attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
+        attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
         onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? pendingQuestions.questions : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : messagingActive && humanConversation
@@ -958,7 +955,6 @@ function RemoteApp() {
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && !messagingActive && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
         {closeConfirm && <CloseRunningChatDialog title={closeConfirm.chat.title} running={closeConfirm.running} onConfirm={() => { const { chat } = closeConfirm; setCloseConfirm(null); void closeChat(chat); }} onClose={() => setCloseConfirm(null)} />}
-        {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
         {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} debug={debugTools} /></Suspense>}
