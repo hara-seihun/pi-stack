@@ -116,7 +116,8 @@ export async function handleRoomOwner(req: Request, owner: RoomOwner): Promise<R
   }
   if (action === "prompt" && req.method === "POST") {
     if (!uuid(body?.requestId) || typeof body.text !== "string" || !body.text.trim() || body.text.length > 100_000) return fail("A requestId and message are required");
-    const sender = metadata.members.find(member => member.user === actor)!;
+    const member = metadata.members.find(member => member.user === actor)!;
+    const sender = body.senderKind === "agent" ? { ...member, displayName: `${member.displayName}'s Kenan`, agent: true as const } : member;
     await owner.send(id, body.requestId, roomInput(sender, body.text));
     return Response.json({ accepted: true }, { status: 202 });
   }

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Rooms } from "./rooms";
+import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { oneKenanEnabled as roomsEnabled } from "kenan-memory/config";
 import { handleRoomOwner, publicRoomSnapshot } from "./rooms-owner";
 import { roomAudienceResolver } from "./room-audience.mjs";
@@ -324,4 +325,44 @@ test("existing directory rows gain inbox defaults without custody or history mig
   expect(await directoryRoom(rooms, "bob")).toMatchObject({ unreadCount: 0 });
   expect((await rooms.handle(request(`/v1/rooms/${id}/close`, "POST", {}), "bob")).status).toBe(200);
   expect((await rooms.handle(request(`/v1/rooms/${id}`), "bob")).status).toBe(503);
+});
+
+test("agent room access is kernel-person bound; identity hints never grant membership", async () => {
+  const f = fixture(); await f.create();
+  const uids = roomPersonUids(people.map(person => person.user), user => ({ alice: 1001, bob: 1002, cara: 1003 })[user]);
+  const access = (path: string, uid?: number, method = "GET", body?: unknown) => handleAgentRooms(request(path, method, body, "alice"), uid === undefined ? undefined : { uid }, uids, f.rooms);
+  for (const uid of [undefined, 0, 9999]) expect((await access("/v1/agent-rooms?user=alice&session=forged", uid)).status).toBe(403);
+  expect((await (await access("/v1/agent-rooms", 1003)).json()).rooms).toEqual([]);
+  expect((await access(`/v1/agent-rooms/${f.id}?user=alice`, 1003)).status).toBe(404);
+  expect((await access(`/v1/agent-rooms/${f.id}/prompt`, 1003, "POST", { requestId: crypto.randomUUID(), text: "Forbidden", sender: "alice" })).status).toBe(404);
+  const listed = await (await access("/v1/agent-rooms", 1002)).json();
+  expect(listed.rooms.map((room: any) => room.id)).toEqual([f.id]);
+  f.history.get(f.id)!.push({ role: "assistant", timestamp: 1, content: [{ type: "text", text: "Visible shared answer" }, { type: "thinking", thinking: "Transparent work" }] });
+  const snapshot = await (await access(`/v1/agent-rooms/${f.id}`, 1002)).json();
+  expect(snapshot.messages.at(-1).text).toBe("Visible shared answer");
+  expect(snapshot.work).toContainEqual(expect.objectContaining({ kind: "thinking", text: "Transparent work" }));
+  expect((await directoryRoom(f.rooms, "bob")).unreadCount).toBeGreaterThan(0);
+  for (const path of ["/v1/agent-rooms/../room-owner/" + f.id, `/v1/agent-rooms/${f.id}/members`, `/v1/agent-rooms/${f.id}/abort`]) expect((await access(path, 1002, "POST", {})).status).toBe(404);
+  const ownId = crypto.randomUUID();
+  expect((await access("/v1/agent-rooms", 1002, "POST", { requestId: ownId, title: "Own room", members: ["alice", "cara"] })).status).toBe(201);
+  expect(f.threads.get(ownId).metadata.room.members).toEqual([people[1]]);
+});
+
+test("agent posts use verified attribution and preserve receipt custody across replay", async () => {
+  const f = fixture(); await f.create();
+  const uids = new Map([[1002, "bob"]]);
+  const receipt = crypto.randomUUID();
+  const post = (text = "Answer from my thread") => handleAgentRooms(request(`/v1/agent-rooms/${f.id}/prompt`, "POST", { requestId: receipt, text, sender: "alice", senderKind: "person", user: "alice" }), { uid: 1002 }, uids, f.rooms);
+  expect((await post()).status).toBe(202);
+  expect((await post()).status).toBe(202);
+  const restarted = new Rooms(f.path, () => people, f.transport); cleanup.push(() => restarted.close());
+  expect(await (await handleAgentRooms(request(`/v1/agent-rooms/${f.id}/prompt`, "POST", { requestId: receipt, text: "Answer from my thread" }), { uid: 1002 }, uids, restarted)).json()).toMatchObject({ accepted: true, replayed: true });
+  expect((await post("Changed text")).status).toBe(409);
+  expect(f.inputs).toHaveLength(1);
+  expect(readRoomInput(f.inputs[0]!.text)).toEqual({ sender: { ...people[1], displayName: "Bob's Kenan", agent: true }, text: "Answer from my thread" });
+  expect((await (await f.rooms.handle(request(`/v1/rooms/${f.id}`), "alice")).json()).messages[0].sender).toMatchObject({ user: "bob", agent: true, displayName: "Bob's Kenan" });
+  const humanReceipt = crypto.randomUUID();
+  await f.rooms.handle(request(`/v1/rooms/${f.id}/prompt`, "POST", { requestId: humanReceipt, text: "Human", senderKind: "agent" }), "alice");
+  expect(readRoomInput(f.inputs.at(-1)!.text)?.sender).toEqual(people[0]);
+  expect((await handleAgentRooms(request(`/v1/agent-rooms/${f.id}/prompt`, "POST", { requestId: humanReceipt, text: "Human" }), { uid: 1002 }, uids, f.rooms)).status).toBe(409);
 });

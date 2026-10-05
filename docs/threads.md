@@ -1,5 +1,7 @@
 # Unified threads
 
+A person's own Kenan can list/read/post their Pi Remote rooms with `pi-room`; the [room contract](../apps/remote/docs/rooms.md#a-persons-own-kenan) owns local kernel-UID admission, server membership and agent attribution. Room conversations remain in the separate room runtime, not the person's private thread directory.
+
 ## Accepted design
 
 Orchestrator owns persistent threads, input admission, execution state and durable message delivery. Remote, fleet lanes, agents and the CLI use the same thread operations. Pi executes individual sessions. There is no selectable core or separate child runtime, scheduler, result relay or registry.

@@ -16,6 +16,8 @@ import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
 import { networkStatus, readPrivateNetwork } from "./private-network";
 import { Rooms, ROOM_CUSTODIAN } from "./rooms";
+import { loopbackPeer } from "pi-orchestrator/api";
+import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 
@@ -44,6 +46,7 @@ const login = oidcSettings ? new OidcLogin(oidcSettings) : null;
 const privateNetwork = readPrivateNetwork();
 const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
+const roomPeople = roomPersonUids(PEOPLE.map(person => person.user));
 
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
 const operations = new Map<string, Promise<unknown>>();
@@ -408,7 +411,8 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
 
 const consentBridge = rootConsentHandler({ capability: rootConsentCapability, persons: listPersons,
   roomsOrigin: process.env.PI_REMOTE_ROOMS_OWNER_URL });
-async function route(req: Request, url: URL): Promise<Response> {
+async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Response> {
+  if (/^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname)) return handleAgentRooms(req, peer, roomPeople, activeRooms());
   const consent = await consentBridge(req);
   if (consent) return consent;
   activeRooms();
@@ -486,7 +490,10 @@ Bun.serve<ProxySocketData>({
     if (url.pathname.startsWith("/v1/auth/")) return oauthRoute(req, url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return preflight();
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);
-    const response = await route(req, url);
+    const socket = /^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
+    const peer = socket?.address === "127.0.0.1" && HOST === "127.0.0.1"
+      ? loopbackPeer({ address: socket.address, port: socket.port, localAddress: HOST, localPort: PORT }, "/proc", false) : undefined;
+    const response = await route(req, url, peer);
     if (!url.pathname.startsWith("/v1/")) return response;
     // A fresh cached private response must carry the authenticated session in
     // its URL. Header/cookie-only URLs can revalidate but cannot cross a later

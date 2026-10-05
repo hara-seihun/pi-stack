@@ -34,6 +34,7 @@ export class Rooms {
       CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY,owner TEXT NOT NULL,creator TEXT NOT NULL,title TEXT NOT NULL,members TEXT NOT NULL,ready INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS deliveries(receipt TEXT NOT NULL,room TEXT NOT NULL,person TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,time INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(receipt,person));
       CREATE TABLE IF NOT EXISTS room_activity(receipt TEXT PRIMARY KEY,room TEXT NOT NULL,time INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS room_prompts(room TEXT NOT NULL,requestId TEXT NOT NULL,actor TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,accepted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(room,requestId));
       CREATE TABLE IF NOT EXISTS room_inbox(room TEXT NOT NULL,person TEXT NOT NULL,current INTEGER NOT NULL DEFAULT 1,received INTEGER NOT NULL DEFAULT 0,readReceived INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(room,person));`);
     if (!hasInbox) this.db.exec(`INSERT INTO room_inbox(room,person,received)
       SELECT room,person,COUNT(*) FROM deliveries GROUP BY room,person;
@@ -141,7 +142,7 @@ export class Rooms {
     this.locks.set(id, next);
     try { return await next; } finally { if (this.locks.get(id) === next) this.locks.delete(id); }
   }
-  async handle(req: Request, actor: string): Promise<Response> {
+  async handle(req: Request, actor: string, senderKind: "person" | "agent" = "person"): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === "/v1/rooms" && req.method === "GET") {
       const visible = this.rows().filter(room => room.ready && room.members.some(member => member.user === actor));
@@ -228,19 +229,24 @@ export class Rooms {
       }
       if (action === "prompt" && req.method === "POST") {
         if (!uuid(body?.requestId) || typeof body.text !== "string" || !body.text.trim() || body.text.length > 100_000) return fail("A requestId and message are required");
-        const sent = await this.transport(room.owner, actor, `/v1/room-owner/${id}/prompt`, "POST", { requestId: body.requestId, text: body.text });
+        const previous = this.db.query("SELECT actor,kind,text,accepted FROM room_prompts WHERE room=? AND requestId=?").get(id, body.requestId) as { actor: string; kind: string; text: string; accepted: number } | null;
+        if (previous && (previous.actor !== actor || previous.kind !== senderKind || previous.text !== body.text)) return fail("Room message requestId already used", 409);
+        if (previous?.accepted) return Response.json({ accepted: true, replayed: true, room: this.visible(room, actor) }, { status: 202 });
+        this.db.query("INSERT OR IGNORE INTO room_prompts(room,requestId,actor,kind,text) VALUES(?,?,?,?,?)").run(id, body.requestId, actor, senderKind, body.text);
+        const sent = await this.transport(room.owner, actor, `/v1/room-owner/${id}/prompt`, "POST", { requestId: body.requestId, text: body.text, senderKind });
         if (sent.ok) {
           this.db.transaction(() => {
+            this.db.query("UPDATE room_prompts SET accepted=1 WHERE room=? AND requestId=?").run(id, body.requestId);
             const receipt = `room-message:${id}:${body.requestId}`;
             if (this.activity(id, receipt)) {
               this.setCurrent(id, actor, true);
             }
-            this.notice(room!, receipt, `${room!.members.find(member => member.user === actor)!.displayName} sent a message`, actor);
+            this.notice(room!, receipt, `${room!.members.find(member => member.user === actor)!.displayName}${senderKind === "agent" ? "'s Kenan" : ""} sent a message`, actor);
           })();
           await this.refresh(this.get(id)!, actor);
           void this.deliver();
         }
-        return sent;
+        return sent.ok ? Response.json({ ...await sent.json(), room: this.visible(this.get(id)!, actor) }, { status: sent.status }) : sent;
       }
       return fail("Unknown room operation", 405);
     });
