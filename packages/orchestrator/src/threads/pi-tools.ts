@@ -62,6 +62,30 @@ export function threadTools(options: PiSessionOptions) {
   }
   return [
     defineTool({
+      name: "thread_wait", label: "Wait on agents",
+      description: "Set or clear your own durable Waiting on agents status. Set with a reason and optional direct child threadIds/after cursors as your final tool call, then this turn ends without polling. Child settlements resume this same thread through ordinary result delivery. For external durable work omit threadIds and set thread_wake first as a recovery check. Holds and archives still win; explicit input clears the wait. Clear removes the status without creating work.",
+      parameters: Type.Union([
+        Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), threadIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 100, uniqueItems: true })), after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))) }),
+        Type.Object({ action: Type.Literal("clear") }),
+      ]),
+      execute: async (id, input, signal) => {
+        const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
+        return { ...result(waited), ...(waited.ok && input.action === "set" && waited.value.metadata?.agentWait ? { terminate: true } : {}) };
+      },
+    }),
+    defineTool({
+      name: "thread_wake", label: "Schedule own-thread wakes",
+      description: "Set, list, change or cancel one durable periodic recovery check for your own existing thread. Set replaces reason/cadence and retimes nextDueAt (epoch milliseconds, default now+cadence). Due checks coalesce while busy and pause during Stop/archive. Restart-safe ordinary messages resume the same thread through normal model admission; no watch-list item or polling model is created. List shows next due and last durable delivery/landing. Cancel when resolved. Prefer agent settlement events; wakes are fallback checks.",
+      parameters: Type.Union([
+        Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), cadenceMs: Type.Integer({ minimum: 60000 }), nextDueAt: Type.Optional(Type.Integer({ minimum: 0 })) }),
+        Type.Object({ action: Type.Literal("list") }),
+        Type.Object({ action: Type.Literal("cancel") }),
+      ]),
+      execute: async (id, input, signal) => result(await api(signal).wakeSchedule(input.action === "list"
+        ? { action: "list", threadId: options.threadId }
+        : { ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
+    defineTool({
       name: "watch_list_add", label: "Add to watch list",
       description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with Opus 5.5, handles routine follow-ups and asks the person about major decisions. An empty list makes no model calls.",
       parameters: Type.Object(watchFields),

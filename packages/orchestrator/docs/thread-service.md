@@ -28,7 +28,7 @@ Create a service with `databasePath`, `sessionsDir` and the shared runner's `ope
 
 `prepareMessage(thread, message)` returns a result containing text and optional images. The service persists that prepared payload before native dispatch and reuses it after interruption. Hooks that change external state must use the stable message ID to replay their own receipt. This matters for meeting transcript cursors: a crash after preparation but before its queue commit must not consume a different transcript on retry.
 
-`start()` enables dispatch. Idle native runtimes close after durable settlement, so persistent threads do not occupy resident runner slots. Reading or inspecting unloaded history does not open a runtime.
+`start()` enables dispatch and the five-second reconciliation tick. That same tick owns [durable self-wakes and dependency waits](../../../docs/threads.md#durable-dependency-waits-and-own-thread-wakes): `agentWait()` validates direct-child cursors, `wakeSchedule()` persists one caller-local schedule in `thread_wake`, and a due wake commits its ordinary input receipt with its next due time in one transaction. Holds/archive/busy work suspend delivery, cancel withdraws any still-queued wake, and restart never replays an accepted wake. `get()`/`list()`/`inspect()` expose typed `waitingOnAgents` and `wakeSchedule` alongside the unchanged lifecycle. Idle native runtimes close after durable settlement, so persistent threads do not occupy resident runner slots. Reading or inspecting unloaded history does not open a runtime.
 
 For controller handoff:
 

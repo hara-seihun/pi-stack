@@ -39,6 +39,8 @@ export interface Thread {
   updatedAt: number;
   pendingMessages: number;
   executionActivity?: ExecutionActivitySnapshot & { activeTools: string[] };
+  wakeSchedule?: ThreadWakeSchedule;
+  waitingOnAgents?: AgentWait;
   metadata?: Record<string, unknown>;
 }
 export interface ThreadQuestion {
@@ -189,7 +191,22 @@ export type ThreadControl =
   | { threadId: string; action: "cancelMessage"; messageId: string }
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
   | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };
+export interface AgentWait { reason: string; threadIds: string[]; after: Record<string, number>; since: number }
+export type AgentWaitRequest = { threadId: string; requestId: string } & (
+  | { action: "set"; reason: string; threadIds?: string[]; after?: Record<string, number> }
+  | { action: "clear" });
+export interface ThreadWakeSchedule {
+  reason: string; cadenceMs: number; nextDueAt: number;
+  lastDueAt?: number; lastDeliveredAt?: number; lastMessageId?: string; lastLandedAt?: number;
+  deferredReason?: "stopped" | "archived" | "busy";
+}
+export type ThreadWakeRequest = { threadId: string } & (
+  | { action: "list" }
+  | { action: "set"; requestId: string; reason: string; cadenceMs: number; nextDueAt?: number }
+  | { action: "cancel"; requestId: string });
 export interface ThreadApi {
+  agentWait(input: AgentWaitRequest): Promise<Result<Thread>>;
+  wakeSchedule(input: ThreadWakeRequest): Promise<Result<ThreadWakeSchedule | null>>;
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;
   questions(threadId: string): Promise<Result<ThreadQuestion[]>>;

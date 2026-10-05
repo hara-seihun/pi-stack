@@ -145,6 +145,19 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
           <Row label="Phase started">{session.activitySince ? formatTime(new Date(session.activitySince).toISOString()) : "Not reported"}</Row>
           <Row label="Last activity">{session.lastActivityAt ? formatTime(new Date(session.lastActivityAt).toISOString()) : "Not reported"}</Row>
         </>}
+        {session.waitingOnAgents && <>
+          <Row label="Dependency">{session.waitingOnAgents.reason}</Row>
+          <Row label="Waiting since">{formatTime(new Date(session.waitingOnAgents.since).toISOString())}</Row>
+          {session.waitingOnAgents.threadIds.length > 0 && <Row label="Agent threads">{session.waitingOnAgents.threadIds.map(id => <code key={id}>{id} </code>)}</Row>}
+        </>}
+        {session.wakeSchedule && <>
+          <Row label="Wake check">{session.wakeSchedule.reason}</Row>
+          <Row label="Check interval">{session.wakeSchedule.cadenceMs / 60000} minutes</Row>
+          <Row label="Next check">{formatTime(new Date(session.wakeSchedule.nextDueAt).toISOString())}{session.wakeSchedule.deferredReason && ` (${session.wakeSchedule.deferredReason})`}</Row>
+          {session.wakeSchedule.lastDueAt !== undefined && <Row label="Last wake due">{formatTime(new Date(session.wakeSchedule.lastDueAt).toISOString())}</Row>}
+          {session.wakeSchedule.lastDeliveredAt && <Row label="Last wake queued">{formatTime(new Date(session.wakeSchedule.lastDeliveredAt).toISOString())}</Row>}
+          {session.wakeSchedule.lastLandedAt && <Row label="Last wake landed">{formatTime(new Date(session.wakeSchedule.lastLandedAt).toISOString())}</Row>}
+        </>}
         <Row label="Model">{session.model}</Row>
         {!session.model.includes("/") && <Row label="Provider">{session.provider}</Row>}
         <Row label="Environment">{session.environment}</Row>

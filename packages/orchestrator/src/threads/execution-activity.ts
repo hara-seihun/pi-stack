@@ -1,7 +1,7 @@
 import { isCompactionFailure, isRateLimitError } from "../provider-errors.js";
 
 export type ExecutionPhase = "queued" | "admitting" | "starting" | "preparing" | "finishing" | "cancelling" | "recovering"
-  | "thinking" | "responding" | "preparing_tool" | "waiting_for_model" | "waiting_on_tool" | "compacting" | "retrying" | "waiting_for_capacity" | "waiting_to_retry";
+  | "thinking" | "responding" | "preparing_tool" | "waiting_for_model" | "waiting_on_agents" | "waiting_on_tool" | "compacting" | "retrying" | "waiting_for_capacity" | "waiting_to_retry";
 
 export interface ExecutionActivitySnapshot {
   activity?: ExecutionPhase;
@@ -10,15 +10,15 @@ export interface ExecutionActivitySnapshot {
   activityDetail?: string;
 }
 
-export interface ExecutionActivity extends ExecutionActivitySnapshot { activityTools: Set<string> }
+export interface ExecutionActivity extends ExecutionActivitySnapshot { activityTools: Set<string>; activityAgentTools: Set<string> }
 
-export function createExecutionActivity(): ExecutionActivity { return { activityTools: new Set() }; }
+export function createExecutionActivity(): ExecutionActivity { return { activityTools: new Set(), activityAgentTools: new Set() }; }
 
 export function executionActivitySnapshot(state: ExecutionActivitySnapshot): ExecutionActivitySnapshot {
   return { activity: state.activity, activitySince: state.activitySince, lastActivityAt: state.lastActivityAt, activityDetail: state.activityDetail };
 }
 
-const phases = new Set<ExecutionPhase>(["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_tool", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"]);
+const phases = new Set<ExecutionPhase>(["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_agents", "waiting_on_tool", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"]);
 
 export function executionWaitActivity(metadata?: Record<string, any>): ExecutionActivitySnapshot | undefined {
   const provider = metadata?.providerWait, admission = metadata?.admissionWait, startup = metadata?.startupFailure;
@@ -34,6 +34,7 @@ export function executionWaitActivity(metadata?: Record<string, any>): Execution
 
 export function restoreExecutionActivity(state: ExecutionActivity, snapshot: Record<string, any>): void {
   state.activityTools = new Set((Array.isArray(snapshot.tools) ? snapshot.tools : []).map((tool: any) => String(tool.toolCallId)));
+  state.activityAgentTools = new Set((Array.isArray(snapshot.tools) ? snapshot.tools : []).filter((tool: any) => tool.toolName === "thread_await").map((tool: any) => String(tool.toolCallId)));
   state.activity = phases.has(snapshot.activity) ? snapshot.activity as ExecutionPhase
     : state.activityTools.size ? "waiting_on_tool" : snapshot.isThinking ? "thinking" : undefined;
   state.activitySince = state.activity && Number.isFinite(snapshot.activitySince) ? snapshot.activitySince : undefined;
@@ -42,7 +43,7 @@ export function restoreExecutionActivity(state: ExecutionActivity, snapshot: Rec
 }
 
 export function settleExecutionActivity(state: ExecutionActivity): void {
-  state.activity = undefined; state.activitySince = undefined; state.activityDetail = undefined; state.activityTools.clear();
+  state.activity = undefined; state.activitySince = undefined; state.activityDetail = undefined; state.activityTools.clear(); state.activityAgentTools.clear();
 }
 
 /** Only production events advance the clock. Inspection and transport heartbeats do not. */
@@ -55,7 +56,7 @@ export function observeExecutionActivity(state: ExecutionActivity, event: Record
       if (!phases.has(event.activity)) return false;
       phase = event.activity; detail = String(event.activityDetail ?? ""); break;
     case "agent_start":
-      state.activityTools.clear(); detail = "Preparing context and runtime hooks"; break;
+      state.activityTools.clear(); state.activityAgentTools.clear(); detail = "Preparing context and runtime hooks"; break;
     case "model_request_start":
       phase = "waiting_for_model"; detail = "Model request sent; waiting for output"; break;
     case "message_start":
@@ -75,9 +76,11 @@ export function observeExecutionActivity(state: ExecutionActivity, event: Record
       if (event.message?.role !== "assistant") return false;
       detail = "Processing completed assistant message"; break;
     case "tool_execution_start": case "tool_execution_update":
-      state.activityTools.add(String(event.toolCallId)); phase = "waiting_on_tool"; detail = "Tool execution observed"; break;
+      state.activityTools.add(String(event.toolCallId));
+      if (event.toolName === "thread_await") state.activityAgentTools.add(String(event.toolCallId));
+      phase = "waiting_on_tool"; detail = "Tool execution observed"; break;
     case "tool_execution_end":
-      state.activityTools.delete(String(event.toolCallId)); detail = "Integrating tool results"; break;
+      state.activityTools.delete(String(event.toolCallId)); state.activityAgentTools.delete(String(event.toolCallId)); detail = "Integrating tool results"; break;
     case "auto_retry_start":
       phase = "retrying"; detail = "Model retry scheduled";
       if (Number.isFinite(event.attempt)) detail += ` (attempt ${event.attempt})`;
@@ -94,7 +97,8 @@ export function observeExecutionActivity(state: ExecutionActivity, event: Record
     default: return false;
   }
   if (state.activityTools.size && !["compacting", "retrying", "cancelling", "finishing", "recovering"].includes(phase)) {
-    phase = "waiting_on_tool"; detail = "Tool execution observed";
+    phase = state.activityAgentTools.size === state.activityTools.size ? "waiting_on_agents" : "waiting_on_tool";
+    detail = phase === "waiting_on_agents" ? "Waiting for child settlement" : "Tool execution observed";
   }
   if (phase !== state.activity || detail !== state.activityDetail) state.activitySince = at;
   state.activity = phase; state.activityDetail = detail; state.lastActivityAt = Math.max(state.lastActivityAt ?? at, at);
