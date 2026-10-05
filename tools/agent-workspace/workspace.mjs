@@ -18,6 +18,7 @@ import {
   rmSync,
   statfsSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
@@ -57,11 +58,20 @@ const DEFAULT_LEASE_SECONDS = 6 * 60 * 60;
 const DEFAULT_MAX_COUNT = 0;
 const DEFAULT_MIN_FREE_GIB = 30;
 const DEFAULT_MIN_FREE_INODES_PERCENT = 10;
+const DEFAULT_CREATION_TIMEOUT_SECONDS = 300;
+const ORIGIN_FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
+
+function creationTimeout(args) {
+  const seconds = numberFlag(args, "creation-timeout-seconds", DEFAULT_CREATION_TIMEOUT_SECONDS);
+  if (seconds < 1 || seconds > 900) fail("--creation-timeout-seconds must be between 1 and 900");
+  return seconds * 1000;
+}
 
 class CliError extends Error {}
 class ResourceBusyError extends CliError {}
 
 let inspectionDeadline;
+let creationDeadline;
 function duringInspection(deadline, inspect) {
   const previous = inspectionDeadline;
   inspectionDeadline = deadline;
@@ -143,8 +153,10 @@ function currentDirectory() {
 }
 
 function command(executable, commandArgs, options = {}) {
-  const remaining = inspectionDeadline === undefined ? Infinity : inspectionDeadline - Date.now();
-  if (remaining <= 0) fail("workspace inspection budget exhausted; no safety verdict was established");
+  const remaining = Math.min(inspectionDeadline ?? Infinity, creationDeadline ?? Infinity) - Date.now();
+  if (remaining <= 0) fail(creationDeadline === undefined
+    ? "workspace inspection budget exhausted; no safety verdict was established"
+    : "creation budget exhausted; checkout retained; repeat the same create command to resume");
   const result = spawnSync(executable, commandArgs, {
     // Git operands are resolved before launch; a released caller directory may vanish mid-command.
     cwd: options.cwd ?? homedir(),
@@ -158,6 +170,9 @@ function command(executable, commandArgs, options = {}) {
   });
   if (inspectionDeadline !== undefined && result.error?.code === "ETIMEDOUT") {
     fail(`workspace inspection timed out: ${executable} ${commandArgs.join(" ")}; no safety verdict was established`);
+  }
+  if (creationDeadline !== undefined && result.error?.code === "ETIMEDOUT") {
+    fail("creation command timed out; checkout retained; repeat the same create command to resume, optionally increasing --creation-timeout-seconds (maximum 900)");
   }
   return {
     status: result.status ?? 1,
@@ -1661,6 +1676,16 @@ function fetchSource(mirror, repository, ref) {
   return run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
 }
 
+// Clone uses a temporary source remote, so Git does not create origin's fetch mapping.
+// Install it before materialization, and repair older interrupted clones at either exit.
+// Preserve explicit caller mappings and never invent a published remote-tracking ref.
+function ensureOriginFetch(destination) {
+  const current = command("git", ["-C", destination, "config", "--local", "--get-all", "remote.origin.fetch"]);
+  if (current.status === 0 && current.stdout.length > 0) return;
+  if (current.status !== 0 && current.status !== 1) fail(`cannot read origin fetch configuration: ${current.stderr || current.error?.message}`);
+  git(destination, ["config", "--local", "--replace-all", "remote.origin.fetch", ORIGIN_FETCH_REFSPEC]);
+}
+
 function cloneSourceTag(statePath, mirror, sourceCommit) {
   const name = `pi-workspace-source-${sourceCommit}`;
   const ref = `refs/tags/${name}`;
@@ -1681,7 +1706,8 @@ function createCommand(database, args, statePath) {
 }
 
 function createWorkspace(database, args, statePath) {
-  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "json"]);
+  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "creation-timeout-seconds", "sparse-pattern", "json"]);
+  const checkoutTimeout = creationTimeout(args);
   const root = path.resolve(required(args, "root"));
   const name = safeName(required(args, "name"));
   const destination = path.join(root, name);
@@ -1691,10 +1717,16 @@ function createWorkspace(database, args, statePath) {
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   const strategy = one(args, "strategy", "clone");
   if (!["clone", "worktree"].includes(strategy)) fail("--strategy must be clone or worktree");
+  const sparsePatterns = many(args, "sparse-pattern");
+  if (sparsePatterns.some(pattern => !pattern.trim() || pattern === "true" || /[\r\n\0]/u.test(pattern))) {
+    fail("--sparse-pattern requires a nonempty single-line Git non-cone pattern");
+  }
+  if (sparsePatterns.length && strategy !== "clone") fail("--sparse-pattern currently requires --strategy clone");
   const branch = one(args, "branch", `agent/${name}`);
   const request = JSON.stringify({ repository, ref, mode, strategy, branch,
     owner: one(args, "owner", name), kind: one(args, "kind", "agent"), groupId: one(args, "group", null),
     cachePaths: normalizeCachePaths(many(args, "cache")),
+    ...(sparsePatterns.length ? { sparsePatterns } : {}),
     leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) });
   const input = JSON.parse(request);
   const mirror = mirrorFor(statePath, repository);
@@ -1743,19 +1775,23 @@ function createWorkspace(database, args, statePath) {
         const worktreeArgs = ["--git-dir", mirror, "worktree", "add"];
         if (mode === "review") worktreeArgs.push("--detach", destination, sourceCommit);
         else worktreeArgs.push("-b", branch, destination, sourceCommit);
-        run("git", worktreeArgs);
+        run("git", worktreeArgs, { timeout: checkoutTimeout });
       } else {
         const sourceTag = cloneSourceTag(statePath, mirror, sourceCommit);
         run("git", ["clone", "--no-local", ...Object.entries(REFERENCE_CLONE_CONFIG)
           .flatMap(([name, value]) => ["--config", `${name}=${value}`]),
-          "--config", `remote.origin.url=${repository}`, "--origin", "workspace-source",
+          "--config", `remote.origin.url=${repository}`, "--config", `remote.origin.fetch=${ORIGIN_FETCH_REFSPEC}`,
+          "--origin", "workspace-source",
           "--reference-if-able", mirror, "--no-checkout", "--no-tags", "--single-branch", "--branch", sourceTag,
           mirror, destination], { timeout: 40_000 });
       }
     }
     const info = gitInfo(destination);
     if (info.checkoutType !== strategy) fail("pending checkout type changed");
-    if (strategy === "clone") resumeCloneCheckout(destination, input, sourceCommit, upstream);
+    if (strategy === "clone") {
+      prepareSparseCheckout(destination, input);
+      resumeCloneCheckout(destination, input, sourceCommit, upstream, checkoutTimeout);
+    }
     const head = git(destination, ["rev-parse", "HEAD"]);
     const selectedBranch = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
     if (head !== sourceCommit || (mode === "writer" ? selectedBranch.stdout !== branch : selectedBranch.status === 0)) {
@@ -1764,7 +1800,7 @@ function createWorkspace(database, args, statePath) {
     assertPendingClean(destination);
     if (strategy === "clone") {
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
-      git(destination, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+      ensureOriginFetch(destination);
       configurePushUrl(["-C", destination], upstream);
       const cloneSource = command("git", ["-C", destination, "config", "--local", "--get", "remote.workspace-source.url"]);
       if (cloneSource.status === 0 && cloneSource.stdout === mirror) git(destination, ["remote", "remove", "workspace-source"]);
@@ -1778,13 +1814,31 @@ function createWorkspace(database, args, statePath) {
   }
 }
 
-function resumeCloneCheckout(destination, input, sourceCommit, upstream) {
+// Write the selection before the first worktree checkout: no large excluded blob is opened.
+// Retrying must not silently overwrite a caller's changed sparse selection or existing index.
+function prepareSparseCheckout(destination, input) {
+  if (!input.sparsePatterns?.length) return;
+  const file = path.join(destination, ".git", "info", "sparse-checkout");
+  const content = `${input.sparsePatterns.join("\n")}\n`;
+  if (existsSync(file)) {
+    if (readFileSync(file, "utf8") !== content) fail("pending sparse selection differs; preserve and repair it before resuming creation");
+  } else {
+    if (git(destination, ["ls-files", "--stage"])) fail("pending sparse checkout has an index but no recorded selection; preserve and repair it before resuming creation");
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, content, { flag: "wx", mode: 0o600 });
+  }
+  git(destination, ["config", "--local", "core.sparseCheckout", "true"]);
+  git(destination, ["config", "--local", "core.sparseCheckoutCone", "false"]);
+}
+
+function resumeCloneCheckout(destination, input, sourceCommit, upstream, checkoutTimeout) {
   const head = git(destination, ["rev-parse", "HEAD"]);
   const selected = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
   const correctBranch = input.mode === "review" ? selected.status !== 0 : selected.stdout === input.branch;
   const refuse = reason => fail(`pending checkout cannot resume: ${reason}; preserve and repair it before resuming creation`);
   const origin = repositoryLocation(git(destination, ["config", "--local", "--get", "remote.origin.url"]), destination);
   if (![input.repository, upstream.fetch].includes(origin)) refuse("origin differs from the creation request");
+  ensureOriginFetch(destination);
   if (head === sourceCommit && correctBranch && existsSync(path.join(destination, ".git", "index"))) return;
   const unique = git(destination, ["rev-list", "--branches", "HEAD", "--not", "--remotes", sourceCommit]);
   if (unique) refuse("commits absent from remote refs and reserved source");
@@ -1840,7 +1894,7 @@ function resumeCloneCheckout(destination, input, sourceCommit, upstream) {
   }
   git(destination, input.mode === "review"
     ? ["checkout", "--force", "--detach", sourceCommit]
-    : ["checkout", "--force", "-B", input.branch, sourceCommit]);
+    : ["checkout", "--force", "-B", input.branch, sourceCommit], { timeout: checkoutTimeout });
 }
 
 function assertPendingClean(destination) {
@@ -1880,11 +1934,14 @@ function finalizeCreationCommand(database, args, statePath) {
   const ancestry = command("git", ["-C", record.path, "merge-base", "--is-ancestor", record.sourceCommit, info.head]);
   if (ancestry.status !== 0) fail("pending checkout HEAD is not descended from the recorded source commit");
   const branch = command("git", ["-C", record.path, "symbolic-ref", "--quiet", "--short", "HEAD"]);
-  if (input.mode === "writer" ? branch.status !== 0 : branch.status === 0) fail("pending checkout branch mode differs from the creation request");
+  if (input.mode === "writer" ? branch.status !== 0 : branch.status === 0) fail("pending checkout branch mode differs from the creation request; repeat the original create command for an untouched checkout, or restore the intended branch and clean index before finalize-creation; no files have been removed");
   assertPendingClean(record.path);
-  if (info.checkoutType === "clone") maintainReferenceClone(record.path, true);
+  if (info.checkoutType === "clone") {
+    ensureOriginFetch(record.path);
+    maintainReferenceClone(record.path, true);
+  }
   completeCreation(database, record.id, info.repository ?? record.repository, input.leaseSeconds,
-    "creation finalized; existing HEAD, branches, remotes and ignored output preserved", args);
+    "creation finalized; existing HEAD, branches, remotes and ignored output preserved; origin fetch mapping verified", args);
 }
 
 function cancelCreationCommand(database, args) {
@@ -2093,7 +2150,7 @@ function statusCommand(database, args) {
 
 function help() {
   process.stdout.write(`Usage:
-  agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...]
+  agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...] [--creation-timeout-seconds 300] [--sparse-pattern PATTERN ...]
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
   agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
   agent-workspace cancel-creation (--id ID|--path PATH)
@@ -2132,22 +2189,27 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const args = parseArgs(rest);
   if (args.positional.length > 0) fail(`unexpected argument: ${args.positional[0]}`);
   if (commandName === "create") {
+    const budgetMs = creationTimeout(args);
     const repository = repositoryLocation(required(args, "repo"), currentDirectory());
     if (process.env.PI_WORKSPACE_CREATE_CHILD !== statePath) {
       args.named.set("root", [path.resolve(required(args, "root"))]);
       args.named.set("repo", [repository]);
       const normalized = [...args.named].flatMap(([name, values]) => values.map((value) => `--${name}=${value}`));
-      const result = command("timeout", ["--kill-after=1", "45",
+      const result = command("timeout", ["--kill-after=1", String(budgetMs / 1000),
         process.execPath, new URL(import.meta.url).pathname, "create", ...normalized], {
-        timeout: 48_000,
+        timeout: budgetMs + 3_000,
         env: { PI_WORKSPACE_STATE: statePath, PI_WORKSPACE_CREATE_CHILD: statePath },
       });
+      if ([124, 137].includes(result.status) || result.error?.code === "ETIMEDOUT") {
+        fail("creation budget exhausted; any pending checkout is retained, not active; repeat the same create command to resume, optionally increasing --creation-timeout-seconds (maximum 900)");
+      }
       if (result.status === 75) throw new ResourceBusyError(result.stderr);
       if (result.status !== 0) fail(result.stderr || result.error?.message ||
         "creation interrupted; repeat the same command to resume");
       process.stdout.write(`${result.stdout}\n`);
       return;
     }
+    creationDeadline = Date.now() + budgetMs;
   }
   if (!["status", "list", "maintain", "cancel-creation", "finalize-creation"].includes(commandName)
     && (commandName !== "reconcile" || bool(args, "execute"))) drainGc(statePath);
@@ -2174,6 +2236,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     }
   } finally {
     database.close();
+    creationDeadline = undefined;
   }
 }
 
