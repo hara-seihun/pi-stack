@@ -63,6 +63,10 @@ def verified(path, manifest):
 def fetch(manifest, destination, store, cache):
     if verified(destination, manifest):
         return
+    partial = Path(str(destination) + '.part')
+    if verified(partial, manifest):
+        os.replace(partial, destination)
+        return
     candidates = list(store.glob('rewrite-*/*'))
     if cache:
         candidates += list(cache.glob('*'))
@@ -73,7 +77,7 @@ def fetch(manifest, destination, store, cache):
             return
     subprocess.run(['bash', '-c', 'source "$1"; pi_stack_download_artifact "$2" "$3" "$4"',
                     'download', str(ROOT / 'deploy/lib'), manifest['url'], str(destination),
-                    manifest['sha256']], check=True, timeout=45, stdout=sys.stderr)
+                    manifest['sha256']], check=True, stdout=sys.stderr)
     if not verified(destination, manifest):
         raise ValueError('artifact size/checksum mismatch: ' + str(destination))
 
