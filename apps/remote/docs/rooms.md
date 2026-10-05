@@ -122,9 +122,51 @@ sender's room. `updatedAt` is an epoch-millisecond activity timestamp, not a pol
 The fields `current`, `updatedAt`, `state`, `unreadCount` and `pendingQuestions` are optional in the
 shared type for existing fixtures and older snapshots; directory responses always supply them.
 
+## A person's own Kenan
+
+The installed `pi-room` CLI lets a person's own threads list/read their rooms and post as that person's Kenan:
+
+```
+pi-room list
+pi-room read ROOM_ID --last 5
+pi-room read ROOM_ID --last 0 --work  # all conversation plus transparent work/context
+pi-room send ROOM_ID 'Message' --request-id UUID
+pi-room create 'Own test room'      # only the caller, never invites anyone else
+```
+
+Owner: `server/agent-rooms.ts` and `server/room-cli.ts`. The local router accepts
+`GET /v1/agent-rooms`, `GET /v1/agent-rooms/:id`, `POST /v1/agent-rooms/:id/prompt`
+and own-only `POST /v1/agent-rooms`. It resolves the client socket's Unix UID from
+`/proc/net/tcp{,6}` and maps it to registered Unix people. Headers, query hints,
+environment names and browser/thread tokens do not choose the person. Root,
+`pi-kenan`, `pi-rooms`, unregistered UIDs and non-loopback callers are not admitted.
+Missing UID evidence fails closed. This does not grant root a person-impersonation route.
+
+These requests reuse the same directory, membership checks and trusted room-owner
+transport as member clients; the internal listener and filesystem permissions are unchanged.
+Responses include the authenticated `person`. Nonmembers cannot enumerate, read or post.
+Agent-created rooms are own-only; inviting other people stays with the human UI.
+Other room controls and remote-environment proxy paths are not agent endpoints.
+`PI_ROOM_URL` selects only a loopback HTTP router origin (default port 8788).
+
+Posts are stamped from the current server roster as `{user: PERSON, displayName:
+"NAME's Kenan", agent: true}`. Human prompt payloads cannot select this attribution.
+The native room history and member clients retain this sender. A requestId durably
+binds actor, sender kind and text; conflicting reuse returns 409, and accepted replay
+returns `replayed:true` without dispatching a second input, even across router restart.
+A lost acknowledgement is uncertain: inspect and retry only with the same requestId.
+Acceptance means queued input, not a completed room turn. Reads do not acknowledge
+unread events, reopen a closed room or alter membership.
+
+`pi-room send` journals intent before dispatch and records confirmed/failed/uncertain
+acceptance through the person's own [action journal](../../../docs/action-journal.md),
+using server-reported membership, not `USER`. Intent-custody failure prevents dispatch;
+outcome-journal failure reports a warning without asking for a resend. Raw HTTP sends
+bypassing the CLI require the normal manual action record.
+
 ## API
 
-All public routes require this host's authenticated router session:
+The member-client public routes require this host's authenticated router session:
 
 - `GET /v1/rooms` → `{ rooms, people }`, filtered by membership, including closed rooms; people is
   the host roster. Each room includes `{ id, title, members, current, updatedAt, state, unreadCount,
@@ -152,6 +194,6 @@ outside this slice. Root may still act on files and describe the result.
 Focused checks run without live services, registries, keys or mounts:
 
 ```
-bun test apps/remote/server/rooms.test.ts apps/remote/server/message-context.test.ts apps/remote/server/notifications.test.ts
+bun test apps/remote/server/rooms.test.ts apps/remote/server/agent-rooms.test.ts apps/remote/server/message-context.test.ts apps/remote/server/notifications.test.ts
 npm test --workspace=pi-orchestrator -- tests/room-session.test.ts
 ```

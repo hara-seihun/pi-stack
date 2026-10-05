@@ -31,6 +31,7 @@ export { loadThreadModelCatalog, type ThreadModelCatalog, type ThreadModelMetada
 export { threadHttp, createThreadClient } from "./threads/http.js";
 export { admissionFor, callerResolver, hostIdentityConfig, threadCapability, THREAD_TOKEN_HEADER, UPSTREAM_CREDENTIAL_HEADER } from "./threads/caller.js";
 export type { CallerResolver, CallerSource, ThreadCaller, ThreadCapability, ThreadCreator } from "./threads/caller.js";
+export { loopbackPeer } from "./threads/caller.js";
 export { openPiSession } from "./threads/pi-session.js";
 export { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 export { WatchList, watchInterval, DEFAULT_WATCH_INTERVAL_MS, type WatchRequest, type WatchResponse, type WatchItem } from "./threads/watch-list.js";

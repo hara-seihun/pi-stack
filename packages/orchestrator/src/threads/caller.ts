@@ -125,7 +125,7 @@ function hexAddress(address: string, six: boolean): string | undefined {
 }
 
 /** The uid and, when readable, pid owning the client end of a loopback TCP connection. */
-export function loopbackPeer(socket: PeerSocket, proc = "/proc"): PeerProcess | undefined {
+export function loopbackPeer(socket: PeerSocket, proc = "/proc", identifyProcess = true): PeerProcess | undefined {
   for (const six of [false, true]) {
     const client = hexAddress(socket.address, six), server = hexAddress(socket.localAddress, six);
     if (!client || !server) continue;
@@ -137,7 +137,7 @@ export function loopbackPeer(socket: PeerSocket, proc = "/proc"): PeerProcess | 
       const fields = line.trim().split(/\s+/);
       if (fields[1] !== local || fields[2] !== remote) continue;
       const uid = Number(fields[7]), inode = fields[9];
-      return { uid, ...(inode && inode !== "0" ? { pid: socketOwner(inode, uid, proc) } : {}) };
+      return { uid, ...(identifyProcess && inode && inode !== "0" ? { pid: socketOwner(inode, uid, proc) } : {}) };
     }
   }
   return undefined;

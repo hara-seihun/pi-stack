@@ -42,7 +42,7 @@ rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/web/dist "$stage/release/web/"
 npm run build --workspace=kenan-root
 mkdir -p "$stage/release/kenan-root"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/kenan-root/src packages/kenan-root/dist packages/kenan-root/instructions.md packages/kenan-root/package.json "$stage/release/kenan-root/"
-for executable in pi-remote pi-phone pi-calendar pi-remote-launch pi-remote-supervise; do
+for executable in pi-remote pi-phone pi-room pi-calendar pi-remote-launch pi-remote-supervise; do
   test -x "$stage/release/server/$executable" || {
     printf 'staged Pi Remote executable is not executable: %s\n' "$executable" >&2
     exit 1
