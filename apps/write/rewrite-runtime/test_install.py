@@ -65,6 +65,50 @@ class InstallTests(unittest.TestCase):
                 self.assertNotEqual(paths[0], new_paths[0])
                 self.assertEqual(paths[1], new_paths[1])
 
+    def test_download_uses_callers_budget_and_verifies_completion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache, manifests, _ = self.fixture(root)
+            manifest = installer.load(manifests / 'model.json')
+            content = (cache / 'model.gguf').read_bytes()
+            store = root / 'store'
+            store.mkdir()
+            destination = store / 'model.gguf'
+
+            def download(command, **kwargs):
+                # Preparation's owner may allow more than 45 seconds. An inner
+                # deadline must not kill its shell and leave curl unowned.
+                self.assertNotIn('timeout', kwargs)
+                self.assertTrue(kwargs['check'])
+                self.assertEqual(command[-3:], [manifest['url'], str(destination), manifest['sha256']])
+                destination.write_bytes(content)
+
+            with patch.object(installer.subprocess, 'run', side_effect=download) as run:
+                installer.fetch(manifest, destination, store, None)
+                self.assertTrue(installer.verified(destination, manifest))
+                installer.fetch(manifest, destination, store, None)
+                self.assertEqual(run.call_count, 1)
+
+    def test_completed_partial_is_promoted_without_network(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache, manifests, _ = self.fixture(root)
+            manifest = installer.load(manifests / 'model.json')
+            store = root / 'store'
+            store.mkdir()
+            model_dir = store / 'rewrite-model-fixture'
+            model_dir.mkdir()
+            destination = model_dir / 'model.gguf'
+            partial = model_dir / 'model.gguf.part'
+            partial.write_bytes((cache / 'model.gguf').read_bytes())
+            # The reuse glob includes our own partial: promote it before scanning
+            # candidates, rather than trying to copy the file over itself.
+            with patch.object(installer.subprocess, 'run') as run:
+                installer.fetch(manifest, destination, store, None)
+                run.assert_not_called()
+            self.assertTrue(installer.verified(destination, manifest))
+            self.assertFalse(partial.exists())
+
     def test_rejects_traversal_and_symlink_before_extraction(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

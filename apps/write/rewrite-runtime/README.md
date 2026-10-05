@@ -33,9 +33,17 @@ into the component store; the cache is optional and safe to remove/rebuild.
 Standalone installation is not selection or a retention pin; `deploy/write-engine`
 creates the dependency links for a complete prepared engine.
 Copies become root-owned public files, never links into that cache. With no seed,
-only public HTTPS artifacts are downloaded. Deployment's 50-second outer deadline
-bounds resumable downloads; `.part` files survive an interrupted preparation.
-Run preparation again to resume rather than selecting an incomplete engine.
+only public HTTPS artifacts are downloaded. Standalone deployment's 50-second
+outer deadline bounds resumable downloads. During `deploy/prepare`, the publication
+worker's caller deadline bounds the entire process group instead; downloads have
+no independent Python timeout. PUB-8a2bc36c51310f5d5f2a29fe exposed a 45-second
+inner timeout that killed the downloader shell before a valid 2.5 GB model could
+be accepted, leaving its curl child to finish outside preparation's custody.
+The reuse scan also included the destination's own completed `.part` and attempted
+to copy it onto itself. The installer now promotes a verified complete partial
+before scanning reuse candidates. `.part` files survive interruption; verified
+complete partials are promoted without another request. Run preparation again to
+resume rather than selecting an incomplete engine.
 
 `deploy/write-rewrite-runtime --paths STORE` prints the two immutable entry paths;
 `--check STORE` validates runtime files, executable wrapper and full model digest
@@ -51,9 +59,10 @@ node --test scripts/deploy-prepare.test.mjs
 ```
 
 The installer fixtures cover checksum reuse, corruption repair, input-key
-invalidation, public permissions, path/link rejection and incompatible glibc
-rejection. Deployment fixtures seed tiny pinned artifacts and run the real rewrite
-installer through engine preparation and selection. They cover host discovery,
+invalidation, public permissions, path/link rejection, incompatible glibc
+rejection, caller-owned download deadlines and completed-partial promotion.
+Deployment fixtures seed tiny pinned artifacts and run the real rewrite installer
+through engine preparation and selection. They cover host discovery,
 dependency-change reuse and retention, and refusal to select corrupt rewrite
 weights until preparation repairs them. No model downloads are needed. Runtime
 lifecycle, inference parameters and rewrite behavior belong to the engine.
