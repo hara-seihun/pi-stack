@@ -119,6 +119,103 @@ for (const stage of ["clone", "checkout"]) test(`creation resumes after interrup
   } finally { f.close(); }
 });
 
+test("origin fetch mapping is installed before an interrupted clone checkout", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "tracking", "--repo", f.remote,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "clone")));
+    const destination = path.join(f.workspaces, "tracking");
+    assert.equal(git(destination, "config", "--local", "--get-all", "remote.origin.fetch"),
+      "+refs/heads/*:refs/remotes/origin/*");
+    assert.throws(() => git(destination, "rev-parse", "--verify", "origin/main"));
+    const record = JSON.parse(run(args, f.env));
+    git(destination, "fetch", "origin", "main");
+    assert.equal(git(destination, "rev-parse", "origin/main"), record.sourceCommit);
+    git(destination, "rebase", "origin/main");
+    assert.equal(git(destination, "status", "--porcelain"), "");
+  } finally { f.close(); }
+});
+
+for (const mapping of [null, "", "+refs/heads/main:refs/remotes/origin/main"]) {
+  for (const operation of ["resume", "finalize"]) test(`${operation} repairs missing origin tracking and preserves explicit mapping (${mapping})`, () => {
+    const f = fixture();
+    try {
+      const args = ["create", "--root", f.workspaces, "--name", "tracking", "--repo", f.remote,
+        "--min-free-gib", "0", "--json"];
+      assert.throws(() => run(args, interruptCreation(f, "checkout")));
+      const destination = path.join(f.workspaces, "tracking");
+      git(destination, "config", "--unset-all", "remote.origin.fetch");
+      if (mapping !== null) git(destination, "config", "--add", "remote.origin.fetch", mapping);
+      const head = git(destination, "rev-parse", "HEAD");
+      const branch = git(destination, "branch", "--show-current");
+      const urls = git(destination, "remote", "-v");
+      const record = JSON.parse(run(operation === "resume" ? args :
+        ["finalize-creation", "--path", destination, "--json"], f.env));
+      assert.equal(record.state, "active");
+      assert.equal(git(destination, "rev-parse", "HEAD"), head);
+      assert.equal(git(destination, "branch", "--show-current"), branch);
+      if (operation === "finalize") assert.equal(git(destination, "remote", "-v"), urls);
+      assert.equal(git(destination, "config", "--local", "--get-all", "remote.origin.fetch"),
+        mapping || "+refs/heads/*:refs/remotes/origin/*");
+      assert.throws(() => git(destination, "rev-parse", "--verify", "origin/main"));
+      git(destination, "fetch", "origin", "main");
+      git(destination, "rebase", "origin/main");
+      assert.equal(git(destination, "rev-parse", "origin/main"), record.sourceCommit);
+    } finally { f.close(); }
+  });
+}
+
+test("bounded creation expiry retains a partial checkout and retries with a larger budget", () => {
+  const f = fixture();
+  try {
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const wrapper = path.join(bin, "git");
+    writeFileSync(wrapper, `#!${process.execPath}
+const {spawnSync} = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const result = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'});
+if (result.status === 0 && args.includes('checkout')) {
+  const dest = args[args.indexOf('-C') + 1];
+  fs.unlinkSync(require('node:path').join(dest, '.git', 'index'));
+  fs.unlinkSync(require('node:path').join(dest, 'file.txt'));
+  setInterval(() => {}, 1000);
+} else process.exit(result.status ?? 1);
+`);
+    chmodSync(wrapper, 0o755);
+    const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+    const args = ["create", "--root", f.workspaces, "--name", "bounded", "--repo", f.remote,
+      "--min-free-gib", "0", "--json"];
+    const started = Date.now();
+    assert.throws(() => run([...args, "--creation-timeout-seconds", "5"], env), /creation.*(budget|timed out)/);
+    assert.ok(Date.now() - started < 10_000);
+    const [pending] = JSON.parse(run(["status", "--json"], f.env)).records;
+    assert.equal(pending.state, "creating");
+    assert.equal(existsSync(pending.path), true);
+    assert.equal(git(pending.path, "config", "--get", "remote.origin.fetch"),
+      "+refs/heads/*:refs/remotes/origin/*");
+    assert.equal(existsSync(path.join(pending.path, "file.txt")), false);
+    const resumed = JSON.parse(run([...args, "--creation-timeout-seconds", "30"], f.env));
+    assert.equal(resumed.id, pending.id);
+    assert.equal(resumed.sourceCommit, pending.sourceCommit);
+    assert.equal(resumed.state, "active");
+    assert.equal(readFileSync(path.join(resumed.path, "file.txt"), "utf8"), "source\n");
+    assert.equal(git(resumed.path, "status", "--porcelain"), "");
+  } finally { f.close(); }
+});
+
+for (const budget of ["0", "901", "NaN", "Infinity"]) test(`creation rejects unbounded or invalid timeout ${budget}`, () => {
+  const f = fixture();
+  try {
+    assert.throws(() => run(["create", "--root", f.workspaces, "--name", "invalid", "--repo", f.remote,
+      "--creation-timeout-seconds", budget, "--min-free-gib", "0"], f.env), /creation-timeout-seconds/);
+    assert.equal(existsSync(path.join(f.workspaces, "invalid")), false);
+  } finally { f.close(); }
+});
+
 for (const mode of ["writer", "review"]) {
   for (const stage of ["complete", "clone", "checkout"]) {
     test(`local ${mode} creation isolates the requested revision with ${stage} materialization`, () => {
@@ -1990,4 +2087,72 @@ test("an unrecognised command prints the usage that names the real ones", () => 
   } finally {
     f.close();
   }
+});
+
+for (const mode of ['writer', 'review']) test(`sparse ${mode} creation selects Markdown and requirements without tracked archives`, () => {
+  const f = fixture();
+  try {
+    mkdirSync(path.join(f.source, 'programme'));
+    writeFileSync(path.join(f.source, 'programme', 'search.md'), '# search\n');
+    writeFileSync(path.join(f.source, 'requirements.txt'), 'numpy\n');
+    writeFileSync(path.join(f.source, 'native-custody.tgz'), Buffer.alloc(2 * 1024 * 1024, 37));
+    git(f.source, 'add', '.');
+    git(f.source, 'commit', '-m', 'sparse selection fixture');
+    const args = ['create', '--root', f.workspaces, '--name', 'sparse', '--repo', f.source,
+      '--mode', mode, '--sparse-pattern', '*.md', '--sparse-pattern', 'requirements*.txt',
+      '--min-free-gib', '0', '--json'];
+    const record = JSON.parse(run(args, f.env));
+    assert.equal(record.state, 'active');
+    assert.equal(readFileSync(path.join(record.path, 'programme', 'search.md'), 'utf8'), '# search\n');
+    assert.equal(readFileSync(path.join(record.path, 'requirements.txt'), 'utf8'), 'numpy\n');
+    assert.equal(existsSync(path.join(record.path, 'native-custody.tgz')), false);
+    assert.equal(existsSync(path.join(record.path, 'file.txt')), false);
+    assert.equal(git(record.path, 'status', '--porcelain'), '');
+    assert.match(git(record.path, 'ls-files', '-t'), /S native-custody.tgz/);
+    assert.equal(git(record.path, 'branch', '--show-current'), mode === 'writer' ? 'agent/sparse' : '');
+    assert.equal(JSON.parse(run(args, f.env)).id, record.id);
+    assert.throws(() => run([...args, '--sparse-pattern', '*.tgz'], f.env), /different creation request/);
+  } finally { f.close(); }
+});
+
+test('interrupted sparse creation resumes its reservation and supports clean finalization', () => {
+  const f = fixture();
+  try {
+    writeFileSync(path.join(f.source, 'programme.md'), '# search\n');
+    git(f.source, 'add', '.');
+    git(f.source, 'commit', '-m', 'markdown');
+    const args = ['create', '--root', f.workspaces, '--name', 'sparse-resume', '--repo', f.source,
+      '--sparse-pattern', '*.md', '--min-free-gib', '0', '--json'];
+    assert.throws(() => run(args, interruptCreation(f, 'checkout')));
+    const [pending] = JSON.parse(run(['status', '--json'], f.env)).records;
+    assert.equal(pending.state, 'creating');
+    const policy = path.join(pending.path, '.git', 'info', 'sparse-checkout');
+    writeFileSync(policy, '*.txt\n');
+    assert.throws(() => run(args, f.env), /pending sparse selection differs/);
+    assert.equal(readFileSync(policy, 'utf8'), '*.txt\n');
+    writeFileSync(policy, '*.md\n');
+    const record = JSON.parse(run(['finalize-creation', '--id', pending.id, '--json'], f.env));
+    assert.equal(record.state, 'active');
+    assert.equal(record.id, pending.id);
+    assert.equal(existsSync(path.join(record.path, 'file.txt')), false);
+    assert.equal(readFileSync(path.join(record.path, 'programme.md'), 'utf8'), '# search\n');
+  } finally { f.close(); }
+});
+
+for (const pattern of ['', 'true', 'x\ny', 'x\ry']) test(`invalid sparse pattern ${JSON.stringify(pattern)} leaves no reservation`, () => {
+  const f = fixture();
+  try {
+    assert.throws(() => run(['create', '--root', f.workspaces, '--name', 'invalid', '--repo', f.source,
+      '--sparse-pattern', pattern, '--min-free-gib', '0'], f.env), /sparse-pattern/);
+    assert.deepEqual(JSON.parse(run(['status', '--json'], f.env)).records, []);
+  } finally { f.close(); }
+});
+
+test('sparse creation rejects linked worktrees without changing mirror configuration', () => {
+  const f = fixture();
+  try {
+    assert.throws(() => run(['create', '--root', f.workspaces, '--name', 'invalid', '--repo', f.source,
+      '--strategy', 'worktree', '--sparse-pattern', '*.md', '--min-free-gib', '0'], f.env), /requires --strategy clone/);
+    assert.deepEqual(JSON.parse(run(['status', '--json'], f.env)).records, []);
+  } finally { f.close(); }
 });
