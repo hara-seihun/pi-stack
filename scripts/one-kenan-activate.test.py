@@ -6,10 +6,12 @@ import pathlib
 import runpy
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -55,6 +57,61 @@ class Host:
         return 'fixture-dropin', '123' if self.migration else None
     def finish_room_migration(self, migration):
         self.calls.append(('room-migration-finished',))
+
+class HTTPProbes(unittest.TestCase):
+    def setUp(self):
+        self.responses = []
+        self.fallback = 'reset'
+        self.requests = 0
+        owner = self
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                owner.requests += 1
+                outcome = owner.responses.pop(0) if owner.responses else owner.fallback
+                if outcome in ['reset', 'disconnect']:
+                    if outcome == 'reset':
+                        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                    self.close_connection = True
+                    self.connection.close()
+                    return
+                data = b'{"ok":' if outcome == 'truncated' else b'{"ok":true,"releaseCommit":"' + outcome.encode() + b'"}'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(data) + (10 if outcome == 'truncated' else 0)))
+                self.end_headers()
+                self.wfile.write(data)
+            def log_message(self, *args): pass
+        self.server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        self.thread = threading.Thread(target=lambda: self.server.serve_forever(poll_interval=.01))
+        self.thread.start()
+        self.host = module['Host']({role + 'Port': self.server.server_port for role in module['UNITS']}, 'new')
+        self.host.deadline = time.monotonic() + 2
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.server_close()
+    def test_ready_survives_real_reset_disconnect_and_truncated_response(self):
+        self.responses = ['reset', 'disconnect', 'truncated', 'old', 'new']
+        self.assertEqual(self.host.ready('rooms')['releaseCommit'], 'new')
+        self.assertEqual(self.requests, 5, 'unavailable and stale listeners must not prove readiness')
+    def test_persistent_resets_defer_at_deadline_without_service_commands(self):
+        self.host.deadline = time.monotonic() + .25
+        with patch.object(self.host, 'command') as command:
+            with self.assertRaises(Deferred): self.host.ready('rooms')
+            command.assert_not_called()
+        self.assertGreater(self.requests, 0)
+    def test_reset_cannot_prove_a_release(self):
+        with patch.object(self.host, 'command', return_value='active'):
+            with self.assertRaisesRegex(RuntimeError, 'running release'): prove(self.host)
+    def test_raw_urlopen_errors_are_unavailable_and_http_status_is_retained(self):
+        errors = [ConnectionResetError(104, 'Connection reset by peer'),
+                  http.client.RemoteDisconnected(), http.client.IncompleteRead(b'partial', 10)]
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with patch.object(module['urllib'].request, 'urlopen', side_effect=error):
+                    self.assertEqual(self.host.http('rooms', '/v1/health'), (0, {}))
+        error = module['urllib'].error.HTTPError('http://fixture', 409, 'busy', {}, None)
+        with patch.object(module['urllib'].request, 'urlopen', side_effect=error):
+            self.assertEqual(self.host.http('rooms', '/v1/health'), (409, {}))
 
 class MigrationHost(Host):
     def __init__(self, *, evidence=None, frozen_evidence=None, **kwargs):

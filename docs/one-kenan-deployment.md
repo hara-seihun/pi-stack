@@ -246,7 +246,9 @@ The integrator's staging stack owns the complete-product acceptance tests.
 
 Source publication does not replace root or memory consumers. `deploy/host` automatically refreshes the installed `pi-kenan-access` command and its additive nft table on enabled hosts, then invokes the room-only rolling handoff and verifies the room startup commit. Root/memory/custody services are not restarted. Room self-instructions access is restricted to root and the room UID; root executor access to room state is a separate read-only filesystem grant.
 
-After selecting committed Remote source, a room-only rolling handoff needs no root migration and touches no memory/root service:
+After selecting committed Remote source, a room-only rolling handoff needs no root migration and touches no memory/root service. Health probes treat connection resets, early disconnects and incomplete/malformed responses during listener replacement as unavailable, just like connection refusal. Readiness still requires the expected startup commit and `ok:true` within the existing 40-second budget; persistent failures defer rather than accept a release or kill active work. This covers the room handoff reset that failed publication `PUB-ef31f4591b7a483ca18022a5` after the replacement listener was already starting.
+
+A room-only handoff:
 
 ```sh
 sudo python3 deploy/one-kenan-activate rooms --host /etc/pi-stack/host.json --expected COMMIT
