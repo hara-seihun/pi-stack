@@ -33,6 +33,7 @@ import { MessagingConversations } from "./Messages";
 import { MessagingCallProvider, SignalCallButton } from "./messaging-call";
 import { RequestIndicator } from "./RequestIndicator";
 import { AndroidDownloadPrompt } from "./android-download";
+import { AppUpdateStatus, useAppUpdate } from "./app-update";
 import { NetworkJoinPrompt } from "./network-join";
 import { beginSectionLoad } from "./in-flight";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
@@ -171,6 +172,7 @@ function UnlockDialog() {
 }
 
 export default function App() {
+  const update = useAppUpdate();
   const [person, setPerson] = useState(window.PiRemotePerson.get());
   const [lockGeneration, setLockGeneration] = useState(0);
   useEffect(reportWebReady, []);
@@ -181,7 +183,7 @@ export default function App() {
     window.addEventListener("pi-auth", authChanged);
     return () => { window.removeEventListener("pi-person", changed); window.removeEventListener("pi-auth", authChanged); };
   }, []);
-  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><NetworkJoinPrompt /><AndroidDownloadPrompt /><RemoteApp key={`${person}:${lockGeneration}`} /></>;
+  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><NetworkJoinPrompt /><AndroidDownloadPrompt /><RemoteApp key={`${person}:${lockGeneration}`} update={update} /></>;
 }
 
 /**
@@ -194,7 +196,7 @@ const LiveConversation = memo(function LiveConversation({ live, ...props }: { li
   return <ConversationScreen {...props} liveText={text} liveThinking={thinking} thinkingActive={props.session.activity === "thinking" || !!thinking} />;
 });
 
-function RemoteApp() {
+function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const person = useRef(window.PiRemotePerson.get()).current;
   const autoCollapseKey = appStorageKey(`pi-remote-auto-collapse:${person}`);
   const [autoCollapse, setAutoCollapse] = useState(() => localStorage.getItem(autoCollapseKey) !== "false");
@@ -949,8 +951,9 @@ function RemoteApp() {
 
   const showTabs = route.tab === "calendar" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
-    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
+    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
+        <AppUpdateStatus update={update} />
         <SpeechBar />
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && !messagingActive && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}

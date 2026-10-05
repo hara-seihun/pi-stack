@@ -1,110 +1,53 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { deadline } from "./abortable";
 import { DismissibleError } from "./dismissible-error";
-import { bootstrapUrl, nativePlatform, remote, type AppUpdate, type AppUpdateCheck } from "./native";
+import { bootstrapUrl, nativePlatform, remote } from "./native";
+import { AppUpdater } from "./app-update-state";
 
-type Availability =
-  | { status: "checking" }
-  | { status: "current"; checked: AppUpdateCheck }
-  | { status: "available"; checked: AppUpdateCheck; update: AppUpdate }
-  | { status: "failed"; message: string };
+const enabled = nativePlatform && !!remote.checkAppUpdate && !!remote.installAppUpdate;
+const attemptKey = "pi-auto-apk-install";
+let storage: Storage | null;
+try { storage = window.sessionStorage; } catch { storage = null; }
+const updater = new AppUpdater({
+  check: async () => {
+    await bootstrapUrl();
+    return deadline(remote.checkAppUpdate!(), 30_000, "App update check");
+  },
+  install: () => remote.installAppUpdate!(),
+  attempted: revision => storage?.getItem(attemptKey) === revision,
+  remember: revision => {
+    if (!storage) return;
+    try { storage.setItem(attemptKey, revision); }
+    catch { storage = null; } // The controller retains attempts in memory when browser storage is unavailable.
+  },
+});
 
-type InstallState = "idle" | "installing" | "installer-opened" | "reloading";
-
-let activeCheck: Promise<AppUpdateCheck> | null = null;
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function checkForUpdate() {
-  if (activeCheck) return activeCheck;
-  if (!remote.checkAppUpdate) return Promise.reject(new Error("App update checks are unavailable"));
-
-  const promise = bootstrapUrl().then(() => deadline(remote.checkAppUpdate!(), 30_000, "App update check")).finally(() => {
-    if (activeCheck === promise) activeCheck = null;
-  });
-  activeCheck = promise;
-  return promise;
-}
-
-function availability(checked: AppUpdateCheck): Availability {
-  return checked.update ? { status: "available", checked, update: checked.update } : { status: "current", checked };
-}
-
-export function AppUpdateControl() {
-  const [available, setAvailable] = useState<Availability>({ status: "checking" });
-  const [install, setInstall] = useState<InstallState>("idle");
-  const [installError, setInstallError] = useState("");
-  const generation = useRef(0);
-  const installing = useRef(false);
-
-  const check = useCallback(async () => {
-    if (installing.current) return;
-    const request = ++generation.current;
-    setInstall("idle");
-    setAvailable({ status: "checking" });
-    try {
-      const checked = await checkForUpdate();
-      if (generation.current === request) setAvailable(availability(checked));
-    } catch (error) {
-      if (generation.current === request) setAvailable({ status: "failed", message: errorMessage(error) });
-    }
-  }, []);
-
+export function useAppUpdate() {
+  const state = useSyncExternalStore(updater.subscribe, updater.snapshot, updater.snapshot);
   useEffect(() => {
-    if (!nativePlatform || !remote.checkAppUpdate || !remote.installAppUpdate) return;
-    void check();
-    const foreground = () => { void check(); };
+    if (!enabled) return;
+    const check = () => { if (document.visibilityState !== "hidden") void updater.check(); };
+    const foreground = () => { void updater.check(); };
+    check();
+    const timer = window.setInterval(check, 60_000);
     window.addEventListener("pi-app-foreground", foreground);
+    window.addEventListener("online", check);
+    document.addEventListener("visibilitychange", check);
     return () => {
-      generation.current++;
+      window.clearInterval(timer);
       window.removeEventListener("pi-app-foreground", foreground);
+      window.removeEventListener("online", check);
+      document.removeEventListener("visibilitychange", check);
     };
-  }, [check]);
+  }, []);
+  return { ...state, onClick: () => { if (enabled) void updater.check(true); } };
+}
 
-  if (!nativePlatform || !remote.checkAppUpdate || !remote.installAppUpdate) return null;
-
-  const startInstall = async () => {
-    if (available.status !== "available" || installing.current) return;
-    installing.current = true;
-    setInstall("installing");
-    setInstallError("");
-    try {
-      const result = await remote.installAppUpdate!();
-      // A web bundle reloads this page from the shell; the state below only shows until then.
-      setInstall(result.status === "reloading" ? "reloading" : "installer-opened");
-    } catch (error) {
-      setInstall("idle");
-      setInstallError(errorMessage(error));
-      installing.current = false;
-      await check();
-    } finally {
-      installing.current = false;
-    }
-  };
-
-  if (available.status === "checking" && !installError && install !== "installing") return null;
-  if (available.status === "current" && !installError && install === "idle") return null;
-
-  const web = available.status === "available" && available.update.kind === "web";
-  const installLabel = install === "installing"
-    ? web ? "Applying update…" : "Downloading update…"
-    : install === "reloading"
-      ? "Restarting…"
-      : install === "installer-opened"
-        ? "Reopen installer"
-        : installError ? "Retry update" : "Update app";
+export function AppUpdateStatus({ update }: { update: ReturnType<typeof useAppUpdate> }) {
+  if (!update.error && !update.approval) return null;
   return <section className="app-update" aria-label="App update" aria-live="polite">
-    <DismissibleError message={installError} dismissLabel="Dismiss update install error" />
-    {available.status === "failed" && <><DismissibleError message={`Update check failed. ${available.message}`} dismissLabel="Dismiss update check error" /><button type="button" onClick={() => void check()}>Retry check</button></>}
-    {available.status === "current" && installError && <p className="app-update-detail">No app update is currently available.</p>}
-    {available.status === "available" && <>
-      <p className="app-update-detail">{web
-        ? `Update ${available.update.revision.slice(0, 12)} is ${available.update.ready ? "downloaded" : "available"}. It applies in place and restarts the app view.`
-        : `Update ${available.update.revision.slice(0, 12)} needs a new app package. Android may ask you to allow installs from Kenan.`}</p>
-      <button type="button" disabled={install === "installing" || install === "reloading"} onClick={() => void startInstall()}>{installLabel}</button>
-    </>}
-    {install === "installer-opened" && <p className="app-update-detail" role="status">Finish the update in the Android installer.</p>}
+    <DismissibleError message={update.error} dismissLabel="Dismiss update error" />
+    {update.error && <button type="button" disabled={update.busy} onClick={update.onClick}>Retry update</button>}
+    {update.approval && <p role="status">{update.status}</p>}
   </section>;
 }
