@@ -88,7 +88,7 @@ export class Daemon {
     this.schedules=new ScheduleService({databasePath:threadDatabasePath,threads:this.threads});
     this.threads.subscribe(event=>{if("event" in event)this.fleet.event(event.threadId,event.event);});
     if(!config.modelBrokerUrl){
-      this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex")});
+      this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex"),autoReset:process.env.PI_CODEX_AUTO_RESET==="1"});
       this.anthropicMeters=new AnthropicMeterSampler(store,{auth:providerOAuth(anthropicProvider(),config.authPath)});
     }
   }
@@ -169,7 +169,7 @@ export class Daemon {
         if(!observed.length)continue;
         // A refused reset-credit balance leaves metering intact, so it is
         // reported by the sampler without holding the account in a meter alarm.
-        const failures=observed.filter((sample)=>sample.outcome!=="recorded"&&sample.outcome!=="stale-reading"&&sample.outcome!=="reset-credits-unreadable");
+        const failures=observed.filter((sample)=>sample.outcome!=="recorded"&&sample.outcome!=="stale-reading"&&sample.outcome!=="reset-credits-unreadable"&&sample.outcome!=="reset-pending");
         const key=`meter-error:${account.id}`,error=failures.length?JSON.stringify(failures):"";
         if(error!==(this.store.control(key)??"")){
           this.store.setControl(key,error);
