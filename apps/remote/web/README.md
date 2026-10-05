@@ -14,6 +14,8 @@ Android still loads its bundled root-relative pages and uses its configured boot
 
 ## Android browser download
 
+The installed Android client owns automatic update checks at the app root, independent of the selected screen. It checks on launch, foreground/visibility return, reconnection and every minute while visible, then starts installation automatically. The entire Machine navigation button becomes **Update** while an update is pending or applying; it is the retry/reopen action, not a link to a hidden update card. Compatible web updates apply and reload directly; native APK changes still require Android's installer approval. See [in-app updates](../../kenan/README.md#in-app-updates).
+
 Android phone browsers show a small dismissible **Get Kenan for Android** prompt, including before folder unlock. Download reads the current same-origin `/v1/app-update` manifest and navigates to `/v1/app-update/<release.fileName>` under the browser mount, retaining ingress cookies. It never uses a selected remote environment or a baked-in APK filename. Dismissal persists per browser mount. The installed app, iPhones and desktop browsers show no APK prompt; an Android APK cannot be installed on iOS.
 
 ## Private network onboarding
