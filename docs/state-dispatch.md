@@ -11,7 +11,7 @@ Hara's October 6, 2026 requirement: the app must describe every state. No catch-
 - Open-ended external data is not a closed lifecycle. Its supported/unsupported outcome is explicit and retains useful evidence. Unknown MIME data may be a binary file; unknown execution phases may not be idle. Provider/model identifiers remain open data, not enumerated app states.
 - A field's intentional omitted-value setting, a module's default export and third-party vendor code are not switch catch-alls. Do not remove them mechanically.
 
-[Thread dependency waits](threads.md#durable-dependency-waits-and-own-thread-wakes) name agents, jobs, deployments or collaborator messages. Being available for another assignment is idle. Existing untyped waits preserve custody but show the missing-type reporting defect rather than inventing a classification.
+[Runtime wire dispatch](runtime-wire.md) owns SDK/native/provider event validation and explicitly non-presentational variants. [Thread dependency waits](threads.md#durable-dependency-waits-and-own-thread-wakes) name agents, jobs, deployments or collaborator messages. Being available for another assignment is idle. Existing untyped waits preserve custody but show the missing-type reporting defect rather than inventing a classification.
 
 ## Regression gate
 
