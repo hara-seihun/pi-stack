@@ -162,7 +162,7 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
     const validKey = (key: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
     const unset = [...new Set([...Object.keys(process.env).filter(key => validKey(key) && !(key in env)), ...(broker ? brokerSecrets : [])])];
     command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--collect", "--quiet", "--wait", "--service-type=exec",
-      "--property=KillMode=control-group", "--property=OOMPolicy=continue", "--property=OOMScoreAdjust=0", `--slice=${slices.boundary}`,
+      "--property=KillMode=control-group", "--property=OOMPolicy=continue", `--slice=${slices.boundary}`,
       `--property=MemoryHigh=${RUNNER_MEMORY}`, `--property=MemoryMax=${RUNNER_MEMORY}`, "--property=MemorySwapMax=256M",
       `--working-directory=${env.HOME}`,
       ...Object.keys(env).filter(key => validKey(key) && env[key] !== undefined).map(key => `--setenv=${key}`),
