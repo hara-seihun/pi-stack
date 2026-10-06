@@ -45,8 +45,10 @@ function humanStatus(conversation: MessagingConversation, backend?: MessagingBac
 
 export function inboxRow(chat: Chat): InboxRow {
   if (chat.kind === "ai") {
-    const status = threadStatus(chat.session);
-    const rank = attentionRank(status);
+    const reported = threadStatus(chat.session);
+    const notified = chat.session.idleUnread && Boolean(chat.session.attentionSummary);
+    const status = notified ? { ...reported, attention: true } : reported;
+    const rank = notified ? Math.min(2, attentionRank(status)) : attentionRank(status);
     const section: InboxSection = status.attention ? "attention" : status.busy ? "working" : "quiet";
     return { chat, section, status, rank, updatedAt: Date.parse(chat.session.updatedAt) || 0 };
   }

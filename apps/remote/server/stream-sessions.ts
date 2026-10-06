@@ -19,7 +19,7 @@ export function streamSessions(sessions: Session[], selected: string | null | un
     for (let cursor = session; cursor && !kept.has(cursor.id); cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined) kept.add(cursor.id);
   };
   for (const session of sessions) {
-    if (session.origin !== "fleet" || session.id === selected || working(session) || Date.parse(session.updatedAt) >= now - RECENT_FLEET_MS) keep(session);
+    if (session.origin !== "fleet" || session.foreground || session.id === selected || working(session) || Date.parse(session.updatedAt) >= now - RECENT_FLEET_MS) keep(session);
   }
   for (const session of sessions) {
     const parent = session.parentId ? byId.get(session.parentId) : undefined;

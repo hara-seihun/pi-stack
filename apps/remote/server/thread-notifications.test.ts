@@ -6,9 +6,9 @@ import { join } from "node:path";
 import type { ThreadApi, Thread, ThreadSettlement, ThreadQuestion, QuestionEvents } from "pi-orchestrator/api";
 import { ensureSupervisorSchema } from "./database";
 import { idleNotifications } from "./notifications";
-import { projectThreadNotifications, projectQuestionNotifications } from "./thread-notifications";
+import { projectThreadNotifications, projectQuestionNotifications, projectAttentionNotifications } from "./thread-notifications";
 
-type NotificationApi = Pick<ThreadApi, "settlements" | "questionEvents" | "questions" | "list">;
+type NotificationApi = Pick<ThreadApi, "settlements" | "questionEvents" | "attentionEvents" | "questions" | "list">;
 
 function thread(id: string, overrides: Partial<Thread> = {}): Thread {
   return { id, title: id, parentId: null, role: "conversation", cwd: "/tmp", sessionFile: `/tmp/${id}.jsonl`,
@@ -27,6 +27,7 @@ function question(threadId: string): ThreadQuestion {
 
 function apiFor(threads: Thread[], receipts: ThreadSettlement[] = [], pending: ThreadQuestion[] = [], events: QuestionEvents["items"] = [], pageSize = 100): NotificationApi {
   return {
+    attentionEvents: (after = 0) => ({ ok: true, value: { cursor: after, items: [] } }),
     questions: async id => ({ ok: true, value: pending.filter(q => q.threadId === id) }),
     questionEvents: (after = 0, limit = 100) => {
       const items = events.filter(event => event.seq > after).slice(0, limit);
@@ -58,6 +59,66 @@ function database(path = ":memory:"): Database {
 function noticeCount(db: Database): number {
   return (db.query("SELECT count(*) n FROM idle_notifications").get() as { n: number }).n;
 }
+
+test("explicit attention notifies from a running worker without waiting for its tree or questions", async () => {
+  const db = database();
+  const worker = thread("child", { parentId: "parent", role: "worker", state: "running", metadata: { foreground: true, attentionSummary: "Please review — work continues." } });
+  const api = apiFor([worker, thread("grandchild", { parentId: worker.id, state: "running" })], [], [question(worker.id)]);
+  api.attentionEvents = (after = 0) => ({ ok: true, value: { cursor: 1, items: after < 1 ? [{ accepted: true, seq: 1, threadId: worker.id, summary: "Please review — work continues.", foreground: true, time: 1000 }] : [] } });
+  await projectThreadNotifications(db, "person", api);
+  expect(db.query("SELECT kind,body,receipt_id FROM idle_notifications").all()).toEqual([{ kind: "attention", body: "Please review — work continues.", receipt_id: "person:attention:1" }]);
+  expect(idleNotifications(db, 0, id => id === worker.id ? worker : null).notifications).toMatchObject([{ sessionId: worker.id, body: "Please review — work continues.", kind: "attention" }]);
+  expect(worker.state).toBe("running");
+  db.close();
+});
+
+test("explicit attention publishes before a delayed or failed settlement scan", async () => {
+  const db = database();
+  const worker = thread("running", { role: "worker", state: "running" });
+  const api = apiFor([worker]);
+  api.attentionEvents = (after = 0) => ({ ok: true, value: { cursor: 1, items: after < 1 ? [{ accepted: true, seq: 1, threadId: worker.id, summary: "Review now", foreground: true, time: 1000 }] : [] } });
+  let published = false;
+  api.settlements = () => {
+    expect(published).toBe(true);
+    return { ok: false, error: { code: "unavailable", message: "Settlement owner unavailable" } };
+  };
+  await expect(projectThreadNotifications(db, "person", api, api, () => {
+    expect(idleNotifications(db, 0, () => worker).notifications).toMatchObject([{ kind: "attention", body: "Review now" }]);
+    published = true;
+  })).rejects.toThrow("Settlement owner unavailable");
+  expect(published).toBe(true);
+  db.close();
+});
+
+test("attention cursors and unread acknowledgements survive restart and owner sequences cannot collide", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "thread-attention-"));
+  try {
+    const path = join(dir, "supervisor.sqlite");
+    const api = apiFor([thread("watch", { metadata: { watchList: true }, state: "running" })]);
+    api.attentionEvents = (after = 0) => ({ ok: true, value: { cursor: 1, items: after < 1 ? [{ accepted: true, seq: 1, threadId: "watch", summary: "A finding", foreground: false, time: 1000 }] : [] } });
+    let db = database(path);
+    await projectAttentionNotifications(db, "person", api);
+    db.query("UPDATE thread_views SET idle_unread=0").run();
+    db.close();
+    db = database(path);
+    await projectAttentionNotifications(db, "person", api);
+    expect(noticeCount(db)).toBe(1);
+    expect(db.query("SELECT idle_unread FROM thread_views WHERE id='watch'").get()).toEqual({ idle_unread: 0 });
+    await projectAttentionNotifications(db, "fleet", api);
+    expect(db.query("SELECT receipt_id FROM idle_notifications ORDER BY seq").all()).toEqual([{ receipt_id: "person:attention:1" }, { receipt_id: "fleet:attention:1" }]);
+    db.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("failed attention projection cannot advance its cursor or commit half a page", async () => {
+  const db = database();
+  const api = apiFor([thread("known")]);
+  api.attentionEvents = () => ({ ok: true, value: { cursor: 2, items: ["known", "missing"].map((threadId, i) => ({ accepted: true, seq: i + 1, threadId, summary: "Review", foreground: true, time: 1000 })) } });
+  await expect(projectAttentionNotifications(db, "person", api)).rejects.toThrow("missing thread");
+  expect(noticeCount(db)).toBe(0);
+  expect(db.query("SELECT value FROM metadata WHERE key='thread-attention:person'").get()).toBeNull();
+  db.close();
+});
 
 test("owner settlement cursors survive presentation replay and do not overlap", async () => {
   const db = database();

@@ -67,6 +67,23 @@ test("worker questions notify while worker completions stay silent", () => {
   db.close();
 });
 
+test("explicit attention admits workers and fleet roots but not unauthorized threads", () => {
+  const db = new Database(":memory:");
+  ensureSupervisorSchema(db);
+  const threads = new Map([
+    ["child", { parentId: "parent", role: "worker" as const }],
+    ["fleet", { parentId: null, role: "worker" as const }],
+  ]);
+  for (const id of ["child", "fleet", "missing"]) {
+    recordIdleNotification(db, `${id}:idle`, { id, title: id }, 1000);
+    recordIdleNotification(db, `${id}:attention`, { id, title: id }, 1001, { kind: "attention", body: `Review ${id}` });
+  }
+  const feed = idleNotifications(db, 0, id => threads.get(id) ?? null);
+  expect(feed.notifications.map(event => [event.sessionId, event.kind, event.body])).toEqual([["child", "attention", "Review child"], ["fleet", "attention", "Review fleet"]]);
+  expect(feed.cursor).toBe(6);
+  db.close();
+});
+
 test("a full page of suppressed completions advances to the next conversation", () => {
   const db = new Database(":memory:");
   ensureSupervisorSchema(db);

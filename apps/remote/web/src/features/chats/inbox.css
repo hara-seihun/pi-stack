@@ -22,6 +22,7 @@
 .inbox-title-line { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
 .inbox-title { flex: 1; min-width: 0; overflow: hidden; font-size: var(--text-md); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-time { flex: 0 0 auto; color: var(--muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.inbox-attention-summary { overflow: hidden; color: var(--text); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .inbox-status-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; overflow: hidden; }
 .inbox-status-line > .status-pill { flex: 0 1 auto; min-width: 0; }
 .inbox-unread { color: var(--status-held); font-size: var(--text-xs); font-weight: 700; white-space: nowrap; }

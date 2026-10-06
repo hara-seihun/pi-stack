@@ -14,7 +14,7 @@ export function idleNotifications(
     .all(after) as IdleNotification[];
   const notifications = page.filter(event => {
     const thread = localThread(event.sessionId);
-    return thread !== null && (event.kind === "question" || !thread.parentId && thread.role !== "worker");
+    return thread !== null && (event.kind === "question" || event.kind === "attention" || !thread.parentId && thread.role !== "worker");
   });
   return { cursor: page.at(-1)?.seq ?? latest, notifications };
 }

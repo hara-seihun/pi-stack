@@ -173,7 +173,7 @@ final class NativeState {
     }
 
     enum NotificationKind implements Value {
-        IDLE("idle"), QUESTION("question");
+        IDLE("idle"), QUESTION("question"), ATTENTION("attention");
         private final String wire;
         NotificationKind(String wire) { this.wire = wire; }
         public String wire() { return wire; }

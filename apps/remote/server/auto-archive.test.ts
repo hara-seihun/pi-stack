@@ -61,6 +61,19 @@ test("a worker whose conversation is archived or gone is archived once it stops 
   expect(calls).toEqual([["orphan", { action: "update", archived: true }], ["parentless", { action: "update", archived: true }]]);
 });
 
+test("promoted and notify-only workers retain unread and unseen attention even when their parent is gone", async () => {
+  const row = (id: string, metadata: Thread["metadata"] = {}) => ({ id, parentId: "missing", role: "worker", state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { foreground: true, ...metadata } }) as unknown as Thread;
+  const rows = [row("unseen"), row("unread", { autoArchiveViewedAt: 2 }), row("read", { autoArchiveViewedAt: 2 }), row("viewed-before-update", { autoArchiveViewedAt: 1 }), row("recent-view", { autoArchiveViewedAt: 9_000_000 }), row("notify-only", { foreground: false, attentionSummary: "Review" }), row("notify-unread", { foreground: false, attentionSummary: "Review", autoArchiveViewedAt: 2 }), row("notify-read", { foreground: false, attentionSummary: "Review", autoArchiveViewedAt: 2 })];
+  rows[3].updatedAt = 3;
+  const calls: unknown[] = [];
+  const api = {
+    async list() { return { ok: true, value: { threads: rows } }; },
+    async control(input: any) { calls.push(input); return { ok: true, value: { ...rows.find(row => row.id === input.threadId), metadata: { archived: true } } }; },
+  } as unknown as ThreadApi;
+  expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000, () => false, thread => thread.id === "unread" || thread.id === "notify-unread")).toBe(2);
+  expect(calls).toEqual([{ threadId: "read", action: "archiveInactive", inactiveBefore: 6_400_000 }, { threadId: "notify-read", action: "archiveInactive", inactiveBefore: 6_400_000 }]);
+});
+
 test("a quiet thread in a live meeting stays open with its ancestors", async () => {
   const rows = [
     { id: "meeting", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "room" } },
