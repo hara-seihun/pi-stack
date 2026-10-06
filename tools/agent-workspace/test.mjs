@@ -1559,6 +1559,52 @@ test("releases a writer after its branch is pushed", () => {
   }
 });
 
+test("clone release excludes durable source ancestry but protects every unpublished new branch", () => {
+  const f = fixture();
+  try {
+    git(f.source, "commit", "--allow-empty", "-m", "local-only source base");
+    const sourceCommit = git(f.source, "rev-parse", "HEAD");
+    const created = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "durable-base", "--repo", f.source,
+      "--strategy", "clone", "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    assert.equal(created.sourceCommit, sourceCommit);
+    assert.equal(git(created.path, "remote"), "origin");
+    rmSync(f.source, { recursive: true });
+    git(created.path, "fetch", "origin");
+    assert.equal(git(created.path, "branch", "-r", "--contains", sourceCommit), "");
+    git(created.path, "config", "user.name", "Test");
+    git(created.path, "config", "user.email", "test@example.invalid");
+    git(created.path, "branch", "source-base", sourceCommit);
+    writeFileSync(path.join(created.path, "file.txt"), "new writer work\n");
+    git(created.path, "commit", "-am", "new writer work");
+    const release = () => JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    const unpushed = release();
+    assert.equal(unpushed.inspection.classification, "repair-required");
+    assert.match(unpushed.inspection.reason, /refs\/heads\/agent\/durable-base:1/);
+    assert.match(unpushed.inspection.reason, /HEAD:1/);
+    assert.equal(existsSync(created.path), true);
+
+    // Returning HEAD to the reserved source must not hide a unique sibling branch.
+    git(created.path, "checkout", "source-base");
+    const sibling = release();
+    assert.equal(sibling.inspection.classification, "repair-required");
+    assert.match(sibling.inspection.reason, /refs\/heads\/agent\/durable-base:1/);
+    assert.equal(existsSync(created.path), true);
+
+    git(created.path, "checkout", "agent/durable-base");
+    git(created.path, "rebase", "--onto", "origin/main", sourceCommit);
+    assert.equal(release().inspection.classification, "repair-required");
+    git(created.path, "push", "origin", "HEAD:refs/heads/published");
+    assert.equal(git(created.path, "branch", "-r", "--contains", sourceCommit), "");
+    assert.equal(git(created.path, "rev-parse", "source-base"), sourceCommit);
+    const published = release();
+    assert.equal(published.action, "released");
+    assert.match(published.inspection.reason, /remote ref or in durable source ancestry/);
+    assert.equal(existsSync(created.path), false);
+  } finally { f.close(); }
+});
+
 test("keeps a unique detached HEAD even when local branches are remote", () => {
   const f = fixture();
   try {

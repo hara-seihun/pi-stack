@@ -863,20 +863,21 @@ function gitDisposition(record, nestedWorkspaces = []) {
     });
   if (ignored.length > 0) return { safe: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}` };
   const head = git(record.path, ["rev-parse", "HEAD"]);
-  if (record.sourceCommit !== null && head === record.sourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };
   const refs = record.checkoutType === "clone"
     ? git(record.path, ["for-each-ref", "--format=%(refname)", "refs/heads"])
       .split("\n")
       .filter(Boolean)
     : [];
   const candidates = [...refs, "HEAD"];
+  const durableSource = record.sourceCommit === null ? [] : [record.sourceCommit];
   const local = [];
   for (const ref of candidates) {
-    const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes"]));
+    const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes", ...durableSource]));
     if (count > 0) local.push(`${ref}:${count}`);
   }
   if (local.length > 0) return { safe: false, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
-  return { safe: true, reason: "every local branch commit exists on a remote ref", head };
+  if (head === record.sourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };
+  return { safe: true, reason: "every local branch commit exists on a remote ref or in durable source ancestry", head };
 }
 
 function gcDestination(statePath, record, suffix) {
