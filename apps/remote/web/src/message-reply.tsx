@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { revealVirtualMessage } from "./virtual-message-navigation";
 import type { MessageIdentity, MessageReply, MessageSender } from "../../server/message-protocol";
 import "./message-reply.css";
 
@@ -15,14 +16,20 @@ export function ReplyQuote({ reply }: { reply: MessageReply }) {
   const jump = (event: React.MouseEvent<HTMLButtonElement>) => {
     const id = reply.messageId;
     const root = event.currentTarget.closest(".transcript");
-    const original = id && [...(root?.querySelectorAll<HTMLElement>("[data-message-id]") ?? [])].find(element => element.dataset.messageId === id);
-    if (!original) { setMissing(true); return; }
-    setMissing(false);
-    original.scrollIntoView({ behavior: "smooth", block: "center" });
-    original.focus({ preventScroll: true });
-    original.classList.remove("reply-highlight");
-    void original.offsetWidth;
-    original.classList.add("reply-highlight");
+    const locate = () => id && [...(root?.querySelectorAll<HTMLElement>("[data-message-id]") ?? [])].find(element => element.dataset.messageId === id);
+    const highlight = (original: HTMLElement) => {
+      original.scrollIntoView({ behavior: "smooth", block: "center" });
+      original.focus({ preventScroll: true });
+      original.classList.remove("reply-highlight");
+      void original.offsetWidth;
+      original.classList.add("reply-highlight");
+    };
+    const original = locate();
+    if (original) { setMissing(false); highlight(original); return; }
+    if (root && id && revealVirtualMessage(root, id)) {
+      setMissing(false);
+      requestAnimationFrame(() => { const revealed = locate(); if (revealed) highlight(revealed); });
+    } else setMissing(true);
   };
   return <div className="reply-quote">
     <button type="button" className="reply-quote-link" onClick={jump} aria-label={`Go to message from ${senderName(reply.sender)}`}>

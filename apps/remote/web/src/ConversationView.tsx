@@ -17,13 +17,15 @@ class ScrollContent extends Component<ScrollContentProps> {
   render() { return <div className="scroll-content">{this.props.transcript}</div>; }
 }
 
-export function ConversationView({ active, label, drawing, editImages = true, transcript, children }: {
+export function ConversationView({ active, label, drawing, editImages = true, transcript, children, newerAvailable = false, onJumpLatest }: {
   active: boolean;
   label: string;
   drawing: ChatDrawing;
   editImages?: boolean;
   transcript: ReactNode;
   children?: ReactNode;
+  newerAvailable?: boolean;
+  onJumpLatest?(): void;
 }) {
   const scrollback = useRef<HTMLDivElement>(null);
   const anchor = useRef<ReadingAnchor | null>(null);
@@ -51,6 +53,7 @@ export function ConversationView({ active, label, drawing, editImages = true, tr
     drawing.editImage(image);
   };
   const jump = () => {
+    if (newerAvailable) onJumpLatest?.();
     if (scrollback.current) {
       anchor.current?.setReading(scrollback.current, false);
       scrollback.current.scrollTop = 0;
@@ -67,7 +70,7 @@ export function ConversationView({ active, label, drawing, editImages = true, tr
     }} onClickCapture={editImage} onKeyDownCapture={event => { if (event.key === "Enter" || event.key === " ") editImage(event); }}>
       <ScrollContent active={active} transcript={transcript} scrollback={scrollback} anchor={anchor.current} />
     </div>
-    {away && !drawing.isOpen && <button type="button" className="jump-latest" aria-label="Jump to latest" onClick={jump}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6" /></svg></button>}
+    {(away || newerAvailable) && !drawing.isOpen && <button type="button" className="jump-latest" aria-label="Jump to latest" onClick={jump}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6" /></svg></button>}
     </div>
     {drawing.editors}
     {children}

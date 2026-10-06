@@ -103,6 +103,8 @@ export interface MessagingLinkPreview {
 
 export interface MessagingMessage {
   id: string;
+  /** Database history cursor; absent on unsaved optimistic messages. */
+  seq?: number;
   requestId: string | null;
   conversationId: string;
   externalId: string | null;

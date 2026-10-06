@@ -16,6 +16,8 @@ export interface ContextEntry {
   preview?: string;
   /** Content hash of the item, and the key its body is fetched and cached by. */
   itemId?: string;
+  /** Authoritative head position; live text has no sequence yet. */
+  seq?: number;
   /** Bytes of the complete body. */
   size?: number;
   bodyLoaded?: boolean;

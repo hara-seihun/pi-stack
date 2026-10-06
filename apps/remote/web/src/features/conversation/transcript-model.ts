@@ -20,6 +20,7 @@ export type TranscriptItem =
       entries: ContextEntry[];
       running: boolean;
       latest: ContextEntry;
+      live?: ContextEntry;
       summary: WorkSummary;
     };
 
@@ -97,18 +98,29 @@ function workItem(key: string, entries: ContextEntry[]): Extract<TranscriptItem,
  * "Thinking…" step the person can open to subscribe.
  */
 export function buildTranscript(entries: ContextEntry[], liveThinking?: string, thinkingActive?: boolean): TranscriptItem[] {
+  return appendLiveThinking(buildStableTranscript(entries), liveThinking, thinkingActive);
+}
+
+export function appendLiveThinking(items: TranscriptItem[], liveThinking?: string, thinkingActive?: boolean): TranscriptItem[] {
   const text = liveThinking?.trim() ? liveThinking : "";
-  const source = text || thinkingActive
-    ? [...entries, {
+  if (!text && !thinkingActive) return items;
+  const live = {
         key: "live-thinking",
-        signature: `live-thinking:${text.length}:${thinkingActive ? "active" : "idle"}`,
+        signature: `live-thinking:${text}:${thinkingActive ? "active" : "idle"}`,
         kind: "thinking",
         label: text ? "Thinking" : "Thinking…",
         text,
         streaming: true,
         live: true,
-      } satisfies ContextEntry]
-    : entries;
+      } satisfies ContextEntry;
+  const last = items.at(-1);
+  const work = last?.kind === "work"
+    ? { ...last, live, running: true, latest: live, summary: { ...last.summary, thinkingBlocks: last.summary.thinkingBlocks + 1 } }
+    : workItem(last ? `work-after:${last.entry.key}` : "work-after:start", [live]);
+  return [...(last?.kind === "work" ? items.slice(0, -1) : items), work];
+}
+
+export function buildStableTranscript(entries: ContextEntry[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let work: ContextEntry[] = [];
   let workKey = "work-after:start";
@@ -119,7 +131,7 @@ export function buildTranscript(entries: ContextEntry[], liveThinking?: string, 
     work = [];
   };
 
-  for (const entry of source) {
+  for (const entry of entries) {
     const kind = visibleKind(entry);
     if (!kind) {
       work.push(entry);

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { VirtualTranscript } from "./features/conversation/VirtualTranscript";
 import { API } from "../../server/api";
 import type { MessagingMessage } from "../../server/messaging/protocol";
 import { extractMessageLinks } from "../../server/messaging/links";
@@ -12,6 +13,8 @@ import { messagingAvatarUrl } from "./messaging-avatar";
 import { chatRows } from "./messaging-state";
 import { resourceUrl } from "./resource-url";
 import "./messaging-chat.css";
+
+const rowMessageIds = (row: ReturnType<typeof chatRows>[number]): readonly string[] => row.kind === "message" ? [row.message.identity?.id ?? row.message.id] : [];
 
 const dayStart = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 
@@ -64,14 +67,15 @@ export interface MessagingChatProps {
  * the column-reverse container restores reading order.
  */
 export function MessagingChat({ messages, backendId, group, checking = [], now = Date.now(), onReply, onCheck, onRetry }: MessagingChatProps) {
+  const rows = useMemo(() => chatRows(messages), [messages]);
   return <div className="chat">
-    {chatRows(messages).reverse().map(row => row.kind === "time"
+    <VirtualTranscript items={rows} messageIds={rowMessageIds} itemKey={row => row.key} reverseDom render={row => row.kind === "time"
       ? <p key={row.key} className="chat-time"><time dateTime={new Date(row.timestamp).toISOString()}>{chatTimeLabel(row.timestamp, now)}</time></p>
       : <ChatLine key={row.key} message={row.message} head={row.head} tail={row.tail} backendId={backendId} group={group}
         checking={checking.includes(row.message.id)}
         onReply={onReply && (target => onReply(row.message, target))}
         onCheck={onCheck && (() => onCheck(row.message))}
-        onRetry={onRetry && (() => onRetry(row.message))} />)}
+        onRetry={onRetry && (() => onRetry(row.message))} />} />
   </div>;
 }
 
@@ -100,7 +104,7 @@ function ChatLine({ message, head, tail, backendId, group, checking, onReply, on
   const avatar = own ? undefined : messagingAvatarUrl(backendId, message.sender, message.senderAvatar);
   const failed = own && (message.status === "failed" || message.status === "unknown");
   const classes = ["chat-line", own ? "own" : "theirs", head && "head", tail && "tail", message.status === "sending" && "pending", failed && "failed"].filter(Boolean).join(" ");
-  return <div className={classes} data-message-id={identity?.id ?? message.id} tabIndex={identity ? 0 : undefined}
+  return <div className={classes} data-transcript-seq={message.seq} data-message-id={identity?.id ?? message.id} tabIndex={identity ? 0 : undefined}
     title={new Date(message.timestamp).toLocaleString()} {...handlers}>
     {head && group && !own && <div className="chat-sender">
       {avatar && <CachedImage className="chat-sender-avatar" src={avatar} alt="" loading="lazy" decoding="async" />}

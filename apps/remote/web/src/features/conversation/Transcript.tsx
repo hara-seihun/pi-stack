@@ -10,9 +10,16 @@ import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
 import { useItemBody } from "./item-bodies";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
-import { buildTranscript, type TranscriptItem } from "./transcript-model";
+import { appendLiveThinking, buildStableTranscript, type TranscriptItem } from "./transcript-model";
+import { VirtualTranscript } from "./VirtualTranscript";
+import { useVisualClock } from "../status/visual-clock";
+import { useVisibleHeads } from "./visible-heads";
+import type { VisibleTranscriptRange } from "./transcript-store";
 import { duration, toolSummary } from "./tool-summary";
 import "./transcript.css";
+
+type RenderedTranscriptItem = TranscriptItem | { kind: "step"; entry: ContextEntry };
+const transcriptMessageIds = (item: RenderedTranscriptItem): readonly string[] => item.kind !== "work" && item.entry.identity ? [item.entry.identity.id] : [];
 
 export interface TranscriptProps {
   entries: ContextEntry[];
@@ -28,6 +35,9 @@ export interface TranscriptProps {
   loadingEarlier?: boolean;
   earlierError?: string;
   onShowEarlier?(): void;
+  newerAvailable?: boolean;
+  onShowNewer?(): void;
+  onVisibleRange?(range: VisibleTranscriptRange | null): void;
   /** Opening the live thinking card subscribes to its text; closing it stops. */
   onThinkingOpen?(open: boolean): void;
   onEdit(entry: ContextEntry): void;
@@ -76,14 +86,9 @@ function toolLabel(name: unknown) {
   return String(name || "Tool").replace(/^functions\./, "").replaceAll("_", " ");
 }
 
-function useElapsed(startedAt: number | undefined, running: boolean) {
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (!running || !startedAt) return;
-    const timer = setInterval(() => tick(value => value + 1), 1_000);
-    return () => clearInterval(timer);
-  }, [running, startedAt]);
-  return startedAt ? Math.max(0, Date.now() - startedAt) : undefined;
+function useElapsed<T extends HTMLElement>(startedAt: number | undefined, running: boolean) {
+  const { ref, now } = useVisualClock<T>(running && !!startedAt);
+  return { ref, elapsed: startedAt ? Math.max(0, now - startedAt) : undefined };
 }
 
 const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onReply }: {
@@ -93,7 +98,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
   onReply(target: ReplyTarget): void;
 }) {
   const text = entry.text || "";
-  return <ChatMessage
+  return <div data-transcript-seq={entry.seq}><ChatMessage
     kind={entry.kind}
     label={entry.label || entry.kind}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
@@ -107,7 +112,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
     menu={entry.kind === "user" && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
-  />;
+  /></div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
 function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {
@@ -133,10 +138,10 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
   const result = entry.toolResult;
   const state = outcome(entry);
   const [open, setOpen] = useState(forceExpanded || state.status === "error" || !result);
-  const body = useItemBody(entry.itemId, open || forceExpanded, entry.size);
+  const body = useItemBody(entry.itemId, open, entry.size);
   const full = body.body?.kind === "toolCall" ? body.body : null;
   const args = full ? full.arguments : call.arguments ?? {};
-  const elapsed = useElapsed(Number(entry.time || 0) || undefined, !result);
+  const { ref, elapsed } = useElapsed<HTMLDetailsElement>(Number(entry.time || 0) || undefined, !result);
   const timing = entry.time ? duration(result ? Number(result.timestamp || entry.time) - Number(entry.time) : elapsed || 0) : "";
   const previewOutput = full?.result ? "" : result ? result.preview || "" : String(call.partialOutput || "");
   const completeOutput = full?.result ? visibleResult(full.result.content) : [];
@@ -149,7 +154,7 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
     return [summary, json(loaded ? loaded.arguments : args), loaded?.result ? resultText(loaded.result.content) : previewOutput].filter(Boolean).join("\n\n");
   };
 
-  return <details className={`conversation-step tool-step ${state.status}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => setOpen(event.currentTarget.open)}>
+  return <details ref={ref} data-transcript-seq={entry.seq} className={`conversation-step tool-step ${state.status}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>
       <span className="step-summary">{open ? toolLabel(call.name) : summary}</span>
       <ThreadChips ids={threadIds} />
@@ -191,7 +196,7 @@ const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = fals
   const state = outcome(entry);
   const error = state.status === "error";
   const [open, setOpen] = useState(forceExpanded || error || (entry.streaming === true && !entry.live));
-  const body = useItemBody(entry.itemId, open || forceExpanded, entry.size);
+  const body = useItemBody(entry.itemId, open, entry.size);
   const loaded = body.body && body.body.kind !== "toolCall" ? body.body.text : undefined;
   const source = entry.text ?? loaded ?? "";
   const preview = (entry.preview ?? source).trim().replace(/\s+/g, " ").slice(0, 120);
@@ -206,7 +211,7 @@ const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = fals
     onOpen?.(next);
   };
   const detail = loaded ?? entry.text ?? "";
-  return <details className={`conversation-step text-step ${state.status}${thinking ? " thinking-step" : ""}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => toggle(event.currentTarget.open)}>
+  return <details data-transcript-seq={entry.seq} className={`conversation-step text-step ${state.status}${thinking ? " thinking-step" : ""}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => toggle(event.currentTarget.open)}>
     <summary>
       <span className="step-summary"><strong>{stepLabel(entry)}</strong>{!open && preview && <span>{preview}</span>}</span>
       {entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
@@ -249,7 +254,7 @@ function workDuration(item: Extract<TranscriptItem, { kind: "work" }>, running: 
 }
 
 function workHeading(item: Extract<TranscriptItem, { kind: "work" }>, running: boolean, elapsed: number | undefined, expanded: boolean) {
-  const steps = item.entries.length;
+  const steps = item.entries.length + (item.live ? 1 : 0);
   const time = steps > 1 ? workDuration(item, running, elapsed) : "";
   if (expanded) return `Work${time ? ` · ${time}` : ""}`;
   const parts = [`${steps} ${steps === 1 ? "step" : "steps"}`];
@@ -271,14 +276,14 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
 }) {
   const [expanded, setExpanded] = useState(false);
   const running = newest && item.running;
-  const elapsed = useElapsed(item.summary.startedAt, running);
-  return <section className={`work-card${running ? " running" : ""}${item.summary.hasErrors ? " has-errors" : ""}`}>
+  const { ref, elapsed } = useElapsed<HTMLElement>(item.summary.startedAt, running);
+  return <section ref={ref} className={`work-card${running ? " running" : ""}${item.summary.hasErrors ? " has-errors" : ""}`}>
     <button type="button" className="work-card-header" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
       <span className="work-chevron" aria-hidden="true">›</span>
       <span>{workHeading(item, running, elapsed, expanded)}</span>
     </button>
     {expanded
-      ? <div className="work-steps">{item.entries.map(entry => <Step key={entry.key} entry={entry} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />)}</div>
+      ? <div className="work-steps"><VirtualTranscript items={item.entries} itemKey={entry => entry.key} render={entry => <Step entry={entry} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />} />{item.live && <Step entry={item.live} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />}</div>
       : <div className="work-latest"><Step entry={item.latest} sessionId={sessionId} home={home} forceExpanded={running && !item.latest.live} onThinkingOpen={onThinkingOpen} /></div>}
   </section>;
 }, (before, after) => before.newest === after.newest
@@ -290,37 +295,25 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
   && before.item.entries.length === after.item.entries.length
   && before.item.entries.every((entry, index) => entry.signature === after.item.entries[index]?.signature));
 
-const CONTEXT_WINDOW_SIZE = 60;
-
-export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
-  const items = useMemo(() => buildTranscript(entries, liveThinking, thinkingActive), [entries, liveThinking, thinkingActive]);
-  const newest = Math.max(0, items.length - CONTEXT_WINDOW_SIZE);
-  const [start, setStart] = useState(newest);
-  const previousCount = useRef(0);
-
-  useEffect(() => {
-    previousCount.current = 0;
-    setStart(newest);
-  }, [sessionId]);
-  useEffect(() => {
-    setStart(value => previousCount.current === 0 ? newest : Math.min(value, newest));
-    previousCount.current = items.length;
-  }, [items.length, newest]);
-
-  const visible = items.slice(start);
-  const newestWork = visible.findLastIndex(item => item.kind === "work");
-  const earlier = start > 0 || earlierAvailable;
+export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onVisibleRange, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
+  const stable = useMemo(() => buildStableTranscript(entries), [entries]);
+  const grouped = useMemo(() => appendLiveThinking(stable, liveThinking, thinkingActive), [stable, liveThinking, thinkingActive]);
+  const items = useMemo(() => autoCollapse ? grouped : grouped.flatMap<RenderedTranscriptItem>(item => item.kind === "work" ? [...item.entries, ...(item.live ? [item.live] : [])].map(entry => ({ kind: "step" as const, entry })) : [item]), [grouped, autoCollapse]);
+  const ref = useVisibleHeads(items, onVisibleRange);
+  const visible = items;
+  const newestWork = items.findLastIndex(item => item.kind === "work");
   return <InlineImagesContext.Provider value={images}>
-    <div className="transcript conversation-transcript">
-      {earlier && <button type="button" className="context-earlier" disabled={loadingEarlier} onClick={() => start > 0 ? setStart(Math.max(0, start - CONTEXT_WINDOW_SIZE)) : onShowEarlier?.()}>
-        {loadingEarlier ? "Loading earlier…" : `Show ${start > 0 ? Math.min(CONTEXT_WINDOW_SIZE, start) : CONTEXT_WINDOW_SIZE} earlier`}
+    <div ref={ref} className="transcript conversation-transcript">
+      {earlierAvailable && <button type="button" className="context-earlier" disabled={loadingEarlier} onClick={onShowEarlier}>
+        {loadingEarlier ? "Loading earlier…" : "Show 60 earlier"}
       </button>}
       {earlierError && <p className="context-earlier-error" role="status">{earlierError}</p>}
-      {visible.flatMap((item, index) => item.kind === "work"
-        ? autoCollapse
-          ? [<WorkCard key={`${sessionId}:${item.key}`} item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />]
-          : item.entries.map(entry => <Step key={`${sessionId}:${entry.key}`} entry={entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />)
-        : [<MessageEntry key={item.entry.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />])}
+      <VirtualTranscript items={visible} messageIds={transcriptMessageIds} itemKey={item => `${sessionId}:${item.kind === "work" ? item.key : item.entry.key}`} render={(item, index) => item.kind === "work"
+        ? <WorkCard item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />
+        : item.kind === "step"
+          ? <Step entry={item.entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />
+          : <MessageEntry entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />} />
+      {newerAvailable && <button type="button" className="context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
     </div>
   </InlineImagesContext.Provider>;
 }

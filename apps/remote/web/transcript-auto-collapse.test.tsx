@@ -107,6 +107,7 @@ test("tool completion and a final answer both render all thought, argument, and 
   };
   const known = new Map([["complete-bash", fullBody]]);
   const cache: BodyCache = {
+    retainBody: () => () => {},
     getBody: id => known.get(id),
     acceptBody: (id, body) => { known.set(id, body); },
     loadBody: (_id, _size, fetcher) => fetcher(),
