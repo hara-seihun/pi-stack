@@ -7,9 +7,9 @@ export function autoArchiveDelay(value: string | undefined): number {
 }
 
 /**
- * Archives conversations nobody has touched for `afterMs` along with their
- * workers, and workers whose conversation is already archived or gone. An
- * unread conversation stays, and keeps its ancestors; an unread worker does
+ * Archives idle conversations `afterMs` after a human views them, along with
+ * their workers, and workers whose conversation is already archived or gone.
+ * An unseen or unread conversation stays, and keeps its ancestors; an unread worker does
  * not, because its reader is the agent above it, which has already finished.
  * A worker whose conversation is archived or gone is archived outright once it
  * stops running, queued messages and all. A thread attached to a live meeting
@@ -30,11 +30,18 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
     cursor = page.value.nextCursor;
   } while (cursor);
   const unread = (thread: Thread) => !thread.parentId && isUnread(thread);
+  const expired = (thread: Thread) => {
+    if (thread.updatedAt >= cutoff) return false;
+    const viewedAt = thread.metadata?.autoArchiveViewedAt;
+    const viewed = typeof viewedAt === "number" && Number.isSafeInteger(viewedAt) && viewedAt > 0;
+    if (thread.parentId || thread.role === "worker") return !viewed || viewedAt < cutoff;
+    return viewed && viewedAt >= thread.updatedAt && viewedAt < cutoff;
+  };
   const orphaned = (thread: Thread) => { const parent = thread.parentId ? threads.get(thread.parentId) : null; return Boolean(thread.parentId) && (!parent || Boolean(parent.metadata?.archived)); };
   const blocked = new Set<string>();
   for (const thread of threads.values()) {
     if (thread.metadata?.archived) continue;
-    if (thread.updatedAt < cutoff && thread.state !== "running" && thread.pendingMessages === 0 && !unread(thread) && !isLive(thread)) continue;
+    if (expired(thread) && thread.state === "idle" && thread.pendingMessages === 0 && !unread(thread) && !isLive(thread)) continue;
     let id: string | null = thread.id;
     const visited = new Set<string>();
     while (id && !visited.has(id)) {
