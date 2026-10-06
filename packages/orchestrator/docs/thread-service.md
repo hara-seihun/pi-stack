@@ -74,6 +74,10 @@ The directory validates every requested parent-child relationship before startin
 
 Archiving through `control(update)` first stops the thread and holds its queue. Synchronous `update()` refuses active archiving. Archived threads reject sending, resuming and native commands until explicitly restored. Restoring creates no work and leaves held messages held.
 
+`control({threadId, action: "view"})` records the owner's `Date.now()` as `metadata.autoArchiveViewedAt` only for an unarchived idle thread without pending work, questions, waits, wakes or native/owner operations. Re-viewing resets that timestamp. The write is durable but silent: it changes neither revision nor `updatedAt`, emits no `changed` event and does not open a runtime. The response carries the new metadata for peer caches. Spawn and generic metadata updates cannot supply or alter this owner-owned clock. Owner changes invalidate the view, including work in the same millisecond; fresh work requires a new idle view.
+
+`control(archiveInactive)` requires a conversation's view timestamp to be a valid positive integer, at least its `updatedAt`, and strictly before `inactiveBefore`. Unseen idle conversations remain unarchived. Workers do not require a view for their existing activity-based cleanup, but a recent idle view protects them and their conversation subtree for the same grace period. The owner rechecks current view/activity and subtree pending work synchronously, with no await before the archive mutation, so stale sweep snapshots cannot archive newly viewed or busy threads.
+
 ## State import
 
 `importState(threads, messages)` imports arrays of the exported `ImportThread` and `ImportMessage` types in one full-synchronous SQLite transaction. Nested operations use savepoints. An error rolls back the batch. Import runs before `start()`; source cleanup belongs to the cutover owner after successful custody transfer.

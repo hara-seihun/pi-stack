@@ -966,17 +966,145 @@ describe("ThreadService", () => {
     expect(runnerHostEntry("file:///release/dist/threads/runner-transport.js")).toBe("/release/dist/threads/runner-host.js");
   });
 
-  it("archives only strictly stale settled threads and gives restores a new grace period", async () => {
+  it("keeps unseen idle conversations and archives only strictly stale idle views", async () => {
     const { service, directory } = fixture();
     const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
     const thread = value(await service.spawn({ requestId: "idle", cwd: directory }));
-    clock.mockReturnValue(3_610_000);
-    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_000 })).metadata?.archived).not.toBe(true);
     clock.mockReturnValue(3_610_001);
-    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_001 })).metadata?.archived).toBe(true);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_001 })).metadata?.archived).not.toBe(true);
+    const changed = vi.fn(); service.subscribe(changed);
+    const viewed = value(await service.control({ threadId: thread.id, action: "view" }));
+    expect(viewed).toEqual({ ...thread, metadata: { ...thread.metadata, autoArchiveViewedAt: 3_610_001 } });
+    expect(changed).not.toHaveBeenCalled();
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_001 })).metadata?.archived).not.toBe(true);
+    clock.mockReturnValue(7_210_001);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 3_610_001 })).metadata?.archived).not.toBe(true);
+    clock.mockReturnValue(7_210_002);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 3_610_002 })).metadata?.archived).toBe(true);
+    const archived = service.get(thread.id)!;
+    expect(value(await service.control({ threadId: thread.id, action: "view" }))).toEqual(archived);
     value(await service.control({ threadId: thread.id, action: "update", archived: false }));
-    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_001 })).metadata?.archived).toBe(false);
+    clock.mockReturnValue(10_810_003);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 7_210_003 })).metadata?.archived).toBe(false);
     expect(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: Date.now() + 1 })).toMatchObject({ ok: false });
+  });
+
+  it("rechecks a re-view after a stale sweep snapshot without refreshing activity clocks", async () => {
+    const { service, directory } = fixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const thread = value(await service.spawn({ requestId: "view-race", cwd: directory }));
+    value(await service.control({ threadId: thread.id, action: "view" }));
+    const sweep = service.snapshot()[0]!;
+    clock.mockReturnValue(3_620_000);
+    const fresh = value(await service.control({ threadId: thread.id, action: "view" }));
+    expect(sweep.metadata?.autoArchiveViewedAt).toBe(10_000);
+    expect(fresh.metadata?.autoArchiveViewedAt).toBe(3_620_000);
+    expect(fresh.updatedAt).toBe(thread.updatedAt);
+    expect(fresh.revision).toBe(thread.revision);
+    expect(value(await service.control({ threadId: sweep.id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
+  });
+
+  it("requires a new idle view after work, even work completed in the same millisecond", async () => {
+    const { service, directory } = fixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const thread = value(await service.spawn({ requestId: "same-ms", cwd: directory }));
+    value(await service.control({ threadId: thread.id, action: "view" }));
+    value(await service.send({ requestId: "new-work", threadId: thread.id, text: "work" }));
+    expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
+    value(await service.cancelMessage(thread.id, "new-work"));
+    expect(service.get(thread.id)?.state).toBe("idle");
+    clock.mockReturnValue(3_620_000);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
+    value(await service.control({ threadId: thread.id, action: "view" }));
+    clock.mockReturnValue(7_240_000);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 3_640_000 })).metadata?.archived).toBe(true);
+  });
+
+  it("persists idle views across owner restart and leaves unviewed workers on their existing clock", async () => {
+    const first = fixture(), workers = fixture(undefined, true);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const thread = value(await first.service.spawn({ requestId: "durable-view", cwd: first.directory }));
+    const worker = value(await workers.service.spawn({ requestId: "worker", cwd: workers.directory }));
+    clock.mockReturnValue(20_000);
+    const viewed = value(await first.service.control({ threadId: thread.id, action: "view" }));
+    value(await first.service.close());
+    const second = fixture(first.directory);
+    value(await second.service.start());
+    expect(second.service.get(thread.id)).toEqual(viewed);
+    clock.mockReturnValue(3_630_000);
+    expect(value(await second.service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 30_000 })).metadata?.archived).toBe(true);
+    expect(value(await workers.service.control({ threadId: worker.id, action: "archiveInactive", inactiveBefore: 30_000 })).metadata?.archived).toBe(true);
+  });
+
+  it("protects recently viewed workers and their conversation without requiring views for worker cleanup", async () => {
+    const { service, directory } = fixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const root = value(await service.spawn({ requestId: "root", cwd: directory }));
+    const worker = value(await service.spawn({ requestId: "worker", parentId: root.id, cwd: directory }));
+    value(await service.control({ threadId: root.id, action: "view" }));
+    clock.mockReturnValue(3_620_000);
+    value(await service.control({ threadId: worker.id, action: "view" }));
+    for (const thread of [root, worker]) {
+      expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
+    }
+    clock.mockReturnValue(7_240_000);
+    expect(value(await service.control({ threadId: root.id, action: "archiveInactive", inactiveBefore: 3_640_000 })).metadata?.archived).toBe(true);
+    expect(service.get(worker.id)?.metadata?.archived).toBe(true);
+  });
+
+  it("rejects invalid or pre-activity view timestamps retained in imported metadata", async () => {
+    const { service, directory } = fixture();
+    vi.spyOn(Date, "now").mockReturnValue(3_620_000);
+    for (const [index, viewedAt] of [undefined, null, "10000", 0, -1, 9999, 10000.5, Number.MAX_SAFE_INTEGER + 1].entries()) {
+      const id = `invalid-view-${index}`;
+      value(service.importThread({ id, title: id, cwd: directory, sessionFile: join(directory, `${id}.jsonl`),
+        settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" },
+        createdAt: 10_000, updatedAt: 10_000, metadata: { autoArchiveViewedAt: viewedAt } }));
+      expect(value(await service.control({ threadId: id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
+    }
+  });
+
+  it("rejects client-supplied view clocks and generic metadata tampering", async () => {
+    const { service, directory } = fixture();
+    expect(await service.spawn({ requestId: "forged", cwd: directory, metadata: { autoArchiveViewedAt: 1 } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    const thread = value(await service.spawn({ requestId: "owned-view", cwd: directory }));
+    expect(service.update(thread.id, { metadata: { autoArchiveViewedAt: 1 } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await service.control({ threadId: thread.id, action: "view", autoArchiveViewedAt: 1 } as never)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    value(await service.control({ threadId: thread.id, action: "view" }));
+    expect(await service.control({ threadId: thread.id, action: "update", metadata: { autoArchiveViewedAt: null } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+
+  it("does not arm views during queued or running work, or pending owner operations", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "busy-view", cwd: directory, message: "work" }));
+    expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
+    value(await service.start());
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const before = service.get(thread.id)!;
+    expect(value(await service.control({ threadId: thread.id, action: "view" }))).toEqual(before);
+    await settle(sessions[0]!, service, thread.id);
+    await turn();
+    const command = service.command(thread.id, { type: "get_state" });
+    expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
+    value(await command);
+    await turn();
+    expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBe(Date.now());
+  });
+
+  it("does not arm idle views with held messages, questions, agent waits or scheduled wakes", async () => {
+    const { service, directory } = fixture();
+    const pending = value(await service.spawn({ requestId: "held", cwd: directory, message: "queued" }));
+    value(await service.control({ threadId: pending.id, action: "stop", descendants: false }));
+    const question = value(await service.spawn({ requestId: "question", cwd: directory }));
+    value(await service.ask({ requestId: "ask", threadId: question.id, questions: [{ question: "Continue?" }] }));
+    const waiting = value(await service.spawn({ requestId: "waiting", cwd: directory }));
+    value(await service.agentWait({ requestId: "wait", threadId: waiting.id, action: "set", reason: "External result" }));
+    const waking = value(await service.spawn({ requestId: "waking", cwd: directory }));
+    value(await service.wakeSchedule({ requestId: "wake", threadId: waking.id, action: "set", reason: "Check", cadenceMs: 60_000 }));
+    for (const thread of [pending, question, waiting, waking]) {
+      expect(service.get(thread.id)?.state).toBe("idle");
+      expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
+    }
   });
 
   it("does not archive pending work or a parent of pending work, even when held", async () => {
@@ -985,6 +1113,7 @@ describe("ThreadService", () => {
     const parent = value(await service.spawn({ requestId: "parent-idle", cwd: directory }));
     const child = value(await service.spawn({ requestId: "child-held", parentId: parent.id, cwd: directory, message: "preserve this" }));
     value(await service.control({ threadId: child.id, action: "stop", descendants: false }));
+    value(await service.control({ threadId: parent.id, action: "view" }));
     clock.mockReturnValue(3_620_000);
     for (const id of [parent.id, child.id]) expect(value(await service.control({ threadId: id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
     expect(service.pending(child.id)).toHaveLength(1);
@@ -1014,6 +1143,7 @@ describe("ThreadService", () => {
     clock.mockReturnValue(3_700_000);
     const other = value(await person.service.spawn({ requestId: "other", cwd: person.directory }));
     const worker = value(await person.service.spawn({ requestId: "other-worker", parentId: other.id, cwd: person.directory }));
+    value(await person.service.control({ threadId: other.id, action: "view" }));
     clock.mockReturnValue(7_400_000);
     expect(value(await person.service.control({ threadId: other.id, action: "archiveInactive", inactiveBefore: 7_300_000 })).metadata?.archived).toBe(true);
     expect(person.service.get(worker.id)?.metadata?.archived).toBe(true);
@@ -1089,6 +1219,7 @@ describe("ThreadService", () => {
     await service.start();
     const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
     const thread = value(await service.spawn({ requestId: "race", cwd: directory }));
+    value(await service.control({ threadId: thread.id, action: "view" }));
     clock.mockReturnValue(3_620_000);
     value(await service.send({ requestId: "new-work", threadId: thread.id, text: "new work", delivery: "queue" }));
     await waitFor(() => sessions[0]?.isStreaming === true);

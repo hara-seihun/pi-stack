@@ -276,7 +276,8 @@ export class ThreadService implements ThreadApi {
   setDirectory(directory: ThreadApi, workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined): void { this.directory = directory; this.workerOwner = workerOwner; }
   private changed(id: string): void {
     if (this.suspended || this.closed) return;
-    this.sql("UPDATE thread SET revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
+    // Invalidate even same-millisecond work; a view belongs to this settled version only.
+    this.sql("UPDATE thread SET revision=revision+1,updated_at=?,metadata=json_remove(metadata,'$.autoArchiveViewedAt') WHERE id=?").run(Date.now(), id);
     const thread = this.get(id); if (thread) this.options.onChange?.(thread);
     for (const listener of this.listeners) listener({ threadId: id, type: "changed" });
   }
@@ -496,6 +497,7 @@ export class ThreadService implements ThreadApi {
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
       if (input.metadata && "agentWait" in input.metadata) return bad("invalid_request", "Use agentWait instead of setting wait metadata");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
+      if (input.metadata && "autoArchiveViewedAt" in input.metadata) return bad("invalid_request", "Use view control instead of setting auto-archive metadata");
       if (parent && (parent.parentId || parent.role === "worker" || parent.metadata?.watchList)) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
       if (parent?.metadata?.sandbox) return bad("invalid_request", "Sandbox threads cannot create workers");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
@@ -706,6 +708,7 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
     if (patch.title !== undefined && (typeof patch.title !== "string" || !patch.title.trim())) return bad("invalid_request", "Thread title must be a nonempty string");
     if (patch.metadata && "titleSource" in patch.metadata && patch.metadata.titleSource !== thread.metadata?.titleSource) return bad("conflict", "Use title control instead of changing metadata.titleSource");
+    if (patch.metadata && "autoArchiveViewedAt" in patch.metadata && patch.metadata.autoArchiveViewedAt !== thread.metadata?.autoArchiveViewedAt) return bad("conflict", "Use view control instead of changing metadata.autoArchiveViewedAt");
     if (patch.title !== undefined && options.automaticTitle && thread.metadata?.titleSource === "manual") return good(thread);
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
     for (const key of ["agentWait", "context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
@@ -756,19 +759,39 @@ export class ThreadService implements ThreadApi {
     }
     this.changed(threadId); this.wake(threadId); return good({ ...this.message(work), delivery });
   }
+  private autoArchiveViewedAt(thread: Thread): number | undefined {
+    const viewedAt = thread.metadata?.autoArchiveViewedAt;
+    return typeof viewedAt === "number" && Number.isSafeInteger(viewedAt) && viewedAt > 0 && viewedAt >= thread.updatedAt ? viewedAt : undefined;
+  }
+  private hasAutoArchiveWork(thread: Thread): boolean {
+    const runtime = this.runtimes.get(thread.id);
+    return !!(thread.metadata?.agentWait || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
+      || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id)
+      || this.execution(thread.id) || thread.metadata?.runnerReference || runtime?.busy || runtime?.commandRunning
+      || this.opening.has(thread.id) || this.operations.has(thread.id) || this.halts.has(thread.id));
+  }
   async control(input: ThreadControl): Promise<Result<Thread>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (!this.get(input.threadId)) return bad("not_found", "Thread not found");
+    if (input.action === "view") {
+      if (Object.keys(input).some(key => key !== "threadId" && key !== "action")) return bad("invalid_request", "View accepts only threadId and action");
+      const current = this.get(input.threadId)!;
+      if (current.metadata?.archived || this.hasAutoArchiveWork(current)) return good(current);
+      // Viewing is not execution activity and must not emit changed (which would re-view it).
+      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.autoArchiveViewedAt',?) WHERE id=?").run(Date.now(), input.threadId);
+      return good(this.get(input.threadId)!);
+    }
     if (input.action === "archiveInactive") {
       if (!Number.isSafeInteger(input.inactiveBefore) || input.inactiveBefore <= 0 || input.inactiveBefore > Date.now()) return bad("invalid_request", "Invalid inactivity cutoff");
       const current = this.get(input.threadId)!;
       if (current.metadata?.archived) return good(current);
+      const viewedAt = this.autoArchiveViewedAt(current);
+      if (current.role !== "worker" && (viewedAt === undefined || viewedAt >= input.inactiveBefore)) return good(current);
       const descendants = this.sql("WITH RECURSIVE descendants(id) AS (SELECT ? UNION SELECT t.id FROM thread t JOIN descendants d ON t.parent_id=d.id) SELECT thread.* FROM thread JOIN descendants USING(id)").all(input.threadId) as Json[];
       for (const row of descendants) {
         const thread = this.project(row);
         if (thread.metadata?.archived) continue;
-        const runtime = this.runtimes.get(thread.id);
-        if (thread.metadata?.agentWait || thread.wakeSchedule || thread.updatedAt >= input.inactiveBefore || thread.state !== "idle" || thread.pendingMessages > 0 || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id) || this.execution(thread.id) || runtime?.busy || runtime?.commandRunning || this.operations.has(thread.id) || this.halts.has(thread.id)) return good(current);
+        if (thread.updatedAt >= input.inactiveBefore || (this.autoArchiveViewedAt(thread) ?? 0) >= input.inactiveBefore || this.hasAutoArchiveWork(thread)) return good(current);
       }
       // No await/stop between the authoritative check and mutation: new work cannot race it.
       // The whole subtree goes together; a finished worker without its conversation is noise in every list.

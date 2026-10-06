@@ -185,6 +185,8 @@ export type ThreadControl =
   | { threadId: string; action: "resume" }
   /** Unarchive a thread, or its whole subtree; `resume` continues the turns and held work its archive interrupted. */
   | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
+  /** Record an idle human view using the owner's clock, without changing execution activity or emitting changed. */
+  | { threadId: string; action: "view" }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
   | { threadId: string; action: "rename"; title: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
