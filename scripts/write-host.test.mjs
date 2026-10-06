@@ -24,7 +24,7 @@ pi_stack_prepare_builds() {
 }
 pi_stack_as_root() { "$@"; }
 pi_stack_run_as() { shift; "$@"; }`);
-  for (const name of ['voice', 'phone', 'native-prerequisites', 'smoke']) put(name, name === 'smoke' ? 'exit "${SMOKE_EXIT:-0}"' : ':');
+  for (const name of ['voice', 'phone', 'native-prerequisites', 'one-kenan-access-release', 'smoke']) put(name, name === 'smoke' ? 'exit "${SMOKE_EXIT:-0}"' : ':');
   put('write-engine', `if [[ $1 == --select ]]; then ln -sfn "$NEW_WRITE" "$PI_STACK_WRITE_ENGINE_DEST"; else echo retained >> "$TRACE"; fi`);
   put('write-service', `[[ $1 != --check ]] || exit 0
 : > "$WARM_STARTED"

@@ -288,7 +288,8 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
-    writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
+    writeFileSync(join(deploy, "skills"), component.replace('name=$(basename "$0")', 'name=$(basename "$0")\nprintf "%s\\n" "$*" >> "$SKILLS_TRACE"'));
+    writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nif [ \"${REQUIRE_ACTIVATION_OVERLAP:-0}\" = 1 ]; then test -f \"$DAEMON_ACTIVATED\" || exit 92; fi\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
     for (const service of ["voice", "phone"]) {
       const key = service.toUpperCase();
       writeFileSync(join(deploy, service), `#!/bin/sh\nprintf '%s\\n' "$1" >> "$${key}_TRACE"\ncase $1 in --check) exit "\${${key}_CHECK_EXIT:-0}";; --activate) exit 0;; *) exit 64;; esac\n`, { mode: 0o755 });
@@ -347,7 +348,20 @@ case $1 in
       *) echo static;;
     esac;;
   restart)
-    case $2 in pi-orchestrator@*) exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
+    case $2 in pi-orchestrator@*)
+      if [ "\${REQUIRE_ACTIVATION_OVERLAP:-0}" = 1 ]; then
+        for i in $(seq 1 100); do
+          if [ -f "$ACTIVATE_TRACE" ]; then
+            sleep 0.05
+            touch "$DAEMON_ACTIVATED"
+            exit "\${DAEMON_RESTART_EXIT:-0}"
+          fi
+          sleep 0.01
+        done
+        echo 'Remote handoff was serialized behind daemon restart' >&2
+        exit 91
+      fi
+      exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
   is-active|reset-failed|stop) exit 0;;
   *) exit 64;;
 esac
@@ -374,6 +388,8 @@ exit 64
 `, { mode: 0o755 });
     const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,VOICE_TRACE:join(directory,"voice.trace"),SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,HEALTH_TRACE:join(directory,"health.trace"),PI_REMOTE_PERSONS_DIR:personsDir,PI_REMOTE_ROUTER_PORT:"8788",PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
     env.PHONE_TRACE = join(directory, "phone.trace");
+    env.SKILLS_TRACE = join(directory, "skills.trace");
+    env.DAEMON_ACTIVATED = join(directory, "daemon.activated");
     env.PERSON_READ_TRACE = personReadTrace;
     env.PI_STACK_ALLOW_LIVE_MEETING_RESTART = "0";
     env.MEETING_ROOMS = '{"rooms":[]}';
@@ -409,7 +425,11 @@ exit 64
     rmSync(env.PHONE_TRACE, { force: true });
     rmSync(personReadTrace);
     installModelDoctor();
-    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env,cwd:directory});assert.equal(first.status,0,first.stderr);
+    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,REQUIRE_ACTIVATION_OVERLAP:"1"},cwd:directory});assert.equal(first.status,0,first.stderr);
+    assert.equal(existsSync(env.DAEMON_ACTIVATED), true, "smoke joins the independent daemon activation job");
+    assert.deepEqual(readFileSync(env.SKILLS_TRACE, "utf8").trim().split("\n").sort(),
+      [user, "--links-only alice", "--links-only guest-person"].sort(),
+      "publish the shared skills once, then only reconcile other accounts' links");
     assert.doesNotMatch(first.stderr, /fatal: not a git repository/, "preflight resolves the source commit independently of caller cwd");
     assert.deepEqual(readFileSync(personReadTrace, "utf8").trim().split("\n"), ["alice", "guest-person"], "preflight reads both unlocked and locked people through their own accounts");
     const firstUnits=readFileSync(systemctlTrace,"utf8");

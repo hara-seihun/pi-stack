@@ -151,17 +151,19 @@ remote_pid=$!
 tools_pid=$!
 (
   set -euo pipefail
+  "$root/deploy/skills" "${users[0]}"
+  account_pids=()
   for user in "${users[@]}"; do
-    "$root/deploy/skills" "$user"
-  done
-  settings_pids=()
-  for user in "${users[@]}"; do
+    if [[ $user != "${users[0]}" ]]; then
+      "$root/deploy/skills" --links-only "$user" &
+      account_pids+=($!)
+    fi
     "$root/deploy/settings" "$user" &
-    settings_pids+=($!)
+    account_pids+=($!)
   done
-  settings_failed=0
-  for pid in "${settings_pids[@]}"; do wait "$pid" || settings_failed=1; done
-  exit "$settings_failed"
+  accounts_failed=0
+  for pid in "${account_pids[@]}"; do wait "$pid" || accounts_failed=1; done
+  exit "$accounts_failed"
 ) &
 accounts_pid=$!
 publish_failed=0
@@ -241,15 +243,23 @@ activate_remote() {
     return 1
   done
 }
+# A daemon's graceful stop can consume its full systemd stop budget. Remote
+# handoff does not depend on it; join both jobs before smoke instead of spending
+# that budget before the supervisors even receive their reload (PUB-bf877cd4).
+(
+  failed=0
+  if (( ${#daemons[@]} )); then
+    pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1
+  fi
+  broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1
+  mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
+  if (( ${#brokers[@]} )); then
+    pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
+  fi
+  exit "$failed"
+) &
+daemon_activation_pid=$!
 activation_failed=0
-if (( ${#daemons[@]} )); then
-  pi_stack_as_root systemctl restart "${daemons[@]}" || activation_failed=1
-fi
-broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || activation_failed=1
-mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
-if (( ${#brokers[@]} )); then
-  pi_stack_as_root systemctl restart "${brokers[@]}" || activation_failed=1
-fi
 if ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then
   activation_failed=1
 elif [[ $previous_remote != "$expected" ]]; then
@@ -270,6 +280,7 @@ fi
 if (( write )); then
   wait "$write_pid" || activation_failed=1
 fi
+wait "$daemon_activation_pid" || activation_failed=1
 
 # Then walk the front door the way the clients do. A release that locks a
 # person out of the app goes back to the previous Pi Remote release on the
