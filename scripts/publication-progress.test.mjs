@@ -685,3 +685,39 @@ for (const kind of ["queued", "live-meeting"]) test(`unserviced ${kind} work get
   assert.match(failed.failure.message, kind === "live-meeting" ? /Meeting probe was not serviced/ : /worker never claimed/);
   assert.equal(JSON.parse(readFileSync(fixture.repairPath, "utf8")).status, "launching");
 });
+
+
+test("later failure acquires exact attempt-bound receipt; retains old evidence and deduplicates retry", t => {
+  const f = repairFixture(t, "retry-submitted");
+  const latest = { ...f.request.failure, attempt: 2, at: "2026-04-15T12:05:00.000Z" };
+  writeJson(f.requestPath, { ...f.request, attempt: 2, failure: latest, failures: [f.request.failure, latest], repairedRetry: { repairId: f.repair.id } });
+  const env = { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "inactive" };
+  let r = runPublication(f.root, f.bin, "repair", env); assert.equal(r.status, 0, r.stderr);
+  const current = JSON.parse(readFileSync(f.repairPath));
+  assert.equal(current.failure.at, latest.at); assert.match(current.id, /attempt-2$/);
+  assert.equal(current.status, "blocked");
+  assert.equal(JSON.parse(readFileSync(join(f.root, "repairs", requestId, "retained", "attempt-1", "receipt.json"))).status, "retry-submitted");
+  const evidence = join(f.root, "proof-2.json"); writeJson(evidence, { passed: true });
+  writeJson(current.result, { status: "infrastructure-fixed", summary: "phase custody repaired", evidence });
+  r = runPublication(f.root, f.bin, "repair-result", env); assert.equal(r.status, 0, r.stderr);
+  r = run(process.execPath, [publication, "_retry", requestId], { env: { ...process.env, PATH: `${f.bin}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: f.root, ...env } });
+  assert.equal(r.status, 0, r.stderr);
+  const retried = JSON.parse(readFileSync(f.requestPath));
+  assert.equal(retried.repairedRetry.failedAttempt, 2); assert.equal(retried.repairedRetry.failureAt, latest.at);
+  assert.equal(retried.repairedRetries.length, 1); assert.equal(retried.failures.length, 2);
+  const before = readFileSync(f.requestPath, "utf8");
+  r = run(process.execPath, [publication, "_retry", requestId], { env: { ...process.env, PATH: `${f.bin}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: f.root, ...env } });
+  assert.equal(r.status, 0, r.stderr); assert.equal(readFileSync(f.requestPath, "utf8"), before);
+});
+
+test("explicit stop cannot be renewed by a later failure or accepted result", t => {
+  const f = repairFixture(t, "blocked");
+  writeJson(f.repairPath, { ...f.repair, explicitStop: true });
+  writeJson(f.requestPath, { ...f.request, attempt: 2, failure: { ...f.request.failure, attempt: 2, at: "2026-04-15T12:05:00.000Z" } });
+  const before = readFileSync(f.repairPath, "utf8");
+  const env = { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "inactive" };
+  assert.equal(runPublication(f.root, f.bin, "repair", env).status, 0);
+  assert.equal(readFileSync(f.repairPath, "utf8"), before);
+  const result = runPublication(f.root, f.bin, "repair-result", env);
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /Stale or explicitly stopped/);
+});

@@ -7,8 +7,19 @@ import { readFileSync } from "node:fs";
 export async function probeBrowser(tool, { url, title, visibleTextCheck, frameValue, screenshotPath, downloadPath, downloadContent, record = () => {} }) {
   const execute = async (phase, input) => {
     const started = performance.now();
-    const answer = await tool.execute(randomUUID(), { timeoutMs: 20000, ...input }, AbortSignal.timeout(25000));
-    record({ phase, elapsedMs: Math.round(performance.now() - started), result: answer });
+    record({ phase, status: "running", deadlineMs: 25000, command: input });
+    console.error(`browser phase=${phase} started command=${JSON.stringify(input)}`);
+    let timer, answer;
+    try {
+      answer = await Promise.race([
+        tool.execute(randomUUID(), { timeoutMs: 20000, ...input }, AbortSignal.timeout(25000)),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${phase} exceeded subcommand deadline 25000ms`)), 25000); }),
+      ]);
+    } catch (error) {
+      record({ phase, status: "failed", command: input, elapsedMs: Math.round(performance.now() - started), error: String(error) });
+      throw error;
+    } finally { clearTimeout(timer); }
+    record({ phase, status: "completed", elapsedMs: Math.round(performance.now() - started), result: answer });
     assert.equal(answer.details.resultCategory, "success", JSON.stringify(answer));
     return answer.details;
   };
@@ -29,7 +40,16 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
   const ownerArgs = ["--session", ownerName];
   const attachedArgs = () => ["--session", attachedName, "--cdp", cdpUrl];
   const batch = async (phase, prefix, steps) => {
-    const details = await execute(phase, { args: [...prefix, "batch", "--bail"], stdin: JSON.stringify(steps) });
+    let details;
+    if (phase === "download-and-frames") {
+      const data = []; let artifactVerification;
+      for (const [index, step] of steps.entries()) {
+        const row = await execute(`${phase}/${index}:${step[0]}`, { args: [...prefix, "batch", "--bail"], stdin: JSON.stringify([step]) });
+        assert.equal(row.data.length, 1); data.push(row.data[0]);
+        if (step[0] === "download") artifactVerification = row.artifactVerification;
+      }
+      details = { data, artifactVerification };
+    } else details = await execute(phase, { args: [...prefix, "batch", "--bail"], stdin: JSON.stringify(steps) });
     assert.equal(details.data.length, steps.length, `${phase}: every command must finish`);
     for (const row of details.data) assert.equal(row.success, true, JSON.stringify(row));
     return details;
