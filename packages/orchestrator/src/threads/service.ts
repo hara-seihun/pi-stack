@@ -52,7 +52,7 @@ export interface ImportMessage {
 class NativeRejection extends Error {}
 class AdmissionWait extends Error {}
 interface Runtime {
-  session: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings;
+  session?: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings;
   finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -1053,11 +1053,13 @@ export class ThreadService implements ThreadApi {
   }
   private rpc(runtime: Runtime, command: PiCommand): Promise<any> {
     if (this.suspended || this.closed) return Promise.reject(new Error("Thread controller is suspended"));
+    const session = runtime.session;
+    if (!session) return Promise.reject(new Error("Pi session is not initialized"));
     const id = command.id ?? `${runtime.epoch}:${++runtime.commandNumber}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { runtime.waiters.delete(id); reject(new Error(`Pi ${command.type} acknowledgement timed out; accepted work remains in custody`)); }, command.type === "compact" ? 240_000 : 30_000);
       runtime.waiters.set(id, { resolve, reject, timer });
-      void runtime.session.command({ ...command, id }).catch(error => { const waiter = runtime.waiters.get(id); if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(id); reject(error); } });
+      void session.command({ ...command, id }).catch(error => { const waiter = runtime.waiters.get(id); if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(id); reject(error); } });
     });
   }
   private exited(id: string, runtime: Runtime, code: number | null | undefined): void {
@@ -1075,7 +1077,7 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id)!;
     if (thread.metadata?.runnerReference) this.phase(id, "recovering", "Reattaching retained runtime socket");
     if (thread.metadata?.runnerReference && !this.options.attachSession) throw new Error("Native runner attachment is not configured");
-    const runtime: Runtime = { session: undefined as unknown as PiSession, epoch: randomUUID(), executionId: this.execution(id)?.id, busy: true, commandNumber: 0, waiters: new Map() };
+    const runtime: Runtime = { epoch: randomUUID(), executionId: this.execution(id)?.id, busy: true, commandNumber: 0, waiters: new Map() };
     this.runtimes.set(id, runtime);
     try {
       const session = await this.options.attachSession?.(thread.metadata?.runnerReference as Parameters<AttachPiSession>[0], event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
@@ -1122,7 +1124,7 @@ export class ThreadService implements ThreadApi {
       this.clearAdmissionWait(id);
       recoveredAdmission = admitted.value; extraEnv = { ...extraEnv, ...admitted.value.env }; settings = admitted.value.settings ?? settings;
     }
-    const runtime: Runtime = { session: undefined as unknown as PiSession, epoch: randomUUID(), busy: false, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings };
+    const runtime: Runtime = { epoch: randomUUID(), busy: true, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings };
     const [provider, ...model] = settings.model.split("/");
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
@@ -1148,8 +1150,8 @@ export class ThreadService implements ThreadApi {
         args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(sandbox ? [SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, JSON.stringify(sandboxPolicy(thread.metadata ?? {}))] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
       const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
-      await this.rpc(runtime, { type: "set_session_name", name: thread.title });
       runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
+      await this.rpc(runtime, { type: "set_session_name", name: thread.title });
       const execution = this.execution(id);
       if (recovering && execution) {
         runtime.executionId = execution.id;
@@ -1399,7 +1401,7 @@ export class ThreadService implements ThreadApi {
     if (runtime) await this.retire(id, runtime);
   }
   private async retire(id: string, runtime: Runtime): Promise<void> {
-    if (this.suspended || runtime.busy || runtime.executionId || this.runtimes.get(id) !== runtime) return;
+    if (this.suspended || !runtime.session || runtime.busy || runtime.executionId || this.runtimes.get(id) !== runtime) return;
     this.runtimes.delete(id);
     try { await runtime.session.close(); this.projections.delete(id); this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id); }
     catch (error) { if (!this.runtimes.has(id) && !this.suspended) this.runtimes.set(id, runtime); throw error; }
@@ -1472,8 +1474,8 @@ export class ThreadService implements ThreadApi {
   }
   async detach(): Promise<Result<void>> {
     this.suspend();
-    await Promise.allSettled([...this.operations.values(), ...this.halts.values()]);
-    for (const runtime of this.runtimes.values()) if (!runtime.busy && !runtime.executionId) {
+    await Promise.allSettled([...this.operations.values(), ...this.halts.values(), ...this.opening.values()]);
+    for (const [id, runtime] of this.runtimes) if (runtime.session && !runtime.busy && !runtime.executionId && !this.execution(id)) {
       try { await runtime.session.close(); } catch (error) { return bad("unavailable", errorText(error)); }
     }
     this.runtimes.clear(); this.listeners.clear();
@@ -1482,10 +1484,10 @@ export class ThreadService implements ThreadApi {
   }
   async close(): Promise<Result<void>> {
     if (this.closed) return good(undefined);
-    if (this.sql("SELECT 1 FROM thread_execution WHERE ended_at IS NULL LIMIT 1").get() || [...this.runtimes.values()].some(runtime => runtime.busy) || this.operations.size) return bad("conflict", "Active execution must settle before controller handoff");
+    if (this.sql("SELECT 1 FROM thread_execution WHERE ended_at IS NULL LIMIT 1").get() || [...this.runtimes.values()].some(runtime => runtime.busy) || this.operations.size || this.opening.size || this.halts.size) return bad("conflict", "Active execution must settle before controller handoff");
     this.started = false; clearInterval(this.timer);
     try {
-      for (const [id, runtime] of this.runtimes) { this.runtimes.delete(id); await runtime.session.close(); }
+      for (const [id, runtime] of this.runtimes) { await runtime.session?.close(); this.runtimes.delete(id); }
       this.closed = true;
       for (const cancel of this.awaiting) cancel();
       this.db.close(); this.listeners.clear(); return good(undefined);

@@ -130,6 +130,128 @@ function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServ
   return { directory, service, sessions };
 }
 
+describe("controller resource handoff", () => {
+  it.each(["queued", "dispatched"] as const)("preserves %s work when its opener rejects after suspension", async state => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-rejection-")); roots.push(directory);
+    let entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const leaseRelease = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      admit: async () => ({ ok: true, value: { release: leaseRelease } }),
+      openSession: async () => { entered = true; await gate; throw new Error("Session initialization interrupted by handoff"); } });
+    services.push(service);
+    value(service.importThread({ id: "opening", title: "opening", cwd: directory, sessionFile: join(directory, "opening.jsonl"),
+      settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
+    value(service.importMessage({ id: "opening-work", threadId: "opening", text: "work", state, insertedAt: state === "dispatched" ? 123 : undefined }));
+    const pending = service.pending("opening");
+    value(await service.start()); await waitFor(() => entered);
+    service.suspend(); const handoff = service.detach(); release(); value(await handoff);
+    expect(leaseRelease).toHaveBeenCalledTimes(state === "queued" ? 1 : 0);
+    const successor = fixture(directory);
+    expect(successor.service.pending("opening")).toEqual(pending);
+    expect(successor.service.latestSettlement("opening")).toBeNull();
+    value(await successor.service.detach());
+  });
+
+  it("waits for an opener returning after suspension without disposing unknown native custody", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-opening-")); roots.push(directory);
+    let release!: () => void, native: FakePiSession | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const leaseRelease = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+      admit: async () => ({ ok: true, value: { release: leaseRelease } }),
+      openSession: async (options, output) => {
+        native = new FakePiSession(options, output);
+        await gate;
+        return native;
+      } });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "opening", cwd: directory, message: "work" }));
+    await waitFor(() => !!native);
+    expect(await service.close()).toMatchObject({ ok: false, error: { code: "conflict" } });
+    service.suspend();
+    let detached = false;
+    const handoff = service.detach().then(result => { detached = true; return result; });
+    await turn(); expect(detached).toBe(false);
+    release(); value(await handoff);
+    expect(native!.commands).toEqual([]);
+    expect(native!.closed).toBe(false);
+    expect(leaseRelease).toHaveBeenCalledOnce();
+    const successor = fixture(directory);
+    expect(successor.service.pending(thread.id)).toMatchObject([{ id: "opening", state: "queued", insertedAt: null, landedAt: null }]);
+    expect(successor.service.latestSettlement(thread.id)).toBeNull();
+    expect(successor.sessions).toHaveLength(0);
+  });
+
+  it.each(["preparing", "admitting"])("leaves %s work queued and releases only unassigned admission", async phase => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-hooks-")); roots.push(directory);
+    let entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const leaseRelease = vi.fn(), openSession = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
+      ...(phase === "preparing" ? { prepareMessage: async (_thread, message) => { entered = true; await gate; return { ok: true, value: { text: message.text } }; } } :
+        { admit: async () => { entered = true; await gate; return { ok: true, value: { release: leaseRelease } }; } }) });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "hook", cwd: directory, message: "work" }));
+    await waitFor(() => entered);
+    service.suspend(); const handoff = service.detach(); release(); value(await handoff);
+    expect(openSession).not.toHaveBeenCalled();
+    expect(leaseRelease).toHaveBeenCalledTimes(phase === "admitting" ? 1 : 0);
+    const successor = fixture(directory);
+    expect(successor.service.pending(thread.id)).toMatchObject([{ id: "hook", state: "queued", insertedAt: null, landedAt: null }]);
+    expect(successor.service.latestSettlement(thread.id)).toBeNull();
+  });
+
+  it("retains busy execution receipts, leases and held/archived input across detach", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-active-")); roots.push(directory);
+    const sessions: FakePiSession[] = [], leaseRelease = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      admit: async () => ({ ok: true, value: { release: leaseRelease } }),
+      openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
+    services.push(service);
+    for (const id of ["held", "archived"]) {
+      value(service.importThread({ id, title: id, cwd: directory, sessionFile: join(directory, `${id}.jsonl`),
+        settings: { model: "sol", thinkingLevel: "high", speed: "standard" }, held: true, metadata: id === "archived" ? { archived: true } : {} }));
+      value(service.importMessage({ id: `${id}-input`, threadId: id, text: "remain held" }));
+    }
+    value(await service.start());
+    const active = value(await service.spawn({ requestId: "active", cwd: directory, message: "keep working" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const pending = service.pending(active.id);
+    value(await service.detach());
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.closed).toBe(false);
+    expect(sessions[0]!.commands.some(command => command.type === "abort")).toBe(false);
+    expect(leaseRelease).not.toHaveBeenCalled();
+    const successor = fixture(directory);
+    expect(successor.service.pending(active.id)).toEqual(pending);
+    expect(successor.service.latestSettlement(active.id)).toBeNull();
+    for (const id of ["held", "archived"]) {
+      expect(successor.service.get(id)).toMatchObject({ held: true });
+      expect(successor.service.pending(id)).toMatchObject([{ id: `${id}-input`, state: "queued" }]);
+    }
+    expect(successor.service.get("archived")?.metadata?.archived).toBe(true);
+    expect(successor.sessions).toHaveLength(0);
+    value(await successor.service.detach());
+  });
+
+  it.each(["close", "detach"] as const)("keeps failed idle disposal owned so %s can retry it", async operation => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-disposal-")); roots.push(directory);
+    let refuses = true, native!: FakePiSession;
+    const disposal = vi.fn(async () => { if (refuses) throw new Error("Native disposal refused"); native.closed = true; });
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      openSession: async (options, output) => { native = new FakePiSession(options, output); native.close = disposal; return native; } });
+    services.push(service);
+    const thread = value(service.importThread({ id: "idle", title: "idle", cwd: directory, sessionFile: join(directory, "idle.jsonl"),
+      settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
+    expect(await service.command(thread.id, { type: "get_context" })).toMatchObject({ ok: false, error: { message: expect.stringContaining("Native disposal refused") } });
+    expect(await service[operation]()).toMatchObject({ ok: false, error: { message: "Native disposal refused" } });
+    refuses = false; value(await service[operation]());
+    expect(disposal).toHaveBeenCalledTimes(3);
+    expect(native.closed).toBe(true);
+  });
+});
+
 it("projects phase timestamps to list and reconnect snapshots without stale thinking or tools", async () => {
   const { service, directory, sessions } = fixture();
   value(await service.start());

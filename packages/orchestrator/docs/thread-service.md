@@ -37,7 +37,11 @@ For controller handoff:
 3. Await `service.detach()` to release the controller database connection.
 4. Start the successor service against the same database and native files.
 
-Dispatched work and its insertion timestamp remain durable. `close()` instead closes idle native resources and refuses active execution. Publication must drain executions for the initial source-owner cutover.
+Dispatched work and its insertion timestamp remain durable. A runtime owns no session until its asynchronous open or attachment returns; it is not disposable until native `get_state` confirms it is idle. Suspension may interrupt either initialization or its acknowledgement. `detach()` waits for owned opening, dispatch and halt operations, skips absent sessions, and never disposes busy or retained execution. Preparation and unassigned admission leave input queued; only that unassigned lease is released. Handoff does not settle accepted work, resume held messages or restore archives.
+
+`close()` instead closes idle native resources and refuses active execution or initialization. A failed native disposal keeps its runtime owned so a later close/detach can retry, rather than losing the handle. Publication must drain executions for the initial source-owner cutover.
+
+October 6's supervisor handoff failed because a rejected opener left an uninitialized runtime under suspension and `detach()` called `runtime.session.close` on its absent session. `tests/thread-service.test.ts` covers that exception, late successful initialization, preparation/admission, retained busy custody and retryable idle disposal across controller replacement.
 
 ## Native execution contract
 
