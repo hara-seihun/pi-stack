@@ -99,6 +99,8 @@ export interface Session {
   provider: string;
   createdAt: string;
   updatedAt: string;
+  /** Latest accepted person input; absent before any person input. */
+  lastUserMessageAt?: string;
   revision: number;
   idleUnread: boolean;
   /** Full rows only for the stream's subscribed session; other rows carry an empty list. */

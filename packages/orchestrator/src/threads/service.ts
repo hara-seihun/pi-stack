@@ -161,6 +161,7 @@ export class ThreadService implements ThreadApi {
         landed_at INTEGER, outcome TEXT, final_message TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS thread_work_queue ON thread_work(thread_id,status,front DESC,ordinal);
       CREATE INDEX IF NOT EXISTS thread_work_unfinished ON thread_work(thread_id) WHERE status!='done';
+      CREATE INDEX IF NOT EXISTS thread_work_user_recency ON thread_work(thread_id,created_at DESC) WHERE sender_id IS NULL AND source='explicit';
       CREATE TABLE IF NOT EXISTS thread_execution (
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), work_id TEXT NOT NULL,
         settings TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER, settlement_seq INTEGER UNIQUE, outcome TEXT, final_message TEXT, error TEXT);
@@ -201,7 +202,7 @@ export class ThreadService implements ThreadApi {
       catch (error) { this.db.exec(depth ? `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}` : "ROLLBACK"); throw error; }
     } finally { this.transactionDepth--; }
   }
-  private static readonly THREAD_COLUMNS = "t.*,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT w.landed_at FROM thread_wake s JOIN thread_work w ON w.id=json_extract(s.data,'$.lastMessageId') WHERE s.thread_id=t.id) wake_landed_at,(SELECT count(*) FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
+  private static readonly THREAD_COLUMNS = "t.*,(SELECT MAX(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.sender_id IS NULL AND w.source='explicit') last_user_message_at,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT w.landed_at FROM thread_wake s JOIN thread_work w ON w.id=json_extract(s.data,'$.lastMessageId') WHERE s.thread_id=t.id) wake_landed_at,(SELECT count(*) FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
   private row(id: string): Json | undefined { return this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t WHERE id=?`).get(id) as Json | undefined; }
   private project(row: Json): Thread {
     const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
@@ -219,7 +220,7 @@ export class ThreadService implements ThreadApi {
         activeTools: projection?.live.tools.map((tool: Json) => String(tool.toolName)) ?? [] };
     return { executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: { ...JSON.parse(row.wake_data), ...(row.wake_landed_at ? { lastLandedAt: row.wake_landed_at } : {}), deferredReason: metadata.archived ? "archived" : row.held ? "stopped" : row.state === "running" ? "busy" : undefined } } : {}), id: row.id, parentId: row.parent_id, role: this.options.workersOnly || row.parent_id ? "worker" : "conversation", title: row.title, cwd: row.cwd, sessionFile: row.session_file,
       settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state, held: !!row.held, revision: row.revision,
-      createdAt: row.created_at, updatedAt: row.updated_at, pendingMessages: pending, metadata };
+      createdAt: row.created_at, updatedAt: row.updated_at, ...(row.last_user_message_at !== null ? { lastUserMessageAt: row.last_user_message_at } : {}), pendingMessages: pending, metadata };
   }
   get(id: string): Thread | null { const row = this.row(id); return row ? this.project(row) : null; }
   /** Every thread, or with `archived: false` only the ones still in play; archived threads outnumber live ones many times over on a long-lived account. */

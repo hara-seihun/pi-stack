@@ -39,6 +39,8 @@ export interface Thread {
   revision: number;
   createdAt: number;
   updatedAt: number;
+  /** Latest accepted person input; absent before any person input. Excludes agent sends and notifications. */
+  lastUserMessageAt?: number;
   pendingMessages: number;
   executionActivity?: ExecutionActivitySnapshot & { activeTools: string[] };
   wakeSchedule?: ThreadWakeSchedule;
