@@ -62,10 +62,13 @@ export function threadTools(options: PiSessionOptions) {
   }
   return [
     defineTool({
-      name: "thread_wait", label: "Wait on agents",
-      description: "Set or clear your own durable Waiting on agents status. Set with a reason and optional direct child threadIds/after cursors as your final tool call, then this turn ends without polling. Child settlements resume this same thread through ordinary result delivery. For external durable work omit threadIds and set thread_wake first as a recovery check. Holds and archives still win; explicit input clears the wait. Clear removes the status without creating work.",
+      name: "thread_wait", label: "Wait for a named dependency",
+      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty direct child threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Holds and archives take precedence; explicit input clears the wait. Clear removes the wait without creating work.",
       parameters: Type.Union([
-        Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), threadIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 100, uniqueItems: true })), after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))) }),
+        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("agents"), reason: Type.String({ minLength: 1 }), threadIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true }), after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))) }),
+        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("job"), reason: Type.String({ minLength: 1 }), jobId: Type.String({ minLength: 1 }) }),
+        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("deployment"), reason: Type.String({ minLength: 1 }), publicationId: Type.String({ minLength: 1 }) }),
+        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("message"), reason: Type.String({ minLength: 1 }), fromThreadId: Type.String({ minLength: 1 }) }),
         Type.Object({ action: Type.Literal("clear") }),
       ]),
       execute: async (id, input, signal) => {

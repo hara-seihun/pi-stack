@@ -8,7 +8,7 @@ Orchestrator owns persistent threads, input admission, execution state and durab
 
 Pi is the only session engine. Astra, Sol, Luna, Fable and Opus are model choices, while retained names of other engines are import provenance. Session, settings, run and CLI operations do not accept an engine selector.
 
-A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. The [Sandbox profile](sandbox.md) adds a raw-context, four-tool execution boundary with a separate persistent workspace per thread. Its execution state describes only its own work. An idle parent with running or dependency-waiting children keeps execution state `idle`, but Remote displays **Waiting on agents** in the inbox, thread header and worker tree. This display includes direct children in either authorized owner. An explicit durable dependency wait can also keep that label after children stop running; it is cleared by a matching result, explicit input, a scheduled recovery wake or `thread_wait` clear. A held parent also remains idle; clients compose its held label from `thread.held`. Native transcripts remain authoritative history. Projections and live output are not additional conversation stores.
+A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. The [Sandbox profile](sandbox.md) adds a raw-context, four-tool execution boundary with a separate persistent workspace per thread. Its execution state describes only its own work. An idle parent with running or dependency-waiting children keeps execution state `idle`, but Remote displays **Waiting on agents** in the inbox, thread header and worker tree. This display includes direct children in either authorized owner. An explicit durable dependency wait names its actual dependency: agents, a job, a deployment or a collaborator message. It is cleared by a matching result, explicit input, a scheduled recovery wake or `thread_wait` clear. Being finished or available for a later assignment is idle, not waiting. See [explicit state dispatch](state-dispatch.md). A held parent also remains idle; clients compose its held label from `thread.held`. Native transcripts remain authoritative history. Projections and live output are not additional conversation stores.
 
 `ThreadState` is exactly `idle | running`, defined in [`contracts.ts`](../packages/orchestrator/src/threads/contracts.ts). `running` includes pending input, admission, startup, execution and cancellation until confirmed. `idle` means the thread has no current work. The separate `held` boolean prevents queued input from starting. Stop leaves the thread `{ state: "idle", held: true }` after cancellation is confirmed, and resume clears `held`. Errors stay in details and execution outcomes; they do not add a lifecycle state. Remote must not display this broad `running` flag as proof of work: its [execution status contract](../apps/remote/web/README.md#execution-status-is-evidence-not-reassurance) reports every owned pending-operation and runtime phase, treats missing instrumentation as a defect rather than a normal unknown state, and exposes elapsed phase time separately from the age of the latest activity update.
 
@@ -91,16 +91,27 @@ Deliver through ordinary messaging, with stable receipt identity and restart-saf
 Use `thread_wait` as the final tool call when no useful local work remains. It stores the reason and optional direct child dependencies, then ends the native turn without another model request:
 
 ```json
-{ "action": "set", "reason": "Need the build worker's result", "threadIds": ["build-worker"], "after": { "build-worker": 12 } }
+{ "action": "set", "kind": "agents", "reason": "Need the build worker's result", "threadIds": ["build-worker"], "after": { "build-worker": 12 } }
 ```
 
 `after` is optional and uses the same per-child settlement cursors as `thread_await`; omitted cursors start at zero. A missing or unrelated child is rejected. An already-settled dependency or result queued during registration does not create a stale wait. For another assignment to the same persistent worker, use its latest cursor. Clear with `{ "action": "clear" }`. Every operation concerns the calling thread itself, not another thread selected by the model.
 
-The thread remains `state: "idle"`, with a typed `waitingOnAgents: {reason,threadIds,after,since}` and the owner-owned `metadata.agentWait`. It releases its model lease and stops inference; its idle native session remains eligible for warm reuse and ordinary idle reclamation. Remote and Android say **Waiting on agents**, show the dependency and wait time, and do not issue a completion notification while a root or descendant still waits. A live `thread_await` tool also reports an observed `waiting_on_agents` execution phase. Human questions, account admission, provider/backoff waits, stopped/archived threads and ordinary idle stay distinct. Stop/archive labels take precedence and retain the wait information for inspection. Waiting/scheduled threads resist inactivity archiving; an ephemeral worker keeps custody while it waits or owns a wake.
+The thread remains `state: "idle"`, with a discriminated `waitingOnAgents` value and the owner-owned `metadata.agentWait`. Every wait has `reason`, `since` and a required `kind`:
+
+- `agents`: 1..100 unique direct child `threadIds`, with optional `after` cursors keyed only by those children.
+- `job`: a stable `jobId` identifying the accepted experiment or task.
+- `deployment`: a stable `publicationId` identifying the accepted release.
+- `message`: an accessible collaborator `fromThreadId`, not the calling thread.
+
+There is no generic external-work or available-for-assignment wait. Invalid, missing or mixed dependency variants are rejected without changing existing custody. Stored waits from before the typed contract retain their reason, scheduling and result routing; the client reports a missing wait type as an instrumentation defect rather than guessing a dependency. The next explicit input or scheduled recovery clears that retained wait normally.
+
+A wait releases its model lease and stops inference; its idle native session remains eligible for warm reuse and ordinary idle reclamation. Remote and Android say **Waiting on agents**, **Waiting for job**, **Waiting for deployment** or **Waiting for message**, show the concrete dependency and wait time, and do not issue a completion notification while a root or descendant still waits. A live `thread_await` tool also reports an observed `waiting_on_agents` execution phase. Human questions, account admission, provider/backoff waits, stopped/archived threads and ordinary idle stay distinct. Stop/archive labels take precedence and retain the wait information for inspection. Waiting/scheduled threads resist inactivity archiving; an ephemeral worker keeps custody while it waits or owns a wake.
 
 Child settlements remain the primary resumption event: their existing durable result message clears a matching wait, steers a busy parent or resumes an idle parent. It never releases a hold or restores an archive. Explicit input clears waiting through ordinary messaging. Waiting is not an assertion that a child succeeded, and ending a native turn is not completion of all dependent work.
 
-For durable external work or recovery from missed events, set a periodic wake **before** waiting:
+For an accepted external job or deployment, name its exact wait kind and identity, and set a periodic wake **before** waiting. A deployment wait is `{ "action": "set", "kind": "deployment", "reason": "Need release result", "publicationId": "PUB-123" }`; a job wait uses `kind: "job"` and `jobId`. A collaborator wait uses `kind: "message"` and `fromThreadId`. Do not use any of them merely to remain available for another assignment.
+
+A recovery wake is:
 
 ```json
 { "action": "set", "reason": "Check the durable release receipt", "cadenceMs": 120000, "nextDueAt": 1791000120000 }

@@ -197,10 +197,53 @@ export type ThreadControl =
   | { threadId: string; action: "cancelMessage"; messageId: string }
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
   | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };
-export interface AgentWait { reason: string; threadIds: string[]; after: Record<string, number>; since: number }
+export const WAIT_KINDS = ["agents", "job", "deployment", "message"] as const;
+export type WaitKind = typeof WAIT_KINDS[number];
+export type WaitDependency =
+  | { kind: "agents"; threadIds: [string, ...string[]]; after: Record<string, number> }
+  | { kind: "job"; jobId: string }
+  | { kind: "deployment"; publicationId: string }
+  | { kind: "message"; fromThreadId: string };
+export type AgentWait = { reason: string; since: number } & WaitDependency;
 export type AgentWaitRequest = { threadId: string; requestId: string } & (
-  | { action: "set"; reason: string; threadIds?: string[]; after?: Record<string, number> }
+  | ({ action: "set"; reason: string } & (
+      | { kind: "agents"; threadIds: string[]; after?: Record<string, number> }
+      | { kind: "job"; jobId: string }
+      | { kind: "deployment"; publicationId: string }
+      | { kind: "message"; fromThreadId: string }))
   | { action: "clear" });
+export function validateWaitDependency(input: unknown): Result<WaitDependency> {
+  const invalid = (message: string): Result<WaitDependency> => ({ ok: false, error: { code: "invalid_request", message } });
+  if (!input || typeof input !== "object") return invalid("A typed wait dependency is required");
+  const value = input as Record<string, unknown>;
+  const nonempty = (value: unknown): value is string => typeof value === "string" && !!value.trim();
+  const rejectForeign = (allowed: string[]) => Object.keys(value).some(key => !["action", "reason", "since", "threadId", "requestId", "kind", ...allowed].includes(key));
+  if (value.kind === "agents") {
+    if (rejectForeign(["threadIds", "after"])) return invalid("An agents wait accepts only child dependencies and cursors");
+    if (!Array.isArray(value.threadIds) || value.threadIds.length < 1 || value.threadIds.length > 100
+      || !value.threadIds.every(nonempty) || new Set(value.threadIds).size !== value.threadIds.length)
+      return invalid("An agents wait requires 1..100 unique child thread IDs; available for assignment is idle, not waiting");
+    const ids = value.threadIds;
+    const after = value.after ?? {};
+    if (!after || typeof after !== "object" || Array.isArray(after)
+      || Object.entries(after).some(([id, cursor]) => !ids.includes(id) || !Number.isSafeInteger(cursor) || (cursor as number) < 0))
+      return invalid("Wait cursors must be nonnegative safe integers keyed only by declared child IDs");
+    return { ok: true, value: { kind: "agents", threadIds: value.threadIds as [string, ...string[]], after: after as Record<string, number> } };
+  }
+  if (value.kind === "job") {
+    if (rejectForeign(["jobId"]) || !nonempty(value.jobId)) return invalid("A job wait requires only its stable jobId");
+    return { ok: true, value: { kind: "job", jobId: value.jobId } };
+  }
+  if (value.kind === "deployment") {
+    if (rejectForeign(["publicationId"]) || !nonempty(value.publicationId)) return invalid("A deployment wait requires only its stable publicationId");
+    return { ok: true, value: { kind: "deployment", publicationId: value.publicationId } };
+  }
+  if (value.kind === "message") {
+    if (rejectForeign(["fromThreadId"]) || !nonempty(value.fromThreadId)) return invalid("A message wait requires only its collaborator fromThreadId");
+    return { ok: true, value: { kind: "message", fromThreadId: value.fromThreadId } };
+  }
+  return invalid("Wait kind must be agents, job, deployment or message; there is no generic wait or available-for-assignment wait");
+}
 export interface ThreadWakeSchedule {
   reason: string; cadenceMs: number; nextDueAt: number;
   lastDueAt?: number; lastDeliveredAt?: number; lastMessageId?: string; lastLandedAt?: number;

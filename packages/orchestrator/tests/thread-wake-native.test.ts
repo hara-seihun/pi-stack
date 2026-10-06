@@ -38,7 +38,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
   vi.spyOn(Date, "now").mockImplementation(() => now);
   const statusCss = readFileSync(new URL("../../../apps/remote/web/src/features/status/status.css", import.meta.url), "utf8");
   const statusDocument = (thread: Thread) => {
-    const status = threadStatus({ state: thread.state, held: thread.held, ...projectThreadActivity(thread.state, undefined, false, thread.executionActivity, thread.metadata, thread.held), idleUnread: false, archivedAt: thread.metadata?.archived ? "archived" : null });
+    const status = threadStatus({ state: thread.state, held: thread.held, waitingOnAgents: thread.waitingOnAgents, ...projectThreadActivity(thread.state, undefined, false, thread.executionActivity, thread.metadata, thread.held), idleUnread: false, archivedAt: thread.metadata?.archived ? "archived" : null });
     return `<!doctype html><html><head><meta charset="utf-8"><title>Thread wake lifecycle proof</title><style>body{font:18px system-ui;margin:32px}code{display:block;margin-top:24px;white-space:pre-wrap}${statusCss}</style></head><body>${renderToStaticMarkup(React.createElement(StatusPill, { status }))}<code>${JSON.stringify({ threadId: thread.id, waitingOnAgents: thread.waitingOnAgents, wakeSchedule: thread.wakeSchedule }).replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</code></body></html>`;
   };
   const server = createServer(async (request, response) => {
@@ -70,7 +70,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
       modelCalls++;
       const model = session.agent.state.model;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: now,
-        content: modelCalls === 1 ? [{ type: "toolCall", id: "wait-call", name: "thread_wait", arguments: { action: "set", reason: "Await synthetic durable job" } }] : [{ type: "text", text: "Wake received in original conversation" }],
+        content: modelCalls === 1 ? [{ type: "toolCall", id: "wait-call", name: "thread_wait", arguments: { action: "set", kind: "job", jobId: "synthetic-job", reason: "Await synthetic durable job" } }] : [{ type: "text", text: "Wake received in original conversation" }],
         stopReason: modelCalls === 1 ? "toolUse" : "stop", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
       const stream = createAssistantMessageEventStream(); stream.push({ type: "done", reason: modelCalls === 1 ? "toolUse" : "stop", message }); stream.end(); return stream;
     };
@@ -83,7 +83,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
     unwrap(await client.wakeSchedule({ action: "set", threadId: "self", requestId: "timer", reason: "Recovery check", cadenceMs: 60000, nextDueAt: now + 60000 }));
     unwrap(await owner.start()); unwrap(await owner.send({ requestId: "first-turn", threadId: "self", text: "Wait for the durable job" }));
     await until(() => owner.get("self")?.state === "idle" && !!owner.get("self")?.waitingOnAgents).catch(error => { throw new Error(`${error.message}: ${JSON.stringify(owner.get("self"))}; calls=${modelCalls}`); });
-    const waiting = await observe("waiting"); expect(waiting.sessionFile).toBe(created.sessionFile); expect(rendered.waiting).toContain("Waiting on agents"); expect(modelCalls).toBe(1);
+    const waiting = await observe("waiting"); expect(waiting.sessionFile).toBe(created.sessionFile); expect(rendered.waiting).toContain("Waiting for job"); expect(modelCalls).toBe(1);
     owner.reconcile(); unwrap(await watch.tick(now)); await boundary(); expect(modelCalls).toBe(1); expect(unwrap(await watch.watch({ threadId: "self", action: "list" }))).toEqual({ items: [] });
     // Native history and the wake survive replacing the scheduler/controller connection.
     unwrap(await owner.detach()); owner = createOwner(); now += 60001; unwrap(await owner.start());
