@@ -2,6 +2,9 @@ import { API } from "../../server/api";
 import { meetVoiceControl } from "../../server/meet/protocol";
 import { piFetch } from "./client";
 import { createStreamClient } from "./stream";
+import type { StreamEvent } from "../../server/protocol";
+import { assertNever, requireState } from "../../shared/explicit-state";
+import { VOICE_STATES, type VoiceState } from "./voice-state";
 
   const MAX_CONTEXT_BYTES = 500;
 
@@ -123,7 +126,8 @@ import { createStreamClient } from "./stream";
       this.streamedMessage = false;
     }
 
-    setState(state, detail = "") {
+    setState(state: VoiceState, detail = "") {
+      requireState(state, VOICE_STATES, "Voice lifecycle");
       this.state = state;
       this.onState(state, detail);
     }
@@ -535,18 +539,17 @@ import { createStreamClient } from "./stream";
       this.stream.start();
     }
 
-    handleStreamEvent(event) {
+    handleStreamEvent(event: StreamEvent) {
       if (this.state !== "live") return;
       try {
-        if (event.type === "live") {
-          this.liveTextValue = event.text;
-          this.observeLiveText(this.liveTextValue);
-        } else if (event.type === "events") {
-          this.consumeEvents(event.events || []);
-          this.stream?.remember({ eventsAfter: this.cursor });
-        } else if (event.type === "error") {
-          this.onNotice(String(event.message || "The thread stream failed"));
+        switch (event.type) {
+          case "live": this.liveTextValue = event.text; this.observeLiveText(this.liveTextValue); return;
+          case "events": this.consumeEvents(event.events); this.stream?.remember({ eventsAfter: this.cursor }); return;
+          case "error": this.onNotice(event.message); return;
+          case "hello": case "bootstrap": case "state": case "messaging": case "dashboard": case "workers": case "transcript": case "images": case "questions": case "notifications": return;
+          case "reconcile": case "selection-ready": throw new Error(`Unprocessed stream control frame reached Voice: ${event.type}`);
         }
+        assertNever(event, "Voice stream event");
       } catch (cause) {
         this.onNotice(String(cause?.message || cause));
       }

@@ -1,6 +1,7 @@
 import { API } from "../../server/api";
 import { parseInlineImageTags, type InlineImage, type InlineImageTag } from "../../server/inline-image-contract";
 import { resourceUrl } from "./resource-url";
+import { assertNever, requireState } from "../../shared/explicit-state";
 
 export interface ImagePresentation {
   assistant?: boolean;
@@ -20,7 +21,10 @@ function imageHtml(tag: InlineImageTag, sessionId: string, presentation: ImagePr
   const label = escape(tag.id || "Image");
   const shell = (body: string) => `<span class="inline-image" data-image-id="${label}">${body}<span class="inline-image-label">${label}</span>${warning}</span>`;
   if (error) return shell(`<span class="inline-image-placeholder inline-image-error" role="alert"><strong>Image failed</strong><span>${escape(error)}</span></span>`);
-  if (image?.state === "complete" && image.path) {
+  if (image) requireState(image.state, { queued: true, generating: true, complete: true, error: true } satisfies Record<InlineImage["state"], true>, "Inline image");
+  if (image?.state === "error") return shell(`<span class="inline-image-placeholder inline-image-error" role="alert">Image state error: failure reason missing.</span>`);
+  if (image?.state === "complete") {
+    if (!image.path) return shell(`<span class="inline-image-placeholder inline-image-error" role="alert">Image state error: completed image path missing.</span>`);
     const href = resourceUrl(API.sessionFiles.path({ sessionId }, { path: image.path }));
     const url = escape(href);
     if (presentation.failedUrls?.has(href)) return shell(`<a href="${url}" target="_blank" rel="noopener noreferrer"><span class="inline-image-placeholder inline-image-error" role="alert">Image could not load. Open the original to try again.</span></a>`);
@@ -29,8 +33,13 @@ function imageHtml(tag: InlineImageTag, sessionId: string, presentation: ImagePr
   if (!image && !tag.definition && !presentation.streaming && presentation.images) {
     return shell(`<span class="inline-image-placeholder inline-image-error" role="alert">Image “${label}” is not available.</span>`);
   }
-  const waiting = image?.waitingFor.length ? `<span>Waiting for ${escape(image.waitingFor.join(", "))}</span>` : "";
-  return shell(`<span class="inline-image-placeholder" role="status" aria-busy="true"><strong>Generating image</strong>${waiting}</span>`);
+  if (!image) return shell(`<span class="inline-image-placeholder" role="status" aria-busy="true"><strong>Waiting for image registration</strong></span>`);
+  const waiting = image.waitingFor.length ? `<span>Waiting for ${escape(image.waitingFor.join(", "))}</span>` : "";
+  switch (image.state) {
+    case "queued": return shell(`<span class="inline-image-placeholder" role="status" aria-busy="true"><strong>Image queued</strong>${waiting}</span>`);
+    case "generating": return shell(`<span class="inline-image-placeholder" role="status" aria-busy="true"><strong>Generating image</strong>${waiting}</span>`);
+  }
+  return assertNever(image.state, "Inline image presentation");
 }
 
 export function installInlineImages(markdown: any) {

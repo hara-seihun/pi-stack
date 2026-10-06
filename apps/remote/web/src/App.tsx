@@ -1,5 +1,8 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { API } from "../../server/api";
+import { assertNever } from "../../shared/explicit-state";
+import { voiceActionLabel, type VoiceState } from "./voice-state";
+import { validateSession } from "../../shared/state-validation";
 import { appPath, appStorageKey } from "./app-path";
 import type { GovernorProvider, InlineImageSnapshot, StreamEvent, ThreadQuestion } from "../../server/protocol";
 import { ClientCache } from "./client-cache";
@@ -242,7 +245,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const [pasteName, setPasteName] = useState("pasted-text.txt");
   const [pasteContent, setPasteContent] = useState("");
   const [workersFilter, setWorkersFilter] = useState<"active" | "all">("active");
-  const [voiceState, setVoiceState] = useState<"idle" | "connecting" | "live" | "error">("idle");
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [voiceDetail, setVoiceDetail] = useState("");
   const voice = useRef<VoiceSession | null>(null);
   const stream = useRef<StreamClient | null>(null);
@@ -293,7 +296,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     }
     voice.current = window.PiRemoteVoice.create({
       sessionId: session.id,
-      onState(next, detail) { setVoiceState(next as typeof voiceState); setVoiceDetail(detail || ""); },
+      onState(next, detail) { setVoiceState(next); setVoiceDetail(detail || ""); },
       onNotice(message) { setVoiceDetail(message); },
     });
     await voice.current.start();
@@ -473,7 +476,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
             notificationsSubscribed.current = true;
             stream.current?.update({ notificationsAfter: readIdleCursor(person, event.bootstrap.environmentId) });
           }
-          break;
+          return;
         }
         case "state": {
           const current = stateRef.current;
@@ -492,7 +495,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           if (closed) { liveText.reset(); Object.assign(update, { selectedChatId: null, transcript: null, images: null }); }
           patch(update);
           if (closed) navigate(routeHome(currentRoute()), { replace: true });
-          break;
+          return;
         }
         case "messaging": {
           messagingHistory.reconcile(event.snapshot);
@@ -502,10 +505,10 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           if (closed) { liveText.reset(); Object.assign(update, { selectedChatId: null, transcript: null, images: null }); }
           patch(update);
           if (closed) navigate(routeHome(currentRoute()), { replace: true });
-          break;
+          return;
         }
-        case "dashboard": patch({ dashboard: event.dashboard }); finishSection("machine"); break;
-        case "workers": patch({ fleet: event.sessions }); break;
+        case "dashboard": patch({ dashboard: event.dashboard }); finishSection("machine"); return;
+        case "workers": patch({ fleet: event.sessions }); return;
         case "transcript": {
           const previous = stateRef.current.transcript;
           const transcript = applyTranscriptEvent(previous, event);
@@ -513,28 +516,31 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           finishSection(`thread:${event.sessionId}`);
           if (previous && previous.generation !== transcript.generation) stream.current?.update({ transcriptFrom: null });
           cache.rememberThread(event.sessionId, { transcript });
-          break;
+          return;
         }
         // Live frames do not touch the app's state: the conversation that
         // shows them subscribes to this store on its own.
-        case "live": liveText.apply(event); break;
+        case "live": liveText.apply(event); return;
         case "images":
           cache.rememberThread(event.sessionId, { images: event.snapshot });
           patch({ images: event.snapshot });
-          break;
+          return;
         case "questions":
           setPendingQuestions({ sessionId: event.sessionId, questions: event.questions });
-          break;
+          return;
         case "notifications": {
           deliverIdleNotifications(event.feed);
           stream.current?.remember({ notificationsAfter: event.feed.cursor });
-          break;
+          return;
         }
         case "error":
           protocolError = event.message;
           patch({ offline: connectionError || protocolError });
-          break;
+          return;
+        case "events": return; // Voice owns occurrence feeds; this client subscribes to snapshots.
+        case "reconcile": case "selection-ready": throw new Error(`Unprocessed stream control frame reached App: ${event.type}`);
       }
+      assertNever(event, "App stream event");
     };
     const opening = currentRoute();
     const client = createStreamClient({
@@ -895,11 +901,11 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       void api(API.session.method, API.session.path({ sessionId: id }))
         .then((result: { session?: Session }) => {
           const session = result?.session;
-          if (!session) return;
+          validateSession(session);
           patch(state => [...state.sessions, ...state.discovered].some(item => item.id === session.id)
             ? {} : { discovered: [...state.discovered, session] });
         })
-        .catch(() => {});
+        .catch(error => toast.error(`Could not load thread ${id}: ${error instanceof Error ? error.message : String(error)}`));
     }
   }, [patch, stateRef]);
   const threadDirectory = useMemo<ThreadDirectory>(() => ({
@@ -915,7 +921,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
     [threadStarts, state.messaging, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
   const debugTools = <div className="inspector-debug">
-    <button type="button" className={voiceState === "idle" ? "" : voiceState} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceState === "live" ? "Hang up voice" : voiceState === "connecting" ? "Connecting voice…" : "Start voice"}</button>
+    <button type="button" className={voiceState === "idle" ? "" : voiceState} disabled={voiceState === "closing"} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceActionLabel(voiceState)}</button>
     {voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}
     <a href={`${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}>Open PiStack Meet</a>
     {voiceDetail && <p className="muted">{voiceDetail}</p>}

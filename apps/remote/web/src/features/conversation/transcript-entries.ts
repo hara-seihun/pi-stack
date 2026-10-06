@@ -6,8 +6,11 @@
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import type { TranscriptItemHead } from "../../../../server/protocol";
 import type { ContextEntry } from "../../types";
+import { assertNever } from "../../../../shared/explicit-state";
+import { validateTranscriptHead } from "../../../../shared/state-validation";
 
 export function entryLabel(head: TranscriptItemHead): string {
+  validateTranscriptHead(head);
   switch (head.kind) {
     case "user": return head.label || "User";
     // The agent is Kenan on every screen; a head stored before the rename still says so.
@@ -16,8 +19,9 @@ export function entryLabel(head: TranscriptItemHead): string {
     case "system": return head.label || "System";
     case "tool": return head.label || "tool";
     case "thinking": return head.label || "Thinking";
-    default: return head.name || "tool";
+    case "toolCall": return head.name || "tool";
   }
+  return assertNever(head, "Transcript label");
 }
 
 /** `bodyLoaded` joins the signature so a memoized step re-renders when the full body lands. */
@@ -51,9 +55,10 @@ export function entryFromHead(head: TranscriptItemHead, bodyLoaded = false): Con
       return { ...base, text: head.text, messageTimestamp: head.timestamp, identity: head.identity, reactions: head.reactions, reply: head.reply };
     case "notice":
       return { ...base, text: head.text, messageTimestamp: head.timestamp };
-    default:
+    case "system": case "tool": case "thinking":
       return { ...base, preview: head.preview, messageTimestamp: head.timestamp };
   }
+  return assertNever(head, "Transcript head");
 }
 
 export function entriesFromHeads(heads: readonly TranscriptItemHead[], bodyLoaded?: (id: string) => boolean): ContextEntry[] {

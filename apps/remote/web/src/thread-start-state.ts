@@ -1,4 +1,5 @@
 import type { ThreadStart } from "./types";
+import { assertNever } from "../../shared/explicit-state";
 
 export type ThreadCreation = { requestId: string; sessionId: string; destination: string; model: string | null; contextFiles?: string[] };
 type Destinations = { kind: "destinations"; starts: ThreadStart[] };
@@ -20,11 +21,21 @@ export type ThreadStartEvent =
   | { type: "retry" };
 
 export function threadStartSelection(state: ThreadStartState): Selection | null {
-  return state.kind === "closed" ? null : state.kind === "creating" || state.kind === "failed" ? state.selection : state;
+  switch (state.kind) {
+    case "closed": return null;
+    case "creating": case "failed": return state.selection;
+    case "destinations": case "models": return state;
+  }
+  return assertNever(state, "Thread start selection");
 }
 
 export function threadStartStage(selection: Selection | null): string {
-  return selection?.kind === "models" ? `models:${selection.destination.id}` : "destinations";
+  if (selection === null) return "destinations";
+  switch (selection.kind) {
+    case "models": return `models:${selection.destination.id}`;
+    case "destinations": return "destinations";
+  }
+  return assertNever(selection, "Thread start stage");
 }
 
 export function threadStartReducer(state: ThreadStartState, event: ThreadStartEvent): ThreadStartState {
@@ -63,4 +74,5 @@ export function threadStartReducer(state: ThreadStartState, event: ThreadStartEv
     case "retry":
       return state.kind === "failed" ? { kind: "creating", selection: state.selection, request: state.request } : state;
   }
+  return assertNever(event, "Thread start event");
 }

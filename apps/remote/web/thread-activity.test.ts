@@ -6,7 +6,7 @@ import { activityTiming, threadStatus, roomThreadStatus } from "./src/features/s
 import { StatusPill } from "./src/features/status/StatusPill";
 
 const running = (patch: Partial<Session> = {}) => ({
-  state: "running" as const, held: false, activity: "running" as Session["activity"], activeTools: [], idleUnread: false, archivedAt: null, ...patch,
+  state: "running" as const, held: false, activity: "status_error" as Session["activity"], activeTools: [], idleUnread: false, archivedAt: null, ...patch,
 });
 
 test("missing owned phase or tool identity is an instrumentation defect, never a normal unknown state", () => {
@@ -31,8 +31,8 @@ test("every owned machine boundary has a distinct interpretable status", () => {
 });
 
 test("durable waiting names its dependency without pretending it is silent model execution", () => {
-  const status = threadStatus(running({ state: "idle", activity: "awaiting", activitySince: 1000, activityDetail: "Publication worker", lastActivityAt: 1000 }));
-  expect(status).toMatchObject({ key: "awaiting", label: "Waiting on agents", title: "Publication worker", since: 1000 });
+  const status = threadStatus(running({ state: "idle", activity: "awaiting", waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Publication worker", since: 1000 }, activitySince: 1000, activityDetail: "Publication worker", lastActivityAt: 1000 }));
+  expect(status).toMatchObject({ key: "waiting_for_deployment", label: "Waiting for deployment", title: "Publication worker", since: 1000 });
   expect(activityTiming(status, 80000)).toEqual({ elapsed: "1m 19s" });
   expect(threadStatus(running({ state: "idle", activity: "awaiting", held: true })).key).toBe("stopped");
   expect(threadStatus(running({ state: "idle", activity: "awaiting", archivedAt: "2026-10-05" })).key).toBe("archived");
@@ -65,6 +65,7 @@ test("phase age and lack of updates are separate, and observation time never imp
 test("settled or held threads never display stale execution clocks", () => {
   for (const patch of [{ state: "idle" as const }, { held: true, state: "idle" as const }, { archivedAt: "2026-10-04" }]) {
     const status = threadStatus(running({ activity: "responding", activitySince: 1_000, lastActivityAt: 2_000, ...patch }));
+    if (patch.state === "idle" && !patch.held) expect(status.key).toBe("reporting_error");
     expect(status.busy).toBe(false);
     expect(activityTiming(status, 80_000)).toEqual({});
   }
@@ -74,7 +75,7 @@ test("confirmed failure and pending cancellation are not confused with idle or s
   expect(threadStatus(running({ held: true }))).toMatchObject({ key: "stopping", busy: true });
   expect(threadStatus(running({ held: true, executionError: "Runner could not cancel" }))).toMatchObject({ key: "error", label: "Stop failed", attention: true });
   expect(threadStatus(running({ held: true, state: "idle" }))).toMatchObject({ key: "stopped", busy: false });
-  const failure = threadStatus(running({ state: "idle", executionError: "Runner exited" }));
+  const failure = threadStatus(running({ state: "idle", activity: "idle", executionError: "Runner exited" }));
   expect(failure).toMatchObject({ key: "error", busy: false, attention: true });
   expect(renderToStaticMarkup(createElement(StatusPill, { status: failure }))).toContain('class="status-error-detail">Runner exited</span>');
   expect(threadStatus(running({ activity: "waiting_for_capacity" })).key).toBe("waiting_for_capacity");

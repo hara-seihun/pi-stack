@@ -12,6 +12,8 @@ import type { StreamEvent, StreamSnapshot, StreamSubscription, StreamWireEvent }
 import { ReconcileReplica, revisionOf } from "../../shared/reconcile";
 import { isStreamSnapshot, streamResource, streamWants } from "../../shared/stream-resources";
 import { piFetch } from "./client";
+import { assertNever, requireState } from "../../shared/explicit-state";
+import { stateObject, stateString, stateArray, validateStreamSnapshot } from "../../shared/state-validation";
 
 export type StreamState = "connecting" | "open" | "offline";
 export interface StreamStatus { state: StreamState; error: string; diagnostic?: string }
@@ -73,17 +75,31 @@ export class EventStreamParser {
   }
 }
 
-/** A wire frame is a direct event or a generic reconciliation frame. */
-export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null {
-  if (!frame.data) return null;
-  let value: any;
-  try { value = JSON.parse(frame.data); } catch { return null; }
-  if (!value || typeof value !== "object") return null;
-  if (typeof value.type !== "string" && frame.event) value.type = frame.event;
-  return ["hello", "reconcile", "selection-ready", "notifications", "events", "error"].includes(value.type) ? value as StreamWireEvent : null;
-}
+export class StreamProtocolError extends Error {}
 
-const SESSION_SCOPED = new Set(["transcript", "live", "images", "questions", "events"]);
+/** Invalid wire input never becomes a healthy event or a silent no-op. */
+export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null {
+  if (!frame.data && !frame.event) return null;
+  try {
+    const value = stateObject(JSON.parse(frame.data), "Stream event");
+    if (!Object.hasOwn(value, "type") && frame.event) value.type = frame.event;
+    const type = requireState(value.type, { hello: true, reconcile: true, "selection-ready": true, notifications: true, events: true, error: true } satisfies Record<StreamWireEvent["type"], true>, "Stream event type");
+    switch (type) {
+      case "hello": stateString(value.epoch, "Supervisor epoch"); stateString(value.streamId, "Stream id"); stateObject(value.bootstrap, "Bootstrap"); break;
+      case "reconcile":
+        stateString(value.resource, "Reconcile resource"); stateString(value.revision, "Reconcile revision");
+        requireState(value.kind, { full: true, patch: true }, "Reconcile kind");
+        break;
+      case "selection-ready": stateString(value.sessionId, "Selected session"); stateString(value.selectionId, "Selection id"); stateObject(value.have, "Selection revisions"); break;
+      case "notifications": stateArray(stateObject(value.feed, "Notification feed").notifications, "Notifications"); break;
+      case "events": stateString(value.sessionId, "Event session"); stateArray(value.events, "Session events"); break;
+      case "error": stateString(value.message, "Stream error"); break;
+    }
+    return value as unknown as StreamWireEvent;
+  } catch (error) {
+    throw new StreamProtocolError(`Invalid stream input: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 export interface StreamClient {
   start(): void;
@@ -181,7 +197,10 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     diagnostic = error instanceof Error ? error.message : String(error);
     authenticationError = authenticationMessage(error) || authenticationError;
     options.onSelectionStatus?.({ sessionId: subscription.session ?? null, ready: false });
-    beginRecovery();
+    if (error instanceof StreamProtocolError) {
+      authenticationError = error.message;
+      showRecovery();
+    } else beginRecovery();
   };
   const clearWatchdog = () => { if (watchdog) clearTimeout(watchdog); watchdog = null; };
   const armWatchdog = (active: AbortController) => {
@@ -209,17 +228,28 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       if (!streamWants(subscription).includes(event.resource)) return;
       if (/^(transcript|live|images|questions):/.test(event.resource) && event.resource.slice(event.resource.indexOf(":") + 1) !== subscription.session) return;
       const result = replica.apply(event);
-      if (!result.ok || !isStreamSnapshot(event.resource, result.value)) {
+      if (!result.ok) {
+        if (result.reason !== "Base revision mismatch") throw new StreamProtocolError(`Invalid ${event.resource} frame: ${result.reason}`);
         replica.forget(event.resource);
         sentSubscription = "";
         post();
         return;
       }
+      try { validateStreamSnapshot(event.resource, result.value); }
+      catch (error) {
+        replica.forget(event.resource);
+        throw new StreamProtocolError(`Invalid ${event.resource} snapshot: ${error instanceof Error ? error.message : String(error)}`);
+      }
       options.onEvent(result.value);
       return;
     }
-    if (SESSION_SCOPED.has(event.type) && "sessionId" in event && event.sessionId !== subscription.session) return;
-    options.onEvent(event);
+    switch (event.type) {
+      case "events":
+        if (event.sessionId !== subscription.session) return;
+        options.onEvent(event); return;
+      case "notifications": case "error": options.onEvent(event); return;
+    }
+    assertNever(event, "Stream delivery");
   };
 
   async function connect(mine: number) {
@@ -385,6 +415,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     },
     restore(snapshot) {
       const resource = streamResource(snapshot);
+      validateStreamSnapshot(resource, snapshot);
       if (replica.get(resource)) return;
       replica.seed(resource, revisionOf(snapshot), snapshot);
       if (!stopped && streamWants(subscription).includes(resource)) post();

@@ -43,7 +43,9 @@ test("the event-stream parser handles split chunks and comments", () => {
   const parser = new EventStreamParser();
   expect(parser.push(": ping\n\nevent: hello\ndata: {\"strea")).toEqual([]);
   expect(parser.push('mId":"s"}\n\n')).toEqual([{ event: "hello", data: '{"streamId":"s"}' }]);
-  expect(streamEventFromFrame({ event: "reconcile", data: "{}" })).toEqual({ type: "reconcile" });
+  expect(() => streamEventFromFrame({ event: "reconcile", data: "{}" })).toThrow("Reconcile resource");
+  expect(() => streamEventFromFrame({ event: "future-state", data: "{}" })).toThrow("invalid state");
+  expect(() => streamEventFromFrame({ event: "error", data: "not JSON" })).toThrow("Invalid stream input");
 });
 
 test("the replica applies generic frames, filters another session, and resumes from resident revisions", async () => {
@@ -70,6 +72,21 @@ test("the replica applies generic frames, filters another session, and resumes f
   client.reconnect(); await settle(); client.stop();
   expect(calls.at(-1)?.body.have["transcript:mine"]).toBe(first);
   expect(calls.at(-1)?.body.have["questions:mine"]).toBe(questions);
+});
+
+test("a hash-valid snapshot with an unknown state is an immediate protocol error, never delivered as healthy data", async () => {
+  const publisher = new ReconcilePublisher();
+  publisher.publish("state", { type: "state", sessions: [{ id: "thread", state: "future", activity: "idle" }] });
+  const statuses: StreamStatus[] = [];
+  const received: StreamEvent[] = [];
+  const client = createStreamClient({ subscription: {}, listen: false, onEvent: event => received.push(event), onStatus: status => statuses.push(status), fetch: async () => sse([hello, frame(publisher.reconcile("state", null))]) });
+  try {
+    client.start(); await settle();
+    expect(received.map(event => event.type)).toEqual(["hello"]);
+    expect(statuses.at(-1)).toMatchObject({ state: "offline" });
+    expect(statuses.at(-1)?.error).toContain("Thread lifecycle: invalid state");
+    expect(statuses.at(-1)?.error).not.toContain("Reconnecting…");
+  } finally { client.stop(); }
 });
 
 test("restored transcript heads declare only their actual local revision", async () => {

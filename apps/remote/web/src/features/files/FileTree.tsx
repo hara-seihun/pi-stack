@@ -4,6 +4,8 @@ import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { API } from "../../../../server/api";
 import { api } from "../../client";
+import { assertNever, requireState } from "../../../../shared/explicit-state";
+import { stateArray, stateObject, stateString } from "../../../../shared/state-validation";
 
 import type { FileBrowserEntry as FileEntry } from "../../../../server/protocol";
 
@@ -31,9 +33,12 @@ function errorEntry(path: string, cause: unknown): { id: string; data: FileBrows
 }
 
 function FileIcon({ kind, open }: { kind: FileBrowserEntry["kind"]; open?: boolean }) {
-  if (kind === "directory") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={open ? "M3 7.5h7l2 2h9l-2.2 9H4.5L3 7.5Z" : "M3 6.5h7l2 2h9v10H3v-12Z"} /></svg>;
-  if (kind === "error") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.8 20h18.4L12 3Zm0 5.5v5m0 3v.2" /></svg>;
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h8l4 4v13H6v-17Zm8 0v4h4" /></svg>;
+  switch (kind) {
+    case "directory": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={open ? "M3 7.5h7l2 2h9l-2.2 9H4.5L3 7.5Z" : "M3 6.5h7l2 2h9v10H3v-12Z"} /></svg>;
+    case "error": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.8 20h18.4L12 3Zm0 5.5v5m0 3v.2" /></svg>;
+    case "file": case "other": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h8l4 4v13H6v-17Zm8 0v4h4" /></svg>;
+  }
+  return assertNever(kind, "File tree icon");
 }
 
 export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree({ selectedPath, onSelect, onRootCount }, ref) {
@@ -52,7 +57,13 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
       getChildrenWithData: async itemId => {
         try {
           const result = await api(API.files.method, API.files.path({}, { path: itemId }));
-          const entries = Array.isArray(result?.directory?.entries) ? result.directory.entries as FileBrowserEntry[] : [];
+          const entries = stateArray(stateObject(result.directory, "File directory").entries, "Directory entries").map(value => {
+            const entry = stateObject(value, "File entry");
+            return {
+              name: stateString(entry.name, "File entry name"), path: stateString(entry.path, "File entry path"),
+              kind: requireState(entry.kind, { directory: true, file: true, other: true } satisfies Record<FileEntry["kind"], true>, "File entry kind"),
+            };
+          });
           if (itemId === ROOT.path) onRootCount?.(entries.length);
           return entries.map(entry => ({ id: entry.path, data: entry }));
         } catch (cause) {

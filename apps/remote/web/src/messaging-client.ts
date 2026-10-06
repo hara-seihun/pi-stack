@@ -2,6 +2,7 @@ import { API } from "../../server/api";
 import type { MessagingAttachment, MessagingCall, MessagingConversation, MessagingHistory, MessagingHistoryChanges, MessagingLink, MessagingLinkPreview, MessagingMessage, MessagingResult, MessagingSend } from "../../server/messaging/protocol";
 import { piFetch } from "./client";
 import { PreviewQueue } from "./preview-queue";
+import { validateMessagingResponse } from "../../shared/state-validation";
 
 const previewQueue = new PreviewQueue();
 
@@ -15,6 +16,7 @@ async function request<T>(path: string, init: RequestInit, signal: AbortSignal):
     const response = await piFetch(path, { ...init, signal: controller.signal });
     const result = await response.json();
     if (!response.ok) return { ok: false, error: { code: String(response.status), message: typeof result.error === "string" ? result.error : result.error?.message || `HTTP ${response.status}` } };
+    validateMessagingResponse(result);
     return { ok: true, value: result as T };
   } catch (error) {
     return { ok: false, error: { code: controller.signal.aborted ? "aborted" : "network", message: error instanceof Error ? error.message : String(error) } };
