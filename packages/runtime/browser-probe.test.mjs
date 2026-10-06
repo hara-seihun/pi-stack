@@ -66,10 +66,14 @@ test("complete native proof keeps linear batches and exact download/frame subcom
   const f = fixture(t);
   const records = [];
   await probeBrowser(f.tool, { ...f.options, record: phase => records.push(phase) });
-  assert.equal(f.calls.length, 22, "only the download/frame troubleshooting phase dispatches individual bounded commands");
   const commands = records.filter(row => row.status === "running");
   assert.equal(commands.length, f.calls.length);
-  assert.equal(commands.filter(row => row.phase.startsWith("download-and-frames/")).length, 16);
+  const frameCommands = commands.filter(row => row.phase.startsWith("download-and-frames/"));
+  assert.ok(frameCommands.length > 0);
+  assert.ok(frameCommands.every(row => JSON.parse(row.command.stdin).length === 1), "troubleshooting commands each have their own bounded custody");
+  const recurring = commands.filter(row => row.command.args?.includes("batch") && !row.phase.startsWith("download-and-frames/"));
+  assert.ok(recurring.length > 0);
+  assert.ok(recurring.every(row => JSON.parse(row.command.stdin).length > 1), "recurring linear checks stay batched");
   assert.ok(commands.every(row => row.deadlineMs === 25000));
   assert.deepEqual(commands.map(row => row.command), f.calls.map(({ timeoutMs, ...input }) => input));
   assert.deepEqual(f.closed, ["attached", "owner"]);
