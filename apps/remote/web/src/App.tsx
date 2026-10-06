@@ -695,12 +695,10 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [undoClose, undoCloses]);
   useEffect(() => {
     const entry = undoState.entries.at(-1);
-    if (!entry || undoState.restoring) return;
-    const description = entry.chat.kind === "ai" ? "Undo restores the chat and its workers and continues their work." : "Restore this chat to your inbox.";
-    const show = undoState.error ? toast.error : toast;
-    const id = show(undoState.error ? `Could not restore ${entry.chat.title}` : `Closed ${entry.chat.title}`, {
-      description: undoState.error || description,
-      action: { label: undoState.error ? "Retry Undo" : "Undo", onClick: () => { void undoClose(); } },
+    if (!entry || undoState.restoring || !undoState.error) return;
+    const id = toast.error(`Could not restore ${entry.chat.title}`, {
+      description: undoState.error,
+      action: { label: "Retry Undo", onClick: () => { void undoClose(); } },
     });
     return () => { toast.dismiss(id); };
   }, [undoState, undoClose]);
