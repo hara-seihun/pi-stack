@@ -97,14 +97,22 @@ The existing cursor and Android native protocol are unchanged. Targets are `room
 client opens room routes and suppresses notifications for the visible room. The ordinary native
 completion target is suppressed to avoid a duplicate private-thread target.
 
-The router reconciles replies and delivery every two seconds. Room listing reads refresh only that
-person's visible rooms from their actual room execution owner. Scheduling/model/tool phases, held
+The router follows each ready room's authenticated owner change feed. Native thread events and row
+changes invalidate that room; active bursts coalesce over one second, and unchanged idle rooms do
+not trigger history reads. Startup and reconnect hydrate current owner evidence. Replies and
+questions still reconcile into the durable outbox without any browser connected. Undelivered
+notifications retry every 30 seconds; failed owner subscriptions/retrievals back off up to 30 seconds.
+Room listing reads hydrate only missing owner evidence for that person's rooms. Scheduling/model/tool phases, held
 state, errors and progress clocks travel with the owner snapshot to both the directory and open
 conversation. Retrieval failure returns `status_error` with its cause and clears stale execution
 clocks/tools, rather than presenting cached running state as healthy. The directory persists inbox,
 unread, pending-question and last-message facts; execution phases and clocks remain with their
-runtime owner and are refreshed after restart. The room inbox and conversation refresh while the
-client is visible. These are narrow room requests, not another person's event stream. Member additions and sends serialize per room at the router. Turning the flag off preserves
+runtime owner and are refreshed after restart. One router-owned revision stream serves room discovery and the selected conversation while the
+client is visible. It sends directory and member-filtered snapshot revisions only on change; unchanged
+reconnect cursors produce no repeated invalidation. The client fetches changed resources, using
+bounded revision patches rather than resending the whole unchanged history. Hidden clients close
+this stream, cancel snapshot reads/retries, and resume from their cursor. These are narrow room
+requests, not another person's event stream; intentional Meet/voice resources are unaffected. Member additions and sends serialize per room at the router. Turning the flag off preserves
 the directory, outbox and native histories. Snapshot history comes from the native branch, including
 pre-compaction messages, not only the current model context.
 
@@ -119,7 +127,7 @@ additions, other members' accepted messages/answers, new questions and finished 
 is independent of push delivery success. A newly recorded event reopens the room for its recipients;
 retries and repeated ticks of the same reply/question do not. Sending or answering also restores the
 sender's room. `updatedAt` is an epoch-millisecond activity timestamp, not a poll, read or close time.
-The fields `current`, `updatedAt`, `state`, `unreadCount` and `pendingQuestions` are optional in the
+The fields `current`, `updatedAt`, `state`, `unreadCount`, `readThrough` and `pendingQuestions` are optional in the
 shared type for existing fixtures and older snapshots; directory responses always supply them.
 
 ## A person's own Kenan
@@ -170,7 +178,16 @@ The member-client public routes require this host's authenticated router session
 
 - `GET /v1/rooms` → `{ rooms, people }`, filtered by membership, including closed rooms; people is
   the host roster. Each room includes `{ id, title, members, current, updatedAt, state, unreadCount,
-  pendingQuestions }`; `state` is `idle` or `running` and counts are nonnegative integers.
+  pendingQuestions, readThrough }`; `state` is `idle` or `running` and counts are nonnegative integers.
+- `GET /v1/rooms/changes?cursor=REVISION` → single-line JSON SSE frames
+  `{ cursor, directory, rooms: { [memberRoomId]: snapshotRevision } }`. Revisions describe current
+  state, not an append-only log; a reconnect hydrates any changed resource without replaying
+  intermediate states. The router aborts the feed when its authenticated session is revoked.
+- Directory and snapshot GETs accept `?sync=1&have=REVISION` for the shared reconcile frame
+  (`full` or `patch`), or HTTP 304 when unchanged. Authorization precedes reconciliation; publisher
+  history is partitioned by actor and bounded to 64 MiB/128 entries, with two historical bases per
+  resource and a 32 MiB value ceiling. A missed/evicted base rehydrates in full. The selected client
+  body owner holds at most one 32 MiB resource. Plain GETs retain the ordinary CLI/agent response.
 - `POST /v1/rooms` with `{ requestId: UUID, title, members: [user] }` → `{ room }`. Creator is
   included automatically; the receipt is the stable room/thread ID, including on retries.
 - `GET /v1/rooms/:id` → `{ room, state, held, error?, messages, live, questions, work, thinking, context, notificationId }`.
@@ -181,8 +198,9 @@ The member-client public routes require this host's authenticated router session
 - `POST /v1/rooms/:id/abort` with `{}` stops the room turn.
 - `POST /v1/rooms/:id/close` with `{}` → `{ room }`, sets only the caller's `current` to false.
 - `POST /v1/rooms/:id/open` with `{}` → `{ room }`, restores only the caller's `current` to true.
-- `POST /v1/rooms/:id/read` with `{}` → `{ room }`, acknowledges all inbox events currently recorded
-  for the caller. A later recorded event remains unread. These three operations do not call the
+- `POST /v1/rooms/:id/read` with `{ through: readThrough }` → `{ room }`, acknowledges only the
+  inbox cursor displayed to the caller. A later recorded event remains unread. `{}` explicitly
+  acknowledges all events recorded at processing time; invalid/ahead cursors return 400. These three operations do not call the
   room runtime, and are available even while it is offline. Reading a snapshot with GET alone does
   not mark it read.
 
@@ -194,6 +212,6 @@ outside this slice. Root may still act on files and describe the result.
 Focused checks run without live services, registries, keys or mounts:
 
 ```
-bun test apps/remote/server/rooms.test.ts apps/remote/server/agent-rooms.test.ts apps/remote/server/message-context.test.ts apps/remote/server/notifications.test.ts
+bun test apps/remote/server/rooms.test.ts apps/remote/server/agent-rooms.test.ts apps/remote/web/room-sync.test.ts apps/remote/server/message-context.test.ts apps/remote/server/notifications.test.ts
 npm test --workspace=pi-orchestrator -- tests/room-session.test.ts
 ```

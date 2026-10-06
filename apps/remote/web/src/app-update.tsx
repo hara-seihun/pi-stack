@@ -2,7 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { deadline } from "./abortable";
 import { DismissibleError } from "./dismissible-error";
 import { bootstrapUrl, nativePlatform, remote } from "./native";
-import { AppUpdater } from "./app-update-state";
+import { AppUpdater, startAppUpdateChecks } from "./app-update-state";
 
 const enabled = nativePlatform && !!remote.checkAppUpdate && !!remote.installAppUpdate;
 const attemptKey = "pi-auto-apk-install";
@@ -26,19 +26,23 @@ export function useAppUpdate() {
   const state = useSyncExternalStore(updater.subscribe, updater.snapshot, updater.snapshot);
   useEffect(() => {
     if (!enabled) return;
-    const check = () => { if (document.visibilityState !== "hidden") void updater.check(); };
-    const foreground = () => { void updater.check(); };
-    check();
-    const timer = window.setInterval(check, 60_000);
-    window.addEventListener("pi-app-foreground", foreground);
-    window.addEventListener("online", check);
-    document.addEventListener("visibilitychange", check);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("pi-app-foreground", foreground);
-      window.removeEventListener("online", check);
-      document.removeEventListener("visibilitychange", check);
-    };
+    return startAppUpdateChecks(updater, {
+      visible: () => document.visibilityState === "visible",
+      schedule: (check, delay) => {
+        const timer = setTimeout(check, delay);
+        return () => clearTimeout(timer);
+      },
+      subscribe: check => {
+        window.addEventListener("pi-app-foreground", check);
+        window.addEventListener("online", check);
+        document.addEventListener("visibilitychange", check);
+        return () => {
+          window.removeEventListener("pi-app-foreground", check);
+          window.removeEventListener("online", check);
+          document.removeEventListener("visibilitychange", check);
+        };
+      },
+    });
   }, []);
   return { ...state, onClick: () => { if (enabled) void updater.check(true); } };
 }

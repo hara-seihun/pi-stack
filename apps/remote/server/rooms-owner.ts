@@ -1,4 +1,5 @@
 import type { Thread } from "pi-orchestrator/api";
+import { roomFeed } from "./room-feed";
 import { projectThreadActivity } from "./live-projection";
 import { validateThreadObservation } from "../shared/state-validation";
 import type { Room, RoomActivity, RoomSnapshot } from "../shared/rooms";
@@ -15,6 +16,7 @@ interface RoomOwner {
   stop?(id: string): Promise<void>;
   answer?(id: string, questionId: string, sender: NonNullable<ReturnType<typeof roomMembers>>[number], body: any): Promise<void>;
   notify(id: string, receiptId: string, title: string, body: string, time: number): void;
+  subscribe?(listener: (id: string) => void): () => void;
 }
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
 const fail = (error: string, status = 400) => Response.json({ error }, { status });
@@ -83,7 +85,7 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory)
 /** Invoked only after the supervisor verifies the router's person caller. */
 export async function handleRoomOwner(req: Request, owner: RoomOwner): Promise<Response> {
   const url = new URL(req.url);
-  const match = /^\/v1\/room-owner\/([0-9a-f-]{36})(?:\/(members|prompt|notify|abort|questions\/[^/]+\/answer))?$/.exec(url.pathname);
+  const match = /^\/v1\/room-owner\/([0-9a-f-]{36})(?:\/(changes|members|prompt|notify|abort|questions\/[^/]+\/answer))?$/.exec(url.pathname);
   if (!match) return fail("Unknown room operation", 404);
   const id = match[1]!, action = match[2];
   const actor = req.headers.get("x-pi-remote-user") ?? "";
@@ -108,9 +110,25 @@ export async function handleRoomOwner(req: Request, owner: RoomOwner): Promise<R
   const metadata = roomMetadata(existing?.metadata?.room);
   if (!existing || !metadata || metadata.id !== id) return fail("Room not found", 404);
   if (!metadata.members.some(member => member.user === actor)) return fail("Room membership required", 403);
+  if (action === "changes" && req.method === "GET") {
+    if (!owner.subscribe) return fail("Room change subscription unavailable", 503);
+    return roomFeed(req.signal, send => {
+      const authorized = () => roomMetadata(owner.get(id)?.metadata?.room)?.members.some(member => member.user === actor) === true;
+      const unsubscribe = owner.subscribe!(changed => {
+        if (changed === id) send({ changed: true, authorized: authorized() });
+      });
+      send({ changed: true, authorized: authorized() });
+      return unsubscribe;
+    });
+  }
   if (!action && req.method === "GET") {
     const history = await owner.history(id);
-    return Response.json(publicRoomSnapshot(owner.get(id) ?? existing, history));
+    const current = owner.get(id);
+    const audience = roomMetadata(current?.metadata?.room);
+    if (!current || audience?.id !== id) return fail("Room not found", 404);
+    if (!audience.members.some(member => member.user === actor)) return fail("Room membership required", 403);
+    if (req.signal.aborted) return fail("Room request ended", 423);
+    return Response.json(publicRoomSnapshot(current, history));
   }
   if (action === "members" && req.method === "POST") {
     const members = roomMembers(body?.members);

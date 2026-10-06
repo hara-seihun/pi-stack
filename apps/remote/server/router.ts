@@ -53,20 +53,23 @@ const operations = new Map<string, Promise<unknown>>();
 let rooms: Rooms | null = null;
 function activeRooms(): Rooms | null {
   if (!oneKenanEnabled()) { rooms?.close(); rooms = null; return null; }
-  return rooms ??= new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/var/lib/pi-remote/one-kenan/rooms.sqlite3",
+  if (rooms) return rooms;
+  rooms = new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/var/lib/pi-remote/one-kenan/rooms.sqlite3",
   () => PEOPLE.map(({ user, displayName }) => ({ user, displayName })),
-  async (owner, actor, path, method, body) => {
+  async (owner, actor, path, method, body, signal) => {
     const person = byUser.get(owner);
     const origin = owner === ROOM_CUSTODIAN ? process.env.PI_REMOTE_ROOMS_OWNER_URL ?? "http://127.0.0.1:18822" : person ? `http://127.0.0.1:${person.port}` : null;
     if (!origin) return Response.json({ error: "Room owner no longer registered" }, { status: 503 });
     const endpoint = new URL(origin);
     if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.pathname !== "/" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Room runtime must be a local loopback HTTP origin");
     return proxy({ port: person?.port ?? Number(endpoint.port), user: actor }, origin,
-      new Request(`http://router${path}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) }),
-      new URL(`http://router${path}`), AbortSignal.timeout(10_000));
+      new Request(`http://router${path}`, { method, signal, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) }),
+      new URL(`http://router${path}`), signal ?? AbortSignal.timeout(10_000));
   });
+  rooms.start();
+  return rooms;
 }
-setInterval(() => { const current = activeRooms(); if (current) void current.tick().catch(error => console.error("Room reconciliation failed", error)); }, 2_000);
+setInterval(() => { const current = activeRooms(); if (current) void current.retryNotifications().catch(error => console.error("Room notification delivery failed", error)); }, 30_000);
 
 async function serialized<T>(person: Person, operation: () => Promise<T>): Promise<T> {
   const previous = operations.get(person.user) ?? Promise.resolve();
@@ -477,7 +480,7 @@ async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Re
   if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments: publicEnvironments(grants.get(person.user)!) });
   // The internal room owner API accepts only router-generated requests, never browser proxying.
   if (rooms && (url.pathname.startsWith("/v1/room-owner/") || /^\/v1\/remotes\/[^/]+\/v1\/(rooms|room-owner)(\/|$)/.test(url.pathname))) return Response.json({ error: "Use this host's room directory" }, { status: 403 });
-  if (rooms && /^\/v1\/rooms(?:\/|$)/.test(url.pathname)) return rooms.handle(req, person.user);
+  if (rooms && /^\/v1\/rooms(?:\/|$)/.test(url.pathname)) return rooms.handle(new Request(req, { signal: AbortSignal.any([req.signal, authenticated.signal]) }), person.user);
   const destination = proxyDestination(person, url);
   if ("error" in destination) return destination.error;
   return proxy(person, destination.origin, req, destination.target, authenticated.signal, destination.upstream);
