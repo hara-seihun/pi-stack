@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { importRemoteThreads } from "../src/threads/import.js";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
 import { ThreadService } from "../src/threads/service.js";
+import * as routing from "../src/extension/routing.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 import { createThreadClient, threadHttp } from "../src/threads/http.js";
@@ -392,6 +393,137 @@ it("model-broker capacity waits respect a durable retry schedule rather than imm
   vi.spyOn(Date,"now").mockReturnValue(wait.retryAt+1);service.reconcile();await waitFor(()=>sessions[1]?.isStreaming===true);
   expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({resumeProviderWait:true});
   sessions[1]!.settle("done");await waitFor(()=>service.latestSettlement(thread.id)!==null);
+});
+
+it.each([false, true])("switches dormant provider waiting Opus -> Sol with original custody and attribution, broker=%s", async broker => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-model-retry-")); roots.push(directory);
+  const sessions: FakePiSession[] = [], release = vi.fn();
+  const original = "anthropic-2/claude-opus-5-5", selected = "openai-codex/gpt-6.1-sol", assigned = "openai-codex-8/gpt-6.1-sol";
+  const failure = { role: "assistant", stopReason: "error", errorMessage: "429 account rate limit" };
+  let allowSol = false;
+  const admit = vi.fn(async (_thread: unknown, settings: { model: string }, _recovering: boolean, _executionId: string) => {
+    if (settings.model.startsWith("anthropic") && sessions.length || !settings.model.startsWith("anthropic") && !allowSol) return { ok: false as const, error: { code: "unavailable" as const, message: "quota exhausted" } };
+    return { ok: true as const, value: { release, settings: { model: settings.model.startsWith("anthropic") ? original : assigned, thinkingLevel: "high" as const, speed: "standard" as const }, ...(broker ? { env: { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" } } : {}) } };
+  });
+  const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, admit,
+    openSession: async (options: PiSessionOptions, output: (event: PiEvent) => void) => {
+      const session = new FakePiSession(options, output);
+      if (sessions.length) { session.acceptedWorkIds.add("same-work"); session.completedWorkIds.add("same-work"); session.lastAssistantMessage = failure; }
+      sessions.push(session); return session;
+    } };
+  const first = new ThreadService(options); services.push(first);
+  value(first.importThread({ id: "retry", title: "Retry", cwd: directory, sessionFile: join(directory, "retry.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" } }));
+  value(first.importMessage({ id: "same-work", threadId: "retry", text: "accepted assignment" }));
+  await first.start(); await waitFor(() => sessions[0]?.isStreaming === true);
+  sessions[0]!.settleMessage(failure); await waitFor(() => sessions[0]!.closed);
+  expect(release).toHaveBeenCalledOnce();
+  const saved = value(await first.control({ threadId: "retry", action: "settings", settings: { model: "sol" } }));
+  expect(saved.settings.model).toBe(selected); expect(saved.effectiveSettings?.model).toBe(original);
+  expect((value(await first.command("retry", { type: "get_state" }))).model).toMatchObject({ provider: "anthropic", id: "claude-opus-5-5" });
+  const db = new DatabaseSync(options.databasePath);
+  const before = db.prepare("SELECT id,settings FROM thread_execution WHERE ended_at IS NULL").get()!;
+  // Queue a second assignment; switching the retained work must not retarget it.
+  value(await first.send({ requestId: "later-work", threadId: "retry", text: "later", delivery: "queue" }));
+  const pendingBefore = first.pending("retry");
+  const queuedSettings = db.prepare("SELECT settings FROM thread_work WHERE id='later-work'").get()!.settings;
+  value(await first.detach());
+  const second = new ThreadService(options); services.push(second);
+  value(await second.control({ threadId: "retry", action: "retryWaiting" }));
+  expect(second.pending("retry")).toEqual(pendingBefore);
+  expect(second.get("retry")?.metadata?.admissionWait).toBeUndefined();
+  expect(second.get("retry")?.metadata?.modelRetryHistory).toMatchObject([{ executionId: before.id, previous: { model: original }, selected: { model: selected } }]);
+  expect(db.prepare("SELECT settings FROM thread_execution WHERE id=?").get(before.id)!.settings).toBe(before.settings);
+  expect(db.prepare("SELECT settings FROM thread_work WHERE id='later-work'").get()!.settings).toBe(queuedSettings);
+  // Persist the retry selection through another owner restart, before admission succeeds.
+  value(await second.detach());
+  const third = new ThreadService(options); services.push(third); allowSol = true;
+  await third.start(); await waitFor(() => sessions[1]?.isStreaming === true);
+  expect(sessions[1]!.options.args).toEqual(expect.arrayContaining(["openai-codex-8", "gpt-6.1-sol"]));
+  expect(sessions[1]!.commands.filter(command => command.type === "prompt")).toMatchObject([{ workId: "same-work", resume: true, resumeProviderWait: true }]);
+  expect(admit.mock.calls.at(-1)?.slice(2)).toEqual([false, before.id]);
+  expect(third.get("retry")?.effectiveSettings?.model).toBe(assigned);
+  expect(third.get("retry")?.metadata?.providerWait).toBeUndefined();
+  expect(db.prepare("SELECT settings,retry_settings FROM thread_execution WHERE id=?").get(before.id)).toMatchObject({ settings: before.settings, retry_settings: JSON.stringify({ model: assigned, thinkingLevel: "high", speed: "standard" }) });
+  sessions[1]!.settle("delivered"); await waitFor(() => third.latestSettlement("retry") !== null);
+  expect(value(third.settlements()).items).toMatchObject([{ executionId: before.id, workId: "same-work", outcome: "complete" }]);
+  db.close();
+});
+
+it("retries queued admission waiting work explicitly, without changing future-only receipt snapshots", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-queued-model-retry-")); roots.push(directory);
+  const sessions: FakePiSession[] = [];
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    admit: async (_thread, settings) => settings.model.startsWith("anthropic") ? { ok: false, error: { code: "unavailable", message: "Opus capacity exhausted" } } : { ok: true, value: { release() {} } },
+    openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
+  const thread = value(await service.spawn({ requestId: "queued-retry", cwd: directory, message: "work", settings: { model: "opus" } }));
+  await service.start(); await waitFor(() => Boolean(service.get(thread.id)?.metadata?.admissionWait));
+  value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "sol" } }));
+  expect(service.get(thread.id)?.effectiveSettings?.model).toBe("anthropic/claude-opus-5-5");
+  value(await service.control({ threadId: thread.id, action: "retryWaiting" }));
+  await waitFor(() => sessions[0]?.isStreaming === true);
+  expect(sessions[0]!.options.args).toEqual(expect.arrayContaining(["openai-codex", "gpt-6.1-sol"]));
+  expect(service.get(thread.id)?.metadata?.admissionWait).toBeUndefined();
+  expect(service.pending(thread.id)).toMatchObject([{ id: "queued-retry", state: "dispatched" }]);
+});
+
+it("checks the selected pooled family rather than obsolete Opus capacity on explicit retry", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-pooled-model-retry-")); roots.push(directory);
+  const availability = vi.spyOn(routing, "pooledRetryAvailability").mockImplementation(model => ({ available: model.startsWith("openai-codex"), retryAt: Date.now() + 3_600_000 }));
+  const sessions: FakePiSession[] = [];
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
+  value(service.importThread({ id: "pooled", title: "Pooled", cwd: directory, sessionFile: join(directory, "pooled.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" },
+    metadata: { providerWait: { executionId: "pooled-execution", workId: "pooled-work", retryAt: Date.now() + 3_600_000, broker: false } } }));
+  value(service.importMessage({ id: "pooled-work", threadId: "pooled", text: "work", state: "dispatched", executionId: "pooled-execution", insertedAt: 1 }));
+  value(await service.control({ threadId: "pooled", action: "settings", settings: { model: "sol" } }));
+  value(await service.control({ threadId: "pooled", action: "retryWaiting" }));
+  await service.start(); await waitFor(() => sessions[0]?.isStreaming === true);
+  expect(availability).toHaveBeenCalledWith("openai-codex/gpt-6.1-sol", expect.any(Object));
+  expect(availability.mock.calls.some(([model]) => model.startsWith("anthropic"))).toBe(false);
+  expect(sessions[0]!.commands.find(command => command.type === "prompt")).toMatchObject({ workId: "pooled-work", resume: true, resumeProviderWait: true });
+});
+
+it.each(["admission", "opening"])("cancellation wins a waiting model retry during %s", async phase => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-model-retry-cancel-")); roots.push(directory);
+  const sessions: FakePiSession[] = [], releaseLease = vi.fn();
+  let unblock!: () => void, reached!: () => void;
+  const gate = new Promise<void>(resolve => { unblock = resolve; }), entered = new Promise<void>(resolve => { reached = resolve; });
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    admit: async () => { if (phase === "admission") { reached(); await gate; } return { ok: true, value: { env: { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" }, release: releaseLease } }; },
+    openSession: async (options, output) => { if (phase === "opening") { reached(); await gate; } const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
+  value(service.importThread({ id: "cancel", title: "Cancel", cwd: directory, sessionFile: join(directory, "cancel.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" },
+    metadata: { providerWait: { executionId: "cancel-execution", workId: "cancel-work", retryAt: Date.now() + 3_600_000, broker: true } } }));
+  value(service.importMessage({ id: "cancel-work", threadId: "cancel", text: "work", state: "dispatched", executionId: "cancel-execution" }));
+  value(await service.control({ threadId: "cancel", action: "settings", settings: { model: "sol" } }));
+  value(await service.control({ threadId: "cancel", action: "retryWaiting" }));
+  await service.start(); await entered;
+  const switched = service.control({ threadId: "cancel", action: "retryWaiting" });
+  const stopped = service.control({ threadId: "cancel", action: "stop", descendants: false });
+  unblock(); value(await stopped);
+  expect(await switched).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(releaseLease).toHaveBeenCalledOnce();
+  expect(sessions.flatMap(session => session.commands).filter(command => command.type === "prompt")).toEqual([]);
+  expect(service.latestSettlement("cancel")).toMatchObject({ executionId: "cancel-execution", outcome: "cancelled" });
+  expect(service.get("cancel")?.metadata?.providerWait).toBeUndefined();
+});
+
+it("does not bypass same-model broker backoff or switch genuinely live work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-same-model-retry-")); roots.push(directory);
+  const sessions: FakePiSession[] = [];
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    admit: async () => ({ ok: true, value: { env: { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" }, release() {} } }),
+    openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
+  await service.start(); const thread = value(await service.spawn({ requestId: "same-model", cwd: directory, message: "work", settings: { model: "opus" } }));
+  await waitFor(() => sessions[0]?.isStreaming === true);
+  value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "sol" } }));
+  expect(await service.control({ threadId: thread.id, action: "retryWaiting" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(sessions[0]!.commands.some(command => command.type === "abort" || command.type === "set_model")).toBe(false);
+  value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "opus" } }));
+  sessions[0]!.settleMessage({ role: "assistant", stopReason: "error", errorMessage: "429 rate limit" }); await waitFor(() => sessions[0]!.closed);
+  const wait = service.get(thread.id)!.metadata!.providerWait;
+  value(await service.control({ threadId: thread.id, action: "retryWaiting" }));
+  expect(service.get(thread.id)!.metadata!.providerWait).toEqual(wait);
+  await turn(); expect(sessions).toHaveLength(1);
 });
 
 it("stop cancels provider waiting without reopening or retrying a model",async()=>{

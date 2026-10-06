@@ -849,7 +849,7 @@ function threadTable(options: { archived?: boolean } = {}) {
 }
 function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: ThreadView | null = threadViewRow.get(thread.id) as ThreadView | null): any {
   const meta = { ...remotePlacement(thread, lookup), ...thread.metadata };
-  const [provider, ...modelParts] = thread.settings.model.split("/");
+  const [provider, ...modelParts] = (thread.effectiveSettings ?? thread.settings).model.split("/");
   const model = { provider, modelId: modelParts.join("/") };
   // A failed execution is a notice in the thread's own transcript and an unread
   // marker on its row; it is not a second status the person has to dismiss.
@@ -1107,7 +1107,7 @@ async function activeAgents() {
   const models = new Map<string, AgentModelCount>();
   let running = 0;
   for (const row of allThreadRows()) if (row.state === "running") {
-    running++; addAgentModel(models, row.settings.model);
+    running++; addAgentModel(models, (row.effectiveSettings ?? row.settings).model);
   }
   return { running, models: sortedAgentModels(models) };
 }
@@ -1172,10 +1172,10 @@ function publicSession(row: any,
     hasChildren,
     origin,
     watchList: row.metadata?.watchList === true,
-    model: row.settings.model, name: row.name, color: row.color, cwd: row.cwd,
+    model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
-    activity: threadActivity(row.state, live, hasRunningChildren),
+    activity: row.metadata?.providerWait || row.metadata?.admissionWait ? "retrying" : threadActivity(row.state, live, hasRunningChildren),
     activeTools: [...(live?.activeTools.values() ?? [])],
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
     createdAt: row.created_at, updatedAt: row.updated_at, revision: row.revision,
@@ -1731,8 +1731,13 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
 
 async function threadSettings(row: any) {
   const metadata = threadSettingsMetadata(row.settings, threads.get(row.id) ? THREAD_MODEL_CATALOG : undefined);
+  const effective = row.effectiveSettings ? threadSettingsMetadata(row.effectiveSettings).model : null;
   return {
     ...metadata,
+    effectiveModel: row.effectiveSettings?.model ?? null,
+    waiting: row.metadata?.admissionWait ? "admission" : row.metadata?.providerWait?.phase === "retry" ? "retry" : row.metadata?.providerWait ? "provider" : null,
+    canRetryWaiting: !row.held && !row.archived_at && Boolean(row.metadata?.providerWait || row.metadata?.admissionWait)
+      && Boolean(effective && (effective.provider !== metadata.model.provider || effective.id !== metadata.model.id)),
     bashTimeoutSeconds: bashTimeoutSeconds(row.bash_timeout_seconds),
     models: rolledUpModels(metadata.models),
   };

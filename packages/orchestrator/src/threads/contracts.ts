@@ -30,6 +30,8 @@ export interface Thread {
   cwd: string;
   sessionFile: string;
   settings: ThreadSettings;
+  /** Actual accepted execution or next queued work; settings above are future preferences. */
+  effectiveSettings?: ThreadSettings;
   admission: Admission;
   state: ThreadState;
   held: boolean;
@@ -179,6 +181,8 @@ export type ThreadControl =
   | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
+  /** Retry dormant waiting work on the saved model, without interrupting live native work. */
+  | { threadId: string; action: "retryWaiting" }
   | { threadId: string; action: "cancelMessage"; messageId: string }
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
   | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };

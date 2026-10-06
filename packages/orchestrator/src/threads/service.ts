@@ -127,6 +127,7 @@ export class ThreadService implements ThreadApi {
       UPDATE thread SET state='idle',held=1 WHERE state='stopped';
       UPDATE thread_work SET status='dispatched' WHERE status IN ('dispatching','inserted');`);
     const executionColumns = this.sql("PRAGMA table_info(thread_execution)").all() as { name: string }[];
+    if (!executionColumns.some(column => column.name === "retry_settings")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN retry_settings TEXT");
     if (executionColumns.some(column => column.name === "state")) this.db.exec("ALTER TABLE thread_execution DROP COLUMN state");
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "landed_at")) this.db.exec("ALTER TABLE thread_work ADD COLUMN landed_at INTEGER; UPDATE thread_work SET landed_at=inserted_at WHERE status='dispatched' AND inserted_at IS NOT NULL");
     this.db.exec(`CREATE INDEX IF NOT EXISTS thread_execution_settlements ON thread_execution(thread_id,ended_at DESC,id DESC);
@@ -152,7 +153,7 @@ export class ThreadService implements ThreadApi {
   private project(row: Json): Thread {
     const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
     return { id: row.id, parentId: row.parent_id, role: this.options.workersOnly || row.parent_id ? "worker" : "conversation", title: row.title, cwd: row.cwd, sessionFile: row.session_file,
-      settings: JSON.parse(row.settings), admission: row.admission, state: row.state, held: !!row.held, revision: row.revision,
+      settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state, held: !!row.held, revision: row.revision,
       createdAt: row.created_at, updatedAt: row.updated_at, pendingMessages: pending, metadata: JSON.parse(row.metadata) };
   }
   get(id: string): Thread | null { const row = this.row(id); return row ? this.project(row) : null; }
@@ -258,7 +259,7 @@ export class ThreadService implements ThreadApi {
   private admissionWait(id: string, error: ThreadError): void {
     if (this.suspended || this.closed) return;
     const existing = this.get(id)?.metadata?.admissionWait as Json | undefined;
-    const wait = { code: error.code, message: error.message, since: existing?.message === error.message ? existing.since : Date.now(), observedAt: Date.now(), ...(error.retryAt ? { retryAt:error.retryAt } : {}) };
+    const wait = { code: error.code, message: error.message, model: this.effectiveSettings(id)?.model ?? this.get(id)?.settings.model, since: existing?.message === error.message ? existing.since : Date.now(), observedAt: Date.now(), ...(error.retryAt ? { retryAt:error.retryAt } : {}) };
     this.sql("UPDATE thread SET metadata=json_set(metadata,'$.admissionWait',json(?)) WHERE id=?").run(JSON.stringify(wait), id);
     if (existing?.message !== error.message || existing?.retryAt !== error.retryAt) this.changed(id);
   }
@@ -626,6 +627,32 @@ export class ThreadService implements ThreadApi {
       const result = input.action === "cancelMessage" ? await this.cancelMessage(input.threadId, input.messageId) : await this.promoteMessage(input.threadId, input.messageId, input.delivery);
       return result.ok ? good(this.get(input.threadId)!) : result;
     }
+    if (input.action === "retryWaiting") return this.serial(input.threadId, async () => {
+      const id = input.threadId, thread = this.get(id)!;
+      if (this.closed || this.suspended || thread.held || thread.metadata?.archived || this.halts.has(id)) return bad("conflict", "Stopped or archived work cannot be retried");
+      if (this.runtimes.has(id) || this.opening.has(id) || thread.metadata?.runnerReference) return bad("conflict", "Current native work must settle before switching its model");
+      const execution = this.execution(id);
+      const work = execution ? undefined : this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status='queued' AND execution_id IS NULL ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
+      if (execution ? !thread.metadata?.providerWait : !work || !thread.metadata?.admissionWait) return bad("conflict", "Only dormant provider or admission waiting work can switch models");
+      const previous = execution ? this.executionSettings(execution) : JSON.parse(work!.settings) as ThreadSettings;
+      const priorSelection = resolveThreadSettings({}, previous);
+      // A same-model selection must not bypass its real quota/backoff.
+      if (priorSelection.ok && priorSelection.value.model === thread.settings.model) return good(thread);
+      this.transaction(() => {
+        const record = { executionId: execution?.id ?? null, workId: execution?.work_id ?? work!.id, previous, selected: thread.settings, providerWait: thread.metadata?.providerWait, admissionWait: thread.metadata?.admissionWait, time: Date.now() };
+        this.sql("UPDATE thread SET metadata=json_insert(json_set(metadata,'$.modelRetryHistory',json(COALESCE(json_extract(metadata,'$.modelRetryHistory'),'[]'))),'$.modelRetryHistory[#]',json(?)) WHERE id=?").run(JSON.stringify(record), id);
+        if (execution) {
+          // Original execution attribution and native work receipts remain unchanged.
+          this.sql("UPDATE thread_execution SET retry_settings=? WHERE id=? AND ended_at IS NULL").run(JSON.stringify(thread.settings), execution.id);
+          const retry = { executionId: execution.id, workId: execution.work_id, model: thread.settings.model, retryAt: 0, broker: false, phase: "retry" };
+          this.sql("UPDATE thread SET metadata=json_set(metadata,'$.providerWait',json(?)) WHERE id=?").run(JSON.stringify(retry), id);
+        } else this.sql("UPDATE thread_work SET settings=? WHERE id=?").run(JSON.stringify(thread.settings), work!.id);
+        this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.admissionWait') WHERE id=?").run(id);
+        if ((thread.metadata?.startupFailure as Json | undefined)?.workId === (execution?.work_id ?? work!.id)) this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.startupFailure','$.executionError') WHERE id=?").run(id);
+      });
+      this.changed(id); this.wake(id);
+      return good(this.get(id)!);
+    });
     if (input.action === "settings") {
       const current = this.get(input.threadId)!, settings = resolveThreadSettings(input.settings, current.settings); if (!settings.ok) return settings;
       const childForbidden = current.parentId ? childModelError(settings.value.model) : undefined; if (childForbidden) return { ok: false, error: childForbidden };
@@ -647,14 +674,14 @@ export class ThreadService implements ThreadApi {
       // settings to it: Voice sets thinking on the meeting thread at the moment a mention's prompt opens it.
       await this.opening.get(input.threadId)?.catch(() => undefined);
       const runtime = this.runtimes.get(input.threadId), execution = this.execution(input.threadId);
-      const activeSettings: ThreadSettings | undefined = execution ? JSON.parse(execution.settings) : runtime?.settings;
+      const activeSettings: ThreadSettings | undefined = execution ? this.executionSettings(execution) : runtime?.settings;
       const activeSelection = activeSettings && resolveThreadSettings({}, activeSettings);
       // An attaching runner has no native session yet either; it keeps the saved settings for its next open.
       if (runtime?.session && activeSettings && activeSelection?.ok && activeSelection.value.model === settings.value.model) {
         const applied = { ...activeSettings };
         const remember = () => {
           runtime.settings = { ...applied };
-          if (execution) this.sql("UPDATE thread_execution SET settings=? WHERE id=?").run(JSON.stringify(applied), execution.id);
+          if (execution) this.sql(`UPDATE thread_execution SET ${execution.retry_settings ? "retry_settings" : "settings"}=? WHERE id=?`).run(JSON.stringify(applied), execution.id);
         };
         try {
           if (input.settings.speed !== undefined) {
@@ -765,11 +792,12 @@ export class ThreadService implements ThreadApi {
           if (saved?.response) return JSON.parse(saved.response) as Result<unknown>;
           receipt = !!prior.value;
         }
-        const execution = this.execution(id), thread=this.get(id)!, settings = execution ? JSON.parse(execution.settings) : thread.settings;
+        const execution = this.execution(id), thread=this.get(id)!, settings = thread.effectiveSettings ?? thread.settings;
         if(command.type==="get_state"&&!this.runtimes.has(id)&&!this.opening.has(id)&&!thread.metadata?.runnerReference&&(!execution||thread.metadata?.providerWait)){
           return good({...threadSettingsMetadata(settings),source:"thread-owner",sessionFile:thread.sessionFile,sessionName:thread.title,
             isStreaming:false,isCompacting:false,isBashRunning:false,localTools:0,pendingCommandCount:0,pendingMessageCount:0,
-            threadState:thread.state,pendingWorkCount:thread.pendingMessages,providerWait:thread.metadata?.providerWait,
+            threadState:thread.state,pendingWorkCount:thread.pendingMessages,providerWait:thread.metadata?.providerWait,admissionWait:thread.metadata?.admissionWait,
+            selectedSettings:thread.settings,effectiveSettings:settings,
             lastAssistantMessage:this.latestSettlement(id)?.finalMessage??null});
         }
         let runtime = await this.open(id, settings, !!execution);
@@ -806,6 +834,13 @@ export class ThreadService implements ThreadApi {
     });
   }
   private execution(id: string): Json | undefined { return this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NULL").get(id) as Json | undefined; }
+  private executionSettings(execution: Json): ThreadSettings { return JSON.parse(execution.retry_settings ?? execution.settings); }
+  private effectiveSettings(id: string): ThreadSettings | undefined {
+    const execution = this.execution(id);
+    if (execution) return this.executionSettings(execution);
+    const work = this.sql("SELECT settings FROM thread_work WHERE thread_id=? AND status!='done' ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
+    return work ? JSON.parse(work.settings) : this.runtimes.get(id)?.settings;
+  }
   private busy(state: Json): boolean { return !!(state.isStreaming || state.isCompacting || state.isBashRunning || state.localTools > 0 || state.cancellationFailed || state.pendingCommandCount > 0 || state.pendingMessageCount > 0); }
   private adoptReference(id: string, state: Json): void {
     if (this.suspended || this.closed || typeof state.sessionFile !== "string" || !state.sessionFile) return;
@@ -870,9 +905,12 @@ export class ThreadService implements ThreadApi {
         }
         throw new Error(admitted.error.message);
       }
+      if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id)) { await admitted.value.release(); throw new AdmissionWait("Recovery cancelled before opening"); }
       this.clearAdmissionWait(id);
       recoveredAdmission = admitted.value; extraEnv = { ...extraEnv, ...admitted.value.env }; settings = admitted.value.settings ?? settings;
+      if (recoveredExecution.retry_settings) this.sql("UPDATE thread_execution SET retry_settings=? WHERE id=? AND ended_at IS NULL").run(JSON.stringify(settings), recoveredExecution.id);
     }
+    if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id)) { await recoveredAdmission?.release(); throw new AdmissionWait("Opening cancelled"); }
     const runtime: Runtime = { session: undefined as unknown as PiSession, epoch: randomUUID(), busy: false, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings };
     const [provider, ...model] = settings.model.split("/");
     const context = thread.metadata?.context;
@@ -1010,7 +1048,7 @@ export class ThreadService implements ThreadApi {
       const halted = await this.halt(id); if (!halted.ok) return;
       execution = undefined; runtime = undefined;
     } else if (!execution && !runtime && thread.metadata?.runnerReference) runtime = await this.open(id, thread.settings, false);
-    if (execution && !runtime) runtime = await this.open(id, JSON.parse(execution.settings), true);
+    if (execution && !runtime) runtime = await this.open(id, this.executionSettings(execution), true);
     execution = this.execution(id);
     const work = this.sql(`SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ${execution ? "AND delivery IN ('steer','hardSteer')" : ""} ORDER BY front DESC,ordinal LIMIT 1`).get(id) as Json | undefined;
     if (!work) { if (!execution && !runtime?.busy) { this.state(id, "idle"); if (runtime) await this.retire(id, runtime); } return; }
@@ -1083,9 +1121,9 @@ export class ThreadService implements ThreadApi {
   }
   private async waitForProvider(id:string,runtime:Runtime|undefined,execution:Json,failure:string):Promise<void>{
     const prior=this.get(id)?.metadata?.providerWait as Json|undefined;
-    const wait={executionId:execution.id,workId:execution.work_id,failure,since:prior?.since??Date.now(),retryAt:Date.now()+rateLimitCooldownMs(failure),broker:runtime?.broker??prior?.broker??false};
+    const wait={executionId:execution.id,workId:execution.work_id,model:this.executionSettings(execution).model,failure,since:prior?.since??Date.now(),retryAt:Date.now()+rateLimitCooldownMs(failure),broker:runtime?.broker??prior?.broker??false};
     this.sql("UPDATE thread SET state='running',metadata=json_set(metadata,'$.providerWait',json(?)) WHERE id=?").run(JSON.stringify(wait),id);
-    this.admissionWait(id,{code:"unavailable",message:`Accepted work is waiting for provider capacity: ${failure}`});
+    this.admissionWait(id,{code:"unavailable",message:`Accepted work is waiting for provider capacity on ${wait.model}: ${failure}`});
     if(runtime){
       runtime.busy=false;
       if(runtime.lease){const lease=runtime.lease;runtime.lease=undefined;await lease.release();}

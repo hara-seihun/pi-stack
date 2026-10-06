@@ -193,12 +193,13 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_control", label: "Control a thread",
-      description: "Stop local execution and hold pending messages, resume held messages, restore archived threads, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Restore unarchives the thread, and with descendants:true every thread below it; resume:true also puts back what the archive took out of play, continuing cancelled turns and releasing held messages, while leaving threads that were already stopped stopped. Omit threadId for this thread. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
+      description: "Stop local execution and hold pending messages, resume held messages, restore archived threads, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Restore unarchives the thread, and with descendants:true every thread below it; resume:true also puts back what the archive took out of play, continuing cancelled turns and releasing held messages, while leaving threads that were already stopped stopped. Omit threadId for this thread. Settings save future preferences; effectiveSettings names accepted/current work. To move dormant provider/admission waiting work to the saved model, use retryWaiting after settings. Live in-flight work is never relabelled or interrupted by settings. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
       parameters: Type.Union([
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("stop"), descendants: Type.Boolean() }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("resume") }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("restore"), descendants: Type.Boolean({ description: "Also restore every thread below it, such as workers archived with their conversation." }), resume: Type.Optional(Type.Boolean({ default: false, description: "Continue the work the archive interrupted." })) }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("settings"), settings }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("retryWaiting") }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("cancelMessage"), messageId: Type.String() }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("promoteMessage"), messageId: Type.String(), delivery }),
       ]),
