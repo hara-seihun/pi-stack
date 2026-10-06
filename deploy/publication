@@ -545,6 +545,7 @@ function noticeBody(request) {
     `Request: ${request.requestId}`,
     `Source: ${request.sourceSha}`,
     request.integrationSha ? `Integration: ${request.integrationSha}` : undefined,
+    request.resolvedBy ? `Resolved by: ${request.resolvedBy}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
     request.repairOf ? `Repairs: ${request.repairOf} via ${request.repairId}` : undefined,
@@ -554,7 +555,7 @@ function noticeBody(request) {
     request.status === "failed" && request.failure?.reason !== request.failure?.message ? `Reason: ${compact(request.failure?.reason)}` : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
     `Log: ${request.status === "failed" ? request.failure?.log : request.status === "queued" ? request.waiting?.log : request.finalProof?.path}`,
-    request.failure?.command ? `Command: ${compact(request.failure.command)}` : undefined,
+    request.status === "failed" && request.failure?.command ? `Command: ${compact(request.failure.command)}` : undefined,
     request.status === "failed" && request.failure?.reason !== "cancelled" ? "The dedicated repair owner retains this failure. A source fix needs a new commit; an unchanged-source retry requires recorded infrastructure repair evidence." : undefined,
   ].filter(Boolean).join("\n");
 }
@@ -586,7 +587,7 @@ function remoteJson(reporter, suffix, method, body) {
   return JSON.parse(output);
 }
 
-function deliverReport(request, key) {
+function deliverReport(request, key, presentation = request) {
   if (!request.reporter) return;
   if (request.report?.key === key && request.report.status === "delivered") return;
   if (request.report?.key !== key) {
@@ -600,7 +601,7 @@ function deliverReport(request, key) {
       const accepted = remoteJson(request.reporter, "/prompt", "POST", {
         requestId: report.requestId,
         delivery: "steer",
-        text: `Publication owner report. Please tell the user this result; do not retry or submit a release without a repair.\n\n${noticeBody(request)}`,
+        text: `Publication owner report. Please tell the user this result; do not retry or submit a release without a repair.\n\n${noticeBody(presentation)}`,
       });
       if (!accepted.accepted || !accepted.workId) throw new Error("Remote did not acknowledge publication report custody");
       report.workId = accepted.workId;
@@ -630,10 +631,10 @@ function deliverReport(request, key) {
 }
 
 function noticeKey(request) {
-  const repair = readRepair(request.requestId);
   const state = request.status === "failed" ? `failed:${request.failure.at}`
     : request.status === "queued" && request.waiting ? `waiting:${request.blockedSince}` : request.status;
-  return state + (repair ? `:${repair.status}:${repair.successor?.requestId ?? ""}:${repair.successor?.status ?? ""}` : "");
+  const existing = request.report?.key;
+  return existing === state || existing?.startsWith(`${state}:`) ? existing : state;
 }
 
 function deriveIssues() {
@@ -666,7 +667,7 @@ function deriveIssues() {
     if (published) return { requestId: published.requestId, integrationSha: published.integrationSha, proof: published.finalProof?.path };
     return resolution(byId.get(repairs.get(request.requestId)?.successor?.requestId), seen);
   }
-  const resolved = [], issues = [];
+  const resolved = [], issues = [], superseded = [];
   for (const request of requests) {
     const custody = outstandingHostCustody(request);
     const cancelled = request.failure?.reason === "cancelled";
@@ -675,7 +676,10 @@ function deriveIssues() {
     if (proof) { resolved.push({ requestId: request.requestId, resolution: proof }); continue; }
     const repair = repairs.get(request.requestId);
     const successor = byId.get(repair?.successor?.requestId);
-    if (!custody && successor && successor.failure?.reason !== "cancelled") continue;
+    if (!custody && successor && successor.failure?.reason !== "cancelled") {
+      superseded.push({ requestId: request.requestId, successorId: successor.requestId });
+      continue;
+    }
     const condition = createHash("sha256").update(JSON.stringify({ source: request.sourceSha,
       status: request.status, failureAt: request.failure?.at, failure: request.failure?.message, reason: request.failure?.reason,
       step: request.step, custody, repair: repair?.status, successor: repair?.successor?.requestId })).digest("hex");
@@ -686,7 +690,7 @@ function deriveIssues() {
   const acknowledgements = existsSync(issueAcknowledgementsPath) ? JSON.parse(readFileSync(issueAcknowledgementsPath, "utf8")) : {};
   const acknowledged = issues.filter(issue => acknowledgements[issue.requestId]?.condition === issue.condition);
   const visible = issues.filter(issue => acknowledgements[issue.requestId]?.condition !== issue.condition);
-  return { issues, resolved, acknowledged: acknowledged.map(issue => issue.requestId), visible };
+  return { issues, resolved, superseded, acknowledged: acknowledged.map(issue => issue.requestId), visible };
 }
 
 function reconcileIssueAlert() {
@@ -712,24 +716,37 @@ function acknowledgeIssues() {
   process.stdout.write(`${issueAcknowledgementsPath}\n`);
 }
 
-function reconcileNotices() {
-  reconcileIssueAlert();
-  const candidates = allRequests().filter(request => {
-    if (!["failed", "published"].includes(request.status) && !(request.status === "queued" && request.waiting)) return false;
-    const key = noticeKey(request);
-    return request.reporter && (request.report?.key !== key || request.report.status !== "delivered");
-  });
-  candidates.sort((a, b) => (a.noticeCheckedAt ?? "").localeCompare(b.noticeCheckedAt ?? ""));
-  if (candidates[0]) deliverNotice(candidates[0]);
+function noticeProjection(request, index) {
+  if (!["failed", "published"].includes(request.status) && !(request.status === "queued" && request.waiting)) return null;
+  if (index.superseded.some(item => item.requestId === request.requestId)) return null;
+  const resolution = index.resolved.find(item => item.requestId === request.requestId)?.resolution;
+  if (resolution && resolution.requestId !== request.requestId) {
+    const completion = readRequest(resolution.requestId);
+    if (completion.reporter && JSON.stringify(completion.reporter) === JSON.stringify(request.reporter)) return null;
+    return { key: `resolved:${resolution.requestId}:${resolution.integrationSha}`, presentation: {
+      ...request, status: "published", step: "complete", integrationSha: resolution.integrationSha,
+      finalProof: { path: resolution.proof }, resolvedBy: resolution.requestId,
+    } };
+  }
+  return { key: noticeKey(request), presentation: request };
 }
 
-function deliverNotice(request) {
-  if (!["failed", "published"].includes(request.status) && !(request.status === "queued" && request.waiting)) return;
-  const key = noticeKey(request);
+function reconcileNotices() {
+  const index = reconcileIssueAlert();
+  const candidates = allRequests().filter(request => {
+    const projection = noticeProjection(request, index);
+    return projection && request.reporter && (request.report?.key !== projection.key || request.report.status !== "delivered");
+  });
+  candidates.sort((a, b) => (a.noticeCheckedAt ?? "").localeCompare(b.noticeCheckedAt ?? ""));
+  if (candidates[0]) deliverNotice(candidates[0], index);
+}
+
+function deliverNotice(request, index = reconcileIssueAlert()) {
+  const projection = noticeProjection(request, index);
+  if (!projection) return;
   request.noticeCheckedAt = new Date().toISOString();
   writeRequest(request);
-  reconcileIssueAlert();
-  deliverReport(request, key);
+  deliverReport(request, projection.key, projection.presentation);
 }
 
 function report(requestId, url, sessionId) {
