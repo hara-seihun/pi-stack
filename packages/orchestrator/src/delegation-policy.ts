@@ -25,7 +25,7 @@ Model descriptions help choose a worker after deciding to delegate; they are not
 - Results arrive automatically. Do not poll or repeatedly read a worker's transcript just to wait for it.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
-- If no useful local work remains, use thread_wait as your final tool call with the dependency and direct child IDs; it ends the turn and automatic result delivery resumes this same conversation. thread_await is a bounded short wait, not a polling loop. For durable external work, set thread_wake as a periodic recovery check before thread_wait, and cancel it when resolved. Do not claim the overall task is complete while delegated work is outstanding.
+- If no useful local work remains, use thread_wait as your final tool call with action set, kind agents, a reason and nonempty direct child threadIds; it ends the turn and automatic result delivery resumes this same conversation. thread_await is a bounded short wait, not a polling loop. For durable external work, set thread_wake as a periodic recovery check before thread_wait, and cancel it when resolved. Do not claim the overall task is complete while delegated work is outstanding.
 - When a delegated coding task returns, quickly review the changes, then integrate or refine them. Report failed or incomplete work plainly.
 
 ### Parallel delegation patterns

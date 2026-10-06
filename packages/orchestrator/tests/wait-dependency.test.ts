@@ -23,3 +23,25 @@ it.each([
 ])("rejects missing, ambiguous and unspecified dependency: %j", dependency => {
   expect(validateWaitDependency(dependency)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
 });
+
+// Retained runners must interoperate with the upgraded owner without restart.
+it.each([undefined, { child: 12 }])("normalizes an old wrapper's concrete child set request with cursors %j", after => {
+  const input = { action: "set", reason: "Child result", threadId: "parent", requestId: "call", threadIds: ["child"], ...(after ? { after } : {}) };
+  expect(validateWaitDependency(input)).toEqual({ ok: true, value: { kind: "agents", threadIds: ["child"], after: after ?? {} } });
+  expect(input).not.toHaveProperty("kind");
+});
+it.each([
+  { action: "set", threadIds: [] },
+  { action: "set", threadIds: ["child", "child"] },
+  { action: "set", threadIds: [" "] },
+  { action: "set", threadIds: ["child"], after: { foreign: 0 } },
+  { action: "set", threadIds: ["child"], after: { child: -1 } },
+  { action: "set", threadIds: ["child"], jobId: "ambiguous" },
+  { action: "set", threadIds: ["child"], kind: null },
+  { action: "set", threadIds: ["child"], kind: "anything_else" },
+  { action: "set", jobId: "job" },
+  { action: "clear", threadIds: ["child"] },
+  { threadIds: ["child"] },
+])("does not relax old-wrapper validation: %j", input => {
+  expect(validateWaitDependency(input)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+});
