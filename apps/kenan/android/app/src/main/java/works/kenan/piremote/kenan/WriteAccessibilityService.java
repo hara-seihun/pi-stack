@@ -33,7 +33,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     static void sessionChanged() {
         WriteAccessibilityService service = active;
         if (service != null) service.main.post(() -> {
-            if (active == service) { service.dismissal.clear(); service.cancel(); service.hide(); service.refresh(); }
+            if (active == service) { service.clearLearning(); service.dismissal.clear(); service.cancel(); service.hide(); service.refresh(); }
         });
     }
     static void settingsChanged() {
@@ -58,6 +58,13 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private String insertedField;
     private int insertedStart, insertedEnd, windowId = -1, audioBytes;
     private long watchUntil;
+    private int insertedWindowId = -1;
+    private final Runnable expireLearning = this::clearLearning;
+    private void clearLearning() {
+        main.removeCallbacks(expireLearning);
+        insertedField = null; insertedNode = null; learnedIdentity = null;
+        insertedStart = 0; insertedEnd = 0; insertedWindowId = -1; watchUntil = 0;
+    }
     private volatile long generation;
     private RemoteSession.Identity learnedIdentity;
     private WriteOpusRecorder recorder;
@@ -81,7 +88,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         if (destroyed) return;
         if (!overlayEnabled()) { refresh(); return; }
-        SharedOverlay.write(this);
+        if (SharedOverlay.overlayWindow(event.getWindowId())) return;
         if (dismissal.active() && event.getEventType() == AccessibilityEvent.TYPE_VIEW_FOCUSED
             && isApplicationWindow(event.getWindowId())) {
             AccessibilityNodeInfo source = event.getSource();
@@ -92,22 +99,27 @@ public final class WriteAccessibilityService extends AccessibilityService {
             }
         }
         AccessibilityNodeInfo changedNode = event.getEventType() == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
-            && insertedField != null && System.currentTimeMillis() < watchUntil && event.getWindowId() == windowId
+            && insertedField != null && android.os.SystemClock.uptimeMillis() < watchUntil && event.getWindowId() == insertedWindowId
             ? event.getSource() : null;
         if (changedNode != null && insertedNode != null && changedNode.equals(insertedNode)) {
             String changed = fieldText(changedNode);
             WriteText.Correction correction = WriteText.changedWord(insertedField, changed, insertedStart, insertedEnd);
             if (correction != null && learnedIdentity != null) {
-                insertedField = null;
                 RemoteSession.Identity identity = learnedIdentity;
+                clearLearning();
                 WriteConnection.learn(this, identity, correction, learned -> {
                     if (learned != null && !learned.undoId().isBlank() && NotificationIdentity.get(this).isCurrent(identity))
                         WriteLearningNotice.show(this, identity, learned);
                 });
             }
         }
-        if (!busy()) refresh();
-        else SharedOverlay.refresh();
+        int type = event.getEventType();
+        if (type == AccessibilityEvent.TYPE_WINDOWS_CHANGED || type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            SharedOverlay.requestRefresh(!busy());
+        else if (!SharedOverlay.inputMethodWindow(event.getWindowId())
+            && (type == AccessibilityEvent.TYPE_VIEW_FOCUSED || type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                && (event.getContentChangeTypes() == 0 || (event.getContentChangeTypes() & AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE) != 0)))
+            SharedOverlay.requestRefresh(!busy());
     }
 
     private boolean isApplicationWindow(int id) {
@@ -149,6 +161,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         return !node.isPassword();
     }
 
+    void reconcileFocus() { refresh(); }
     private void refresh() {
         if (active != this || destroyed) return;
         if (!overlayEnabled()) {
@@ -160,8 +173,11 @@ public final class WriteAccessibilityService extends AccessibilityService {
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
         boolean allowed = identity != null && Settings.canDrawOverlays(this)
             && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
-        AccessibilityNodeInfo focused = null;
-        List<AccessibilityWindowInfo> visible = getWindows();
+        if (!allowed) { hide(); return; }
+        boolean keyboardRequired = getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true);
+        if (keyboardRequired && !hasKeyboard()) { hide(); return; }
+        AccessibilityNodeInfo focused = target != null && target.refresh() && eligible(target) ? target : null;
+        List<AccessibilityWindowInfo> visible = focused == null ? getWindows() : null;
         if (visible != null) for (AccessibilityWindowInfo window : visible) {
             if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
             // getRoot() fetches a fresh snapshot each call and can turn null between calls.
@@ -174,9 +190,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo activeRoot = getRootInActiveWindow();
             if (activeRoot != null) focused = activeRoot.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
         }
-        boolean keyboardRequired = getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true);
-        if (!allowed || !eligible(focused) || keyboardRequired && !hasKeyboard()
-            || focused != null && dismissal.hides(field(focused), false)) {
+        if (!eligible(focused) || focused != null && dismissal.hides(field(focused), false)) {
             if (!busy()) hide();
             return;
         }
@@ -218,6 +232,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
         };
         tap.run();
     }
+    String visualState() { return phase + ":" + waveLevel + ":" + backlog; }
+    boolean animates() { return phase.connecting || phase.finishing; }
     String description() {
         return switch (phase) {
             case FINISHING, FINISHING_CONNECTING -> "Finishing dictation";
@@ -232,6 +248,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private void start() {
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
         if (identity == null || target == null || !target.refresh() || !eligible(target)) return;
+        clearLearning();
         synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
         waveLevel = 0; backlog = false;
         long attempt = ++generation;
@@ -269,7 +286,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 while (attempt == generation) {
                     byte[] packet;
                     synchronized (packetsLock) {
-                        while (attempt == generation && index == packets.size() && !stopped) packetsLock.wait(80);
+                        while (attempt == generation && index == packets.size() && !stopped) packetsLock.wait();
                         if (attempt != generation) return;
                         if (index == packets.size() && stopped) break;
                         packet = packets.get(index);
@@ -324,10 +341,12 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 }
                 @Override public void amplitude(int level) { main.post(() -> {
                     if (attempt != generation) return;
-                    waveLevel = level;
                     long queue = stream.queueSize();
-                    synchronized (packetsLock) { backlog = queue > 3000 || packets.size() - sentPackets > 50; }
-                    render();
+                    boolean nextBacklog;
+                    synchronized (packetsLock) { nextBacklog = queue > 3000 || packets.size() - sentPackets > 50; }
+                    if (waveLevel != level || backlog != nextBacklog) {
+                        waveLevel = level; backlog = nextBacklog; render();
+                    }
                 }); }
                 @Override public void stopped() {
                     if (attempt != generation) return;
@@ -391,8 +410,11 @@ public final class WriteAccessibilityService extends AccessibilityService {
             node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection);
             insertedField = result.text(); insertedNode = node;
             insertedStart = result.start(); insertedEnd = result.end();
-            watchUntil = System.currentTimeMillis() + 20_000;
+            insertedWindowId = node.getWindowId();
+            watchUntil = android.os.SystemClock.uptimeMillis() + 20_000;
             learnedIdentity = NotificationIdentity.get(this).current();
+            main.removeCallbacks(expireLearning);
+            main.postDelayed(expireLearning, 20_000);
             backlog = false; render(); refresh();
         } else fallback(text);
     }
@@ -404,10 +426,11 @@ public final class WriteAccessibilityService extends AccessibilityService {
         render();
     }
 
-    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); if (!destroyed) SharedOverlay.write(this); }
-    @Override public void onInterrupt() { cancel(); hide(); }
+    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); if (!destroyed) SharedOverlay.requestRefresh(true); }
+    @Override public void onInterrupt() { clearLearning(); cancel(); hide(); }
     @Override public void onDestroy() {
         destroyed = true;
+        clearLearning();
         if (active == this) active = null;
         cancel(); hide(); SharedOverlay.detach(this); super.onDestroy();
     }

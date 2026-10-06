@@ -29,7 +29,7 @@ public class KenanOverlayTest {
         RuntimeException addFailure, updateFailure;
 
         Windows() {
-            android.app.Activity activity = Robolectric.buildActivity(android.app.Activity.class).setup().get();
+            android.app.Activity activity = Robolectric.buildActivity(android.app.Activity.class).setup().visible().get();
             root = new android.widget.FrameLayout(activity);
             activity.setContentView(root);
         }
@@ -95,6 +95,61 @@ public class KenanOverlayTest {
         position.invoke(overlay, 10, 10);
     }
 
+    private Object field(KenanOverlay overlay, String name) throws Exception {
+        Field field = KenanOverlay.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(overlay);
+    }
+    private KenanOverlay phoneOverlay(Windows windows) throws Exception {
+        PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();
+        KenanOverlay overlay = new KenanOverlay(service, windows.manager());
+        bindSharedOverlay(service, service, null, overlay);
+        overlay.refresh();
+        return overlay;
+    }
+    private void drawDot(View dot) throws Exception {
+        Method draw = dot.getClass().getDeclaredMethod("onDraw", android.graphics.Canvas.class);
+        draw.setAccessible(true);
+        draw.invoke(dot, new android.graphics.Canvas());
+    }
+    @Test public void idleDotHasNoRecurringFrameButActiveWorkDoes() throws Exception {
+        KenanOverlay overlay = phoneOverlay(new Windows());
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        View dot = (View) field(overlay, "dot");
+        Object attachment = org.robolectric.util.ReflectionHelpers.getField(dot, "mAttachInfo");
+        org.robolectric.util.ReflectionHelpers.setField(attachment, "mWindowVisibility", View.VISIBLE);
+        assertTrue("test dot must be visible", dot.isShown());
+        assertEquals(View.VISIBLE, dot.getWindowVisibility());
+        drawDot(dot);
+        org.robolectric.Shadows.shadowOf(dot).clearWasInvalidated();
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(220));
+        assertFalse("idle decoration must not schedule redraws", org.robolectric.Shadows.shadowOf(dot).wasInvalidated());
+        overlay.state("thinking");
+        drawDot(dot);
+        org.robolectric.Shadows.shadowOf(dot).clearWasInvalidated();
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(45));
+        assertTrue("actual work must remain animated", org.robolectric.Shadows.shadowOf(dot).wasInvalidated());
+    }
+    @Test public void disconnectSettlesAcknowledgedBusyState() throws Exception {
+        KenanOverlay overlay = phoneOverlay(new Windows());
+        overlay.state("working");
+        assertTrue(((java.util.Map<?, ?>) field(overlay, "pending")).isEmpty());
+        overlay.disconnected();
+        assertEquals(NativeState.OverlayAnimation.IDLE, field(overlay, "state"));
+    }
+    @Test public void unchangedRefreshDoesNotInvalidateOrRepositionWindows() throws Exception {
+        Windows windows = new Windows();
+        KenanOverlay overlay = phoneOverlay(windows);
+        overlay.refreshGeometry();
+        View dot = (View) field(overlay, "dot"), scene = (View) field(overlay, "scene");
+        org.robolectric.Shadows.shadowOf(dot).clearWasInvalidated();
+        org.robolectric.Shadows.shadowOf(scene).clearWasInvalidated();
+        int updates = windows.updates;
+        overlay.refresh(); overlay.refreshGeometry();
+        assertEquals(updates, windows.updates);
+        assertFalse(org.robolectric.Shadows.shadowOf(dot).wasInvalidated());
+        assertFalse(org.robolectric.Shadows.shadowOf(scene).wasInvalidated());
+    }
     @Test public void failedWindowAttachmentClosesAndRollsBackEveryAddedView() {
         RuntimeException[] failures = {
             new WindowManager.BadTokenException("Service token expired"),

@@ -20,7 +20,7 @@ final class WriteOpusRecorder {
     }
     interface Input extends AutoCloseable {
         void start() throws IOException;
-        /** Nonblocking: zero means no PCM is available yet. */
+        /** Waits for requested PCM; stop() must unblock a pending read. */
         int read(byte[] frame, int offset, int length) throws IOException;
         void stop();
         void close();
@@ -45,6 +45,7 @@ final class WriteOpusRecorder {
     private Thread worker;
     private Input activeInput;
     private RuntimeException stopFailure;
+    private final java.util.concurrent.ScheduledExecutorService finishTimer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
 
     WriteOpusRecorder(Listener listener) { this(listener, new NativeResources()); }
     WriteOpusRecorder(Listener listener, Resources resources) {
@@ -62,7 +63,11 @@ final class WriteOpusRecorder {
         synchronized (lifecycle) {
             if (!running || finishAt != 0) return;
             if (worker == null) running = false;
-            else finishAt = System.nanoTime() + FINISH_TAIL_MILLIS * 1_000_000;
+            else {
+                finishAt = System.nanoTime() + FINISH_TAIL_MILLIS * 1_000_000;
+                finishTimer.schedule(() -> { synchronized (lifecycle) { stopInput(); lifecycle.notifyAll(); } },
+                    FINISH_TAIL_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
             lifecycle.notifyAll();
         }
     }
@@ -103,12 +108,12 @@ final class WriteOpusRecorder {
             while (running && (finishAt == 0 || System.nanoTime() < finishAt)) {
                 int read = input.read(frame, filled, frame.length - filled);
                 if (read < 0) {
-                    if (!running) break;
+                    if (!running || finishAt != 0 && System.nanoTime() >= finishAt) break;
                     throw new IOException("Microphone read failed: " + read);
                 }
                 if (read == 0) {
                     synchronized (lifecycle) {
-                        if (running) lifecycle.wait(5);
+                        if (running) lifecycle.wait(20);
                     }
                     continue;
                 }
@@ -135,6 +140,7 @@ final class WriteOpusRecorder {
         } catch (IOException | RuntimeException error) {
             failure = error;
         } finally {
+            finishTimer.shutdownNow();
             synchronized (lifecycle) {
                 running = false;
                 activeInput = null;
@@ -182,7 +188,7 @@ final class WriteOpusRecorder {
                     record.startRecording();
                 }
                 public int read(byte[] frame, int offset, int length) {
-                    return record.read(frame, offset, length, AudioRecord.READ_NON_BLOCKING);
+                    return record.read(frame, offset, length, AudioRecord.READ_BLOCKING);
                 }
                 public void stop() { record.stop(); }
                 public void close() {

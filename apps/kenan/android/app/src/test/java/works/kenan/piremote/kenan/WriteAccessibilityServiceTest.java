@@ -19,8 +19,10 @@ import org.robolectric.annotation.Config;
 public class WriteAccessibilityServiceTest {
     @org.robolectric.annotation.Implements(AccessibilityNodeInfo.class)
     public static class FocusedNode extends org.robolectric.shadows.ShadowAccessibilityNodeInfo {
+        static int focusScans;
         @org.robolectric.annotation.RealObject private AccessibilityNodeInfo node;
         @org.robolectric.annotation.Implementation protected AccessibilityNodeInfo findFocus(int focus) {
+            focusScans++;
             return node.isFocused() ? node : null;
         }
     }
@@ -164,6 +166,53 @@ public class WriteAccessibilityServiceTest {
         service.getSharedPreferences("write-settings", 0).edit().putBoolean("overlayEnabled", enabled).commit();
         WriteAccessibilityService.settingsChanged();
         shadowOf(android.os.Looper.getMainLooper()).idle();
+    }
+    @Test public void ineligibleWriteNeverScansFocus() throws Exception {
+        WriteAccessibilityService service = focusedService(true);
+        NotificationIdentity.get(service).replace("", "");
+        FocusedNode.focusScans = 0;
+        service.reconcileFocus();
+        assertEquals(0, FocusedNode.focusScans);
+        NotificationIdentity.get(service).replace("hara", "test-session");
+        org.robolectric.shadows.ShadowSettings.setCanDrawOverlays(false);
+        service.reconcileFocus();
+        assertEquals(0, FocusedNode.focusScans);
+        org.robolectric.shadows.ShadowSettings.setCanDrawOverlays(true);
+        shadowOf(org.robolectric.RuntimeEnvironment.getApplication()).denyPermissions(android.Manifest.permission.RECORD_AUDIO);
+        service.reconcileFocus();
+        assertEquals(0, FocusedNode.focusScans);
+    }
+    @Test public void accessibilityBurstsReconcileOnceAndTextOnlyChangesDoNotScan() throws Exception {
+        WriteAccessibilityService service = focusedService(true);
+        FocusedNode.focusScans = 0;
+        android.view.accessibility.AccessibilityEvent event = android.view.accessibility.AccessibilityEvent.obtain(
+            android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+        event.setContentChangeTypes(android.view.accessibility.AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
+        for (int i = 0; i < 20; i++) service.onAccessibilityEvent(event);
+        assertEquals(0, FocusedNode.focusScans);
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(80));
+        assertEquals(1, FocusedNode.focusScans);
+        event.setContentChangeTypes(android.view.accessibility.AccessibilityEvent.CONTENT_CHANGE_TYPE_TEXT);
+        for (int i = 0; i < 20; i++) service.onAccessibilityEvent(event);
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(80));
+        assertEquals(1, FocusedNode.focusScans);
+    }
+    @Test public void learningReferencesExpireWithoutAnotherAccessibilityEvent() throws Exception {
+        WriteAccessibilityService service = withActiveSender();
+        AccessibilityNodeInfo node = editable("", false);
+        set(service, "target", node);
+        set(service, "windowId", node.getWindowId());
+        shadowOf(node).setRefreshReturnValue(true);
+        shadowOf(node).setOnPerformActionListener((action, args) -> true);
+        call(service, "completed", "Learn this word");
+        assertNotNull(get(service, "insertedField"));
+        assertSame(node, get(service, "insertedNode"));
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(20));
+        assertNull(get(service, "insertedField"));
+        assertNull(get(service, "insertedNode"));
+        assertNull(get(service, "learnedIdentity"));
+        assertEquals(0L, get(service, "watchUntil"));
+        assertSame("live field is still a valid Write target", node, get(service, "target"));
     }
     @Test public void disablingFencesConnectingRecordingAndFinishingWithoutClosingPhoneOverlay() throws Exception {
         for (NativeState.WritePhase phase : new NativeState.WritePhase[] {

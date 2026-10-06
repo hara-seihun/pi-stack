@@ -99,6 +99,38 @@ public final class WriteOpusRecorderTest {
         assertEquals(1, capture.input.stops);
     }
 
+    @Test public void finishUnblocksPendingMicrophoneReadAtTailDeadline() throws Exception {
+        Capture capture = new Capture();
+        CountDownLatch reading = new CountDownLatch(1), stopped = new CountDownLatch(1);
+        WriteOpusRecorder.Resources resources = new WriteOpusRecorder.Resources() {
+            public WriteOpusRecorder.Input input() {
+                return new WriteOpusRecorder.Input() {
+                    public void start() {}
+                    public int read(byte[] frame, int offset, int length) throws IOException {
+                        reading.countDown();
+                        try { if (!stopped.await(1, TimeUnit.SECONDS)) throw new IOException("Read stayed blocked"); }
+                        catch (InterruptedException error) { throw new IOException(error); }
+                        return -3;
+                    }
+                    public void stop() { stopped.countDown(); }
+                    public void close() {}
+                };
+            }
+            public WriteOpusRecorder.Encoder encoder(WriteOpusRecorder.Listener listener) { return capture.encoder(listener); }
+        };
+        WriteOpusRecorder recorder = new WriteOpusRecorder(capture, resources);
+        recorder.start(); await(reading); recorder.stop(); capture.settled();
+        assertNull(capture.failure);
+        assertTrue(capture.encoder.finished);
+        assertEquals(0, stopped.getCount());
+    }
+    @Test public void emptyInputWaitsAtAudioFrameCadenceNotFiveMilliseconds() throws Exception {
+        Capture capture = new Capture();
+        WriteOpusRecorder recorder = capture.recorder();
+        recorder.start(); await(capture.input.reading); recorder.stop(); capture.settled();
+        assertTrue("empty reads must not poll at 200 Hz", capture.input.reads <= 15);
+        assertTrue(capture.encoder.finished);
+    }
     @Test public void stopPadsPartialFrameAndFlushesIt() throws Exception {
         Capture capture = new Capture();
         capture.input.partial = 100;
