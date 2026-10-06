@@ -12,6 +12,7 @@ import { convergeTools } from "./converge.js";
 import { argument, assertPiSessionFile, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
+import { scopedBashOperations } from "./pi-bash-resources.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
@@ -60,7 +61,8 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
   options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_ID: options.threadId,
     PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
-    PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1" };
+    PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1",
+    PI_THREAD_RESOURCE_BOUNDARY: process.env.PI_THREAD_RESOURCE_BOUNDARY };
   // A shared runner inherits its first session's launch environment. Account
   // custody belongs to this open, not to whichever session started the runner.
   for (const key of ["PI_ORCHESTRATOR_ASSIGNED", "PI_ORCHESTRATOR_ACCOUNT_ID", "PI_ORCHESTRATOR_RUN_ID", "PI_ORCHESTRATOR_PROVIDER", "PI_SUBAGENT_MODEL"])
@@ -150,7 +152,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       const provider = argument(options.args, "--provider"), modelId = argument(options.args, "--model");
       const selection = provider && modelId ? await resolveSessionModel(services.modelRuntime.getModels(), provider, modelId, env) : undefined;
       if (selection && !selection.ok) throw new Error(selection.error);
-      const bash = createBashTool(cwd, { spawnHook: context => ({ ...context, env: { ...context.env, ...env,
+      const bash = createBashTool(cwd, { operations: scopedBashOperations(env), spawnHook: context => ({ ...context, env: { ...context.env, ...env,
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
