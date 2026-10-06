@@ -33,6 +33,7 @@ export interface ThreadServiceOptions {
   environment?: (thread: Thread) => Record<string, string | undefined>;
   admit?: (thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string) => Promise<Result<ThreadAdmission>>;
   prepareMessage?: (thread: Thread, message: ThreadMessage) => Promise<Result<{ text: string; images?: unknown[] }>>;
+  retireIdleSession?: (thread: Thread) => boolean;
   onChange?: (thread: Thread) => void;
   /** Issues each session's PI_THREAD_TOKEN, which its tools present to thread owners. */
   capability?: ThreadCapability;
@@ -1534,8 +1535,11 @@ export class ThreadService implements ThreadApi {
     if (runtime) await this.park(id, runtime);
   }
   private async park(id: string, runtime: Runtime): Promise<void> {
-    if (this.suspended || this.halts.has(id) || !runtime.session || runtime.busy || runtime.executionId || this.runtimes.get(id) !== runtime) return;
-    if (!runtime.environmentKey || this.get(id)?.metadata?.archived || this.row(id)?.held) { await this.retire(id, runtime); return; }
+    if (this.suspended || this.halts.has(id) || !runtime.session || runtime.busy || runtime.commandRunning || runtime.executionId || this.execution(id) || this.runtimes.get(id) !== runtime) return;
+    const thread = this.get(id);
+    if (!thread) return;
+    const completed = thread.state === "idle" && !thread.pendingMessages && !thread.waitingOnAgents && !thread.wakeSchedule;
+    if (!runtime.environmentKey || thread.metadata?.archived || thread.held || completed && this.options.retireIdleSession?.(thread)) { await this.retire(id, runtime); return; }
     if (!runtime.parked) { await runtime.session.setActive?.(false); runtime.parked = true; }
   }
   private async retire(id: string, runtime: Runtime): Promise<void> {
