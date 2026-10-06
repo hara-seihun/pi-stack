@@ -2265,7 +2265,7 @@ function main() {
   if (operation === "repair-run" && args.length === 1) return locked("repair-agent", "repair-run", args);
   if (operation === "_repair-run" && args.length === 1) return repairRun(args[0]);
   if (operation === "repair-result" && args.length === 1) return locked("watchdog", "repair-result", args);
-  if (operation === "_repair-result" && args.length === 1) return locked("repair-agent", "complete-repair", args);
+  if (operation === "_repair-result" && args.length === 1) { validateRequestId(args[0]); return locked(`repair-result-${args[0]}`, "complete-repair", args); }
   if (operation === "_complete-repair" && args.length === 1) return completeRepair(args[0]);
   if (operation === "repair" && args.length === 1) return locked("worker", "repair", args);
   if (operation === "_repair" && args.length === 1) return requestRepair(args[0]);
