@@ -42,7 +42,6 @@ import {
   type PiEvent,
   type Result,
   type SharedImageGenerationService,
-  THREAD_MODES,
   type ThreadModeName,
   type PlanUsageSnapshot,
   type PersonalUsage,
@@ -79,6 +78,7 @@ import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "
 import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
+import { ensureExternalMeetingThread, MEETING_MODE, MEETING_SETTINGS } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
@@ -209,11 +209,6 @@ function availableThreadModels() {
     .map(model => ({ id: model.id, label: model.label, icon: model.icon, accent: model.accent,
       enabled: policy.ok && !policy.value.has(modelAvailabilityKey(`${model.provider}/${model.modelId}`)) }));
 }
-// Live meeting threads answer in the room, so their first call must be quick. On September 28, 2026,
-// astra at low thinking placed live-research placeholders 5.8 s after a request, against 11.1 s at
-// the destination's high default; Sara chose it over sol at medium.
-/** Meetings are live consulting: the thread mode declares the dispatcher's settings, tools, admission and its workers. */
-const MEETING_MODE = "live" satisfies ThreadModeName;
 const OFFERED_DESTINATIONS = (process.env.PI_REMOTE_DESTINATIONS ?? "home").split(",").map((id) => id.trim()).filter(Boolean);
 const destinationDefinitions: ThreadDestination[] = process.env.PI_REMOTE_THREAD_DESTINATIONS === undefined
   ? defaultThreadDestinations()
@@ -2241,36 +2236,20 @@ const server = Bun.serve<SocketData>({
     if (ownedThreadResponse) return ownedThreadResponse;
     const threadResponse = await threadHttp(directory, req, "/v1/threads", admissionFor(callers, caller));
     if (threadResponse) return threadResponse;
-    const externalResponse = await externalMeetingRequest(req, meet, async (sessionId, meetingId, name) => {
-      const existing = sessionRow.get(sessionId) as any;
-      if (existing) {
-        if (existing.meeting_id !== meetingId) throw new Error("The external meeting's thread is unavailable");
-        // The stable event key reopens its own thread. Auto-archive may have
-        // closed it between attempts, and a calendar retry must not fail on that.
-        if (existing.archived_at) {
-          const reopened = await directory.control({ threadId: sessionId, action: "update", archived: false });
-          if (!reopened.ok) throw new Error(`The external meeting's thread could not be reopened: ${reopened.error.message}`);
-        }
-        // A recurring meeting reuses its thread; one created before meetings became live consulting joins the mode here.
-        const thread = threads.get(sessionId);
-        if (thread && thread.metadata?.mode !== MEETING_MODE) {
-          const moded = await directory.control({ threadId: sessionId, action: "update", metadata: { mode: MEETING_MODE } });
-          if (!moded.ok) throw new Error(`The external meeting's thread could not become live: ${moded.error.message}`);
-        }
-        // Every start brings the thread to the mode's speed, so a recurring meeting follows a mode change.
-        // A thread moved off Astra keeps its own speed rather than failing the join.
-        const { speed } = THREAD_MODES[MEETING_MODE].conversation.settings;
-        if (thread && thread.settings.speed !== speed) {
-          const fast = await directory.control({ threadId: sessionId, action: "settings", settings: { speed } });
-          if (!fast.ok) console.warn(`[meet] external meeting thread ${sessionId} kept ${thread.settings.speed} speed: ${fast.error.message}`);
-        }
-        return;
-      }
-      const destination = meetingDestination();
-      const { model, thinkingLevel, speed } = THREAD_MODES[MEETING_MODE].conversation.settings;
-      if (!destination) throw new Error("This host needs a configured Astra destination for meetings");
-      await insertThread(sessionId, name, destination, THREAD_MODELS.get(model)!.id, meetingId, undefined, undefined, { thinkingLevel, speed }, [], undefined, MEETING_MODE);
-    });
+    const externalResponse = await externalMeetingRequest(req, meet, (sessionId, meetingId, name) => ensureExternalMeetingThread(sessionId, meetingId, name, {
+      existing: id => {
+        const row = sessionRow.get(id) as any;
+        return row ? { meetingId: row.meeting_id, archived: Boolean(row.archived_at) } : undefined;
+      },
+      get: id => threads.get(id),
+      control: input => directory.control(input),
+      create: async (id, meetingId, name, settings, mode) => {
+        const destination = meetingDestination();
+        if (!destination) throw new Error("This host needs a configured destination for meetings");
+        await insertThread(id, name, destination, THREAD_MODELS.get(settings.model)!.id, meetingId, undefined, undefined, settings, [], undefined, mode);
+      },
+      warn: message => console.warn(message),
+    }));
     if (externalResponse) return externalResponse;
     const meetingResponse = await meet.handle(req);
     if (meetingResponse) return meetingResponse;
@@ -2641,7 +2620,8 @@ const server = Bun.serve<SocketData>({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? "home"));
         if (!destination) return error("Unknown destination");
-        const model = String(body.model ?? destination.defaultModel);
+        const meetingSettings = body.meetingId ? MEETING_SETTINGS : undefined;
+        const model = String(body.model ?? meetingSettings?.model ?? destination.defaultModel);
         if (!destination.models.includes(model)) return error("Model not available at this destination");
         const id = String(body.sessionId ?? requestId);
         const contextFiles = selectContextFiles(destinationContextSources(destination), body.contextFiles);
@@ -2649,7 +2629,8 @@ const server = Bun.serve<SocketData>({
         const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
         if (!creator.ok) return error(creator.message, creator.status);
         const thread = await insertThread(id, creationName(requestId), destination, model, body.meetingId ?? null, body.message, body.parentId,
-          { thinkingLevel: body.thinkingLevel, speed: body.speedMode }, contextFiles.value, creator.input.createdBy);
+          { thinkingLevel: body.thinkingLevel ?? meetingSettings?.thinkingLevel, speed: body.speedMode ?? meetingSettings?.speed },
+          contextFiles.value, creator.input.createdBy, meetingSettings ? MEETING_MODE : undefined);
         const response = { session: publicSession(threadRow(thread)) };
         saveRequest(requestId, id, "create", 201, response);
         return json(response, 201);

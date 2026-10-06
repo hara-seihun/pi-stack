@@ -1,4 +1,5 @@
-import type { Admission, SettingsOverrides } from "./contracts.js";
+import type { Admission, SettingsOverrides, ThreadSettings } from "./contracts.js";
+import { requestedSpeedError, type Speed } from "./speed.js";
 
 /**
  * Thread modes are declared here, once, and every owner derives admission, settings and tools from
@@ -6,8 +7,8 @@ import type { Admission, SettingsOverrides } from "./contracts.js";
  *
  * `live` is live consulting: a conversation with people waiting on the other end, such as a meeting.
  * Its conversation thread only dispatches, so it stays free to answer; its workers do the work.
- * The conversation runs Astra at Ultrafast, so it needs an account advertising that tier; its
- * workers run at priority. Both are admitted ahead of the fleet's ceilings. Nothing else gets these
+ * The conversation runs Sol at low thinking and priority speed; its workers also run at priority.
+ * Both are admitted ahead of the fleet's ceilings. Nothing else gets these
  * speeds by default, so the extra spend is bounded by live conversations.
  */
 export interface ThreadMode {
@@ -27,7 +28,7 @@ export const THREAD_MODES = {
   live: {
     admission: "live",
     conversation: {
-      settings: { model: "astra", thinkingLevel: "low", speed: "ultrafast" },
+      settings: { model: "sol", thinkingLevel: "low", speed: "priority" },
       tools: ["bash", "read", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", "thread_wait", "thread_wake",
         "meet_room", "meet_voice", "meet_share_screen", "meet_stop_sharing", "message_react",
         "watch_list", "watch_list_add", "watch_list_update", "watch_list_remove"],
@@ -41,6 +42,12 @@ export type ThreadModeName = keyof typeof THREAD_MODES;
 
 export function threadMode(value: unknown): ThreadMode | undefined {
   return typeof value === "string" && Object.hasOwn(THREAD_MODES, value) ? THREAD_MODES[value as ThreadModeName] : undefined;
+}
+
+export function conversationModeSpeed(mode: ThreadModeName, settings: ThreadSettings): Speed | undefined {
+  const speed = THREAD_MODES[mode].conversation.settings.speed;
+  const [provider, id] = settings.model.split("/");
+  return settings.speed !== speed && !requestedSpeedError({ provider, id: id ?? "" }, speed) ? speed : undefined;
 }
 
 export function isThreadModeName(value: unknown): value is ThreadModeName {

@@ -73,6 +73,21 @@ it("rejects fresh roots and children without changing existing threads or accept
   expect((await owner.spawn({ ...request, id: "rejected", requestId: "rejected" })).ok).toBe(true);
 });
 
+it("admits new live meetings and their priority workers while Astra and Fable are disabled", async () => {
+  const { root, store } = fixture(), owner = service(root, store);
+  value(store.set("astra", false));
+  value(store.set("fable", false));
+  const meeting = value(await owner.spawn({ requestId: "meeting", cwd: root, metadata: { mode: "live" } }));
+  expect(meeting).toMatchObject({ admission: "live", settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "low", speed: "priority" } });
+  const worker = value(await owner.spawn({ requestId: "worker", cwd: root, parentId: meeting.id }));
+  expect(worker).toMatchObject({ admission: "live", settings: { model: "openai-codex/gpt-6-luna", speed: "priority" } });
+  const explicit = value(await owner.spawn({ requestId: "explicit", cwd: root, metadata: { mode: "live" },
+    settings: { model: "opus", thinkingLevel: "high", speed: "standard" } }));
+  expect(explicit.settings).toEqual({ model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" });
+  expect(store.admit("astra").ok).toBe(false);
+  expect(store.admit("fable").ok).toBe(false);
+});
+
 it("fails closed on unreadable policy without rewriting or enabling it", async () => {
   const { root, store } = fixture();
   value(store.set("astra", false));
