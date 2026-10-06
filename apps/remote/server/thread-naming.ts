@@ -72,36 +72,46 @@ export function namingTranscript(messages: NamingMessage[], chars = 3_000): stri
 /** The request ID carries its input's digest, so one ID can only ever mean one prompt. A thread
  * whose mirror filled in between attempts submits a new request instead of conflicting with the
  * ID it already used. */
-export function namingRequestId(sessionId: string, messageCount: number, input: unknown): string {
-  return `remote-name:${sessionId}:${messageCount}:${createHash("sha256").update(JSON.stringify(input)).digest("hex").slice(0, 12)}`;
+export function namingRequestId(sessionId: string, messageCount: number, input: unknown, attempt = 0): string {
+  return `remote-name:${sessionId}:${messageCount}:${createHash("sha256").update(JSON.stringify(input)).digest("hex").slice(0, 12)}${attempt ? `:${attempt}` : ""}`;
+}
+
+export class NamingConfigurationError extends Error {}
+
+export const THREAD_NAMING_RETRY_DELAYS = [30_000, 120_000] as const;
+export function namingRetryAt(failures: number, now: number, required = false): number | null {
+  const delay = THREAD_NAMING_RETRY_DELAYS[failures - 1];
+  return required || delay === undefined ? null : now + delay;
 }
 
 export type NamingOutcome =
   | { kind: "pending" }
   | { kind: "title"; text: string }
-  | { kind: "failed"; message: string; keepReceipt: boolean; regenerate: boolean };
+  | { kind: "failed"; message: string; keepReceipt: boolean; recovery: "automatic" | "required" };
 
-/** What a submitted naming request has become. A rejected request cannot turn into a title however
- * often it is replayed, so its receipt is dropped and the thread asks again from the conversation it
- * has now; a request still in flight or lost in transport keeps its receipt and is resumed. */
+/** Terminal receipts cannot recover through polling. Transport failures retain their receipt;
+ * retryable terminal attempts need a fresh ID, while unsupported inputs need a configuration repair. */
 export function namingOutcome(result: CompletionOutcome<CompletionRecord>): NamingOutcome {
   if (!result.ok) {
-    const spent = ["invalid-request", "unsupported-option", "request-conflict"].includes(result.error.code);
-    return { kind: "failed", message: result.error.message, keepReceipt: !spent, regenerate: spent };
+    const required = ["invalid-request", "unsupported-option", "invalid-state"].includes(result.error.code);
+    return { kind: "failed", message: result.error.message, keepReceipt: !required && result.error.code !== "request-conflict", recovery: required ? "required" : "automatic" };
   }
   const record = result.value;
   if (record.state === "queued" || record.state === "running") return { kind: "pending" };
   if (record.state === "completed") return { kind: "title", text: record.result.text };
-  return { kind: "failed", message: "error" in record ? record.error.message : `Completion ${record.state}.`, keepReceipt: false, regenerate: false };
+  const required = "error" in record && ["invalid-request", "unsupported-option", "invalid-state"].includes(record.error.code);
+  return { kind: "failed", message: "error" in record ? record.error.message : `Completion ${record.state}.`, keepReceipt: false, recovery: required ? "required" : "automatic" };
 }
 
-export interface ThreadNamingView { name: string; titleSource?: unknown; messageCount: number; namedAtMessageCount: number; attemptedCount: number; hasReceipt: boolean }
+export interface ThreadNamingView { name: string; titleSource?: unknown; messageCount: number; namedAtMessageCount: number; attemptedCount: number; hasReceipt: boolean; retryAt?: number | null; now?: number }
 /** What a naming tick owes this thread: finish the request it already submitted, ask for a title, or
  * nothing. Any thread that answers `generate` is due, whether or not its last attempt left a receipt. */
 export function namingStep(view: ThreadNamingView): "poll" | "generate" | "idle" {
   if (view.titleSource === "manual") return "idle";
+  if (view.retryAt !== undefined && (view.retryAt === null || (view.now ?? Date.now()) < view.retryAt)) return "idle";
   if (view.hasReceipt) return "poll";
-  return shouldNameThread(view.name, view.messageCount, view.namedAtMessageCount) && view.messageCount > view.attemptedCount ? "generate" : "idle";
+  return shouldNameThread(view.name, view.messageCount, view.namedAtMessageCount)
+    && (view.retryAt !== undefined || view.messageCount > view.attemptedCount) ? "generate" : "idle";
 }
 
 /** A thread still carrying the name it was created with. */

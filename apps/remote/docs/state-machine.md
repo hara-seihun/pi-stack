@@ -24,7 +24,7 @@ The client's status line is composed from those facts and never from a status fi
 | `Stopped`, with the queue chip carrying what it holds | `held` |
 | `Archived` | `archivedAt` |
 
-A failed execution is a notice in the thread's own transcript and an unread marker on its row. There is no thread-level error field and nothing for the person to dismiss; owner-level failures, such as a naming route that cannot run, stay on the Machine screen where their owner is named.
+A failed execution is a notice in the thread's own transcript and an unread marker on its row. There is no thread-level error field and nothing for the person to dismiss. Owner-level failures follow the [error policy](errors.md): recoverable background attempts stay diagnostic; a naming route that cannot run or has exhausted recovery produces one compact **Thread names** consequence/action notice on Machine.
 
 `server/live-projection.ts` stores disposable text, thinking and bounded tool previews. These fields neither admit nor complete work. No GET request or browser selection starts a thread merely to read history. Owner inspection returns cached context or persisted native history without opening Pi.
 
@@ -47,7 +47,8 @@ Defaults come from Orchestrator. Remote's model picker restricts which configure
 
 `server/database.ts` stores presentation data in `supervisor.sqlite3`:
 
-- `thread_views` contains AI unread markers, naming counters and completion receipt references. Its thread-only order seeds the first shared chat list.
+- `thread_views` contains AI unread markers, naming counters, diagnostic `naming_error` and completion receipt references. Its thread-only order seeds the first shared chat list.
+- `thread_naming_recovery` owns per-thread naming failure counts, retry deadlines and the message-count/model selection that bounds each recovery episode; a null retry deadline means recovery is parked for repair.
 - `metadata.current_chat_order` stores mixed AI/human order keys for Current Chats. Messaging current flags and snapshot version stay in the encrypted messaging store.
 - Context documents and patches contain the provider-neutral display source.
 - `message_facts` retains what the supervisor measured about a finished assistant message: the thinking it streamed and its response timing, joined to the message each finalizes.
@@ -62,9 +63,13 @@ The supervisor epoch fences replaced Remote instances from publishing presentati
 
 ## Thread naming
 
-Naming uses Orchestrator's durable tool-free `CompletionClient`, not a Pi process or a hidden thread. Remote saves a stable thread/message-count request ID and immutable input before submission, then reconciles the owner's receipt. Orchestrator owns provider execution and retry policy. A supervisor restart reuses the receipt rather than submitting another inference.
+Naming uses Orchestrator's durable tool-free `CompletionClient`, not a Pi process or a hidden thread. Remote saves a stable thread/message-count/input-digest request ID and immutable input before submission, then reconciles the owner's receipt. Orchestrator owns provider execution and its retry policy. A supervisor restart reuses the receipt and preserves Remote's recovery budget. A terminal failed receipt or invalid generated title cannot recover through replay; the next attempt gets a retry suffix, not the same completed receipt.
 
-With an OpenAI selection, the completion owner must be explicitly permitted for the same Unix person. Without one, the thread keeps its current name and exposes a naming error. That route supports the completion facility's Luna model. Defaults come from that facility; an explicit effort in `PI_REMOTE_THREAD_NAMING_MODEL`, such as `:low`, is forwarded. Speed is standard. With a `local/ENGINE/MODEL` selection, the supervisor calls the manifest engine in place with thinking off and keeps no `naming_request` receipt; `naming_attempted_count` still advances before the call so one message count is tried once. Unsupported models and failed naming results are visible in the drawer's owner errors.
+With an OpenAI selection, the completion owner must be explicitly permitted for the same Unix person. That route supports the completion facility's Luna model. Defaults come from that facility; an explicit effort in `PI_REMOTE_THREAD_NAMING_MODEL`, such as `:low`, is forwarded. Speed is standard. With a `local/ENGINE/MODEL` selection, the supervisor calls the manifest engine in place with thinking off and keeps no `naming_request` receipt.
+
+The current title remains unchanged until valid output is ready, and manually pinned titles never participate in recovery. Invalid titles, transport errors and terminal provider failures are diagnostic automatic failures. Remote retries after 30 seconds and 120 seconds on its 15-second reconcile tick, even for a finished conversation. It persists the failure count and retry deadline; neither stream reads nor process restarts reset the budget. Transport recovery polls the existing receipt; other retryable failures use a fresh request ID. Maintenance reservations defer without consuming the failure budget. A new conversation message or changed naming-model selection starts a new episode.
+
+Missing same-person completion ownership, unsupported configuration and exhausted recovery need repair rather than another identical retry. Remote consolidates these into one stable **Thread names** notice with the consequence and action, not a notice per thread or raw provider text. `naming_error` and `error_diagnostics` retain evidence and are never projected blindly as human errors. Startup adopts prior failures into bounded recovery and clears stale per-thread visible occurrences. Successful naming, manual pinning and archiving clear recovery and resolve that thread's occurrence.
 
 ## Handoff
 

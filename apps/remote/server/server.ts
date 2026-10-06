@@ -65,7 +65,7 @@ import { oneKenanEnabled } from "kenan-memory/config";
 import { handleRoomOwner } from "./rooms-owner";
 import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
 import { readThreadHistory } from "pi-orchestrator/history";
-import { dismissError, observeError } from "./error-feedback";
+import { dismissError, observeError, observeFailure } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
@@ -121,6 +121,8 @@ import {
   LOCAL_THREAD_NAMING_MAX_TOKENS,
   namingOutcome,
   namingRequestId,
+  namingRetryAt,
+  NamingConfigurationError,
   unnamedThread,
   namingStep,
   namingTranscript,
@@ -377,6 +379,21 @@ const peerThreads = new Map<string, Thread>();
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
 let peerError: string | null = null;
+let peerRecovery: "automatic" | "required" = "automatic";
+class PeerOwnershipError extends Error {}
+function peerFeedback(message: string | null) {
+  return observeFailure(db, "peer:fleet", !message ? null : peerRecovery === "required" ? {
+    message, recovery: "required", impact: "Worker status cannot be reconciled because a thread has conflicting owners.",
+    action: "Ask Kenan to repair the conflicting thread ownership.",
+  } : {
+    message, recovery: "automatic", impact: "Worker status updates are delayed; the last available listing is retained.", attentionAfterMs: 60_000,
+  });
+}
+function notificationFeedback(owner: string, message: string | null) {
+  return observeFailure(db, `notifications:${owner}`, message ? {
+    message, recovery: "automatic", impact: "Idle notifications are delayed; existing notifications are retained.", attentionAfterMs: 60_000,
+  } : null);
+}
 const notificationErrors = new Map<string, string>();
 let peerRefresh: Promise<void> | null = null;
 const notificationRefreshes = new Map<string, Promise<void>>();
@@ -391,10 +408,10 @@ function refreshThreadNotifications(): Promise<void> {
         await projectThreadNotifications(db, owner.id, owner.api, directory);
       } while (notificationRefreshAgain.has(owner.id));
     })()
-      .then(() => { observeError(db, `notifications:${owner.id}`, null); if (notificationErrors.delete(owner.id)) signalSync(); })
+      .then(() => { notificationFeedback(owner.id, null); if (notificationErrors.delete(owner.id)) signalSync(); })
       .catch(cause => {
         const message = cause instanceof Error ? cause.message : String(cause);
-        observeError(db, `notifications:${owner.id}`, message);
+        notificationFeedback(owner.id, message);
         if (notificationErrors.get(owner.id) !== message) { notificationErrors.set(owner.id, message); signalSync(); }
       })
       .finally(() => { notificationRefreshes.delete(owner.id); signalSync(); pushNotifications(); });
@@ -410,16 +427,16 @@ async function refreshPeers() {
     let cursor: string | undefined;
     do {
       const page = await fleet.list({ limit: 100, cursor });
-      if (!page.ok) { observeError(db, "peer:fleet", page.error.message); if (peerError !== page.error.message) { peerError = page.error.message; signalSync(); } return; }
+      if (!page.ok) { peerRecovery = "automatic"; peerError = page.error.message; peerFeedback(peerError); signalSync(); return; }
       for (const thread of page.value.threads) {
-        if (threads.get(thread.id)) throw new Error(`Thread ${thread.id} has two owners`);
+        if (threads.get(thread.id)) throw new PeerOwnershipError(`Thread ${thread.id} has two owners`);
         next.set(thread.id, thread);
       }
       cursor = page.value.nextCursor;
     } while (cursor);
     const changed = peerError !== null || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
     peerError = null;
-    observeError(db, "peer:fleet", null);
+    peerFeedback(null);
     const updated = [...next.values()].filter(thread => peerThreads.get(thread.id)?.revision !== thread.revision);
     for (const thread of updated) if (!peerThreads.has(thread.id)) ensureThreadView(db, thread.id);
     peerThreads.clear();
@@ -431,8 +448,10 @@ async function refreshPeers() {
     if (changed) { signalSync(); void refreshThreadNotifications(); }
   })().catch(cause => {
     const message = cause instanceof Error ? cause.message : String(cause);
-    observeError(db, "peer:fleet", message);
-    if (peerError !== message) { peerError = message; signalSync(); }
+    peerRecovery = cause instanceof PeerOwnershipError ? "required" : "automatic";
+    peerFeedback(message);
+    peerError = message;
+    signalSync();
   }).finally(() => { peerRefresh = null; });
   return peerRefresh;
 }
@@ -1041,10 +1060,14 @@ function recentThreadMessages(sessionId: string): NamingMessage[] {
 // Naming is background work, so it holds the engine's maintenance reservation for the whole attempt
 // and gives up immediately when somebody else has it.
 async function localThreadName(messages: NamingMessage[]): Promise<string> {
-  const selection = parseThreadNamingModel(THREAD_NAMING_MODEL);
-  if (selection.kind !== "local") throw new Error("Thread naming model is not a local engine");
+  let selection;
+  try { selection = parseThreadNamingModel(THREAD_NAMING_MODEL); }
+  catch (cause) { throw new NamingConfigurationError(cause instanceof Error ? cause.message : String(cause)); }
+  if (selection.kind !== "local") throw new NamingConfigurationError("Thread naming model is not a local engine");
   const prompt = localNamingPrompt(messages);
-  const engine = await loadLocalEngine(AGENT_DIR, selection.engine);
+  const engine = await loadLocalEngine(AGENT_DIR, selection.engine).catch(cause => {
+    throw new NamingConfigurationError(cause instanceof Error ? cause.message : String(cause));
+  });
   return withLocalEngine(engine, BACKGROUND_RESERVATION_WAIT_SECONDS, async () => {
     await ensureLocalEngine(engine);
     return localNamingCompletion(engine, { model: selection.model, systemPrompt: LOCAL_THREAD_NAMING_INSTRUCTION, prompt,
@@ -1061,29 +1084,91 @@ interface NamingView { id: string; message_count: number; named_at_message_count
 const namingViewRows = db.query("SELECT id,message_count,named_at_message_count,naming_attempted_count,naming_request FROM thread_views");
 function namingInput(transcript: string): CompletionInput {
   const parts = THREAD_NAMING_MODEL.split(":");
-  if (parts.length > 2) throw new Error("Invalid naming model selection");
+  if (parts.length > 2) throw new NamingConfigurationError("Invalid naming model selection");
   const physical = parts[0]!.split("/").at(-1)!;
   const model = ORCHESTRATOR_CATALOG.models.find(candidate => candidate.id === physical || candidate.model === physical);
-  if (model?.id !== "luna") throw new Error("Thread naming completion currently supports Luna");
+  if (model?.id !== "luna") throw new NamingConfigurationError("Thread naming completion currently supports Luna");
   const thinkingLevel = parts[1];
-  if (thinkingLevel && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingLevel)) throw new Error("Invalid naming thinking level");
+  if (thinkingLevel && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingLevel)) throw new NamingConfigurationError("Invalid naming thinking level");
   return { model: "luna", systemPrompt: THREAD_NAMING_INSTRUCTION, prompt: transcript,
     speed: "standard", ...(thinkingLevel ? { thinkingLevel } : {}) } as CompletionInput;
 }
+interface NamingRecovery { id: string; model: string; message_count: number; failures: number; retry_at: number | null }
+db.exec(`CREATE TABLE IF NOT EXISTS thread_naming_recovery (
+  id TEXT PRIMARY KEY, model TEXT NOT NULL, message_count INTEGER NOT NULL,
+  failures INTEGER NOT NULL, retry_at INTEGER
+)`);
+// Previous releases could leave a visible occurrence behind even after naming_error was cleared.
+for (const row of db.query("SELECT source,message,occurrence FROM error_feedback WHERE source LIKE 'naming:%'").all() as { source: string; message: string; occurrence: string }[]) {
+  observeFailure(db, row.source, { message: row.message, recovery: "automatic", impact: "The thread keeps its current title." }, row.occurrence);
+  const view = db.query("SELECT naming_error FROM thread_views WHERE id=?").get(row.source.slice("naming:".length)) as { naming_error: string | null } | null;
+  if (!view?.naming_error) observeFailure(db, row.source, null);
+}
+function namingRecovery(id: string, messageCount: number): NamingRecovery | null {
+  const recovery = db.query("SELECT * FROM thread_naming_recovery WHERE id=?").get(id) as NamingRecovery | null;
+  if (recovery && (recovery.model !== THREAD_NAMING_MODEL || messageCount > recovery.message_count)) {
+    db.query("DELETE FROM thread_naming_recovery WHERE id=?").run(id);
+    db.query("UPDATE thread_views SET naming_request=NULL,naming_attempted_count=named_at_message_count WHERE id=?").run(id);
+    namingError(id, null);
+    return null;
+  }
+  return recovery;
+}
+function namingFeedback(id: string, message: string | null) {
+  return observeFailure(db, `naming:${id}`, message ? {
+    message, recovery: "automatic", impact: "The thread keeps its current title.",
+  } : null);
+}
+function namingAttention() {
+  const paused = (db.query(`SELECT v.id FROM thread_views v JOIN thread_naming_recovery r ON r.id=v.id
+    WHERE r.retry_at IS NULL AND v.naming_error IS NOT NULL`).all() as { id: string }[])
+    .some(row => { const thread = threads.get(row.id); return thread && !thread.metadata?.archived && thread.metadata?.titleSource !== "manual"; });
+  return observeFailure(db, "naming", paused ? {
+    message: "Automatic naming cannot proceed after bounded recovery or a configuration rejection.",
+    recovery: "required", impact: "Some threads could not be named automatically; their current titles are unchanged.",
+    action: "Rename them manually or ask Kenan to repair naming.",
+  } : null);
+}
 function namingError(id: string, message: string | null) {
-  const view = db.query("SELECT naming_attempted_count FROM thread_views WHERE id=?").get(id) as any;
-  observeError(db, `naming:${id}`, message, String(view?.naming_attempted_count ?? 0));
+  namingFeedback(id, message);
   const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
   if (result.changes) signalSync();
+}
+function namingFailed(id: string, messageCount: number, message: string, required = false) {
+  const previous = namingRecovery(id, messageCount);
+  const failures = (previous?.failures ?? 0) + 1;
+  const retryAt = namingRetryAt(failures, Date.now(), required);
+  db.query(`INSERT INTO thread_naming_recovery(id,model,message_count,failures,retry_at) VALUES(?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET model=excluded.model,message_count=excluded.message_count,failures=excluded.failures,retry_at=excluded.retry_at`)
+    .run(id, THREAD_NAMING_MODEL, messageCount, failures, retryAt);
+  namingError(id, message);
+  signalSync();
+}
+function namingResolved(id: string) {
+  db.query("DELETE FROM thread_naming_recovery WHERE id=?").run(id);
+  namingError(id, null);
 }
 function clearPinnedThreadNaming(sessionId: string): boolean {
   if (threads.get(sessionId)?.metadata?.titleSource !== "manual") return false;
   reservedNames.delete(sessionId);
   if (ownsSupervisorLease()) {
     db.query("UPDATE thread_views SET naming_request=NULL WHERE id=? AND naming_request IS NOT NULL").run(sessionId);
-    namingError(sessionId, null);
+    namingResolved(sessionId);
   }
   return true;
+}
+function restoreThreadNaming(thread: Pick<Thread, "id" | "title" | "metadata">) {
+  if (clearPinnedThreadNaming(thread.id)) return;
+  if (thread.metadata?.archived) { namingResolved(thread.id); return; }
+  let view = db.query("SELECT message_count,naming_error FROM thread_views WHERE id=?").get(thread.id) as any;
+  const recovery = namingRecovery(thread.id, Number(view?.message_count ?? 0));
+  view = db.query("SELECT message_count,naming_error FROM thread_views WHERE id=?").get(thread.id) as any;
+  if (view?.naming_error) {
+    if (!recovery) namingFailed(thread.id, Number(view.message_count ?? 0), view.naming_error);
+    else namingFeedback(thread.id, view.naming_error);
+  } else if (!recovery && unnamedThread(thread.title)) {
+    db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
+  }
 }
 async function nameThread(sessionId: string): Promise<void> {
   if (clearPinnedThreadNaming(sessionId) || namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
@@ -1094,9 +1179,12 @@ async function nameThread(sessionId: string): Promise<void> {
     ensureThreadView(db, sessionId);
     const view = db.query("SELECT * FROM thread_views WHERE id=?").get(sessionId) as any;
     const messageCount = Number(view.message_count ?? 0);
-    let receipt = view.naming_request ? JSON.parse(view.naming_request) as NamingReceipt : null;
-    const attemptedBefore = Number(view.naming_attempted_count ?? 0);
-    const step = namingStep({ name: row.name, titleSource: row.metadata?.titleSource, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt });
+    const recovery = namingRecovery(sessionId, messageCount);
+    const current = db.query("SELECT naming_request,naming_attempted_count FROM thread_views WHERE id=?").get(sessionId) as any;
+    let receipt = current.naming_request ? JSON.parse(current.naming_request) as NamingReceipt : null;
+    const attemptedBefore = Number(current.naming_attempted_count ?? 0);
+    const step = namingStep({ name: row.name, titleSource: row.metadata?.titleSource, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt,
+      now: Date.now(), ...(recovery ? { retryAt: recovery.retry_at } : {}) });
     if (step === "idle") { reservedNames.delete(sessionId); return; }
     // Naming reads the conversation from the context mirror. Until the mirror holds this thread's
     // messages there is nothing to title, and an empty prompt is a request no completion owner
@@ -1128,20 +1216,21 @@ async function nameThread(sessionId: string): Promise<void> {
       const title = generatedThreadName(output);
       if (!ownsSupervisorLease() || shuttingDown) return;
       unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
-      db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(messageCount, sessionId);
+      db.query("UPDATE thread_views SET named_at_message_count=? WHERE id=?").run(messageCount, sessionId);
+      namingResolved(sessionId);
       signalSync();
       return;
     }
     if (!namingClient) {
       db.query("UPDATE thread_views SET naming_request=NULL,naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
-      namingError(sessionId, "Thread naming has no explicitly permitted same-person completion owner");
+      namingFailed(sessionId, messageCount, "Thread naming has no explicitly permitted same-person completion owner", true);
       return;
     }
     if (!receipt) {
       const messages = conversation();
       if (!messages.length) return;
       const input = namingInput(namingTranscript(messages));
-      receipt = { requestId: namingRequestId(sessionId, messageCount, input), messageCount, input };
+      receipt = { requestId: namingRequestId(sessionId, messageCount, input, recovery?.failures ?? 0), messageCount, input };
       db.query("UPDATE thread_views SET naming_request=?,naming_attempted_count=? WHERE id=?").run(JSON.stringify(receipt), messageCount, sessionId);
     }
     const submitted = step === "generate";
@@ -1153,17 +1242,20 @@ async function nameThread(sessionId: string): Promise<void> {
     if (outcome.kind === "pending") { namingError(sessionId, null); return; }
     if (outcome.kind === "failed") {
       if (!outcome.keepReceipt) db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-      if (outcome.regenerate) db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(Number(view.named_at_message_count ?? 0), sessionId);
-      namingError(sessionId, outcome.message);
+      namingFailed(sessionId, messageCount, outcome.message, outcome.recovery === "required");
       return;
     }
     db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
     const title = generatedThreadName(outcome.text);
     unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
-    db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(receipt.messageCount, sessionId);
+    db.query("UPDATE thread_views SET named_at_message_count=? WHERE id=?").run(receipt.messageCount, sessionId);
+    namingResolved(sessionId);
     signalSync();
   } catch (cause) {
-    if (!clearPinnedThreadNaming(sessionId) && ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
+    if (!clearPinnedThreadNaming(sessionId) && ownsSupervisorLease()) {
+      const view = db.query("SELECT message_count FROM thread_views WHERE id=?").get(sessionId) as any;
+      namingFailed(sessionId, Number(view?.message_count ?? 0), cause instanceof Error ? cause.message : String(cause), cause instanceof NamingConfigurationError);
+    }
   } finally { namingThreads.delete(sessionId); }
 }
 function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId); }
@@ -1171,6 +1263,7 @@ function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId)
  * a local engine, or was left numbered by an earlier process. */
 function reconcileThreadNames() {
   const due = new Set(reservedNames);
+  for (const row of db.query("SELECT id FROM thread_naming_recovery WHERE retry_at IS NOT NULL AND retry_at<=?").all(Date.now()) as {id: string}[]) due.add(row.id);
   for (const row of db.query("SELECT id FROM thread_views WHERE naming_request IS NOT NULL").all() as {id: string}[]) due.add(row.id);
   const views = new Map((namingViewRows.all() as NamingView[]).map(view => [view.id, view]));
   const live = new Set<string>();
@@ -1184,11 +1277,11 @@ function reconcileThreadNames() {
   // An archived or departed thread will never be named again, so its last failure is not something
   // the person can act on. It leaves the error feed with the conversation.
   if (ownsSupervisorLease()) {
-    for (const row of db.query("SELECT id FROM thread_views WHERE naming_error IS NOT NULL").all() as {id: string}[]) {
-      if (!live.has(row.id)) namingError(row.id, null);
+    for (const row of db.query("SELECT id FROM thread_views WHERE naming_error IS NOT NULL UNION SELECT id FROM thread_naming_recovery").all() as {id: string}[]) {
+      if (!live.has(row.id)) namingResolved(row.id);
     }
   }
-  for (const id of due) void nameThread(id);
+  for (const id of due) if (live.has(id)) void nameThread(id);
 }
 
 const agentModelOrder = new Map(ORCHESTRATOR_CATALOG.agentOrder.map((key, index) => [key, index]));
@@ -1223,11 +1316,9 @@ function supervisorState(): SupervisorState {
     sessions: publicSessions(table.rows().filter(row => !row.archived_at), table.local),
     archivedTotal: threads.archivedCount() + peerArchived,
     ownerErrors: [
-      { owner: "fleet", feedback: peerError ? observeError(db, "peer:fleet", peerError) : null },
-      ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: observeError(db, `notifications:${owner}`, message) })),
-      ...(db.query("SELECT id,naming_error,naming_attempted_count FROM thread_views WHERE naming_error IS NOT NULL").all() as any[])
-        .map(row => ({ owner: `Thread ${sessionRow.get(row.id)?.name ?? row.id} naming`,
-          feedback: observeError(db, `naming:${row.id}`, row.naming_error, String(row.naming_attempted_count)) })),
+      { owner: "fleet", feedback: peerFeedback(peerError) },
+      ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: notificationFeedback(owner, message) })),
+      { owner: "Thread names", feedback: namingAttention() },
     ].flatMap(({ owner, feedback }) => feedback ? [{ owner, ...feedback }] : []),
   };
 }
@@ -2912,13 +3003,8 @@ function pruneUploadTransfers() {
 }
 pruneUploadTransfers();
 
-// A naming attempt that failed leaves the thread parked until its next message, which never comes for
-// a finished conversation. Starting the supervisor is new evidence — a repaired release, a reachable
-// engine, a restored account — so every thread still carrying its number gets one more attempt.
-for (const thread of threads.snapshot()) {
-  if (clearPinnedThreadNaming(thread.id) || thread.metadata?.archived) continue;
-  if (unnamedThread(thread.title)) db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
-}
+// Adopt prior diagnostic-only failures into bounded recovery; restarts must not reset the budget.
+for (const thread of threads.snapshot()) restoreThreadNaming(thread);
 
 const uploadPruner = setInterval(pruneUploadTransfers, 60_000);
 const namingReceipts = setInterval(reconcileThreadNames, 15_000);
