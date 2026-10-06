@@ -9,7 +9,16 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
     const started = performance.now();
     record({ phase, status: "running", deadlineMs: 25000, command: input });
     console.error(`browser phase=${phase} started command=${JSON.stringify(input)}`);
-    const answer = await tool.execute(randomUUID(), { timeoutMs: 20000, ...input }, AbortSignal.timeout(25000));
+    let timer, answer;
+    try {
+      answer = await Promise.race([
+        tool.execute(randomUUID(), { timeoutMs: 20000, ...input }, AbortSignal.timeout(25000)),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${phase} exceeded subcommand deadline 25000ms`)), 25000); }),
+      ]);
+    } catch (error) {
+      record({ phase, status: "failed", command: input, elapsedMs: Math.round(performance.now() - started), error: String(error) });
+      throw error;
+    } finally { clearTimeout(timer); }
     record({ phase, status: "completed", elapsedMs: Math.round(performance.now() - started), result: answer });
     assert.equal(answer.details.resultCategory, "success", JSON.stringify(answer));
     return answer.details;
