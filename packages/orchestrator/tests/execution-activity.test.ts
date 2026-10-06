@@ -70,3 +70,11 @@ it("names argument dispatch, concurrent tool completion, retry, compaction and f
   expect(state.activityTools.size).toBe(0);
   expect(executionActivitySnapshot(state)).toEqual({ activity: "finishing", activitySince: 100, activityDetail: "Synchronizing final execution result", lastActivityAt: 100 });
 });
+
+it("distinguishes runner backpressure from model admission and unknown startup failures", () => {
+  for (const error of ["Error: Runner capacity busy; work remains queued", "Runner capacity busy: memory pressure"]) {
+    expect(executionWaitActivity({ startupFailure: { error, attempts: 4, since: 10, retryAt: 20 } }))
+      .toMatchObject({ activity: "waiting_for_capacity", activitySince: 10, activityDetail: expect.stringContaining("Waiting for runner capacity") });
+  }
+  expect(executionWaitActivity({ startupFailure: { error: "temporary runner failure" } })).toMatchObject({ activity: "waiting_to_retry" });
+});

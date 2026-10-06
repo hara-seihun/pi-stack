@@ -1,3 +1,4 @@
+import { isRunnerCapacityFailure } from "./runner-capacity.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { readThreadHistory, visibleThreadHistory } from "pi-orchestrator/history";
@@ -361,13 +362,17 @@ export class ThreadService implements ThreadApi {
         const work = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
         if (!work) throw error;
         const prior = this.get(id)?.metadata?.startupFailure as Json | undefined;
-        const attempts = prior && prior.workId === work ? Number(prior.attempts) + 1 : 1;
+        const runnerCapacity = isRunnerCapacityFailure(message);
+        // Capacity is backpressure, not a failed assignment or a human Stop.
+        // Keep its retry counter separate from the bounded unknown-startup budget.
+        const sameFailure = prior && prior.workId === work && (prior.kind === "runner_capacity") === runnerCapacity;
+        const attempts = sameFailure ? Number(prior.attempts) + 1 : 1;
         const permanent = isModelConfigurationError(message) || /Pi cwd admission rejected|Invalid recorded (?:runner|isolated)|Compiled thread runner is missing/.test(message);
-        const failure = { workId: work, attempts, error: message, since: prior && prior.workId === work ? prior.since ?? Date.now() : Date.now(),
+        const failure = { workId: work, attempts, ...(runnerCapacity ? { kind: "runner_capacity" } : {}), error: message, since: sameFailure ? prior!.since ?? Date.now() : Date.now(),
           lastActivityAt: Date.now(), retryAt: Date.now() + Math.min(attempts * 5_000, 30_000) };
         this.sql("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure',json(?),'$.executionError',?) WHERE id=?").run(JSON.stringify(failure), message, id);
         this.changed(id);
-        if (permanent || attempts >= 3) await this.rejectStartup(id, message);
+        if (!runnerCapacity && (permanent || attempts >= 3)) await this.rejectStartup(id, message);
       }
     }).catch(error => {
       if (this.closed || this.suspended || !this.row(id)) return;
@@ -1168,6 +1173,7 @@ export class ThreadService implements ThreadApi {
           runtime.busy = true;
         }
       }
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.startupFailure') WHERE id=?").run(id);
       return runtime;
     } catch (error) {
       if (!this.suspended) {

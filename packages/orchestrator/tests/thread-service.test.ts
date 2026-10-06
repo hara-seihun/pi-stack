@@ -427,6 +427,75 @@ it("does not invent a failed settlement when retained runner absence is uncertai
   expect(service.pending("child")).toMatchObject([{ id: "assignment", state: "dispatched" }]);
 });
 
+it.each([false, true])("retains runner-capacity custody beyond three refusals and restart, recovering=%s", async (recovering) => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-runner-capacity-")); roots.push(directory);
+  const sessions: FakePiSession[] = [];
+  let available = false;
+  const release = vi.fn();
+  const admit = vi.fn(async () => ({ ok: true as const, value: { release } }));
+  const openSession = vi.fn<OpenPiSession>(async (options, output) => {
+    if (!available) throw new Error("Error: Runner capacity busy; work remains queued");
+    const session = new FakePiSession(options, output); sessions.push(session); return session;
+  });
+  const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit };
+  const first = new ThreadService(options); services.push(first);
+  value(first.importThread({ id: "capacity-child", title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
+  value(first.importMessage({ id: "assignment", threadId: "capacity-child", text: "work", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
+  value(await first.agentWait({ requestId: "wait", threadId: "capacity-child", action: "set", reason: "Awaiting delegated release", threadIds: [] }));
+  const schedule = value(await first.wakeSchedule({ requestId: "wake", threadId: "capacity-child", action: "set", reason: "Fallback", cadenceMs: 600_000 }));
+  await first.start();
+  await waitFor(() => (first.get("capacity-child")?.metadata?.startupFailure as { attempts: number })?.attempts === 1);
+  first.reconcile(); first.reconcile(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  await first.close();
+  const second = new ThreadService(options); services.push(second);
+  await second.start(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  const db = new DatabaseSync(options.databasePath);
+  try {
+    for (const attempts of [2, 3, 4]) {
+      db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure.retryAt',0) WHERE id='capacity-child'").run();
+      second.reconcile(); second.reconcile();
+      await waitFor(() => (second.get("capacity-child")?.metadata?.startupFailure as { attempts: number })?.attempts === attempts);
+      expect(second.get("capacity-child")).toMatchObject({ held: false });
+      expect(second.latestSettlement("capacity-child")).toBeNull();
+      expect(second.get("capacity-child")?.metadata?.agentWait).toMatchObject({ reason: "Awaiting delegated release" });
+      expect(second.get("capacity-child")?.wakeSchedule).toEqual(schedule);
+      expect(second.pending("capacity-child")).toMatchObject([{ id: "assignment", state: recovering ? "dispatched" : "queued" }]);
+    }
+    expect(release).toHaveBeenCalledTimes(4);
+    expect(admit).toHaveBeenCalledTimes(4);
+    available = true;
+    db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure.retryAt',0) WHERE id='capacity-child'").run();
+    second.reconcile(); second.reconcile();
+    await waitFor(() => sessions.length === 1 && sessions[0]!.commands.some(c => c.type === "prompt"));
+    expect(openSession).toHaveBeenCalledTimes(5);
+    expect(admit).toHaveBeenCalledTimes(5);
+    expect(release).toHaveBeenCalledTimes(4);
+    expect(sessions[0]!.commands.filter(c => c.type === "prompt")).toMatchObject([{ workId: "assignment" }]);
+    expect(second.get("capacity-child")?.metadata?.startupFailure).toBeUndefined();
+    sessions[0]!.settle("done");
+    await waitFor(() => second.latestSettlement("capacity-child")?.outcome === "complete");
+    expect(second.latestSettlement("capacity-child")).toMatchObject({ workId: "assignment", ...(recovering ? { executionId: "retained-execution" } : {}) });
+  } finally { db.close(); }
+});
+
+it.each(["stop", "archive"] as const)("never auto-resumes an explicit %s during runner backpressure", async action => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-capacity-stop-")); roots.push(directory);
+  const openSession = vi.fn<OpenPiSession>(async () => { throw new Error("Runner capacity busy: memory pressure"); });
+  const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
+  const first = new ThreadService(options); services.push(first);
+  const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
+  await first.start();
+  await waitFor(() => first.get(thread.id)?.metadata?.startupFailure !== undefined);
+  value(await first.control(action === "archive" ? { threadId: thread.id, action: "update", archived: true } : { threadId: thread.id, action: "stop", descendants: false }));
+  await first.close();
+  const second = new ThreadService(options); services.push(second);
+  await second.start(); second.reconcile(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  expect(second.get(thread.id)).toMatchObject({ held: true, ...(action === "archive" ? { metadata: { archived: true } } : {}) });
+});
+
 it("persists a bounded startup retry budget across owner restart", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-startup-retry-")); roots.push(directory);
   const openSession = vi.fn<OpenPiSession>(async () => { throw new Error("temporary runner failure"); });
