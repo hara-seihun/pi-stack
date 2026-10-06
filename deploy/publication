@@ -43,6 +43,10 @@ let activeRequest;
 let activeLog;
 let trackingCommand = false;
 
+// A shared master may belong to a thread scope that exits during publication.
+const publicationSshOptions = ["-o", "ControlPath=none", "-o", "ControlMaster=no", "-o", "ControlPersist=no"];
+const publicationRsyncShell = ["ssh", ...publicationSshOptions, "-o", "BatchMode=yes"].join(" ");
+
 function usage() {
   process.stderr.write(`usage:
   deploy/publication install [--code-only]
@@ -60,7 +64,9 @@ function usage() {
 The installed systemd user service also invokes the internal enqueue and drain commands.\n`);
 }
 
-function commandResult(command, args, options = {}) {
+export function commandResult(command, args, options = {}) {
+  if (command === "ssh") args = [...publicationSshOptions, ...args];
+  if (command === "rsync") args = ["-e", publicationRsyncShell, ...args];
   const timeoutSeconds = options.timeoutSeconds ?? 60;
   const tracked = activeRequest && !trackingCommand;
   if (tracked) {
@@ -875,7 +881,7 @@ function publishAndroidArtifact(request, logPath) {
     if (target.sshHost) {
       let result = runLogged(request, `transfer-android-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "mkdir", "-p", "-m", "700", remoteDirectory], 30, logPath);
       if (!result.ok) throw new Error(`${target.id} Android transfer directory exited ${result.status}`);
-      result = runLogged(request, `transfer-android-${target.id}`, "rsync", ["-a", "--chmod=D700,F600", "-e", "ssh -o BatchMode=yes", `${directory}/`, `${target.sshHost}:${remoteDirectory}/`], 90, logPath);
+      result = runLogged(request, `transfer-android-${target.id}`, "rsync", ["-a", "--chmod=D700,F600", `${directory}/`, `${target.sshHost}:${remoteDirectory}/`], 90, logPath);
       if (!result.ok) throw new Error(`${target.id} Android transfer exited ${result.status}`);
       const remoteSource = runCapture("ssh", ["-o", "BatchMode=yes", target.sshHost, "git", "-C", target.releaseRepository, "rev-parse", "HEAD^{commit}"], { timeoutSeconds: 30 });
       if (remoteSource !== request.integrationSha) throw new Error(`${target.id} release checkout ${remoteSource} differs from checked integration ${request.integrationSha}`);

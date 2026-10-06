@@ -25,6 +25,16 @@ There is no GitHub Actions workflow or self-hosted runner attached to this publi
 
 Run `npm ci --ignore-scripts` and `npm run check` in an environment appropriate for the source being evaluated. Run Android checks with the host's local build configuration. The configured publication owner runs the integration checks and records the exact commit, commands, artifacts, deployment results and service proof.
 
+## Publication transport custody
+
+The publication command boundary disables SSH connection sharing for every remote
+operation, including rsync's remote shell. Each command owns its connection for
+its bounded lifetime. A configured shared master can belong to an unrelated
+thread's systemd scope; stopping that scope previously cut a release off with
+exit 255 during preparation. Releases, host proofs and recovery must not inherit
+that other owner's connection lifetime. Host authentication configuration remains
+unchanged, and transport failures still fail publication rather than retrying it.
+
 ## Public history
 
 The public history begins with a source snapshot. Private development transcripts, household configuration and GitHub job logs are not included. The source owner retains prior development provenance privately, including the original commit and the snapshot's tree identity. Do not merge pre-publication branches into this repository. Reapply an outstanding change onto current public `main`, then review it as an ordinary source change.
