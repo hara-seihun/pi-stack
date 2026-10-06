@@ -1,5 +1,7 @@
 # Unified threads
 
+Thread projections expose `lastUserMessageAt` from accepted explicit inputs without a sender thread. It is absent before the first person input. Agent-to-agent sends, automatic notifications, tool activity, title changes and settlements do not change it; imported input keeps its original timestamp. Remote uses this timestamp for conversation recency, with creation time defining the initial placement of a thread without person input.
+
 A person's own Kenan can list/read/post their Pi Remote rooms with `pi-room`; the [room contract](../apps/remote/docs/rooms.md#a-persons-own-kenan) owns local kernel-UID admission, server membership and agent attribution. Room conversations remain in the separate room runtime, not the person's private thread directory.
 
 ## Accepted design

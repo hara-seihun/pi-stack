@@ -337,6 +337,25 @@ function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServ
   return { directory, service, sessions };
 }
 
+it("projects durable person-input recency without agent sends, notifications or edits", async () => {
+  const { service, directory } = fixture();
+  const thread = value(service.importThread({ id: "recency", title: "Recency", cwd: directory,
+    sessionFile: join(directory, "recency.jsonl"), settings: { model: "sol", thinkingLevel: "high", speed: "standard" },
+    createdAt: 1, updatedAt: 2 }));
+  expect(thread.lastUserMessageAt).toBeUndefined();
+  value(service.importMessage({ id: "person-old", threadId: thread.id, text: "first", createdAt: 10, state: "done" }));
+  value(service.importMessage({ id: "person-new", threadId: thread.id, text: "next", createdAt: 20, state: "done" }));
+  value(service.importMessage({ id: "agent", threadId: thread.id, senderId: "child", text: "agent send", createdAt: 30, state: "done" }));
+  value(service.importMessage({ id: "notice", threadId: thread.id, source: "notification", text: "notice", createdAt: 40, state: "done" }));
+  value(service.importMessage({ id: "person-new", threadId: thread.id, text: "next", createdAt: 50, state: "done" }));
+  expect(service.get(thread.id)?.lastUserMessageAt).toBe(20);
+  expect(service.snapshot()[0]?.lastUserMessageAt).toBe(20);
+  expect(value(await service.list({ id: thread.id })).threads[0]?.lastUserMessageAt).toBe(20);
+  await service.close();
+  const restored = fixture(directory).service;
+  expect(restored.get(thread.id)?.lastUserMessageAt).toBe(20);
+});
+
 describe("controller resource handoff", () => {
   it.each(["queued", "dispatched"] as const)("preserves %s work when its opener rejects after suspension", async state => {
     const directory = mkdtempSync(join(tmpdir(), "thread-handoff-rejection-")); roots.push(directory);

@@ -35,7 +35,7 @@ export const INBOX_SECTIONS: { id: InboxSection; label: string }[] = [
   { id: "quiet", label: "Quiet" },
 ];
 
-export interface InboxRow { chat: Chat; section: InboxSection; status: ThreadStatus | null; rank: number; updatedAt: number }
+export interface InboxRow { chat: Chat; section: InboxSection; status: ThreadStatus | null; rank: number; updatedAt: number; recencyAt: number }
 
 function humanStatus(conversation: MessagingConversation, backend?: MessagingBackendInfo): { section: InboxSection; rank: number } {
   if (conversation.unread > 0) return { section: "attention", rank: 3 };
@@ -50,18 +50,19 @@ export function inboxRow(chat: Chat): InboxRow {
     const status = notified ? { ...reported, attention: true } : reported;
     const rank = notified ? Math.min(2, attentionRank(status)) : attentionRank(status);
     const section: InboxSection = status.attention ? "attention" : status.busy ? "working" : "quiet";
-    return { chat, section, status, rank, updatedAt: Date.parse(chat.session.updatedAt) || 0 };
+    return { chat, section, status, rank, updatedAt: Date.parse(chat.session.updatedAt) || 0,
+      recencyAt: Date.parse(chat.session.lastUserMessageAt ?? chat.session.createdAt) };
   }
   if (chat.kind === "room") {
     const busy = chat.room.state === "running";
     const attention = (chat.room.unreadCount ?? 0) > 0 || (chat.room.pendingQuestions ?? 0) > 0;
     const reported = roomThreadStatus(chat.room);
     const status: ThreadStatus = { ...reported, attention: attention || reported.attention };
-    return { chat, section: status.attention ? "attention" : busy ? "working" : "quiet", status, rank: reported.attention ? attentionRank(reported) : attention ? 3 : busy ? 10 : 22, updatedAt: chat.room.updatedAt ?? 0 };
+    return { chat, section: status.attention ? "attention" : busy ? "working" : "quiet", status, rank: reported.attention ? attentionRank(reported) : attention ? 3 : busy ? 10 : 22, updatedAt: chat.room.updatedAt ?? 0, recencyAt: chat.room.updatedAt ?? 0 };
   }
   if (chat.kind === "human") {
     const { section, rank } = humanStatus(chat.conversation, chat.backend);
-    return { chat, section, status: null, rank, updatedAt: chat.conversation.updatedAt || 0 };
+    return { chat, section, status: null, rank, updatedAt: chat.conversation.updatedAt || 0, recencyAt: chat.conversation.updatedAt || 0 };
   }
   return assertNever(chat, "Inbox chat");
 }
@@ -71,7 +72,7 @@ export function inboxRow(chat: Chat): InboxRow {
  * the same inputs give the same list on every device. */
 export function inboxRows(sessions: Session[], starts: ThreadStart[], messaging: MessagingSnapshot, rooms: Room[] = []): InboxRow[] {
   const chats = [...conversationThreads(sessions).map(session => aiChat(session, starts)), ...messaging.conversations.filter(item => item.current).map(item => humanChat(item, messaging.backends)), ...rooms.filter(room => room.current !== false).map(roomChat)];
-  return chats.map(inboxRow).sort((a, b) => a.rank - b.rank || b.updatedAt - a.updatedAt || a.chat.title.localeCompare(b.chat.title));
+  return chats.map(inboxRow).sort((a, b) => a.rank - b.rank || b.recencyAt - a.recencyAt || a.chat.title.localeCompare(b.chat.title));
 }
 
 export function currentChats(sessions: Session[], starts: ThreadStart[], messaging: MessagingSnapshot): Chat[] {
