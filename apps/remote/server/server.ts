@@ -6,6 +6,7 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
+import { capturedContextUsage } from "./context-usage";
 import { startThreadRefresh } from "./thread-refresh";
 import {
   WatchList,
@@ -1369,6 +1370,7 @@ function publicSession(row: any,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
+    ...(queued ? { contextUsage: capturedContextUsage(baseStoredContext(row.id), (row.effectiveSettings ?? row.settings).model) } : {}),
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
     ...projectThreadActivity(row.state, live, hasRunningChildren, row.executionActivity, row.metadata, Boolean(row.held)),
@@ -1434,7 +1436,7 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected), contextUsage: capturedContextUsage(baseStoredContext(selected), session.model) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
