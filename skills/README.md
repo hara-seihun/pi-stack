@@ -9,7 +9,8 @@ the agent's skill directory.
 - [`software-engineering`](software-engineering/SKILL.md) — **load first for any
   software-related work**, including small UI changes, debugging, operations and
   technical documentation. Every path yields a valid state or an explicit typed
-  error; invalid states must be unrepresentable.
+  error; invalid states must be unrepresentable. Things are set or unset, behaviour
+  is known or an error, and defaults are wrong.
 - [`charisma`](charisma/SKILL.md) — how a voice agent should behave in live
   meetings and calls: register, hedging, agreement, humour, and pacing.
 - [`kelana`](kelana/SKILL.md) — the way of calm energy: minimal descriptions of both
