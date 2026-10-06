@@ -145,6 +145,22 @@ test("malformed checkpoints and missing payload markers abort rather than leakin
   assert.equal(checkpointContext(buildSessionContext(f.sm.getBranch()).messages, f.sm.getBranch(), model).ok, false);
 });
 
+test("unknown stored attempt state blocks context and automatic compaction without provider requests", async t => {
+  t.mock.method(console, "error", () => {});
+  const f = fixture();
+  f.sm.appendCustomEntry(ATTEMPT, { state: "future", modelKey: modelKey(model) });
+  codexCompaction(f.pi);
+  let calls = 0;
+  f.ctx.modelRegistry.complete = async () => { calls++; throw new Error("Unexpected provider request"); };
+  const context = f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx);
+  assert.match(context.error, /Unsupported stored compaction attempt state/);
+  assert.match(context.error, /no automatic retry was inferred/);
+  const result = await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
+  assert.match(result.error, /Unsupported stored compaction attempt state/);
+  assert.equal(calls, 0);
+  assert.equal(f.sm.getBranch().at(-1).data.state, "future");
+});
+
 test("an interrupted checkpoint permits context and one automatic retry, then fences a terminal failure", async t => {
   t.mock.method(console, "error", () => {});
   const f = fixture();

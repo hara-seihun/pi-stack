@@ -77,7 +77,9 @@ export class RootConsentManager {
         const delivery = await this.dispatch(current);
         if (!delivery.ok) return delivery;
       }
-      return { ok: true, value: { delivered: true, consentId: row.id } };
+      if (current.state === "waiting" || current.state === "answered" || current.state === "decided" || current.state === "delivered")
+        return { ok: true, value: { delivered: true, consentId: row.id } };
+      return { ok: false, message: "Invalid stored consent state; question delivery is not confirmed" };
     });
   }
   private async log(row: PendingConsent, kind: "question" | "answer", text: string): Promise<ConsentResult<void>> {
@@ -129,10 +131,12 @@ export class RootConsentManager {
       if (!sent.ok) return sent;
       row.state = "delivered"; delete row.lastError; this.saveNotification(row);
     }
-    return { ok: true, value: undefined };
+    if (row.state === "delivered") return { ok: true, value: undefined };
+    if (row.state === "failed") return { ok: false, message: row.lastError ?? "Notification was rejected; nothing was delivered" };
+    return { ok: false, message: "Invalid stored notification state; nothing was delivered" };
   }
   async drain(): Promise<{ pending: number; delivered: number; errors: number }> {
-    const notifications = this.db.query("SELECT id FROM root_notification WHERE state IN ('queued','logged') ORDER BY updated_at LIMIT 32").all() as { id: string }[];
+    const notifications = this.db.query("SELECT id FROM root_notification WHERE state NOT IN ('delivered','failed') ORDER BY updated_at LIMIT 32").all() as { id: string }[];
     let notificationDelivered = 0, notificationErrors = 0;
     if (this.options.enabled()) await Promise.all(notifications.map(({ id }) => this.serial(id, async () => {
       const row: PendingNotification = JSON.parse((this.db.query("SELECT data FROM root_notification WHERE id=?").get(id) as { data: string }).data);
@@ -179,6 +183,7 @@ export class RootConsentManager {
       if (!delivery.ok) return delivery;
       row.state = "delivered"; delete row.lastError; this.save(row);
     }
-    return { ok: true, value: undefined };
+    if (row.state === "delivered") return { ok: true, value: undefined };
+    return { ok: false, message: "Invalid stored consent state; no reply was delivered" };
   }
 }

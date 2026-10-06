@@ -17,6 +17,15 @@ export type RootRequest = {
 );
 export const requestHash = (request: string) => createHash("sha256").update(request).digest("hex");
 
+export function parseRootRequest(body: string): RootRequest {
+  const record = JSON.parse(body);
+  if (!record || !["executing", "interrupted", "failed", "finalizing", "completed"].includes(record.state)
+    || !["pending", "delivered", "inline"].includes(record.delivery)) throw new Error("Invalid stored root request lifecycle");
+  if ((record.state === "finalizing" || record.state === "completed")
+    && (typeof record.chosen?.reply !== "string" || !Array.isArray(record.chosen?.subjects))) throw new Error("Stored root reply is missing its chosen result");
+  return record;
+}
+
 export class RootRequestStore {
   private readonly db: Database;
   constructor(path: string) {
@@ -29,7 +38,7 @@ export class RootRequestStore {
   }
   get(id: string): RootRequest | undefined {
     const row = this.db.query("SELECT body FROM requests WHERE id=?").get(id) as { body: string } | null;
-    return row ? JSON.parse(row.body) : undefined;
+    return row ? parseRootRequest(row.body) : undefined;
   }
   accept(id: string, request: string, admission: RootAdmission, asynchronous = true): RootRequest {
     const { memoryToken: _token, ...original } = admission;
@@ -41,7 +50,7 @@ export class RootRequestStore {
     this.db.query("UPDATE requests SET body=? WHERE id=?").run(JSON.stringify(record), record.id);
   }
   pending(limit = 4): RootRequest[] {
-    return (this.db.query("SELECT body FROM requests WHERE json_extract(body,'$.state')='finalizing' OR (json_extract(body,'$.state') IN ('completed','failed','interrupted') AND json_extract(body,'$.delivery')='pending') ORDER BY coalesce(json_extract(body,'$.attemptedAt'),0),rowid LIMIT ?").all(limit) as { body: string }[]).map(row => JSON.parse(row.body));
+    return (this.db.query("SELECT body FROM requests WHERE json_extract(body,'$.state')='finalizing' OR (json_extract(body,'$.state') IN ('completed','failed','interrupted') AND json_extract(body,'$.delivery')='pending') OR coalesce(json_extract(body,'$.state'),'') NOT IN ('executing','finalizing','completed','failed','interrupted') OR coalesce(json_extract(body,'$.delivery'),'') NOT IN ('pending','delivered','inline') ORDER BY coalesce(json_extract(body,'$.attemptedAt'),0),rowid LIMIT ?").all(limit) as { body: string }[]).map(row => parseRootRequest(row.body));
   }
   close() { this.db.close(); }
 }

@@ -101,6 +101,7 @@ import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCoun
 import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
+import { parsePresentationEvent } from "./pi-event-presentation";
 import { ResourceCache } from "../shared/resource-cache";
 import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-items";
 import { MachineActions } from "./machine-actions";
@@ -1623,7 +1624,8 @@ function activeSessionEntries(entries: any[], leafId: unknown): any[] {
 function modelFailureText(message: any): string {
   if (!message || message.role !== "assistant") return "";
   const stopReason = String(message.stopReason ?? "");
-  if (stopReason !== "error" && stopReason !== "aborted") return "";
+  if (["pending", "stop", "length", "toolUse", "deferred"].includes(stopReason)) return "";
+  if (stopReason !== "error" && stopReason !== "aborted") return `Unsupported model completion reason: ${stopReason || "(missing)"}`;
   const rawStopReason = String(message.rawStopReason ?? "");
   const label = rawStopReason === "refusal"
     ? "Model refused the message"
@@ -1647,7 +1649,7 @@ function toolResultText(result: any): string {
   const parts = blocks.map((block: any) => {
     if (block?.type === "text") return String(block.text ?? "");
     if (block?.type === "image") return `[image${block.mimeType ? ` · ${block.mimeType}` : ""}]`;
-    return block ? JSON.stringify(block) : "";
+    return block ? `[Unsupported tool-result block · ${String(block.type ?? "missing type")}]\n${JSON.stringify(block)}` : "";
   }).filter(Boolean);
   const text = parts.join("\n");
   if (text.length <= 20_000) return text;
@@ -1660,6 +1662,11 @@ async function rpc(id: string, type: string, body: Record<string, unknown> = {})
 
 function handlePiEvent(sessionId: string, event: any) {
   if (!ownsSupervisorLease()) return;
+  const presentation = parsePresentationEvent(event);
+  if (!presentation.ok) {
+    emit(sessionId, "notice", { text: `Runtime protocol error: ${presentation.error.slice(0, 500)}` });
+    return;
+  }
   try { phoneOverlay?.event(sessionId, event); } catch (cause) { console.error("phone overlay event failed", cause); }
   ensureThreadView(db, sessionId);
   const rt = liveFor(sessionId);
@@ -1709,6 +1716,8 @@ function handlePiEvent(sessionId: string, event: any) {
     }, `failure:${event.executionId}`);
     return;
   }
+
+  if (!presentation.project) return;
 
   // Time responses by when Pi produced each event, not when it reached this
   // supervisor: delivery can arrive in bursts, which made a whole response
@@ -2049,7 +2058,8 @@ const meet = new MeetServer((id) => {
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    activity: projectThreadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id), row.executionActivity, row.metadata, Boolean(row.held)).activity,
+    ...projectThreadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id), row.executionActivity, row.metadata, Boolean(row.held)),
+    waitingOnAgents: row.waitingOnAgents,
     tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
 
@@ -2911,6 +2921,7 @@ const server = Bun.serve<SocketData>({
     open(socket) {
       if (socket.data.kind === "phone") { socket.data.connection = phones.open({ send: frame => socket.send(frame), close: (code, reason) => socket.close(code, reason) }); return; }
       if (socket.data.kind === "write") { socket.data.receive = connectWrite(socket as Bun.ServerWebSocket<WriteSocketData>, writeEndpoint, writeDictionary); return; }
+      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
       const audio = openCallAudio(socket.data.callId);
       if (!audio) {
         socket.close(1008, "Call is unavailable");
@@ -2933,7 +2944,8 @@ const server = Bun.serve<SocketData>({
         write.data.receive?.(message);
         return;
       }
-      if (typeof message === "string") return;
+      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
+      if (typeof message === "string") { socket.close(1008, "Call audio must be binary"); return; }
       const frame = message instanceof Uint8Array ? message : new Uint8Array(message);
       socket.data.audio?.receive(frame);
     },
@@ -2945,6 +2957,7 @@ const server = Bun.serve<SocketData>({
         write.data.upstream?.close();
         return;
       }
+      if (socket.data.kind !== "call") throw new Error("Unsupported WebSocket kind at close");
       socket.data.audio?.detach();
       socket.data.audio = undefined;
     },

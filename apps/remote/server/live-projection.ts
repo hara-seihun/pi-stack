@@ -1,4 +1,4 @@
-import { createExecutionActivity, executionWaitActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type Thread, type ThreadState } from "pi-orchestrator/api";
+import { createExecutionActivity, executionWaitActivity, restoreExecutionActivity, settleExecutionActivity, validateWaitDependency, type ExecutionActivity, type Thread, type ThreadState } from "pi-orchestrator/api";
 import type { ToolProgress } from "./tool-progress";
 import type { Activity, Session } from "./protocol";
 
@@ -11,19 +11,28 @@ export function runningChildParents(...sources: Iterable<Pick<Thread, "parentId"
 }
 
 export function threadActivity(state: ThreadState, live?: LiveProjection, hasRunningChildren = false): Activity {
-  if (state === "idle" && hasRunningChildren) return "awaiting";
-  if (state !== "running") return state;
-  return live?.compacting ? "compacting" : live?.retrying ? "retrying"
+  if (state === "idle") return hasRunningChildren ? "awaiting" : "idle";
+  if (state === "running") return live?.compacting ? "compacting" : live?.retrying ? "retrying"
     : live?.activeTools.size ? "waiting_on_tool" : live?.activity ?? (live?.thinkingActive ? "thinking" : "status_error");
+  state satisfies never;
+  throw new Error("Unsupported thread execution state");
 }
 
 export function projectThreadActivity(state: ThreadState, live?: LiveProjection, hasRunningChildren = false,
-  snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
+  snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError" | "waitingForChildren"> {
   const dependency = metadata?.agentWait as import("pi-orchestrator/api").AgentWait | undefined;
-  if (state === "idle" && !held && !metadata?.archived && dependency) return {
-    activity: "awaiting", activitySince: dependency.since, activityDetail: dependency.reason,
-    activeTools: [], executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
-  };
+  if (state === "idle" && !held && !metadata?.archived && dependency) {
+    const labels = { agents: "Waiting on agents", job: "Waiting for job", deployment: "Waiting for deployment", message: "Waiting for message" } as const;
+    const parsed = validateWaitDependency(dependency);
+    if (!parsed.ok || typeof dependency.reason !== "string" || !dependency.reason.trim() || !Number.isFinite(dependency.since)) {
+      const detail = "Wait reporting defect: missing, unsupported or invalid dependency";
+      return { activity: "status_error", activitySince: dependency.since, activityDetail: detail, activeTools: [], executionError: detail };
+    }
+    return {
+      activity: "awaiting", activitySince: dependency.since, activityDetail: `${labels[parsed.value.kind]} · ${dependency.reason}`,
+      activeTools: [], executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
+    };
+  }
   if (held || metadata?.archived) hasRunningChildren = false;
   const wait = state === "running" ? executionWaitActivity(metadata) : undefined;
   const resuming = snapshot?.activity && !["waiting_for_capacity", "waiting_to_retry"].includes(snapshot.activity)
@@ -33,6 +42,7 @@ export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
     : threadActivity(state, live, hasRunningChildren);
   const evidence = snapshot ?? live;
   return { activity,
+    ...(state === "idle" && !held && !metadata?.archived && hasRunningChildren ? { waitingForChildren: true } : {}),
     activitySince: state === "running" ? evidence?.activitySince : undefined,
     lastActivityAt: evidence?.lastActivityAt,
     activityDetail: state === "running" ? evidence?.activityDetail : undefined,
