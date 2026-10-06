@@ -9,6 +9,7 @@ import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 import { threadMode } from "./modes.js";
 import { SPEEDS } from "./speed.js";
 import { threadWaitParameters } from "./wait-contract.js";
+import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
@@ -62,6 +63,15 @@ export function threadTools(options: PiSessionOptions) {
     return "other";
   }
   return [
+    defineTool({
+      name: "thread_attention", label: "Notify the person or move into Chats",
+      description: `Send an explicit notification from your own thread, including while background or scheduled work is running. Set foreground:true to also make this same thread visible in Chats and retain it after an ephemeral assignment settles; it remains a leaf worker when applicable. Durable receipt acceptance is not proof the person's device displayed it. ${BACKGROUND_ATTENTION_POLICY}`,
+      parameters: Type.Object({
+        summary: Type.String({ minLength: 1, maxLength: 1000, description: "Renia-reduced notification: the important change and what the person needs to do, with deadline/timezone if relevant." }),
+        foreground: Type.Optional(Type.Boolean({ description: "Also promote this existing thread into Chats without taking over the current screen." })),
+      }),
+      execute: async (id, input, signal) => result(await api(signal).attention({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
     defineTool({
       name: "thread_wait", label: "Wait for a named dependency",
       description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty direct child threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Holds and archives take precedence; explicit input clears the wait. Clear removes the wait without creating work.",

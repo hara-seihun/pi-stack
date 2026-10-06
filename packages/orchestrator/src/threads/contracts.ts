@@ -257,7 +257,16 @@ export type ThreadWakeRequest = { threadId: string } & (
   | { action: "list" }
   | { action: "set"; requestId: string; reason: string; cadenceMs: number; nextDueAt?: number }
   | { action: "cancel"; requestId: string });
+export interface ThreadAttentionRequest {
+  threadId: string; requestId: string; summary: string; foreground?: boolean;
+}
+export interface ThreadAttentionReceipt {
+  accepted: true; seq: number; threadId: string; summary: string; foreground: boolean; time: number;
+}
+export interface ThreadAttentionEvents { cursor: number; items: ThreadAttentionReceipt[] }
 export interface ThreadApi {
+  attention(input: ThreadAttentionRequest): Promise<Result<ThreadAttentionReceipt>>;
+  attentionEvents(after?: number, limit?: number): Result<ThreadAttentionEvents> | Promise<Result<ThreadAttentionEvents>>;
   agentWait(input: AgentWaitRequest): Promise<Result<Thread>>;
   wakeSchedule(input: ThreadWakeRequest): Promise<Result<ThreadWakeSchedule | null>>;
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;

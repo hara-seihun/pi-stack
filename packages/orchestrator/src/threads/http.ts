@@ -11,7 +11,7 @@ export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number;
 export type ThreadAdmission = (operation: string, input: Record<string, any>) => Promise<AdmissionResult>;
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const operations = ["agentWait", "wakeSchedule", "watch", "ask", "questions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
+const operations = ["attention", "attentionEvents", "agentWait", "wakeSchedule", "watch", "ask", "questions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -42,6 +42,7 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
       operation === "await" ? api.await(fields as Parameters<ThreadApi["await"]>[0], signal)
       : operation === "settlements" ? api.settlements(fields.after, fields.limit)
       : operation === "questionEvents" ? api.questionEvents(fields.after, fields.limit)
+      : operation === "attentionEvents" ? api.attentionEvents(fields.after, fields.limit)
       : operation === "inspect" ? api.inspect(fields.threadId, Number.isSafeInteger(fields.contextRevision) ? { contextRevision: fields.contextRevision } : undefined)
       : operation === "questions" ? api.questions(fields.threadId)
       : operation === "questionState" ? api.questionState(fields.threadId, fields.questionId)
@@ -57,8 +58,8 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
   const base = baseUrl.replace(/\/$/, "");
   async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
     const body = JSON.stringify(input ?? {});
-    const requestId = (["send", "spawn", "ask", "watch", "agentWait", "wakeSchedule"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
-    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "questionState", "questionEvents", "answer", "settlements"].includes(operation) || ["watch", "wakeSchedule"].includes(operation) && (input as { action?: string })?.action === "list";
+    const requestId = (["send", "spawn", "ask", "watch", "agentWait", "wakeSchedule", "attention"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
+    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "questionState", "questionEvents", "attentionEvents", "answer", "settlements"].includes(operation) || ["watch", "wakeSchedule"].includes(operation) && (input as { action?: string })?.action === "list";
     const terminal = (value: Result<T>): Result<T> => value.ok ? value
       : { ok: false, error: { ...value.error, retryable: false, ...(requestId ? { requestId } : {}) } };
     const inherited = requestContext.getStore();
@@ -99,6 +100,8 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
       message: `Thread ${operation} ${reason}: ${lastError}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}` } };
   }
   return {
+    attention: input => call("attention", input),
+    attentionEvents: (after, limit) => call("attentionEvents", { after, limit }),
     agentWait: input => call("agentWait", input),
     wakeSchedule: input => call("wakeSchedule", input),
     watch: input => call("watch", input),

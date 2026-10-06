@@ -33,9 +33,9 @@ Humans and agents use the same thread API, with one delivery restriction:
 - An explicit new human or agent message to a held thread clears the hold and runs that message ahead of previously queued messages. Those messages retain their relative order.
 - Automatic child-idle notifications do not resume a held parent.
 
-Remote's main Threads tab lists only parentless person conversations. The Orchestrator tab lists fleet threads and children using the same thread identities and controls. The right panel lists active direct children, with an expandable Inactive children section.
+Remote's Chats tab lists parentless person conversations and threads explicitly promoted with `thread_attention`. Workers lists scheduled checks, fleet threads and children using the same thread identities and controls; promotion does not remove worker discovery or change custody.
 
-Delegation has exactly one level. Person conversations create workers in their authorized Orchestrator owner when configured. Ordinary people without access to the administrator's fleet retain workers in their own person boundary. Every parented thread, including existing records, and every fleet or isolated-application thread is a leaf worker. The owning service derives this role from custody and parentage, not client metadata. Workers do not receive `thread_spawn`, and the backend rejects recursive spawning even from already-running sessions with older tool schemas. Held or archived parents cannot create new workers, including while cancellation is unconfirmed. Local receipts are checked before forwarding creation so retries preserve previously accepted child identities. Existing transcripts and receipts remain with their current owner; they appear only in Orchestrator, not the main drawer.
+Delegation has exactly one level. Person conversations create workers in their authorized Orchestrator owner when configured. Ordinary people without access to the administrator's fleet retain workers in their own person boundary. Every parented thread, including existing records, and every fleet or isolated-application thread is a leaf worker. The owning service derives this role from custody and parentage, not client metadata. Workers do not receive `thread_spawn`, and the backend rejects recursive spawning even from already-running sessions with older tool schemas. Held or archived parents cannot create new workers, including while cancellation is unconfirmed. Local receipts are checked before forwarding creation so retries preserve previously accepted child identities. Existing transcripts and receipts remain with their current owner; workers appear in Workers and can explicitly promote their own existing thread into Chats.
 
 Encrypted-folder workers also stay in their person's mount namespace and transcript custody. These remain leaf workers in the Orchestrator view. Worker tool eligibility is sent explicitly per session as `PI_THREAD_CAN_SPAWN=0`; conversations receive `1`. Shared runner processes do not carry this setting between sessions. Agent CLI `run` calls preserve the calling thread as parent and use its authorized API; agents cannot use unparented `wave` calls. Stop-with-descendants and child discovery traverse authorized owners, while durable completion notifications return through the directory to the original parent.
 
@@ -66,7 +66,7 @@ Root-owned permission questions are different: a `rootConsent` inbox question wh
 
 ## Personal watch list
 
-Every normal thread can maintain its person's [watch list](watch-list.md) with `watch_list`, `watch_list_add`, `watch_list_update` and `watch_list_remove`. The unlocked Remote supervisor stores it in the existing encrypted thread database and starts a visible Opus 5.5 check only for due items. Major decisions use the asynchronous question tool. Fleet tools route to the person's owner rather than storing private checks in the fleet ledger. Watch checks are root conversations visible in Chats but cannot create workers.
+Every normal thread can maintain its person's [watch list](watch-list.md) with `watch_list`, `watch_list_add`, `watch_list_update` and `watch_list_remove`. The unlocked Remote supervisor stores it in the existing encrypted thread database and starts a visible Opus 5.5 check only for due items. Major decisions use the asynchronous question tool. Fleet tools route to the person's owner rather than storing private checks in the fleet ledger. Watch checks are root conversations visible in Workers and cannot create workers. They can explicitly promote themselves into Chats when human attention is needed.
 
 ## Rooms
 
@@ -85,6 +85,24 @@ A parent can call `thread_await` with one child ID or a group of direct child ID
 When a child's execution settles, commit its full outcome and final assistant message to execution/work receipts and a compact parent notification to the message queue. The parent sees `thread_idle`, the worker title, `complete`/`failed`/`cancelled`, final text or null, and any error. It receives no thinking, tool calls, provider metadata, usage or opaque fields. Its envelope retains the sender thread ID so the agent can send follow-up work. Native transcripts and stored execution results retain the original message for continuation and inspection. Dispatch and recovery also project queued reports prepared by an earlier release, preserving appended meeting context and receipt identity. Agent tool previews apply the same projection to pending reports.
 
 Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain queued when the parent is held. Idle is not proof that an assignment succeeded.
+
+## Explicit human attention from background work
+
+Every normal agent can use `thread_attention` while running or scheduled in the background:
+
+```json
+{ "summary": "Your tour is today at 2 pm Pacific at the leasing office. Bring ID.", "foreground": true }
+```
+
+The nonblank summary is at most 1000 characters. Omit `foreground` to notify without moving the thread into Chats. `foreground:true` also makes the same existing thread visible in Chats, without opening it over the person's current screen. The worker role, parentage, permissions, admission, scheduled checks and result reporting stay intact. Promotion never grants spawning rights. An ephemeral worker that explicitly requests attention stays available after its assignment settles, even for notify-only requests, so auto-archiving cannot erase an unseen notice. These workers use human viewed/unread inactivity retention. Explicit Stop/archive retain their normal meanings. Attention cannot release a hold or restore an archive.
+
+Notifications use the existing browser/Android channel, immediately and independently of settlement or questions. A durable owner-local sequenced event and request receipt commit atomically with placement. Retrying the same thread/tool call returns the original receipt; changing its payload conflicts. Remote projects each owner's attention cursor into its ordinary encrypted notification ledger. A receipt means custody, not proof a device displayed it. Clicking a promoted notice opens its original thread in Chats. Raw/sandbox and shared-room tool restrictions remain unchanged.
+
+The tool, watch-check prompt and own-thread recovery prompt teach **Renia reduction**: keep only what changes what the person does, stops doing, or relies on when next acting. Include the relevant consequence and next action, with time, timezone, location/contact when needed. Notify early enough to act. Cut repeated unchanged status and process narration. Reassurance that ends unnecessary checking is useful; uncertainty that changes a decision must remain. No meaningful change means finish quietly. Actual decisions still use `request_user_input_async`; do not disguise questions as notices or repeat unanswered questions.
+
+Owner APIs are `POST /v1/threads/attention` with `{threadId,requestId,summary,foreground?}` and `/v1/threads/attentionEvents` with `{after?,limit?}`. The native tool supplies its own thread ID and stable tool-call identity. Capability admission rejects another thread's identity and senderless processes; authorized runtime/service forwarding uses the existing directory. The owner's `thread_attention` table stores events beside normal thread receipts. `foreground` and `attentionSummary` metadata cannot be set through spawn or generic metadata patches.
+
+Focused acceptance: `npm test --workspace=pi-orchestrator -- tests/thread-attention.test.ts`, plus Remote attention notification/placement and Android delivery tests.
 
 ## Durable dependency waits and own-thread wakes
 
