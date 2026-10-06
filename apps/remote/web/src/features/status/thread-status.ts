@@ -38,11 +38,11 @@ function executionStatus(session: Pick<Session, "activity" | "activeTools">): Th
   switch (session.activity) {
     case "queued": return { key: "queued", label: "Queued for execution", short: "Queued", busy: true, attention: false };
     case "admitting": return { key: "admitting", label: "Acquiring model account", short: "Acquiring account", busy: true, attention: false };
-    case "starting": return { key: "starting", label: "Starting runtime", short: "Starting runtime", busy: true, attention: false };
+    case "starting": return { key: "starting", label: "Preparing agent", short: "Preparing agent", busy: true, attention: false };
     case "preparing": return { key: "preparing", label: "Preparing next step", short: "Preparing step", busy: true, attention: false };
     case "finishing": return { key: "finishing", label: "Saving execution result", short: "Saving result", busy: true, attention: false };
     case "cancelling": return { key: "cancelling", label: "Cancelling execution", short: "Cancelling", busy: true, attention: false };
-    case "recovering": return { key: "recovering", label: "Reconnecting to runtime", short: "Reconnecting runtime", busy: true, attention: false };
+    case "recovering": return { key: "recovering", label: "Reconnecting to agent", short: "Reconnecting", busy: true, attention: false };
     case "thinking": return { key: "thinking", label: "Thinking", short: "Thinking", busy: true, attention: false };
     case "responding": return { key: "responding", label: "Writing response", short: "Writing", busy: true, attention: false };
     case "preparing_tool": return { key: "preparing_tool", label: "Preparing tool call", short: "Preparing tool", busy: true, attention: false };
