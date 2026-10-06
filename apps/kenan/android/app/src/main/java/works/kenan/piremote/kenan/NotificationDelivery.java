@@ -78,7 +78,10 @@ final class NotificationDelivery {
                 if (!sequence.accept(seq, next, stream)) continue;
                 String session = event.getString("sessionId");
                 String thread = ThreadNotifications.key(identity.user, environment, session);
-                boolean question = "question".equals(event.optString("kind"));
+                boolean question = switch (NativeState.require(NativeState.NotificationKind.class, event.getString("kind"))) {
+                    case IDLE -> false;
+                    case QUESTION -> true;
+                };
                 String title = name + " · " + event.getString("name") + (question ? " · Question" : "");
                 String body = event.optString("body", "Session is idle");
                 Intent open = new Intent(context, MainActivity.class)

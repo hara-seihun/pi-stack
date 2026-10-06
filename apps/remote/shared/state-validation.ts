@@ -1,0 +1,141 @@
+import type { Activity, GovernorState, Session, StreamSnapshot, TranscriptItemKind } from "../server/protocol.js";
+import type { MessagingBackendInfo, MessagingCallState, MessagingLink, MessagingMessage } from "../server/messaging/protocol.js";
+import { assertNever, requireState } from "./explicit-state.js";
+
+export const ACTIVITIES = {
+  idle: true, awaiting: true, status_error: true,
+  queued: true, admitting: true, starting: true, preparing: true, finishing: true, cancelling: true, recovering: true,
+  thinking: true, responding: true, preparing_tool: true, waiting_for_model: true, waiting_on_agents: true,
+  waiting_on_tool: true, compacting: true, retrying: true, waiting_for_capacity: true, waiting_to_retry: true,
+} satisfies Record<Activity, true>;
+const THREAD_STATES = { idle: true, running: true } satisfies Record<Session["state"], true>;
+export const TRANSCRIPT_KINDS = { system: true, tool: true, user: true, assistant: true, thinking: true, toolCall: true, notice: true } satisfies Record<TranscriptItemKind, true>;
+export const GOVERNOR_STATES = { off: true, green: true, blue: true, red: true } satisfies Record<GovernorState, true>;
+export const BACKEND_STATES = { ready: true, unconfigured: true, connecting: true, error: true } satisfies Record<MessagingBackendInfo["status"], true>;
+export const LINK_STATES = { waiting: true, linked: true, failed: true, cancelled: true } satisfies Record<MessagingLink["status"], true>;
+export const MESSAGE_STATES = { received: true, sending: true, sent: true, failed: true, unknown: true } satisfies Record<MessagingMessage["status"], true>;
+export const CALL_STATES = { ringing_incoming: true, ringing_outgoing: true, connecting: true, connected: true, reconnecting: true, ended: true } satisfies Record<MessagingCallState, true>;
+const SNAPSHOT_TYPES = { bootstrap: true, state: true, messaging: true, dashboard: true, workers: true, transcript: true, live: true, images: true, questions: true } satisfies Record<StreamSnapshot["type"], true>;
+
+export function stateObject(value: unknown, owner: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${owner}: expected object`);
+  return value as Record<string, unknown>;
+}
+export function stateArray(value: unknown, owner: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${owner}: expected array`);
+  return value;
+}
+export function stateString(value: unknown, owner: string): string {
+  if (typeof value !== "string") throw new Error(`${owner}: expected string`);
+  return value;
+}
+
+export function validateThreadObservation(value: unknown): void {
+  const row = stateObject(value, "Thread observation");
+  requireState(row.state, THREAD_STATES, "Thread lifecycle");
+  requireState(row.activity, ACTIVITIES, "Thread activity");
+}
+
+export function validateSession(value: unknown): asserts value is Session {
+  validateThreadObservation(value);
+  const row = stateObject(value, "Session");
+  stateString(row.id, "Session id");
+  requireState(row.origin, { person: true, fleet: true } satisfies Record<Session["origin"], true>, "Session origin");
+  if (typeof row.held !== "boolean") throw new Error("Session held: expected boolean");
+  if (row.waitingForChildren !== undefined && typeof row.waitingForChildren !== "boolean") throw new Error("Child wait evidence: expected boolean");
+  stateArray(row.activeTools, "Active tools").forEach(tool => stateString(tool, "Active tool"));
+  stateArray(row.queuedMessages, "Queued messages").forEach(value => {
+    const message = stateObject(value, "Queued message");
+    requireState(message.state, { queued: true, dispatched: true } satisfies Record<Session["queuedMessages"][number]["state"], true>, "Queued message state");
+    requireState(message.delivery, { queue: true, steer: true, hardSteer: true } satisfies Record<Session["queuedMessages"][number]["delivery"], true>, "Queued message delivery");
+    if (message.acknowledgement !== undefined) requireState(message.acknowledgement, { pending: true, unconfirmed: true }, "Message acknowledgement");
+  });
+  if (row.waitingOnAgents !== undefined) {
+    const wait = stateObject(row.waitingOnAgents, "Dependency wait");
+    if (!Object.hasOwn(wait, "kind")) {
+      if (row.activity !== "status_error") throw new Error("Dependency wait: wait type missing");
+    } else {
+      const kind = requireState(wait.kind, { agents: true, job: true, deployment: true, message: true } satisfies Record<NonNullable<Session["waitingOnAgents"]>["kind"], true>, "Dependency wait");
+      stateString(wait.reason, "Wait reason");
+      switch (kind) {
+        case "agents":
+          if (!stateArray(wait.threadIds, "Agent dependencies").length) throw new Error("Agent wait: dependencies are empty");
+          (wait.threadIds as unknown[]).forEach(id => stateString(id, "Agent dependency"));
+          stateObject(wait.after, "Agent wait cursors");
+          break;
+        case "job": stateString(wait.jobId, "Job dependency"); break;
+        case "deployment": stateString(wait.publicationId, "Deployment dependency"); break;
+        case "message": stateString(wait.fromThreadId, "Message dependency"); break;
+      }
+    }
+  }
+}
+
+export function validateTranscriptHead(value: unknown): void {
+  const head = stateObject(value, "Transcript head");
+  requireState(head.kind, TRANSCRIPT_KINDS, "Transcript kind");
+}
+export function validateMessagingMessage(value: unknown): void {
+  const message = stateObject(value, "Messaging message");
+  requireState(message.status, MESSAGE_STATES, "Message delivery");
+  requireState(message.direction, { incoming: true, outgoing: true } satisfies Record<MessagingMessage["direction"], true>, "Message direction");
+}
+
+export function validateMessagingResponse(value: unknown): void {
+  const response = stateObject(value, "Messaging response");
+  if (Object.hasOwn(response, "message")) validateMessagingMessage(response.message);
+  if (Object.hasOwn(response, "messages")) stateArray(response.messages, "Message history").forEach(validateMessagingMessage);
+  if (Object.hasOwn(response, "call")) requireState(stateObject(response.call, "Call response").state, CALL_STATES, "Call state");
+  if (Object.hasOwn(response, "link")) requireState(stateObject(response.link, "Link response").status, LINK_STATES, "Link status");
+  if (Object.hasOwn(response, "conversation")) requireState(stateObject(response.conversation, "Conversation response").kind, { direct: true, group: true }, "Conversation kind");
+}
+
+export function validateStreamSnapshot(resource: string, value: unknown): asserts value is StreamSnapshot {
+  const snapshot = stateObject(value, "Stream snapshot");
+  const type = requireState(snapshot.type, SNAPSHOT_TYPES, "Stream snapshot type");
+  const scoped = type === "transcript" || type === "live" || type === "images" || type === "questions";
+  const expected = scoped ? `${type}:${stateString(snapshot.sessionId, "Snapshot session")}` : type;
+  if (resource !== expected) throw new Error(`Stream resource ${resource} does not match ${expected}`);
+  switch (type) {
+    case "state": case "workers": stateArray(snapshot.sessions, `${type} sessions`).forEach(validateSession); return;
+    case "transcript": stateArray(snapshot.items, "Transcript items").forEach(validateTranscriptHead); return;
+    case "live": stateString(snapshot.text, "Live text"); return;
+    case "images": {
+      const images = stateObject(snapshot.snapshot, "Image snapshot");
+      stateArray(images.images, "Inline images").forEach(value => {
+        const image = stateObject(value, "Inline image");
+        requireState(image.state, { queued: true, generating: true, complete: true, error: true }, "Inline image state");
+      });
+      return;
+    }
+    case "questions": stateArray(snapshot.questions, "Questions"); return;
+    case "bootstrap": stateObject(snapshot.bootstrap, "Bootstrap"); return;
+    case "dashboard": {
+      const dashboard = stateObject(snapshot.dashboard, "Dashboard");
+      if (dashboard.governors) {
+        const governors = stateObject(dashboard.governors, "Governors");
+        for (const provider of ["openai", "anthropic"]) requireState(stateObject(governors[provider], "Governor").state, GOVERNOR_STATES, "Governor mode");
+      }
+      stateArray(dashboard.plans, "Plans").forEach(value => {
+        const plan = stateObject(value, "Plan");
+        stateArray(plan.metrics, "Plan metrics").forEach(value => {
+          const metric = stateObject(value, "Plan metric");
+          stateArray(metric.accounts, "Plan accounts").forEach(value => requireState(stateObject(value, "Plan account").state, { ready: true, stale: true, unavailable: true }, "Account reading"));
+        });
+      });
+      return;
+    }
+    case "messaging": {
+      const messaging = stateObject(snapshot.snapshot, "Messaging snapshot");
+      stateArray(messaging.backends, "Messaging backends").forEach(value => {
+        const backend = stateObject(value, "Messaging backend");
+        requireState(backend.status, BACKEND_STATES, "Backend status");
+        if (backend.link !== null) requireState(stateObject(backend.link, "Messaging link").status, LINK_STATES, "Link status");
+      });
+      stateArray(messaging.conversations, "Messaging conversations").forEach(value => requireState(stateObject(value, "Conversation").kind, { direct: true, group: true }, "Conversation kind"));
+      stateArray(messaging.calls, "Messaging calls").forEach(value => requireState(stateObject(value, "Call").state, CALL_STATES, "Call state"));
+      return;
+    }
+  }
+  assertNever(type, "Stream snapshot");
+}

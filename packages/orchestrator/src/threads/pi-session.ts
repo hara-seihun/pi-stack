@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
+import { assertNever, requireRuntimeEvent, requireAssistantStopReason } from "./runtime-events.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,10 +39,20 @@ type SharedRpc = (runtime: AgentSessionRuntime, io: { output(event: PiEvent): vo
 const inputCommands = new Set(["prompt", "steer", "follow_up"]);
 const retry = { enabled: true, maxRetries: 6, baseDelayMs: 5_000 };
 
+export function assistantWorkOutcome(stopReason: unknown): "complete" | "failed" {
+  const reason = requireAssistantStopReason(stopReason);
+  switch (reason) {
+    case "stop": case "length": case "toolUse": return "complete";
+    case "error": case "aborted": case "pending": case "deferred": return "failed";
+  }
+  return assertNever(reason);
+}
+
 export const openPiSession: OpenPiSession = async (options, emitOutput, exit) => {
   const activity = createExecutionActivity();
   const liveTools = new Map<string, Record<string, unknown>>();
-  const output = (event: PiEvent) => {
+  const output = (input: PiEvent) => {
+    let event = requireRuntimeEvent(input);
     if (typeof event.emittedAt !== "number") event.emittedAt = Date.now();
     observeExecutionActivity(activity, event);
     if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
@@ -234,7 +245,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       const firstInput = entries.findIndex(entry => entry.id === executionStart);
       const final = entries.slice(firstInput < 0 ? entries.length : firstInput + 1).reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
       const message = final?.type === "message" ? final.message : null;
-      const outcome = cancelled ? "cancelled" : message?.role === "assistant" && ["error", "aborted"].includes(message.stopReason) ? "failed" : "complete";
+      const outcome = cancelled ? "cancelled" : message?.role === "assistant" ? assistantWorkOutcome(message.stopReason) : "complete";
       const landed = new Set(receipts().landedWorkIds);
       const deferredWorkIds = cancelled ? [...activeWork].filter(id => !landed.has(id)) : [];
       const workIds = [...activeWork].filter(id => !deferredWorkIds.includes(id));
@@ -288,6 +299,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       const sdk = join(getPackageDir(), "dist");
       const { runSharedRpcMode } = await import(pathToFileURL(join(sdk, "modes/rpc/shared-rpc-mode.js")).href) as { runSharedRpcMode: SharedRpc };
       rpc = await runSharedRpcMode(runtime, { exit, output: event => {
+        event = requireRuntimeEvent(event);
         if (event.type === "response") {
           if (internalResponses.has(String(event.id))) { internalResponses.set(String(event.id), event); return; }
           commands.finish(event, runtime.session.sessionManager);
@@ -449,6 +461,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             output({ ...admission.response, id: command.id });
             return;
           }
+          if (admission.kind !== "execute") return assertNever(admission);
           if (command.type === "compact") {
             backgroundCommands.add(String(command.id));
             output({ type: "compaction_start", commandId: command.id });

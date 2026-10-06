@@ -3,7 +3,7 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState } from "pi-orchestrator/api";
+import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, Delivery as ThreadDelivery } from "pi-orchestrator/api";
 import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
@@ -41,7 +41,7 @@ export interface IdleNotificationFeed { cursor: number; notifications: IdleNotif
 export interface QueuedMessage {
   id: string;
   text: string;
-  delivery: string;
+  delivery: ThreadDelivery;
   /** Where the message is: waiting for its turn, or taken by the runtime and
    * not yet in the agent's context. The client words it. */
   state: "queued" | "dispatched";
@@ -79,6 +79,8 @@ export interface Session {
   lastActivityAt?: number;
   activityDetail?: string;
   waitingOnAgents?: AgentWait;
+  /** Observed running children, not an inferred generic dependency. */
+  waitingForChildren?: boolean;
   wakeSchedule?: ThreadWakeSchedule;
   executionError?: string;
   /** Every tool running right now, in the order they started. */

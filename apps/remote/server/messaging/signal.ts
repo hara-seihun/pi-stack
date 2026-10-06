@@ -230,17 +230,17 @@ interface SignalCallRecord {
   outputDeviceName: string;
 }
 
-function callState(value: string): MessagingCallState | null {
+function callState(value: string): MessagingResult<MessagingCallState> {
   switch (value) {
-    case "RINGING_INCOMING": return "ringing_incoming";
-    case "RINGING_OUTGOING": return "ringing_outgoing";
-    case "CONNECTING": return "connecting";
-    case "CONNECTED": return "connected";
-    case "RECONNECTING": return "reconnecting";
+    case "RINGING_INCOMING": return success("ringing_incoming");
+    case "RINGING_OUTGOING": return success("ringing_outgoing");
+    case "CONNECTING": return success("connecting");
+    case "CONNECTED": return success("connected");
+    case "RECONNECTING": return success("reconnecting");
     case "ENDED":
-    case "IDLE": return "ended";
-    default: return null;
+    case "IDLE": return success("ended");
   }
+  return failure("protocol", `Unsupported Signal call state: ${value || "(missing)"}`);
 }
 
 class SignalPlugin implements MessagingPlugin {
@@ -565,8 +565,9 @@ class SignalPlugin implements MessagingPlugin {
     const direction = typeof raw.isOutgoing === "boolean"
       ? (raw.isOutgoing ? "outgoing" : "incoming")
       : fallback?.direction ?? previous?.call.direction;
-    if (!externalId || !state || !peer || !direction) return failure("protocol", "Signal returned an invalid call state");
-    const call: BackendCall = { externalId, peer, direction, state, reason: text(raw.reason) || null };
+    if (!state.ok) return state;
+    if (!externalId || !peer || !direction) return failure("protocol", "Signal returned an invalid call state");
+    const call: BackendCall = { externalId, peer, direction, state: state.value, reason: text(raw.reason) || null };
     this.callRecords.set(externalId, {
       call,
       inputDeviceName: text(raw.inputDeviceName) || previous?.inputDeviceName || "",

@@ -14,12 +14,16 @@ export function blockedAttempt(branch, modelKey, now = Date.now()) {
     // compaction may safely retry it against the unchanged session context.
     if (!latest && entry.data.state === "started") return;
     if (entry.data.state === "started") continue;
+    if (entry.data.state !== "failed" && entry.data.state !== "cancelled") return {
+      kind: "invalid", state: entry.data.state,
+      error: `Unsupported stored compaction attempt state: ${String(entry.data.state)}`,
+    };
     latest ??= entry;
     failures++;
   }
   if (!latest) return;
   const retryAt = compactionRetryAt(Date.parse(latest.timestamp) || 0, failures);
-  return now < retryAt ? { ...latest.data, failures, retryAt } : undefined;
+  return now < retryAt ? { ...latest.data, kind: "terminal", failures, retryAt } : undefined;
 }
 
 export function operationScope(parent, { idleMs = IDLE_MS, deadlineMs = DEADLINE_MS } = {}) {

@@ -108,7 +108,9 @@ describe("thread naming", () => {
     expect(namingOutcome(record("completed", { result: { text: "Alert Delivery" } }))).toEqual({ kind: "title", text: "Alert Delivery" });
     expect(namingOutcome(record("failed", { error: { code: "provider", message: "provider said no" } })))
       .toEqual({ kind: "failed", message: "provider said no", keepReceipt: false, recovery: "automatic" });
-    expect(namingOutcome(record("cancelled"))).toMatchObject({ kind: "failed", keepReceipt: false, recovery: "automatic" });
+    expect(namingOutcome(record("cancelled", { error: { code: "cancelled", message: "Cancelled by caller" } }))).toMatchObject({ kind: "failed", keepReceipt: false, recovery: "automatic" });
+    expect(() => namingOutcome(record("cancelled"))).toThrow("Invalid completion error receipt");
+    expect(() => namingOutcome(record("future"))).toThrow("Unsupported completion state");
   });
 
   test("retries are delayed and bounded even without another message", () => {

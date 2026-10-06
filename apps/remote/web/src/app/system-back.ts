@@ -5,6 +5,7 @@
 // pretending it handled it.
 import { useEffect } from "react";
 import { currentRoute, navigate, type Route } from "./routes";
+import { assertNever } from "../../../shared/explicit-state";
 
 export type BackActions = {
   closePanel(): void;
@@ -19,6 +20,7 @@ export function routeHasDetail(route: Route): boolean {
     case "files": return route.path !== null;
     case "calendar": case "machine": return false;
   }
+  return assertNever(route, "Back route");
 }
 
 /**

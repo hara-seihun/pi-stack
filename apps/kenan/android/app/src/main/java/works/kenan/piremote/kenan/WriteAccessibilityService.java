@@ -62,7 +62,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private RemoteSession.Identity learnedIdentity;
     private WriteOpusRecorder recorder;
     private WriteConnection connection;
-    private boolean shown, recording, connecting, finishing, clipboardReady;
+    private boolean shown;
+    private NativeState.WritePhase phase = NativeState.WritePhase.IDLE;
     private volatile boolean stopped;
     private boolean destroyed;
     private volatile int sentPackets;
@@ -105,7 +106,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 });
             }
         }
-        if (!recording && !finishing && !connecting) refresh();
+        if (!busy()) refresh();
         else SharedOverlay.refresh();
     }
 
@@ -151,7 +152,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     private void refresh() {
         if (active != this || destroyed) return;
         if (!overlayEnabled()) {
-            if (busy() || clipboardReady) cancel();
+            if (busy() || phase.clipboard) cancel();
             hide();
             return;
         }
@@ -176,7 +177,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         boolean keyboardRequired = getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true);
         if (!allowed || !eligible(focused) || keyboardRequired && !hasKeyboard()
             || focused != null && dismissal.hides(field(focused), false)) {
-            if (!recording && !finishing && !connecting) hide();
+            if (!busy()) hide();
             return;
         }
         target = focused;
@@ -190,7 +191,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         if (busy()) failed("Overlay window is no longer available");
     }
     boolean visible() { return shown && overlayEnabled(); }
-    boolean busy() { return recording || connecting || finishing; }
+    boolean busy() { return phase.busy(); }
     boolean canDismiss() { return !busy(); }
     void dismiss() {
         if (!canDismiss()) return;
@@ -205,17 +206,26 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
     void tapped() {
         if (!overlayEnabled()) { refresh(); return; }
-        if (finishing) return;
-        if (recording) { finish(); return; }
-        if (clipboardReady && target != null && eligible(target)
-            && target.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
-            clipboardReady = false; render(); return;
-        }
-        if (!connecting) start();
+        Runnable tap = switch (phase) {
+            case FINISHING, FINISHING_CONNECTING, CONNECTING -> () -> { }; // These phases must settle before another tap.
+            case RECORDING, BUFFERING -> this::finish;
+            case CLIPBOARD_READY -> () -> {
+                if (target != null && eligible(target) && target.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
+                    phase = NativeState.WritePhase.IDLE; render();
+                } else start();
+            };
+            case IDLE -> this::start;
+        };
+        tap.run();
     }
     String description() {
-        return finishing ? "Finishing dictation" : recording ? "Tap to finish Pi Stack Write"
-            : connecting ? "Connecting Pi Stack Write" : clipboardReady ? "Tap to paste dictated text" : "Tap to start Pi Stack Write";
+        return switch (phase) {
+            case FINISHING, FINISHING_CONNECTING -> "Finishing dictation";
+            case RECORDING, BUFFERING -> "Tap to finish Pi Stack Write";
+            case CONNECTING -> "Connecting Pi Stack Write";
+            case CLIPBOARD_READY -> "Tap to paste dictated text";
+            case IDLE -> "Tap to start Pi Stack Write";
+        };
     }
     private void render() { SharedOverlay.refresh(); }
 
@@ -223,9 +233,9 @@ public final class WriteAccessibilityService extends AccessibilityService {
         RemoteSession.Identity identity = NotificationIdentity.get(this).current();
         if (identity == null || target == null || !target.refresh() || !eligible(target)) return;
         synchronized (packetsLock) { packets.clear(); audioBytes = 0; }
-        clipboardReady = false; waveLevel = 0; backlog = false;
+        waveLevel = 0; backlog = false;
         long attempt = ++generation;
-        connecting = true; stopped = false; sentPackets = 0;
+        phase = NativeState.WritePhase.CONNECTING; stopped = false; sentPackets = 0;
         render();
         if (connection != null) connection.cancel();
         String text = fieldText(target);
@@ -234,8 +244,8 @@ public final class WriteAccessibilityService extends AccessibilityService {
         String context = text.substring(Math.max(0, end - 200), end);
         WriteConnection stream = new WriteConnection(this, identity, new WriteConnection.Events() {
             @Override public void connected() { main.post(() -> {
-                if (attempt != generation || !connecting || !NotificationIdentity.get(WriteAccessibilityService.this).isCurrent(identity)) return;
-                connecting = false;
+                if (attempt != generation || !phase.connecting || !NotificationIdentity.get(WriteAccessibilityService.this).isCurrent(identity)) return;
+                phase = phase.connected();
                 sendPackets(attempt, connection);
                 render();
             }); }
@@ -248,7 +258,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
         });
         connection = stream;
         startRecorder(attempt, stream);
-        if (connecting) stream.connect(context);
+        if (phase.connecting) stream.connect(context);
     }
 
     private void sendPackets(long attempt, WriteConnection stream) {
@@ -277,11 +287,11 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 }
                 main.post(() -> {
                     if (attempt != generation) return;
-                    finishing = true; recording = false;
+                    phase = NativeState.WritePhase.FINISHING;
                     stream.finish();
                     render();
                     main.postDelayed(() -> {
-                        if (attempt == generation && finishing) failed("Server did not finish");
+                        if (attempt == generation && phase.finishing) failed("Server did not finish");
                     }, 30000);
                 });
             } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
@@ -300,7 +310,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
                 .setContentTitle("Pi Stack Write is listening").setOngoing(true).build();
             if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFICATION, foreground, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
             else startForeground(NOTIFICATION, foreground);
-            recording = true;
+            phase = NativeState.WritePhase.BUFFERING;
             recorder = new WriteOpusRecorder(new WriteOpusRecorder.Listener() {
                 @Override public void packet(byte[] packet) {
                     synchronized (packetsLock) {
@@ -333,14 +343,13 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
 
     private void finish() {
-        if (!recording) return;
-        recording = false;
-        finishing = true;
+        if (!phase.recording) return;
+        phase = phase.finish();
         if (recorder != null) recorder.stop();
         render();
     }
     private void stopRecorder() {
-        recording = false;
+        phase = NativeState.WritePhase.IDLE;
         if (recorder != null) recorder.cancel();
         recorder = null;
         stopForeground(STOP_FOREGROUND_REMOVE);
@@ -354,21 +363,20 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
     private void idle() {
         retireAttempt();
-        connecting = false; finishing = false; stopped = false; backlog = false; clipboardReady = false;
+        phase = NativeState.WritePhase.IDLE; stopped = false; backlog = false;
         render(); refresh();
     }
     private void cancel() { idle(); }
     private void failed(String message) {
-        if (!recording && !finishing && !connecting) return;
+        if (!busy()) return;
         Log.w("PiStackWrite", "Dictation ended: " + message);
         SharedOverlay.haptic();
         idle();
     }
     private void completed(String text) {
         if (!overlayEnabled()) { refresh(); return; }
-        if (!finishing && !recording) return;
+        if (!phase.finishing && !phase.recording) return;
         retireAttempt();
-        finishing = false; connecting = false;
         if (text == null || text.isBlank()) { idle(); return; }
         AccessibilityNodeInfo node = target;
         if (node == null || !node.refresh() || !eligible(node) || node.getWindowId() != windowId) { fallback(text); return; }
@@ -390,7 +398,7 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
     private void fallback(String text) {
         getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("Pi Stack Write", text));
-        clipboardReady = true;
+        phase = NativeState.WritePhase.CLIPBOARD_READY;
         backlog = false;
         Toast.makeText(this, "Write copied text. Tap the dot to paste.", Toast.LENGTH_LONG).show();
         render();
@@ -405,7 +413,6 @@ public final class WriteAccessibilityService extends AccessibilityService {
     }
 
     void draw(Canvas canvas, Paint paint, float cx, float cy, float scale) {
-        boolean waiting = finishing || (connecting && !recording);
         float pulse = (float) (Math.sin(android.os.SystemClock.uptimeMillis() / 160.0) * .5 + .5);
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(backlog ? 0xff555b71 : 0xff242b40);
@@ -413,32 +420,38 @@ public final class WriteAccessibilityService extends AccessibilityService {
         paint.setColor(Color.WHITE);
         paint.setStrokeWidth(2.7f * scale);
         paint.setStrokeCap(Paint.Cap.ROUND);
-        if (waiting) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setAlpha(110 + Math.round(140 * pulse));
-            canvas.drawArc(cx - 13 * scale, cy - 13 * scale, cx + 13 * scale, cy + 13 * scale,
-                -90, 110 + 120 * pulse, false, paint);
-            paint.setAlpha(255);
-        } else if (recording) {
-            float[] bars = { .4f, .7f, 1f, .55f, .8f };
-            for (int i = 0; i < bars.length; i++) {
-                float h = (4 + waveLevel * 1.6f * bars[i]) * scale;
-                float x = cx + (i - 2) * 6 * scale;
-                canvas.drawLine(x, cy - h, x, cy + h, paint);
-            }
-        } else if (clipboardReady) {
-            paint.setStyle(Paint.Style.STROKE);
-            canvas.drawRoundRect(cx - 8 * scale, cy - 11 * scale, cx + 8 * scale, cy + 11 * scale,
-                2 * scale, 2 * scale, paint);
-            canvas.drawLine(cx - 4 * scale, cy - 3 * scale, cx + 4 * scale, cy - 3 * scale, paint);
-            canvas.drawLine(cx - 4 * scale, cy + 2 * scale, cx + 4 * scale, cy + 2 * scale, paint);
-        } else {
-            paint.setStyle(Paint.Style.FILL);
-            canvas.drawRoundRect(cx - 5 * scale, cy - 11 * scale, cx + 5 * scale, cy + 5 * scale,
-                5 * scale, 5 * scale, paint);
-            paint.setStyle(Paint.Style.STROKE);
-            canvas.drawArc(cx - 9 * scale, cy - 5 * scale, cx + 9 * scale, cy + 10 * scale, 0, 180, false, paint);
-            canvas.drawLine(cx, cy + 10 * scale, cx, cy + 14 * scale, paint);
-        }
+        Runnable draw = switch (phase) {
+            case CONNECTING, FINISHING, FINISHING_CONNECTING -> () -> {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setAlpha(110 + Math.round(140 * pulse));
+                canvas.drawArc(cx - 13 * scale, cy - 13 * scale, cx + 13 * scale, cy + 13 * scale,
+                    -90, 110 + 120 * pulse, false, paint);
+                paint.setAlpha(255);
+            };
+            case RECORDING, BUFFERING -> () -> {
+                float[] bars = { .4f, .7f, 1f, .55f, .8f };
+                for (int i = 0; i < bars.length; i++) {
+                    float h = (4 + waveLevel * 1.6f * bars[i]) * scale;
+                    float x = cx + (i - 2) * 6 * scale;
+                    canvas.drawLine(x, cy - h, x, cy + h, paint);
+                }
+            };
+            case CLIPBOARD_READY -> () -> {
+                paint.setStyle(Paint.Style.STROKE);
+                canvas.drawRoundRect(cx - 8 * scale, cy - 11 * scale, cx + 8 * scale, cy + 11 * scale,
+                    2 * scale, 2 * scale, paint);
+                canvas.drawLine(cx - 4 * scale, cy - 3 * scale, cx + 4 * scale, cy - 3 * scale, paint);
+                canvas.drawLine(cx - 4 * scale, cy + 2 * scale, cx + 4 * scale, cy + 2 * scale, paint);
+            };
+            case IDLE -> () -> {
+                paint.setStyle(Paint.Style.FILL);
+                canvas.drawRoundRect(cx - 5 * scale, cy - 11 * scale, cx + 5 * scale, cy + 5 * scale,
+                    5 * scale, 5 * scale, paint);
+                paint.setStyle(Paint.Style.STROKE);
+                canvas.drawArc(cx - 9 * scale, cy - 5 * scale, cx + 9 * scale, cy + 10 * scale, 0, 180, false, paint);
+                canvas.drawLine(cx, cy + 10 * scale, cx, cy + 14 * scale, paint);
+            };
+        };
+        draw.run();
     }
 }

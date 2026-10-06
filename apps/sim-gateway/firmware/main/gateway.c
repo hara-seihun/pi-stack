@@ -91,13 +91,27 @@ static bool send_json(cJSON *json)
     if (!ok) { mute(); atomic_store(&fault, true); }
     return ok;
 }
-static void call_state(const char *id, const char *status, const char *error)
+typedef enum { CALL_DIALING, CALL_RINGING, CALL_ACTIVE, CALL_ENDED, CALL_FAILED } call_status;
+static const char *call_status_name(call_status status)
 {
+    switch (status) {
+    case CALL_DIALING: return "dialing";
+    case CALL_RINGING: return "ringing";
+    case CALL_ACTIVE: return "active";
+    case CALL_ENDED: return "ended";
+    case CALL_FAILED: return "failed";
+    }
+    return NULL;
+}
+static void call_state(const char *id, call_status status, const char *error)
+{
+    const char *name = call_status_name(status);
+    if (!name) { mute(); atomic_store(&fault, true); return; }
     if (!state.ws_up) return;
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "type", "call-state");
     cJSON_AddStringToObject(j, "callId", id);
-    cJSON_AddStringToObject(j, "state", status);
+    cJSON_AddStringToObject(j, "state", name);
     if (error && *error) cJSON_AddStringToObject(j, "error", error);
     send_json(j);
 }
@@ -119,7 +133,7 @@ static void hello(void)
 static void finish(const char *error)
 {
     mute();
-    if (state.call_id[0]) call_state(state.call_id, error && *error ? "failed" : "ended", error);
+    if (state.call_id[0]) call_state(state.call_id, error && *error ? CALL_FAILED : CALL_ENDED, error);
     state.call_id[0] = state.number[0] = state.end_error[0] = 0;
     state.active = state.progress = state.answered = state.verified = state.closing = false;
     state.audio_connecting = false;
@@ -160,7 +174,7 @@ static void maybe_active(void)
     }
     if (!state.active && state.ws_up && atomic_load(&online)) {
         mute();
-        call_state(state.call_id, "active", NULL);
+        call_state(state.call_id, CALL_ACTIVE, NULL);
         if (atomic_load(&fault)) return;
         state.active = true;
         portENTER_CRITICAL(&audio_lock);
@@ -200,7 +214,8 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t id, void *
     static int opcode;
     (void)arg; (void)base;
     event e = {0};
-    if (id == WEBSOCKET_EVENT_CONNECTED || id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_ERROR) {
+    if (id == WEBSOCKET_EVENT_CONNECTED || id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_ERROR ||
+        id == WEBSOCKET_EVENT_CLOSED || id == WEBSOCKET_EVENT_FINISH) {
         mute(); used = expected = 0;
         atomic_store(&online, id == WEBSOCKET_EVENT_CONNECTED);
         e.type = id == WEBSOCKET_EVENT_CONNECTED ? EV_WS_UP : EV_WS_DOWN;
@@ -208,10 +223,12 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t id, void *
         enqueue(&e);
         return;
     }
-    if (id != WEBSOCKET_EVENT_DATA) return;
+    if (id == WEBSOCKET_EVENT_BEFORE_CONNECT || id == WEBSOCKET_EVENT_BEGIN) return;
+    if (id != WEBSOCKET_EVENT_DATA) { mute(); atomic_store(&fault, true); return; }
     esp_websocket_event_data_t *d = data;
     if (d->op_code == 8) { mute(); atomic_store(&online, false); return; }
     if (d->op_code == 9 || d->op_code == 10) return;
+    if (d->op_code != 1 && d->op_code != 2) { mute(); atomic_store(&fault, true); return; }
     if (d->payload_offset == 0 && (d->op_code == 1 || d->op_code == 2)) {
         used = 0; expected = d->payload_len; opcode = d->op_code;
     }
@@ -250,24 +267,38 @@ static void hf_callback(esp_hf_client_cb_event_t id, esp_hf_client_cb_param_t *p
     case ESP_HF_CLIENT_CONNECTION_STATE_EVT:
         e.value = p->conn_stat.state; memcpy(e.address, p->conn_stat.remote_bda, 6);
         if (e.value != ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED) mute();
-        break;
+        enqueue(&e); return;
     case ESP_HF_CLIENT_AUDIO_STATE_EVT:
         e.value = p->audio_stat.state; memcpy(e.address, p->audio_stat.remote_bda, 6);
         mute();
-        break;
-    case ESP_HF_CLIENT_CIND_CALL_EVT: e.value = p->call.status; if (!e.value) mute(); break;
-    case ESP_HF_CLIENT_CIND_CALL_SETUP_EVT: e.value = p->call_setup.status; if (e.value == 1) mute(); break;
-    case ESP_HF_CLIENT_CIND_CALL_HELD_EVT: e.value = p->call_held.status; if (e.value) mute(); break;
-    case ESP_HF_CLIENT_AT_RESPONSE_EVT: e.value = p->at_response.code; break;
-    case ESP_HF_CLIENT_PROF_STATE_EVT: e.value = p->prof_stat.state; break;
+        enqueue(&e); return;
+    case ESP_HF_CLIENT_CIND_CALL_EVT: e.value = p->call.status; if (!e.value) mute(); enqueue(&e); return;
+    case ESP_HF_CLIENT_CIND_CALL_SETUP_EVT: e.value = p->call_setup.status; if (e.value == 1) mute(); enqueue(&e); return;
+    case ESP_HF_CLIENT_CIND_CALL_HELD_EVT: e.value = p->call_held.status; if (e.value) mute(); enqueue(&e); return;
+    case ESP_HF_CLIENT_AT_RESPONSE_EVT: e.value = p->at_response.code; enqueue(&e); return;
+    case ESP_HF_CLIENT_PROF_STATE_EVT: e.value = p->prof_stat.state; enqueue(&e); return;
     case ESP_HF_CLIENT_CLCC_EVT:
         e.value = p->clcc.status; e.extra = p->clcc.dir;
         if (p->clcc.number) snprintf(e.data, sizeof(e.data), "%s", p->clcc.number);
-        break;
-    case ESP_HF_CLIENT_RING_IND_EVT: break;
-    default: return;
+        enqueue(&e); return;
+    case ESP_HF_CLIENT_RING_IND_EVT: enqueue(&e); return;
+    case ESP_HF_CLIENT_BVRA_EVT:
+    case ESP_HF_CLIENT_CIND_SERVICE_AVAILABILITY_EVT:
+    case ESP_HF_CLIENT_CIND_SIGNAL_STRENGTH_EVT:
+    case ESP_HF_CLIENT_CIND_ROAMING_STATUS_EVT:
+    case ESP_HF_CLIENT_CIND_BATTERY_LEVEL_EVT:
+    case ESP_HF_CLIENT_COPS_CURRENT_OPERATOR_EVT:
+    case ESP_HF_CLIENT_BTRH_EVT:
+    case ESP_HF_CLIENT_CLIP_EVT:
+    case ESP_HF_CLIENT_CCWA_EVT:
+    case ESP_HF_CLIENT_VOLUME_CONTROL_EVT:
+    case ESP_HF_CLIENT_CNUM_EVT:
+    case ESP_HF_CLIENT_BSIR_EVT:
+    case ESP_HF_CLIENT_BINP_EVT:
+    case ESP_HF_CLIENT_PKT_STAT_NUMS_GET_EVT:
+        return;
     }
-    enqueue(&e);
+    mute(); atomic_store(&fault, true);
 }
 static void gap_callback(esp_bt_gap_cb_event_t id, esp_bt_gap_cb_param_t *p)
 {
@@ -283,6 +314,37 @@ static void gap_callback(esp_bt_gap_cb_event_t id, esp_bt_gap_cb_param_t *p)
         esp_bt_gap_pin_reply(p->pin_req.bda, false, 0, pin);
     } else if (id == ESP_BT_GAP_KEY_REQ_EVT) {
         esp_bt_gap_ssp_passkey_reply(p->key_req.bda, false, 0);
+    } else {
+        switch (id) {
+        case ESP_BT_GAP_DISC_RES_EVT:
+        case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
+        case ESP_BT_GAP_RMT_SRVCS_EVT:
+        case ESP_BT_GAP_RMT_SRVC_REC_EVT:
+        case ESP_BT_GAP_AUTH_CMPL_EVT:
+        case ESP_BT_GAP_KEY_NOTIF_EVT:
+        case ESP_BT_GAP_READ_RSSI_DELTA_EVT:
+        case ESP_BT_GAP_CONFIG_EIR_DATA_EVT:
+        case ESP_BT_GAP_SET_AFH_CHANNELS_EVT:
+        case ESP_BT_GAP_READ_REMOTE_NAME_EVT:
+        case ESP_BT_GAP_MODE_CHG_EVT:
+        case ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT:
+        case ESP_BT_GAP_QOS_CMPL_EVT:
+        case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+        case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+        case ESP_BT_GAP_SET_PAGE_TO_EVT:
+        case ESP_BT_GAP_GET_PAGE_TO_EVT:
+        case ESP_BT_GAP_ACL_PKT_TYPE_CHANGED_EVT:
+        case ESP_BT_GAP_ENC_CHG_EVT:
+        case ESP_BT_GAP_SET_MIN_ENC_KEY_SIZE_EVT:
+        case ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT:
+            return;
+        case ESP_BT_GAP_PIN_REQ_EVT:
+        case ESP_BT_GAP_CFM_REQ_EVT:
+        case ESP_BT_GAP_KEY_REQ_EVT:
+        case ESP_BT_GAP_EVT_MAX:
+            break;
+        }
+        mute(); atomic_store(&fault, true);
     }
 }
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -293,6 +355,8 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (esp_wifi_connect() != ESP_OK) atomic_store(&fault, true);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         event e = {.type = EV_WIFI}; enqueue(&e);
+    } else {
+        mute(); atomic_store(&fault, true);
     }
 }
 static void console_task(void *arg)
@@ -321,15 +385,16 @@ static bool seen_call(const char *id)
 }
 static void command(const char *text)
 {
-    cJSON *j = cJSON_Parse(text);
-    if (!j) { stop_call("invalid_command"); return; }
+    cJSON *j = cJSON_ParseWithOpts(text, NULL, true);
+    if (!j) { stop_call("invalid_command"); atomic_store(&fault, true); return; }
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(j, "type");
     const cJSON *id = cJSON_GetObjectItemCaseSensitive(j, "callId");
     if (!cJSON_IsString(type) || !cJSON_IsString(id) || !valid_call_id(id->valuestring)) {
-        cJSON_Delete(j); return;
+        cJSON_Delete(j); stop_call("invalid_command"); atomic_store(&fault, true); return;
     }
     if (!strcmp(type->valuestring, "hangup")) {
         if (!strcmp(id->valuestring, state.call_id)) stop_call(NULL);
+        else call_state(id->valuestring, CALL_FAILED, "unknown_call");
     } else if (!strcmp(type->valuestring, "dial")) {
         const cJSON *number = cJSON_GetObjectItemCaseSensitive(j, "number");
         const cJSON *seconds = cJSON_GetObjectItemCaseSensitive(j, "maxSeconds");
@@ -342,7 +407,7 @@ static void command(const char *text)
         else if (state.call_id[0] || state.call_present || state.setup || state.held) error = "phone_busy";
         if (error) {
             /* A duplicate of the current call must not terminally fail its reservation. */
-            if (strcmp(id->valuestring, state.call_id)) call_state(id->valuestring, "failed", error);
+            if (strcmp(id->valuestring, state.call_id)) call_state(id->valuestring, CALL_FAILED, error);
         } else {
             snprintf(state.recent[state.recent_index++ % RECENT_CALLS], 37, "%s", id->valuestring);
             snprintf(state.call_id, sizeof(state.call_id), "%s", id->valuestring);
@@ -350,16 +415,62 @@ static void command(const char *text)
             state.deadline = esp_timer_get_time() + (int64_t)seconds->valueint * 1000000;
             state.progress = state.answered = state.verified = state.active = state.closing = false;
             mute();
-            call_state(state.call_id, "dialing", NULL);
+            call_state(state.call_id, CALL_DIALING, NULL);
             if (atomic_load(&online) && !atomic_load(&fault)) {
                 if (esp_hf_client_dial(state.number) != ESP_OK) finish("dial_request_failed");
             } else finish("server_disconnected_before_dial");
         }
+    } else {
+        stop_call("invalid_command"); atomic_store(&fault, true);
     }
     cJSON_Delete(j);
 }
+static bool valid_hfp(const event *e)
+{
+    switch (e->code) {
+    case ESP_HF_CLIENT_CONNECTION_STATE_EVT:
+        return e->value == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED ||
+            e->value == ESP_HF_CLIENT_CONNECTION_STATE_CONNECTING ||
+            e->value == ESP_HF_CLIENT_CONNECTION_STATE_CONNECTED ||
+            e->value == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED ||
+            e->value == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTING;
+    case ESP_HF_CLIENT_AUDIO_STATE_EVT:
+        return e->value == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED ||
+            e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTING ||
+            e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED ||
+            e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC;
+    case ESP_HF_CLIENT_CIND_CALL_EVT:
+        return e->value == ESP_HF_CALL_STATUS_NO_CALLS || e->value == ESP_HF_CALL_STATUS_CALL_IN_PROGRESS;
+    case ESP_HF_CLIENT_CIND_CALL_SETUP_EVT:
+        return e->value == ESP_HF_CALL_SETUP_STATUS_IDLE || e->value == ESP_HF_CALL_SETUP_STATUS_INCOMING ||
+            e->value == ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING || e->value == ESP_HF_CALL_SETUP_STATUS_OUTGOING_ALERTING;
+    case ESP_HF_CLIENT_CIND_CALL_HELD_EVT:
+        return e->value == ESP_HF_CALL_HELD_STATUS_NONE || e->value == ESP_HF_CALL_HELD_STATUS_HELD_AND_ACTIVE ||
+            e->value == ESP_HF_CALL_HELD_STATUS_HELD;
+    case ESP_HF_CLIENT_CLCC_EVT:
+        return (e->extra == ESP_HF_CURRENT_CALL_DIRECTION_OUTGOING || e->extra == ESP_HF_CURRENT_CALL_DIRECTION_INCOMING) &&
+            (e->value == ESP_HF_CURRENT_CALL_STATUS_ACTIVE || e->value == ESP_HF_CURRENT_CALL_STATUS_HELD ||
+             e->value == ESP_HF_CURRENT_CALL_STATUS_DIALING || e->value == ESP_HF_CURRENT_CALL_STATUS_ALERTING ||
+             e->value == ESP_HF_CURRENT_CALL_STATUS_INCOMING || e->value == ESP_HF_CURRENT_CALL_STATUS_WAITING ||
+             e->value == ESP_HF_CURRENT_CALL_STATUS_HELD_BY_RESP_HOLD);
+    case ESP_HF_CLIENT_AT_RESPONSE_EVT:
+        return e->value == ESP_HF_AT_RESPONSE_CODE_OK || e->value == ESP_HF_AT_RESPONSE_CODE_ERR ||
+            e->value == ESP_HF_AT_RESPONSE_CODE_NO_CARRIER || e->value == ESP_HF_AT_RESPONSE_CODE_BUSY ||
+            e->value == ESP_HF_AT_RESPONSE_CODE_NO_ANSWER || e->value == ESP_HF_AT_RESPONSE_CODE_DELAYED ||
+            e->value == ESP_HF_AT_RESPONSE_CODE_BLACKLISTED || e->value == ESP_HF_AT_RESPONSE_CODE_CME;
+    case ESP_HF_CLIENT_PROF_STATE_EVT:
+        return e->value == ESP_HF_INIT_SUCCESS || e->value == ESP_HF_INIT_ALREADY || e->value == ESP_HF_INIT_FAIL ||
+            e->value == ESP_HF_DEINIT_SUCCESS || e->value == ESP_HF_DEINIT_ALREADY || e->value == ESP_HF_DEINIT_FAIL;
+    case ESP_HF_CLIENT_RING_IND_EVT: return true;
+    }
+    return false;
+}
 static void handle_hfp(const event *e)
 {
+    if (!valid_hfp(e)) {
+        ESP_LOGE(TAG, "Invalid HFP event/state: %d/%d", e->code, e->value);
+        lose_ownership(); return;
+    }
     switch (e->code) {
     case ESP_HF_CLIENT_PROF_STATE_EVT:
         if (e->value == ESP_HF_INIT_SUCCESS) state.reconnect_at = 0;
@@ -382,11 +493,12 @@ static void handle_hfp(const event *e)
     case ESP_HF_CLIENT_AUDIO_STATE_EVT:
         if (memcmp(e->address, phone, 6)) return;
         state.audio_state = e->value;
-        if (e->value >= ESP_HF_CLIENT_AUDIO_STATE_CONNECTED) state.active = false;
+        if (e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED || e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) state.active = false;
         portENTER_CRITICAL(&audio_lock);
-        sco_rate = e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC ? 16000 : 8000;
+        if (e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED) sco_rate = 8000;
+        else if (e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) sco_rate = 16000;
         portEXIT_CRITICAL(&audio_lock);
-        if (!state.call_id[0] && e->value >= ESP_HF_CLIENT_AUDIO_STATE_CONNECTED)
+        if (!state.call_id[0] && (e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED || e->value == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC))
             esp_hf_client_disconnect_audio(phone);
         if (state.active && e->value == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED) stop_call("sco_disconnected");
         maybe_active(); break;
@@ -409,7 +521,7 @@ static void handle_hfp(const event *e)
             if (state.call_id[0]) lose_ownership();
         } else if (e->value == ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING && state.call_id[0]) state.progress = true;
         else if (e->value == ESP_HF_CALL_SETUP_STATUS_OUTGOING_ALERTING && state.call_id[0]) {
-            state.progress = true; call_state(state.call_id, "ringing", NULL);
+            state.progress = true; call_state(state.call_id, CALL_RINGING, NULL);
         } else if (!e->value && !state.call_present && state.progress && state.call_id[0]) finish(state.end_error);
         hello(); break;
     case ESP_HF_CLIENT_CIND_CALL_HELD_EVT:
@@ -429,11 +541,15 @@ static void handle_hfp(const event *e)
         if (state.call_id[0] && e->value != ESP_HF_AT_RESPONSE_CODE_OK) stop_call("phone_at_error");
         break;
     case ESP_HF_CLIENT_RING_IND_EVT: hello(); break;
-    default: break;
     }
 }
 static void handle_event(event e)
 {
+    if (e.type != EV_WIFI && e.type != EV_WS_UP && e.type != EV_WS_DOWN && e.type != EV_JSON &&
+        e.type != EV_HFP && e.type != EV_PAIR && e.type != EV_CONFIRM) {
+        ESP_LOGE(TAG, "Invalid gateway event: %d", e.type);
+        mute(); atomic_store(&fault, true); return;
+    }
             switch (e.type) {
             case EV_WIFI:
                 if (!esp_websocket_client_is_connected(ws)) {
@@ -536,7 +652,8 @@ void app_main(void)
     esp_netif_create_default_wifi_sta();
     wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_init));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, wifi_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
     wifi_config_t wifi = {0};
     snprintf((char *)wifi.sta.ssid, sizeof(wifi.sta.ssid), "%s", CONFIG_SIM_WIFI_SSID);

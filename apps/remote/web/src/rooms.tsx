@@ -13,6 +13,7 @@ import { DismissibleError } from "./dismissible-error";
 import { appStorageKey } from "./app-path";
 import "./features/conversation/questions.css";
 import "./rooms.css";
+import { validateThreadObservation, stateArray } from "../../shared/state-validation";
 
 export function useRooms(enabled: boolean) {
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -23,6 +24,7 @@ export function useRooms(enabled: boolean) {
     const response = await piFetch("/v1/rooms", { signal, cache: "no-store" });
     if (!response.ok) throw new Error(`Rooms returned HTTP ${response.status}`);
     const value = await response.json() as { rooms: Room[]; people: RoomMember[] };
+    stateArray(value.rooms, "Room directory").forEach(validateThreadObservation);
     setRooms(value.rooms); setPeople(value.people); setError("");
   }, [enabled]);
   useEffect(() => {
@@ -148,6 +150,7 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
     const response = await piFetch(`/v1/rooms/${encodeURIComponent(id)}`, { signal, cache: "no-store" });
     if (!response.ok) throw new Error(`Room returned HTTP ${response.status}`);
     const value = await response.json() as RoomSnapshot;
+    validateThreadObservation(value);
     if (signal?.aborted) return;
     setSnapshot(value);
     const marker = value.messages.at(-1)?.id ?? "empty";

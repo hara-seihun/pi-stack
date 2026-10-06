@@ -171,6 +171,8 @@ test("revocation and cancellation refuse execution without making a provider cal
 test.each([
   [[], "without response.completed"],
   [[{ type: "response.failed", response: { error: { message: "generation refused" } } }], "generation refused"],
+  [[{ type: "response.new_variant" }, completed()], "Unknown provider response event type"],
+  [[{ type: "response.completed" }], "Missing response object"],
   [[completed(IMAGE_MODELS[0], "bad")], "invalid PNG"],
   [[completed("gpt-image-2")], "instead of"],
 ])("incomplete, failed, invalid or wrong-model output fails without retry", async (events, message) => {

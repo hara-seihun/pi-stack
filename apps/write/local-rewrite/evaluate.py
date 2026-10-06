@@ -123,4 +123,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.action == 'freeze': freeze()
     elif args.action == 'run': run(args.start, args.count)
-    else: summarize()
+    elif args.action == 'summarize': summarize()
+    else: parser.error('unknown action')

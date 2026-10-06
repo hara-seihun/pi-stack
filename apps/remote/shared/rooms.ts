@@ -1,6 +1,6 @@
 import type { Activity, Session } from "../server/protocol.js";
 
-export interface RoomActivity extends Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError" | "held">> {
+export interface RoomActivity extends Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError" | "held" | "waitingOnAgents" | "waitingForChildren">> {
   activity?: Activity | "status_error";
   error?: string;
 }

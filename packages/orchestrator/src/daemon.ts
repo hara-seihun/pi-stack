@@ -15,7 +15,7 @@ import { CompletionPool } from "./host/completion-pool.js";
 import { accountReservation, isAccountReservation, prioritizeReservedCompletions, reservationKey } from "./admission-reservation.js";
 import { COMPLETION_OPENAPI } from "./completion-openapi.js";
 import { reconcileCompletionReceipts } from "./host/completion-receipts.js";
-import type { CompletionOutcome } from "./completion-contract.js";
+import { completionHttpStatus, type CompletionOutcome } from "./completion-contract.js";
 import { CodexMeterSampler } from "./meters-codex.js";
 import { AnthropicMeterSampler } from "./meters-anthropic.js";
 import { ORCHESTRATOR_CATALOG } from "./catalog.js";
@@ -405,8 +405,7 @@ export class Daemon {
       }
       const completionReply=(outcome:CompletionOutcome<unknown>)=>{
         if(outcome.ok)return json(res,200,outcome.value);
-        const statuses:Record<string,number>={"invalid-request":400,"not-found":404,"request-conflict":409,"invalid-state":409,"unsupported-option":422};
-        return json(res,statuses[outcome.error.code]??500,{error:outcome.error});
+        return json(res,completionHttpStatus(outcome.error.code),{error:outcome.error});
       };
       if(method==="GET"&&url.pathname==="/v1/completions/openapi.json")return json(res,200,COMPLETION_OPENAPI);
       const completionRoute=/^\/v1\/completions\/([^/]+)(\/(?:cancel|retry|attempts))?$/.exec(url.pathname);

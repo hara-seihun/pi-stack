@@ -5,6 +5,8 @@ import { Models } from "./Models";
 import { iconUrl } from "../../chat-row";
 import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens, formatWeekReset } from "./format";
 import "./machine.css";
+import { assertNever, requireState } from "../../../../shared/explicit-state";
+import { GOVERNOR_STATES } from "../../../../shared/state-validation";
 
 export type MachineScreenProps = {
   dashboard: Dashboard | null;
@@ -22,17 +24,25 @@ export type MachineScreenProps = {
   clientRevision: string;
 };
 
-const governorModes: GovernorState[] = ["off", "green", "blue", "red"];
-
 function governorModeLabel(mode: GovernorState, governor: Governor): string {
-  if (mode === "off") return "Normal";
-  if (mode === "green") return "3×";
-  if (mode === "blue") return `${governor.boostedMultiplier}×`;
-  return "Halted";
+  requireState(mode, GOVERNOR_STATES, "Governor label");
+  switch (mode) {
+    case "off": return "Normal";
+    case "green": return "3×";
+    case "blue": return `${governor.boostedMultiplier}×`;
+    case "red": return "Halted";
+  }
+  return assertNever(mode, "Governor label");
 }
 
 function nextGovernorMode(governor: Governor): GovernorState {
-  return governorModes[(governorModes.indexOf(governor.state) + 1) % governorModes.length]!;
+  switch (governor.state) {
+    case "off": return "green";
+    case "green": return "blue";
+    case "blue": return "red";
+    case "red": return "off";
+  }
+  return assertNever(governor.state, "Governor cycle");
 }
 
 function percentage(text: string): number | null {

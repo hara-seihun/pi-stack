@@ -73,7 +73,7 @@ it("dependency settlement resumes a durable waiter through the existing cross-ow
   await spawn(parent, "parent"); unwrap(await parent.service.start()); unwrap(await child.service.start());
   unwrap(await child.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: child.root, message: "work" }));
   await until(() => child.sessions[0]?.commands.some(c => c.type === "prompt") === true);
-  const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", reason: "Need child result", threadIds: ["child"] }));
+  const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", kind: "agents", reason: "Need child result", threadIds: ["child"] }));
   expect(wait).toMatchObject({ state: "idle", waitingOnAgents: { threadIds: ["child"], reason: "Need child result" } });
   expect(parent.sessions).toHaveLength(0);
   child.sessions[0]!.settle(); await until(() => parent.sessions[0]?.commands.some(c => c.type === "prompt") === true);
@@ -81,13 +81,13 @@ it("dependency settlement resumes a durable waiter through the existing cross-ow
   expect(parent.service.pending("parent")).toHaveLength(1);
   expect(parent.service.pending("parent")[0]).toMatchObject({ senderId: "child", source: "notification" });
   parent.sessions[0]!.settle(); await until(() => parent.service.get("parent")?.state === "idle");
-  expect(unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", reason: "Already arrived", threadIds: ["child"] })).waitingOnAgents).toBeUndefined();
+  expect(unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).waitingOnAgents).toBeUndefined();
 });
 
 it("Stop and archive pause wakes across restart; restore alone never releases the hold", async () => {
   const f = fixture(); await spawn(f, "held"); await spawn(f, "archived");
   unwrap(await schedule(f, "held", "wake-held")); unwrap(await schedule(f, "archived", "wake-archived"));
-  unwrap(await f.service.agentWait({ requestId: "wait-held", threadId: "held", action: "set", reason: "External job" }));
+  unwrap(await f.service.agentWait({ requestId: "wait-held", threadId: "held", action: "set", kind: "job", jobId: "external-job", reason: "External job" }));
   unwrap(await f.service.control({ threadId: "held", action: "stop", descendants: false }));
   unwrap(await f.service.control({ threadId: "archived", action: "update", archived: true })); unwrap(await f.service.close());
   const next = fixture(f.root); unwrap(await next.service.start()); next.service.reconcile(); await boundary();
@@ -107,12 +107,12 @@ it("set/change/cancel retries have stable custody, invalid dependencies cannot m
   expect((await f.service.wakeSchedule({ ...input, cadenceMs: 70000 })).ok).toBe(false);
   unwrap(await f.service.wakeSchedule({ ...input, requestId: "retime", nextDueAt: 900000 }));
   unwrap(await f.service.wakeSchedule(input)); expect(f.service.get("self")?.wakeSchedule?.nextDueAt).toBe(900000);
-  const bad = await f.service.agentWait({ requestId: "bad", threadId: "self", action: "set", reason: "x", threadIds: ["other"] }); expect(bad.ok).toBe(false);
+  const bad = await f.service.agentWait({ requestId: "bad", threadId: "self", action: "set", kind: "agents", reason: "x", threadIds: ["other"] }); expect(bad.ok).toBe(false);
   expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
   unwrap(await f.service.wakeSchedule({ threadId: "self", action: "cancel", requestId: "cancel" }));
   unwrap(await f.service.wakeSchedule({ threadId: "self", action: "cancel", requestId: "cancel" }));
   unwrap(await f.service.wakeSchedule(input)); expect(f.service.get("self")?.wakeSchedule).toBeUndefined();
-  unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", reason: "external" }));
+  unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "job", jobId: "external-job", reason: "external" }));
   const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10000);
   unwrap(await f.service.control({ threadId: "self", action: "archiveInactive", inactiveBefore: Date.now() - 1 })); expect(f.service.get("self")?.metadata?.archived).not.toBe(true);
   clock.mockRestore(); unwrap(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" })); expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
@@ -128,7 +128,7 @@ it("capability admission denies other threads and other people, including schedu
   const own = createThreadClient("http://fixture/v1/threads", transport, { token: key.issue("self") });
   unwrap(await own.wakeSchedule({ threadId: "self", action: "set", requestId: "own", reason: "job", cadenceMs: 60000 }));
   for (const action of ["list", "cancel"] as const) expect((await own.wakeSchedule({ threadId: "other", action, requestId: "forged" })).ok).toBe(false);
-  expect((await own.agentWait({ threadId: "other", action: "set", requestId: "forged-wait", reason: "x" })).ok).toBe(false);
+  expect((await own.agentWait({ threadId: "other", action: "set", kind: "job", jobId: "external-job", requestId: "forged-wait", reason: "x" })).ok).toBe(false);
   const foreign = createThreadClient("http://fixture/v1/threads", transport, { token: foreignKey.issue("self") });
   expect((await foreign.wakeSchedule({ threadId: "self", action: "list" })).ok).toBe(false);
   const process = createThreadClient("http://fixture/v1/threads", transport); expect((await process.wakeSchedule({ threadId: "self", action: "list" })).ok).toBe(false);
@@ -147,11 +147,28 @@ it.each(["prepare", "admit", "open"] as const)("cancel fences a queued wake whil
   expect(f.service.pending("self")).toHaveLength(0);
 });
 
+it("typed external waits survive restart and collaborator messages clear only the named message wait", async () => {
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "collaborator"); await spawn(f, "other");
+  expect((await f.service.agentWait({ requestId: "generic", threadId: "self", action: "set", reason: "available" } as never)).ok).toBe(false);
+  expect((await f.service.agentWait({ requestId: "empty", threadId: "self", action: "set", kind: "agents", reason: "available", threadIds: [] })).ok).toBe(false);
+  unwrap(await f.service.agentWait({ requestId: "job", threadId: "self", action: "set", kind: "job", reason: "GPU assay", jobId: "assay-123" }));
+  unwrap(await f.service.close()); const next = fixture(f.root);
+  expect(next.service.get("self")?.waitingOnAgents).toMatchObject({ kind: "job", jobId: "assay-123" });
+  unwrap(await next.service.agentWait({ requestId: "release", threadId: "self", action: "set", kind: "deployment", reason: "Release", publicationId: "PUB-123" }));
+  expect(next.service.get("self")?.waitingOnAgents).toMatchObject({ kind: "deployment", publicationId: "PUB-123" });
+  expect((await next.service.agentWait({ requestId: "foreign", threadId: "self", action: "set", kind: "message", reason: "Collaborator", fromThreadId: "inaccessible" })).ok).toBe(false);
+  unwrap(await next.service.agentWait({ requestId: "message", threadId: "self", action: "set", kind: "message", reason: "Collaborator", fromThreadId: "collaborator" }));
+  unwrap(await next.service.send({ requestId: "unrelated", threadId: "self", senderId: "other", source: "notification", text: "Unrelated result" }));
+  expect(next.service.get("self")?.waitingOnAgents).toMatchObject({ kind: "message", fromThreadId: "collaborator" });
+  unwrap(await next.service.send({ requestId: "matched", threadId: "self", senderId: "collaborator", source: "notification", text: "Named result" }));
+  expect(next.service.get("self")?.waitingOnAgents).toBeUndefined();
+});
+
 it("native tools end dependency waits rather than asking a model to poll; transient await is an explicit observed phase", async () => {
   const f = fixture(); await spawn(f, "self");
   const tools = threadTools({ threadId: "self", cwd: f.root, sessionFile: "none", args: [], env: {}, threads: f.service });
   const wait = tools.find(t => t.name === "thread_wait")!;
-  const result = await wait.execute("call", { action: "set", reason: "external job" } as never, undefined, undefined, {} as never);
+  const result = await wait.execute("call", { action: "set", kind: "job", jobId: "external-job", reason: "external job" } as never, undefined, undefined, {} as never);
   expect(result).toMatchObject({ terminate: true, details: { ok: true } });
   const activity = createExecutionActivity(); observeExecutionActivity(activity, { type: "tool_execution_start", toolCallId: "await", toolName: "thread_await" }); expect(activity.activity).toBe("waiting_on_agents");
   observeExecutionActivity(activity, { type: "tool_execution_start", toolCallId: "shell", toolName: "bash" }); expect(activity.activity).toBe("waiting_on_tool");

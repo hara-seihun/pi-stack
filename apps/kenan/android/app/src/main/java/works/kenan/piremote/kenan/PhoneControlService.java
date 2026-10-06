@@ -148,8 +148,15 @@ public final class PhoneControlService extends Service {
         }
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && "disable".equals(intent.getAction())) { disable(this); return START_NOT_STICKY; }
-        if (intent != null && "overlay".equals(intent.getAction())) KenanOverlay.setVisible(this, !KenanOverlay.isVisible(this));
+        String wire = intent == null || intent.getAction() == null ? "start" : intent.getAction();
+        var requested = NativeState.parse(NativeState.ServiceIntent.class, wire);
+        if (requested.isEmpty()) { errorCode = "invalid_args"; errorMessage = "Unknown phone service action: " + wire; stopSelf(); return START_NOT_STICKY; }
+        boolean resume = switch (requested.get()) {
+            case START -> true;
+            case DISABLE -> { disable(this); yield false; }
+            case OVERLAY -> { KenanOverlay.setVisible(this, !KenanOverlay.isVisible(this)); yield true; }
+        };
+        if (!resume) return START_NOT_STICKY;
         if (stopping || !enabled(this)) { stopSelf(); return START_NOT_STICKY; }
         RemoteSession.Identity selected = NotificationIdentity.get(this).current();
         String chosen = settings(this).getString("environment", "");
@@ -179,27 +186,30 @@ public final class PhoneControlService extends Service {
                 PhoneAccessibilityService service = PhoneAccessibilityService.current;
                 if (source == connection && source.valid() && authorized() && service != null) service.overlayAck(frame);
             }); }
-            public void closed(PhoneConnection source, String code, String message) { main.post(() -> { if (source == connection) lost(code, message); }); }
+            public void closed(PhoneConnection source, NativeState.PhoneFailure code, String message) { main.post(() -> { if (source == connection) lost(code, message); }); }
         });
         connection = candidate;
         network.execute(candidate::connect);
     }
-    private void lost(String code, String message) {
+    private void lost(NativeState.PhoneFailure code, String message) {
         if (!authorized()) return;
-        connected = false; errorCode = code; errorMessage = message; updateNotice(message);
+        connected = false; errorCode = code.wire(); errorMessage = message; updateNotice(message);
         PhoneAccessibilityService service = PhoneAccessibilityService.current;
         if (service != null) service.overlayDisconnected();
-        if (code.equals("session_expired")) {
-            NotificationIdentity.replace(this, "", ""); return;
-        }
-        long delay = Math.min(60, 1L << Math.min(6, attempts++));
-        PhoneConnection previous = connection;
-        network.schedule(() -> main.post(() -> { if (previous == connection && authorized()) connect(); }), delay, TimeUnit.SECONDS);
+        Runnable recover = switch (code) {
+            case SESSION_EXPIRED -> () -> NotificationIdentity.replace(this, "", "");
+            case PUBLIC_SIGN_IN_REQUIRED, PERMISSION_DENIED, DISCONNECTED, PROTOCOL_ERROR, INTERNAL_ERROR -> () -> {
+                long delay = Math.min(60, 1L << Math.min(6, attempts++));
+                PhoneConnection previous = connection;
+                network.schedule(() -> main.post(() -> { if (previous == connection && authorized()) connect(); }), delay, TimeUnit.SECONDS);
+            };
+        };
+        recover.run();
     }
     private void receive(PhoneConnection source, JSONObject frame) {
         if (source != connection || !source.valid() || !authorized()) return;
         String id = frame.optString("id", "");
-        if (id.isBlank() || id.length() > 256) { source.close(); lost("protocol_error", "Invalid command identity"); return; }
+        if (id.isBlank() || id.length() > 256) { source.close(); lost(NativeState.PhoneFailure.PROTOCOL_ERROR, "Invalid command identity"); return; }
         long deadline = frame.optLong("deadline", 0);
         if (deadline <= System.currentTimeMillis()) { source.send(PhoneResult.error("expired", "Command deadline has passed").envelope(id)); return; }
         if (commands.containsKey(id)) {
@@ -254,40 +264,43 @@ public final class PhoneControlService extends Service {
     }
     private void dispatch(String command, JSONObject args, long deadline, java.util.function.BooleanSupplier authorized, Consumer<PhoneResult> done) {
         try {
-            if (command.equals("status")) { done.accept(PhoneResult.success(status(this))); return; }
-            if (command.startsWith("ui.") || command.startsWith("overlay.") || command.equals("screen.capture")) {
+            if (NativeState.parse(NativeState.AccessibilityCommand.class, command).isPresent()
+                || NativeState.parse(NativeState.OverlayCommand.class, command).isPresent()) {
                 PhoneAccessibilityService service = PhoneAccessibilityService.current;
                 if (service == null) done.accept(PhoneResult.error("permission_denied", "Enable the Phone control accessibility service on the phone"));
                 else service.dispatch(command, args, deadline, authorized, done);
                 return;
             }
-            if (command.startsWith("notifications.")) {
+            if (NativeState.parse(NativeState.NotificationCommand.class, command).isPresent()) {
                 PhoneNotificationService listener = PhoneNotificationService.current;
                 if (listener == null) done.accept(PhoneResult.error("permission_denied", "Enable Phone control notification access on the phone"));
                 else listener.dispatch(command, args, done);
                 return;
             }
-            switch (command) {
-                case "app.launch" -> {
+            var parsed = NativeState.parse(NativeState.ServiceCommand.class, command);
+            if (parsed.isEmpty()) { done.accept(PhoneResult.error("unsupported", "Unknown phone command: " + command)); return; }
+            NativeState.Action action = switch (parsed.get()) {
+                case STATUS -> () -> done.accept(PhoneResult.success(status(this)));
+                case APP_LAUNCH -> () -> {
                     Intent launch = getPackageManager().getLaunchIntentForPackage(args.getString("package"));
                     if (launch == null) { done.accept(PhoneResult.error("not_found", "No launchable activity for this package")); return; }
                     startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                     done.accept(PhoneResult.success(new JSONObject().put("requested", true)));
-                }
-                case "url.open" -> {
+                };
+                case URL_OPEN -> () -> {
                     Uri uri = Uri.parse(args.getString("url"));
                     if (!"https".equals(uri.getScheme()) && !"http".equals(uri.getScheme())) { done.accept(PhoneResult.error("invalid_args", "URL must use http or https")); return; }
                     startActivity(new Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                     done.accept(PhoneResult.success(new JSONObject().put("requested", true)));
-                }
-                case "clipboard.set" -> {
+                };
+                case CLIPBOARD_SET -> () -> {
                     String text = args.getString("text");
                     if (text.length() > 100000) { done.accept(PhoneResult.error("invalid_args", "Clipboard text exceeds 100000 characters")); return; }
                     ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Pi Remote", text));
                     done.accept(PhoneResult.success(new JSONObject()));
-                }
-                default -> done.accept(PhoneResult.error("unsupported", "Unknown phone command: " + command));
-            }
+                };
+            };
+            action.run();
         } catch (SecurityException failure) { done.accept(PhoneResult.error("permission_denied", failure.getMessage())); }
         catch (android.content.ActivityNotFoundException failure) { done.accept(PhoneResult.error("not_found", "No application can open this request")); }
         catch (Exception failure) { done.accept(PhoneResult.error("invalid_args", failure.getMessage())); }

@@ -3,7 +3,8 @@ import { runJobs } from "./run-jobs.mjs";
 import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
 
 const jobs = [
-  ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs"]],
+  ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs", "scripts/check-state-dispatch.test.mjs"]],
+  ["explicit state dispatch", "node", ["scripts/check-state-dispatch.mjs"]],
   ["orchestrator types", "npm", ["run", "typecheck", "--workspace=pi-orchestrator"]],
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],

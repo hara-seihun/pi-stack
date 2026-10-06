@@ -55,6 +55,18 @@ async function setup(root = directory(), onChange?: () => void, journal?: Action
 }
 
 describe("messaging custody", () => {
+  test("unknown backend variants fail before calls, links or messages become known states", async () => {
+    const { service, context, conversation } = await setup();
+    expect(() => context.status("future" as any, "unsupported")).toThrow("Unsupported messaging backend status");
+    expect(() => context.link({ status: "future" } as any)).toThrow("Unsupported messaging link status");
+    expect(() => context.call({ externalId: "call", peer: "peer", direction: "incoming", state: "future" } as any)).toThrow("Unsupported messaging call state");
+    expect(() => context.call({ externalId: "call", peer: "peer", direction: "future", state: "connected" } as any)).toThrow("Unsupported messaging call state or direction");
+    await expect(context.message({ id: "message", conversation: { id: conversation.externalId, title: "peer", kind: "direct" }, direction: "future" } as any)).rejects.toThrow("Unsupported messaging message direction");
+    expect(service.snapshot().calls).toHaveLength(0);
+    expect(service.snapshot().backends[0]!.status).toBe("ready");
+    expect(service.snapshot().backends[0]!.link).toBeNull();
+    expect(service.history(conversation.id).messages).toHaveLength(0);
+  });
   test("outbound boundary journals confirmation once across receipt replay and uncertain sends", async () => {
     const items: MemoryInput[] = [];
     const client = { async request(request: any) { items.push(request.item); return { ok: true, value: request.item }; } } as MemoryClient;

@@ -122,7 +122,7 @@ test("completion is deferred while a child runs, survives restart, and is rechec
 
 test("durable agent waits are not completion notifications even after their native turn settles", async () => {
   const db = database();
-  const wait = { reason: "Need durable result", threadIds: [], after: {}, since: 1000 };
+  const wait = { kind: "job" as const, jobId: "job-1", reason: "Need durable result", since: 1000 };
   const root = thread("root", { waitingOnAgents: wait });
   const api = apiFor([root], [settlement("root")]);
   await projectThreadNotifications(db, "person", api);

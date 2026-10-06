@@ -5,7 +5,8 @@ export type GatewaySocket = { send(data: string | Buffer): unknown; close(code?:
 export type GatewaySpec = { id: string; name: string; token: string };
 export type GatewaySnapshot = { id: string; name: string; connected: boolean; ready: boolean; reason: string; callId: string | null };
 type Gateway = GatewaySpec & { socket?: GatewaySocket; hello: boolean; ready: boolean; reason: string; callId?: string; dialled: boolean; ending: boolean; active: boolean; lastSeen: number };
-export type GatewayEvents = { state(callId: string, state: string, error?: string): void; audio(callId: string, data: Buffer): void };
+export type GatewayCallState = "dialing" | "ringing" | "active" | "ended" | "failed";
+export type GatewayEvents = { state(callId: string, state: GatewayCallState, error?: string): void; audio(callId: string, data: Buffer): void };
 const equal = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); };
 
 export class SimGateways {

@@ -8,7 +8,7 @@ export type {
 export interface ContextEntry {
   key: string;
   signature: string;
-  kind: string;
+  kind: import("../../server/protocol").TranscriptItemKind;
   label?: string;
   /** Inline text: user, assistant and notice items carry it with the head. */
   text?: string;

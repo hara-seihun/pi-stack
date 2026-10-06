@@ -10,7 +10,8 @@
 [data-status="thinking"] { --status-color: var(--status-thinking); }
 [data-status="tool"] { --status-color: var(--status-tool); }
 [data-status="compacting"], [data-status="retrying"] { --status-color: var(--status-running); }
-[data-status="awaiting"] { --status-color: var(--status-awaiting); }
+[data-status="awaiting"], [data-status="waiting_for_job"], [data-status="waiting_for_deployment"], [data-status="waiting_for_message"] { --status-color: var(--status-awaiting); }
+.status-pill[data-status="waiting_for_job"], .status-pill[data-status="waiting_for_deployment"], .status-pill[data-status="waiting_for_message"] { color: var(--status-color); }
 [data-status="stopped"], [data-status="stopping"], [data-status="waiting_for_capacity"], [data-status="waiting_to_retry"] { --status-color: var(--status-held); }
 [data-status="error"], [data-status="reporting_error"] { --status-color: var(--danger); }
 [data-status="idle"], [data-status="archived"] { --status-color: var(--status-idle); }

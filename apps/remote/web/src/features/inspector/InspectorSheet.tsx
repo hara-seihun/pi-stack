@@ -11,6 +11,8 @@ import { threadStatus } from "../status/thread-status";
 import { WorkersTree } from "../workers/WorkersTree";
 import { WriteSettings } from "./WriteSettings";
 import "./inspector.css";
+import { assertNever } from "../../../../shared/explicit-state";
+import { validateSession, stateArray } from "../../../../shared/state-validation";
 
 export type InspectorTab = "thread" | "settings" | "timeline";
 
@@ -21,6 +23,17 @@ function formatTime(value: string) {
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return <div className="inspector-row"><dt>{label}</dt><dd>{children}</dd></div>;
+}
+
+function WaitReference({ wait }: { wait: NonNullable<Session["waitingOnAgents"]> }) {
+  if (!Object.hasOwn(wait, "kind")) return <Row label="Wait error">Wait type missing</Row>;
+  switch (wait.kind) {
+    case "agents": return <Row label="Agent threads">{wait.threadIds.map(id => <code key={id}>{id} </code>)}</Row>;
+    case "job": return <Row label="Job"><code>{wait.jobId}</code></Row>;
+    case "deployment": return <Row label="Publication"><code>{wait.publicationId}</code></Row>;
+    case "message": return <Row label="Message from"><code>{wait.fromThreadId}</code></Row>;
+  }
+  return assertNever(wait, "Inspector dependency");
 }
 
 export function InspectorSheet({ session, sessions, open, pending, autoCollapse, onAutoCollapseChange, onClose, onOpenThread, onArchive, onRestore, debug }: {
@@ -88,7 +101,11 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
     setChildrenLoading(true);
     setChildrenFailure("");
     api(API.sessionChildren.method, API.sessionChildren.path({ sessionId: session.id }))
-      .then(result => { if (active) setChildren(result.children ?? []); })
+      .then(result => {
+        if (!active) return;
+        stateArray(result.children, "Child directory").forEach(validateSession);
+        setChildren(result.children);
+      })
       .catch(error => { if (active) setChildrenFailure(error?.message || String(error)); })
       .finally(() => { if (active) setChildrenLoading(false); });
     return () => { active = false; };
@@ -148,7 +165,7 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
         {session.waitingOnAgents && <>
           <Row label="Dependency">{session.waitingOnAgents.reason}</Row>
           <Row label="Waiting since">{formatTime(new Date(session.waitingOnAgents.since).toISOString())}</Row>
-          {session.waitingOnAgents.threadIds.length > 0 && <Row label="Agent threads">{session.waitingOnAgents.threadIds.map(id => <code key={id}>{id} </code>)}</Row>}
+          <WaitReference wait={session.waitingOnAgents} />
         </>}
         {session.wakeSchedule && <>
           <Row label="Wake check">{session.wakeSchedule.reason}</Row>

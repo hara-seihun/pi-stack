@@ -10,6 +10,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { modelDrainsMeter } from "./catalog.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
+import { assertNever, requireRuntimeEvent, type RuntimeEvent } from "./threads/runtime-events.js";
 
 /** Children bypass background pacing; live consulting retains its mode's admission class. */
 function admissionClass(thread: Thread): Thread["admission"] {
@@ -98,14 +99,31 @@ export class Fleet {
     if (!this.leases.has(threadId) && this.store.control("repair-owner") === threadId) this.store.db.prepare("DELETE FROM control WHERE key='repair-owner'").run();
   }
 
-  event(threadId: string, event: PiEvent): void {
-    if (event.type === "thread_settled") {
-      if (this.brokerExecutions.has(threadId)) this.releaseBroker(threadId, String(event.executionId));
-      else this.release(threadId, String(event.executionId));
-      return;
+  event(threadId: string, input: PiEvent): void {
+    const event = requireRuntimeEvent(input);
+    switch (event.type) {
+      case "thread_settled":
+        if (this.brokerExecutions.has(threadId)) this.releaseBroker(threadId, String(event.executionId));
+        else this.release(threadId, String(event.executionId));
+        return;
+      case "message_end": return this.recordMessageEnd(threadId, event);
+      // Lease release requires durable settlement; usage requires a finished assistant message.
+      case "agent_start": case "agent_end": case "agent_settled": case "turn_start": case "turn_end":
+      case "message_start": case "message_update": case "queue_update":
+      case "tool_execution_start": case "tool_execution_update": case "tool_execution_end":
+      case "compaction_start": case "compaction_end": case "auto_compaction_start": case "auto_compaction_end":
+      case "auto_retry_start": case "auto_retry_end": case "summarization_retry_scheduled":
+      case "summarization_retry_attempt_start": case "summarization_retry_finished":
+      case "entry_appended": case "session_info_changed": case "thinking_level_changed": case "bash_execution_update":
+      case "response": case "extension_ui_request": case "extension_error": case "user_bash":
+      case "owner_execution_phase": case "model_request_start": case "context_update": case "session_changed":
+      case "conversation_replaced": case "command_settled": case "runner_attached": case "thread_error": case "thread_message_inserted": return;
     }
+    assertNever(event);
+  }
+
+  private recordMessageEnd(threadId: string, event: Extract<RuntimeEvent, { type: "message_end" }>): void {
     if (this.brokerExecutions.has(threadId)) return;
-    if (event.type !== "message_end") return;
     const lease = this.leases.get(threadId), message = event.message as Record<string, any> | undefined;
     if (!lease || message?.role !== "assistant") return;
     const failure = String(message.errorMessage ?? "");

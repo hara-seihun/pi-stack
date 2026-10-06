@@ -1,5 +1,6 @@
 import type { Thread } from "pi-orchestrator/api";
 import { projectThreadActivity } from "./live-projection";
+import { validateThreadObservation } from "../shared/state-validation";
 import type { Room, RoomActivity, RoomSnapshot } from "../shared/rooms";
 import { roomInput, roomMembers, roomMetadata, readRoomInput } from "../shared/rooms";
 
@@ -22,10 +23,21 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory)
   const metadata = roomMetadata(thread.metadata?.room)!;
   const execution = source.execution ?? projectThreadActivity(thread.state, undefined, false, thread.executionActivity, thread.metadata, Boolean(thread.held));
   const error = source.error ?? execution.executionError;
-  const activity: RoomActivity = execution.activity && execution.activity !== "status_error" && String(execution.activity) !== "running"
-    ? { ...execution, held: thread.held ?? false, ...(error ? { error } : {}) }
-    : { activity: "status_error", activityDetail: "Room owner did not report an execution phase", activeTools: execution.activeTools ?? [],
-      held: thread.held ?? false, error: error ?? "Room owner did not report an execution phase" };
+  let activity: RoomActivity;
+  try {
+    validateThreadObservation({ state: thread.state, ...execution });
+    activity = { ...execution, held: thread.held ?? false,
+      ...(thread.metadata?.agentWait ? { waitingOnAgents: thread.metadata.agentWait as Thread["waitingOnAgents"] } : {}),
+      ...(error ? { error } : {}) };
+    if (execution.activity === "status_error") {
+      const detail = execution.activityDetail ?? error ?? "Room owner did not report an execution phase";
+      activity.activityDetail = detail;
+      activity.error = error ?? detail;
+    }
+  } catch {
+    activity = { activity: "status_error", activityDetail: "Room owner did not report a supported execution phase", activeTools: execution.activeTools ?? [],
+      held: thread.held ?? false, error: error ?? "Room owner did not report a supported execution phase" };
+  }
   const room: Room = { ...metadata, title: thread.title, state: thread.state, ...activity };
   const messages: RoomSnapshot["messages"] = [];
   const work: NonNullable<RoomSnapshot["work"]> = [];

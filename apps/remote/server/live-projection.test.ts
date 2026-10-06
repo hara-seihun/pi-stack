@@ -8,14 +8,17 @@ test("awaiting describes child work without inheriting progress or overriding th
   parent.thinkingActive = true;
   expect(threadActivity("idle", parent)).toBe("idle");
   expect(threadActivity("idle", parent, true)).toBe("awaiting");
+  expect(projectThreadActivity("idle", parent, true)).toMatchObject({ activity: "awaiting", waitingForChildren: true });
+  expect(projectThreadActivity("idle", parent, true, undefined, undefined, true).waitingForChildren).toBeUndefined();
+  expect(projectThreadActivity("idle", parent, true, undefined, { archived: true }).waitingForChildren).toBeUndefined();
   expect(threadActivity("running", parent, true)).toBe("thinking");
   expect(threadActivity("running", child)).toBe("waiting_on_tool");
   expect(threadActivity("idle", child)).toBe("idle");
 });
 
 test("idle dependency evidence survives owner replacement but holds and archives override waiting", () => {
-  const metadata = { agentWait: { reason: "Publication", threadIds: ["child"], after: {}, since: 1000 } };
-  expect(projectThreadActivity("idle", undefined, false, undefined, metadata)).toMatchObject({ activity: "awaiting", activitySince: 1000, activityDetail: "Publication" });
+  const metadata = { agentWait: { kind: "deployment", reason: "Publication", publicationId: "pub-1", since: 1000 } };
+  expect(projectThreadActivity("idle", undefined, false, undefined, metadata)).toMatchObject({ activity: "awaiting", activitySince: 1000, activityDetail: "Waiting for deployment · Publication" });
   expect(projectThreadActivity("idle", undefined, true, undefined, metadata, true).activity).toBe("idle");
   expect(projectThreadActivity("idle", undefined, true, undefined, { ...metadata, archived: true }).activity).toBe("idle");
 });

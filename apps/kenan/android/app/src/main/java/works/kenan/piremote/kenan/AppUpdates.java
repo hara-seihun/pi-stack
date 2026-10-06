@@ -110,11 +110,11 @@ final class AppUpdates {
 
     /** What the drawer offers: a web bundle applied in place, or an APK through Android's installer. */
     static final class Update {
-        final String kind;
+        final NativeState.UpdateKind kind;
         final String revision;
         final int versionCode;
 
-        Update(String kind, String revision, int versionCode) {
+        Update(NativeState.UpdateKind kind, String revision, int versionCode) {
             this.kind = kind;
             this.revision = revision;
             this.versionCode = versionCode;
@@ -151,12 +151,12 @@ final class AppUpdates {
     static Update decide(Manifest manifest, int installedVersionCode, String shellId, int runningWebVersionCode, BadBundles bad) {
         WebRelease web = manifest.web;
         if (web != null && shellId.equals(web.shellId) && web.versionCode > runningWebVersionCode && !bad.isBad(web.revision)) {
-            return new Update("web", web.revision, web.versionCode);
+            return new Update(NativeState.UpdateKind.WEB, web.revision, web.versionCode);
         }
         Release apk = manifest.release;
         if (apk != null && apk.versionCode > installedVersionCode) {
             boolean sameShell = shellId.equals(apk.shellId) && web != null && web.revision.equals(apk.revision);
-            if (!sameShell) return new Update("apk", apk.revision, apk.versionCode);
+            if (!sameShell) return new Update(NativeState.UpdateKind.APK, apk.revision, apk.versionCode);
         }
         return null;
     }
@@ -173,7 +173,7 @@ final class AppUpdates {
     WebBundles.Installed stageWeb(WebBundles bundles) throws IOException {
         Manifest manifest = fetchManifest();
         Update update = decide(manifest, BuildConfig.VERSION_CODE, BuildConfig.SHELL_ID, bundles.runningVersionCode(), bundles::isBad);
-        if (update == null || !update.kind.equals("web")) throw new IOException("No newer web client is published for this app now. Check for updates again.");
+        if (update == null || update.kind != NativeState.UpdateKind.WEB) throw new IOException("No newer web client is published for this app now. Check for updates again.");
         return bundles.stage(manifest.web, AppUpdates::transfer);
     }
 

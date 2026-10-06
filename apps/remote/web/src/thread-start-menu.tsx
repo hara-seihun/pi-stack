@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { API } from "../../server/api";
 import type { MessagingSnapshot } from "../../server/messaging/protocol";
 import { api } from "./client";
+import { validateSession, stateArray } from "../../shared/state-validation";
 import { ChatIcon } from "./chat-row";
 import { aiChat, humanChat, roomChat, type Chat } from "./chats";
 import type { Room, RoomMember } from "../../shared/rooms";
@@ -108,8 +109,9 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
       void api(API.archivedSessions.method, API.archivedSessions.path({}, { query, conversationsOnly: true, limit: PICKER_RESULT_LIMIT }))
         .then((result: { sessions: Session[]; total: number }) => {
           if (!active) return;
+          stateArray(result.sessions, "Archived directory").forEach(validateSession);
           setArchivePage({ ...result, query });
-        }, (cause: unknown) => {
+        }).catch((cause: unknown) => {
           if (active) setArchiveError(cause instanceof Error ? cause.message : String(cause));
         });
     }, query ? 120 : 0);

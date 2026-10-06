@@ -14,6 +14,7 @@ import socket
 import subprocess
 import tempfile
 from threading import Event, Lock, Thread
+from typing import Literal
 import time
 import urllib.error
 import urllib.request
@@ -96,9 +97,13 @@ def guard(source: str, candidate: str, dictionary: dict, baseline: str | None = 
 @dataclass(frozen=True)
 class Decision:
     text: str
-    status: str
+    status: Literal['applied', 'unchanged', 'guarded', 'unavailable']
     reason: str | None
     latency_ms: float
+
+    def __post_init__(self):
+        if self.status not in ('applied', 'unchanged', 'guarded', 'unavailable'):
+            raise ValueError('invalid rewrite status')
 
 
 class LocalRewriter:
@@ -190,7 +195,7 @@ class LocalRewriter:
             text, finish = choice['message']['content'], choice['finish_reason']
         except (KeyError, TypeError, IndexError) as error:
             raise ValueError('Invalid local rewrite response') from error
-        if not isinstance(text, str) or not isinstance(finish, str):
+        if not isinstance(text, str) or finish not in ('stop', 'length'):
             raise ValueError('Invalid local rewrite response content')
         return text.strip(), finish
 
@@ -223,7 +228,12 @@ class LocalRewriter:
         finally:
             self.lock.release()
         latency = round((time.perf_counter() - began) * 1000, 2)
-        reason = 'generation_limit' if finish != 'stop' else guard(source, candidate, dictionary, baseline)
+        if finish == 'length':
+            reason = 'generation_limit'
+        elif finish == 'stop':
+            reason = guard(source, candidate, dictionary, baseline)
+        else:
+            return Decision(baseline, 'unavailable', 'invalid_finish_reason', latency)
         if reason:
             LOG.warning('Write rewrite rejected: %s', reason)
             return Decision(baseline, 'guarded', reason, latency)

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MessagingBackendInfo } from "../../server/messaging/protocol";
 import { DismissibleError } from "./dismissible-error";
 import { messagingClient } from "./messaging-client";
+import { assertNever, requireState } from "../../shared/explicit-state";
+import { BACKEND_STATES, LINK_STATES } from "../../shared/state-validation";
 
 /**
  * What the account owner should see for this backend's account link. A ready
@@ -9,13 +11,22 @@ import { messagingClient } from "./messaging-client";
  * supervisor reported through the messaging snapshot.
  */
 export function linkStage(backend: MessagingBackendInfo): "hidden" | "idle" | "waiting" | "connecting" | "failed" {
+  requireState(backend.status, BACKEND_STATES, "Link backend status");
+  if (backend.link) requireState(backend.link.status, LINK_STATES, "Link attempt status");
   if (!backend.linkable) return "hidden";
-  if (backend.status === "ready") return "hidden";
+  switch (backend.status) {
+    case "ready": return "hidden";
+    case "unconfigured": case "connecting": case "error": break;
+  }
   const link = backend.link;
-  if (link?.status === "waiting") return "waiting";
-  if (link?.status === "linked") return "connecting";
-  if (link?.status === "failed") return "failed";
-  return "idle";
+  if (link === null) return "idle";
+  switch (link.status) {
+    case "waiting": return "waiting";
+    case "linked": return "connecting";
+    case "failed": return "failed";
+    case "cancelled": return "idle";
+  }
+  return assertNever(link.status, "Link attempt");
 }
 
 export function MessagingLinkPanel({ backend, deviceName, onDeviceName, onStart, onCancel, busy, error, copied, onCopy }: {

@@ -14,6 +14,8 @@ Pi Stack runs persistent agents through [Pi](https://github.com/badlogic/pi-mono
 
 This public repository starts from a reviewed source snapshot. Earlier development history contains private operational records and is not part of the public Git history.
 
+[Explicit app states](docs/state-dispatch.md) requires exhaustive state/event dispatch, boundary rejection of invalid discriminators, and no first-party switch default clauses. The source gate enforces the switch rule; typed dispatch and transition tests enforce behavior.
+
 Upstream Pi is a pinned dependency. Host identities, endpoints and deployment routes belong in host configuration. Credentials, person registries and mutable runtime state stay outside Git. See [configuration and publication boundaries](docs/publication.md).
 
 ## Development

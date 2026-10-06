@@ -47,7 +47,11 @@ scored alongside fluency; lexical guards alone are not a semantic guarantee.
 ## End of speech is an ordered boundary
 
 One socket carries `start`, binary audio frames, then exactly one `finish` or
-`cancel`. Start declares `audio: "opus"` (raw Opus packets) or `"pcm"` (16 kHz mono
+`cancel`. [The protocol parser](protocol.py) admits only those three variants and
+explicit awaiting-start/streaming phases; unknown types, malformed objects and repeated
+Start are protocol errors. Omitted Start settings mean PCM, rewrite enabled, an empty
+dictionary and empty context; supplied invalid/null settings are rejected, not treated
+as omitted. Start declares `audio: "opus"` (raw Opus packets) or `"pcm"` (16 kHz mono
 signed little-endian PCM16). `finish` follows every audio packet, including encoder
 EOS output; the connection remains open for the engine's `final` response.
 
@@ -89,6 +93,11 @@ From this directory, with the deployed engine's Python environment:
 PI_STACK_TEST_WRITE_MODEL=/srv/pi/write-engine/model OPENBLAS_NUM_THREADS=1 \
   /srv/pi/write-engine/venv/bin/python -m unittest test_audio_tail -v
 ```
+
+[Protocol regressions](test_protocol.py) cover unknown control, device-mode and
+rewrite-state variants, malformed Start settings, and socket-visible rejection. The
+local model accepts only provider finish reasons `stop` and `length`; unknown reasons
+report unavailable rather than masquerading as a generation limit.
 
 `test_finishing.py` covers Finish during encoder-slot contention on both paths,
 a quiet terminal word after speculation, and cancellation while an encoder is busy.
