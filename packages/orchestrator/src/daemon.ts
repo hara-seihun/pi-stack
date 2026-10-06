@@ -28,7 +28,7 @@ import { ModelAvailabilityStore, modelAvailabilityPath } from "./threads/model-a
 import { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 import { createThreadClient, threadHttp } from "./threads/http.js";
 import { importFleetThreads } from "./threads/import.js";
-import type { SettingsOverrides, Thread } from "./threads/contracts.js";
+import type { Result, SettingsOverrides, SpawnThread, Thread } from "./threads/contracts.js";
 import { ThreadDirectory } from "./threads/directory.js";
 import { admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerResolver, type CallerSource } from "./threads/caller.js";
 import { resolveThreadSettings } from "./threads/settings.js";
@@ -49,6 +49,7 @@ export class Daemon {
   private readiness?:LaneReadiness;
   private repairReadiness=new Map<string,{at:number;revision?:string;ready:boolean}>();
   private reconciling=false;
+  private laneAdmissionQueue:Promise<unknown>=Promise.resolve();
   private stopped=false;
   private releasePath:string;
   private readonly ledgerPath:string;
@@ -228,8 +229,10 @@ export class Daemon {
     let backgroundAdmissions=0;
     while(true){
       const running=this.threads.runningSummary();
+      const custody=this.threads.laneCustody();
       const atBackgroundCeiling=backgroundAdmissions>=this.config.maxConcurrentSessions||running.total>=this.config.maxConcurrentSessions;
       const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id,running.repairOwner)
+        &&(lane.maxActive===undefined||(custody.get(lane.id)??0)<lane.maxActive)
         &&(lane.admission==="background"&&!lane.repair?!atBackgroundCeiling:!admittedForced.has(lane.id)));
       const share=(lane:LaneSpec)=>(1+(running.lanes.get(lane.id)??0))/lane.weight;
       lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||share(a)-share(b)||a.id.localeCompare(b.id));
@@ -241,7 +244,7 @@ export class Daemon {
         if(choice&&!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map(r=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
         try{
           const prompt=await this.lanePrompt(lane);
-          const spawned=await this.threads.spawn({requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:prompt,
+          const spawned=await this.spawnLane(lane.id,{requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:prompt,
             settings:this.laneSettings(lane,choice?.assignment&&`${choice.assignment.provider}/${choice.assignment.model}`),admission:lane.repair?"force":lane.admission??"force",
             metadata:{source:"lane",laneId:lane.id,execution:lane.repair?"root-repair":"user"}});
           if(!spawned.ok)throw new Error(spawned.error.message);
@@ -254,6 +257,19 @@ export class Daemon {
       }
       if(!admitted)break;
     }
+  }
+
+  private spawnLane(id:string,input:SpawnThread):Promise<Result<Thread>>{
+    const operation=this.laneAdmissionQueue.then(()=>{
+      const lane=this.store.lane(id);
+      if(!lane)return{ok:false as const,error:{code:"not_found" as const,message:`Lane ${id} no longer exists`}};
+      if(lane.maxActive!==undefined&&(this.threads.laneCustody().get(id)??0)>=lane.maxActive)
+        return{ok:false as const,error:{code:"unavailable" as const,message:`Lane ${id} reached maxActive ${lane.maxActive}`}};
+      return this.threads.spawn(input);
+    });
+    // Both readiness and wave creation share this boundary, including while a prompt probe awaits.
+    this.laneAdmissionQueue=operation.then(()=>undefined,()=>undefined);
+    return operation;
   }
 
   /** A lane's declared thinking level belongs to every worker it starts, not just the first. */
@@ -479,7 +495,7 @@ export class Daemon {
         const count=input.count??1;if(!Number.isInteger(count)||count<1||count>100)return json(res,400,{error:"count must be between 1 and 100"});
         const threads:Thread[]=[];
         for(let i=0;i<count;i++){
-          const result=await this.threads.spawn({requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:await this.lanePrompt(lane),
+          const result=await this.spawnLane(lane.id,{requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:await this.lanePrompt(lane),
             settings:{...this.laneSettings(lane),...input.settings},admission:input.admission??lane.admission??"force",metadata:{source:"direct",laneId:lane.id}});
           if(!result.ok)return json(res,400,result);threads.push(result.value);
         }
@@ -491,14 +507,14 @@ export class Daemon {
   }
 
   private status():unknown{
-    const running=this.threads.runningSummary();
+    const running=this.threads.runningSummary(),custody=this.threads.laneCustody();
     return{
     launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:running.repairOwner,laneBudget:this.laneBudget,
     repairReadiness:this.store.lanes().filter(lane=>lane.repair).map(lane=>({lane:lane.id,...this.repairReadiness.get(lane.id),error:this.store.control(`repair-readiness-error:${lane.id}`)||undefined})),
     readinessError:this.store.control("readiness_error")||undefined,
     meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),
     capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,this.laneBudget,this.config)})),
-    accounts:this.store.accounts(),codexCapabilities:readCodexCapabilities(this.store),lanes:this.store.lanes().map((lane)=>({...lane,active:running.lanes.get(lane.id)??0})),
+    accounts:this.store.accounts(),codexCapabilities:readCodexCapabilities(this.store),lanes:this.store.lanes().map((lane)=>({...lane,active:running.lanes.get(lane.id)??0,custody:custody.get(lane.id)??0})),
     threads:this.threads.snapshot(),leases:this.store.activeLeases(),
   };}
 }

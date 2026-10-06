@@ -125,6 +125,7 @@ export class ThreadService implements ThreadApi {
       CREATE INDEX IF NOT EXISTS thread_parent ON thread(parent_id,updated_at);
       CREATE INDEX IF NOT EXISTS thread_created ON thread(created_at,id);
       CREATE INDEX IF NOT EXISTS thread_running ON thread(id,json_extract(metadata,'$.laneId'),json_extract(metadata,'$.execution')) WHERE state='running';
+      CREATE INDEX IF NOT EXISTS thread_native_custody ON thread(id) WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL;
       CREATE TABLE IF NOT EXISTS thread_work (
         ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL,
         sender_id TEXT, text TEXT NOT NULL, images TEXT NOT NULL, delivery TEXT NOT NULL, source TEXT NOT NULL,
@@ -204,6 +205,17 @@ export class ThreadService implements ThreadApi {
       if (row.execution === "root-repair") repairOwner ??= row.id;
     }
     return { total: rows.length, lanes, repairOwner };
+  }
+  /** Counts each live lane owner once; a hold releases its queue only after cancellation is confirmed. */
+  laneCustody(): Map<string, number> {
+    const rows = this.sql(`SELECT json_extract(t.metadata,'$.laneId') lane_id,count(*) n FROM (
+      SELECT id FROM thread INDEXED BY thread_running WHERE state='running'
+      UNION SELECT thread_id FROM thread_execution INDEXED BY thread_execution_active WHERE ended_at IS NULL
+      UNION SELECT w.thread_id FROM thread_work w INDEXED BY thread_work_unfinished CROSS JOIN thread queued_thread ON queued_thread.id=w.thread_id WHERE w.status!='done' AND queued_thread.held=0
+      UNION SELECT id FROM thread INDEXED BY thread_native_custody WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL
+    ) custody CROSS JOIN thread t ON t.id=custody.id
+    WHERE json_extract(t.metadata,'$.laneId') IS NOT NULL GROUP BY lane_id`).all() as { lane_id: string; n: number }[];
+    return new Map(rows.map(row => [row.lane_id, row.n]));
   }
   archivedCount(): number { return (this.sql("SELECT count(*) n FROM thread WHERE json_extract(metadata,'$.archived')=1").get() as { n: number }).n; }
   settlements(after = 0, limit = 100): Result<ThreadSettlements> {

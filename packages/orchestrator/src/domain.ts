@@ -32,6 +32,8 @@ export interface LaneSpec {
   readonly cwd: string;
   readonly profile: string;
   readonly weight: number;
+  /** Optional ceiling on durable lane custody, independent of quota admission. */
+  readonly maxActive?: number;
   readonly priority?: number;
   readonly admission?: BudgetClass;
   /** Held by every worker this lane starts, instead of the model's default. */

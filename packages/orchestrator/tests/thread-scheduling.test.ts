@@ -23,9 +23,10 @@ it("schedules indexed live custody without projecting or losing historical and h
       ["queued", "running", 0, { laneId: "lane" }],
       ["repair", "running", 0, { laneId: "repair", execution: "root-repair" }],
       ["cancel", "running", 1, { laneId: "lane" }],
-      ["retained-execution", "idle", 1, {}],
-      ["retained-queue", "idle", 0, {}],
-      ["held-queue", "idle", 1, {}],
+      ["retained-execution", "idle", 1, { laneId: "lane" }],
+      ["retained-queue", "idle", 0, { laneId: "lane" }],
+      ["held-queue", "idle", 1, { laneId: "lane" }],
+      ["native", "idle", 1, { laneId: "lane", runnerReference: { control: "control.sock", socketPath: "session.sock" } }],
     ] as const) insert.run(id, id, root, history, '{}', state, held, JSON.stringify(metadata));
     const work = db.prepare("INSERT INTO thread_work(id,thread_id,text,images,delivery,source,status,settings,created_at) VALUES(?,?,'accepted payload','[]','queue','explicit',?,'{}',1)");
     for (const id of ["queued", "retained-queue", "held-queue"]) work.run(id, id, "queued");
@@ -35,6 +36,7 @@ it("schedules indexed live custody without projecting or losing historical and h
     const wake = vi.spyOn(internals, "wake").mockImplementation(() => {});
     const halt = vi.spyOn(internals, "halt").mockResolvedValue({ ok: true });
     expect(service.runningSummary()).toEqual({ total: 3, lanes: new Map([["lane", 2], ["repair", 1]]), repairOwner: "repair" });
+    expect(service.laneCustody()).toEqual(new Map([["lane", 5], ["repair", 1]]));
     await service.start();
     expect(wake.mock.calls.map(call => call[0]).sort()).toEqual(["queued", "repair", "retained-queue"]);
     expect(halt.mock.calls.map(call => call[0]).sort()).toEqual(["cancel", "retained-execution"]);
@@ -55,11 +57,12 @@ it("schedules indexed live custody without projecting or losing historical and h
       if (query.includes("UNION SELECT")) {
         expect(plan).toContain("thread_work_unfinished");
         expect(plan).toContain("thread_execution_active");
+        if (query.includes("thread_native_custody")) expect(plan).toContain("thread_native_custody");
       }
     }
     const order = db.prepare("EXPLAIN QUERY PLAN SELECT * FROM thread ORDER BY created_at,id").all().map((row: any) => row.detail).join("\n");
     expect(order).toContain("thread_created");
     expect(order).not.toContain("TEMP B-TREE");
-    expect(db.prepare("SELECT count(*) n FROM thread").get()).toEqual({ n: 20006 });
+    expect(db.prepare("SELECT count(*) n FROM thread").get()).toEqual({ n: 20007 });
   } finally { vi.restoreAllMocks(); await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
