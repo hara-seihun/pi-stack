@@ -14,13 +14,25 @@ import { isStreamSnapshot, streamResource, streamWants } from "../../shared/stre
 import { piFetch } from "./client";
 
 export type StreamState = "connecting" | "open" | "offline";
-export interface StreamStatus { state: StreamState; error: string }
+export interface StreamStatus { state: StreamState; error: string; diagnostic?: string }
 
 export interface StreamFrame { event: string; data: string }
 
 /** No bytes for this long means the stream is gone, comments included. */
 export const DEAD_STREAM_MS = 30_000;
 const MAX_RETRY_MS = 5_000;
+export const RECONNECT_GRACE_MS = 5_000;
+
+class StreamHttpError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
+function authenticationMessage(error: unknown): string {
+  if (!(error instanceof StreamHttpError)) return "";
+  if (error.status === 423) return "Unlock your folder to reconnect.";
+  if (error.status === 401 || error.status === 403) return "Sign in to reconnect.";
+  return "";
+}
 
 /** Incremental `text/event-stream` reader. Comment lines are keep-alives. */
 export class EventStreamParser {
@@ -111,6 +123,11 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   let controller: AbortController | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
   let watchdog: ReturnType<typeof setTimeout> | null = null;
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let recovering = false;
+  let recoveryOverdue = false;
+  let diagnostic = "";
+  let authenticationError = "";
   let failures = 0;
   let generation = 0;
   let posting: Promise<void> = Promise.resolve();
@@ -130,7 +147,41 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 
   const setStatus = (next: StreamState, error = "") => {
     state = next;
-    options.onStatus({ state: next, error });
+    options.onStatus({ state: next, error, ...(diagnostic ? { diagnostic } : {}) });
+  };
+  const showRecovery = () => setStatus(
+    authenticationError || recoveryOverdue ? "offline" : "connecting",
+    authenticationError || (recoveryOverdue ? "Connection lost. Reconnecting…" : ""),
+  );
+  const beginRecovery = () => {
+    if (!recovering) {
+      recovering = true;
+      recoveryTimer = setTimeout(() => {
+        recoveryTimer = null;
+        recoveryOverdue = true;
+        showRecovery();
+      }, RECONNECT_GRACE_MS);
+    }
+    showRecovery();
+  };
+  const clearRecovery = () => {
+    if (recoveryTimer) clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+    recovering = false;
+    recoveryOverdue = false;
+    diagnostic = "";
+    authenticationError = "";
+  };
+  const recovered = () => {
+    failures = 0;
+    clearRecovery();
+    setStatus("open");
+  };
+  const failed = (error: unknown) => {
+    diagnostic = error instanceof Error ? error.message : String(error);
+    authenticationError = authenticationMessage(error) || authenticationError;
+    options.onSelectionStatus?.({ sessionId: subscription.session ?? null, ready: false });
+    beginRecovery();
   };
   const clearWatchdog = () => { if (watchdog) clearTimeout(watchdog); watchdog = null; };
   const armWatchdog = (active: AbortController) => {
@@ -141,6 +192,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   const deliver = (event: StreamWireEvent) => {
     if (event.type === "hello") {
       streamId = event.streamId;
+      if (!subscription.session || !subscription.viewing) recovered();
       options.onEvent(event);
       if (JSON.stringify(declaration()) !== sentSubscription) post();
       return;
@@ -149,6 +201,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       if (event.sessionId !== subscription.session || event.selectionId !== subscription.selectionId) return;
       const have = replica.have();
       if (["state", `transcript:${event.sessionId}`, `live:${event.sessionId}`].some(resource => !event.have[resource] || have[resource] !== event.have[resource])) return;
+      recovered();
       options.onSelectionStatus?.({ sessionId: event.sessionId, ready: true });
       return;
     }
@@ -174,7 +227,8 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     controller = active;
     streamId = "";
     beginSelection();
-    setStatus("connecting");
+    beginRecovery();
+    armWatchdog(active);
     const initial = declaration();
     sentSubscription = JSON.stringify(initial);
     const response = await send(API.stream.path(), {
@@ -185,10 +239,8 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       cache: "no-store",
     });
     if (mine !== generation || stopped) return;
-    if (!response.ok) throw new Error(`The stream returned HTTP ${response.status}`);
+    if (!response.ok) throw new StreamHttpError(response.status, `The stream returned HTTP ${response.status}`);
     if (!response.body) throw new Error("The stream returned no body");
-    failures = 0;
-    setStatus("open");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const parser = new EventStreamParser();
@@ -227,8 +279,8 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       () => {}, // Returns only when a newer connection replaced this one or the client stopped.
       (error: unknown) => {
         if (mine !== generation || stopped) return;
-        const message = error instanceof Error ? error.message : String(error);
-        setStatus("offline", message);
+        clearWatchdog();
+        failed(controller?.signal.aborted ? controller.signal.reason : error);
         schedule(Math.min(MAX_RETRY_MS, 1_000 * 2 ** Math.min(failures++, 3)));
       },
     );
@@ -256,11 +308,11 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
         });
         if (stopped || streamId !== id || generation !== mine || active.signal.aborted) return;
         if (response.status === 404) { open(); return; }
-        if (!response.ok) throw new Error(`The stream rejected the change with HTTP ${response.status}`);
+        if (!response.ok) throw new StreamHttpError(response.status, `The stream rejected the change with HTTP ${response.status}`);
         sentSubscription = encoded;
       } catch (error) {
         if (stopped || streamId !== id || generation !== mine) return;
-        setStatus("offline", error instanceof Error ? error.message : String(error));
+        failed(active.signal.aborted ? active.signal.reason : error);
         open();
       } finally {
         if (postingSelection === request) postingSelection = null;
@@ -291,6 +343,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       controller?.abort();
       controller = null;
       clearWatchdog();
+      clearRecovery();
       if (retry) clearTimeout(retry);
       retry = null;
       streamId = "";
@@ -304,9 +357,13 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     update(change) {
       const previous = streamWants(subscription);
       const previousSession = subscription.session;
+      const previousViewing = subscription.viewing;
       subscription = { ...subscription, ...change };
-      if (previousSession !== subscription.session) beginSelection();
+      if (previousSession !== subscription.session || (!previousViewing && subscription.viewing)) beginSelection();
       if (stopped) return;
+      if (subscription.session && subscription.viewing) {
+        if (previousSession !== subscription.session || !previousViewing) beginRecovery();
+      } else if (streamId && recovering) recovered();
       for (const resource of streamWants(subscription)) {
         if (previous.includes(resource)) continue;
         const held = replica.get(resource);
