@@ -1682,6 +1682,68 @@ test("keeps a unique detached HEAD even when local branches are remote", () => {
   }
 });
 
+test("same-path registration refreshes a linked worktree replaced by a shared clone without granting source custody", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const workspace = path.join(f.workspaces, "replaced");
+    const sourceCommit = git(f.source, "rev-parse", "HEAD");
+    git(f.source, "worktree", "add", "--detach", workspace, sourceCommit);
+    const first = JSON.parse(run(["register", "--path", workspace, "--owner", "original-owner",
+      "--source-commit", sourceCommit, "--group", "original-group", "--cache", "generated-one", "--json"], f.env));
+    assert.equal(first.checkoutType, "worktree");
+    git(f.source, "worktree", "remove", workspace);
+    execFileSync("git", ["clone", "--shared", f.source, workspace]);
+    git(workspace, "remote", "set-url", "origin", f.remote);
+    git(workspace, "config", "user.name", "Test");
+    git(workspace, "config", "user.email", "test@example.invalid");
+    writeFileSync(path.join(workspace, "file.txt"), "new clone unique work\n");
+    git(workspace, "add", "file.txt");
+    git(workspace, "commit", "-m", "new clone unique work");
+    const head = git(workspace, "rev-parse", "HEAD");
+    assert.equal(existsSync(path.join(workspace, ".git", "objects", "info", "alternates")), true);
+    const refreshed = JSON.parse(run(["register", "--path", workspace, "--cache", "generated-two", "--json"], f.env));
+    assert.equal(refreshed.checkoutType, "clone");
+    for (const key of ["id", "owner", "sourceCommit", "groupId", "leaseExpiresAt", "createdAt", "state", "detail"]) {
+      assert.equal(refreshed[key], first[key], key);
+    }
+    assert.equal(refreshed.cachePaths.includes("generated-one"), true);
+    assert.equal(refreshed.cachePaths.includes("generated-two"), true);
+    assert.equal(git(workspace, "rev-parse", "HEAD"), head);
+    const held = JSON.parse(run(["release", "--id", first.id, "--json"], f.env));
+    assert.equal(held.inspection.classification, "repair-required");
+    assert.equal(existsSync(workspace), true);
+    assert.equal(git(workspace, "rev-parse", "HEAD"), head);
+  } finally { f.close(); }
+});
+
+test("same-path registration refreshes a clone replaced by a worktree and keeps parent branches out of its custody", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const workspace = path.join(f.workspaces, "replaced");
+    const sourceCommit = git(f.source, "rev-parse", "HEAD");
+    execFileSync("git", ["clone", f.remote, workspace]);
+    const first = JSON.parse(run(["register", "--path", workspace, "--source-commit", sourceCommit, "--json"], f.env));
+    assert.equal(first.checkoutType, "clone");
+    rmSync(workspace, { recursive: true });
+    writeFileSync(path.join(f.source, "file.txt"), "unique parent branch\n");
+    git(f.source, "add", "file.txt");
+    git(f.source, "commit", "-m", "unique parent branch");
+    const parentHead = git(f.source, "rev-parse", "HEAD");
+    git(f.source, "worktree", "add", "--detach", workspace, sourceCommit);
+    const refreshed = JSON.parse(run(["register", "--path", workspace, "--json"], f.env));
+    assert.equal(refreshed.id, first.id);
+    assert.equal(refreshed.checkoutType, "worktree");
+    assert.equal(refreshed.sourceCommit, sourceCommit);
+    assert.equal(git(workspace, "rev-parse", "HEAD"), sourceCommit);
+    const released = JSON.parse(run(["release", "--id", first.id, "--json"], f.env));
+    assert.equal(released.action, "released");
+    assert.equal(existsSync(workspace), false);
+    assert.equal(git(f.source, "rev-parse", "HEAD"), parentHead);
+  } finally { f.close(); }
+});
+
 test("existing registration adopts one requested group and rejects a conflicting replacement", () => {
   const f = fixture();
   try {
