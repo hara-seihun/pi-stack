@@ -289,7 +289,7 @@ test("finite timeout aborts the request and schedules immediate recovery", () =>
   expect(h.statuses.at(-1)?.diagnostic).toBe("State synchronization timed out");
 }));
 
-for (const event of ["focus", "online", "pageshow", "visibilitychange"]) {
+for (const event of ["focus", "online", "pi-network-changed", "pageshow", "visibilitychange"]) {
   test(`${event} replaces a nominally-open dead stream immediately and coalesces wake bursts`, () => harness(async h => {
     const client = h.client(undefined, { listen: true });
     client.start(); await h.time.flush();

@@ -723,7 +723,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       const latest = stateRef.current.transcript;
       const changedWhilePaging = latest?.generation !== window.generation;
       const updated = !result.reset && latest?.generation === result.window.generation
-        ? { ...result.window, total: latest.total, items: result.window.items.map(item => latest.items.find(current => current.seq === item.seq) ?? item) }
+        ? { ...result.window, total: Math.max(latest.total, result.window.total), items: result.window.items.map(item => latest.items.find(current => current.seq === item.seq) ?? item) }
         : changedWhilePaging ? latest ?? result.window : result.window;
       cache.rememberThread(id, { transcript: updated });
       patch({ transcript: updated, loadingEarlier: false });
@@ -740,10 +740,13 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     if (!id || !held || stateRef.current.loadingEarlier) return;
     patch({ loadingEarlier: true, earlierError: "" });
     try {
-      const updated = jump ? await loadLatest(id) : (await loadNewer(id, held)).window;
+      const page = jump ? await loadLatest(id) : (await loadNewer(id, held)).window;
       if (selectedAiId(stateRef.current) !== id) return;
       const current = stateRef.current.transcript;
-      if (current && current.generation !== held.generation && current.generation !== updated.generation) return;
+      if (current && current.generation !== held.generation && current.generation !== page.generation) return;
+      const updated = current?.generation === page.generation
+        ? { ...page, total: Math.max(current.total, page.total), items: page.items.map(item => current.items.find(head => head.seq === item.seq) ?? item) }
+        : page;
       visibleHeads.current = null;
       cache.rememberThread(id, { transcript: updated });
       patch({ transcript: updated });
@@ -753,8 +756,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [cache, patch, stateRef]);
 
   useEffect(() => {
-    if (!visible || !messagingActive) messagingHistory.select(null);
-  }, [visible, messagingActive, messagingHistory]);
+    messagingHistory.select(messagingActive ? humanConversation?.id ?? null : null);
+  }, [messagingActive, humanConversation?.id, messagingHistory]);
 
   const thinkingOpen = useCallback((open: boolean) => {
     if (!autoCollapse) return;
