@@ -98,7 +98,7 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { fileEditResponse } from "./file-edit";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
-import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
@@ -110,6 +110,7 @@ import { createMessagingService, openCallAudio } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
 import { parseMessageReference } from "./message-protocol";
 import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
+import { PromptAdmissions } from "./prompt-admissions";
 import { SlackReactions } from "./slack-reactions";
 import { AGENT_NAME } from "./agent-identity";
 import { createSpeechService } from "./speech/service";
@@ -333,6 +334,7 @@ const threads = new ThreadService({
 unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "threads"),
   resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
 ensureSupervisorSchema(db);
+const promptAdmissions = new PromptAdmissions(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
 const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
@@ -1487,12 +1489,15 @@ function sendEvents(stream: ClientStream): void {
 
 function pushNotifications(target?: ClientStream): void {
   for (const stream of target ? [target] : [...streams.values()]) {
-    const cursor = stream.subscription.notificationsAfter;
-    if (cursor === undefined || cursor === null) continue;
-    const feed = idleNotifications(db, cursor, notificationThread);
-    if (!feed.notifications.length) continue;
-    stream.subscription.notificationsAfter = feed.cursor;
-    stream.send({ type: "notifications", feed });
+    let cursor = stream.subscription.notificationsAfter;
+    if (cursor === undefined) continue;
+    for (let page = 0; page < 16; page++) {
+      const feed = idleNotifications(db, cursor, notificationThread);
+      stream.subscription.notificationsAfter = feed.cursor;
+      if (page === 0 && target || feed.cursor !== cursor || feed.notifications.length) stream.send({ type: "notifications", feed });
+      if (cursor === null || cursor === feed.cursor) break;
+      cursor = feed.cursor;
+    }
   }
 }
 
@@ -1541,13 +1546,13 @@ function sendTranscript(stream: ClientStream, update: ReturnType<typeof refreshT
   if (!sessionId) return;
   const current = update?.current;
   const from = stream.subscription.transcriptFrom;
-  const limit = from == null ? 60 : Math.max(60, (current?.items.length ?? 0) - from);
+  const limit = from == null ? 60 : Math.min(600, Math.max(60, (current?.items.length ?? 0) - from));
   stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.items.length ?? 0,
     items: current ? transcriptWindow(current.items, limit) : [] });
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
-async function applySubscription(stream: ClientStream, patch: Partial<StreamSubscription>): Promise<void> {
+async function applySubscription(stream: ClientStream, patch: Partial<StreamSubscription>, mode: "push" | "finite"): Promise<void> {
   const before = stream.subscription;
   stream.declare(patch);
   const revision = stream.revision;
@@ -1556,23 +1561,26 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
   if (changedSession) releaseOpenDisplayContexts();
   if (sessionId && stream.subscription.viewing) await markSessionViewed(sessionId,
     changedSession || !before.viewing || before.selectionId !== stream.subscription.selectionId);
+  const pending: Promise<void>[] = [];
   if (sessionId) {
     const captured = storedContext(sessionId);
-    if (captured) refreshTranscript(sessionId);
-    sendLive(stream);
+    if (mode === "push") {
+      if (captured) sendTranscript(stream, refreshTranscript(sessionId));
+      sendLive(stream);
+    }
     sendImages(stream);
-    void sendQuestions(stream);
+    pending.push(sendQuestions(stream));
     sendEvents(stream);
     const fresh = changedSession || before.selectionId !== stream.subscription.selectionId;
-    void stream.synchronizeSelection(
+    pending.push(stream.synchronizeSelection(
       () => sessionRow.get(sessionId) ? refreshThreadInspection(sessionId, fresh) : Promise.resolve(),
       () => {
-        refreshTranscript(sessionId);
+        sendTranscript(stream, refreshTranscript(sessionId));
         sendLive(stream);
         projectState();
         sendState(stream);
       },
-    );
+    ));
   }
   if (!sessionId) {
     projectState();
@@ -1585,6 +1593,7 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     if (!dashboardSnapshot) await refreshDashboard();
     if (!stream.closed && stream.revision === revision && dashboardSnapshot) stream.publish({ type: "dashboard", dashboard: dashboardSnapshot });
   }
+  await Promise.all(pending);
 }
 
 function closeStream(stream: ClientStream): void {
@@ -2123,6 +2132,7 @@ const server = Bun.serve<SocketData>({
       const resolved = callers.resolve(caller);
       if ("error" in resolved || resolved.kind !== "person" || resolved.via !== "router") return error("Rooms require the authenticated local router", 403);
       return handleRoomOwner(req, {
+        subscribe: listener => threads.subscribe(change => listener(change.threadId)),
         get: id => threads.get(id) ?? null,
         create: async (id, title, members) => {
           const destination = meetingDestination();
@@ -2568,6 +2578,25 @@ const server = Bun.serve<SocketData>({
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
     }
+    if (API.reconcile.match(req.method, url.pathname)) {
+      const patch = readSubscription(await readBody(req));
+      const events: StreamWireEvent[] = [];
+      const stream = new ClientStream({
+        write: chunk => { events.push(JSON.parse(chunk.slice(chunk.indexOf("data: ") + 6).trim())); },
+        close: () => {},
+      }, reconciledState);
+      const abort = () => stream.close();
+      req.signal.addEventListener("abort", abort, { once: true });
+      try {
+        stream.send({ type: "hello", epoch: SUPERVISOR_EPOCH, streamId: stream.id, bootstrap: bootstrap() });
+        void refreshPeers();
+        await applySubscription(stream, patch, "finite");
+        return json({ events });
+      } finally {
+        req.signal.removeEventListener("abort", abort);
+        stream.close();
+      }
+    }
     if (API.stream.match(req.method, url.pathname)) {
       const patch = readSubscription(await readBody(req).catch(() => ({})));
       let stream!: ClientStream;
@@ -2587,13 +2616,14 @@ const server = Bun.serve<SocketData>({
       httpServer.timeout(req, 0);
       const ping = setInterval(() => {
         if (stream.closed) { clearInterval(ping); closeStream(stream); return; }
+        pushNotifications(stream);
         stream.ping();
       }, PING_INTERVAL_MS);
       req.signal.addEventListener("abort", () => { clearInterval(ping); closeStream(stream); }, { once: true });
       const facts = bootstrap();
       bootstrapEncoded = JSON.stringify(facts);
       stream.send({ type: "hello", epoch: SUPERVISOR_EPOCH, streamId: stream.id, bootstrap: facts });
-      void applySubscription(stream, patch).catch((cause) => {
+      void applySubscription(stream, patch, "push").catch((cause) => {
         stream.send({ type: "error", message: cause instanceof Error ? cause.message : String(cause) });
       });
       void refreshPeers();
@@ -2610,7 +2640,7 @@ const server = Bun.serve<SocketData>({
       const stream = streams.get(streamUpdate.streamId);
       if (!stream) return error("Unknown stream", 404);
       try {
-        await applySubscription(stream, readSubscription(await readBody(req)));
+        await applySubscription(stream, readSubscription(await readBody(req)), "push");
         return new Response(null, { status: 204, headers: API_CORS_HEADERS });
       } catch (cause: any) { return error(cause?.message ?? "Could not update the stream", 400); }
     }
@@ -2706,6 +2736,40 @@ const server = Bun.serve<SocketData>({
     const id = sessionMatch.params.sessionId;
     const action = sessionMatch.action;
     const row = sessionRow.get(id) as any;
+    if (action === "prompt" && req.method === "POST") {
+      let body: unknown;
+      try { body = await readBody(req); }
+      catch (cause) { return json({ outcome: "rejected", error: cause instanceof Error ? cause.message : "Invalid prompt JSON", code: "invalid_request" }, 400); }
+      if (body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string" && !promptAdmissions.has(body.requestId) && requestResult(body.requestId)) {
+        return json({ outcome: "rejected", error: "requestId already belongs to another operation", code: "conflict" }, 409);
+      }
+      const result = await promptAdmissions.submit(id, body, {
+        prepare: async input => {
+          if (!row) return { ok: false, error: { code: "not_found", message: "Session not found" } };
+          if (ROOMS_ENABLED && roomMetadata(row.metadata?.room)) return { ok: false, error: { code: "forbidden", message: "Use the room API for room messages" } };
+          if (row.archived_at) return { ok: false, error: { code: "conflict", message: "Thread is archived" } };
+          if (forkingSessions.has(id)) return { ok: false, error: { code: "conflict", message: "Wait for the conversation edit to finish" } };
+          const roomImages = input.includeMeetingImages === true && row.meeting_id
+            ? meet.captureDelegation(row.meeting_id) : { images: [], note: "" };
+          let text = input.text.trim() + (roomImages.note ? `\n\n${roomImages.note}` : "");
+          if (input.replyTo !== undefined) {
+            const target = parseMessageReference(input.replyTo);
+            if (target?.transport !== "pi" || target.sessionId !== id) return { ok: false, error: { code: "invalid_request", message: "Reply must reference a message in this conversation" } };
+            const history = await directory.read({ threadId: id, entryId: target.messageId });
+            if (!history.ok) return history;
+            const reply = replyFromNativeEntry(input.replyTo, history.value.entries[0], MESSAGE_OWNER, AGENT_NAME);
+            if (!reply) return { ok: false, error: { code: "invalid_request", message: "Reply target is not a user or assistant message" } };
+            text = encodeMessageReply(text, reply);
+          }
+          return { ok: true, value: { text, delivery: input.delivery, images: roomImages.images } };
+        },
+        send: async (threadId, requestId, prepared) => {
+          if (req.signal.aborted) return { ok: false, error: { code: "unavailable", message: "The caller disconnected before admission; check the saved request explicitly." } };
+          return directory.send({ threadId, requestId, ...prepared });
+        },
+      });
+      return json(result.body.outcome === "accepted" && row ? { ...result.body, session: publicSession(row) } : result.body, result.status);
+    }
     if (ROOMS_ENABLED && roomMetadata(row?.metadata?.room) && ["prompt", "fork", "command"].includes(action ?? "")) return error("Use the room API for room messages", 403);
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
@@ -2873,35 +2937,6 @@ const server = Bun.serve<SocketData>({
           forkingSessions.delete(id);
         }
       } catch (e: any) { return error(e.message ?? "Could not edit from that message", 400); }
-    }
-    if (action === "prompt" && req.method === "POST") {
-      try {
-        const body = await readBody(req);
-        const requestId = String(body.requestId ?? "");
-        const old = requestResult(requestId);
-        if (old) return json(JSON.parse(old.response), old.status);
-        if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
-        const text = String(body.text ?? "").trim();
-        if (!text) return error("Prompt is empty");
-        if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        const delivery = resolveDelivery(body);
-        if (!["queue", "steer", "hardSteer"].includes(delivery)) return error("delivery must be queue, steer or hardSteer");
-
-        const roomImages = body.includeMeetingImages === true && row.meeting_id
-          ? meet.captureDelegation(row.meeting_id)
-          : { images: [], note: "" };
-        let message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
-        if (body.replyTo !== undefined) {
-          const target = typeof body.replyTo === "string" ? parseMessageReference(body.replyTo) : null;
-          if (target?.transport !== "pi" || target.sessionId !== id) return error("Reply must reference a message in this conversation");
-          const history = await directory.read({ threadId: id, entryId: target.messageId });
-          if (!history.ok) return threadError(history.error);
-          const reply = replyFromNativeEntry(body.replyTo, history.value.entries[0], MESSAGE_OWNER, AGENT_NAME);
-          if (!reply) return error("Reply target is not a user or assistant message");
-          message = encodeMessageReply(message, reply);
-        }
-        return json(await enqueuePrompt(id, requestId, message, delivery, roomImages.images), 202);
-      } catch (e: any) { return error(e.message ?? "Prompt failed", 400); }
     }
     if (action === "abort" && req.method === "POST") {
       const body = await readBody(req);

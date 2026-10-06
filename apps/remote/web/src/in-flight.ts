@@ -23,7 +23,7 @@ let activation: Activation | null = null;
 
 const WRITES = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const TOP_LEVEL_READ = /^\/v1\/(?:sessions(?:\/archived)?|workspaces|messaging|files|environments|actions)$/;
-const BACKGROUND_WRITE = /^\/v1\/(?:stream(?:\/[^/]+)?|messaging\/conversations\/[^/]+\/read|speech\/utterances)$/;
+const BACKGROUND_WRITE = /^\/v1\/(?:reconcile|stream(?:\/[^/]+)?|messaging\/conversations\/[^/]+\/read|speech\/utterances)$/;
 const NATIVE_ACTION = /^native:(?:installAppUpdate|checkAppUpdate|notifications)$/;
 
 /** Native bridge calls are not API reads; only explicit native actions can show progress. */
@@ -31,7 +31,7 @@ export const NATIVE_METHOD = "NATIVE";
 
 export function requestVisibility(method: string, pathname: string, activationAgeMs: number | null): "shown" | "background" {
   const route = pathname.replace(/^.*(?=\/v1\/)/, "");
-  if (/^\/v1\/(?:stream(?:\/|$)|diagnostics\/requests$)/.test(route)) return "background";
+  if (/^\/v1\/(?:reconcile$|stream(?:\/|$)|diagnostics\/requests$)/.test(route)) return "background";
   if (method === NATIVE_METHOD) return NATIVE_ACTION.test(pathname) && activationAgeMs !== null && activationAgeMs >= 0 && activationAgeMs <= ACTIVATION_WINDOW_MS ? "shown" : "background";
   if (WRITES.has(method)) return BACKGROUND_WRITE.test(route) ? "background" : "shown";
   return method === "GET" && TOP_LEVEL_READ.test(route) && activationAgeMs !== null && activationAgeMs >= 0 && activationAgeMs <= ACTIVATION_WINDOW_MS ? "shown" : "background";
@@ -88,7 +88,7 @@ export function beginRequest(method: string, pathname: string, now = performance
   const normalizedMethod = method.toUpperCase();
   const age = activation ? now - activation.at : null;
   const shown = requestVisibility(normalizedMethod, path, age) === "shown";
-  if (/\/v1\/(?:stream(?:\/|$)|diagnostics\/requests$)/.test(path) || normalizedMethod === NATIVE_METHOD && !shown) return () => {};
+  if (/\/v1\/(?:reconcile$|stream(?:\/|$)|diagnostics\/requests$)/.test(path) || normalizedMethod === NATIVE_METHOD && !shown) return () => {};
   const origin = attributedOrigin(activation, now);
   const request: InFlightRequest = { id: nextId++, method: normalizedMethod, path, origin, startedAt: now };
   const startedAt = Date.now();

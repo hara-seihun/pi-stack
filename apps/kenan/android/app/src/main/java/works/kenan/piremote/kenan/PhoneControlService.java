@@ -46,6 +46,11 @@ public final class PhoneControlService extends Service {
     private String environment;
     private int attempts;
     private boolean refreshScheduled;
+    private String displayedNotice;
+    private boolean displayedOverlay;
+    private final android.content.BroadcastReceiver capabilitiesChanged = new android.content.BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) { refresh(); }
+    };
 
     static SharedPreferences settings(Context context) { return context.getSharedPreferences("phone-control", MODE_PRIVATE); }
     static boolean enabled(Context context) {
@@ -85,7 +90,10 @@ public final class PhoneControlService extends Service {
         });
     }
     static void refresh() { PhoneControlService active = current; if (active != null) active.main.post(() -> {
-        if (active.connection != null) active.connection.hello();
+        PhoneConnection source = active.connection;
+        if (!active.stopping && active.connected && source != null && !active.network.isShutdown()) active.network.execute(() -> {
+            if (source == active.connection && source.valid()) source.announceChanges();
+        });
         active.updateNotice(active.connected ? "Phone control connected" : errorMessage.isEmpty() ? "Connecting through Pi Remote" : errorMessage);
     }); }
     static boolean sendOverlay(JSONObject frame) {
@@ -140,6 +148,14 @@ public final class PhoneControlService extends Service {
         manager.createNotificationChannel(new NotificationChannel(CHANNEL, "Phone control", NotificationManager.IMPORTANCE_LOW));
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTICE, notification("Connecting through Pi Remote"), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(NOTICE, notification("Connecting through Pi Remote"));
+        displayedNotice = "Connecting through Pi Remote";
+        displayedOverlay = KenanOverlay.isVisible(this);
+        android.content.IntentFilter changes = new android.content.IntentFilter();
+        changes.addAction(Intent.ACTION_SCREEN_ON);
+        changes.addAction(Intent.ACTION_SCREEN_OFF);
+        changes.addAction(Intent.ACTION_USER_PRESENT);
+        changes.addAction(Intent.ACTION_USER_UNLOCKED);
+        ContextCompat.registerReceiver(this, capabilitiesChanged, changes, ContextCompat.RECEIVER_NOT_EXPORTED);
         try {
             JSONArray saved = new JSONArray(settings(this).getString("seenCommands", "[]"));
             for (int i = 0; i < saved.length(); i++) commands.put(saved.getString(i), null);
@@ -167,12 +183,13 @@ public final class PhoneControlService extends Service {
             connect();
             if (!refreshScheduled) {
                 refreshScheduled = true;
-                network.scheduleWithFixedDelay(() -> main.post(() -> {
+                network.scheduleWithFixedDelay(() -> {
                     PhoneConnection active = connection;
-                    if (connected && active != null && active.valid()) active.hello();
-                }), 30, 30, TimeUnit.SECONDS);
+                    if (connected && active != null && active.valid()) active.heartbeat();
+                }, PhoneConnection.HEARTBEAT_SECONDS, PhoneConnection.HEARTBEAT_SECONDS, TimeUnit.SECONDS);
             }
         }
+        refresh();
         return START_STICKY;
     }
     private boolean authorized() { return !stopping && enabled(this) && NotificationIdentity.get(this).isCurrent(identity)
@@ -218,10 +235,17 @@ public final class PhoneControlService extends Service {
         }
         commands.put(id, null);
         while (commands.size() > 512) commands.remove(commands.keySet().iterator().next());
-        // Persist acceptance before dispatch so a process restart cannot replay an uncertain mutation.
-        if (!settings(this).edit().putString("seenCommands", new JSONArray(commands.keySet()).toString()).commit()) {
-            source.send(PhoneResult.error("state_error", "Could not persist command replay ledger").envelope(id)); return;
-        }
+        PhoneCommandReplay.accept(this, id, acceptance -> main.post(() -> {
+            if (source != connection || !source.valid() || !authorized()) return;
+            switch (acceptance) {
+                case PERSISTED -> dispatchAccepted(source, frame, id, deadline);
+                case DUPLICATE -> source.send(PhoneResult.error("unconfirmed", "Command was already accepted; it will not be replayed").envelope(id));
+                case STATE_ERROR -> source.send(PhoneResult.error("state_error", "Could not persist command replay ledger").envelope(id));
+                case BUSY -> source.send(PhoneResult.error("rate_limited", "Command acceptance queue is full").envelope(id));
+            }
+        }));
+    }
+    private void dispatchAccepted(PhoneConnection source, JSONObject frame, String id, long deadline) {
         String command = frame.optString("command", "");
         JSONObject args = frame.optJSONObject("args");
         if (args == null) args = new JSONObject();
@@ -232,6 +256,7 @@ public final class PhoneControlService extends Service {
             if (source == connection && source.valid() && authorized()) {
                 if (commands.containsKey(id)) commands.put(id, envelope.toString().length() <= 16384 ? envelope : null);
                 if (System.currentTimeMillis() <= deadline) source.send(envelope);
+                if (result.ok && (command.equals("permissions.grant") || command.equals("settings.put"))) refresh();
             }
         });
         Runnable execute = () -> {
@@ -315,8 +340,14 @@ public final class PhoneControlService extends Service {
             .addAction(0, KenanOverlay.isVisible(this) ? "Hide Kenan" : "Show Kenan", overlay)
             .addAction(0, "Disable", disable).build();
     }
-    private void updateNotice(String text) { getSystemService(NotificationManager.class).notify(NOTICE, notification(text)); }
+    private void updateNotice(String text) {
+        boolean overlay = KenanOverlay.isVisible(this);
+        if (text.equals(displayedNotice) && overlay == displayedOverlay) return;
+        getSystemService(NotificationManager.class).notify(NOTICE, notification(text));
+        displayedNotice = text;
+        displayedOverlay = overlay;
+    }
     private void close() { stopping = true; connected = false; PhoneConnection active = connection; connection = null; if (active != null) active.close(); network.shutdownNow(); data.shutdownNow(); main.removeCallbacksAndMessages(null); }
-    @Override public void onDestroy() { close(); if (current == this) current = null; stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }
+    @Override public void onDestroy() { unregisterReceiver(capabilitiesChanged); close(); if (current == this) current = null; stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }
     @Override public IBinder onBind(Intent intent) { return null; }
 }

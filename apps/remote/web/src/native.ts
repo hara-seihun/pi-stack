@@ -289,6 +289,24 @@ async function getState(): Promise<EnvironmentState> {
   return current;
 }
 
+export async function pinnedFetch(endpoint: Endpoint, user: string, path: string, init: RequestInit): Promise<Response> {
+  const revision = generation;
+  const selected = await getState();
+  if (revision !== generation || user !== auth.user || selected.id !== endpoint.id || selected.baseUrl !== endpoint.baseUrl) {
+    throw new DOMException("Request owner changed", "AbortError");
+  }
+  const signal = init.signal ? AbortSignal.any([init.signal, personRequests.signal]) : personRequests.signal;
+  signal.throwIfAborted();
+  const headers = auth.headers(init.headers);
+  const token = auth.session;
+  const settle = beginRequest(init.method ?? "GET", path);
+  try {
+    const response = await abortable(browserFetch(new URL(`${endpoint.baseUrl}${path}`, location.href), { ...init, headers, signal, redirect: "error" }), signal);
+    if (response.status === 423) auth.clear(token);
+    return response;
+  } finally { settle(); }
+}
+
 function apiPath(input: RequestInfo | URL) {
   const value = typeof input === "string" || input instanceof URL ? String(input) : input.url;
   const prefix = new URL(bootstrap || "/", location.href).pathname.replace(/\/$/, "");
