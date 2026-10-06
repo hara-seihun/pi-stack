@@ -33,6 +33,7 @@ it("multiplexes native sessions and keeps an accepted execution through controll
   const sessions: PiSession[] = [];
   let first: ReturnType<typeof createSharedPiSessionOpener> | undefined;
   let second: ReturnType<typeof createSharedPiSessionOpener> | undefined;
+  let next: ReturnType<typeof createSharedPiSessionOpener> | undefined;
   try {
     writeFileSync(join(compiled, "package.json"), '{"type":"module"}');
     await build({ entryPoints: ["runner-host", "runner-transport"].map(name => join(repository, `packages/orchestrator/src/threads/${name}.ts`)),
@@ -47,7 +48,8 @@ it("multiplexes native sessions and keeps an accepted execution through controll
       }});
     }`);
     const options = (threadId: string): PiSessionOptions => ({ threadId, cwd: dataDir, sessionFile: join(dataDir, `${threadId}.jsonl`), args: ["--extension", extension],
-      env: { HOME: dataDir, PI_CODING_AGENT_DIR: join(dataDir, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: "http://127.0.0.1:1/v1/threads" } });
+      env: { HOME: dataDir, PI_CODING_AGENT_DIR: join(dataDir, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: "http://127.0.0.1:1/v1/threads",
+        PI_THREAD_MAX_ACTIVE_SESSIONS: "2", PI_THREAD_MAX_RESIDENT_SESSIONS: "3", PI_THREAD_SESSION_KEY: threadId } });
     first = runtime.createSharedPiSessionOpener({ dataDir });
     const a: PiEvent[] = [], b: PiEvent[] = [];
     const restored = options("one");
@@ -92,9 +94,54 @@ it("multiplexes native sessions and keeps an accepted execution through controll
     await resumed.command({ type: "prompt", id: "duplicate", workId: "work-one", resume: true, message: "/hold" });
     await until(() => replay.some(event => event.id === "duplicate"));
     expect(readFileSync(join(dataDir, "entered"), "utf8")).toBe("one\n");
+    await resumed.setActive!(false); await two.setActive!(false);
+    expect(await status(control)).toMatchObject({ sessions: 2, activeSessions: 0, availableSlots: 2 });
+    const c: PiEvent[] = [];
+    const three = await second.openSession(options("three"), event => c.push(event), () => {}); sessions.push(three);
+    await three.command({ type: "get_state", id: "three-ready" });
+    await until(() => c.some(event => event.id === "three-ready"));
+    await three.setActive!(false);
+    const changed = options("three"); changed.env.PI_THREAD_SESSION_KEY = "three-next";
+    const replacement = await second.openSession(changed, event => c.push(event), () => {}); sessions.push(replacement);
+    await replacement.command({ type: "get_state", id: "three-replaced" });
+    await until(() => c.some(event => event.id === "three-replaced"));
+    expect(c.find(event => event.id === "three-replaced")).toMatchObject({ data: { threadSessionKey: "three-next", sessionFile: changed.sessionFile } });
+    await replacement.setActive!(false);
+    const d: PiEvent[] = [];
+    const four = await second.openSession(options("four"), event => d.push(event), () => {}); sessions.push(four);
+    expect(await status(control)).toMatchObject({ sessions: 3, activeSessions: 1, threadIds: ["two", "three", "four"] });
+    const e: PiEvent[] = [];
+    const five = await second.openSession(options("five"), event => e.push(event), () => {}); sessions.push(five);
+    await expect(second.openSession(options("six"), () => {}, () => {})).rejects.toThrow("Runner capacity busy");
+    expect((await status(control)).threadIds).toEqual(expect.arrayContaining(["four", "five"]));
+    const nextEntry = join(compiled, "runner-transport-next.js");
+    writeFileSync(nextEntry, readFileSync(join(compiled, "runner-transport.js")));
+    const nextRuntime = await import(pathToFileURL(nextEntry).href) as typeof runtime;
+    next = nextRuntime.createSharedPiSessionOpener({ dataDir });
+    const retainedFour = d.find(event => event.type === "runner_attached") as PiEvent & PiRunnerReference;
+    const recovery = options("four"); recovery.env.PI_THREAD_RUNNER_REFERENCE = JSON.stringify(retainedFour); recovery.env.PI_THREAD_RECOVERING = "1";
+    const recovered: PiEvent[] = [];
+    const recoveredFour = await next.openSession(recovery, event => recovered.push(event), () => {}); sessions.push(recoveredFour);
+    expect(recovered.find(event => event.type === "runner_attached")).toMatchObject({ control });
+    expect((await status(control)).pid).toBe(original.pid);
+    const oldReference = e.find(event => event.type === "runner_attached") as PiEvent & PiRunnerReference;
+    const nextOptions = options("five"); nextOptions.env.PI_THREAD_RUNNER_REFERENCE = JSON.stringify(oldReference);
+    const moved: PiEvent[] = [];
+    const movedFive = await next.openSession(nextOptions, event => moved.push(event), () => {}); sessions.push(movedFive);
+    const newReference = moved.find(event => event.type === "runner_attached") as PiEvent & PiRunnerReference;
+    expect(newReference.control).not.toBe(control);
+    expect((await status(newReference.control)).pid).not.toBe(original.pid);
+    expect((await status(control)).threadIds).toContain("four");
+    await four.close(); await until(() => !existsSync(control));
+    for (const session of sessions) await session.close().catch(() => {});
+    const newPid = (await status(newReference.control)).pid;
+    expect(await status(newReference.control)).toMatchObject({ sessions: 0, activeSessions: 0 });
+    await new Promise(resolve => setTimeout(resolve, 5200));
+    expect(await status(newReference.control)).toMatchObject({ sessions: 0, pid: newPid });
+    next.detach(); await until(() => !existsSync(newReference.control));
   } finally {
     for (const session of sessions) await session.close().catch(() => {});
-    first?.detach(); second?.detach();
+    first?.detach(); second?.detach(); next?.detach();
     rmSync(dataDir, { recursive: true, force: true }); rmSync(compiled, { recursive: true, force: true });
   }
-}, 10_000);
+}, 15_000);

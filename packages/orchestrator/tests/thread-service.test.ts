@@ -43,6 +43,7 @@ class FakePiSession implements PiSession {
   pendingMessageCount = 0;
   lastAssistantMessage?: Record<string, unknown>;
   closed = false;
+  setActive?: (active: boolean) => Promise<void>;
 
   constructor(readonly options: PiSessionOptions, private readonly output: (event: PiEvent) => void) {}
 
@@ -89,6 +90,94 @@ class FakePiSession implements PiSession {
   async close(): Promise<void> { this.closed = true; }
 }
 
+describe("warm execution residency", () => {
+  it("reuses idle native context but reacquires and releases admission for every assignment", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-warm-")); roots.push(directory);
+    const sessions: FakePiSession[] = [], release = vi.fn(), activity = vi.fn(async (_active: boolean) => {});
+    let admitted = true;
+    const admit = vi.fn(async () => admitted ? { ok: true as const, value: { env: { PI_ORCHESTRATOR_ACCOUNT_ID: "account-one" }, release } }
+      : { ok: false as const, error: { code: "unavailable" as const, message: "Capacity is occupied" } });
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, admit,
+      openSession: async (options, output) => { const session = new FakePiSession(options, output); session.setActive = activity; sessions.push(session); return session; } });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    await settle(sessions[0]!, service, thread.id);
+    await waitFor(() => activity.mock.calls.some(([active]) => !active));
+    expect(release).toHaveBeenCalledOnce(); expect(sessions[0]!.closed).toBe(false);
+    service.reconcile(); await turn(); expect(sessions).toHaveLength(1);
+    admitted = false;
+    value(await service.send({ requestId: "second", threadId: thread.id, text: "second" }));
+    await waitFor(() => !!service.get(thread.id)?.metadata?.admissionWait);
+    expect(sessions[0]!.commands.some(command => command.workId === "second")).toBe(false);
+    const phases: string[] = [];
+    service.subscribe(() => { const phase = service.get(thread.id)?.executionActivity?.activity; if (phase) phases.push(phase); });
+    admitted = true; service.reconcile();
+    await waitFor(() => sessions[0]!.commands.some(command => command.workId === "second"));
+    expect(phases).not.toContain("starting"); expect(sessions).toHaveLength(1);
+    expect(admit).toHaveBeenCalledTimes(3);
+    expect(activity.mock.calls.filter(([active]) => active)).toHaveLength(2);
+    await settle(sessions[0]!, service, thread.id);
+    expect(release).toHaveBeenCalledTimes(2);
+    value(await service.control({ threadId: thread.id, action: "view" }));
+    expect(service.get(thread.id)?.metadata?.autoArchiveViewedAt).toBeTypeOf("number");
+  });
+
+  it.each(["admission", "activation"])("recovers reclamation racing %s before dispatch without losing accepted input", async stage => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-reclaim-")); roots.push(directory);
+    const sessions: FakePiSession[] = [], release = vi.fn();
+    let nativeExit!: (code?: number) => void, reclaimed = false, admissions = 0, activations = 0;
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      admit: async () => {
+        if (++admissions === 2 && stage === "admission") { reclaimed = true; nativeExit(0); await turn(); }
+        return { ok: true, value: { release } };
+      },
+      openSession: async (options, output, exit) => {
+        const session = new FakePiSession(options, output); nativeExit = exit;
+        session.setActive = async active => {
+          if (active && ++activations === 2 && stage === "activation") {
+            reclaimed = true; exit(0);
+            throw new Error("Runner capacity busy: idle session was reclaimed; work remains queued");
+          }
+        };
+        sessions.push(session); return session;
+      } });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first" }));
+    await waitFor(() => sessions[0]?.isStreaming === true); await settle(sessions[0]!, service, thread.id);
+    value(await service.send({ requestId: "second", threadId: thread.id, text: "second" }));
+    await waitFor(() => sessions[1]?.isStreaming === true);
+    expect(reclaimed).toBe(true); expect(admissions).toBe(2);
+    expect(sessions[0]!.commands.some(command => command.workId === "second")).toBe(false);
+    expect(sessions[1]!.commands.filter(command => command.workId === "second")).toHaveLength(1);
+    expect(service.latestSettlement(thread.id)?.workId).toBe("first");
+    await settle(sessions[1]!, service, thread.id); expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["account", "broker", "environment", "model"])("reopens an idle session when its admitted %s changes", async change => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-reopen-")); roots.push(directory);
+    const sessions: FakePiSession[] = [], release = vi.fn();
+    let admissionEnv = { PI_ORCHESTRATOR_ACCOUNT_ID: "one" } as Record<string, string>, environment = { HOME: directory };
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      environment: () => environment, admit: async () => ({ ok: true, value: { env: admissionEnv, release } }),
+      openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first", settings: { model: "sol" } }));
+    await waitFor(() => sessions[0]?.isStreaming === true); await settle(sessions[0]!, service, thread.id);
+    if (change === "account") admissionEnv = { PI_ORCHESTRATOR_ACCOUNT_ID: "two" };
+    if (change === "broker") admissionEnv = { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" };
+    if (change === "environment") environment = { HOME: join(directory, "new-home") };
+    if (change === "model") value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
+    value(await service.send({ requestId: "second", threadId: thread.id, text: "second" }));
+    await waitFor(() => sessions[1]?.isStreaming === true);
+    expect(sessions[0]!.closed).toBe(true);
+    expect(sessions[1]!.options.env).toMatchObject(admissionEnv);
+    expect(sessions[1]!.options.sessionFile).toBe(sessions[0]!.options.sessionFile);
+    expect(sessions[1]!.options.env.PI_THREAD_REQUIRE_SESSION).toBe("1");
+    await settle(sessions[1]!, service, thread.id); expect(release).toHaveBeenCalledTimes(2);
+  });
+});
+
 function signedFinalMessage() {
   return {
     role: "assistant", stopReason: "stop", timestamp: 1234,
@@ -129,6 +218,128 @@ function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServ
   services.push(service);
   return { directory, service, sessions };
 }
+
+describe("controller resource handoff", () => {
+  it.each(["queued", "dispatched"] as const)("preserves %s work when its opener rejects after suspension", async state => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-rejection-")); roots.push(directory);
+    let entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const leaseRelease = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      admit: async () => ({ ok: true, value: { release: leaseRelease } }),
+      openSession: async () => { entered = true; await gate; throw new Error("Session initialization interrupted by handoff"); } });
+    services.push(service);
+    value(service.importThread({ id: "opening", title: "opening", cwd: directory, sessionFile: join(directory, "opening.jsonl"),
+      settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
+    value(service.importMessage({ id: "opening-work", threadId: "opening", text: "work", state, insertedAt: state === "dispatched" ? 123 : undefined }));
+    const pending = service.pending("opening");
+    value(await service.start()); await waitFor(() => entered);
+    service.suspend(); const handoff = service.detach(); release(); value(await handoff);
+    expect(leaseRelease).toHaveBeenCalledTimes(state === "queued" ? 1 : 0);
+    const successor = fixture(directory);
+    expect(successor.service.pending("opening")).toEqual(pending);
+    expect(successor.service.latestSettlement("opening")).toBeNull();
+    value(await successor.service.detach());
+  });
+
+  it("waits for an opener returning after suspension without disposing unknown native custody", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-opening-")); roots.push(directory);
+    let release!: () => void, native: FakePiSession | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const leaseRelease = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+      admit: async () => ({ ok: true, value: { release: leaseRelease } }),
+      openSession: async (options, output) => {
+        native = new FakePiSession(options, output);
+        await gate;
+        return native;
+      } });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "opening", cwd: directory, message: "work" }));
+    await waitFor(() => !!native);
+    expect(await service.close()).toMatchObject({ ok: false, error: { code: "conflict" } });
+    service.suspend();
+    let detached = false;
+    const handoff = service.detach().then(result => { detached = true; return result; });
+    await turn(); expect(detached).toBe(false);
+    release(); value(await handoff);
+    expect(native!.commands).toEqual([]);
+    expect(native!.closed).toBe(false);
+    expect(leaseRelease).toHaveBeenCalledOnce();
+    const successor = fixture(directory);
+    expect(successor.service.pending(thread.id)).toMatchObject([{ id: "opening", state: "queued", insertedAt: null, landedAt: null }]);
+    expect(successor.service.latestSettlement(thread.id)).toBeNull();
+    expect(successor.sessions).toHaveLength(0);
+  });
+
+  it.each(["preparing", "admitting"])("leaves %s work queued and releases only unassigned admission", async phase => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-hooks-")); roots.push(directory);
+    let entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const leaseRelease = vi.fn(), openSession = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
+      ...(phase === "preparing" ? { prepareMessage: async (_thread, message) => { entered = true; await gate; return { ok: true, value: { text: message.text } }; } } :
+        { admit: async () => { entered = true; await gate; return { ok: true, value: { release: leaseRelease } }; } }) });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "hook", cwd: directory, message: "work" }));
+    await waitFor(() => entered);
+    service.suspend(); const handoff = service.detach(); release(); value(await handoff);
+    expect(openSession).not.toHaveBeenCalled();
+    expect(leaseRelease).toHaveBeenCalledTimes(phase === "admitting" ? 1 : 0);
+    const successor = fixture(directory);
+    expect(successor.service.pending(thread.id)).toMatchObject([{ id: "hook", state: "queued", insertedAt: null, landedAt: null }]);
+    expect(successor.service.latestSettlement(thread.id)).toBeNull();
+  });
+
+  it("retains busy execution receipts, leases and held/archived input across detach", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-active-")); roots.push(directory);
+    const sessions: FakePiSession[] = [], leaseRelease = vi.fn();
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      admit: async () => ({ ok: true, value: { release: leaseRelease } }),
+      openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
+    services.push(service);
+    for (const id of ["held", "archived"]) {
+      value(service.importThread({ id, title: id, cwd: directory, sessionFile: join(directory, `${id}.jsonl`),
+        settings: { model: "sol", thinkingLevel: "high", speed: "standard" }, held: true, metadata: id === "archived" ? { archived: true } : {} }));
+      value(service.importMessage({ id: `${id}-input`, threadId: id, text: "remain held" }));
+    }
+    value(await service.start());
+    const active = value(await service.spawn({ requestId: "active", cwd: directory, message: "keep working" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const pending = service.pending(active.id);
+    value(await service.detach());
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.closed).toBe(false);
+    expect(sessions[0]!.commands.some(command => command.type === "abort")).toBe(false);
+    expect(leaseRelease).not.toHaveBeenCalled();
+    const successor = fixture(directory);
+    expect(successor.service.pending(active.id)).toEqual(pending);
+    expect(successor.service.latestSettlement(active.id)).toBeNull();
+    for (const id of ["held", "archived"]) {
+      expect(successor.service.get(id)).toMatchObject({ held: true });
+      expect(successor.service.pending(id)).toMatchObject([{ id: `${id}-input`, state: "queued" }]);
+    }
+    expect(successor.service.get("archived")?.metadata?.archived).toBe(true);
+    expect(successor.sessions).toHaveLength(0);
+    value(await successor.service.detach());
+  });
+
+  it.each(["close", "detach"] as const)("keeps failed idle disposal owned so %s can retry it", async operation => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-disposal-")); roots.push(directory);
+    let refuses = true, native!: FakePiSession;
+    const disposal = vi.fn(async () => { if (refuses) throw new Error("Native disposal refused"); native.closed = true; });
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      openSession: async (options, output) => { native = new FakePiSession(options, output); native.close = disposal; return native; } });
+    services.push(service);
+    const thread = value(service.importThread({ id: "idle", title: "idle", cwd: directory, sessionFile: join(directory, "idle.jsonl"),
+      settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
+    expect(await service.command(thread.id, { type: "get_context" })).toMatchObject({ ok: true });
+    expect(await service[operation]()).toMatchObject({ ok: false, error: { message: "Native disposal refused" } });
+    refuses = false; value(await service[operation]());
+    expect(disposal).toHaveBeenCalledTimes(2);
+    expect(native.closed).toBe(true);
+  });
+});
 
 it("projects phase timestamps to list and reconnect snapshots without stale thinking or tools", async () => {
   const { service, directory, sessions } = fixture();
@@ -1555,8 +1766,9 @@ describe("ThreadService", () => {
     expect(service.pending(thread.id).some(message => message.id === "later")).toBe(true);
     expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
     sessions[1]!.settle("now done");
-    await waitFor(() => sessions[2]?.commands.some(input => input.workId === "later") === true);
-    await settle(sessions[2]!, service, thread.id);
+    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "later") === true);
+    expect(sessions).toHaveLength(2);
+    await settle(sessions[1]!, service, thread.id);
   });
 
   it.each(["send", "promoteMessage"] as const)("preserves accepted but unlanded steers when %s hard steers the thread", async action => {
@@ -1606,8 +1818,9 @@ describe("ThreadService", () => {
       sessions[1]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replay.message) }] } });
     }
     sessions[1]!.settle("Urgent work and retained steers handled");
-    await waitFor(() => sessions[2]?.commands.some(command => command.workId === "later") === true);
-    await settle(sessions[2]!, service, thread.id);
+    await waitFor(() => sessions[1]?.commands.some(command => command.workId === "later") === true);
+    expect(sessions).toHaveLength(2);
+    await settle(sessions[1]!, service, thread.id);
     const inputs = sessions.flatMap(session => session.commands.filter(command => ["prompt", "steer"].includes(command.type)));
     expect(inputs.map(command => command.workId)).toEqual(["active", "landed", "first", "second", "now", "first", "second", "later"]);
     expect(service.pending(thread.id)).toEqual([]);

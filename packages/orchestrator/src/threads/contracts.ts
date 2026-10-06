@@ -231,6 +231,8 @@ export interface ThreadApi {
 export type PiEvent = Record<string, unknown> & { type: string; emittedAt?: number };
 export type PiCommand = Record<string, unknown> & { type: string; id?: string };
 export interface PiSession {
+  /** Reserve execution capacity, or release it while retaining an idle native session. */
+  setActive?(active: boolean): Promise<void>;
   command(command: PiCommand): Promise<void>;
   close(): Promise<void>;
 }
