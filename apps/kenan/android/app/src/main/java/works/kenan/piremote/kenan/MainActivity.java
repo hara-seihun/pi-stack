@@ -19,6 +19,22 @@ import com.getcapacitor.WebViewListener;
 import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
+    private DefaultNetworkMonitor networkMonitor;
+    private volatile boolean foreground;
+    private final android.os.Handler networkEvents = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable networkChanged = () -> {
+        if (!foreground || bridge == null) return;
+        NotificationFeedLease.clear();
+        IdleNotificationService.requestPoll();
+        bridge.triggerWindowJSEvent("pi-network-changed");
+    };
+
+    private void defaultNetworkChanged() {
+        if (!foreground) return;
+        networkEvents.removeCallbacks(networkChanged);
+        networkEvents.post(networkChanged);
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         NotificationFeedLease.clear();
@@ -34,6 +50,7 @@ public class MainActivity extends BridgeActivity {
         });
         keepSharedClientBelowSystemBars();
         routeSystemBackThroughClient();
+        networkMonitor = new DefaultNetworkMonitor(this, this::defaultNetworkChanged);
     }
 
     /**
@@ -75,6 +92,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        foreground = true;
         NotificationFeedLease.resume();
         ThreadNotifications.resume(this, this);
         if (bridge != null) bridge.triggerWindowJSEvent("pi-app-foreground");
@@ -82,10 +100,19 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onPause() {
+        foreground = false;
+        networkEvents.removeCallbacks(networkChanged);
         NotificationFeedLease.pause();
         IdleNotificationService.requestPoll();
         ThreadNotifications.pause(this);
         super.onPause();
+    }
+
+    @Override public void onDestroy() {
+        foreground = false;
+        if (networkMonitor != null) networkMonitor.close();
+        networkEvents.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     void notificationToast(JSONObject detail) {
