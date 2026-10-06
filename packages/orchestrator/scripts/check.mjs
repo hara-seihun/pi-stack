@@ -29,17 +29,18 @@ export function orchestratorTestChecks(suites) {
   ])];
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [mode, ...args] = process.argv.slice(2);
-  let jobs;
+export function orchestratorChecks(mode, args) {
   switch (mode) {
-    case "test": jobs = orchestratorTestChecks([{ name: "orchestrator tests", args }]); break;
+    case "test": return orchestratorTestChecks([{ name: "orchestrator tests", args }]);
     case "typecheck":
     case "build":
       if (args.length) throw new Error(`${mode} does not accept arguments`);
-      jobs = mode === "build" ? orchestratorBuildChecks() : orchestratorTypeChecks();
-      break;
-    default: throw new Error(`unknown Orchestrator check mode: ${mode}`);
+      return mode === "build" ? orchestratorBuildChecks() : orchestratorTypeChecks();
   }
-  await runJobs(jobs);
+  throw new Error(`unknown Orchestrator check mode: ${mode}`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const [mode, ...args] = process.argv.slice(2);
+  await runJobs(orchestratorChecks(mode, args));
 }

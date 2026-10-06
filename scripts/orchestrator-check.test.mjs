@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runJob, runJobs } from "./run-jobs.mjs";
-import { orchestratorTestChecks } from "../packages/orchestrator/scripts/check.mjs";
+import { orchestratorBuildChecks, orchestratorChecks, orchestratorTestChecks, orchestratorTypeChecks } from "../packages/orchestrator/scripts/check.mjs";
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const silent = () => {};
@@ -14,6 +14,19 @@ async function withoutExitCode(fn) {
   const exitCode = process.exitCode;
   try { await fn(); } finally { process.exitCode = exitCode; }
 }
+
+test("check modes return their complete graph or reject input before execution", () => {
+  const args = ["tests/import.test.ts", "--testNamePattern=import fixture"];
+  assert.deepEqual(orchestratorChecks("test", args), orchestratorTestChecks([{ name: "orchestrator tests", args }]));
+  assert.deepEqual(orchestratorChecks("typecheck", []), orchestratorTypeChecks());
+  assert.deepEqual(orchestratorChecks("build", []), orchestratorBuildChecks());
+  for (const mode of [undefined, "", "typo"]) {
+    assert.throws(() => orchestratorChecks(mode, []), /unknown Orchestrator check mode/);
+  }
+  for (const mode of ["typecheck", "build"]) {
+    assert.throws(() => orchestratorChecks(mode, args), new RegExp(`${mode} does not accept arguments`));
+  }
+});
 
 test("failed prerequisites block runtime transitively while independent checks finish", () => withoutExitCode(async () => {
   const command = (name, code, dependsOn = []) => [name, process.execPath, ["-e", `process.exit(${code})`], { dependsOn }];
