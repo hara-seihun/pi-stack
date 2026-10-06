@@ -1,4 +1,4 @@
-import type { Model, Provider } from "@earendil-works/pi-ai";
+import type { Api, Model, Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import customModelConfig from "./models.json" with { type: "json" };
 
@@ -6,11 +6,16 @@ export function isSupportedModel(model: { id: string }): boolean {
   return !/(^|[-_./:])terra($|[-_./:])/i.test(model.id);
 }
 
-export function withCustomModels(provider: Provider): Provider {
-  const custom = provider.id === "anthropic" ? customModelConfig.providers.anthropic.models as unknown as Model<"anthropic-messages">[]
-    : provider.id === "openai-codex" ? customModelConfig.providers["openai-codex"].models as unknown as Model<"openai-codex-responses">[] : [];
+/** Custom definitions replace builtins by id; retired models remain available to accounting. */
+export function modelsWithCustomDefinitions(provider: Provider): Model<Api>[] {
+  const providers = customModelConfig.providers as unknown as Record<string, { models: Model<Api>[] }>;
+  const custom = providers[provider.id]?.models ?? [];
   const replacements = new Set(custom.map(model => model.id));
-  return { ...provider, getModels: () => [...provider.getModels().filter(model => isSupportedModel(model) && !replacements.has(model.id)), ...custom] };
+  return [...provider.getModels().filter(model => !replacements.has(model.id)), ...custom];
+}
+
+export function withCustomModels(provider: Provider): Provider {
+  return { ...provider, getModels: () => modelsWithCustomDefinitions(provider).filter(isSupportedModel) };
 }
 
 export const nativeProviders = builtinProviders().map(withCustomModels);
