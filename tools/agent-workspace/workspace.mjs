@@ -681,23 +681,38 @@ function systemdManagerSnapshot(manager, execute = command) {
     "--state=active,activating,reloading,deactivating",
     "--type=service",
     "--type=scope",
-    "--no-legend",
-    "--plain",
+    "--output=json",
+    "--no-pager",
   ], { timeout: 20_000 });
   if (listed.error?.code === "ENOENT" || /not been booted with systemd|failed to connect to (?:user scope )?bus|(?:DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR) not defined/iu.test(listed.stderr)) {
     return { units: [], available: false };
   }
   if (listed.status !== 0) return { units: [], available: true, error: listed.stderr || listed.stdout || "systemctl list-units failed" };
-  const unitIds = listed.stdout.split("\n").map((line) => line.trim().split(/\s+/u)[0]).filter(Boolean);
+  let rows;
+  try {
+    rows = JSON.parse(listed.stdout);
+  } catch {
+    return { units: [], available: true, error: "systemctl list-units returned invalid JSON" };
+  }
+  if (!Array.isArray(rows) || rows.some((row) =>
+    row === null || typeof row !== "object" || typeof row.unit !== "string" ||
+    !/^[a-zA-Z0-9:_.@\\\\-]+\.(?:service|scope)$/u.test(row.unit))) {
+    return { units: [], available: true, error: "systemctl list-units returned invalid unit records" };
+  }
+  const unitIds = rows.map((row) => row.unit);
+  if (new Set(unitIds).size !== unitIds.length) {
+    return { units: [], available: true, error: "systemctl list-units returned duplicate unit records" };
+  }
   if (unitIds.length === 0) return { units: [], available: true };
   const shown = execute("systemctl", [
     ...managerArgs,
     "show",
-    ...unitIds,
     "--property=Id",
     "--property=ActiveState",
     "--property=WorkingDirectory",
     "--property=ExecStart",
+    "--",
+    ...unitIds,
   ], { timeout: 20_000 });
   if (shown.status !== 0) return { units: [], available: true, error: shown.stderr || shown.stdout || "systemctl show failed" };
   return { units: parseSystemdUnits(shown.stdout, manager), available: true };

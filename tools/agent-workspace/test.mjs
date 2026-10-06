@@ -1060,6 +1060,60 @@ test("ignores containers removed during the Docker ownership snapshot", () => {
   assert.deepEqual(snapshot, { containers: [{ Id: "live" }], available: true });
 });
 
+test("systemd discovery keeps multiline command descriptions out of unit operands", () => {
+  const workspace = "/srv/workspaces/agent-one";
+  const description = `python3 -c '\nroot='${workspace}'\n\nprint(root)\n'`;
+  const unitIds = ["worker.service", "session-12.scope", "worker@escaped\\x2dname.service"];
+  for (const manager of ["user", "system"]) {
+    const calls = [];
+    const snapshot = workspaceTesting.systemdManagerSnapshot(manager, (_executable, args) => {
+      calls.push(args);
+      if (args.includes("list-units")) return {
+        status: 0, stderr: "",
+        stdout: JSON.stringify(unitIds.map((unit) => ({ unit, description }))),
+      };
+      assert.deepEqual(args.slice(args.indexOf("--") + 1), unitIds);
+      return {
+        status: 0, stderr: "",
+        stdout: `ExecStart={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -c root='${workspace}/data'\\nprint(root) ; }\nWorkingDirectory=/srv\nId=worker.service\nActiveState=active\n\nId=session-12.scope\nActiveState=active\nWorkingDirectory=${workspace}\nExecStart=\n`,
+      };
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].includes("--output=json"), true);
+    assert.equal(calls[0].includes("--user"), manager === "user");
+    assert.equal(snapshot.error, undefined);
+    const references = workspaceTesting.systemdReferences(workspace, snapshot).references;
+    assert.deepEqual(references.map(({ id }) => id), ["worker.service", "session-12.scope"]);
+    assert.equal(workspaceTesting.systemdReferences(`${workspace}-unrelated`, snapshot).references.length, 0);
+  }
+});
+
+test("systemd malformed discovery refuses safety instead of omitting units", () => {
+  for (const stdout of ["worker.service loaded active running python3\nroot=42", "{}", "null", "[null]",
+    '[{"description":"no unit"}]', '[{"unit":"root=42"}]', '[{"unit":"worker.timer"}]',
+    '[{"unit":"worker.service\\nroot=42"}]', '[{"unit":"worker.service"},{"unit":"worker.service"}]']) {
+    let calls = 0;
+    const snapshot = workspaceTesting.systemdManagerSnapshot("user", () => {
+      calls += 1;
+      return { status: 0, stderr: "", stdout };
+    });
+    assert.equal(calls, 1);
+    assert.match(snapshot.error, /^systemctl list-units returned /u);
+    assert.deepEqual(workspaceTesting.systemdReferences("/srv/workspaces/agent-one", snapshot), {
+      references: [], available: true, error: snapshot.error,
+    });
+  }
+  assert.deepEqual(workspaceTesting.systemdManagerSnapshot("system", () => ({
+    status: 0, stderr: "", stdout: "[]",
+  })), { units: [], available: true });
+  for (const phase of ["list-units", "show"]) {
+    const snapshot = workspaceTesting.systemdManagerSnapshot("system", (_executable, args) => args.includes(phase)
+      ? { status: 1, stderr: "permission denied", stdout: "" }
+      : { status: 0, stderr: "", stdout: '[{"unit":"worker.service"}]' });
+    assert.equal(snapshot.error, "permission denied");
+  }
+});
+
 test("classifies active systemd workspace references", () => {
   const workspace = "/srv/workspaces/agent-one";
   const units = workspaceTesting.parseSystemdUnits(`Id=worker.service\nActiveState=active\nExecStart={ path=/usr/bin/node ; argv[]=/usr/bin/node ${workspace}/server.js ; }\nWorkingDirectory=${workspace}\n\nId=finished.service\nActiveState=inactive\nExecStart={ path=/bin/true ; argv[]=/bin/true ; }\nWorkingDirectory=${workspace}\n`, "user");
