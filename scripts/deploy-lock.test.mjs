@@ -305,15 +305,31 @@ if [[ \${REQUIRE_RUNTIME_OVERLAP:-0} == 1 ]]; then
   fi
 fi
 `;
-    for (const name of ["runtime", "orchestrator"]) writeFileSync(join(deploy, name), component + runtimeOverlap);
+    for (const name of ["runtime", "orchestrator"]) writeFileSync(join(deploy, name), component + runtimeOverlap + '\nif [[ $name == orchestrator ]]; then exit "${ORCHESTRATOR_EXIT:-0}"; fi\n');
     writeFileSync(join(deploy, "skills"), component.replace('name=$(basename "$0")', 'name=$(basename "$0")\nprintf "%s\\n" "$*" >> "$SKILLS_TRACE"'));
     writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nif [ \"${REQUIRE_ACTIVATION_OVERLAP:-0}\" = 1 ]; then test -f \"$DAEMON_ACTIVATED\" || exit 92; fi\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
     for (const service of ["voice", "phone"]) {
       const key = service.toUpperCase();
-      writeFileSync(join(deploy, service), `#!/bin/sh\nprintf '%s\\n' "$1" >> "$${key}_TRACE"\ncase $1 in --check) exit "\${${key}_CHECK_EXIT:-0}";; --activate) exit 0;; *) exit 64;; esac\n`, { mode: 0o755 });
+      writeFileSync(join(deploy, service), `#!/bin/sh\nprintf '%s\\n' "$1" >> "$${key}_TRACE"\ncase $1 in --check) exit "\${${key}_CHECK_EXIT:-0}";; --activate) if [ -n "\${DOCTOR_ACTIVATION_STARTED:-}" ]; then touch "$DOCTOR_ACTIVATION_STARTED"; fi; exit 0;; *) exit 64;; esac\n`, { mode: 0o755 });
     }
     mkdirSync(join(repository,"packages/runtime"),{recursive:true});
-    writeFileSync(join(repository,"packages/runtime/browser-doctor.mjs"), "process.exit(Number(process.env.BROWSER_SMOKE_EXIT ?? 0));\n");
+    const doctorProof = (name, peer) => `
+import { existsSync, writeFileSync } from 'node:fs';
+if (process.env.REQUIRE_DOCTOR_OVERLAP === '1') {
+  writeFileSync(process.env.${name}_DOCTOR_STARTED, 'started');
+  const deadline = Date.now() + 1500;
+  while (!existsSync(process.env.${peer}_DOCTOR_STARTED) || !existsSync(process.env.DOCTOR_ACTIVATION_STARTED)) {
+    if (Date.now() >= deadline) { console.error('Runtime doctors must overlap each other and activation'); process.exit(94); }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+if (process.env.DOCTOR_SETTLEMENT_DIR) {
+  await new Promise(resolve => setTimeout(resolve, 150));
+  writeFileSync(process.env.DOCTOR_SETTLEMENT_DIR + '/${name}.settled', 'settled');
+}
+process.exit(Number(process.env.${name}_SMOKE_EXIT ?? 0));
+`;
+    writeFileSync(join(repository,"packages/runtime/browser-doctor.mjs"), doctorProof("BROWSER", "MODEL"));
     // Activation hands the supervisor the selected release; its health then names that commit.
     writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\ncat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\" > \"$SUPERVISOR_COMMIT\"\n");chmodSync(join(remoteApp,"activate"),0o755);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps","packages"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
@@ -321,7 +337,7 @@ fi
     const doctorBin = join(destinations.PI_STACK_RUNTIME_DEST, "node_modules/.bin");
     function installModelDoctor() {
       mkdirSync(doctorBin, { recursive: true });
-      writeFileSync(join(doctorBin, "pi-model-selection-doctor"), "process.exit(Number(process.env.MODEL_SMOKE_EXIT ?? 0));\n");
+      writeFileSync(join(doctorBin, "pi-model-selection-doctor"), doctorProof("MODEL", "BROWSER"));
     }
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
@@ -443,7 +459,7 @@ exit 64
     rmSync(env.PHONE_TRACE, { force: true });
     rmSync(personReadTrace);
     installModelDoctor();
-    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,REQUIRE_ACTIVATION_OVERLAP:"1"},cwd:directory});assert.equal(first.status,0,first.stderr);
+    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,REQUIRE_ACTIVATION_OVERLAP:"1",REQUIRE_DOCTOR_OVERLAP:"1",BROWSER_DOCTOR_STARTED:join(directory,"browser.started"),MODEL_DOCTOR_STARTED:join(directory,"model.started"),DOCTOR_ACTIVATION_STARTED:join(directory,"doctor.activation.started")},cwd:directory});assert.equal(first.status,0,first.stderr);
     assert.equal(existsSync(env.DAEMON_ACTIVATED), true, "smoke joins the independent daemon activation job");
     assert.deepEqual(readFileSync(env.SKILLS_TRACE, "utf8").trim().split("\n").sort(),
       [user, "--links-only alice", "--links-only guest-person"].sort(),
@@ -469,6 +485,16 @@ exit 64
     assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
     assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
     rmSync(systemctlTrace,{force:true});
+    const doctorSettlement = join(directory, "doctor-settlement");
+    mkdirSync(doctorSettlement);
+    const stagingFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ORCHESTRATOR_EXIT: "23", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });
+    assert.equal(stagingFailure.status, 23, stagingFailure.stderr);
+    for (const doctor of ["BROWSER", "MODEL"]) assert.equal(existsSync(join(doctorSettlement, `${doctor}.settled`)), false, "doctors require successful publication of the runtime");
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "staging failure cannot activate services");
+    const activationFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, DAEMON_RESTART_EXIT: "1", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });
+    assert.equal(activationFailure.status, 1, activationFailure.stderr);
+    for (const doctor of ["BROWSER", "MODEL"]) assert.ok(existsSync(join(doctorSettlement, `${doctor}.settled`)), "failed activation must join both proof jobs before releasing custody");
+    rmSync(systemctlTrace);
     const overlapEnv = { ...env, REQUIRE_RUNTIME_OVERLAP: "1", ORCHESTRATOR_STAGED: join(directory, "orchestrator.staged"), RUNTIME_CHECKED: join(directory, "runtime.checked") };
     const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:overlapEnv});assert.equal(unchanged.status,0,unchanged.stderr);
     assert.equal(existsSync(overlapEnv.RUNTIME_CHECKED), true, "prepared runtime proof overlaps component staging and is joined");

@@ -101,6 +101,10 @@ restore_write() {
     (( write_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-write.service || true
     pi_stack_as_root rm -f "$candidate"
   fi
+  # Join bounded proof jobs before releasing deployment custody.
+  if [[ -n ${doctor_pid:-} ]]; then
+    wait "$doctor_pid" || true
+  fi
   exit "$status"
 }
 trap restore_write EXIT
@@ -124,8 +128,14 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
   phase publication 50 env PI_STACK_HOST_PHASE=publication "$0" "$@"
   if (( services )); then
     (
-      phase browser-doctor 120 "$control/deploy/runtime-doctors" browser "$root" "${fleet:-${users[0]}}" "$control" &&
-      phase model-doctor 30 "$control/deploy/runtime-doctors" model "$root" "${fleet:-${users[0]}}" "$control"
+      phase browser-doctor 120 "$control/deploy/runtime-doctors" browser "$root" "${fleet:-${users[0]}}" "$control" &
+      browser_doctor_pid=$!
+      phase model-doctor 30 "$control/deploy/runtime-doctors" model "$root" "${fleet:-${users[0]}}" "$control" &
+      model_doctor_pid=$!
+      failed=0
+      wait "$browser_doctor_pid" || failed=1
+      wait "$model_doctor_pid" || failed=1
+      exit "$failed"
     ) &
     doctor_pid=$!
     activation_failed=0; doctor_failed=0
