@@ -2088,8 +2088,6 @@ const server = Bun.serve<SocketData>({
   async fetch(req, httpServer) {
     return jsonHttp(req, await (async () => {
     const url = new URL(req.url);
-    const peer = httpServer.requestIP(req);
-    const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
       return new Response(null, {
         status: 204,
@@ -2098,6 +2096,9 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
+    const peer = httpServer.requestIP(req);
+    const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);
       if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
@@ -2351,7 +2352,6 @@ const server = Bun.serve<SocketData>({
     }
     const web = webResponse(WEB_DIR, url.pathname, req.method, req);
     if (web) return web;
-    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
     if (API.requestTimingsRead.match(req.method, url.pathname)) return json({ requests: requestTimings.list() });
     if (API.requestTimings.match(req.method, url.pathname)) {
       const result = requestTimings.receive(await readBody(req));

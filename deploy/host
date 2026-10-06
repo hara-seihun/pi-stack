@@ -125,11 +125,14 @@ else
 fi
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1
-wait "$runtime_pid" || preparation_failed=1
-(( preparation_failed == 0 )) || exit 1
-
 expected=$(git -C "$root" rev-parse HEAD)
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+# prepare already selected this immutable runtime. Its repeated custody proof
+# can overlap component staging; a cold deployment still needs it selected first.
+if [[ ! -f $runtime/.pi-stack-commit || $(<"$runtime/.pi-stack-commit") != "$expected" ]]; then
+  wait "$runtime_pid" || preparation_failed=1
+fi
+(( preparation_failed == 0 )) || exit 1
 orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
 skills=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
@@ -167,6 +170,7 @@ tools_pid=$!
 ) &
 accounts_pid=$!
 publish_failed=0
+wait "$runtime_pid" || publish_failed=1
 wait "$remote_pid" || publish_failed=1
 wait "$tools_pid" || publish_failed=1
 wait "$accounts_pid" || publish_failed=1
