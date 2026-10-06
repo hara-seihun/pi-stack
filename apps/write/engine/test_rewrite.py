@@ -37,8 +37,9 @@ class RewriteGuardTest(unittest.TestCase):
         self.assertFalse(runtime.wait_ready(0))
         self.assertEqual(runtime.rewrite('hello', 'Hello.', {}).reason, 'warmup_failed')
 
-    def test_close_reaps_the_child_and_joins_inflight_warmup(self):
+    def test_model_health_skips_empty_warmup_and_close_joins_owned_prefix_warmup(self):
         entered, stopped = Event(), Event()
+        arguments = []
         class Process:
             def poll(self):
                 return 0 if stopped.is_set() else None
@@ -51,13 +52,22 @@ class RewriteGuardTest(unittest.TestCase):
             if not stopped.wait(1):
                 raise TimeoutError('test did not close the runtime')
             raise ConnectionResetError('child closed')
-        opener = SimpleNamespace(open=lambda *args, **kwargs: io.BytesIO(b'{}'))
-        with patch('rewrite.subprocess.Popen', return_value=Process()), \
+        def launch(argv, **kwargs):
+            arguments.extend(argv)
+            return Process()
+        def health(*args, **kwargs):
+            if '--no-warmup' not in arguments:
+                from urllib.error import HTTPError
+                raise HTTPError('http://localhost/health', 503, 'empty model run pending', {}, None)
+            return io.BytesIO(b'{}')
+        opener = SimpleNamespace(open=health)
+        with patch('rewrite.subprocess.Popen', side_effect=launch), \
                 patch('rewrite.urllib.request.build_opener', return_value=opener), \
                 patch.object(LocalRewriter, '_request', side_effect=warm):
-            runtime = LocalRewriter(Path('/runtime'), Path('/model'))
+            runtime = LocalRewriter(Path('/runtime'), Path('/model'), startup_timeout=.05)
             directory = Path(runtime.private.name)
             self.assertTrue(entered.wait(1))
+            self.assertEqual(runtime.rewrite('hello', 'Hello.', {}).reason, 'warming')
             runtime.close()
             self.assertTrue(stopped.is_set())
             self.assertFalse(runtime.warm_thread.is_alive())

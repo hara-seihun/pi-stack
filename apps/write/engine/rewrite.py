@@ -127,7 +127,7 @@ class LocalRewriter:
             self.process = subprocess.Popen([
                 str(binary), '-m', str(model), '--host', '127.0.0.1', '--port', str(port),
                 '-ngl', '0', '-t', str(threads), '-tb', str(batch_threads), '-c', '2048', '-np', '1',
-                '--api-key-file', str(key_file), '--log-disable'], stdout=subprocess.DEVNULL, stderr=self.diagnostics)
+                '--api-key-file', str(key_file), '--no-warmup', '--log-disable'], stdout=subprocess.DEVNULL, stderr=self.diagnostics)
             deadline = time.monotonic() + startup_timeout
             while True:
                 if self.process.poll() is not None:
