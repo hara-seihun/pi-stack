@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { PromptAdmissions, type PreparedPrompt, type PromptAdmissionEffects } from "./prompt-admissions";
+import { PromptAdmissions, type PreparedPrompt, type PromptAdmissionEffects, type PromptFailure } from "./prompt-admissions";
 import { encodeMessageReply } from "./message-replies";
 
 const databases: Database[] = [];
@@ -71,14 +71,50 @@ test("validation errors are explicit rejection and immutable owner failures rema
   })).toMatchObject({ status: 202, body: { workId: "accepted-later" } });
 });
 
-test("definitive preparation rejection is retained through restart and never re-submitted", async () => {
+const failureCases = [
+  ["invalid_request", 400, "rejected"],
+  ["not_found", 404, "rejected"],
+  ["conflict", 409, "rejected"],
+  ["forbidden", 403, "rejected"],
+  ["unavailable", 503, "pending"],
+  ["no_pending_messages", 503, "pending"],
+  ["cancellation_failed", 503, "pending"],
+] as const satisfies ReadonlyArray<readonly [PromptFailure["code"], number, "rejected" | "pending"]>;
+
+test.each(failureCases)("%s during preparation or send yields %i/%s with correct restart custody", async (code, status, outcome) => {
+  for (const phase of ["prepare", "send"] as const) {
+    const f = fixture();
+    const body = input();
+    const fail = async () => ({ ok: false as const, error: { code, message: "Admission failure" } });
+    const response = await f.admissions.submit("thread", body, {
+      prepare: phase === "prepare" ? fail : async () => good(prepared(body.text)),
+      send: phase === "send" ? fail : unreachable,
+    });
+    expect(response).toEqual({ status, body: { outcome, code: outcome === "pending" ? "unavailable" : code, error: "Admission failure" } });
+    const restarted = new PromptAdmissions(f.db);
+    if (outcome === "rejected") {
+      expect(await restarted.submit("thread", body, { prepare: unreachable, send: unreachable })).toEqual(response);
+    } else {
+      expect(await restarted.submit("thread", body, {
+        prepare: phase === "prepare" ? async () => good(prepared(body.text)) : unreachable,
+        send: async () => good({ id: "accepted-later", delivery: "hardSteer" }),
+      })).toMatchObject({ status: 202, body: { workId: "accepted-later" } });
+    }
+  }
+});
+
+test("an undescribed failure code reports the protocol defect and leaves admission unconfirmed", async () => {
   const f = fixture();
   const body = input();
-  const rejected = await f.admissions.submit("thread", body, {
-    prepare: async () => ({ ok: false, error: { code: "invalid_request", message: "Reply target is not a user or assistant message" } }), send: unreachable,
+  const response = await f.admissions.submit("thread", body, {
+    prepare: async () => ({ ok: false, error: { code: "unknown-owner-state", message: "Not a known failure" } as unknown as PromptFailure }),
+    send: unreachable,
   });
-  expect(rejected).toMatchObject({ status: 400, body: { outcome: "rejected" } });
-  expect(await new PromptAdmissions(f.db).submit("thread", body, { prepare: unreachable, send: unreachable })).toEqual(rejected);
+  expect(response).toEqual({ status: 503, body: { outcome: "pending", code: "unavailable", error: 'Prompt admission failure: undescribed state "unknown-owner-state"' } });
+  expect(await new PromptAdmissions(f.db).submit("thread", body, {
+    prepare: async () => good(prepared(body.text)),
+    send: async () => good({ id: "accepted-after-protocol-repair", delivery: "hardSteer" }),
+  })).toMatchObject({ status: 202, body: { workId: "accepted-after-protocol-repair" } });
 });
 
 test("concurrent identical requests share effects; concurrent collisions do not share acceptance", async () => {

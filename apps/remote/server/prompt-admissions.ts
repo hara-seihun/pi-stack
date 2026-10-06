@@ -1,10 +1,11 @@
 import type { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { Delivery } from "pi-orchestrator/api";
+import type { Delivery, ThreadError } from "pi-orchestrator/api";
+import { assertNever } from "../shared/explicit-state";
 
 export type PromptInput = { requestId: string; text: string; delivery: Delivery; replyTo?: string; includeMeetingImages?: boolean };
 export type PreparedPrompt = { text: string; delivery: Delivery; images: ImageContent[] };
-export type PromptFailure = { code: string; message: string };
+export type PromptFailure = { code: ThreadError["code"] | "forbidden"; message: string };
 export type AdmissionResult<T> = { ok: true; value: T } | { ok: false; error: PromptFailure };
 export type PromptAdmissionResponse = {
   status: number;
@@ -26,8 +27,11 @@ function failureResponse(error: PromptFailure): PromptAdmissionResponse {
     case "not_found": return rejection(error.code, error.message, 404);
     case "conflict": return rejection(error.code, error.message, 409);
     case "forbidden": return rejection(error.code, error.message, 403);
-    default: return pending(error.message);
+    case "unavailable":
+    case "no_pending_messages":
+    case "cancellation_failed": return pending(error.message);
   }
+  return assertNever(error.code, "Prompt admission failure");
 }
 export function parsePromptInput(body: unknown): AdmissionResult<PromptInput> {
   if (!object(body) || typeof body.requestId !== "string" || !uuid.test(body.requestId)
