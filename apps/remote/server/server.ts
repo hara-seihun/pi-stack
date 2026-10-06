@@ -69,6 +69,7 @@ import { dismissError, observeError } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
+import { createThreadViewRecorder } from "./thread-viewing";
 import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
 import { meetingActivity } from "./meet/activity";
@@ -1010,7 +1011,11 @@ function recordResponseMetrics(sessionId: string, metrics: ResponseMetrics | nul
 }
 
 function touchSession(_id: string) { signalSync(); }
-function markSessionViewed(id: string) {
+const recordThreadView = createThreadViewRecorder(directory, liveThread, thread => {
+  if (!threads.get(thread.id)) peerThreads.set(thread.id, thread);
+});
+async function markSessionViewed(id: string, reopened = false) {
+  await recordThreadView(id, reopened);
   const result = db.query("UPDATE thread_views SET idle_unread=0 WHERE id=? AND idle_unread<>0").run(id);
   if (result.changes) signalSync();
 }
@@ -1316,7 +1321,8 @@ function projectState(): void {
 
 function refreshState(): void {
   for (const stream of streams.values()) {
-    if (stream.subscription.viewing && stream.subscription.session) markSessionViewed(stream.subscription.session);
+    if (stream.subscription.viewing && stream.subscription.session) void markSessionViewed(stream.subscription.session)
+      .catch(error => console.error("[supervisor] recording thread view failed", error));
   }
   projectState();
   for (const stream of streams.values()) sendState(stream);
@@ -1453,7 +1459,8 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
   const sessionId = stream.subscription.session ?? null;
   const changedSession = (before.session ?? null) !== sessionId;
   if (changedSession) releaseOpenDisplayContexts();
-  if (sessionId && stream.subscription.viewing) markSessionViewed(sessionId);
+  if (sessionId && stream.subscription.viewing) await markSessionViewed(sessionId,
+    changedSession || !before.viewing || before.selectionId !== stream.subscription.selectionId);
   if (sessionId) {
     const captured = storedContext(sessionId);
     if (captured) refreshTranscript(sessionId);

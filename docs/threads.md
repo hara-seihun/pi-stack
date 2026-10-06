@@ -156,17 +156,16 @@ reuses that output rather than submitting another inference.
 Remote can archive settled threads automatically with the person environment setting
 `PI_REMOTE_AUTO_ARCHIVE_AFTER_MS=3600000` (one hour). The default is `0`, disabled.
 A non-overlapping sweep runs every minute across that person's local and fleet directory.
-Only idle threads with no pending messages and no activity newer than the cutoff qualify. Unread idle conversations remain in Current Chats until the person reads them.
+Only idle threads with no pending messages and no activity newer than the cutoff qualify. A conversation's hour starts when any authorized person views it while it is idle, not when it finishes. Unseen and unread idle conversations remain in Current Chats. Opening or returning to an idle conversation resets the hour; if it finishes while visible, that counts as an idle view. Background selection and agent reads do not count. New activity invalidates the previous idle view, so the next idle period needs another view.
 Running threads, pending messages and in-flight command work are retained, and
 active or recent nonarchived descendants protect their parents. The owning service's
-`archiveInactive` control rechecks eligibility synchronously without stopping execution;
-older owners reject this action rather than interpreting it as an unconditional archive.
+The owner stores the view as `metadata.autoArchiveViewedAt` through `control(view)`, without changing execution activity or `updatedAt`. Remote records the view before clearing unread, and state refreshes do not continually reset an already armed timer. `archiveInactive` control rechecks the view deadline and subtree eligibility synchronously without stopping execution, so a view arriving after the sweep's list read still prevents an immediate archive. The view survives restarts; conversations without one are not backdated.
 
 A persistent worker's lifetime is its conversation's. An ephemeral worker archives after its final assignment settles; it never waits in the active worker list for the inactivity sweep. Archiving a thread, by the sweep or by hand,
 archives every descendant with it, across owners: `archiveInactive` marks the whole
 subtree once it has verified the subtree is idle, and the directory's `update
 archived` walks children in other owners after the root. A worker's unread marker
-protects nothing; its reader is the agent above it. A worker whose parent is archived
+protects nothing; its reader is the agent above it. Workers still expire without a human view, but opening an idle worker gives it and its ancestors a fresh hour. A worker whose parent is archived
 or missing is archived on the next sweep as soon as it stops running, however recent,
 along with any messages still queued for it: they came from the conversation that is
 gone. Before
@@ -176,7 +175,7 @@ forever, and they filled the Workers tab as parentless roots.
 Closing hides a thread without deleting history. The UI's X first stops that AI and all
 its descendants, then marks the root archived. A failed descendant stop keeps the chat
 visible. There is no separate archive tab; the New/Open Chat picker restores previous
-conversations. Restoring resets the inactivity clock but does not resume held work.
+conversations. Restoring clears the previous idle-view clock but does not resume held work; viewing the restored idle conversation starts a fresh hour.
 
 A stop with `reason: "archive"` (the X, and the stop inside `update archived`) records
 `metadata.archiveInterruption` on every thread it takes out of play that was not

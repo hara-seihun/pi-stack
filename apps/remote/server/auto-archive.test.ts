@@ -9,7 +9,7 @@ test("disabled by default and validates configuration", () => {
 });
 
 test("collects all pages before mutation and protects recent or busy descendants", async () => {
-  const row = (id: string, patch: Partial<Thread> = {}) => ({ id, parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, ...patch }) as Thread;
+  const row = (id: string, patch: Partial<Thread> = {}) => ({ id, parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, ...patch, metadata: { autoArchiveViewedAt: 1, ...patch.metadata } }) as Thread;
   const rows = [row("parent"), row("stale"), row("recent", { updatedAt: 6_400_000 }), row("child", { parentId: "parent", state: "running" }), row("held", { held: true, pendingMessages: 1 }), row("archived", { metadata: { archived: true } }), row("cancelling", { state: "running", metadata: { executionError: "Cancellation not confirmed" } }), row("failed", { metadata: { executionError: "Provider failed" } })];
   const calls: string[] = [];
   const api = {
@@ -24,9 +24,9 @@ test("collects all pages before mutation and protects recent or busy descendants
 
 test("an unread conversation stays current; an unread worker follows its conversation", async () => {
   const rows = [
-    { id: "root", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0 },
+    { id: "root", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { autoArchiveViewedAt: 1 } },
     { id: "unread-child", parentId: "root", state: "idle", updatedAt: 1, pendingMessages: 0 },
-    { id: "read", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0 },
+    { id: "read", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { autoArchiveViewedAt: 1 } },
   ] as Thread[];
   const calls: string[] = [];
   const api = {
@@ -65,7 +65,7 @@ test("a quiet thread in a live meeting stays open with its ancestors", async () 
   const rows = [
     { id: "meeting", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "room" } },
     { id: "worker", parentId: "meeting", state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "room" } },
-    { id: "ended", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "gone" } },
+    { id: "ended", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "gone", autoArchiveViewedAt: 1 } },
   ] as unknown as Thread[];
   const calls: string[] = [];
   const api = {
