@@ -9,8 +9,9 @@ export type { QueueAction };
 
 function deliveryLabel(delivery: string) { return DELIVERY_LABELS[delivery]?.label ?? delivery; }
 
-export function queueMessageStatus(message: Pick<QueuedMessage, "state" | "delivery">, held: boolean): string {
-  if (message.state === "dispatched") return "Sent to agent";
+export function queueMessageStatus(message: Pick<QueuedMessage, "state" | "delivery" | "acknowledgement">, held: boolean): string {
+  if (message.state === "dispatched") return message.acknowledgement === "unconfirmed" ? "Acknowledgement unconfirmed — not resent"
+    : message.acknowledgement === "pending" ? "Awaiting agent acknowledgement" : "Sent to agent";
   if (held) return "Held until resumed";
   if (message.delivery === "steer") return "Steering after current tool calls";
   if (message.delivery === "hardSteer") return "Interrupting current work";

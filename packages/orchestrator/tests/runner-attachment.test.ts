@@ -8,7 +8,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { PiEvent } from "../src/threads/contracts.js";
 import { createSharedPiSessionOpener } from "../src/threads/runner-transport.js";
 
-vi.mock("node:child_process", () => ({ spawn: vi.fn(() => { throw new Error("Attach must not launch a runner"); }) }));
+vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<typeof import("node:child_process")>(),
+  spawn: vi.fn(() => { throw new Error("Attach must not launch a runner"); }) }));
 vi.mock("../src/threads/runner-memory.js", () => ({ underMemoryPressure: () => { throw new Error("Attach must not request admission"); } }));
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {

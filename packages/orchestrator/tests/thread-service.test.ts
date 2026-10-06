@@ -91,6 +91,123 @@ class FakePiSession implements PiSession {
   async close(): Promise<void> { this.closed = true; }
 }
 
+describe("delayed native input acknowledgements", () => {
+  async function delayed() {
+    const directory = mkdtempSync(join(tmpdir(), "thread-late-ack-")); roots.push(directory);
+    let session!: FakePiSession, input!: PiCommand;
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      openSession: async (options, output) => {
+        session = new FakePiSession(options, output);
+        const command = session.command.bind(session);
+        session.command = async next => {
+          if (next.type !== "steer") return command(next);
+          input = next; session.commands.push(next);
+          session.acceptedWorkIds.add(String(next.workId));
+          session.emit({ type: "auto_compaction_start" });
+        };
+        return session;
+      } });
+    services.push(service); value(await service.start());
+    const thread = value(await service.spawn({ requestId: "initial", cwd: directory, message: "initial" }));
+    await waitFor(() => !!service.pending(thread.id)[0]?.insertedAt);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    value(await service.send({ requestId: "delayed", threadId: thread.id, text: "retain this", delivery: "steer" }));
+    await waitFor(() => !!input);
+    await vi.advanceTimersByTimeAsync(30_001); await turn();
+    return { service, session, input, thread };
+  }
+
+  it("treats 170-second automatic compaction as pending and reconciles its late acknowledgement exactly once", async () => {
+    try {
+      const { service, session, input, thread } = await delayed();
+      expect(service.get(thread.id)?.metadata?.executionError).toBeUndefined();
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toMatchObject({ workId: "delayed" });
+      expect(service.get(thread.id)?.executionActivity?.activityDetail).toContain("acknowledgement pending");
+      expect(service.pending(thread.id).find(work => work.id === "delayed")).toMatchObject({ state: "dispatched", insertedAt: null });
+      await vi.advanceTimersByTimeAsync(140_000);
+      session.emit({ type: "auto_compaction_end" });
+      session.emit({ type: "response", id: input.id, command: "prompt", success: true });
+      await turn();
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
+      expect(service.get(thread.id)?.metadata?.executionError).toBeUndefined();
+      expect(service.pending(thread.id).find(work => work.id === "delayed")).toMatchObject({ insertedAt: expect.any(Number), landedAt: null });
+      service.reconcile(); await turn();
+      expect(session.commands.filter(command => command.workId === "delayed")).toHaveLength(1);
+      session.emit({ type: "message_start", inputWorkId: "delayed", message: { role: "user", content: "retain this" } });
+      expect(service.pending(thread.id).find(work => work.id === "delayed")?.landedAt).toEqual(expect.any(Number));
+      await settle(session, service, thread.id);
+      expect(value(service.settlements(0)).items[0]?.outcome).toBe("complete");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("bounds observation with read-only custody probes rather than replay after four minutes", async () => {
+    try {
+      const { service, session, thread } = await delayed();
+      // No receipt is visible yet: remain uncertain instead of inventing acceptance or failure.
+      session.acceptedWorkIds.delete("delayed");
+      await vi.advanceTimersByTimeAsync(210_000); service.reconcile(); await turn(); await turn();
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toMatchObject({ overdue: true });
+      expect(service.get(thread.id)?.metadata?.executionError).toBeUndefined();
+      expect(service.get(thread.id)?.executionActivity?.activityDetail).toContain("without replay");
+      session.acceptedWorkIds.add("delayed");
+      await vi.advanceTimersByTimeAsync(30_000); service.reconcile(); await turn(); await turn();
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
+      expect(service.pending(thread.id).find(work => work.id === "delayed")?.insertedAt).toEqual(expect.any(Number));
+      expect(session.commands.filter(command => command.workId === "delayed")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("retains pending acknowledgement across controller handoff and adopts late receipt without dispatch", async () => {
+    try {
+      const { service, session, input, thread } = await delayed();
+      const wait = service.get(thread.id)?.metadata?.acknowledgementWait;
+      await service.suspend();
+      let recovered!: FakePiSession;
+      const replacement = new ThreadService({ databasePath: join(thread.cwd, "threads.sqlite"), sessionsDir: thread.cwd,
+        openSession: async (options, output) => {
+          recovered = new FakePiSession(options, output);
+          recovered.isStreaming = true;
+          recovered.acceptedWorkIds.add("initial");
+          return recovered;
+        } });
+      services.push(replacement); value(await replacement.start());
+      await waitFor(() => !!recovered?.commands.some(command => command.type === "get_state"));
+      expect(replacement.get(thread.id)?.metadata?.acknowledgementWait).toEqual(wait);
+      recovered.emit({ type: "response", id: input.id, command: "prompt", success: true });
+      await turn();
+      expect(replacement.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
+      expect(replacement.pending(thread.id).find(work => work.id === "delayed")?.insertedAt).toEqual(expect.any(Number));
+      expect(recovered.commands.some(command => command.workId === "delayed")).toBe(false);
+      expect(session.commands.filter(command => command.workId === "delayed")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps explicit late rejection terminal rather than calling every timeout a success", async () => {
+    try {
+      const { service, session, input, thread } = await delayed();
+      session.emit({ type: "response", id: input.id, command: "prompt", success: false, error: "Preflight rejected input" });
+      await waitFor(() => value(service.settlements(0)).items.length > 0);
+      expect(value(service.settlements(0)).items[0]).toMatchObject({ outcome: "failed", error: "Preflight rejected input" });
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
+      expect(session.commands.filter(command => command.workId === "delayed")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("Stop fences late receipts from reviving cancelled work", async () => {
+    try {
+      const { service, session, input, thread } = await delayed();
+      value(await service.control({ threadId: thread.id, action: "stop", descendants: false }));
+      const before = service.pending(thread.id);
+      session.emit({ type: "response", id: input.id, command: "prompt", success: true });
+      await turn();
+      expect(service.get(thread.id)?.held).toBe(true);
+      expect(service.pending(thread.id)).toEqual(before);
+      expect(value(service.settlements(0)).items[0]?.outcome).toBe("cancelled");
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
+});
+
 describe("warm execution residency", () => {
   it("reuses idle native context but reacquires and releases admission for every assignment", async () => {
     const directory = mkdtempSync(join(tmpdir(), "thread-warm-")); roots.push(directory);

@@ -45,6 +45,7 @@ export interface QueuedMessage {
   /** Where the message is: waiting for its turn, or taken by the runtime and
    * not yet in the agent's context. The client words it. */
   state: "queued" | "dispatched";
+  acknowledgement?: "pending" | "unconfirmed";
   canSteer: boolean;
   canHardSteer: boolean;
   canCancel: boolean;
