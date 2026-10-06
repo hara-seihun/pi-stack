@@ -164,6 +164,63 @@ it("typed external waits survive restart and collaborator messages clear only th
   expect(next.service.get("self")?.waitingOnAgents).toBeUndefined();
 });
 
+it.each([
+  { kind: "agents", threadIds: ["child"], after: { child: 0 } },
+  { kind: "job", jobId: "job-123" },
+  { kind: "deployment", publicationId: "PUB-123" },
+  { kind: "message", fromThreadId: "collaborator" },
+])("authenticated wire/tool custody accepts $kind, terminates only a registered wait, and clear creates no work", async dependency => {
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "collaborator");
+  unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "self", cwd: f.root }));
+  const key = threadCapability(join(f.root, "key"));
+  const resolver = callerResolver({ capability: key });
+  const transport = async (url: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(String(url), init);
+    return (await threadHttp(f.service, request, "/v1/threads", admissionFor(resolver, { headers: request.headers })))!;
+  };
+  const tools = threadTools({ threadId: "self", cwd: f.root, sessionFile: "none", args: [], env: {}, threads: createThreadClient("http://fixture/v1/threads", transport, { token: key.issue("self") }) });
+  const wait = tools.find(t => t.name === "thread_wait")!;
+  const execute = (id: string, input: unknown) => wait.execute(id, input as never, undefined, undefined, {} as never);
+  for (const [n, input] of [{ action: "set", reason: "done" }, { action: "set", reason: "done", threadIds: [] }, { action: "set", kind: "agents", reason: "done", threadIds: [] }].entries()) {
+    expect(await execute(`bad:${n}`, input)).toMatchObject({ isError: true, details: { ok: false } });
+    expect(await execute(`bad:${n}`, input)).not.toHaveProperty("terminate");
+    expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
+  }
+  const input = { action: "set", reason: "needed", ...dependency };
+  expect(await execute("wait", input)).toMatchObject({ terminate: true, details: { ok: true } });
+  const since = f.service.get("self")!.waitingOnAgents!.since;
+  expect(await execute("wait", input)).toMatchObject({ terminate: true });
+  expect(f.service.get("self")!.waitingOnAgents!.since).toBe(since);
+  expect(await execute("wait", { ...input, reason: "changed input" })).toMatchObject({ isError: true, details: { error: { code: "conflict" } } });
+  expect(await execute("clear", { action: "clear" })).not.toHaveProperty("terminate");
+  expect(await execute("wait", input)).not.toHaveProperty("terminate");
+  expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
+  expect(f.service.pending("self")).toHaveLength(0); expect(f.sessions).toHaveLength(0);
+});
+
+it("normalizes only explicit legacy child waits, preserving raw receipt identity and ordinary settlements", async () => {
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "other");
+  unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "self", cwd: f.root, message: "work" }));
+  unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(c => c.type === "prompt") === true);
+  const legacy = { requestId: "legacy-wait", threadId: "self", action: "set", reason: "child", threadIds: ["child"] } as const;
+  const waiting = unwrap(await f.service.agentWait(legacy as never));
+  expect(waiting.waitingOnAgents).toMatchObject({ kind: "agents", threadIds: ["child"] });
+  expect(unwrap(await f.service.agentWait(legacy as never)).waitingOnAgents).toEqual(waiting.waitingOnAgents);
+  expect(await f.service.agentWait({ ...legacy, kind: "agents" } as never)).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(await f.service.agentWait({ ...legacy, requestId: "foreign", threadIds: ["other"] } as never)).toMatchObject({ ok: false });
+  expect(await f.service.agentWait({ ...legacy, requestId: "mixed", jobId: "guessed" } as never)).toMatchObject({ ok: false });
+  f.sessions[0]!.settle(); await until(() => !!f.service.latestSettlement("child"));
+  const settlement = f.service.latestSettlement("child")!;
+  expect(settlement).toMatchObject({ outcome: "complete" });
+  await until(() => f.sessions[1]?.commands.some(c => c.type === "prompt") === true);
+  expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
+  expect(f.service.pending("self")).toHaveLength(1);
+  expect(unwrap(await f.service.agentWait(legacy as never)).waitingOnAgents).toBeUndefined();
+  f.service.reconcile(); await boundary();
+  expect(f.service.latestSettlement("child")).toEqual(settlement);
+  expect(f.service.pending("self")).toHaveLength(1);
+});
+
 it("native tools end dependency waits rather than asking a model to poll; transient await is an explicit observed phase", async () => {
   const f = fixture(); await spawn(f, "self");
   const tools = threadTools({ threadId: "self", cwd: f.root, sessionFile: "none", args: [], env: {}, threads: f.service });

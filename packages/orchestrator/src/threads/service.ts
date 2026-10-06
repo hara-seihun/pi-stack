@@ -19,6 +19,7 @@ import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy,
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, validateWaitDependency, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
+import { parseRunnerWaitDependency } from "./wait-contract.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
@@ -441,7 +442,7 @@ export class ThreadService implements ThreadApi {
     if (input.action === "set") {
       if (thread.held || thread.metadata?.archived || thread.metadata?.raw) return bad("unavailable", "Waiting requires an unheld, unarchived normal thread");
       if (typeof input.reason !== "string" || !input.reason.trim()) return bad("invalid_request", "Waiting requires a reason");
-      const parsed = validateWaitDependency(input); if (!parsed.ok) return parsed;
+      const parsed = parseRunnerWaitDependency(input); if (!parsed.ok) return parsed;
       dependency = parsed.value;
       if (dependency.kind === "agents") {
         const settled = await (this.directory ?? this).await({ parentId: thread.id, threadIds: dependency.threadIds, after: dependency.after, timeoutMs: 0 });

@@ -8,6 +8,7 @@ import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 import { threadMode } from "./modes.js";
 import { SPEEDS } from "./speed.js";
+import { threadWaitParameters } from "./wait-contract.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
@@ -64,13 +65,7 @@ export function threadTools(options: PiSessionOptions) {
     defineTool({
       name: "thread_wait", label: "Wait for a named dependency",
       description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty direct child threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Holds and archives take precedence; explicit input clears the wait. Clear removes the wait without creating work.",
-      parameters: Type.Union([
-        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("agents"), reason: Type.String({ minLength: 1 }), threadIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true }), after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))) }),
-        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("job"), reason: Type.String({ minLength: 1 }), jobId: Type.String({ minLength: 1 }) }),
-        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("deployment"), reason: Type.String({ minLength: 1 }), publicationId: Type.String({ minLength: 1 }) }),
-        Type.Object({ action: Type.Literal("set"), kind: Type.Literal("message"), reason: Type.String({ minLength: 1 }), fromThreadId: Type.String({ minLength: 1 }) }),
-        Type.Object({ action: Type.Literal("clear") }),
-      ]),
+      parameters: threadWaitParameters,
       execute: async (id, input, signal) => {
         const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
         return { ...result(waited), ...(waited.ok && input.action === "set" && waited.value.metadata?.agentWait ? { terminate: true } : {}) };
