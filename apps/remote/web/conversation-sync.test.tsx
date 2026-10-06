@@ -52,6 +52,15 @@ test("cached idle transcript stays visible while the header updates, then idle r
   expect(ready).toContain("Cached conversation text");
 });
 
+test("chat header consumes context usage and replaces a count with recalculating or unavailable", () => {
+  const measured = { ...session, contextUsage: { tokens: 12_345, contextWindow: 200_000, percent: 6.1725 } };
+  expect(header(render({ session: measured }))).toContain("~12.3K tok");
+  const recalculating = header(render({ session: { ...measured, contextUsage: { ...measured.contextUsage, tokens: null, percent: null } } }));
+  expect(recalculating).toContain("Context …");
+  expect(recalculating).not.toContain("~12.3K tok");
+  expect(header(render())).toContain("Context —");
+});
+
 test("a running conversation defaults to steer rather than waiting for the turn to finish", () => {
   const html = render({ session: { ...session, state: "running" }, prompt: "Adjust the work" });
   expect(html).toContain('aria-label="Change delivery. Current: Steer"');
