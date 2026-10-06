@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { PromptOutboxEntry } from "./prompt-outbox";
 import "./prompt-outbox-status.css";
 
@@ -7,6 +8,11 @@ export function PromptOutboxStatus({ entries, busyRequestId, onRetry, onDiscard 
   onRetry: (requestId: string) => void;
   onDiscard: (requestId: string) => void;
 }) {
+  const [copyError, setCopyError] = useState<{ requestId: string; message: string } | null>(null);
+  const copyText = async (requestId: string, text: string) => {
+    const result = await copySavedPromptText(text, navigator.clipboard);
+    setCopyError(result.ok ? null : { requestId, message: result.error });
+  };
   const visible = entries.filter(entry => entry.outcome.kind !== "accepted"
     && !(entry.outcome.kind === "pending" && entry.outcome.reason === "saved" && entry.requestId === busyRequestId));
   if (!visible.length) return null;
@@ -23,10 +29,27 @@ export function PromptOutboxStatus({ entries, busyRequestId, onRetry, onDiscard 
         <div>{outcome.message}</div>
         <div className="prompt-outbox-status-actions">
           {outcome.kind === "pending" && <button type="button" disabled={busy} onClick={() => onRetry(entry.requestId)}>Retry same request</button>}
+          <button type="button" onClick={() => { void copyText(entry.requestId, body.text); }}>Copy saved text</button>
           <button type="button" disabled={busy} onClick={() => onDiscard(entry.requestId)}>Dismiss saved prompt</button>
         </div>
+        {copyError?.requestId === entry.requestId && <div role="alert">{copyError.message}</div>}
+        <SavedPromptText text={body.text} />
         {outcome.kind === "pending" && <small>Dismiss stops retrying on this device. It does not cancel a prompt the server already accepted.</small>}
       </div>;
     })}
   </div>;
+}
+
+export async function copySavedPromptText(text: string, clipboard: Pick<Clipboard, "writeText"> | undefined): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!clipboard?.writeText) return { ok: false, error: "Clipboard is unavailable. Open Full saved text to select it." };
+  try { await clipboard.writeText(text); return { ok: true }; }
+  catch (error) { return { ok: false, error: `Could not copy saved text: ${error instanceof Error ? error.message : String(error)}` }; }
+}
+
+function SavedPromptText({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>Full saved text</summary>
+    {open && <pre className="prompt-outbox-status-full">{text}</pre>}
+  </details>;
 }

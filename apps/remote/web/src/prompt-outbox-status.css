@@ -19,6 +19,13 @@
   white-space: pre-wrap;
   opacity: .8;
 }
+.prompt-outbox-status-full {
+  white-space: pre-wrap;
+  font: inherit;
+  max-height: 12rem;
+  overflow: auto;
+  user-select: text;
+}
 .prompt-outbox-status-actions {
   display: flex;
   flex-wrap: wrap;

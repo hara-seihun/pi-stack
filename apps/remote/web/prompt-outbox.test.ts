@@ -106,6 +106,38 @@ test("owner disposal aborts a pending transport and never acknowledges it into a
   expect(value(await f.create().list())[0]?.outcome.kind).toBe("pending");
 });
 
+test("Stop interrupts retries waiting for storage before HTTP, and only a later explicit Retry can transmit", async () => {
+  const outbox = fixture().create();
+  const input = body();
+  value(await outbox.enqueue("thread", input));
+  let calls = 0;
+  const transport = async () => { calls++; return accepted("steer"); };
+  const operation = outbox.submit(input.requestId, transport);
+  outbox.interrupt(input.requestId);
+  expect(await operation).toMatchObject({ ok: false, error: { kind: "interrupted" } });
+  expect(calls).toBe(0);
+  expect(value(await outbox.list())[0]?.outcome.kind).toBe("pending");
+  expect(value(await outbox.submit(input.requestId, transport)).outcome.kind).toBe("accepted");
+  expect(calls).toBe(1);
+});
+
+test("Stop interrupts a live transport without claiming cancellation of accepted server work", async () => {
+  const outbox = fixture().create();
+  const input = body();
+  value(await outbox.enqueue("thread", input));
+  let start!: () => void;
+  const started = new Promise<void>(resolve => { start = resolve; });
+  let signal!: AbortSignal;
+  const operation = outbox.submit(input.requestId, async (_entry, activeSignal) => {
+    signal = activeSignal; start(); return new Promise(() => {});
+  });
+  await started;
+  outbox.interrupt(input.requestId);
+  expect(value(await operation).outcome).toMatchObject({ kind: "pending", reason: "transport" });
+  expect(signal.aborted).toBe(true);
+  expect(value(await outbox.list())[0]?.outcome.kind).toBe("pending");
+});
+
 test("concurrent storage writers enforce count bound without evicting any unconfirmed intent", async () => {
   const f = fixture();
   const writers = [f.create(), f.create()];

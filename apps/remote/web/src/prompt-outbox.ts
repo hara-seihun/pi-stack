@@ -1,6 +1,6 @@
 export type OutboxResult<T> = { ok: true; value: T } | { ok: false; error: PromptOutboxError };
 export type PromptOutboxError = {
-  kind: "invalid_scope" | "scope_changed" | "invalid_prompt" | "storage_unavailable" | "storage_corrupt"
+  kind: "invalid_scope" | "scope_changed" | "interrupted" | "invalid_prompt" | "storage_unavailable" | "storage_corrupt"
     | "full" | "conflicting_request" | "not_found" | "pending_not_acknowledged";
   message: string;
 };
@@ -92,7 +92,8 @@ export class PromptOutbox {
   private readonly scope: string | null;
   private readonly database: Promise<OutboxResult<IDBDatabase>>;
   private readonly inFlight = new Map<string, Promise<OutboxResult<PromptOutboxEntry>>>();
-  private readonly controllers = new Set<AbortController>();
+  private readonly controllers = new Map<string, AbortController>();
+  private readonly interrupted = new Set<string>();
   private disposed = false;
   constructor(private options: {
     scope: PromptOutboxScope;
@@ -190,7 +191,7 @@ export class PromptOutbox {
   submit(requestId: string, transport: PromptOutboxTransport): Promise<OutboxResult<PromptOutboxEntry>> {
     const previous = this.inFlight.get(requestId);
     if (previous) return previous;
-    const operation = this.deliver(requestId, transport).finally(() => this.inFlight.delete(requestId));
+    const operation = this.deliver(requestId, transport).finally(() => { this.inFlight.delete(requestId); this.interrupted.delete(requestId); });
     this.inFlight.set(requestId, operation);
     return operation;
   }
@@ -200,22 +201,23 @@ export class PromptOutbox {
       return entry ? good(publicEntry(entry)) : bad("not_found", "This saved prompt was not found.");
     });
     if (!loaded.ok || loaded.value.outcome.kind !== "pending") return loaded;
+    if (this.interrupted.has(requestId)) return bad("interrupted", "Automatic submission stopped. The saved prompt requires explicit Retry.");
     const fence = this.fence();
     if (!fence.ok) return fence;
     const controller = new AbortController();
-    this.controllers.add(controller);
+    this.controllers.set(requestId, controller);
     const timer = setTimeout(() => controller.abort(new Error("Prompt acknowledgement timed out.")), 20_000);
     let outcome: PromptOutboxOutcome;
     try {
       const response = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
         const abort = () => reject(controller.signal.reason);
         controller.signal.addEventListener("abort", abort, { once: true });
-        Promise.resolve().then(() => transport(loaded.value, controller.signal)).then(resolve, reject)
+        Promise.resolve().then(() => { controller.signal.throwIfAborted(); return transport(loaded.value, controller.signal); }).then(resolve, reject)
           .finally(() => controller.signal.removeEventListener("abort", abort));
       });
       outcome = classify(response, loaded.value.bodyJson);
     } catch (error) { outcome = { kind: "pending", reason: "transport", message: message(error) || "Acceptance is unconfirmed; check using the saved request." }; }
-    finally { clearTimeout(timer); this.controllers.delete(controller); }
+    finally { clearTimeout(timer); this.controllers.delete(requestId); }
     return this.transact("readwrite", (entries, store) => {
       const entry = entries.find(item => item.requestId === requestId);
       if (!entry) return bad("not_found", "The saved prompt was explicitly discarded while checking acceptance.");
@@ -225,9 +227,13 @@ export class PromptOutbox {
       return good(publicEntry(next));
     });
   }
+  interrupt(requestId: string): void {
+    if (this.inFlight.has(requestId)) this.interrupted.add(requestId);
+    this.controllers.get(requestId)?.abort(new Error("Automatic submission stopped. Use explicit Retry to check the saved prompt."));
+  }
   acknowledge(requestId: string): Promise<OutboxResult<void>> { return this.remove(requestId, false); }
   /** User abandonment only: the server may already have accepted this request. This does not Stop it. */
-  discard(requestId: string): Promise<OutboxResult<void>> { return this.remove(requestId, true); }
+  discard(requestId: string): Promise<OutboxResult<void>> { this.interrupt(requestId); return this.remove(requestId, true); }
   private remove(requestId: string, allowPending: boolean): Promise<OutboxResult<void>> {
     return this.transact("readwrite", (entries, store) => {
       const entry = entries.find(item => item.requestId === requestId);
@@ -239,7 +245,7 @@ export class PromptOutbox {
   }
   dispose(): void {
     this.disposed = true;
-    for (const controller of this.controllers) controller.abort(new Error("Prompt owner changed."));
+    for (const controller of this.controllers.values()) controller.abort(new Error("Prompt owner changed."));
     void this.database.then(result => { if (result.ok) result.value.close(); });
   }
 }
