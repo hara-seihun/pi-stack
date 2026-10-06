@@ -6,12 +6,17 @@ import { spawn } from "node:child_process";
 import { createSharedPiSessionOpener, runnerSocketDirectory } from "../src/threads/runner-transport.js";
 import type { PiSessionOptions } from "../src/threads/contracts.js";
 
-vi.mock("node:child_process", () => ({ spawn: vi.fn(() => { throw new Error("launch captured"); }) }));
+vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<typeof import("node:child_process")>(),
+  spawn: vi.fn(() => { throw new Error("launch captured"); }) }));
 vi.mock("node:fs", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, existsSync: (path: Parameters<typeof fs.existsSync>[0]) => String(path).endsWith("/runner-host.js") || fs.existsSync(path) };
 });
 vi.mock("../src/threads/runner-memory.js", () => ({ underMemoryPressure: () => false }));
+vi.mock("../src/threads/runner-resources.js", async importOriginal => {
+  const resources = await importOriginal<typeof import("../src/threads/runner-resources.js")>();
+  return { ...resources, prepareRunnerSlices: vi.fn(async id => resources.runnerSlices(id)) };
+});
 const roots: string[] = [];
 afterEach(() => { vi.clearAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture(execution: "user" | "root-repair", durable: boolean, isolated = false, broker = false) {
@@ -32,6 +37,11 @@ it.each(["user", "root-repair"] as const)("launches %s in its own UID with servi
     ? ["sudo", "-n", "--preserve-env", "systemd-run", "--collect", "--quiet", "--wait", "--service-type=exec"]
     : ["systemd-run", "--user", "--collect", "--quiet", "--wait", "--service-type=exec"]);
   expect(args).toContain("--property=KillMode=control-group");
+  expect(args).toContain("--property=OOMPolicy=continue");
+  expect(args).toContain("--property=MemoryHigh=4G");
+  expect(args).toContain("--property=MemoryMax=4G");
+  expect(args).toContain("--max-old-space-size=3072");
+  expect(options?.env?.PI_THREAD_RESOURCE_BOUNDARY).toMatch(/^[a-f0-9]{16}$/);
   expect(args).toContain("--setenv=PI_THREAD_API_URL");
   expect(args!.some(arg => arg.includes("http://127.0.0.1:1"))).toBe(false);
   expect(options?.env?.PI_ORCHESTRATOR_OWNER_UID).toBe(root ? String(process.getuid!()) : undefined);
@@ -40,6 +50,14 @@ it.each(["user", "root-repair"] as const)("launches %s in its own UID with servi
     expect(options?.env?.XDG_RUNTIME_DIR).toBe(`/run/user/${process.getuid!()}`);
     expect(options?.env?.DBUS_SESSION_BUS_ADDRESS).toBe(`unix:path=/run/user/${process.getuid!()}/bus`);
   }
+});
+
+it("does not move supervisor-owned runners or their private mount boundary into a user service", async () => {
+  await expect(fixture("user", false)()).rejects.toThrow("launch captured");
+  const [command, args, options] = vi.mocked(spawn).mock.calls[0]!;
+  expect(String(command)).toMatch(/\/flock$/);
+  expect(args).toContain("--max-old-space-size=8192");
+  expect(options?.env?.PI_THREAD_RESOURCE_BOUNDARY).toBeUndefined();
 });
 
 it("keeps long OIDC and application socket paths inside their Unix owner's runtime directory", () => {

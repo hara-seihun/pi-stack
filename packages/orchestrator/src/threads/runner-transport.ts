@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import type { AttachPiSession, OpenPiSession, PiCommand, PiEvent, PiRunnerReference, PiSession, PiSessionOptions } from "./contracts.js";
 import { underMemoryPressure } from "./runner-memory.js";
 import { isolatePiEnvironment } from "./pi-environment.js";
+import { prepareRunnerSlices, managerCommand, RUNNER_MEMORY, RUNNER_HEAP_MB } from "./runner-resources.js";
 
 interface Connection { send(command: PiCommand): void; detach(): void }
 const starts = new Map<string, Promise<void>>();
@@ -151,13 +152,19 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
   if (root && broker) throw new Error("Root repair cannot use a model-broker execution boundary");
   if (root && (!durable || options.args.includes("--orchestrator-context"))) throw new Error("Root repair requires the fleet execution boundary without isolated context");
   if (root) { env.PI_ORCHESTRATOR_OWNER_UID = String(process.getuid!()); env.PI_ORCHESTRATOR_OWNER_GID = String(process.getgid!()); }
-  const command = [executable("flock", env.PATH), "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, executable("node", env.PATH), "--max-old-space-size=8192", "--expose-gc", entry, control];
+  delete env.PI_THREAD_RESOURCE_BOUNDARY;
+  const resourceId = hash(control);
+  const command = [executable("flock", env.PATH), "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, executable("node", env.PATH), `--max-old-space-size=${durable ? RUNNER_HEAP_MB : 8192}`, "--expose-gc", entry, control];
   if (durable) {
     if (!root) Object.assign(env, userManagerEnvironment(process.getuid!()));
+    env.PI_THREAD_RESOURCE_BOUNDARY = resourceId;
+    const slices = await prepareRunnerSlices(resourceId, env, !root);
     const validKey = (key: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
     const unset = [...new Set([...Object.keys(process.env).filter(key => validKey(key) && !(key in env)), ...(broker ? brokerSecrets : [])])];
     command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--collect", "--quiet", "--wait", "--service-type=exec",
-      "--property=KillMode=control-group", `--working-directory=${env.HOME}`,
+      "--property=KillMode=control-group", "--property=OOMPolicy=continue", "--property=OOMScoreAdjust=0", `--slice=${slices.boundary}`,
+      `--property=MemoryHigh=${RUNNER_MEMORY}`, `--property=MemoryMax=${RUNNER_MEMORY}`, "--property=MemorySwapMax=256M",
+      `--working-directory=${env.HOME}`,
       ...Object.keys(env).filter(key => validKey(key) && env[key] !== undefined).map(key => `--setenv=${key}`),
       ...(unset.length ? [`--property=UnsetEnvironment=${unset.join(" ")}`] : []),
       `--unit=pi-thread-runner-${hash(control)}`);
@@ -174,7 +181,12 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
     if (launchError) throw launchError;
     if (host.exitCode !== null && host.exitCode !== 75) throw new Error(`Thread runner exited ${host.exitCode}`);
     if (existsSync(control)) {
-      try { await runnerRequest(control, { type: "status" }); return; }
+      try {
+        await runnerRequest(control, { type: "status" });
+        if (durable) await managerCommand(["set-property", "--runtime", `pi-thread-runner-${resourceId}.service`,
+          `MemoryHigh=${RUNNER_MEMORY}`, `MemoryMax=${RUNNER_MEMORY}`, "MemorySwapMax=256M"], env, !root);
+        return;
+      }
       catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
     }
     await delay(25);

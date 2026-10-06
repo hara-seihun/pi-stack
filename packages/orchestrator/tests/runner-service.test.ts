@@ -64,7 +64,14 @@ it.skipIf(!manager)("runner death removes orphan tools and permits the same boun
     expect(alive(second.runner)).toBe(true);
   } finally {
     opener?.detach();
-    if (unit) execFileSync("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+    if (unit) {
+      execFileSync("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+      const id = unit.replace("pi-thread-runner-", "").replace(".service", "");
+      for (const slice of [`pi-thread-${id}-tools.slice`, `pi-thread-${id}.slice`]) {
+        execFileSync("systemctl", ["--user", "stop", slice], { stdio: "ignore" });
+        execFileSync("systemctl", ["--user", "revert", slice], { stdio: "ignore" });
+      }
+    }
     if (existsSync(dataDir)) rmSync(dataDir, { recursive: true, force: true });
     rmSync(compiled, { recursive: true, force: true });
   }
