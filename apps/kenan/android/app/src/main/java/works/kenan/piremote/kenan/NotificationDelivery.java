@@ -28,6 +28,8 @@ final class NotificationDelivery {
         return cursor >= 0 ? "?after=" + cursor : "";
     }
 
+    static long cursor(Context context, String environment) { return cursor(preferences(context), environment); }
+
     private static long cursor(SharedPreferences prefs, String environment) {
         if (prefs.contains(CURSOR + environment)) return prefs.getLong(CURSOR + environment, 0);
         if (!prefs.contains(environment)) return -1;

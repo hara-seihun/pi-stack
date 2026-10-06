@@ -21,6 +21,7 @@ import org.json.JSONObject;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        NotificationFeedLease.clear();
         ThreadNotifications.pageStarting();
         registerPlugin(KenanRemotePlugin.class);
         // A downloaded web client for this shell replaces the APK's built-in copy.
@@ -29,7 +30,7 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
         android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(bridge.getWebView(), true);
         bridge.addWebViewListener(new WebViewListener() {
-            @Override public void onPageStarted(WebView webView) { ThreadNotifications.pageStarting(); }
+            @Override public void onPageStarted(WebView webView) { NotificationFeedLease.clear(); ThreadNotifications.pageStarting(); IdleNotificationService.requestPoll(); }
         });
         keepSharedClientBelowSystemBars();
         routeSystemBackThroughClient();
@@ -65,6 +66,7 @@ public class MainActivity extends BridgeActivity {
     /** Switches the running WebView to a bundle (or back to the built-in client) and reloads it. */
     void serveWebBundle(WebBundles.Installed bundle) {
         if (bridge == null) return;
+        NotificationFeedLease.clear();
         ThreadNotifications.pageStarting();
         if (bundle != null) bridge.setServerBasePath(bundle.directory.getPath());
         else bridge.setServerAssetPath("public");
@@ -73,12 +75,15 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        NotificationFeedLease.resume();
         ThreadNotifications.resume(this, this);
         if (bridge != null) bridge.triggerWindowJSEvent("pi-app-foreground");
     }
 
     @Override
     public void onPause() {
+        NotificationFeedLease.pause();
+        IdleNotificationService.requestPoll();
         ThreadNotifications.pause(this);
         super.onPause();
     }

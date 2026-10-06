@@ -471,12 +471,54 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void notificationCursor(PluginCall call) {
+        RemoteSession state = NotificationIdentity.get(getContext());
+        synchronized (state) {
+            if (!notificationCaller(call)) return;
+            long after = NotificationDelivery.cursor(getContext(), call.getString("environment"));
+            call.resolve(new JSObject().put("after", after < 0 ? org.json.JSONObject.NULL : after));
+        }
+    }
+
+    @PluginMethod
+    public void notificationLease(PluginCall call) {
+        RemoteSession state = NotificationIdentity.get(getContext());
+        synchronized (state) {
+            if (!notificationCaller(call)) return;
+            String environment = call.getString("environment");
+            String requested = call.getString("state");
+            long after = NotificationDelivery.cursor(getContext(), environment);
+            boolean accepted;
+            if ("healthy".equals(requested)) {
+                accepted = getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
+                    && NativeAccess.notifications(getContext()) && NotificationFeedLease.renew(state.current(), environment, after, android.os.SystemClock.elapsedRealtime());
+                if (!accepted) NotificationFeedLease.release(environment);
+            } else if ("released".equals(requested)) {
+                NotificationFeedLease.release(environment);
+                IdleNotificationService.requestPoll();
+                accepted = false;
+            } else { call.reject("Unknown notification lease state", "invalid_args"); return; }
+            call.resolve(new JSObject().put("accepted", accepted).put("after", after < 0 ? org.json.JSONObject.NULL : after));
+        }
+    }
+
+    private boolean notificationCaller(PluginCall call) {
+        RemoteSession.Identity identity = NotificationIdentity.get(getContext()).current();
+        String environment = call.getString("environment");
+        if (identity == null || !identity.user.equals(call.getString("user")) || !identity.session.equals(call.getString("session"))) {
+            call.reject("Notification session changed", "session_expired"); return false;
+        }
+        if (environment == null || environment.isBlank()) { call.reject("Notification environment is required", "invalid_args"); return false; }
+        return true;
+    }
+
+    @PluginMethod
     public void notificationFeed(PluginCall call) {
         RemoteSession state = NotificationIdentity.get(getContext());
         synchronized (state) {
+            if (!notificationCaller(call)) return;
             RemoteSession.Identity identity = state.current();
-            if (identity == null || !identity.user.equals(call.getString("user", ""))
-                || !getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
+            if (!getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
                 || !NativeAccess.notifications(getContext())) {
                 call.resolve();
                 return;
@@ -486,8 +528,24 @@ public final class KenanRemotePlugin extends Plugin {
                 String name = call.getString("name", "");
                 org.json.JSONObject feed = call.getObject("feed");
                 if (environment.isBlank() || name.isBlank() || feed == null) throw new IllegalArgumentException("Invalid notification feed");
-                NotificationDelivery.receive(getContext(), identity, environment, name, feed, true);
-                call.resolve();
+                boolean replay = Boolean.TRUE.equals(call.getBoolean("replay"));
+                if (replay) {
+                    long cursor = NotificationDelivery.cursor(getContext(), environment);
+                    Object supplied = call.getData().opt("after");
+                    if (supplied != org.json.JSONObject.NULL && (!(supplied instanceof Number)
+                        || ((Number) supplied).doubleValue() != ((Number) supplied).longValue())) {
+                        call.reject("Replay after must be an integer cursor or null", "invalid_args"); return;
+                    }
+                    Long origin = supplied == org.json.JSONObject.NULL ? null : ((Number) supplied).longValue();
+                    if (!NotificationSequence.canReplay(cursor, origin, feed.getLong("cursor"))) {
+                        NotificationFeedLease.release(environment);
+                        call.reject("Replay must begin at or before the native cursor", "notification_gap");
+                        return;
+                    }
+                }
+                NotificationDelivery.receive(getContext(), identity, environment, name, feed, !replay);
+                long after = NotificationDelivery.cursor(getContext(), environment);
+                call.resolve(new JSObject().put("after", after < 0 ? org.json.JSONObject.NULL : after));
             } catch (Exception failure) { call.reject("Could not deliver notification feed: " + failure.getMessage(), failure); }
         }
     }

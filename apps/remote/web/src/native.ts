@@ -41,7 +41,9 @@ interface RemoteBridge {
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
   notificationTarget?(): Promise<{ environment?: string; sessionId?: string; user?: string }>;
   notificationThread?(options: { user: string; environment: string; sessionId: string }): Promise<void>;
-  notificationFeed?(options: { user: string; environment: string; name: string; feed: IdleNotificationFeed }): Promise<void>;
+  notificationCursor?(options: { user: string; session: string; environment: string }): Promise<{ after: number | null }>;
+  notificationLease?(options: { user: string; session: string; environment: string; state: "healthy" | "released" }): Promise<{ accepted: boolean; after: number | null }>;
+  notificationFeed?(options: { user: string; session: string; environment: string; name: string; feed: IdleNotificationFeed; replay: boolean; after: number | null }): Promise<{ after: number | null } | void>;
   checkAppUpdate?(): Promise<AppUpdateCheck>;
   installAppUpdate?(): Promise<AppUpdateInstall>;
   webReady?(): Promise<void>;
@@ -109,6 +111,8 @@ export const remote: RemoteBridge = !nativePlatform
         notificationTarget: () => capacitor.nativePromise("KenanRemote", "notificationTarget", {}),
         notificationThread: (options) => capacitor.nativePromise("KenanRemote", "notificationThread", options),
         notificationFeed: (options) => capacitor.nativePromise("KenanRemote", "notificationFeed", options),
+        notificationCursor: (options) => capacitor.nativePromise("KenanRemote", "notificationCursor", options),
+        notificationLease: (options) => capacitor.nativePromise("KenanRemote", "notificationLease", options),
         checkAppUpdate: () => capacitor.nativePromise("KenanRemote", "checkAppUpdate", {}),
         installAppUpdate: () => capacitor.nativePromise("KenanRemote", "installAppUpdate", {}),
         webReady: () => capacitor.nativePromise("KenanRemote", "webReady", {}),
