@@ -10,6 +10,8 @@ import type { AttachPiSession, OpenPiSession, PiCommand, PiEvent, PiRunnerRefere
 import { underMemoryPressure } from "./runner-memory.js";
 import { isolatePiEnvironment } from "./pi-environment.js";
 import { prepareRunnerSlices, managerCommand, RUNNER_MEMORY, RUNNER_HEAP_MB } from "./runner-resources.js";
+import { assertNever, requireRuntimeEvent } from "./runtime-events.js";
+import { requireRunnerFrame, type RunnerFrame } from "./runner-protocol.js";
 
 interface Connection { send(command: PiCommand): void; detach(): void }
 const starts = new Map<string, Promise<void>>();
@@ -63,6 +65,26 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
       const timer = setTimeout(() => current.destroy(new Error("Thread runner attach timed out")), 5000);
       current.setNoDelay(true);
       current.on("connect", () => current.write(`${JSON.stringify({ type: "attach", after: sequence })}\n`));
+      function acceptFrame(value: RunnerFrame): void {
+        switch (value.type) {
+          case "attached":
+            attached = true; connected = true; clearTimeout(timer);
+            for (const line of unsent.splice(0)) current.write(line);
+            resolve(connection); return;
+          case "output": {
+            const next = value.sequence;
+            if (next <= sequence) return;
+            const event = requireRuntimeEvent(JSON.parse(value.line));
+            if (value.at !== undefined && event.emittedAt === undefined) event.emittedAt = value.at;
+            output(event);
+            sequence = next;
+            current.write(`${JSON.stringify({ type: "ack", sequence })}\n`);
+            return;
+          }
+          case "exit": finish(value.code); return;
+        }
+        assertNever(value);
+      }
       current.on("data", chunk => {
         if (current !== socket) return;
         const text = decoder.write(chunk);
@@ -78,21 +100,16 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
           if (current !== socket || current.destroyed) return;
           if (!line) continue;
           try {
-            const value = JSON.parse(line);
-            if (value.type === "attached") {
-              attached = true; connected = true; clearTimeout(timer);
-              for (const line of unsent.splice(0)) current.write(line);
-              resolve(connection);
-            } else if (value.type === "output") {
-              const next = Number(value.sequence);
-              if (!Number.isSafeInteger(next) || next <= sequence) continue;
-              const event = JSON.parse(value.line);
-              if (typeof value.at === "number" && event && typeof event === "object" && event.emittedAt === undefined) event.emittedAt = value.at;
-              output(event);
-              sequence = next;
-              current.write(`${JSON.stringify({ type: "ack", sequence })}\n`);
-            } else if (value.type === "exit") finish(Number(value.code));
-          } catch (error) { current.destroy(error instanceof Error ? error : new Error(String(error))); }
+            acceptFrame(requireRunnerFrame(JSON.parse(line)));
+          } catch (error) {
+            const failure = error instanceof Error ? error : new Error(String(error));
+            if (!attached) { ended = true; clearTimeout(timer); reject(failure); }
+            else {
+              try { output({ type: "thread_error", error: `Runner protocol failure: ${failure.message}` }); }
+              finally { finish(1); current.destroy(failure); }
+            }
+            current.destroy(failure);
+          }
         }
       });
       current.on("end", () => current.destroy());

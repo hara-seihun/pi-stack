@@ -71,6 +71,38 @@ it("names argument dispatch, concurrent tool completion, retry, compaction and f
   expect(executionActivitySnapshot(state)).toEqual({ activity: "finishing", activitySince: 100, activityDetail: "Synchronizing final execution result", lastActivityAt: 100 });
 });
 
+it("rejects unrecognized external variants instead of silently ignoring progress", () => {
+  const state = createExecutionActivity();
+  observeExecutionActivity(state, { type: "model_request_start" }, 10);
+  const waiting = executionActivitySnapshot(state);
+  for (const event of [
+    { type: "new_sdk_event" },
+    { type: "message_update", assistantMessageEvent: { type: "new_chunk" } },
+    { type: "message_update" },
+    { type: "owner_execution_phase", activity: "new_phase" },
+  ]) expect(() => observeExecutionActivity(state, event, 20)).toThrow(/Unknown|requires/);
+  expect(executionActivitySnapshot(state)).toEqual(waiting);
+  expect(() => restoreExecutionActivity(state, { activity: "new_phase", tools: [{ toolCallId: "bad" }] })).toThrow("Unknown execution activity phase");
+  expect(state.activityTools.size).toBe(0);
+  expect(executionActivitySnapshot(state)).toEqual(waiting);
+});
+
+it("enumerates known non-progress events without moving the clock and observes summarization retries", () => {
+  const state = createExecutionActivity();
+  observeExecutionActivity(state, { type: "model_request_start" }, 10);
+  const waiting = executionActivitySnapshot(state);
+  for (const type of ["queue_update", "entry_appended", "session_info_changed", "thinking_level_changed", "context_update", "runner_attached"]) {
+    expect(observeExecutionActivity(state, { type }, 20)).toBe(false);
+    expect(executionActivitySnapshot(state)).toEqual(waiting);
+  }
+  observeExecutionActivity(state, { type: "summarization_retry_scheduled", attempt: 2, delayMs: 1000 }, 30);
+  expect(state).toMatchObject({ activity: "retrying", lastActivityAt: 30 });
+  observeExecutionActivity(state, { type: "summarization_retry_attempt_start", source: "compaction" }, 40);
+  expect(state.activity).toBe("compacting");
+  observeExecutionActivity(state, { type: "summarization_retry_finished" }, 50);
+  expect(state.activity).toBe("preparing");
+});
+
 it("distinguishes runner backpressure from model admission and unknown startup failures", () => {
   for (const error of ["Error: Runner capacity busy; work remains queued", "Runner capacity busy: memory pressure"]) {
     expect(executionWaitActivity({ startupFailure: { error, attempts: 4, since: 10, retryAt: 20 } }))

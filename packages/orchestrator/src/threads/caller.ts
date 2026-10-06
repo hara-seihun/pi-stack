@@ -32,6 +32,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SendThread, SpawnThread } from "./contracts.js";
+import { assertNever } from "./runtime-events.js";
 
 export const THREAD_TOKEN_HEADER = "x-pi-thread-token";
 export const UPSTREAM_CREDENTIAL_HEADER = "x-pi-remote-upstream";
@@ -235,6 +236,7 @@ export function creatorOf(caller: ThreadCaller, parentId?: string, forwarded?: u
     case "person": return { kind: "person", via: caller.via };
     case "process": return { kind: "process", uid: caller.uid, ...(caller.pid ? { pid: caller.pid } : {}), ...(caller.command ? { command: caller.command } : {}) };
   }
+  return assertNever(caller);
 }
 
 function isCreator(value: unknown): value is ThreadCreator {

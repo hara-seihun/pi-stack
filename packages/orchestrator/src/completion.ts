@@ -1,7 +1,9 @@
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { catalogModel } from "./catalog.js";
-import { completionCanonical, completionError, isCompletionExecution, isCompletionInput, isCompletionRequestId, type CompletionExecution, type CompletionInput, type CompletionOutcome, type CompletionRecord, type CompletionAttempt } from "./completion-contract.js";
+import { completionCanonical, completionError, isCompletionExecution, isCompletionInput, isCompletionRecord, isCompletionRequestId, type CompletionExecution, type CompletionInput, type CompletionOutcome, type CompletionRecord, type CompletionAttempt } from "./completion-contract.js";
 import type { Store } from "./store.js";
+import type { RunState } from "./domain.js";
+import { assertNever } from "./threads/runtime-events.js";
 import { recordCompletionRejection, recordCompletionSuccess } from "./completion-feedback.js";
 
 export interface CompletionAccess { principal: string; accounts: string[]; models: string[] }
@@ -18,14 +20,39 @@ export interface CompletionClaim {
   readonly record: CompletionRecord;
   readonly input?: CompletionInput;
 }
-const terminal = (record: CompletionRecord) => record.state !== "queued" && record.state !== "running";
+function terminal(record: CompletionRecord): boolean {
+  switch (record.state) {
+    case "queued": case "running": return false;
+    case "completed": case "failed": case "cancelled": case "indeterminate": return true;
+  }
+  return assertNever(record);
+}
+function completionRunState(state: RunState, attempted: boolean): "cancelled" | "indeterminate" | "failed" | undefined {
+  switch (state) {
+    case "queued": case "starting": case "running": return undefined;
+    case "aborted": return "cancelled";
+    case "done": case "failed": return attempted ? "indeterminate" : "failed";
+  }
+  return assertNever(state);
+}
+function completionRunResult(outcome: CompletionExecution): Parameters<Store["finishCompletionRun"]>[1] {
+  switch (outcome.state) {
+    case "completed": return { state: "done", result: outcome.result.text };
+    case "cancelled": return { state: "aborted", result: outcome.error.message, failureKind: "operator" };
+    case "failed": case "indeterminate": return { state: "failed", result: outcome.error.message, failureKind: "provider" };
+  }
+  return assertNever(outcome);
+}
 
 export class CompletionService {
   constructor(private readonly store: Store, private readonly cwd: string) {}
 
   private stored(requestId: string): StoredCompletion | undefined {
     const value = this.store.control(`completion:${requestId}`);
-    return value ? JSON.parse(value) : undefined;
+    if (!value) return undefined;
+    const stored = JSON.parse(value) as StoredCompletion;
+    if (!isCompletionRecord(stored.record) || !isCompletionInput(stored.input) || (stored.receipt !== undefined && !isCompletionExecution(stored.receipt))) throw new Error(`Invalid stored completion state for ${requestId}`);
+    return stored;
   }
   private save(value: StoredCompletion): void {
     this.store.setControl(`completion:${value.record.requestId}`, JSON.stringify(value));
@@ -36,8 +63,9 @@ export class CompletionService {
   private synchronize(value: StoredCompletion): void {
     if (terminal(value.record)) return;
     const run = this.store.run(value.record.runId);
-    if (!run || !["done", "failed", "aborted"].includes(run.state)) return;
-    const state = run.state === "aborted" ? "cancelled" : value.attemptId ? "indeterminate" : "failed";
+    if (!run) return;
+    const state = completionRunState(run.state, !!value.attemptId);
+    if (state === undefined) return;
     value.record = { ...value.record, state, updatedAt: Date.now(), error: {
       code: state === "failed" ? "provider" : state,
       message: run.result ?? "Completion worker ended without a durable provider result.",
@@ -190,11 +218,7 @@ export class CompletionService {
       value.receipt = outcome;
       if (value.record.state !== "cancelled") value.record = { requestId: value.record.requestId, runId, model: value.record.model, metadata: value.record.metadata, createdAt: value.record.createdAt, updatedAt: Date.now(), attemptCount: value.attemptCount ?? 1, ...outcome };
       this.save(value);
-      if (value.record.state !== "cancelled") this.store.finishCompletionRun(runId, {
-        state: outcome.state === "completed" ? "done" : outcome.state === "cancelled" ? "aborted" : "failed",
-        result: outcome.state === "completed" ? outcome.result.text : outcome.error.message,
-        ...(outcome.state === "completed" ? {} : { failureKind: outcome.state === "cancelled" ? "operator" as const : "provider" as const }),
-      });
+      if (value.record.state !== "cancelled") this.store.finishCompletionRun(runId, completionRunResult(outcome));
       this.store.endLease(`run:${runId}`);
       return { ok: true, value: value.record };
     });

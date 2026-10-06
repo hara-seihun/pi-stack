@@ -1,4 +1,4 @@
-import { normalizeContext, type Api, type Context, type Model, type Provider, type ThinkingLevel } from "@earendil-works/pi-ai";
+import { normalizeContext, type Api, type Context, type Model, type Provider, type ThinkingLevel, type StopReason } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createParser } from "eventsource-parser";
 import { providerOAuth } from "../auth/shared-oauth.js";
@@ -6,6 +6,8 @@ import { providerResponseFailure, quarantineProviderCredential, repairProviderCr
 import type { CompletionExecution, CompletionFetch, CompletionInput, CompletionUsage } from "../completion-contract.js";
 import type { Run } from "../domain.js";
 import { isRejectedTokenError } from "../provider-errors.js";
+import { parseResponseEvent } from "../response-events.js";
+import { assertNever, requireAssistantStopReason } from "../threads/runtime-events.js";
 
 interface NativeResponse {
   id?: string;
@@ -45,6 +47,14 @@ function usage(response: NativeResponse): CompletionUsage | undefined {
   return { input: native.input_tokens! - cacheRead - cacheWrite, output: native.output_tokens!, cacheRead, cacheWrite, totalTokens: native.total_tokens!, ...(reasoning === undefined ? {} : { reasoning }) };
 }
 
+function completionStopReason(reason: StopReason): "stop" | "length" | "error" | "aborted" | "incomplete" {
+  switch (reason) {
+    case "stop": case "length": case "error": case "aborted": return reason;
+    case "pending": case "toolUse": case "deferred": return "incomplete";
+  }
+  return assertNever(reason);
+}
+
 export async function executeCompletion(input: CompletionInput, run: Run, options: CompletionProviderOptions): Promise<CompletionExecution> {
   if (input.maxOutputTokens !== undefined) return { state: "failed", error: { code: "unsupported-option", message: "OpenAI Codex rejects max_output_tokens for Luna. No provider request was sent." } };
   const provider = options.provider ?? builtinProviders().find(provider => provider.id === "openai-codex");
@@ -52,6 +62,7 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
   if (!provider || !model || !run.accountId || run.provider !== provider.id) return { state: "failed", error: { code: "provider", message: "Completion model does not match an admitted OpenAI account." } };
   let dispatched = false, phase: "authentication" | "provider" = "authentication";
   let native: NativeResponse = {}, responseStatus: number | undefined, nativeTerminal = false, retryAfterMs: number | undefined;
+  let protocolFailure: string | undefined;
   const rateLimited = (message: string): CompletionExecution => ({ state: "failed", error: { code: "rate-limited", message, httpStatus: 429, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) } });
   const fetchProvider = options.fetch ?? globalThis.fetch;
   const deadline = AbortSignal.timeout(options.deadlineMs ?? 300_000);
@@ -100,11 +111,17 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
       const decoder = new TextDecoder();
       const parser = createParser({ onEvent(event) {
         if (event.data === "[DONE]") return;
-        const value = JSON.parse(event.data) as { type?: string; response?: NativeResponse };
-        if (value.response && ["response.created", "response.completed", "response.incomplete", "response.failed"].includes(value.type ?? "")) {
-          native = { ...native, ...value.response };
-          if (value.type !== "response.created") nativeTerminal = true;
+        const parsed = parseResponseEvent(JSON.parse(event.data));
+        if (!parsed.ok) { protocolFailure ??= parsed.error; return; }
+        const { kind, event: value } = parsed.value;
+        switch (kind) {
+          case "created": native = { ...native, ...value.response }; return;
+          case "completed": case "incomplete": case "failed":
+            native = { ...native, ...value.response }; nativeTerminal = true; return;
+          // SDK owns incremental text assembly and provider errors; this observer owns native evidence.
+          case "item_done": case "error": case "progress": return;
         }
+        assertNever(kind);
       } });
       return new Response(response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) { parser.feed(decoder.decode(chunk, { stream: true })); controller.enqueue(chunk); },
@@ -122,8 +139,10 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
       onPayload: payload => completionPayload(payload, input),
     }).result();
     if (signal.aborted) return interrupted();
-    if (message.stopReason === "aborted") return { state: "indeterminate", error: { code: "indeterminate", message: "Provider aborted without a terminal response." } };
-    if (message.stopReason === "error") {
+    if (protocolFailure) return { state: "indeterminate", error: { code: "protocol", message: protocolFailure } };
+    const stopReason = completionStopReason(requireAssistantStopReason(message.stopReason));
+    if (stopReason === "aborted") return { state: "indeterminate", error: { code: "indeterminate", message: "Provider aborted without a terminal response." } };
+    if (stopReason === "error") {
       if (shared && isRejectedTokenError(message.errorMessage ?? "")) {
         const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
         if (repaired) await quarantineProviderCredential(shared, run.accountId, message.errorMessage!, false, repairSignal, auth.apiKey);
@@ -137,14 +156,15 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
     const refusal = native.output?.flatMap(item => item.content ?? []).find(item => item.type === "refusal");
     if (refusal) return { state: "failed", error: { code: "provider", message: refusal.refusal ?? "Provider refused the completion." } };
     const tokens = usage(native);
-    if (!tokens || !native.model || !["stop", "length"].includes(message.stopReason)) return { state: "failed", error: { code: "missing-provider-evidence", message: "Provider response did not contain a completed text result with native model and token usage." } };
+    if (!tokens || !native.model || stopReason === "incomplete") return { state: "failed", error: { code: "missing-provider-evidence", message: "Provider response did not contain a completed text result with native model and token usage." } };
     return { state: "completed", result: {
       text: message.content.filter(part => part.type === "text").map(part => part.text).join(""),
       provider: provider.id, model: native.model, responseId: native.id,
-      usage: tokens, stopReason: message.stopReason as "stop" | "length",
+      usage: tokens, stopReason,
     } };
   } catch (cause) {
     if (signal.aborted) return interrupted();
+    if (protocolFailure) return { state: "indeterminate", error: { code: "protocol", message: protocolFailure } };
     const message = cause instanceof Error ? cause.message : String(cause);
     if (responseStatus === 429 && !nativeTerminal) return rateLimited(message);
     return dispatched
