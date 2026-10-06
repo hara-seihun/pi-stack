@@ -27,7 +27,7 @@ export type { AgentWait, AgentWaitRequest, ThreadWakeSchedule, ThreadWakeRequest
 export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";
 export { ModelAvailabilityStore, modelAvailabilityPath, modelAvailabilityKey } from "./threads/model-availability.js";
 export { threadSettingsMetadata } from "./threads/settings-metadata.js";
-export { THREAD_MODES, threadMode, type ThreadMode, type ThreadModeName } from "./threads/modes.js";
+export { THREAD_MODES, threadMode, conversationModeSpeed, type ThreadMode, type ThreadModeName } from "./threads/modes.js";
 export { loadThreadModelCatalog, type ThreadModelCatalog, type ThreadModelMetadata } from "./threads/model-catalog.js";
 export { threadHttp, createThreadClient } from "./threads/http.js";
 export { admissionFor, callerResolver, hostIdentityConfig, threadCapability, THREAD_TOKEN_HEADER, UPSTREAM_CREDENTIAL_HEADER } from "./threads/caller.js";

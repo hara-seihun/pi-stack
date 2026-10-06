@@ -21,7 +21,7 @@ export class MeetingStart {
     if (!pending.threadCreated) {
       const { session } = await this.request<{ session: { id: string } }>(API.createSession.path(), this.owner, post({
         requestId: pending.threadRequestId, sessionId: pending.sessionId,
-        meetingId: pending.meetingId, model: "astra",
+        meetingId: pending.meetingId,
       }));
       if (session.id !== pending.sessionId) throw new Error("Meeting thread creation returned an unexpected identity");
       pending.threadCreated = true;
