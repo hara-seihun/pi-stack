@@ -123,6 +123,8 @@ export class ThreadService implements ThreadApi {
         settings TEXT NOT NULL, admission TEXT NOT NULL, state TEXT NOT NULL, held INTEGER NOT NULL DEFAULT 0,
         revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT NOT NULL DEFAULT '{}');
       CREATE INDEX IF NOT EXISTS thread_parent ON thread(parent_id,updated_at);
+      CREATE INDEX IF NOT EXISTS thread_created ON thread(created_at,id);
+      CREATE INDEX IF NOT EXISTS thread_running ON thread(id,json_extract(metadata,'$.laneId'),json_extract(metadata,'$.execution')) WHERE state='running';
       CREATE TABLE IF NOT EXISTS thread_work (
         ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL,
         sender_id TEXT, text TEXT NOT NULL, images TEXT NOT NULL, delivery TEXT NOT NULL, source TEXT NOT NULL,
@@ -130,6 +132,7 @@ export class ThreadService implements ThreadApi {
         settings TEXT NOT NULL, prepared TEXT, execution_id TEXT, created_at INTEGER NOT NULL, inserted_at INTEGER,
         landed_at INTEGER, outcome TEXT, final_message TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS thread_work_queue ON thread_work(thread_id,status,front DESC,ordinal);
+      CREATE INDEX IF NOT EXISTS thread_work_unfinished ON thread_work(thread_id) WHERE status!='done';
       CREATE TABLE IF NOT EXISTS thread_execution (
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), work_id TEXT NOT NULL,
         settings TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER, settlement_seq INTEGER UNIQUE, outcome TEXT, final_message TEXT, error TEXT);
@@ -191,6 +194,16 @@ export class ThreadService implements ThreadApi {
   snapshot(options: { archived?: boolean } = {}): Thread[] {
     const where = options.archived === false ? " WHERE json_extract(t.metadata,'$.archived') IS NOT 1" : "";
     return (this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t${where} ORDER BY created_at,id`).all() as Json[]).map(row => this.project(row));
+  }
+  runningSummary(): { total: number; lanes: Map<string, number>; repairOwner?: string } {
+    const rows = this.sql("SELECT id,json_extract(metadata,'$.laneId') lane_id,json_extract(metadata,'$.execution') execution FROM thread WHERE state='running'").all() as { id: string; lane_id: string | null; execution: string | null }[];
+    const lanes = new Map<string, number>();
+    let repairOwner: string | undefined;
+    for (const row of rows) {
+      if (row.lane_id) lanes.set(row.lane_id, (lanes.get(row.lane_id) ?? 0) + 1);
+      if (row.execution === "root-repair") repairOwner ??= row.id;
+    }
+    return { total: rows.length, lanes, repairOwner };
   }
   archivedCount(): number { return (this.sql("SELECT count(*) n FROM thread WHERE json_extract(metadata,'$.archived')=1").get() as { n: number }).n; }
   settlements(after = 0, limit = 100): Result<ThreadSettlements> {
@@ -363,7 +376,10 @@ export class ThreadService implements ThreadApi {
     if (!this.started || this.closed || this.suspended) return;
     void this.routeNotifications();
     this.deliverScheduledWakes();
-    const rows = this.sql("SELECT id,held FROM thread WHERE state='running' OR EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=thread.id AND e.ended_at IS NULL) OR (held=0 AND EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done'))").all() as { id: string; held: number }[];
+    // CROSS JOIN keeps the partial custody indexes on the driving side; SQLite otherwise scans historical threads to merge the UNION.
+    const rows = this.sql(`SELECT id,held FROM thread WHERE state='running'
+      UNION SELECT t.id,t.held FROM thread_execution e INDEXED BY thread_execution_active CROSS JOIN thread t ON t.id=e.thread_id WHERE e.ended_at IS NULL
+      UNION SELECT t.id,t.held FROM thread_work w INDEXED BY thread_work_unfinished CROSS JOIN thread t ON t.id=w.thread_id WHERE w.status!='done' AND t.held=0`).all() as { id: string; held: number }[];
     for (const row of rows) {
       if (row.held) void this.halt(row.id);
       else if (!this.operations.has(row.id) && !this.halts.has(row.id)) this.wake(row.id);
