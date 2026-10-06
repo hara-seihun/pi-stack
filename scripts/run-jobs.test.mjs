@@ -7,6 +7,7 @@ import test from "node:test";
 import { checkParallelism, runJob, runJobs } from "./run-jobs.mjs";
 import { checkJobs } from "./test.mjs";
 import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
+import { orchestratorTestChecks } from "../packages/orchestrator/scripts/check.mjs";
 
 test("job output is visible before the process finishes", async () => {
   let complete = false;
@@ -109,18 +110,24 @@ test("publication shards Orchestrator under the shared budget without dropping t
   const shards = checkJobs.filter(([name]) => /^orchestrator \d+\/6$/.test(name));
   assert.equal(shards.length, 6);
   assert.deepEqual(shards.map(([, , args]) => args.at(-1)), Array.from({ length: 6 }, (_, index) => `--shard=${index + 1}/6`));
-  for (const [, command, args] of shards) {
-    assert.equal(command, "npm");
-    assert.deepEqual(args.slice(0, -1), ["test", "--workspace=pi-orchestrator", "--", "--exclude=tests/routing-runtime.test.ts"]);
+  for (const [, command, args, options] of shards) {
+    assert.equal(command, process.execPath);
+    assert.equal(args[1], "run");
+    assert.ok(args.includes("--exclude=tests/routing-runtime.test.ts"));
+    assert.deepEqual(options.dependsOn, ["orchestrator shared RPC"]);
   }
-  assert.deepEqual(checkJobs.find(([name]) => name === "orchestrator routing runtime")?.slice(1),
-    ["npm", ["test", "--workspace=pi-orchestrator", "--", "tests/routing-runtime.test.ts"]]);
-  assert.equal(checkJobs.some(([name]) => name === "orchestrator"), false);
+  const routing = checkJobs.find(([name]) => name === "orchestrator routing runtime");
+  assert.equal(routing[2].at(-1), "tests/routing-runtime.test.ts");
+  assert.deepEqual(routing[3].dependsOn, shards[0][3].dependsOn);
+  for (const prerequisite of ["orchestrator memory build", "orchestrator types", "orchestrator shared RPC"]) {
+    assert.equal(checkJobs.filter(([name]) => name === prerequisite).length, 1);
+  }
   let output = "";
-  const results = await runJobs(shards.map(([name, command, args]) => [name, command, [
-    ...args.slice(0, 3), "tests/thread-wake-native.test.ts", "--passWithNoTests", ...args.slice(3),
-  ]]), { concurrency: checkParallelism(), write(text) { output += text; } });
-  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0], output);
+  const jobs = orchestratorTestChecks(shards.map(([name, , args]) => ({ name, args: [
+    "tests/thread-wake-native.test.ts", "--passWithNoTests", ...args.slice(3),
+  ] })));
+  const results = await runJobs(jobs, { concurrency: checkParallelism(), write(text) { output += text; } });
+  assert.deepEqual(results.map(result => result.code), jobs.map(() => 0), output);
   assert.equal((output.match(/✓ tests\/thread-wake-native\.test\.ts/g) ?? []).length, 1, output);
 });
 
