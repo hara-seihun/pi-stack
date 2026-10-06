@@ -1,14 +1,19 @@
 import { expect, spyOn, test } from "bun:test";
 import { ReconcilePublisher, revisionOf } from "../shared/reconcile";
-import { createStreamClient, EventStreamParser, RECONNECT_GRACE_MS, streamEventFromFrame, type StreamStatus } from "./src/stream";
-import type { StreamEvent } from "../server/protocol";
+import type { StreamEvent, StreamSnapshot, StreamSubscription } from "../server/protocol";
+import { createStreamClient, DEAD_STREAM_MS, EventStreamParser, RECONCILE_TIMEOUT_MS, RECONNECT_GRACE_MS, streamEventFromFrame, type StreamClient, type StreamClientOptions, type StreamStatus } from "./src/stream";
 
-const hello = 'event: hello\ndata: {"epoch":"e","streamId":"s","bootstrap":{"home":"/","threadStarts":[],"environmentId":"local"}}\n\n';
-const sse = (frames: string[]) => new Response(new ReadableStream<Uint8Array>({ start(controller) { for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame)); } }), { status: 200 });
-const frame = (value: unknown) => `event: reconcile\ndata: ${JSON.stringify({ type: "reconcile", ...value })}\n\n`;
-const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+const hello = { type: "hello", epoch: "epoch", streamId: "disposable", bootstrap: { home: "/", threadStarts: [], environmentId: "local", speech: null } };
+const encode = (event: unknown) => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+const finite = (events: unknown[]) => Response.json({ events });
+const transcript = (sessionId: string): StreamSnapshot => ({ type: "transcript", sessionId, generation: "g", total: 0, items: [] });
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+};
 
-function recoveryClock() {
+function clock() {
   let now = 0;
   let sequence = 0;
   const timers = new Map<number, { at: number; run(): void }>();
@@ -18,13 +23,14 @@ function recoveryClock() {
     return id;
   }) as typeof setTimeout);
   const clear = spyOn(globalThis, "clearTimeout").mockImplementation(id => { timers.delete(Number(id)); });
-  const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+  const flush = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
   return {
-    flush,
+    now: () => now, flush, pending: () => timers.size,
     async advance(ms: number) {
       const until = now + ms;
       await flush();
-      for (;;) {
+      for (let count = 0; ; count++) {
+        if (count > 1_000) throw new Error("Unbounded immediate retry loop");
         const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
         if (!next) break;
         now = next[1].at;
@@ -34,328 +40,430 @@ function recoveryClock() {
       }
       now = until;
     },
-    pending: () => timers.size,
     restore() { timeout.mockRestore(); clear.mockRestore(); },
   };
 }
 
-test("the event-stream parser handles split chunks and comments", () => {
+class Page extends EventTarget {
+  visibilityState = "visible";
+  visibility(value: "visible" | "hidden") { this.visibilityState = value; this.dispatchEvent(new Event("visibilitychange")); }
+}
+type Call = { path: string; body: StreamSubscription; signal: AbortSignal; init: RequestInit };
+
+async function harness(run: (h: ReturnType<typeof setup>) => Promise<void>) {
+  const h = setup();
+  try { await run(h); } finally { h.cleanup(); }
+}
+function setup() {
+  const time = clock();
+  const page = new Page();
+  const windowTarget = new EventTarget();
+  const original = ["document", "window"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  Object.defineProperty(globalThis, "document", { configurable: true, value: page });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: windowTarget });
+  const clients: StreamClient[] = [];
+  const calls: Call[] = [];
+  const events: StreamEvent[] = [];
+  const statuses: StreamStatus[] = [];
+  const selections: Array<{ sessionId: string | null; ready: boolean }> = [];
+  const activities: boolean[] = [];
+  const publisher = new ReconcilePublisher();
+  publisher.publish("state", { type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] });
+  for (const session of ["a", "b", "mine", "other"]) {
+    publisher.publish(`transcript:${session}`, transcript(session));
+    publisher.publish(`live:${session}`, { type: "live", sessionId: session, text: "" });
+    publisher.publish(`questions:${session}`, { type: "questions", sessionId: session, questions: [] });
+  }
+  const reconcile = (resource: string, have: string | null = null) => {
+    const frame = publisher.reconcile(resource, have);
+    return frame && { type: "reconcile", ...frame };
+  };
+  const ack = (body: StreamSubscription, have?: Record<string, string>) => ({
+    type: "selection-ready", sessionId: body.session, selectionId: body.selectionId,
+    have: have ?? Object.fromEntries(["state", `transcript:${body.session}`, `live:${body.session}`].map(resource => [resource, publisher.reconcile(resource, null)!.revision])),
+  });
+  const response = (body: StreamSubscription) => {
+    const frames = (body.want ?? []).map(resource => reconcile(resource, body.have?.[resource] ?? null)).filter(Boolean);
+    return finite([hello, ...frames, ...(body.session && body.viewing ? [ack(body)] : [])]);
+  };
+  const wires: Array<{ emit(event: unknown): void; raw(text: string): void; fail(error: Error): void; cancelled: boolean }> = [];
+  const push = (signal?: AbortSignal) => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const wire = {
+      emit: (event: unknown) => controller.enqueue(encode(event)),
+      raw: (text: string) => controller.enqueue(new TextEncoder().encode(text)),
+      fail: (error: Error) => controller.error(error), cancelled: false,
+    };
+    const body = new ReadableStream<Uint8Array>({
+      start(value) { controller = value; signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true }); },
+      cancel() { wire.cancelled = true; },
+    });
+    wires.push(wire);
+    return new Response(body, { headers: { "content-type": "text/event-stream" } });
+  };
+  const client = (fetch: (call: Call) => Promise<Response> | Response = call => call.path === "/v1/reconcile" ? response(call.body) : push(call.signal), options: Partial<StreamClientOptions> = {}) => {
+    const value = createStreamClient({
+      subscription: {}, listen: false, now: time.now,
+      onEvent: event => events.push(event), onStatus: status => statuses.push(status),
+      onSelectionStatus: value => selections.push(value), onActivity: value => activities.push(value),
+      ...options,
+      fetch: async (path, init) => {
+        const call = { path, body: JSON.parse(String(init.body)) as StreamSubscription, signal: init.signal as AbortSignal, init };
+        calls.push(call);
+        return fetch(call);
+      },
+    });
+    clients.push(value);
+    return value;
+  };
+  return { time, page, window: windowTarget, calls, events, statuses, selections, activities, publisher, reconcile, ack, response, push, wires, client,
+    cleanup() {
+      for (const client of clients) client.stop();
+      time.restore();
+      for (const [key, descriptor] of original) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    },
+  };
+}
+
+test("SSE parses split chunks, comments, multiline data and CRLF; invalid variants fail explicitly", () => {
   const parser = new EventStreamParser();
-  expect(parser.push(": ping\n\nevent: hello\ndata: {\"strea")).toEqual([]);
-  expect(parser.push('mId":"s"}\n\n')).toEqual([{ event: "hello", data: '{"streamId":"s"}' }]);
+  expect(parser.push(": keepalive\r\n\r\nevent: hello\ndata: {\"strea")).toEqual([]);
+  expect(parser.push('mId\":\"s\"}\n\n')).toEqual([{ event: "hello", data: '{"streamId":"s"}' }]);
+  expect(parser.push("data: first\ndata: second\n\n")).toEqual([{ event: "message", data: "first\nsecond" }]);
   expect(() => streamEventFromFrame({ event: "reconcile", data: "{}" })).toThrow("Reconcile resource");
   expect(() => streamEventFromFrame({ event: "future-state", data: "{}" })).toThrow("invalid state");
   expect(() => streamEventFromFrame({ event: "error", data: "not JSON" })).toThrow("Invalid stream input");
 });
 
-test("the replica applies generic frames, filters another session, and resumes from resident revisions", async () => {
-  const publisher = new ReconcilePublisher();
-  const first = publisher.publish("transcript:mine", { type: "transcript", sessionId: "mine", generation: "g", total: 0, items: [] });
-  publisher.publish("transcript:other", { type: "transcript", sessionId: "other", generation: "g", total: 0, items: [] });
-  const questions = publisher.publish("questions:mine", { type: "questions", sessionId: "mine", questions: [] });
-  publisher.publish("questions:other", { type: "questions", sessionId: "other", questions: [] });
-  const calls: Array<{ path: string; body: any }> = [];
-  const received: StreamEvent[] = [];
-  const client = createStreamClient({
-    subscription: { session: "mine", viewing: true }, listen: false,
-    onEvent: event => received.push(event), onStatus: () => {},
-    fetch: async (path, init) => {
-      calls.push({ path, body: JSON.parse(String(init.body)) });
-      if (path !== "/v1/stream") return new Response(null, { status: 204 });
-      return sse([hello, frame(publisher.reconcile("transcript:other", null)), frame(publisher.reconcile("transcript:mine", calls.length === 1 ? null : first)),
-        frame(publisher.reconcile("questions:other", null)), frame(publisher.reconcile("questions:mine", calls.length === 1 ? null : questions))]);
-    },
-  });
-  client.start(); await settle();
-  expect(received.map(event => event.type)).toEqual(["hello", "transcript", "questions"]);
-  expect(calls[0].body).toMatchObject({ have: {}, want: ["bootstrap", "state", "messaging", "live:mine", "transcript:mine", "images:mine", "questions:mine"] });
-  client.reconnect(); await settle(); client.stop();
-  expect(calls.at(-1)?.body.have["transcript:mine"]).toBe(first);
-  expect(calls.at(-1)?.body.have["questions:mine"]).toBe(questions);
-});
+test("finite reconciliation acknowledges visible resources before disposable push opens", () => harness(async h => {
+  const pending = deferred<Response>();
+  const client = h.client(call => call.path === "/v1/reconcile" ? pending.promise : h.push(call.signal), { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  expect(h.calls.map(call => call.path)).toEqual(["/v1/reconcile"]);
+  expect(client.state()).toBe("connecting");
+  pending.resolve(h.response(h.calls[0].body)); await h.time.flush();
+  expect(h.calls.map(call => call.path)).toEqual(["/v1/reconcile", "/v1/stream"]);
+  expect(client.state()).toBe("open");
+  expect(h.selections.at(-1)).toEqual({ sessionId: "a", ready: true });
+  expect(h.calls[1].body.selectionId).toBe(h.calls[0].body.selectionId);
+  expect(h.calls.every(call => call.init.method === "POST" && call.init.cache === "no-store")).toBe(true);
+}));
 
-test("a hash-valid snapshot with an unknown state is an immediate protocol error, never delivered as healthy data", async () => {
-  const publisher = new ReconcilePublisher();
-  publisher.publish("state", { type: "state", sessions: [{ id: "thread", state: "future", activity: "idle" }] });
-  const statuses: StreamStatus[] = [];
-  const received: StreamEvent[] = [];
-  const client = createStreamClient({ subscription: {}, listen: false, onEvent: event => received.push(event), onStatus: status => statuses.push(status), fetch: async () => sse([hello, frame(publisher.reconcile("state", null))]) });
-  try {
-    client.start(); await settle();
-    expect(received.map(event => event.type)).toEqual(["hello"]);
-    expect(statuses.at(-1)).toMatchObject({ state: "offline" });
-    expect(statuses.at(-1)?.error).toContain("Thread lifecycle: invalid state");
-    expect(statuses.at(-1)?.error).not.toContain("Reconnecting…");
-  } finally { client.stop(); }
-});
+test("finite sync succeeds with permanently unavailable push; first recovery has no one-second floor", () => harness(async h => {
+  const client = h.client(call => {
+    if (call.path === "/v1/reconcile") return h.response(call.body);
+    throw new Error("push permanently unavailable");
+  }, { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  expect(client.state()).toBe("open");
+  expect(h.selections.at(-1)?.ready).toBe(true);
+  await h.time.advance(0);
+  expect(h.calls.filter(call => call.path === "/v1/reconcile")).toHaveLength(2);
+  await h.time.advance(RECONNECT_GRACE_MS * 3);
+  expect(client.state()).toBe("open");
+  expect(h.statuses.some(status => status.state === "offline")).toBe(false);
+  expect(h.calls.every(call => ["/v1/reconcile", "/v1/stream"].includes(call.path))).toBe(true);
+}));
 
-test("restored transcript heads declare only their actual local revision", async () => {
-  const cached = { type: "transcript" as const, sessionId: "mine", generation: "g", total: 1, items: [] };
-  const calls: any[] = [];
-  const client = createStreamClient({ subscription: { session: "mine", viewing: true }, listen: false, onEvent: () => {}, onStatus: () => {}, fetch: async (path, init) => {
-    calls.push({ path, body: JSON.parse(String(init.body)) });
-    return sse([hello]);
-  } });
+test("reconnect retains actual replica hashes and caller-remembered event/notification cursors, not claimed server hashes", () => harness(async h => {
+  const client = h.client(undefined, { subscription: { session: "mine", viewing: true, have: { state: "invented", "transcript:mine": "invented" }, notificationsAfter: 2, eventsAfter: 3 } });
+  const cached = transcript("mine");
   client.restore(cached);
-  client.start(); await settle(); client.stop();
-  expect(calls[0].body.have).toEqual({ "transcript:mine": revisionOf(cached) });
-  expect(calls[0].body.want).toContain("transcript:mine");
-});
-
-test("a missing patch base requests a full resource without retaining its revision", async () => {
-  const calls: any[] = [];
-  const client = createStreamClient({ subscription: { session: "mine", viewing: true }, listen: false, onEvent: () => {}, onStatus: () => {}, fetch: async (path, init) => {
-    calls.push({ path, body: JSON.parse(String(init.body)) });
-    return path === "/v1/stream"
-      ? sse([hello, frame({ resource: "live:mine", revision: "new", base: "missing", kind: "patch", patch: { op: "replace", value: { type: "live", sessionId: "mine", text: "hi" } } })])
-      : new Response(null, { status: 204 });
+  client.start(); await h.time.flush();
+  expect(h.calls[0].body.have).toEqual({ "transcript:mine": revisionOf(cached) });
+  client.remember({ notificationsAfter: 11, eventsAfter: 19 });
+  expect(h.calls).toHaveLength(2);
+  client.reconnect(); await h.time.flush();
+  expect(h.calls[2].body).toMatchObject({ notificationsAfter: 11, eventsAfter: 19, have: {
+    "transcript:mine": revisionOf(cached), "live:mine": h.publisher.reconcile("live:mine", null)!.revision,
+    state: h.publisher.reconcile("state", null)!.revision,
   } });
-  client.start(); await settle(); client.stop();
-  expect(calls.map(call => call.path)).toEqual(["/v1/stream", "/v1/stream/s"]);
-  expect(calls[1].body.have).toEqual({});
-});
+  expect(h.calls[2].body.selectionId).not.toBe(h.calls[0].body.selectionId);
+}));
 
-test("a new selection replaces a stream whose obsolete subscription post is still pending", async () => {
-  const posts: Array<{ body: any; signal: AbortSignal }> = [];
-  const statuses: string[] = [];
-  let connects = 0;
-  const client = createStreamClient({ subscription: { session: "a", viewing: true }, listen: false,
-    onEvent: () => {}, onStatus: status => statuses.push(status.state),
-    fetch: async (path, init) => {
-      if (path === "/v1/stream") {
-        connects++;
-        return sse([hello]);
-      }
-      const signal = init.signal as AbortSignal;
-      posts.push({ body: JSON.parse(String(init.body)), signal });
-      if (connects > 1) return new Response(null, { status: 204 });
-      return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
-    },
-  });
-  client.start(); await settle();
-  client.update({ session: "b" }); await settle();
-  expect(posts[0].body.session).toBe("b");
-  expect(posts[0].signal.aborted).toBe(false);
-  client.update({ session: "c" }); await settle();
-  expect(connects).toBe(2);
-  expect(posts[0].signal.aborted).toBe(true);
-  client.update({ session: "d" }); await settle();
-  expect(posts).toHaveLength(2);
-  expect(posts[1].body.session).toBe("d");
-  expect(posts[1].signal.aborted).toBe(false);
-  expect(statuses).not.toContain("offline");
-  client.stop();
-  expect(posts[1].signal.aborted).toBe(true);
-});
+test("frames for another session cannot enter the replica or reach consumers", () => harness(async h => {
+  const client = h.client(call => call.path === "/v1/reconcile" ? finite([h.reconcile("transcript:other"), h.reconcile("questions:other"), hello]) : h.push(call.signal), { subscription: { session: "mine" } });
+  client.start(); await h.time.flush();
+  h.wires[0].emit({ type: "events", sessionId: "other", events: [] }); await h.time.flush();
+  expect(h.events.map(event => event.type)).toEqual(["hello"]);
+  client.reconnect(); await h.time.flush();
+  expect(h.calls[2].body.have).toEqual({});
+}));
 
-test("only the current opening's acknowledged revisions finish refresh, including unchanged caches and reconnects", async () => {
-  const publisher = new ReconcilePublisher();
-  const cached = { type: "transcript" as const, sessionId: "a", generation: "g", total: 0, items: [] };
-  const have = {
-    "transcript:a": publisher.publish("transcript:a", cached),
-    "live:a": publisher.publish("live:a", { type: "live", sessionId: "a", text: "" }),
-    state: publisher.publish("state", { type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] }),
-  };
-  const selections: Array<{ sessionId: string | null; ready: boolean }> = [];
-  const calls: any[] = [];
-  let wire!: ReadableStreamDefaultController<Uint8Array>;
-  const emit = (event: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
-  const client = createStreamClient({
-    subscription: { session: "a" }, listen: false, onEvent: () => {}, onStatus: () => {},
-    onSelectionStatus: status => selections.push(status),
-    fetch: async (path, init) => {
-      calls.push(JSON.parse(String(init.body)));
-      if (path !== "/v1/stream") return new Response(null, { status: 204 });
-      return new Response(new ReadableStream({ start(controller) { wire = controller; controller.enqueue(new TextEncoder().encode(hello)); } }));
-    },
-  });
-  client.restore(cached);
-  try {
-    client.start(); await settle();
-    const first = calls[0].selectionId;
-    for (const resource of ["state", "live:a"]) emit({ type: "reconcile", ...publisher.reconcile(resource, null) });
-    await settle();
-    expect(selections).toEqual([{ sessionId: "a", ready: false }]);
-    const ready = (selectionId: string, revisions = have) => emit({ type: "selection-ready", sessionId: "a", selectionId, have: revisions });
-    ready(first, { ...have, "transcript:a": "not-applied" }); await settle();
-    expect(selections.at(-1)?.ready).toBe(false);
-    ready(first); await settle();
-    expect(selections.at(-1)?.ready).toBe(true);
+test("selection updates replace transports immediately, and revisits reuse resident resources", () => harness(async h => {
+  const client = h.client(undefined, { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  client.update({ session: "b" }); await h.time.flush();
+  expect(h.calls[1].signal.aborted).toBe(true);
+  expect(h.calls[2].body.want).toContain("transcript:b");
+  client.update({ session: "a" }); await h.time.flush();
+  expect(h.calls[4].body.have?.["transcript:a"]).toBe(revisionOf(transcript("a")));
+  expect(h.calls[4].body.have).not.toHaveProperty("transcript:b");
+  const before = h.calls.length;
+  client.update({ session: "a" }); await h.time.flush();
+  expect(h.calls).toHaveLength(before);
+}));
 
-    client.update({ session: "b" }); await settle();
-    client.update({ session: "a" }); await settle();
-    const revisit = calls.at(-1).selectionId;
-    expect(revisit).not.toBe(first);
-    ready(first); await settle();
-    expect(selections.at(-1)).toEqual({ sessionId: "a", ready: false });
-    client.update({ thinking: true }); await settle();
-    expect(calls.at(-1).selectionId).toBe(revisit);
-    ready(revisit); await settle();
-    expect(selections.at(-1)?.ready).toBe(true);
-
-    client.reconnect(); await settle();
-    expect(selections.at(-1)?.ready).toBe(false);
-    ready(revisit); await settle();
-    expect(selections.at(-1)?.ready).toBe(false);
-    ready(calls.at(-1).selectionId); await settle();
-    expect(selections.at(-1)?.ready).toBe(true);
-  } finally { client.stop(); }
-});
-
-test("selection changed before hello posts the latest subscription rather than reconnecting", async () => {
-  const calls: Array<{ path: string; body: any }> = [];
-  let resolve!: (value: Response) => void;
-  const pending = new Promise<Response>(done => { resolve = done; });
-  const client = createStreamClient({ subscription: { session: "a", viewing: true }, listen: false, onEvent: () => {}, onStatus: () => {}, fetch: async (path, init) => {
-    calls.push({ path, body: JSON.parse(String(init.body)) });
-    return path === "/v1/stream" ? pending : new Response(null, { status: 204 });
-  } });
-  client.start(); await settle(); client.update({ session: "b" });
-  resolve(sse([hello])); await settle(); client.stop();
-  expect(calls.map(call => call.path)).toEqual(["/v1/stream", "/v1/stream/s"]);
-  expect(calls[1].body.want).toContain("transcript:b");
-});
-
-test("short transport recovery stays syncing; uninterrupted loss stays visible across retries until hello", async () => {
-  const clock = recoveryClock();
-  const statuses: StreamStatus[] = [];
-  let wire!: ReadableStreamDefaultController<Uint8Array>;
-  let failing = false;
-  const client = createStreamClient({
-    subscription: { session: "a" }, listen: false, onEvent: () => {}, onStatus: status => statuses.push(status),
-    fetch: async (_path, init) => {
-      if (failing) throw new Error("raw socket diagnostic");
-      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
-        wire = controller;
-        controller.enqueue(new TextEncoder().encode(hello));
-        init.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), { once: true });
-      } }));
-    },
-  });
-  try {
-    client.start(); await clock.flush();
-    expect(client.state()).toBe("open");
-    wire.error(new Error("short interruption")); await clock.flush();
-    expect(statuses.at(-1)).toMatchObject({ state: "connecting", error: "", diagnostic: "short interruption" });
-    await clock.advance(1_000);
-    expect(client.state()).toBe("open");
-    expect(statuses.some(status => status.state === "offline")).toBe(false);
-
-    failing = true;
-    wire.error(new Error("long interruption")); await clock.flush();
-    await clock.advance(RECONNECT_GRACE_MS);
-    expect(statuses.at(-1)).toEqual({ state: "offline", error: "Connection lost. Reconnecting…", diagnostic: "raw socket diagnostic" });
-    const sinceLoss = statuses.length;
-    client.reconnect(); await clock.flush();
-    await clock.advance(2_000);
-    expect(statuses.slice(sinceLoss).every(status => status.state === "offline")).toBe(true);
-
-    failing = false;
-    client.reconnect(); await clock.flush();
-    expect(statuses.at(-1)).toEqual({ state: "open", error: "" });
-    client.stop();
-    expect(clock.pending()).toBe(0);
-  } finally { client.stop(); clock.restore(); }
-});
-
-test("a visible conversation must acknowledge current resources before ending recovery", async () => {
-  const clock = recoveryClock();
-  const publisher = new ReconcilePublisher();
-  const resources = {
-    state: publisher.publish("state", { type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] }),
-    "transcript:a": publisher.publish("transcript:a", { type: "transcript", sessionId: "a", generation: "g", total: 0, items: [] }),
-    "live:a": publisher.publish("live:a", { type: "live", sessionId: "a", text: "" }),
-  };
-  let wire!: ReadableStreamDefaultController<Uint8Array>;
-  let selectionId = "";
-  const statuses: StreamStatus[] = [];
-  const client = createStreamClient({
-    subscription: { session: "a", viewing: true }, listen: false, onEvent: () => {}, onStatus: status => statuses.push(status),
-    fetch: async (_path, init) => {
-      selectionId = JSON.parse(String(init.body)).selectionId;
-      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
-        wire = controller;
-        controller.enqueue(new TextEncoder().encode(hello));
-        init.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), { once: true });
-      } }));
-    },
-  });
-  const emit = (event: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
-  try {
-    client.start(); await clock.flush();
-    expect(client.state()).toBe("connecting");
-    const stale = selectionId;
-    wire.error(new Error("closed before refresh")); await clock.flush();
-    await clock.advance(RECONNECT_GRACE_MS);
-    expect(client.state()).toBe("offline");
-    expect(selectionId).not.toBe(stale);
-    for (const resource of Object.keys(resources)) emit({ type: "reconcile", ...publisher.reconcile(resource, null) });
-    emit({ type: "selection-ready", sessionId: "a", selectionId: stale, have: resources });
-    await clock.flush();
-    expect(client.state()).toBe("offline");
-    emit({ type: "selection-ready", sessionId: "a", selectionId, have: resources });
-    await clock.flush();
-    expect(statuses.at(-1)).toEqual({ state: "open", error: "" });
-  } finally { client.stop(); clock.restore(); }
-});
-
-test("HTTP success without a stream hello does not clear persistent loss", async () => {
-  const clock = recoveryClock();
-  const statuses: StreamStatus[] = [];
-  let requests = 0;
-  const client = createStreamClient({
-    subscription: { session: "a" }, listen: false, onEvent: () => {}, onStatus: status => statuses.push(status),
-    fetch: async () => { requests++; return sse([]); },
-  });
-  try {
-    client.start(); await clock.flush();
-    expect(client.state()).toBe("connecting");
-    await clock.advance(RECONNECT_GRACE_MS);
-    expect(statuses.at(-1)?.state).toBe("offline");
-    client.reconnect(); await clock.flush();
-    expect(requests).toBe(2);
-    expect(statuses.at(-1)?.state).toBe("offline");
-  } finally { client.stop(); clock.restore(); }
-});
-
-for (const status of [401, 403, 423]) {
-  test(`HTTP ${status} requires authentication immediately, not after the transport grace`, async () => {
-    const clock = recoveryClock();
-    const statuses: StreamStatus[] = [];
-    const client = createStreamClient({
-      subscription: { session: "a" }, listen: false, onEvent: () => {}, onStatus: status => statuses.push(status),
-      fetch: async () => new Response(null, { status }),
-    });
-    try {
-      client.start(); await clock.flush();
-      expect(statuses.at(-1)).toEqual({ state: "offline", error: status === 423 ? "Unlock your folder to reconnect." : "Sign in to reconnect.", diagnostic: `The stream returned HTTP ${status}` });
-      client.reconnect();
-      expect(statuses.at(-1)?.state).toBe("offline");
-    } finally { client.stop(); clock.restore(); }
-  });
+for (const stage of ["fetch", "JSON"]) {
+  test(`late finite ${stage} replies are fenced after a selection change`, () => harness(async h => {
+  const pending = deferred<Response>();
+  const json = deferred<unknown>();
+  const client = h.client(call => {
+    if (call.path !== "/v1/reconcile") return h.push(call.signal);
+    if (call.body.session === "a") return pending.promise;
+    return h.response(call.body);
+  }, { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  if (stage === "JSON") { pending.resolve({ ok: true, json: () => json.promise } as Response); await h.time.flush(); }
+  client.update({ session: "b" }); await h.time.flush();
+  const count = h.events.length;
+  if (stage === "fetch") pending.resolve(h.response(h.calls[0].body));
+  else json.resolve({ events: [h.reconcile("state"), h.reconcile("transcript:a"), h.ack(h.calls[0].body)] });
+  await h.time.flush();
+  expect(h.events).toHaveLength(count);
+  expect(h.selections.at(-1)).toEqual({ sessionId: "b", ready: true });
+  expect(h.calls.filter(call => call.path === "/v1/stream")).toHaveLength(1);
+  expect(h.calls[0].signal.aborted).toBe(true);
+  }));
 }
 
-test("a failed subscription update uses the same recovery grace as a failed stream", async () => {
-  const clock = recoveryClock();
-  const statuses: StreamStatus[] = [];
-  let connections = 0;
-  const client = createStreamClient({
-    subscription: { session: "a" }, listen: false, onEvent: () => {}, onStatus: status => statuses.push(status),
-    fetch: async path => {
-      if (path === "/v1/stream") {
-        connections++;
-        if (connections > 1) throw new Error("stream unreachable");
-        return sse([hello]);
-      }
-      throw new Error("update unreachable");
-    },
+test("late opening of obsolete push cannot deliver or rewind the current selection", () => harness(async h => {
+  const pending = deferred<Response>();
+  const client = h.client(call => call.path === "/v1/reconcile" ? h.response(call.body) : call.body.session === "a" ? pending.promise : h.push(call.signal), { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  client.update({ session: "b" }); await h.time.flush();
+  const before = h.events.length;
+  const late = h.push();
+  h.wires.at(-1)!.emit(h.reconcile("transcript:a"));
+  pending.resolve(late); await h.time.flush();
+  expect(h.events).toHaveLength(before);
+  expect(h.selections.at(-1)).toEqual({ sessionId: "b", ready: true });
+}));
+
+for (const stale of ["selection", "revision", "session"]) {
+  test(`a stale ${stale} acknowledgement never ends finite selection recovery`, () => harness(async h => {
+    const client = h.client(call => {
+      const response = { ...h.ack(call.body) };
+      if (stale === "selection") response.selectionId = "obsolete";
+      if (stale === "session") response.sessionId = "other";
+      if (stale === "revision") response.have = { ...response.have, "transcript:a": "unapplied" };
+      return finite([hello, h.reconcile("state"), h.reconcile("transcript:a"), h.reconcile("live:a"), response]);
+    }, { subscription: { session: "a", viewing: true } });
+    client.start(); await h.time.flush();
+    expect(h.selections.some(status => status.ready)).toBe(false);
+    expect(client.state()).not.toBe("open");
+    expect(h.calls.map(call => call.path)).toEqual(["/v1/reconcile"]);
+  }));
+}
+
+test("finite transport failures recover immediately, then show persistent loss across retries", () => harness(async h => {
+  let failing = true;
+  const client = h.client(call => {
+    if (failing) throw new Error("finite unreachable");
+    return call.path === "/v1/reconcile" ? h.response(call.body) : h.push(call.signal);
   });
-  try {
-    client.start(); await clock.flush();
-    client.update({ session: "b" }); await clock.flush();
-    expect(connections).toBe(2);
-    expect(statuses.some(status => status.state === "offline")).toBe(false);
-    await clock.advance(RECONNECT_GRACE_MS);
-    expect(statuses.at(-1)).toMatchObject({ state: "offline", error: "Connection lost. Reconnecting…" });
-  } finally { client.stop(); clock.restore(); }
-});
+  client.start(); await h.time.flush();
+  expect(h.statuses.at(-1)).toMatchObject({ state: "connecting", error: "", diagnostic: "finite unreachable" });
+  await h.time.advance(0);
+  expect(h.calls).toHaveLength(2);
+  await h.time.advance(RECONNECT_GRACE_MS);
+  expect(h.statuses.at(-1)).toMatchObject({ state: "offline", error: "Connection lost. Reconnecting…" });
+  client.reconnect(); await h.time.flush();
+  expect(client.state()).toBe("offline");
+  failing = false;
+  client.reconnect(); await h.time.flush();
+  expect(h.statuses.at(-1)).toEqual({ state: "open", error: "" });
+  client.stop(); await h.time.flush();
+  expect(h.time.pending()).toBe(0);
+}));
+
+test("finite timeout aborts the request and schedules immediate recovery", () => harness(async h => {
+  const client = h.client(call => new Promise<Response>((_, reject) => call.signal.addEventListener("abort", () => reject(call.signal.reason), { once: true })));
+  client.start(); await h.time.flush();
+  await h.time.advance(RECONCILE_TIMEOUT_MS);
+  expect(h.calls[0].signal.aborted).toBe(true);
+  expect(h.calls).toHaveLength(2);
+  expect(h.statuses.at(-1)?.diagnostic).toBe("State synchronization timed out");
+}));
+
+for (const event of ["focus", "online", "pageshow", "visibilitychange"]) {
+  test(`${event} replaces a nominally-open dead stream immediately and coalesces wake bursts`, () => harness(async h => {
+    const client = h.client(undefined, { listen: true });
+    client.start(); await h.time.flush();
+    const target = event === "visibilitychange" ? h.page : h.window;
+    target.dispatchEvent(new Event(event)); target.dispatchEvent(new Event(event)); await h.time.flush();
+    expect(h.calls.map(call => call.path)).toEqual(["/v1/reconcile", "/v1/stream", "/v1/reconcile", "/v1/stream"]);
+    expect(h.calls[1].signal.aborted).toBe(true);
+    expect(client.state()).toBe("open");
+    client.stop(); await h.time.flush();
+    target.dispatchEvent(new Event(event)); await h.time.flush();
+    expect(h.calls).toHaveLength(4);
+    expect(h.time.pending()).toBe(0);
+  }));
+}
+
+test("a silent push watchdog reconciles immediately without discarding held state", () => harness(async h => {
+  const client = h.client(undefined, { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  await h.time.advance(DEAD_STREAM_MS - 1);
+  expect(h.calls).toHaveLength(2);
+  await h.time.advance(1);
+  expect(h.calls).toHaveLength(4);
+  expect(h.calls[1].signal.aborted).toBe(true);
+  expect(h.calls[2].body.have?.["transcript:a"]).toBe(revisionOf(transcript("a")));
+}));
+
+test("SSE comments refresh the silence watchdog without delivering events", () => harness(async h => {
+  const client = h.client();
+  client.start(); await h.time.flush();
+  const count = h.events.length;
+  await h.time.advance(DEAD_STREAM_MS - 1);
+  h.wires[0].raw(": keepalive\n\n"); await h.time.flush();
+  await h.time.advance(DEAD_STREAM_MS - 1);
+  expect(h.calls).toHaveLength(2);
+  expect(h.events).toHaveLength(count);
+  await h.time.advance(1);
+  expect(h.calls).toHaveLength(4);
+}));
+
+test("hidden normal clients cancel open push, retries and all timers; visible resumes once", () => harness(async h => {
+  const client = h.client(undefined, { listen: true, suspendWhenHidden: true });
+  client.start(); await h.time.flush();
+  h.page.visibility("hidden"); await h.time.flush();
+  expect(h.calls[1].signal.aborted).toBe(true);
+  expect(h.time.pending()).toBe(0);
+  client.update({ dashboard: true }); client.reconnect(); h.window.dispatchEvent(new Event("focus"));
+  await h.time.advance(DEAD_STREAM_MS * 2);
+  expect(h.calls).toHaveLength(2);
+  h.page.visibility("visible"); h.window.dispatchEvent(new Event("pageshow")); await h.time.flush();
+  expect(h.calls).toHaveLength(4);
+  expect(h.calls[2].body.want).toContain("dashboard");
+}));
+
+test("hiding after transport failure removes queued retries and recovery-grace timers", () => harness(async h => {
+  const client = h.client(() => { throw new Error("offline"); }, { listen: true, suspendWhenHidden: true });
+  client.start(); await h.time.flush();
+  expect(h.time.pending()).toBeGreaterThan(0);
+  h.page.visibility("hidden"); await h.time.flush();
+  expect(h.time.pending()).toBe(0);
+  await h.time.advance(RECONNECT_GRACE_MS * 2);
+  expect(h.calls).toHaveLength(1);
+}));
+
+for (const stage of ["finite", "push"]) {
+  test(`hiding during a pending ${stage} opening cancels its deadline even if fetch ignores abort`, () => harness(async h => {
+    const pending = deferred<Response>();
+    const client = h.client(call => stage === "finite" || call.path === "/v1/stream" ? pending.promise : h.response(call.body), { listen: true, suspendWhenHidden: true });
+    client.start(); await h.time.flush();
+    h.page.visibility("hidden"); await h.time.flush();
+    expect(h.calls.at(-1)!.signal.aborted).toBe(true);
+    expect(h.time.pending()).toBe(0);
+    pending.resolve(stage === "finite" ? finite([hello]) : h.push()); await h.time.flush();
+    expect(h.time.pending()).toBe(0);
+  }));
+}
+
+test("a normal client started hidden does no work; Voice's default remains active while hidden", () => harness(async h => {
+  h.page.visibility("hidden");
+  const normal = h.client(undefined, { listen: true, suspendWhenHidden: true });
+  normal.start(); await h.time.flush();
+  expect(h.calls).toHaveLength(0);
+  expect(h.time.pending()).toBe(0);
+  const voice = h.client(undefined, { listen: true, subscription: { session: "a", eventsAfter: 7 } });
+  voice.start(); await h.time.flush();
+  expect(voice.state()).toBe("open");
+  h.page.visibility("hidden"); await h.time.flush();
+  expect(h.calls[1].signal.aborted).toBe(false);
+  await h.time.advance(DEAD_STREAM_MS);
+  expect(h.calls).toHaveLength(4);
+}));
+
+test("stopping pending finite work fences late replies and releases every timer", () => harness(async h => {
+  const pending = deferred<Response>();
+  const client = h.client(() => pending.promise);
+  client.start(); await h.time.flush();
+  client.stop(); await h.time.flush();
+  expect(h.calls[0].signal.aborted).toBe(true);
+  expect(h.time.pending()).toBe(0);
+  pending.resolve(finite([hello])); await h.time.flush();
+  expect(h.events).toEqual([]);
+  expect(h.calls).toHaveLength(1);
+}));
+
+test("beforeReconcile changes the finite declaration, but an obsolete preparation cannot send", () => harness(async h => {
+  const first = deferred<Partial<StreamSubscription>>();
+  let preparations = 0;
+  const client = h.client(undefined, { beforeReconcile: () => ++preparations === 1 ? first.promise : Promise.resolve({ eventsAfter: 13 }) });
+  client.start(); await h.time.flush();
+  expect(h.calls).toHaveLength(0);
+  client.reconnect(); await h.time.flush();
+  expect(h.calls[0].body.eventsAfter).toBe(13);
+  first.resolve({ eventsAfter: 1 }); await h.time.flush();
+  expect(h.calls).toHaveLength(2);
+  expect(client.subscription().eventsAfter).toBe(13);
+}));
+
+for (const status of [401, 403, 423]) {
+  for (const endpoint of ["/v1/reconcile", "/v1/stream"]) {
+    test(`HTTP ${status} from ${endpoint} requires authentication immediately`, () => harness(async h => {
+      const client = h.client(call => call.path === endpoint ? new Response(null, { status }) : h.response(call.body));
+      client.start(); await h.time.flush();
+      expect(h.statuses.at(-1)).toMatchObject({ state: "offline", error: status === 423 ? "Unlock your folder to reconnect." : "Sign in to reconnect." });
+      expect(h.statuses.at(-1)?.diagnostic).toContain(`HTTP ${status}`);
+    }));
+  }
+}
+
+for (const malformed of ["JSON", "envelope", "event", "snapshot"]) {
+  test(`malformed finite ${malformed} is an immediate explicit protocol error, not delayed transport loss`, () => harness(async h => {
+    const client = h.client(() => {
+      if (malformed === "JSON") return new Response("not JSON", { headers: { "content-type": "application/json" } });
+      if (malformed === "envelope") return Response.json({ events: null });
+      if (malformed === "event") return finite([{ type: "future-state" }]);
+      h.publisher.publish("state", { type: "state", sessions: [{ id: "thread", state: "future", activity: "idle" }] });
+      return finite([h.reconcile("state")]);
+    });
+    client.start(); await h.time.flush();
+    expect(h.events).toEqual([]);
+    expect(h.statuses.at(-1)?.state).toBe("offline");
+    expect(h.statuses.at(-1)?.error).not.toBe("");
+    expect(h.statuses.at(-1)?.error).not.toContain("Reconnecting…");
+  }));
+}
+
+test("malformed push is explicit even after finite sync succeeded", () => harness(async h => {
+  const client = h.client();
+  client.start(); await h.time.flush();
+  h.wires[0].emit({ type: "unknown" }); await h.time.flush();
+  expect(h.statuses.at(-1)?.state).toBe("offline");
+  expect(h.statuses.at(-1)?.error).toContain("Invalid stream input");
+}));
+
+test("invalidation drops only its held hash; accepted push revisions become the next finite declaration", () => harness(async h => {
+  const client = h.client(undefined, { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  const changed = { type: "live", sessionId: "a", text: "changed output" };
+  const base = h.calls[1].body.have!["live:a"];
+  const revision = h.publisher.publish("live:a", changed);
+  h.wires[0].emit(h.reconcile("live:a", base)); await h.time.flush();
+  expect(h.events.at(-1)).toEqual(changed);
+  client.reconnect(); await h.time.flush();
+  expect(h.calls[2].body.have!["live:a"]).toBe(revision);
+  client.invalidate("live:a"); await h.time.flush();
+  expect(h.calls[4].body.have).not.toHaveProperty("live:a");
+  expect(h.calls[4].body.have!["transcript:a"]).toBe(revisionOf(transcript("a")));
+}));
+
+test("a missing patch base is forgotten before immediate finite repair", () => harness(async h => {
+  const client = h.client(undefined, { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  h.wires[0].emit({ type: "reconcile", resource: "live:a", revision: "new", base: "missing", kind: "patch", patch: { op: "replace", value: { type: "live", sessionId: "a", text: "hi" } } });
+  await h.time.flush(); await h.time.advance(0);
+  expect(h.calls[2].path).toBe("/v1/reconcile");
+  expect(h.calls[2].body.have).not.toHaveProperty("live:a");
+  expect(h.calls[2].body.have?.["transcript:a"]).toBe(revisionOf(transcript("a")));
+  expect(client.state()).toBe("open");
+}));
