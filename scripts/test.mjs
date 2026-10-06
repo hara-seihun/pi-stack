@@ -16,7 +16,11 @@ const jobs = [
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
-  ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],
+  ["orchestrator routing runtime", "npm", ["test", "--workspace=pi-orchestrator", "--", "tests/routing-runtime.test.ts"]],
+  ...Array.from({ length: 6 }, (_, index) => [
+    `orchestrator ${index + 1}/6`, "npm",
+    ["test", "--workspace=pi-orchestrator", "--", "--exclude=tests/routing-runtime.test.ts", `--shard=${index + 1}/6`],
+  ]),
   ...workspaceChecks,
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],

@@ -105,6 +105,26 @@ test("workspace shards execute a selected contract exactly once across the publi
   assert.equal((output.match(/✔ cache discovery walks each directory once/g) ?? []).length, 1, output);
 });
 
+test("publication shards Orchestrator under the shared budget without dropping the native proof", async () => {
+  const shards = checkJobs.filter(([name]) => /^orchestrator \d+\/6$/.test(name));
+  assert.equal(shards.length, 6);
+  assert.deepEqual(shards.map(([, , args]) => args.at(-1)), Array.from({ length: 6 }, (_, index) => `--shard=${index + 1}/6`));
+  for (const [, command, args] of shards) {
+    assert.equal(command, "npm");
+    assert.deepEqual(args.slice(0, -1), ["test", "--workspace=pi-orchestrator", "--", "--exclude=tests/routing-runtime.test.ts"]);
+  }
+  assert.deepEqual(checkJobs.find(([name]) => name === "orchestrator routing runtime")?.slice(1),
+    ["npm", ["test", "--workspace=pi-orchestrator", "--", "tests/routing-runtime.test.ts"]]);
+  assert.equal(checkJobs.some(([name]) => name === "orchestrator"), false);
+  let output = "";
+  const results = await runJobs(shards.map(([name, , args]) => [name, process.execPath, [
+    "node_modules/vitest/vitest.mjs", "run", "--root=packages/orchestrator", "--maxWorkers=1",
+    "tests/thread-wake-native.test.ts", "--passWithNoTests", ...args.slice(3),
+  ]]), { concurrency: checkParallelism(), write(text) { output += text; } });
+  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0], output);
+  assert.equal((output.match(/✓ tests\/thread-wake-native\.test\.ts/g) ?? []).length, 1, output);
+});
+
 test("check budgets reject invalid settings and permit an empty queue", async () => {
   assert.equal(checkParallelism({ PI_STACK_CHECK_CONCURRENCY: "2" }), 2);
   for (const value of ["0", "-1", "1.5", "garbage", ""]) {

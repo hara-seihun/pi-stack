@@ -43,7 +43,7 @@
   "scripts": {
     "build": "npm run build --workspace=kenan-memory && tsc -p tsconfig.build.json",
     "docs": "npm run build && node scripts/generate-docs.mjs && node scripts/generate-completion-openapi.mjs",
-    "pretest": "node ../runtime/patch-shared-rpc.mjs ../../node_modules",
+    "pretest": "npm run build --workspace=kenan-memory && node ../runtime/patch-shared-rpc.mjs ../../node_modules",
     "test": "vitest run --maxWorkers=1",
     "typecheck": "npm run build --workspace=kenan-memory && tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/orchestrator.tsbuildinfo"
   },
