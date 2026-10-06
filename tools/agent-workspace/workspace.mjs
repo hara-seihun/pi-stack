@@ -439,8 +439,8 @@ function registerWorkspace(database, input, inspectedInfo) {
       ? input.cachePaths
       : [...new Set([...JSON.parse(existing.cache_paths), ...input.cachePaths])];
     const groupId = input.groupId ?? existing.group_id;
-    database.prepare("UPDATE workspace SET cache_paths = ?, group_id = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(cachePaths), groupId, now, existing.id);
+    database.prepare("UPDATE workspace SET checkout_type = ?, cache_paths = ?, group_id = ?, updated_at = ? WHERE id = ?")
+      .run(info.checkoutType, JSON.stringify(cachePaths), groupId, now, existing.id);
     return recordBy(database, { id: existing.id });
   }
   if (existing !== undefined) database.prepare("DELETE FROM workspace WHERE id = ?").run(existing.id);

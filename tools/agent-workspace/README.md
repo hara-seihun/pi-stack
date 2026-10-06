@@ -41,6 +41,8 @@ A released or expired checkout is reclaimable only when it is clean and every lo
 
 Give related repositories the same `--group` value when one agent task spans them. A heartbeat on any member renews the whole group. Release removes the group only when every member is recoverable, so a clean frontend checkout cannot disappear while its backend peer still contains unique work.
 
+Re-registering an existing non-released path inspects its current Git layout and refreshes `checkoutType`: an owner may have replaced a clean linked worktree with an independent shared clone, or the reverse. Registration preserves the existing row identity, owner, source custody and lease; it does not bless new commits as published. Cache and group declarations still follow their normal rules. Pending creations remain pending and require their explicit resume or finalization transition.
+
 ## Finding out what became of a checkout
 
 Records outlive the directory. When a checkout is gone, the registry still holds why, so this is answerable rather than a matter of guesswork:
