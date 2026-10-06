@@ -66,14 +66,14 @@ it("recovers a stored timer after controller restart and does not duplicate a de
   expect(restarted.service.pending("self")).toHaveLength(0);
 });
 
-it("dependency settlement resumes a durable waiter through the existing cross-owner result route", async () => {
+it.each([true, false])("dependency settlement resumes a durable waiter through the existing cross-owner result route (legacy=%s)", async legacy => {
   const parent = fixture(), child = fixture(undefined, { workersOnly: true });
   const directory = new ThreadDirectory({ id: "person", api: parent.service }, [{ id: "fleet", api: child.service }]);
   parent.service.setDirectory(directory); child.service.setDirectory(directory);
   await spawn(parent, "parent"); unwrap(await parent.service.start()); unwrap(await child.service.start());
   unwrap(await child.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: child.root, message: "work" }));
   await until(() => child.sessions[0]?.commands.some(c => c.type === "prompt") === true);
-  const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", kind: "agents", reason: "Need child result", threadIds: ["child"] }));
+  const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", ...(legacy ? {} : { kind: "agents" as const }), reason: "Need child result", threadIds: ["child"] }));
   expect(wait).toMatchObject({ state: "idle", waitingOnAgents: { threadIds: ["child"], reason: "Need child result" } });
   expect(parent.sessions).toHaveLength(0);
   child.sessions[0]!.settle(); await until(() => parent.sessions[0]?.commands.some(c => c.type === "prompt") === true);
@@ -173,4 +173,52 @@ it("native tools end dependency waits rather than asking a model to poll; transi
   const activity = createExecutionActivity(); observeExecutionActivity(activity, { type: "tool_execution_start", toolCallId: "await", toolName: "thread_await" }); expect(activity.activity).toBe("waiting_on_agents");
   observeExecutionActivity(activity, { type: "tool_execution_start", toolCallId: "shell", toolName: "bash" }); expect(activity.activity).toBe("waiting_on_tool");
   observeExecutionActivity(activity, { type: "tool_execution_end", toolCallId: "shell" }); expect(activity.activity).toBe("waiting_on_agents");
+});
+
+it("legacy child waits retain validation, retry identity and normalized custody across restart", async () => {
+  const f = fixture(); await spawn(f, "parent"); await spawn(f, "unrelated");
+  unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: f.root }));
+  const request = { requestId: "legacy-call", threadId: "parent", action: "set" as const, reason: "Child result", threadIds: ["child"], after: { child: 0 } };
+  const before = f.service.get("parent");
+  for (const invalid of [
+    { ...request, threadIds: [] },
+    { ...request, threadIds: ["unrelated"] },
+    { ...request, after: { foreign: 0 } },
+    { ...request, jobId: "ambiguous" },
+  ]) {
+    expect(await f.service.agentWait(invalid)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(f.service.get("parent")).toEqual(before);
+    expect(f.service.pending("parent")).toEqual([]);
+  }
+  const accepted = unwrap(await f.service.agentWait(request));
+  expect(accepted.metadata?.agentWait).toMatchObject({ kind: "agents", threadIds: ["child"], after: { child: 0 } });
+  expect(unwrap(await f.service.agentWait(request))).toEqual(accepted);
+  unwrap(await f.service.close());
+  const next = fixture(f.root);
+  expect(next.service.get("parent")?.metadata?.agentWait).toEqual(accepted.metadata?.agentWait);
+  expect(unwrap(await next.service.agentWait(request)).metadata?.agentWait).toEqual(accepted.metadata?.agentWait);
+  expect(next.service.pending("parent")).toEqual([]);
+});
+
+it("old wrapper shape crosses authenticated HTTP while new schema still advertises each typed kind", async () => {
+  const f = fixture(); await spawn(f, "parent"); await spawn(f, "other");
+  unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: f.root }));
+  const key = threadCapability(join(f.root, "key"));
+  const resolver = callerResolver({ capability: key });
+  const transport = async (url: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(String(url), init);
+    return (await threadHttp(f.service, request, "/v1/threads", admissionFor(resolver, { headers: request.headers })))!;
+  };
+  const own = createThreadClient("http://fixture/v1/threads", transport, { token: key.issue("parent") });
+  const input = { requestId: "old-call", threadId: "parent", action: "set" as const, reason: "Child result", threadIds: ["child"], after: { child: 0 } };
+  const denied = await own.agentWait({ ...input, threadId: "other" });
+  expect(denied.ok).toBe(false);
+  expect(f.service.get("other")?.metadata?.agentWait).toBeUndefined();
+  const accepted = unwrap(await own.agentWait(input));
+  expect(accepted.metadata?.agentWait).toMatchObject({ kind: "agents", threadIds: ["child"], after: { child: 0 } });
+  expect(unwrap(await own.agentWait(input)).metadata?.agentWait).toEqual(accepted.metadata?.agentWait);
+  const tool = threadTools({ threadId: "parent", cwd: f.root, sessionFile: "none", args: [], env: {}, threads: own }).find(t => t.name === "thread_wait")!;
+  const schema = tool.parameters as { anyOf: Array<{ required: string[]; properties: { kind?: { const: string } } }> };
+  expect(schema.anyOf.filter(branch => branch.properties.kind).map(branch => branch.properties.kind?.const)).toEqual(["agents", "job", "deployment", "message"]);
+  for (const branch of schema.anyOf.filter(branch => branch.properties.kind)) expect(branch.required).toContain("kind");
 });

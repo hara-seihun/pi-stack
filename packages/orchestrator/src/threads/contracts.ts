@@ -207,7 +207,8 @@ export type WaitDependency =
 export type AgentWait = { reason: string; since: number } & WaitDependency;
 export type AgentWaitRequest = { threadId: string; requestId: string } & (
   | ({ action: "set"; reason: string } & (
-      | { kind: "agents"; threadIds: string[]; after?: Record<string, number> }
+      // Retained pre-typed runners send concrete child waits without kind.
+      | { kind?: "agents"; threadIds: string[]; after?: Record<string, number> }
       | { kind: "job"; jobId: string }
       | { kind: "deployment"; publicationId: string }
       | { kind: "message"; fromThreadId: string }))
@@ -218,7 +219,10 @@ export function validateWaitDependency(input: unknown): Result<WaitDependency> {
   const value = input as Record<string, unknown>;
   const nonempty = (value: unknown): value is string => typeof value === "string" && !!value.trim();
   const rejectForeign = (allowed: string[]) => Object.keys(value).some(key => !["action", "reason", "since", "threadId", "requestId", "kind", ...allowed].includes(key));
-  if (value.kind === "agents") {
+  // An old live wrapper has no kind field. Normalize only its explicit set
+  // request with concrete children; all normal validation/access checks still run.
+  // Never infer generic waits, external kinds, or reinterpret an explicit kind.
+  if (value.kind === "agents" || value.kind === undefined && value.action === "set" && Array.isArray(value.threadIds)) {
     if (rejectForeign(["threadIds", "after"])) return invalid("An agents wait accepts only child dependencies and cursors");
     if (!Array.isArray(value.threadIds) || value.threadIds.length < 1 || value.threadIds.length > 100
       || !value.threadIds.every(nonempty) || new Set(value.threadIds).size !== value.threadIds.length)
