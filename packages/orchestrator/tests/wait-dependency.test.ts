@@ -14,6 +14,7 @@ it.each([
   { kind: "agents", threadIds: [] },
   { kind: "agents", threadIds: ["child", "child"] },
   { kind: "agents", threadIds: ["child"], after: { foreign: 0 } },
+  { kind: "agents", threadIds: ["child"], after: null },
   { kind: "job", jobId: "" },
   { kind: "deployment", publicationId: " " },
   { kind: "message", fromThreadId: null },

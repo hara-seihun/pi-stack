@@ -224,7 +224,7 @@ export function validateWaitDependency(input: unknown): Result<WaitDependency> {
       || !value.threadIds.every(nonempty) || new Set(value.threadIds).size !== value.threadIds.length)
       return invalid("An agents wait requires 1..100 unique child thread IDs; available for assignment is idle, not waiting");
     const ids = value.threadIds;
-    const after = value.after ?? {};
+    const after = value.after === undefined ? {} : value.after;
     if (!after || typeof after !== "object" || Array.isArray(after)
       || Object.entries(after).some(([id, cursor]) => !ids.includes(id) || !Number.isSafeInteger(cursor) || (cursor as number) < 0))
       return invalid("Wait cursors must be nonnegative safe integers keyed only by declared child IDs");
