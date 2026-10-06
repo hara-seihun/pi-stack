@@ -958,7 +958,7 @@ function threadTable(options: { archived?: boolean } = {}) {
 }
 function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: ThreadView | null = threadViewRow.get(thread.id) as ThreadView | null): any {
   const meta = { ...remotePlacement(thread, lookup), ...thread.metadata };
-  const [provider, ...modelParts] = thread.settings.model.split("/");
+  const [provider, ...modelParts] = (thread.effectiveSettings ?? thread.settings).model.split("/");
   const model = { provider, modelId: modelParts.join("/") };
   return { ...thread, name: thread.title, workspace_id: meta.workspaceId ?? thread.cwd,
     session_path: thread.sessionFile,
@@ -1305,7 +1305,7 @@ async function activeAgents() {
   const models = new Map<string, AgentModelCount>();
   let running = 0;
   for (const row of allThreadRows()) if (row.state === "running") {
-    running++; addAgentModel(models, row.settings.model);
+    running++; addAgentModel(models, (row.effectiveSettings ?? row.settings).model);
   }
   return { running, models: sortedAgentModels(models) };
 }
@@ -1370,7 +1370,7 @@ function publicSession(row: any,
     watchList: row.metadata?.watchList === true,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
-    model: row.settings.model, name: row.name, color: row.color, cwd: row.cwd,
+    model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
     ...projectThreadActivity(row.state, live, hasRunningChildren, row.executionActivity, row.metadata, Boolean(row.held)),
@@ -1940,8 +1940,13 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
 
 async function threadSettings(row: any) {
   const metadata = threadSettingsMetadata(row.settings, threads.get(row.id) ? THREAD_MODEL_CATALOG : undefined);
+  const effective = row.effectiveSettings ? threadSettingsMetadata(row.effectiveSettings).model : null;
   return {
     ...metadata,
+    effectiveModel: row.effectiveSettings?.model ?? null,
+    waiting: row.metadata?.admissionWait ? "admission" : row.metadata?.providerWait?.phase === "retry" ? "retry" : row.metadata?.providerWait ? "provider" : null,
+    canRetryWaiting: !row.held && !row.archived_at && Boolean(row.metadata?.providerWait || row.metadata?.admissionWait)
+      && Boolean(effective && (effective.provider !== metadata.model.provider || effective.id !== metadata.model.id)),
     bashTimeoutSeconds: bashTimeoutSeconds(row.bash_timeout_seconds),
     models: rolledUpModels(metadata.models),
   };
