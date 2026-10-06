@@ -29,7 +29,7 @@ export const THREAD_MODES = {
     admission: "live",
     conversation: {
       settings: { model: "sol", thinkingLevel: "low", speed: "priority" },
-      tools: ["bash", "read", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", "thread_wait", "thread_wake",
+      tools: ["bash", "read", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", "thread_wait", "thread_wake", "thread_attention",
         "meet_room", "meet_voice", "meet_share_screen", "meet_stop_sharing", "message_react",
         "watch_list", "watch_list_add", "watch_list_update", "watch_list_remove"],
       bashTimeoutSeconds: 10,

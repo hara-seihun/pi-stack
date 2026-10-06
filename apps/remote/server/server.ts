@@ -403,7 +403,7 @@ function refreshThreadNotifications(): Promise<void> {
     const refresh = (async () => {
       do {
         notificationRefreshAgain.delete(owner.id);
-        await projectThreadNotifications(db, owner.id, owner.api, directory);
+        await projectThreadNotifications(db, owner.id, owner.api, directory, () => { signalSync(); pushNotifications(); });
       } while (notificationRefreshAgain.has(owner.id));
     })()
       .then(() => { notificationFeedback(owner.id, null); if (notificationErrors.delete(owner.id)) signalSync(); })
@@ -1367,6 +1367,8 @@ function publicSession(row: any,
     hasChildren,
     origin,
     watchList: row.metadata?.watchList === true,
+    foreground: row.metadata?.foreground === true,
+    attentionSummary: typeof row.metadata?.attentionSummary === "string" ? row.metadata.attentionSummary : undefined,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
@@ -2015,7 +2017,7 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
 }
 
 function notificationThread(id: string): { parentId: string | null; role?: "conversation" | "worker" } | null {
-  const thread = threads.get(id);
+  const thread = threads.get(id) ?? peerThreads.get(id);
   if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
   return thread ?? (ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null);
 }

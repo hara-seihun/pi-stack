@@ -7,7 +7,11 @@ export function activeThread(session: Session | null) {
 export const working = activeThread;
 
 export function conversationThreads(sessions: Session[]) {
-  return sessions.filter(session => !session.parentId && session.origin !== "fleet" && !session.watchList);
+  return sessions.filter(session => session.foreground || !session.parentId && session.origin !== "fleet" && !session.watchList);
+}
+
+export function conversationTab(session: Session): "chats" | "workers" {
+  return session.watchList && !session.foreground ? "workers" : "chats";
 }
 
 export function workerThreads(sessions: Session[]) {

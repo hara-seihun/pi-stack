@@ -41,6 +41,7 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
       <span className="inbox-glyph"><ChatAvatar avatar={chat.kind === "human" ? chat.avatar : undefined} icon={chat.icon} color={color ? "var(--thread-color)" : undefined} /></span>
       <span className="inbox-main">
         <span className="inbox-title-line"><span className="inbox-title">{chat.title}</span>{session?.idleUnread && <span className="inbox-unread-dot" aria-label="Unread" title="Unread" />}{!titleOnly && <time className="inbox-time">{relativeTime(row.updatedAt)}</time>}</span>
+        {!titleOnly && session?.attentionSummary && <span className="inbox-attention-summary">{session.attentionSummary}</span>}
         {showStatusLine && <span className="inbox-status-line">
           {status ? <StatusPill status={status} compact /> : null}
           {unread > 0 && <span className="inbox-unread">{unread} unread</span>}

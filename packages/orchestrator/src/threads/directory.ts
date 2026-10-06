@@ -10,6 +10,13 @@ export class ThreadDirectory implements ThreadApi {
     this.owners = [local, ...peers];
     if (new Set(this.owners.map(owner => owner.id)).size !== this.owners.length) throw new Error("Thread owner IDs must be unique");
   }
+  async attention(input: import("./contracts.js").ThreadAttentionRequest): Promise<Result<import("./contracts.js").ThreadAttentionReceipt>> {
+    const owner = await this.owner(input.threadId);
+    return owner.ok ? owner.value.api.attention(input) : owner;
+  }
+  async attentionEvents(after = 0, limit = 100): Promise<Result<import("./contracts.js").ThreadAttentionEvents>> {
+    return this.owners[0]!.api.attentionEvents(after, limit);
+  }
   async agentWait(input: import("./contracts.js").AgentWaitRequest): Promise<Result<Thread>> {
     const owner = await this.owner(input.threadId);
     return owner.ok ? owner.value.api.agentWait(input) : owner;

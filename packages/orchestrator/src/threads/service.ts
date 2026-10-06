@@ -20,6 +20,7 @@ import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateThreadAwait, validateWaitDependency, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
 import { parseRunnerWaitDependency } from "./wait-contract.js";
+import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
@@ -169,6 +170,9 @@ export class ThreadService implements ThreadApi {
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), question TEXT NOT NULL,
         suggestions TEXT NOT NULL, recommended_id TEXT, created_at INTEGER NOT NULL,
         answer TEXT, accepted_at INTEGER);
+      CREATE TABLE IF NOT EXISTS thread_attention (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE,
+        thread_id TEXT NOT NULL REFERENCES thread(id), summary TEXT NOT NULL, foreground INTEGER NOT NULL, time INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS thread_question_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, question_id TEXT NOT NULL UNIQUE REFERENCES thread_question(id));
       INSERT OR IGNORE INTO thread_question_event(question_id) SELECT id FROM thread_question WHERE accepted_at IS NULL ORDER BY created_at,rowid;
       CREATE INDEX IF NOT EXISTS thread_question_pending ON thread_question(thread_id,created_at) WHERE accepted_at IS NULL;
@@ -514,7 +518,7 @@ export class ThreadService implements ThreadApi {
       const receipt = `thread-wake:${row.generation}:${schedule.nextDueAt}`;
       this.transaction(() => {
         this.insertMessage(receipt, { requestId: receipt, threadId: thread.id, senderId: thread.id, source: "notification", delivery: "steer",
-          text: `Scheduled wake check for this existing thread: ${schedule.reason}\nRead current dependency evidence. Continue useful work, cancel thread_wake when resolved, or return to thread_wait without polling.` }, thread.settings);
+          text: `Scheduled wake check for this existing thread: ${schedule.reason}\nRead current dependency evidence. Continue useful work, cancel thread_wake when resolved, or return to thread_wait without polling.\n\n${BACKGROUND_ATTENTION_POLICY}` }, thread.settings);
         this.sql("UPDATE thread SET state='running',metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
         this.sql("UPDATE thread_wake SET data=? WHERE thread_id=?").run(JSON.stringify({ ...schedule, nextDueAt: now + schedule.cadenceMs, lastDueAt: schedule.nextDueAt, lastDeliveredAt: now, lastMessageId: receipt }), thread.id);
       });
@@ -568,6 +572,7 @@ export class ThreadService implements ThreadApi {
       if (input.ephemeral && !parent) return bad("invalid_request", "Only subagents can be ephemeral");
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
       if (input.metadata && "agentWait" in input.metadata) return bad("invalid_request", "Use agentWait instead of setting wait metadata");
+      if (input.metadata && ("foreground" in input.metadata || "attentionSummary" in input.metadata)) return bad("invalid_request", "Use attention instead of setting attention metadata");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (input.metadata && "autoArchiveViewedAt" in input.metadata) return bad("invalid_request", "Use view control instead of setting auto-archive metadata");
       if (parent && (parent.parentId || parent.role === "worker" || parent.metadata?.watchList)) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
@@ -606,6 +611,38 @@ export class ThreadService implements ThreadApi {
       });
       this.changed(id); this.wake(id); return good(this.get(id)!);
     } catch (error) { return bad("unavailable", errorText(error)); }
+  }
+  async attention(input: import("./contracts.js").ThreadAttentionRequest): Promise<Result<import("./contracts.js").ThreadAttentionReceipt>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    if (!input || typeof input.requestId !== "string" || !input.requestId.trim() || typeof input.threadId !== "string" || !input.threadId.trim()
+      || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 1000
+      || input.foreground !== undefined && typeof input.foreground !== "boolean"
+      || Object.keys(input).some(key => !["threadId", "requestId", "summary", "foreground"].includes(key)))
+      return bad("invalid_request", "Attention requires a stable requestId, your threadId, a nonblank summary of at most 1000 characters and optional boolean foreground");
+    try {
+      const prior = this.request(input.requestId, input, "attention"); if (!prior.ok) return prior;
+      if (prior.value) return good(JSON.parse(prior.value));
+      const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found");
+      if (thread.held || thread.metadata?.archived || thread.metadata?.raw || thread.metadata?.sandbox)
+        return bad("unavailable", "Attention requires an unheld, unarchived normal thread");
+      let receipt!: import("./contracts.js").ThreadAttentionReceipt;
+      this.transaction(() => {
+        const time = Date.now(), summary = input.summary.trim(), foreground = input.foreground === true;
+        const inserted = this.sql("INSERT INTO thread_attention(request_id,thread_id,summary,foreground,time) VALUES(?,?,?,?,?)")
+          .run(input.requestId, thread.id, summary, foreground ? 1 : 0, time);
+        receipt = { accepted: true, seq: Number(inserted.lastInsertRowid), threadId: thread.id, summary, foreground, time };
+        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.attentionSummary',?) WHERE id=?").run(summary, thread.id);
+        if (foreground) this.sql("UPDATE thread SET metadata=json_set(metadata,'$.foreground',json('true')) WHERE id=?").run(thread.id);
+        this.recordRequest(input.requestId, input, "attention", JSON.stringify(receipt));
+      });
+      this.changed(thread.id);
+      return good(receipt);
+    } catch (error) { return bad("unavailable", errorText(error)); }
+  }
+  attentionEvents(after = 0, limit = 100): Result<import("./contracts.js").ThreadAttentionEvents> {
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid attention cursor or limit");
+    const rows = this.sql("SELECT seq,thread_id AS threadId,summary,foreground,time FROM thread_attention WHERE seq>? ORDER BY seq LIMIT ?").all(after, limit) as Json[];
+    return good({ cursor: rows.at(-1)?.seq ?? after, items: rows.map(row => ({ ...row, accepted: true, foreground: row.foreground === 1 })) as import("./contracts.js").ThreadAttentionReceipt[] });
   }
   private question(row: Json): ThreadQuestion {
     return { id: row.id, threadId: row.thread_id, question: row.question,
@@ -783,7 +820,7 @@ export class ThreadService implements ThreadApi {
     if (patch.metadata && "autoArchiveViewedAt" in patch.metadata && patch.metadata.autoArchiveViewedAt !== thread.metadata?.autoArchiveViewedAt) return bad("conflict", "Use view control instead of changing metadata.autoArchiveViewedAt");
     if (patch.title !== undefined && options.automaticTitle && thread.metadata?.titleSource === "manual") return good(thread);
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["agentWait", "context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["agentWait", "foreground", "attentionSummary", "context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
     const admission = patch.metadata && "mode" in patch.metadata ? threadMode(patch.metadata.mode)!.admission : thread.admission;
@@ -858,7 +895,7 @@ export class ThreadService implements ThreadApi {
       const current = this.get(input.threadId)!;
       if (current.metadata?.archived) return good(current);
       const viewedAt = this.autoArchiveViewedAt(current);
-      if (current.role !== "worker" && (viewedAt === undefined || viewedAt >= input.inactiveBefore)) return good(current);
+      if ((current.role !== "worker" || current.metadata?.attentionSummary) && (viewedAt === undefined || viewedAt >= input.inactiveBefore)) return good(current);
       const descendants = this.sql("WITH RECURSIVE descendants(id) AS (SELECT ? UNION SELECT t.id FROM thread t JOIN descendants d ON t.parent_id=d.id) SELECT thread.* FROM thread JOIN descendants USING(id)").all(input.threadId) as Json[];
       for (const row of descendants) {
         const thread = this.project(row);
@@ -1549,7 +1586,7 @@ export class ThreadService implements ThreadApi {
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait','$.providerRetry','$.acknowledgementWait') WHERE id=?").run(id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
-      if (thread.metadata?.ephemeral && !thread.metadata.agentWait && !thread.wakeSchedule && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
+      if (thread.metadata?.ephemeral && !thread.metadata.attentionSummary && !thread.metadata.agentWait && !thread.wakeSchedule && !this.sql("SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done' LIMIT 1").get(id)) {
         this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
       }
       if (thread.parentId) {

@@ -35,7 +35,7 @@ export type ContextSplice = {
 
 export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
-export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question"; body?: string }
+export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
 
 export interface QueuedMessage {
@@ -71,6 +71,9 @@ export interface Session {
   origin: "person" | "fleet";
   /** Scheduled watch checks belong in Workers without changing their owning supervisor. */
   watchList?: boolean;
+  /** Explicitly promoted background threads also belong in Chats. */
+  foreground?: boolean;
+  attentionSummary?: string;
   model: string;
   /** Native Pi context estimate, not cumulative billed tokens. Null after compaction until fresh usage arrives. */
   contextUsage?: ContextUsage;

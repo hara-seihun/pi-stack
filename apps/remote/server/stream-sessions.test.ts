@@ -30,6 +30,12 @@ test("every connection carries the person's threads and only current fleet threa
   expect(fleetSessions(sessions).map(item => item.id)).not.toContain("mine");
 });
 
+test("promoted fleet threads stay in the Chats stream after the recent-work window", () => {
+  const sessions = [session("parent"), session("promoted", { parentId: "parent", foreground: true }), session("quiet")];
+  expect(streamSessions(sessions, null, now).map(item => item.id)).toEqual(["parent", "promoted"]);
+  expect(fleetSessions(sessions).map(item => item.id)).toContain("promoted");
+});
+
 test("the complete fleet list is a resource only the Workers screen's All view asks for", () => {
   expect(streamWants({ session: null })).not.toContain("workers");
   expect(streamWants({ session: null, workers: true })).toContain("workers");

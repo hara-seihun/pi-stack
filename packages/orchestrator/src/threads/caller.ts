@@ -270,6 +270,10 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
         if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only manage its own waiting and wakes`);
         if (caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Self waiting and wakes require a thread capability or the Pi runtime");
       }
+      if (operation === "attention") {
+        if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only request attention for itself`);
+        if (caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Self attention requires a thread capability or the Pi runtime");
+      }
       if (operation === "watch") {
         if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only edit the watch list as itself`);
         if (caller.kind === "process") return refuse("Watch list access requires a thread capability or the Pi runtime");
@@ -305,7 +309,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
 export function admissionFor(resolver: CallerResolver, source: CallerSource): (operation: string, input: Record<string, any>) => Promise<AdmissionResult> {
   let caller: ThreadCaller | { error: string } | undefined;
   return async (operation, input) => {
-    if (operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule") return { ok: true, input };
+    if (operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention") return { ok: true, input };
     caller ??= resolver.resolve(source);
     if ("error" in caller) return { ok: false, status: 401, message: caller.error };
     return resolver.admit(operation, input, caller);

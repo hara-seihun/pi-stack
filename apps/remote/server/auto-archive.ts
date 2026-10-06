@@ -9,8 +9,8 @@ export function autoArchiveDelay(value: string | undefined): number {
 /**
  * Archives idle conversations `afterMs` after a human views them, along with
  * their workers, and workers whose conversation is already archived or gone.
- * An unseen or unread conversation stays, and keeps its ancestors; an unread worker does
- * not, because its reader is the agent above it, which has already finished.
+ * Workers with explicit human attention use conversation retention. An unseen or unread conversation
+ * stays, and keeps its ancestors; ordinary unread workers do not.
  * A worker whose conversation is archived or gone is archived outright once it
  * stops running, queued messages and all. A thread attached to a live meeting
  * room stays with its ancestors however long the room has been quiet: the
@@ -29,15 +29,17 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
     for (const thread of page.value.threads) threads.set(thread.id, thread);
     cursor = page.value.nextCursor;
   } while (cursor);
-  const unread = (thread: Thread) => !thread.parentId && isUnread(thread);
+  const humanAttention = (thread: Thread) => thread.metadata?.foreground === true
+    || typeof thread.metadata?.attentionSummary === "string" && thread.metadata.attentionSummary.length > 0;
+  const unread = (thread: Thread) => (!thread.parentId || humanAttention(thread)) && isUnread(thread);
   const expired = (thread: Thread) => {
     if (thread.updatedAt >= cutoff) return false;
     const viewedAt = thread.metadata?.autoArchiveViewedAt;
     const viewed = typeof viewedAt === "number" && Number.isSafeInteger(viewedAt) && viewedAt > 0;
-    if (thread.parentId || thread.role === "worker") return !viewed || viewedAt < cutoff;
+    if (!humanAttention(thread) && (thread.parentId || thread.role === "worker")) return !viewed || viewedAt < cutoff;
     return viewed && viewedAt >= thread.updatedAt && viewedAt < cutoff;
   };
-  const orphaned = (thread: Thread) => { const parent = thread.parentId ? threads.get(thread.parentId) : null; return Boolean(thread.parentId) && (!parent || Boolean(parent.metadata?.archived)); };
+  const orphaned = (thread: Thread) => { const parent = thread.parentId ? threads.get(thread.parentId) : null; return !humanAttention(thread) && Boolean(thread.parentId) && (!parent || Boolean(parent.metadata?.archived)); };
   const blocked = new Set<string>();
   for (const thread of threads.values()) {
     if (thread.metadata?.archived) continue;

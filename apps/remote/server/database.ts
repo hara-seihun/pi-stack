@@ -195,7 +195,7 @@ export function setThreadColor(db: Database, id: string, color: ThreadColor | nu
   })();
 }
 
-export function recordIdleNotification(db: Database, receiptId: string, thread: { id: string; title: string }, time: number, notice: { kind: "idle" | "question"; body: string } = { kind: "idle", body: "Session is idle" }): void {
+export function recordIdleNotification(db: Database, receiptId: string, thread: { id: string; title: string }, time: number, notice: { kind: "idle" | "question" | "attention"; body: string } = { kind: "idle", body: "Session is idle" }): void {
   db.transaction(() => {
     ensureThreadView(db, thread.id);
     const inserted = db.query("INSERT OR IGNORE INTO idle_notifications(session_id,name,time,receipt_id,kind,body) VALUES(?,?,?,?,?,?)")

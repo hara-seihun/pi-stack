@@ -22,7 +22,7 @@ import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
 import { useRooms, RoomConversation } from "./rooms";
-import { workerThreads, working } from "./thread-state";
+import { conversationTab, workerThreads, working } from "./thread-state";
 import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
 import type { ChatPickerHandle } from "./thread-start-menu";
@@ -642,7 +642,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       patch(current => ({ discovered: [...current.sessions, ...current.discovered].some(session => session.id === chat.session.id) ? current.discovered : [...current.discovered, chat.session] }));
       if (chat.session.archivedAt) await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: chat.session.id }), {});
       if (signal?.aborted) return;
-      openChat(chat.id, { tab: chat.session.watchList ? "workers" : "chats" });
+      openChat(chat.id, { tab: conversationTab(chat.session) });
     } else if (chat.kind === "room") {
       if (chat.room.current === false) await api("POST", `/v1/rooms/${chat.room.id}/open`, {});
       if (signal?.aborted) return;

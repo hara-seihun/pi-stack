@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { requestStop, runningDescendants, submitThreadControl } from "./src/thread-controls";
-import { composerAction, conversationThreads, workerThreads, working } from "./src/thread-state";
+import { composerAction, conversationTab, conversationThreads, workerThreads, working } from "./src/thread-state";
 import { inboxRows, selectionAfterSync } from "./src/chats";
 import { streamSessions } from "../server/stream-sessions";
 import { buildWorkerTree, isActiveWorker } from "./src/features/workers/tree-model";
@@ -73,6 +73,25 @@ describe("thread controls", () => {
     requestStop({ ...watch, hasChildren: true }, stop);
     expect(stopped).toEqual([{ id: watch.id, descendants: false }, { id: watch.id, descendants: false }]);
     expect(runningDescendants(watch.id, workers)).toEqual([worker]);
+  });
+  test("explicitly promoted background threads join Chats without leaving Workers or taking selection", () => {
+    const current = session("current");
+    const watch = session("watch", { watchList: true, foreground: true, state: "running", activity: "thinking", attentionSummary: "Please review this", idleUnread: true });
+    const child = session("child", { parentId: watch.id, foreground: true, state: "running", activity: "thinking" });
+    const fleet = session("fleet", { origin: "fleet", foreground: true });
+    const quiet = session("quiet", { watchList: true });
+    const before = [current, { ...watch, foreground: false }, { ...child, foreground: false }, { ...fleet, foreground: false }, quiet];
+    const after = [current, watch, child, fleet, quiet];
+    const messaging = { version: 0, backends: [], conversations: [], calls: [] };
+    expect(conversationThreads(after).map(row => row.id)).toEqual(["current", "watch", "child", "fleet"]);
+    expect(workerThreads(after).map(row => row.id)).toEqual(["watch", "child", "fleet", "quiet"]);
+    expect(selectionAfterSync("ai:current", { sessions: before, messaging }, { sessions: after, messaging })).toBe("ai:current");
+    expect(conversationTab(watch)).toBe("chats");
+    expect(conversationTab(quiet)).toBe("workers");
+    expect(inboxRows(after, [], messaging)[0]).toMatchObject({ chat: { id: "ai:watch" }, section: "attention", status: { busy: true } });
+    expect(composerAction(watch, "")).toBe("stop");
+    expect(watch).toMatchObject({ watchList: true, origin: "person", state: "running", held: false });
+    expect(child.parentId).toBe(watch.id);
   });
   test("resume exposes an empty-queue error instead of reporting success", async () => {
     await withThreadClient((async (url, init) => {
