@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { validateThreadObservation } from "../shared/state-validation";
 import type { Room, RoomActivity, RoomMember, RoomSnapshot } from "../shared/rooms";
 
 export const ROOM_CUSTODIAN = "pi-rooms";
@@ -126,9 +127,9 @@ export class Rooms {
     }
   }
   private reconcile(room: StoredRoom, snapshot: RoomSnapshot) {
-    const { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error } = snapshot;
-    if (!activity || String(activity) === "running") this.statusFailure(room.id, "Room owner did not report an execution phase");
-    else this.statuses.set(room.id, { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error });
+    validateThreadObservation(snapshot);
+    const { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error, waitingOnAgents, waitingForChildren } = snapshot;
+    this.statuses.set(room.id, { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error, waitingOnAgents, waitingForChildren });
     this.db.transaction(() => {
       const questions = snapshot.questions ?? [];
       this.db.query("UPDATE rooms SET state=?,pendingQuestions=?,questionIds=? WHERE id=?")

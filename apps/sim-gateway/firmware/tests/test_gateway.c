@@ -152,9 +152,46 @@ static void test_pcm_and_pairing(void)
     CHECK(valid_call_id(ID) && !valid_call_id("not-a-uuid"));
     CHECK(valid_e164("+15551234567") && !valid_e164("+1555\rATD+12") && !valid_e164(NULL));
 }
+static void test_invalid_states(void)
+{
+    const int codes[] = { ESP_HF_CLIENT_CONNECTION_STATE_EVT, ESP_HF_CLIENT_AUDIO_STATE_EVT,
+        ESP_HF_CLIENT_CIND_CALL_EVT, ESP_HF_CLIENT_CIND_CALL_SETUP_EVT, ESP_HF_CLIENT_CIND_CALL_HELD_EVT,
+        ESP_HF_CLIENT_CLCC_EVT, ESP_HF_CLIENT_AT_RESPONSE_EVT, ESP_HF_CLIENT_PROF_STATE_EVT, 9999 };
+    for (unsigned i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
+        reset(); activate();
+        hf(codes[i], 9999);
+        CHECK(!media_enabled && !state.active && !state.hf_ready && !state.call_id[0]);
+        CHECK(mock_hangups == 0);
+    }
+    reset(); call_state(ID, (call_status)9999, NULL); CHECK(atomic_load(&fault) && !mock_json_size);
+    reset(); event unknown = {.type = (event_type)9999}; handle_event(unknown);
+    CHECK(atomic_load(&fault));
+    reset(); esp_hf_client_cb_param_t hfp = {0}; hf_callback((esp_hf_client_cb_event_t)9999, &hfp);
+    CHECK(atomic_load(&fault));
+    reset(); hf_callback(ESP_HF_CLIENT_CIND_BATTERY_LEVEL_EVT, &hfp);
+    CHECK(!atomic_load(&fault));
+    reset(); esp_bt_gap_cb_param_t gap = {0}; gap_callback((esp_bt_gap_cb_event_t)9999, &gap);
+    CHECK(atomic_load(&fault));
+    reset(); gap_callback(ESP_BT_GAP_AUTH_CMPL_EVT, &gap); CHECK(!atomic_load(&fault));
+    const char *invalid[] = { "null", "{}", "{", "{\"type\":\"dial\",\"callId\":\"not-a-uuid\"}",
+        "{\"type\":\"future\",\"callId\":\"12345678-1234-4567-89ab-123456789abc\"}",
+        "{\"type\":\"hangup\",\"callId\":\"12345678-1234-4567-89ab-123456789abc\"} junk" };
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        reset(); command(invalid[i]); CHECK(atomic_load(&fault) && !mock_dials);
+    }
+    reset(); command("{\"type\":\"hangup\",\"callId\":\"12345678-1234-4567-89ab-123456789abc\"}");
+    CHECK(!mock_hangups && strstr(mock_json, "unknown_call"));
+    reset(); esp_websocket_event_data_t data = {.op_code = 15};
+    websocket_event(NULL, NULL, WEBSOCKET_EVENT_DATA, &data); CHECK(atomic_load(&fault));
+    reset(); websocket_event(NULL, NULL, 9999, NULL); CHECK(atomic_load(&fault));
+    reset(); websocket_event(NULL, NULL, WEBSOCKET_EVENT_BEFORE_CONNECT, NULL);
+    websocket_event(NULL, NULL, WEBSOCKET_EVENT_BEGIN, NULL); CHECK(!atomic_load(&fault));
+    activate(); websocket_event(NULL, NULL, WEBSOCKET_EVENT_CLOSED, NULL);
+    CHECK(!media_enabled && !atomic_load(&online));
+}
 int main(void)
 {
-    test_call_control(); test_session_and_watchdog(); test_pcm_and_pairing();
+    test_call_control(); test_session_and_watchdog(); test_pcm_and_pairing(); test_invalid_states();
     printf("PASS: %u firmware lifecycle/audio assertions; no radio, calls, or flashing\n", checks);
     return 0;
 }

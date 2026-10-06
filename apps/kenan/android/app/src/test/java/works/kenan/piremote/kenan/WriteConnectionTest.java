@@ -95,7 +95,7 @@ public final class WriteConnectionTest {
         for (String status : List.of("guarded", "unavailable")) {
             Capture capture = new Capture();
             capture.connect();
-            String response = "{\"type\":\"final\",\"text\":\"Keep this transcript\",\"rewrite\":{\"status\":\"" + status + "\"}}";
+            String response = "{\"type\":\"final\",\"text\":\"Keep this transcript\",\"rewrite\":{\"status\":\"" + status + "\",\"reason\":\"inference_failed\"}}";
             capture.socket.listener.onMessage(capture.socket, response);
             capture.closed();
             assertEquals("Keep this transcript", capture.result);
@@ -141,6 +141,38 @@ public final class WriteConnectionTest {
             assertFalse(connection.audio(new byte[] { 1 }));
             capture.socket.listener.onClosed(capture.socket, 1000, "Gone");
             assertEquals(1, capture.terminals);
+        }
+    }
+
+    @Test public void undescribedWireStatesFailBeforeInsertingTextAndReleaseTransport() throws Exception {
+        for (String response : List.of(
+            "{\"type\":\"future-event\"}",
+            "{\"type\":\"final\",\"text\":\"Do not insert\",\"rewrite\":{\"status\":\"future-status\"}}",
+            "{\"type\":\"final\",\"text\":\"Do not insert\",\"rewrite\":{\"status\":\"unavailable\",\"reason\":\"future-reason\"}}",
+            "{\"type\":\"final\",\"text\":\"Do not insert\",\"rewrite\":{\"status\":\"unavailable\"}}",
+            "{\"type\":\"final\",\"text\":\"Do not insert\",\"rewrite\":\"applied\"}")) {
+            Capture capture = new Capture();
+            WriteConnection connection = capture.connect();
+            capture.socket.listener.onMessage(capture.socket, response);
+            capture.closed();
+            assertTrue(capture.failure.startsWith("Invalid dictation response"));
+            assertNull(capture.result);
+            assertTrue(capture.notices.isEmpty());
+            assertTrue(connection.ended());
+            assertFalse(connection.audio(new byte[] { 1 }));
+        }
+    }
+
+    @Test public void successfulRewriteStatusesFinishWithoutADegradedNotice() throws Exception {
+        for (String status : List.of("applied", "unchanged")) {
+            Capture capture = new Capture();
+            capture.connect();
+            capture.socket.listener.onMessage(capture.socket,
+                "{\"type\":\"final\",\"text\":\"Done\",\"rewrite\":{\"status\":\"" + status + "\"}}");
+            capture.closed();
+            assertEquals("Done", capture.result);
+            assertNull(capture.failure);
+            assertTrue(capture.notices.isEmpty());
         }
     }
 

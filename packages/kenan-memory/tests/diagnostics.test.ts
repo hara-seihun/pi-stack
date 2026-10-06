@@ -42,6 +42,10 @@ test("root client diagnoses HTTP, malformed replies and transport errors without
   expect(http.result.content[0].text).not.toContain("private-error");
   const invalid = await ask((async () => Response.json({ trace: "private-error" })) as typeof fetch);
   expect(invalid.events[0].reason).toBe("invalid-response");
+  const unknown = await ask((async (_url, init) => Response.json({ requestId: (init!.headers as Record<string, string>)["x-kenan-request-id"], status: "future-status", reply: "private-reply" })) as typeof fetch);
+  expect(unknown.events[0].reason).toBe("invalid-response");
+  expect(unknown.result.isError).toBe(true);
+  expect(unknown.result.content[0].text).not.toContain("private-reply");
   const refused = await ask((async () => { throw Object.assign(new Error("private-error"), { code: "ECONNREFUSED" }); }) as typeof fetch);
   expect(refused.events[0].reason).toBe("connection-refused");
   const ready = await ask((async () => Response.json({ reply: "private-reply" })) as typeof fetch);

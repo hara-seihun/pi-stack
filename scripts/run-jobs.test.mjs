@@ -117,9 +117,8 @@ test("publication shards Orchestrator under the shared budget without dropping t
     ["npm", ["test", "--workspace=pi-orchestrator", "--", "tests/routing-runtime.test.ts"]]);
   assert.equal(checkJobs.some(([name]) => name === "orchestrator"), false);
   let output = "";
-  const results = await runJobs(shards.map(([name, , args]) => [name, process.execPath, [
-    "node_modules/vitest/vitest.mjs", "run", "--root=packages/orchestrator", "--maxWorkers=1",
-    "tests/thread-wake-native.test.ts", "--passWithNoTests", ...args.slice(3),
+  const results = await runJobs(shards.map(([name, command, args]) => [name, command, [
+    ...args.slice(0, 3), "tests/thread-wake-native.test.ts", "--passWithNoTests", ...args.slice(3),
   ]]), { concurrency: checkParallelism(), write(text) { output += text; } });
   assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0], output);
   assert.equal((output.match(/✓ tests\/thread-wake-native\.test\.ts/g) ?? []).length, 1, output);

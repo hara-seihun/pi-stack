@@ -99,8 +99,13 @@ export function namingOutcome(result: CompletionOutcome<CompletionRecord>): Nami
   const record = result.value;
   if (record.state === "queued" || record.state === "running") return { kind: "pending" };
   if (record.state === "completed") return { kind: "title", text: record.result.text };
-  const required = "error" in record && ["invalid-request", "unsupported-option", "invalid-state"].includes(record.error.code);
-  return { kind: "failed", message: "error" in record ? record.error.message : `Completion ${record.state}.`, keepReceipt: false, recovery: required ? "required" : "automatic" };
+  if (record.state === "failed" || record.state === "cancelled" || record.state === "indeterminate") {
+    if (typeof record.error?.code !== "string" || typeof record.error?.message !== "string") throw new Error("Invalid completion error receipt for thread naming");
+    const required = ["invalid-request", "unsupported-option", "invalid-state"].includes(record.error.code);
+    return { kind: "failed", message: record.error.message, keepReceipt: false, recovery: required ? "required" : "automatic" };
+  }
+  record satisfies never;
+  throw new Error("Unsupported completion state for thread naming");
 }
 
 export interface ThreadNamingView { name: string; titleSource?: unknown; messageCount: number; namedAtMessageCount: number; attemptedCount: number; hasReceipt: boolean; retryAt?: number | null; now?: number }

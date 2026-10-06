@@ -131,13 +131,40 @@ it("attaches, forwards commands and owns detach/close without needing a cwd or a
   expect(requests).toHaveLength(3);
 });
 
+it("rejects an unknown attach frame rather than hanging for a known variant", async () => {
+  const { opener, reference } = fixture();
+  await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
+  await listen(reference.socketPath, (_value, socket) => socket.write('{"type":"new_frame"}\n'));
+  await expect(opener.attachSession(reference, () => {}, () => {})).rejects.toThrow("Invalid runner output frame");
+});
+
+it("fails an attached execution with a protocol diagnostic instead of acknowledging an unknown event", async () => {
+  const { opener, reference } = fixture(), events: PiEvent[] = [], acknowledgements: unknown[] = [];
+  await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
+  let finished!: () => void;
+  const failed = new Promise<void>(resolve => { finished = resolve; });
+  const exit = vi.fn(() => finished());
+  await listen(reference.socketPath, (value, socket) => {
+    if (value.type === "attach") socket.write('{"type":"attached"}\n');
+    if (value.type === "ack") acknowledgements.push(value);
+    if (value.type === "command") socket.write(`${JSON.stringify({ type: "output", sequence: 1, line: '{"type":"new_sdk_event"}' })}\n`);
+  });
+  const session = await opener.attachSession(reference, event => events.push(event), exit);
+  await session!.command({ type: "get_state" });
+  await failed;
+  expect(events.at(-1)).toMatchObject({ type: "thread_error", error: expect.stringContaining("Unknown runtime event type") });
+  expect(exit).toHaveBeenCalledWith(1);
+  expect(acknowledgements).toEqual([]);
+  await expect(session!.command({ type: "get_state" })).rejects.toThrow("detached");
+});
+
 it("delivers multi-megabyte and multi-line output across arbitrary chunk boundaries with linear scan work", async () => {
   const { opener, reference } = fixture(), events: PiEvent[] = [];
   await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
   // 24 MiB of text in 64 KiB writes. Quadratic rescanning grows with the square of the line.
   const big = "é".repeat(12 * 1024 * 1024) + "✓";
   const lines = [
-    { type: "output", sequence: 1, line: JSON.stringify({ type: "message_update", text: big }) },
+    { type: "output", sequence: 1, line: JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta" }, text: big }) },
     { type: "output", sequence: 2, at: 1_790_000_000_123, line: JSON.stringify({ type: "agent_end" }) },
     { type: "output", sequence: 3, line: JSON.stringify({ type: "turn_end" }) },
   ].map(value => `${JSON.stringify(value)}\n`).join("");

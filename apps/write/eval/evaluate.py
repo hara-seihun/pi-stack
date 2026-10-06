@@ -195,6 +195,10 @@ def tight_tail(data):
 
 async def replay_one(fixture, manifest, args, dictionary, finish):
     from websockets.asyncio.client import connect
+    if finish not in ("immediate", "tight", "silence"):
+        raise ValueError("invalid finish mode")
+    if args.pace not in ("realtime", "burst"):
+        raise ValueError("invalid replay pace")
     data = pcm(fixture)
     original_samples = len(data) // 2
     if finish == "tight":
@@ -211,14 +215,18 @@ async def replay_one(fixture, manifest, args, dictionary, finish):
             nonlocal partials
             async for message in socket:
                 result = json.loads(message)
-                if result["type"] == "final":
+                if not isinstance(result, dict):
+                    raise ValueError("engine message must be an object")
+                if result.get("type") == "final":
                     if not isinstance(result.get("raw"), str) or not isinstance(result.get("text"), str):
                         raise ValueError("engine final must supply distinct raw and cleaned text")
                     return result
-                if result["type"] == "error":
+                if result.get("type") == "error":
                     raise ValueError(f"engine error: {result}")
-                if result["type"] == "partial":
+                if result.get("type") == "partial":
                     partials += 1
+                    continue
+                raise ValueError("unknown engine message type")
             raise ValueError("engine closed without final")
 
         receiver = asyncio.create_task(receive())
@@ -272,7 +280,10 @@ def summary(receipts):
 
 
 async def replay(fixtures, manifest, args):
-    dictionaries = [False, True] if args.dictionary == "paired" else [args.dictionary == "on"]
+    dictionary_modes = {"off": [False], "on": [True], "paired": [False, True]}
+    if args.dictionary not in dictionary_modes:
+        raise ValueError("invalid dictionary mode")
+    dictionaries = dictionary_modes[args.dictionary]
     finishes = ["immediate", "tight", "silence"] if args.finish == "all" else [args.finish]
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -326,10 +337,12 @@ def main():
                 raise ValueError("receipt belongs to changed fixture")
             row["metrics"] = score(fixture, row["final"], row["dictionary_enabled"], manifest["dictionary"]["words"])
         print(json.dumps(summary(rows), indent=2))
-    else:
+    elif args.command == "replay":
         if not fixtures:
             parser.error("empty fixture selection")
         return asyncio.run(replay(fixtures, manifest, args))
+    else:
+        parser.error("unknown command")
     return 0
 
 

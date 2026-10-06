@@ -23,8 +23,10 @@ export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, Th
   ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { ThreadService } from "./threads/service.js";
-export type { AgentWait, AgentWaitRequest, ThreadWakeSchedule, ThreadWakeRequest } from "./threads/contracts.js";
+export { validateWaitDependency } from "./threads/contracts.js";
+export type { AgentWait, AgentWaitRequest, WaitDependency, WaitKind, ThreadWakeSchedule, ThreadWakeRequest } from "./threads/contracts.js";
 export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";
+export { parseRuntimeEvent, requireRuntimeEvent, requireAssistantStopReason, assertNever, RUNTIME_EVENT_TYPES, type RuntimeEvent, type RuntimeEventType } from "./threads/runtime-events.js";
 export { ModelAvailabilityStore, modelAvailabilityPath, modelAvailabilityKey } from "./threads/model-availability.js";
 export { threadSettingsMetadata } from "./threads/settings-metadata.js";
 export { THREAD_MODES, threadMode, conversationModeSpeed, type ThreadMode, type ThreadModeName } from "./threads/modes.js";

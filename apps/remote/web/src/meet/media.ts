@@ -86,6 +86,8 @@ export function meetThreadStatus(thread: MeetThreadState): ThreadStatus {
     held: thread.held,
     activity: thread.activity,
     activeTools: thread.tools,
+    activitySince: thread.activitySince, lastActivityAt: thread.lastActivityAt, activityDetail: thread.activityDetail,
+    executionError: thread.executionError, waitingOnAgents: thread.waitingOnAgents, waitingForChildren: thread.waitingForChildren,
     idleUnread: false,
     archivedAt: null,
   });

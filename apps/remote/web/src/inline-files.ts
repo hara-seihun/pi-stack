@@ -11,6 +11,7 @@
 import { API } from "../../server/api";
 import { fileKind } from "./features/files/file-kind";
 import { resourceUrl } from "./resource-url";
+import { assertNever } from "../../shared/explicit-state";
 
 const FILE_TAG_AT = /^<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/i;
 /** Image formats every client can draw; HEIC and TIFF stay links. */
@@ -35,7 +36,8 @@ export function inlineFileHtml(path: string, sessionId: string): string | null {
   const href = fileUrl(sessionId, path);
   const url = escape(href);
   const label = escape(name);
-  switch (fileKind(name)) {
+  const kind = fileKind(name);
+  switch (kind) {
     case "audio":
       return `<span class="inline-file inline-file-audio"><audio controls preload="metadata" src="${url}" aria-label="${label}"></audio>${caption(name, href)}</span>`;
     case "video":
@@ -45,9 +47,9 @@ export function inlineFileHtml(path: string, sessionId: string): string | null {
     case "text":
     case "markdown":
       return `<span class="inline-file inline-file-text"><pi-inline-text src="${url}" name="${label}"></pi-inline-text>${caption(name, href)}</span>`;
-    default:
-      return null;
+    case "image": case "binary": return null;
   }
+  return assertNever(kind, "Inline file kind");
 }
 
 /**

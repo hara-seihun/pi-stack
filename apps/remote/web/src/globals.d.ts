@@ -39,7 +39,7 @@ interface Window {
       onFragment?(fragment: { id: string; role: "user" | "assistant"; text: string; voiceSessionId: string; startMs: number; endMs: number; startedAt: number }): void;
       onPlayback?(state: "playing" | "blocked" | "muted" | "stopped"): void;
       onAudioDiagnostic?(data: unknown): void;
-      onState(state: string, detail?: string): void;
+      onState(state: import("./voice-state").VoiceState, detail?: string): void;
       onNotice(message: string): void;
       onTranscript?(role: string, text: string): void;
     }): VoiceSession;
@@ -56,7 +56,7 @@ interface Window {
 }
 
 interface VoiceSession {
-  state: string;
+  state: import("./voice-state").VoiceState;
   start(): Promise<void>;
   suspend(): void;
   stop(): Promise<void>;

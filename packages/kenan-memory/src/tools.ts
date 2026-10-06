@@ -4,9 +4,16 @@ import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
 import { oneKenanEnabled } from "./config.js";
+import { isMemoryRole, memoryRole, stateValue } from "./explicit-state.js";
 import { prepareMemoryEnvironment } from "./session.js";
 import { infrastructureReason, reportInfrastructure, type InfrastructureReporter } from "./diagnostics.js";
-import { KENAN_ROOT_DEFAULT_PORT, KENAN_REQUEST_HEADER, KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, MEMORY_READ_DETAIL, type MemoryClient, type MemoryRead, type MemoryRequest, type MemoryResult, type ReadContext } from "./contract.js";
+import { KENAN_ROOT_DEFAULT_PORT, KENAN_REQUEST_HEADER, KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, MEMORY_READ_DETAIL, type KenanRequestStatus, type MemoryClient, type MemoryRead, type MemoryRequest, type MemoryResult, type ReadContext } from "./contract.js";
+const terminalReceiptMessage = "Kenan did not complete this request; actions may already have occurred. Do not resubmit it";
+const rootReceiptStates = {
+  pending: { message: "Kenan accepted this request. The chosen reply or safe terminal status will arrive automatically in this thread; continue other work. requestId is for optional recovery, not resubmission", isError: false },
+  failed: { message: terminalReceiptMessage, isError: true },
+  interrupted: { message: terminalReceiptMessage, isError: true },
+} satisfies Record<KenanRequestStatus, { message: string; isError: boolean }>;
 export const MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure"];
 const strings = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 });
 const optionalTime = Type.Optional(Type.String());
@@ -36,7 +43,7 @@ export function memoryExtension(options: MemoryToolOptions) {
         initialized = true;
       }
       pi.setActiveTools([...new Set([...pi.getActiveTools(), ...pi.getAllTools().filter(tool => names.has(tool.name)).map(tool => tool.name)])]);
-      const guidance = readFileSync(new URL(options.env.PI_KENAN_MEMORY_ROLE === "root" ? "../discretion.md" : "../person.md", import.meta.url), "utf8");
+      const guidance = readFileSync(new URL(memoryRole(options.env.PI_KENAN_MEMORY_ROLE) === "root" ? "../discretion.md" : "../person.md", import.meta.url), "utf8");
       return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
     });
   };
@@ -44,13 +51,14 @@ export function memoryExtension(options: MemoryToolOptions) {
 function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     const threadId = options.env.PI_THREAD_ID;
     if (!threadId) throw new Error("Kenan memory tools require a thread identity");
-    const root = options.env.PI_KENAN_MEMORY_ROLE === "root";
+    const root = memoryRole(options.env.PI_KENAN_MEMORY_ROLE) === "root";
     if (root && (!options.env.PI_KENAN_MEMORY_TOKEN || !options.env.PI_KENAN_MEMORY_PERSON))
       throw new Error("Root memory requires an admitted root capability");
     const room = options.env.PI_REMOTE_ROOMS_RUNTIME === "1";
     let pending: Promise<MemoryResult<unknown>> | undefined;
     const ensureSession = async (): Promise<MemoryResult<unknown>> => {
       if (!oneKenanEnabled(options.env)) return { ok: false, error: "disabled", message: "One Kenan is disabled on this host" };
+      if (options.env.PI_KENAN_MEMORY_ROLE !== undefined && !isMemoryRole(options.env.PI_KENAN_MEMORY_ROLE)) return { ok: false, error: "unauthenticated", message: "Unknown memory role" };
       if (options.env.PI_KENAN_MEMORY_TOKEN && options.env.PI_KENAN_MEMORY_PERSON && (root || options.env.PI_KENAN_MEMORY_ROLE === "person")) return { ok: true, value: undefined };
       if (root) return { ok: false, error: "unauthenticated", message: "Root memory requires an admitted root capability" };
       if (pending) return pending;
@@ -89,14 +97,14 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
               return uncertain(`Kenan's privileged request is unavailable (HTTP ${response.status}); no action outcome is implied`);
             }
             const result = await response.json() as any;
-            if (result?.requestId === requestId && ["pending", "failed", "interrupted"].includes(result?.status)) {
-              const message = result.status === "pending" ? "Kenan accepted this request. The chosen reply or safe terminal status will arrive automatically in this thread; continue other work. requestId is for optional recovery, not resubmission" : "Kenan did not complete this request; actions may already have occurred. Do not resubmit it";
-              const receipt = { requestId, status: result.status, message };
+            if (result?.requestId === requestId && typeof result.status === "string" && Object.hasOwn(rootReceiptStates, result.status) && !("reply" in result)) {
+              const receiptState = stateValue(rootReceiptStates, result.status as KenanRequestStatus);
+              const receipt = { requestId, status: result.status, message: receiptState.message };
               report({ component: "root-client", stage: "request", outcome: "ok", status: response.status, durationMs: Math.round(performance.now() - started) });
-              return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], details: { rootRequest: receipt }, isError: result.status !== "pending" };
+              return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], details: { rootRequest: receipt }, isError: receiptState.isError };
             }
-            const reply = result?.reply ?? (result?.ok === true ? result.value?.reply : undefined);
-            if (typeof reply !== "string") {
+            const reply = result?.reply;
+            if (!result || typeof result !== "object" || Array.isArray(result) || "status" in result || typeof reply !== "string") {
               report({ component: "root-client", stage: "request", outcome: "failed", reason: "invalid-response", status: response.status, durationMs: Math.round(performance.now() - started) });
               return uncertain("Kenan's privileged context returned an invalid response");
             }

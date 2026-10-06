@@ -6,6 +6,7 @@ import type { Session, ThreadStart } from "./types";
 import { messagingAvatarUrl } from "./messaging-avatar";
 import { conversationThreads } from "./thread-state";
 import { attentionRank, threadStatus, roomThreadStatus, type ThreadStatus } from "./features/status/thread-status";
+import { assertNever } from "../../shared/explicit-state";
 
 export type Chat =
   | { id: ChatId; kind: "ai"; title: string; icon: string; label: string; session: Session }
@@ -56,8 +57,11 @@ export function inboxRow(chat: Chat): InboxRow {
     const status: ThreadStatus = { ...reported, attention: attention || reported.attention };
     return { chat, section: status.attention ? "attention" : busy ? "working" : "quiet", status, rank: reported.attention ? attentionRank(reported) : attention ? 3 : busy ? 10 : 22, updatedAt: chat.room.updatedAt ?? 0 };
   }
-  const { section, rank } = humanStatus(chat.conversation, chat.backend);
-  return { chat, section, status: null, rank, updatedAt: chat.conversation.updatedAt || 0 };
+  if (chat.kind === "human") {
+    const { section, rank } = humanStatus(chat.conversation, chat.backend);
+    return { chat, section, status: null, rank, updatedAt: chat.conversation.updatedAt || 0 };
+  }
+  return assertNever(chat, "Inbox chat");
 }
 
 /** The inbox: every current chat, AI and human alike, ordered by what needs

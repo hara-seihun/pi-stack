@@ -1,4 +1,6 @@
 import { createParser } from "eventsource-parser";
+import { parseResponseEvent } from "./response-events.js";
+import { assertNever } from "./threads/runtime-events.js";
 
 export const IMAGE_MODELS = ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const;
 export const IMAGE_QUALITIES = ["auto", "low", "medium", "high", "xhigh", "max"] as const;
@@ -68,13 +70,19 @@ export async function requestImage(request: ImageRequest, auth: ImageAuth, signa
       maxBufferSize: 64 * 1024 * 1024,
       onEvent({ data }) {
         if (data === "[DONE]") return;
-        const event = JSON.parse(data) as ObjectValue;
-        if (event.type === "response.output_item.done" && event.item) items.set(event.item.id, event.item);
-        if (event.type === "response.completed") completed = event.response;
-        if (["error", "response.failed", "response.incomplete"].includes(event.type)) {
-          streamFailure = String(event.error?.message ?? event.response?.error?.message
-            ?? event.response?.incomplete_details?.reason ?? event.type).slice(0, 2000);
+        const parsed = parseResponseEvent(JSON.parse(data));
+        if (!parsed.ok) { streamFailure = parsed.error; return; }
+        const { kind, event } = parsed.value;
+        switch (kind) {
+          case "item_done": items.set(event.item.id, event.item); return;
+          case "completed": completed = event.response; return;
+          case "error": case "failed": case "incomplete":
+            streamFailure = String(event.error?.message ?? event.message ?? event.response?.error?.message
+              ?? event.response?.incomplete_details?.reason ?? event.type).slice(0, 2000);
+            return;
+          case "created": case "progress": return;
         }
+        assertNever(kind);
       },
       onError(error) { throw error; },
     });

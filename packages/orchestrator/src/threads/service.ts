@@ -1,4 +1,5 @@
 import { isRunnerCapacityFailure } from "./runner-capacity.js";
+import { parseRuntimeEvent, requireAssistantStopReason, assertNever } from "./runtime-events.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { readThreadHistory, visibleThreadHistory } from "pi-orchestrator/history";
@@ -17,11 +18,25 @@ import { formatThreadMessage, serializeThreadNotification } from "./message-form
 import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
-import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
+import { isThreadState, resolveDelivery, validateThreadAwait, validateWaitDependency, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
+export function settledWorkOutcome(outcome: unknown, message: Json | null | undefined): WorkOutcome {
+  if (outcome === "complete" || outcome === "failed" || outcome === "cancelled") return outcome;
+  if (outcome !== undefined) throw new Error(`Unknown work outcome: ${String(outcome)}`);
+  // A native completion receipt can finish a turn without producing an assistant message.
+  if (message === null || message === undefined) return "complete";
+  const reason = requireAssistantStopReason(message.stopReason);
+  switch (reason) {
+    case "stop": case "length": case "toolUse": return "complete";
+    case "error": return "failed";
+    case "aborted": return "cancelled";
+    case "pending": case "deferred": throw new Error(`Cannot settle nonterminal assistant state: ${reason}`);
+  }
+  return assertNever(reason);
+}
 export interface ThreadAdmission { env?: Record<string, string | undefined>; settings?: ThreadSettings; release(): void | Promise<void> }
 export interface ThreadServiceOptions {
   databasePath: string;
@@ -422,27 +437,34 @@ export class ThreadService implements ThreadApi {
     if (prior.value) return good(thread);
     if (!["set", "clear"].includes(input.action)) return bad("invalid_request", "Waiting action must be set or clear");
     let resultAlreadyArrived = false;
+    let dependency: import("./contracts.js").WaitDependency | undefined;
     if (input.action === "set") {
       if (thread.held || thread.metadata?.archived || thread.metadata?.raw) return bad("unavailable", "Waiting requires an unheld, unarchived normal thread");
       if (typeof input.reason !== "string" || !input.reason.trim()) return bad("invalid_request", "Waiting requires a reason");
-      const ids = input.threadIds ?? [];
-      if (!Array.isArray(ids) || ids.length > 100) return bad("invalid_request", "At most 100 child dependencies are supported");
-      if (ids.length) {
-        const settled = await (this.directory ?? this).await({ parentId: thread.id, threadIds: ids, after: input.after, timeoutMs: 0 });
+      const parsed = validateWaitDependency(input); if (!parsed.ok) return parsed;
+      dependency = parsed.value;
+      if (dependency.kind === "agents") {
+        const settled = await (this.directory ?? this).await({ parentId: thread.id, threadIds: dependency.threadIds, after: dependency.after, timeoutMs: 0 });
         if (!settled.ok) return settled;
-        // A result accepted before registration must not be hidden by a new wait.
         resultAlreadyArrived = settled.value.settlement !== null;
-      } else if (input.after !== undefined && (!input.after || typeof input.after !== "object" || Array.isArray(input.after)
-        || Object.values(input.after).some(cursor => !Number.isSafeInteger(cursor) || cursor < 0))) return bad("invalid_request", "Invalid dependency cursors");
+      }
+      if (dependency.kind === "message") {
+        if (dependency.fromThreadId === thread.id) return bad("invalid_request", "A message wait must name another accessible thread");
+        const found = await (this.directory ?? this).list({ id: dependency.fromThreadId, limit: 1 });
+        if (!found.ok) return found;
+        if (!found.value.threads.length) return bad("not_found", "Wait collaborator is not accessible");
+      }
     }
     const accepted = this.request(input.requestId, input, "agent-wait"); if (!accepted.ok) return accepted;
     if (accepted.value) return good(this.get(thread.id)!);
     const current = this.get(thread.id)!;
     if (input.action === "set" && (current.held || current.metadata?.archived)) return bad("unavailable", "Thread was stopped while registering its wait");
     this.transaction(() => {
-      const resultQueued = input.action === "set" && this.pending(thread.id).some(message => message.source === "notification" && !message.landedAt && message.senderId && input.threadIds?.includes(message.senderId));
-      if (input.action === "set" && !resultQueued && !resultAlreadyArrived) {
-        const wait: import("./contracts.js").AgentWait = { reason: input.reason.trim(), threadIds: input.threadIds ?? [], after: input.after ?? {}, since: Date.now() };
+      const resultQueued = dependency && this.pending(thread.id).some(message => !message.landedAt && message.senderId
+        && (dependency.kind === "agents" && message.source === "notification" && dependency.threadIds.includes(message.senderId)
+          || dependency.kind === "message" && dependency.fromThreadId === message.senderId));
+      if (input.action === "set" && dependency && !resultQueued && !resultAlreadyArrived) {
+        const wait: import("./contracts.js").AgentWait = { ...dependency, reason: input.reason.trim(), since: Date.now() };
         this.sql("UPDATE thread SET metadata=json_set(metadata,'$.agentWait',json(?)) WHERE id=?").run(JSON.stringify(wait), thread.id);
       } else this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
       this.recordRequest(input.requestId, input, "agent-wait", thread.id);
@@ -511,8 +533,14 @@ export class ThreadService implements ThreadApi {
   }
   private recordRequest(id: string, value: unknown, kind: string, target: string): void { this.sql("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,?,?,?)").run(id, digest(value), kind, target); }
   private insertMessage(id: string, input: SendThread, settings: ThreadSettings, front = false): ThreadMessage {
-    const wait = this.get(input.threadId)?.metadata?.agentWait as import("./contracts.js").AgentWait | undefined;
-    if (wait && (input.source !== "notification" || input.senderId && wait.threadIds.includes(input.senderId))) {
+    const wait = this.get(input.threadId)?.metadata?.agentWait;
+    const dependency = validateWaitDependency(wait);
+    const matchingResult = dependency.ok && input.senderId && (dependency.value.kind === "agents" && dependency.value.threadIds.includes(input.senderId)
+      || dependency.value.kind === "message" && dependency.value.fromThreadId === input.senderId);
+    // Untyped persisted waits retain their original child-result routing until the next input or scheduled recovery.
+    const priorChildResult = wait && typeof wait === "object" && !("kind" in wait) && "threadIds" in wait
+      && Array.isArray(wait.threadIds) && input.senderId && wait.threadIds.includes(input.senderId);
+    if (wait && (input.source !== "notification" || matchingResult || priorChildResult)) {
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(input.threadId);
     }
     this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
@@ -1260,7 +1288,7 @@ export class ThreadService implements ThreadApi {
         const last = state.lastAssistantMessage;
         const capacityFailure = last?.stopReason === "error" && (isTransientFailure(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
         if (!runtime.busy && completed.has(execution.work_id) && (!providerWait || !capacityFailure)) {
-          await this.finish(id, runtime, last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete", last ?? null);
+          await this.finish(id, runtime, settledWorkOutcome(undefined, last), last ?? null);
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
           this.phase(id, "preparing", "Resuming accepted input in runtime");
@@ -1283,6 +1311,13 @@ export class ThreadService implements ThreadApi {
   }
   private output(id: string, runtime: Runtime, event: PiEvent): void {
     if (this.runtimes.get(id) !== runtime || this.closed || this.suspended) return;
+    const parsed = parseRuntimeEvent(event);
+    if (!parsed.ok) {
+      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(parsed.error, id);
+      this.changed(id);
+      for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_error", error: parsed.error } });
+      return;
+    }
     // Runner events carry their production time; in-process sessions are stamped here.
     if (typeof event.emittedAt !== "number") event.emittedAt = Date.now();
     const projection = this.projections.get(id) ?? { live: { text: "", thinking: "", isThinking: false, tools: [] }, activity: createExecutionActivity() };
@@ -1360,7 +1395,7 @@ export class ThreadService implements ThreadApi {
         if (this.busy(state)) return;
         if (!runtime.executionId) { runtime.busy = false; this.state(id, this.row(id)?.held ? "idle" : this.pending(id).length ? "running" : "idle"); await this.park(id, runtime); return; }
         const last = "lastAssistantMessage" in event ? event.lastAssistantMessage as Json | null : state.lastAssistantMessage ?? runtime.finalMessage;
-        const outcome = ["complete", "failed", "cancelled"].includes(String(event.outcome)) ? event.outcome as WorkOutcome : last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete";
+        const outcome = settledWorkOutcome(event.outcome, last);
         const settledOutcome = this.row(id)?.held ? "cancelled" : outcome;
         await this.finish(id, runtime, settledOutcome, last ?? null, settledOutcome === "failed" ? last?.errorMessage : undefined);
       }).then(() => this.wake(id)).catch(error => {

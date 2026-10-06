@@ -19,9 +19,12 @@ public final class PhoneNotificationService extends NotificationListenerService 
     @Override public void onDestroy() { if (current == this) current = null; super.onDestroy(); }
     void dispatch(String command, JSONObject args, Consumer<PhoneResult> done) {
         try {
+            var parsed = NativeState.parse(NativeState.NotificationCommand.class, command);
+            if (parsed.isEmpty()) { done.accept(PhoneResult.error("unsupported", "Unknown notification command")); return; }
+            NativeState.NotificationCommand kind = parsed.get();
             StatusBarNotification[] active = getActiveNotifications();
             if (active == null) { done.accept(PhoneResult.error("unavailable", "Notification listener is not connected")); return; }
-            if (command.equals("notifications.list")) {
+            if (kind == NativeState.NotificationCommand.LIST) {
                 JSONArray result = new JSONArray(); remainingText = 500000; truncated = active.length > 256;
                 for (int notificationIndex = 0; notificationIndex < Math.min(active.length, 256); notificationIndex++) {
                     StatusBarNotification notification = active[notificationIndex];
@@ -44,14 +47,19 @@ public final class PhoneNotificationService extends NotificationListenerService 
             StatusBarNotification found = null;
             for (StatusBarNotification notification : active) if (notification.getKey().equals(key)) { found = notification; break; }
             if (found == null) { done.accept(PhoneResult.error("not_found", "Notification no longer exists")); return; }
-            if (command.equals("notifications.dismiss")) {
+            if (kind == NativeState.NotificationCommand.DISMISS) {
                 if (!found.isClearable()) { done.accept(PhoneResult.error("unavailable", "Notification cannot be dismissed")); return; }
                 cancelNotification(key);
                 done.accept(PhoneResult.success(new JSONObject().put("requested", true))); return;
             }
+            boolean replies = switch (kind) {
+                case REPLY -> true;
+                case ACTION -> false;
+                case LIST, DISMISS -> throw new IllegalStateException("Notification command already handled: " + kind);
+            };
             Notification.Action[] actions = found.getNotification().actions;
             int index = args.optInt("actionIndex", -1);
-            if (command.equals("notifications.reply") && index == -1 && actions != null) {
+            if (replies && index == -1 && actions != null) {
                 for (int i = 0; i < actions.length; i++) if (actions[i].getRemoteInputs() != null) { index = i; break; }
             }
             if (actions == null || index < 0 || index >= actions.length || actions[index].actionIntent == null) {
@@ -59,7 +67,7 @@ public final class PhoneNotificationService extends NotificationListenerService 
             }
             Notification.Action action = actions[index];
             Intent fill = new Intent();
-            if (command.equals("notifications.reply")) {
+            if (replies) {
                 RemoteInput[] inputs = action.getRemoteInputs();
                 if (inputs == null || inputs.length == 0) { done.accept(PhoneResult.error("unsupported", "Action does not support text replies")); return; }
                 String reply = args.getString("text");
@@ -73,7 +81,7 @@ public final class PhoneNotificationService extends NotificationListenerService 
                 if (values.isEmpty()) { done.accept(PhoneResult.error("invalid_args", "Reply is not allowed by this action")); return; }
                 RemoteInput.addResultsToIntent(inputs, fill, values);
                 RemoteInput.setResultsSource(fill, RemoteInput.SOURCE_FREE_FORM_INPUT);
-            } else if (!command.equals("notifications.action")) { done.accept(PhoneResult.error("unsupported", "Unknown notification command")); return; }
+            }
             action.actionIntent.send(this, 0, fill);
             done.accept(PhoneResult.success(new JSONObject().put("sent", true)));
         } catch (android.app.PendingIntent.CanceledException failure) { done.accept(PhoneResult.error("unconfirmed", "Notification action was cancelled")); }

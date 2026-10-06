@@ -63,9 +63,7 @@ public class WriteSetupTest {
         WriteAccessibilityService service = org.robolectric.Robolectric.buildService(WriteAccessibilityService.class).get();
         org.robolectric.util.ReflectionHelpers.setStaticField(WriteAccessibilityService.class, "active", service);
         org.robolectric.util.ReflectionHelpers.setField(service, "shown", true);
-        org.robolectric.util.ReflectionHelpers.setField(service, "recording", true);
-        org.robolectric.util.ReflectionHelpers.setField(service, "connecting", true);
-        org.robolectric.util.ReflectionHelpers.setField(service, "finishing", true);
+        org.robolectric.util.ReflectionHelpers.setField(service, "phase", NativeState.WritePhase.FINISHING_CONNECTING);
         KenanRemotePlugin plugin = plugin();
         Call disable = new Call(new JSObject().put("step", "enabled").put("enabled", false));
         plugin.writeSetup(disable);

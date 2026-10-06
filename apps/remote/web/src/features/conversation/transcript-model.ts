@@ -1,4 +1,5 @@
 import type { ContextEntry } from "../../types";
+import { assertNever } from "../../../../shared/explicit-state";
 
 export interface WorkSummary {
   toolCalls: number;
@@ -23,9 +24,12 @@ export type TranscriptItem =
     };
 
 function visibleKind(entry: ContextEntry): "user" | "assistant" | undefined {
-  if (entry.kind === "user") return "user";
-  if (entry.kind === "assistant") return "assistant";
-  return undefined;
+  switch (entry.kind) {
+    case "user": return "user";
+    case "assistant": return "assistant";
+    case "system": case "tool": case "toolCall": case "thinking": case "notice": return undefined;
+  }
+  return assertNever(entry.kind, "Transcript visible kind");
 }
 
 function isRunning(entry: ContextEntry) {

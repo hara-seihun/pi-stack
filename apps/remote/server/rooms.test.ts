@@ -239,6 +239,18 @@ test("tick caches work/questions; read leaves questions pending; only fresh repl
   expect(await directoryRoom(f.rooms)).toMatchObject({ current: true, unreadCount: 1 });
 });
 
+test("room wait evidence survives projection and unsupported owner phases are explicit defects", () => {
+  const id = crypto.randomUUID();
+  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) }, agentWait: { kind: "job" as const, jobId: "job-1", reason: "Result", since: 100 } } };
+  const snapshot = publicRoomSnapshot(thread, { messages: [], live: "" });
+  expect(snapshot).toMatchObject({ activity: "awaiting", waitingOnAgents: thread.metadata.agentWait });
+  expect(snapshot.room.waitingOnAgents).toEqual(thread.metadata.agentWait);
+  const legacy = publicRoomSnapshot({ ...thread, metadata: { ...thread.metadata, agentWait: { reason: "Result", threadIds: [], since: 100 } } }, { messages: [], live: "" });
+  expect(legacy).toMatchObject({ activity: "status_error", error: expect.stringContaining("Wait reporting defect") });
+  const unsupported = publicRoomSnapshot(thread, { messages: [], live: "", execution: { activity: "future", activeTools: [] } as any });
+  expect(unsupported).toMatchObject({ activity: "status_error", error: expect.stringContaining("supported execution phase") });
+});
+
 test("room owner transports owned phases, clocks, tools and failures without unrelated metadata", () => {
   const id = crypto.randomUUID();
   const thread = { id, title: "House", state: "running" as const, metadata: { room: { id, members: people.slice(0, 2) }, rootPrivate: "outside room" } };

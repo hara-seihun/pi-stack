@@ -11,6 +11,8 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - [Web search](extensions/web-search/README.md) registers a native `web_search` tool over a host-selected search backend, so every session has web search in its tool list instead of reaching for a skill or a browser. The shipped Exa backend sends requests through the host's governed `exa-api` transport.
 - [Local models](extensions/local-models/README.md) registers the OpenAI-compatible inference engines a host lists in `~/.pi/agent/local-models.json`, starting one that is not running as a transient user unit, and mirrors them into Pi's model catalog.
 
+[Runtime wire dispatch](../../docs/runtime-wire.md) owns the closed SDK/runner/provider event domains and explicit diagnostics for unsupported values. A stored Codex compaction operation with an invalid state is a repair error, never automatically reinterpreted as failed/retryable. The invalid record remains intact; explicit compact may supersede it through its owning operation path.
+
 PiStack's [unified thread service](../../docs/threads.md) hosts Remote and fleet sessions through Pi. Pi retains these native extensions and its native JSONL history. Codex is a model provider, not a separate session engine.
 
 The stack also supplies native [Image 2.5 generation](../orchestrator/docs/image-generation.md) through the Orchestrator routing extension, which owns its OpenAI account selection and leases.

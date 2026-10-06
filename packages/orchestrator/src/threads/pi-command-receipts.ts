@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { PiCommand, PiEvent } from "./contracts.js";
 import { checkpointPiSession } from "./pi-session-file.js";
+import { Type } from "typebox";
+import { Check } from "typebox/value";
+import { assertNever, parseRuntimeEvent } from "./runtime-events.js";
 
 const durable = new Set(["fork", "clone", "new_session", "switch_session", "compact", "bash", "cycle_model", "cycle_thinking_level", "export_html"]);
 function digest(command: PiCommand) {
@@ -10,6 +13,12 @@ function digest(command: PiCommand) {
 }
 type Started = { state: "started"; id: string; hash: string; command: string; sourceSessionFile: string };
 type Completed = Omit<Started, "state"> & { state: "complete"; response: PiEvent; sessionFile: string };
+const identity = { id: Type.String(), hash: Type.String(), command: Type.String(), sourceSessionFile: Type.String() };
+const receiptSchema = Type.Union([
+  Type.Object({ ...identity, state: Type.Literal("started") }),
+  Type.Object({ ...identity, state: Type.Literal("complete"), response: Type.Object({ type: Type.Literal("response") }), sessionFile: Type.String() }),
+]);
+const unconfirmed = (id: string) => ({ kind: "error" as const, message: `Command ${id} has an unconfirmed outcome. It may still be running or have been interrupted; it will not be executed again. Inspect its native command receipt before requesting different work.` });
 type Admission = { kind: "execute" } | { kind: "replay"; response: PiEvent; sessionFile: string } | { kind: "error"; message: string };
 
 export class PiCommandReceipts {
@@ -21,11 +30,22 @@ export class PiCommandReceipts {
     const hash = digest(command), id = command.id;
     const prior = [...manager.getEntries()].reverse().find(entry => entry.type === "custom"
       && ["thread_command", "thread_command_result"].includes(entry.customType) && (entry.data as Started)?.id === id);
+    if (prior?.type === "custom" && !Check(receiptSchema, prior.data)) return { kind: "error", message: `Command ${id} has an invalid native receipt state; it will not be executed again.` };
     const saved = prior?.type === "custom" ? prior.data as Started | Completed : undefined;
     const active = this.pending.get(id);
     if (saved && saved.hash !== hash || active && active.receipt.hash !== hash) return { kind: "error", message: `Command id ${id} belongs to different input` };
-    if (saved?.state === "complete") return { kind: "replay", response: saved.response, sessionFile: saved.sessionFile };
-    if (saved || active) return { kind: "error", message: `Command ${id} has an unconfirmed outcome. It may still be running or have been interrupted; it will not be executed again. Inspect its native command receipt before requesting different work.` };
+    if (saved) {
+      switch (saved.state) {
+        case "complete": {
+          const response = parseRuntimeEvent(saved.response);
+          if (!response.ok) return { kind: "error", message: `Command ${id} has an invalid response: ${response.error}` };
+          return { kind: "replay", response: response.value, sessionFile: saved.sessionFile };
+        }
+        case "started": return unconfirmed(id);
+      }
+      return assertNever(saved);
+    }
+    if (active) return unconfirmed(id);
     const receipt: Started = { state: "started", id, hash, command: command.type, sourceSessionFile: manager.getSessionFile()! };
     manager.appendCustomEntry("thread_command", receipt);
     checkpointPiSession(manager);

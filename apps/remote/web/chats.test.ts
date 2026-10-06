@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { runningChildParents, threadActivity } from "../server/live-projection";
+import { runningChildParents, projectThreadActivity } from "../server/live-projection";
 import { ChatIcon } from "./src/chat-row";
 import { InboxRowView } from "./src/features/chats/Inbox";
 import type { Session } from "../server/protocol";
@@ -37,7 +37,7 @@ test("inbox ranks attention, then work, then quiet, mixing AI and human chats", 
     session("held", { held: true, queuedMessages: [queued] }),
     session("unread", { idleUnread: true }),
     session("busy", { state: "running", activity: "waiting_on_tool", activeTools: ["bash"] }),
-    session("parent", { activity: "awaiting", hasChildren: true }),
+    session("parent", { activity: "awaiting", hasChildren: true, waitingForChildren: true }),
     session("old", { updatedAt: "2025-01-01T00:00:00Z" }),
   ], [], messaging);
   expect(rows.map(row => row.chat.id)).toEqual(["ai:held", "ai:unread", "human:unread", "ai:busy", "ai:parent", "ai:same-id", "ai:old", "human:same-id"]);
@@ -96,7 +96,7 @@ test("the last worker settling clears waiting status in the inbox", () => {
   const parent = session("parent", { hasChildren: true });
   const local = session("local", { parentId: parent.id });
   const fleet = session("fleet", { parentId: parent.id, state: "running" });
-  const project = () => ({ ...parent, activity: threadActivity(parent.state, undefined, runningChildParents([local], [fleet]).has(parent.id)) });
+  const project = () => ({ ...parent, ...projectThreadActivity(parent.state, undefined, runningChildParents([local], [fleet]).has(parent.id)) });
   const waiting = project();
   expect(threadStatus(waiting)).toMatchObject({ key: "awaiting", busy: true });
 
@@ -126,7 +126,7 @@ test("status vocabulary covers every lifecycle and flag", () => {
   expect(threadStatus(session("a", { held: true, queuedMessages: [queued] }))).toMatchObject({ key: "stopped", label: "Stopped", attention: true });
   expect(threadStatus(session("a", { idleUnread: true }))).toMatchObject({ key: "idle", label: "Idle", attention: true });
   expect(threadStatus(session("a", { archivedAt: "2026" })).key).toBe("archived");
-  expect(threadStatus(session("a", { activity: "awaiting" }))).toMatchObject({ key: "awaiting", busy: true });
+  expect(threadStatus(session("a", { activity: "awaiting", waitingForChildren: true }))).toMatchObject({ key: "awaiting", busy: true });
   expect(selectedAiId({ selectedChatId: "human:same-id" })).toBeNull();
   expect(selectedAiId({ selectedChatId: "ai:same-id" })).toBe("same-id");
 });

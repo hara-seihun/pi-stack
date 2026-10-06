@@ -7,6 +7,8 @@ import { RuntimeOutput } from "./runner-output.js";
 import { shareFile } from "../shared-custody.js";
 import { openPiSession, piEnvironmentScope } from "./pi-session.js";
 import type { PiEvent, PiSession, PiSessionOptions } from "./contracts.js";
+import { assertNever } from "./runtime-events.js";
+import { requireRunnerChannelRequest, requireRunnerControlRequest } from "./runner-protocol.js";
 
 type Resident = { close(): Promise<void>; id: string; key?: string; active: boolean; used: number; pending: number; priority: boolean };
 const [controlPath] = process.argv.slice(2);
@@ -84,18 +86,23 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   const resident: Resident = { close, id: options.threadId, key: env.PI_THREAD_SESSION_KEY, active: true, used: Date.now(), pending: 0, priority: options.priority !== false };
   const channel = createServer(socket => {
     client?.destroy(); client = socket; socket.setNoDelay(true);
-    lines(socket, value => {
-      if (value.type === "attach") {
-        reply(socket, { type: "attached", pid: process.pid, sequence: output.sequence });
-        output.attach(socket, Number(value.after || 0));
-      } else if (value.type === "ack") output.acknowledge(Number(value.sequence));
-      else if (value.type === "command") {
-        resident.pending++;
-        const observing = /^(?:get_|set_session_name$|set_speed$|set_thinking_level$)/.test(String(value.value?.type));
-        void serial(async () => { if (!observing) await activate(resident); else resident.used = Date.now(); await ready; }).then(() => piEnvironmentScope.run(env, () => adapter.command(value.value))).catch(error => publish({
-          id: value.value?.id, type: "response", command: value.value?.type, success: false, error: String(error),
-        })).finally(() => { resident.pending--; });
+    lines(socket, input => {
+      const value = requireRunnerChannelRequest(input);
+      switch (value.type) {
+        case "attach":
+          reply(socket, { type: "attached", pid: process.pid, sequence: output.sequence });
+          output.attach(socket, value.after ?? 0); return;
+        case "ack": output.acknowledge(value.sequence); return;
+        case "command": {
+          resident.pending++;
+          const observing = /^(?:get_|set_session_name$|set_speed$|set_thinking_level$)/.test(value.value.type);
+          void serial(async () => { if (!observing) await activate(resident); else resident.used = Date.now(); await ready; }).then(() => piEnvironmentScope.run(env, () => adapter.command(value.value))).catch(error => publish({
+            id: value.value.id, type: "response", command: value.value.type, success: false, error: String(error),
+          })).finally(() => { resident.pending--; });
+          return;
+        }
       }
+      assertNever(value);
     });
     socket.on("close", () => { if (client === socket) client = null; });
   });
@@ -129,21 +136,26 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   void ready.catch(() => {});
 }
 const server = createServer(socket => {
-  lines(socket, value => {
+  lines(socket, input => {
+    const value = requireRunnerControlRequest(input);
     const respond = (operation: Promise<unknown>) => void operation.then(() => reply(socket, { ok: true, pid: process.pid }), error => reply(socket, { error: String(error) }));
-    if (value.type === "open") respond(serial(() => open(value.options)));
-    else if (value.type === "close") respond(serial(async () => { await sessions.get(value.socketPath)?.close(); }));
-    else if (value.type === "activity") respond(serial(async () => {
-      const session = sessions.get(value.socketPath);
-      if (!session) throw new Error("Runner capacity busy: idle session was reclaimed; work remains queued");
-      if (value.active) await activate(session);
-      else { session.active = false; session.used = Date.now(); await reclaim(); }
-    }));
-    else if (value.type === "retain") { drainWhenEmpty = false; reply(socket, { ok: true }); }
-    else if (value.type === "drain") { drainWhenEmpty = true; reply(socket, { ok: true }); if (!sessions.size) void serial(stop); }
-    else if (value.type === "status") reply(socket, { ok: true, pid: process.pid, sessions: sessions.size, activeSessions: activeCount(), availableSlots: availableSlots(true),
-      backgroundSlots: availableSlots(false), threadIds: [...sessions.values()].map(session => session.id), maxSessions, maxResident, rss: process.memoryUsage().rss });
-    else reply(socket, { error: "Unknown runner command" });
+    switch (value.type) {
+      case "open": respond(serial(() => open(value.options))); return;
+      case "close": respond(serial(async () => { await sessions.get(value.socketPath)?.close(); })); return;
+      case "activity":
+        respond(serial(async () => {
+          const session = sessions.get(value.socketPath);
+          if (!session) throw new Error("Runner capacity busy: idle session was reclaimed; work remains queued");
+          if (value.active) await activate(session);
+          else { session.active = false; session.used = Date.now(); await reclaim(); }
+        })); return;
+      case "retain": drainWhenEmpty = false; reply(socket, { ok: true }); return;
+      case "drain": drainWhenEmpty = true; reply(socket, { ok: true }); if (!sessions.size) void serial(stop); return;
+      case "status":
+        reply(socket, { ok: true, pid: process.pid, sessions: sessions.size, activeSessions: activeCount(), availableSlots: availableSlots(true),
+          backgroundSlots: availableSlots(false), threadIds: [...sessions.values()].map(session => session.id), maxSessions, maxResident, rss: process.memoryUsage().rss }); return;
+    }
+    assertNever(value);
   });
 });
 server.on("error", error => { console.error(error); process.exitCode = 1; });

@@ -770,7 +770,7 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
   const first = new ThreadService(options); services.push(first);
   value(first.importThread({ id: "capacity-child", title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
   value(first.importMessage({ id: "assignment", threadId: "capacity-child", text: "work", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
-  value(await first.agentWait({ requestId: "wait", threadId: "capacity-child", action: "set", reason: "Awaiting delegated release", threadIds: [] }));
+  value(await first.agentWait({ requestId: "wait", threadId: "capacity-child", action: "set", kind: "deployment", publicationId: "publication-fixture", reason: "Awaiting delegated release" }));
   const schedule = value(await first.wakeSchedule({ requestId: "wake", threadId: "capacity-child", action: "set", reason: "Fallback", cadenceMs: 600_000 }));
   await first.start();
   await waitFor(() => (first.get("capacity-child")?.metadata?.startupFailure as { attempts: number })?.attempts === 1);
@@ -1673,7 +1673,7 @@ describe("ThreadService", () => {
     const question = value(await service.spawn({ requestId: "question", cwd: directory }));
     value(await service.ask({ requestId: "ask", threadId: question.id, questions: [{ question: "Continue?" }] }));
     const waiting = value(await service.spawn({ requestId: "waiting", cwd: directory }));
-    value(await service.agentWait({ requestId: "wait", threadId: waiting.id, action: "set", reason: "External result" }));
+    value(await service.agentWait({ requestId: "wait", threadId: waiting.id, action: "set", kind: "job", jobId: "external-result", reason: "External result" }));
     const waking = value(await service.spawn({ requestId: "waking", cwd: directory }));
     value(await service.wakeSchedule({ requestId: "wake", threadId: waking.id, action: "set", reason: "Check", cadenceMs: 60_000 }));
     for (const thread of [pending, question, waiting, waking]) {

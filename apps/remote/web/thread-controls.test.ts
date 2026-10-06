@@ -117,7 +117,7 @@ describe("thread controls", () => {
   });
 
   test("an awaiting parent displays child activity but remains available for messages", () => {
-    const parent = session("parent", { hasChildren: true, idleUnread: true, activity: "awaiting" });
+    const parent = session("parent", { hasChildren: true, idleUnread: true, activity: "awaiting", waitingForChildren: true });
     const child = session("child", { parentId: parent.id, state: "running", activity: "thinking" });
     expect(working(parent)).toBe(false);
     expect(working(child)).toBe(true);

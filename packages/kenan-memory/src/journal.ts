@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { memoryClient } from "./client.js";
 import { oneKenanEnabled } from "./config.js";
 import type { MemoryClient, MemoryInput, MemoryRequest, MemoryResult, MemoryValue } from "./contract.js";
+import { stateValue } from "./explicit-state.js";
 
 export type ActionSpec = {
   action: string;
@@ -19,6 +20,9 @@ export type ActionSpec = {
 };
 export type ActionTicket = { id: string; spec: ActionSpec; startedAt: string };
 export type ActionOutcome = "confirmed" | "failed" | "unconfirmed";
+const outcomeWords = {
+  attempted: "is attempting", confirmed: "completed", failed: "did not complete", unconfirmed: "could not confirm",
+} satisfies Record<"attempted" | ActionOutcome, string>;
 export type JournalResult = { ok: true } | { ok: false; error: string };
 type Options = { enabled?: () => boolean; directory?: string; client?: MemoryClient; person?: string; autoDrain?: boolean };
 const compact = (text: string) => text.replace(/\s+/g, " ").trim().slice(0, 800);
@@ -77,11 +81,12 @@ export class ActionJournal {
     this.autoDrain = options.autoDrain ?? true;
   }
   private persist(ticket: ActionTicket, outcome: "attempted" | ActionOutcome, detail = ""): void {
+    const outcomeWord = stateValue(outcomeWords, outcome);
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     const spec = ticket.spec;
     const person = spec.actedFor ?? this.person;
     const item: MemoryInput = {
-      text: `Kenan ${outcome === "attempted" ? "is attempting" : outcome === "confirmed" ? "completed" : outcome === "failed" ? "did not complete" : "could not confirm"} ${spec.action} for ${person}, to ${spec.recipients.map(compact).join(", ") || "their calendar"}. ${compact(spec.summary)}${spec.externalId ? ` Reference: ${compact(spec.externalId)}.` : ""}${detail ? ` Outcome: ${compact(detail)}` : ""}${outcome === "attempted" ? " This records an attempt, not proof it happened; if no outcome follows, it may or may not have executed. Do not retry automatically." : ""}`,
+      text: `Kenan ${outcomeWord} ${spec.action} for ${person}, to ${spec.recipients.map(compact).join(", ") || "their calendar"}. ${compact(spec.summary)}${spec.externalId ? ` Reference: ${compact(spec.externalId)}.` : ""}${detail ? ` Outcome: ${compact(detail)}` : ""}${outcome === "attempted" ? " This records an attempt, not proof it happened; if no outcome follows, it may or may not have executed. Do not retry automatically." : ""}`,
       about: [...new Set([person, ...(spec.affected ?? []), ...spec.recipients.filter(value => value.trim())])].slice(0, 100),
       source: { actedFor: person, action: `${spec.action}:${outcome}`, externalId: `action:${ticket.id}:${outcome}` },
       setting: { person, ...(spec.threadId ? { threadId: spec.threadId } : {}), ...(spec.roomId ? { roomId: spec.roomId } : {}) },
@@ -103,6 +108,7 @@ export class ActionJournal {
     return ticket;
   }
   finish(ticket: ActionTicket | null, outcome: ActionOutcome, detail = ""): JournalResult {
+    if (outcome !== "confirmed" && outcome !== "failed" && outcome !== "unconfirmed") return { ok: false, error: `Unknown action outcome: ${String(outcome)}` };
     if (!ticket) return { ok: true };
     try { this.persist(ticket, outcome, detail); return { ok: true }; }
     catch (cause) { return { ok: false, error: `Action ${ticket.id} ${outcome}; outcome journal could not be saved (${String(cause)}). The durable attempt remains. Do not repeat the action.` }; }

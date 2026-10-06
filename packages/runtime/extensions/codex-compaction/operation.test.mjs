@@ -3,6 +3,17 @@ import { test } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { ATTEMPT, blockedAttempt, cancellableResponse, operationScope } from "./operation.mjs";
 
+test("unknown stored attempt states remain explicit errors, not retryable terminal failures", () => {
+  const entry = { type: "custom", customType: ATTEMPT, timestamp: new Date(1).toISOString(), data: { modelKey: "astra", state: "future", error: "preserved" } };
+  const before = JSON.stringify(entry);
+  const held = blockedAttempt([entry], "astra", 1_000_000);
+  assert.equal(held.kind, "invalid");
+  assert.equal(held.state, "future");
+  assert.match(held.error, /Unsupported stored compaction attempt state/);
+  assert.equal(held.retryAt, undefined);
+  assert.equal(JSON.stringify(entry), before);
+});
+
 test("deadline distinguishes productive streams, idle stalls, total budget and cancellation", t => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const parent = new AbortController();

@@ -1,3 +1,5 @@
+import { stateValue } from "./explicit-state.js";
+
 export type PersonId = string;
 export type MemoryRole = "person" | "root";
 export type ForgetMode = "delete" | "stop-using";
@@ -98,7 +100,8 @@ export const KENAN_REQUEST_HEADER = "x-kenan-request-id";
 export const KENAN_REQUEST_ID_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
 export type KenanRequestStatus = "pending" | "failed" | "interrupted";
 export interface RootLogRequestStatus { rootSessionId: string; requestId: string; status: "failed" | "interrupted" }
-export const kenanRequestNotice = (requestId: string, status: "failed" | "interrupted") => `Kenan's request ${requestId} ${status === "interrupted" ? "was interrupted" : "failed"} before completion. Actions may already have occurred; do not repeat the original request. Its status can be retrieved with ask_kenan({requestId:\"${requestId}\"}).`;
+const requestNoticeStates = { failed: "failed", interrupted: "was interrupted" } satisfies Record<RootLogRequestStatus["status"], string>;
+export const kenanRequestNotice = (requestId: string, status: RootLogRequestStatus["status"]) => `Kenan's request ${requestId} ${stateValue(requestNoticeStates, status)} before completion. Actions may already have occurred; do not repeat the original request. Its status can be retrieved with ask_kenan({requestId:\"${requestId}\"}).`;
 export type KenanRequestResponse = { reply: string } | { requestId: string; status: KenanRequestStatus };
 export interface RootFinalizeReply { rootSessionId: string; reply: string; subjects: PersonId[]; recipients?: PersonId[] }
 export type RoomAudienceResolver = (person: PersonId, threadId: string) => { roomId: string; people: PersonId[] } | undefined | Promise<{ roomId: string; people: PersonId[] } | undefined>;

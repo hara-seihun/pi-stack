@@ -2,6 +2,8 @@ import { API } from "../../server/api";
 import { api } from "./client";
 import { toast } from "./toasts";
 import { openWebSocket } from "./websocket";
+import { parseWriteFrame } from "./write-wire";
+import { assertNever } from "../../shared/explicit-state";
 
 const worklet = `class WriteCapture extends AudioWorkletProcessor {
   constructor() { super(); this.phase = 0; this.samples = []; }
@@ -62,18 +64,26 @@ export async function startWrite(options: { context: string; partial(committed: 
     node.port.onmessage = event => { if (peer.readyState === WebSocket.OPEN && !ended && peer.bufferedAmount < 64 * 1024) peer.send(event.data); };
     peer.addEventListener("message", event => {
       try {
-        const frame = JSON.parse(event.data);
-        if (frame.type === "partial") options.partial(String(frame.committed ?? ""), String(frame.tail ?? ""));
-        else if (frame.type === "final") {
-          if (frame.rewrite?.status === "unavailable") {
-            if (frame.rewrite.reason === "warming") toast("Local rewrite is warming up; inserted the transcript.");
-            else toast.error("Local rewrite unavailable; inserted the transcript.");
+        const frame = parseWriteFrame(event.data);
+        switch (frame.type) {
+          case "partial": options.partial(frame.committed, frame.tail); return;
+          case "final": {
+            if (frame.rewrite) {
+              switch (frame.rewrite.status) {
+                case "unavailable":
+                  if (frame.rewrite.reason === "warming") toast("Local rewrite is warming up; inserted the transcript.");
+                  else toast.error("Local rewrite unavailable; inserted the transcript.");
+                  break;
+                case "guarded": toast("Kept the original wording to avoid changing its meaning."); break;
+                case "applied": case "unchanged": break;
+              }
+            }
+            options.final(frame.text); ended = true; cleanup(); return;
           }
-          else if (frame.rewrite?.status === "guarded") toast("Kept the original wording to avoid changing its meaning.");
-          options.final(String(frame.text ?? "")); ended = true; cleanup();
+          case "error": options.error(frame.message); ended = true; cleanup(); return;
         }
-        else if (frame.type === "error") { options.error(String(frame.message ?? "Write failed")); ended = true; cleanup(); }
-      } catch { options.error("Write returned an invalid response"); ended = true; cleanup(); }
+        assertNever(frame, "Write frame");
+      } catch (cause) { options.error(`Write returned an invalid response: ${cause instanceof Error ? cause.message : String(cause)}`); ended = true; cleanup(); peer.close(1002, "Invalid Write response"); }
     });
     peer.addEventListener("close", () => { cleanup(); if (!ended) options.error(finished ? "Write closed before returning final text" : "Write connection closed"); ended = true; });
     peer.addEventListener("error", () => { if (!ended) options.error("Write connection failed"); ended = true; cleanup(); });

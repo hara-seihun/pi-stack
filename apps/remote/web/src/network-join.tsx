@@ -4,6 +4,7 @@ import type { NetworkStatus, PrivateNetwork } from "../../server/protocol";
 import { appStorageKey } from "./app-path";
 import { nativePlatform } from "./native";
 import "./network-join.css";
+import { assertNever } from "../../shared/explicit-state";
 
 const SNOOZE_MS = 24 * 60 * 60 * 1000;
 
@@ -38,6 +39,7 @@ function steps(platform: Platform, server: string) {
       <>In a terminal run <code>tailscale login --login-server {server}</code>.</>,
     ];
   }
+  return assertNever(platform, "Network join platform");
 }
 
 async function readStatus(): Promise<NetworkStatus | null> {

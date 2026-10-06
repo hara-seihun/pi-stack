@@ -7,6 +7,7 @@ import { InlineImagesContext, Markdown } from "../../context";
 import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
+import { assertNever } from "../../../../shared/explicit-state";
 import { useItemBody } from "./item-bodies";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
 import { buildTranscript, type TranscriptItem } from "./transcript-model";
@@ -109,15 +110,18 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
   />;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
-function outcome(entry: ContextEntry) {
-  if (entry.kind === "toolCall") {
-    if (!entry.toolResult) return { status: "running", label: "Running" };
-    if (entry.toolResult.isError) return { status: "error", label: "Error" };
-    return { status: "done", label: "Done" };
+function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {
+  switch (entry.kind) {
+    case "toolCall":
+      if (!entry.toolResult) return { status: "running", label: "Running" };
+      return entry.toolResult.isError ? { status: "error", label: "Error" } : { status: "done", label: "Done" };
+    case "notice":
+      if (/error|fail/i.test(`${entry.label || ""} ${entry.text || ""}`)) return { status: "error", label: "Error" };
+      return { status: "done", label: "Done" };
+    case "system": case "tool": case "thinking": case "user": case "assistant":
+      return entry.streaming ? { status: "running", label: "Running" } : { status: "done", label: "Done" };
   }
-  if (entry.kind === "notice" && /error|fail/i.test(`${entry.label || ""} ${entry.text || ""}`)) return { status: "error", label: "Error" };
-  if (entry.streaming) return { status: "running", label: "Running" };
-  return { status: "done", label: "Done" };
+  return assertNever(entry.kind, "Transcript outcome");
 }
 
 const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: {
@@ -170,9 +174,12 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
 }, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home && before.forceExpanded === after.forceExpanded);
 
 function stepLabel(entry: ContextEntry) {
-  if (entry.kind === "system") return "System prompt";
-  if (entry.kind === "tool") return `Tool schema${entry.label ? ` · ${entry.label.replace(/^Tool\s*·?\s*/i, "")}` : ""}`;
-  return entry.label || entry.kind;
+  switch (entry.kind) {
+    case "system": return "System prompt";
+    case "tool": return `Tool schema${entry.label ? ` · ${entry.label.replace(/^Tool\s*·?\s*/i, "")}` : ""}`;
+    case "thinking": case "notice": case "toolCall": case "user": case "assistant": return entry.label || entry.kind;
+  }
+  return assertNever(entry.kind, "Transcript step label");
 }
 
 const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = false, onOpen }: {
@@ -226,9 +233,12 @@ function Step({ entry, sessionId, home, forceExpanded = false, onThinkingOpen }:
   forceExpanded?: boolean;
   onThinkingOpen?(open: boolean): void;
 }) {
-  return entry.kind === "toolCall"
-    ? <ToolStep entry={entry} home={home} forceExpanded={forceExpanded} />
-    : <TextStep entry={entry} sessionId={sessionId} forceExpanded={forceExpanded} onOpen={entry.live ? onThinkingOpen : undefined} />;
+  switch (entry.kind) {
+    case "toolCall": return <ToolStep entry={entry} home={home} forceExpanded={forceExpanded} />;
+    case "system": case "tool": case "thinking": case "notice": case "user": case "assistant":
+      return <TextStep entry={entry} sessionId={sessionId} forceExpanded={forceExpanded} onOpen={entry.live ? onThinkingOpen : undefined} />;
+  }
+  return assertNever(entry.kind, "Transcript step");
 }
 
 function workDuration(item: Extract<TranscriptItem, { kind: "work" }>, running: boolean, elapsed: number | undefined) {

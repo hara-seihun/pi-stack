@@ -113,7 +113,10 @@ it("preserves queued continuation and warm interactive, unbounded, live and wait
       const created = unwrap(await f.service.spawn({ requestId: id, cwd: f.root, message: id, settings: { model: "sol" }, metadata: id === "interactive" ? {} : { laneId: id, ...(id === "live" ? { mode: "live" } : {}) } }));
       await until(() => f.sessions.at(-1)?.streaming === true);
       const session = f.sessions.at(-1)!;
-      if (id === "waiting") unwrap(await f.service.agentWait({ requestId: "wait", threadId: created.id, action: "set", reason: "durable job" }));
+      if (id === "waiting") {
+        const waiting = unwrap(await f.service.agentWait({ requestId: "wait", threadId: created.id, action: "set", kind: "job", jobId: "durable-job", reason: "durable job" }));
+        expect(waiting.waitingOnAgents).toMatchObject({ kind: "job", jobId: "durable-job" });
+      }
       if (id === "scheduled") unwrap(await f.service.wakeSchedule({ requestId: "wake", threadId: created.id, action: "set", reason: "recovery", cadenceMs: 60000 }));
       session.settle(); await until(() => session.setActive.mock.calls.some(([active]) => !active));
       f.service.reconcile(); await new Promise(resolve => setImmediate(resolve));

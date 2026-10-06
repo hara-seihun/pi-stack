@@ -75,7 +75,7 @@ export function contentMarkdown(content: unknown): string {
       const namespace = block.namespace ? `${block.namespace}.` : "";
       return `**Tool call · ${namespace}${String(block.name || "tool")}**\n\n${fenced(formatJson(block.arguments))}`;
     }
-    return fenced(formatJson(block));
+    return `*Unsupported context block · ${String(block.type ?? "missing type")}*\n\n${fenced(formatJson(block))}`;
   }).filter(Boolean).join("\n\n");
 }
 
@@ -223,8 +223,10 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
           if (String(block.thinking || "").trim()) {
             lazy("thinking", `thinking:${identity}:${blockIndex}`, "Thinking", String(block.thinking), stamp);
           }
-        } else {
+        } else if (block?.type === "text" || block?.type === "image") {
           inline("assistant", `assistant:${identity}:${blockIndex}`, AGENT_NAME, contentMarkdown([block]), stamp);
+        } else {
+          inline("notice", `unsupported:assistant:${identity}:${blockIndex}`, "Unsupported context block", contentMarkdown([block]), stamp);
         }
       }
       if (message.content.length === 0 && message.errorMessage) {
@@ -246,7 +248,11 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
       const key = `toolResult:${String(message.toolCallId || identity)}`;
       if (message?.isError) inline("notice", `notice:${key}`, label, text, stamp);
       else lazy("tool", key, label, text, stamp);
-    } else lazy("tool", `message:${role}:${identity}`, role, text, stamp);
+    } else if (role === "system") lazy("system", `system:${identity}`, "System", text, stamp);
+    else if (role === "custom") lazy("tool", `custom:${identity}`, `Context · ${String(message.customType ?? "custom")}`, text, stamp);
+    else if (role === "branchSummary" || role === "compactionSummary") lazy("tool", `${role}:${identity}`, role === "branchSummary" ? "Branch summary" : "Compaction summary", String(message.summary ?? ""), stamp);
+    else if (role === "bashExecution") lazy("tool", `bashExecution:${identity}`, "Shell execution", fenced(formatJson(message)), stamp);
+    else inline("notice", `unsupported:message:${role}:${identity}`, `Unsupported message role · ${role}`, fenced(formatJson(message)), stamp);
     attachIdentity(message, itemsBefore);
   }
   return items;

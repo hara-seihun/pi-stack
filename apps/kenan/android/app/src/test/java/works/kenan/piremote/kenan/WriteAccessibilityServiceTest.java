@@ -42,7 +42,7 @@ public class WriteAccessibilityServiceTest {
     private WriteAccessibilityService withActiveSender() throws Exception {
         WriteAccessibilityService service = Robolectric.buildService(WriteAccessibilityService.class).get();
         set(service, "generation", 42L);
-        set(service, "finishing", true);
+        set(service, "phase", NativeState.WritePhase.FINISHING);
         ArrayList<byte[]> packets = new ArrayList<>() {
             @Override public void clear() {
                 try {
@@ -80,7 +80,7 @@ public class WriteAccessibilityServiceTest {
             AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE).toString());
         assertEquals(expected.length(), actions.get(1).second.getInt(
             AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT));
-        assertFalse((boolean) get(service, "clipboardReady"));
+        assertEquals(NativeState.WritePhase.IDLE, get(service, "phase"));
     }
     @Test public void hintIsNeitherDictationContextNorInsertedContent() throws Exception {
         AccessibilityNodeInfo node = editable("Type a message", true);
@@ -109,20 +109,19 @@ public class WriteAccessibilityServiceTest {
         set(service, "windowId", node.getWindowId());
         shadowOf(node).setRefreshReturnValue(false);
         call(service, "completed", "Keep this transcript");
-        assertTrue((boolean) get(service, "clipboardReady"));
+        assertEquals(NativeState.WritePhase.CLIPBOARD_READY, get(service, "phase"));
         assertTrue(shadowOf(node).getPerformedActions().isEmpty());
     }
     @Test public void emptyResultFencesSenderBeforeClearingAudio() throws Exception {
         WriteAccessibilityService service = withActiveSender();
         call(service, "completed", "");
-        assertFalse((boolean) get(service, "finishing"));
+        assertEquals(NativeState.WritePhase.IDLE, get(service, "phase"));
         assertEquals(0, ((ArrayList<?>) get(service, "packets")).size());
     }
     @Test public void clipboardResultAlsoRetiresSender() throws Exception {
         WriteAccessibilityService service = withActiveSender();
         call(service, "completed", "dictated text");
-        assertTrue((boolean) get(service, "clipboardReady"));
-        assertFalse((boolean) get(service, "finishing"));
+        assertEquals(NativeState.WritePhase.CLIPBOARD_READY, get(service, "phase"));
         long retired = (long) get(service, "generation");
         call(service, "completed", "late duplicate");
         assertEquals(retired, (long) get(service, "generation"));
@@ -130,7 +129,7 @@ public class WriteAccessibilityServiceTest {
     @Test public void failedAttemptFencesSenderBeforeClearingAudio() throws Exception {
         WriteAccessibilityService service = withActiveSender();
         call(service, "failed", "connection lost");
-        assertFalse((boolean) get(service, "finishing"));
+        assertEquals(NativeState.WritePhase.IDLE, get(service, "phase"));
     }
     @After public void clearSharedOwner() throws Exception {
         KenanOverlayTest.clearSharedOverlay();
@@ -167,12 +166,14 @@ public class WriteAccessibilityServiceTest {
         shadowOf(android.os.Looper.getMainLooper()).idle();
     }
     @Test public void disablingFencesConnectingRecordingAndFinishingWithoutClosingPhoneOverlay() throws Exception {
-        for (String phase : new String[] { "connecting", "recording", "finishing" }) {
+        for (NativeState.WritePhase phase : new NativeState.WritePhase[] {
+            NativeState.WritePhase.CONNECTING, NativeState.WritePhase.BUFFERING, NativeState.WritePhase.RECORDING,
+            NativeState.WritePhase.FINISHING_CONNECTING, NativeState.WritePhase.FINISHING }) {
             WriteAccessibilityService service = focusedService(true);
             WriteAccessibilityService.settingsChanged();
             shadowOf(android.os.Looper.getMainLooper()).idle();
             assertTrue(service.visible());
-            set(service, phase, true);
+            set(service, "phase", phase);
             set(service, "generation", 42L);
             WriteConnection connection = new WriteConnection(service, NotificationIdentity.get(service).current(),
                 new WriteConnection.Events() {
@@ -197,8 +198,8 @@ public class WriteAccessibilityServiceTest {
 
             enabled(service, false);
 
-            assertFalse(phase, service.visible());
-            assertFalse(phase, service.busy());
+            assertFalse(phase.name(), service.visible());
+            assertFalse(phase.name(), service.busy());
             assertTrue((long) get(service, "generation") > 42);
             assertNull(get(service, "connection"));
             assertNull(get(service, "recorder"));
@@ -211,7 +212,7 @@ public class WriteAccessibilityServiceTest {
             assertSame(overlay, SharedOverlay.current());
             assertFalse(overlay.closed());
             call(service, "completed", "late transcript");
-            assertFalse((boolean) get(service, "clipboardReady"));
+            assertEquals(NativeState.WritePhase.IDLE, get(service, "phase"));
             service.onAccessibilityEvent(android.view.accessibility.AccessibilityEvent.obtain());
             assertFalse(service.visible());
             enabled(service, true);

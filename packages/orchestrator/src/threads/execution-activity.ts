@@ -1,8 +1,9 @@
 import { isRunnerCapacityFailure } from "./runner-capacity.js";
 import { isCompactionFailure, isRateLimitError } from "../provider-errors.js";
+import { assertNever, requireAssistantUpdate, requireRuntimeEvent, type RuntimeEvent } from "./runtime-events.js";
 
-export type ExecutionPhase = "queued" | "admitting" | "starting" | "preparing" | "finishing" | "cancelling" | "recovering"
-  | "thinking" | "responding" | "preparing_tool" | "waiting_for_model" | "waiting_on_agents" | "waiting_on_tool" | "compacting" | "retrying" | "waiting_for_capacity" | "waiting_to_retry";
+export const EXECUTION_PHASES = ["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_agents", "waiting_on_tool", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"] as const;
+export type ExecutionPhase = typeof EXECUTION_PHASES[number];
 
 export interface ExecutionActivitySnapshot {
   activity?: ExecutionPhase;
@@ -19,7 +20,11 @@ export function executionActivitySnapshot(state: ExecutionActivitySnapshot): Exe
   return { activity: state.activity, activitySince: state.activitySince, lastActivityAt: state.lastActivityAt, activityDetail: state.activityDetail };
 }
 
-const phases = new Set<ExecutionPhase>(["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_agents", "waiting_on_tool", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"]);
+const phases: ReadonlySet<unknown> = new Set(EXECUTION_PHASES);
+export function requireExecutionPhase(value: unknown): ExecutionPhase {
+  if (!phases.has(value)) throw new Error(`Unknown execution activity phase: ${String(value)}`);
+  return value as ExecutionPhase;
+}
 
 export function executionWaitActivity(metadata?: Record<string, any>): ExecutionActivitySnapshot | undefined {
   const acknowledgement = metadata?.acknowledgementWait;
@@ -38,9 +43,10 @@ export function executionWaitActivity(metadata?: Record<string, any>): Execution
 }
 
 export function restoreExecutionActivity(state: ExecutionActivity, snapshot: Record<string, any>): void {
+  const restoredPhase = snapshot.activity === undefined ? undefined : requireExecutionPhase(snapshot.activity);
   state.activityTools = new Set((Array.isArray(snapshot.tools) ? snapshot.tools : []).map((tool: any) => String(tool.toolCallId)));
   state.activityAgentTools = new Set((Array.isArray(snapshot.tools) ? snapshot.tools : []).filter((tool: any) => tool.toolName === "thread_await").map((tool: any) => String(tool.toolCallId)));
-  state.activity = phases.has(snapshot.activity) ? snapshot.activity as ExecutionPhase
+  state.activity = restoredPhase !== undefined ? restoredPhase
     : state.activityTools.size ? "waiting_on_tool" : snapshot.isThinking ? "thinking" : undefined;
   state.activitySince = state.activity && Number.isFinite(snapshot.activitySince) ? snapshot.activitySince : undefined;
   state.lastActivityAt = Number.isFinite(snapshot.lastActivityAt) ? snapshot.lastActivityAt : undefined;
@@ -51,56 +57,73 @@ export function settleExecutionActivity(state: ExecutionActivity): void {
   state.activity = undefined; state.activitySince = undefined; state.activityDetail = undefined; state.activityTools.clear(); state.activityAgentTools.clear();
 }
 
-/** Only production events advance the clock. Inspection and transport heartbeats do not. */
-export function observeExecutionActivity(state: ExecutionActivity, event: Record<string, any>, now = Date.now()): boolean {
-  const at = typeof event.emittedAt === "number" ? event.emittedAt : now;
-  let phase: ExecutionPhase = "preparing", detail = "Preparing next runtime step";
-  const update = event.assistantMessageEvent;
+type ActivityObservation = { phase: ExecutionPhase; detail: string } | "settled" | undefined;
+function assistantActivity(value: unknown): ActivityObservation {
+  const update = requireAssistantUpdate(value);
+  switch (update.type) {
+    case "text_start": case "text_delta": return { phase: "responding", detail: "Response text streaming" };
+    case "thinking_start": case "thinking_delta": return { phase: "thinking", detail: "Reasoning output streaming" };
+    case "toolcall_start": case "toolcall_delta": return { phase: "preparing_tool", detail: "Tool-call arguments streaming" };
+    case "text_end": return { phase: "preparing", detail: "Processing completed response block" };
+    case "thinking_end": return { phase: "preparing", detail: "Processing completed reasoning block" };
+    case "toolcall_end": return { phase: "preparing", detail: "Dispatching completed tool call" };
+    // Start is a header; message_end owns terminal processing, not stream metadata.
+    case "start": case "done": case "error": return undefined;
+  }
+  return assertNever(update);
+}
+function activityObservation(state: ExecutionActivity, event: RuntimeEvent): ActivityObservation {
   switch (event.type) {
-    case "owner_execution_phase":
-      if (!phases.has(event.activity)) return false;
-      phase = event.activity; detail = String(event.activityDetail ?? ""); break;
+    case "owner_execution_phase": return { phase: requireExecutionPhase(event.activity), detail: String(event.activityDetail ?? "") };
     case "agent_start":
-      state.activityTools.clear(); state.activityAgentTools.clear(); detail = "Preparing context and runtime hooks"; break;
-    case "model_request_start":
-      phase = "waiting_for_model"; detail = "Model request sent; waiting for output"; break;
-    case "message_start":
-      return false;
-    case "message_update":
-      switch (update?.type) {
-        case "text_start": case "text_delta": phase = "responding"; detail = "Response text streaming"; break;
-        case "thinking_start": case "thinking_delta": phase = "thinking"; detail = "Reasoning output streaming"; break;
-        case "toolcall_start": case "toolcall_delta": phase = "preparing_tool"; detail = "Tool-call arguments streaming"; break;
-        case "text_end": detail = "Processing completed response block"; break;
-        case "thinking_end": detail = "Processing completed reasoning block"; break;
-        case "toolcall_end": detail = "Dispatching completed tool call"; break;
-        default: return false;
-      }
-      break;
+      state.activityTools.clear(); state.activityAgentTools.clear();
+      return { phase: "preparing", detail: "Preparing context and runtime hooks" };
+    case "model_request_start": return { phase: "waiting_for_model", detail: "Model request sent; waiting for output" };
+    case "message_update": return assistantActivity(event.assistantMessageEvent);
     case "message_end":
-      if (event.message?.role !== "assistant") return false;
-      detail = "Processing completed assistant message"; break;
+      if ((event.message as { role?: string } | undefined)?.role !== "assistant") return undefined;
+      return { phase: "preparing", detail: "Processing completed assistant message" };
     case "tool_execution_start": case "tool_execution_update":
       state.activityTools.add(String(event.toolCallId));
       if (event.toolName === "thread_await") state.activityAgentTools.add(String(event.toolCallId));
-      phase = "waiting_on_tool"; detail = "Tool execution observed"; break;
+      return { phase: "waiting_on_tool", detail: "Tool execution observed" };
     case "tool_execution_end":
-      state.activityTools.delete(String(event.toolCallId)); state.activityAgentTools.delete(String(event.toolCallId)); detail = "Integrating tool results"; break;
-    case "auto_retry_start":
-      phase = "retrying"; detail = "Model retry scheduled";
-      if (Number.isFinite(event.attempt)) detail += ` (attempt ${event.attempt})`;
-      if (Number.isFinite(event.delayMs)) detail += `; delay ${event.delayMs} ms`;
-      break;
-    case "compaction_start": case "auto_compaction_start":
-      phase = "compacting"; detail = "Context compaction started"; break;
-    case "auto_retry_end": detail = "Preparing retry continuation"; break;
-    case "compaction_end": case "auto_compaction_end": detail = "Integrating compacted context"; break;
+      state.activityTools.delete(String(event.toolCallId)); state.activityAgentTools.delete(String(event.toolCallId));
+      return { phase: "preparing", detail: "Integrating tool results" };
+    case "auto_retry_start": case "summarization_retry_scheduled": {
+      let detail = event.type === "auto_retry_start" ? "Model retry scheduled" : "Context summarization retry scheduled";
+      if (typeof event.attempt === "number" && Number.isFinite(event.attempt)) detail += ` (attempt ${event.attempt})`;
+      if (typeof event.delayMs === "number" && Number.isFinite(event.delayMs)) detail += `; delay ${event.delayMs} ms`;
+      return { phase: "retrying", detail };
+    }
+    case "summarization_retry_attempt_start": return { phase: "compacting", detail: "Context summarization retry started" };
+    case "compaction_start": case "auto_compaction_start": return { phase: "compacting", detail: "Context compaction started" };
+    case "auto_retry_end": return { phase: "preparing", detail: "Preparing retry continuation" };
+    case "compaction_end": case "auto_compaction_end": case "summarization_retry_finished": return { phase: "preparing", detail: "Integrating compacted context" };
     case "agent_end": case "agent_settled":
-      state.activityTools.clear(); phase = "finishing"; detail = "Synchronizing final execution result"; break;
-    case "thread_settled": case "thread_error":
-      settleExecutionActivity(state); state.lastActivityAt = Math.max(state.lastActivityAt ?? at, at); return true;
-    default: return false;
+      state.activityTools.clear(); state.activityAgentTools.clear();
+      return { phase: "finishing", detail: "Synchronizing final execution result" };
+    case "thread_settled": case "thread_error": return "settled";
+    // Inspection, UI, persistence, transport and direct RPC shell output do not prove agent progress.
+    case "message_start": case "turn_start": case "turn_end": case "queue_update":
+    case "entry_appended": case "session_info_changed": case "thinking_level_changed":
+    case "response": case "extension_ui_request": case "extension_error": case "user_bash": case "bash_execution_update":
+    case "context_update": case "session_changed": case "conversation_replaced":
+    case "command_settled": case "runner_attached": case "thread_message_inserted": return undefined;
   }
+  return assertNever(event);
+}
+
+/** Only production events advance the clock. Inspection and transport heartbeats do not. */
+export function observeExecutionActivity(state: ExecutionActivity, input: unknown, now = Date.now()): boolean {
+  const event = requireRuntimeEvent(input);
+  const at = event.emittedAt ?? now;
+  const observation = activityObservation(state, event);
+  if (observation === undefined) return false;
+  if (observation === "settled") {
+    settleExecutionActivity(state); state.lastActivityAt = Math.max(state.lastActivityAt ?? at, at); return true;
+  }
+  let { phase, detail } = observation;
   if (state.activityTools.size && !["compacting", "retrying", "cancelling", "finishing", "recovering"].includes(phase)) {
     phase = state.activityAgentTools.size === state.activityTools.size ? "waiting_on_agents" : "waiting_on_tool";
     detail = phase === "waiting_on_agents" ? "Waiting for child settlement" : "Tool execution observed";

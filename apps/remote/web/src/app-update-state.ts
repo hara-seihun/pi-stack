@@ -1,4 +1,5 @@
 import type { AppUpdate, AppUpdateCheck, AppUpdateInstall } from "./native";
+import { requireState } from "../../shared/explicit-state";
 
 export interface UpdateState {
   visible: boolean;
@@ -46,7 +47,9 @@ export class AppUpdater {
 
   private async run(manual: boolean) {
     try {
-      this.update = (await this.port.check()).update;
+      const checked = (await this.port.check()).update;
+      if (checked !== null) requireState(checked.kind, { apk: true, web: true } satisfies Record<AppUpdate["kind"], true>, "App update kind");
+      this.update = checked;
     } catch (error) {
       this.publish({ ...this.state, error: `Update check failed. ${message(error)}` });
       return;
@@ -64,11 +67,13 @@ export class AppUpdater {
     this.publish({ visible: true, busy: true, status: update.kind === "web" ? "Applying update…" : "Downloading update…", error: "", approval: false });
     try {
       const result = await this.port.install();
-      if (result.status === "installer-opened") {
-        this.remember(result.revision ?? update.revision);
-        this.publish({ visible: true, busy: false, status: "Finish the update in Android. Tap Update to reopen installation.", error: "", approval: true });
-      } else {
-        this.publish({ visible: true, busy: true, status: "Restarting…", error: "", approval: false });
+      requireState(result.status, { "installer-opened": true, reloading: true } satisfies Record<AppUpdateInstall["status"], true>, "App installation result");
+      switch (result.status) {
+        case "installer-opened":
+          this.remember(result.revision ?? update.revision);
+          this.publish({ visible: true, busy: false, status: "Finish the update in Android. Tap Update to reopen installation.", error: "", approval: true });
+          break;
+        case "reloading": this.publish({ visible: true, busy: true, status: "Restarting…", error: "", approval: false }); break;
       }
     } catch (error) {
       const failure = message(error);

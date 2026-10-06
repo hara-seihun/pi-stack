@@ -1,9 +1,11 @@
 import type { Session } from "../../types";
 import type { Room, RoomSnapshot } from "../../../../shared/rooms";
+import { assertNever } from "../../../../shared/explicit-state";
+import { validateThreadObservation } from "../../../../shared/state-validation";
 
 export type StatusKey =
   | "queued" | "admitting" | "starting" | "preparing" | "finishing" | "cancelling" | "recovering" | "reporting_error" | "thinking" | "responding" | "preparing_tool" | "waiting_for_model" | "waiting_for_capacity" | "waiting_to_retry"
-  | "tool" | "compacting" | "retrying" | "awaiting" | "stopping" | "error"
+  | "tool" | "compacting" | "retrying" | "awaiting" | "waiting_for_job" | "waiting_for_deployment" | "waiting_for_message" | "stopping" | "error"
   | "stopped" | "archived" | "idle" | "offline";
 
 export interface ThreadStatus {
@@ -53,15 +55,21 @@ function executionStatus(session: Pick<Session, "activity" | "activeTools">): Th
     case "waiting_on_tool": return toolStatus(session.activeTools);
     case "compacting": return { key: "compacting", label: "Compacting context", short: "Compacting", busy: true, attention: false };
     case "retrying": return { key: "retrying", label: "Retrying model request", short: "Retrying", busy: true, attention: false };
-    default: return STATUS_REPORTING_ERROR;
+    case "status_error": return STATUS_REPORTING_ERROR;
+    case "idle": case "awaiting": return { ...STATUS_REPORTING_ERROR, title: `Running execution reports the non-execution phase ${session.activity}.` };
   }
+  return assertNever(session.activity, "Execution activity");
 }
 
 type StatusSession = Pick<Session, "state" | "held" | "activity" | "activeTools" | "idleUnread" | "archivedAt">
-  & Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError">>;
+  & Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents" | "waitingForChildren">>;
 
 export function threadStatus(session: StatusSession): ThreadStatus {
+  validateThreadObservation(session);
   if (session.archivedAt) return { key: "archived", label: "Archived", short: "Archived", busy: false, attention: false };
+  if (session.activity === "status_error" && !session.held) return { ...STATUS_REPORTING_ERROR,
+    ...(session.waitingOnAgents && !Object.hasOwn(session.waitingOnAgents, "kind") ? { label: "Wait type missing", short: "Wait type missing" } : {}),
+    busy: session.state === "running", title: session.activityDetail || session.executionError || STATUS_REPORTING_ERROR.title };
   if (session.executionError) return { key: "error", label: session.held && session.state === "running" ? "Stop failed" : "Execution error", short: "Error", title: session.executionError, busy: session.state === "running", attention: true };
   if (session.held && session.state === "running") return { key: "stopping", label: "Stopping", short: "Stopping", busy: true, attention: false, title: "Cancellation has been requested, but the runtime has not confirmed it." };
   if (session.held) return { key: "stopped", label: "Stopped", short: "Stopped", busy: false, attention: true };
@@ -74,17 +82,44 @@ export function threadStatus(session: StatusSession): ThreadStatus {
       ...(session.activityDetail ? { title: [status.title, session.activityDetail].filter(Boolean).join(" · ") } : {}),
     };
   }
-  if (session.activity === "awaiting") return { key: "awaiting", label: "Waiting on agents", short: "Waiting on agents", busy: true, attention: false,
-    since: session.activitySince, title: session.activityDetail };
-  return { key: "idle", label: "Idle", short: "Idle", busy: false, attention: session.idleUnread };
+  switch (session.activity) {
+    case "awaiting": return dependencyStatus(session);
+    case "status_error": return { ...STATUS_REPORTING_ERROR, busy: false, title: session.activityDetail || STATUS_REPORTING_ERROR.title };
+    case "idle": return { key: "idle", label: "Idle", short: "Idle", busy: false, attention: session.idleUnread };
+    case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering":
+    case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "waiting_for_capacity": case "waiting_to_retry":
+    case "waiting_on_agents": case "waiting_on_tool": case "compacting": case "retrying":
+      return { ...STATUS_REPORTING_ERROR, busy: false, title: `Idle thread reports the execution phase ${session.activity}.` };
+  }
+  return assertNever(session.activity, "Idle activity");
+}
+
+function dependencyStatus(session: StatusSession): ThreadStatus {
+  const wait = session.waitingOnAgents;
+  if (!wait) {
+    if (session.waitingForChildren === true) return { key: "awaiting", label: "Waiting on agents", short: "Waiting on agents", busy: true, attention: false, since: session.activitySince, title: session.activityDetail };
+    return { ...STATUS_REPORTING_ERROR, busy: false, title: "Awaiting thread has no typed dependency or observed active children." };
+  }
+  if (!Object.hasOwn(wait, "kind")) return { ...STATUS_REPORTING_ERROR, label: "Wait type missing", short: "Wait type missing", busy: false, title: "The stored wait has no dependency type. Set an explicitly typed wait to repair it." };
+  const status = (key: StatusKey, label: string): ThreadStatus => ({ key, label, short: label, busy: true, attention: false, since: wait.since, title: wait.reason });
+  switch (wait.kind) {
+    case "agents": return status("awaiting", "Waiting on agents");
+    case "job": return status("waiting_for_job", "Waiting for job");
+    case "deployment": return status("waiting_for_deployment", "Waiting for deployment");
+    case "message": return status("waiting_for_message", "Waiting for message");
+  }
+  return assertNever(wait, "Dependency wait");
 }
 
 export function roomThreadStatus(room: Room | RoomSnapshot): ThreadStatus {
+  if (room.state === undefined || room.activity === undefined) return { ...STATUS_REPORTING_ERROR, busy: false, title: "Room owner did not report state and activity." };
+  validateThreadObservation(room);
   if (room.activity === "status_error") return { ...STATUS_REPORTING_ERROR, title: room.activityDetail || room.error || STATUS_REPORTING_ERROR.title };
   return threadStatus({
-    state: room.state ?? "idle", held: room.held ?? false, activity: room.activity ?? "idle",
+    state: room.state, held: room.held ?? false, activity: room.activity,
     activeTools: room.activeTools ?? [], activitySince: room.activitySince, lastActivityAt: room.lastActivityAt,
-    activityDetail: room.activityDetail, executionError: room.executionError ?? room.error, idleUnread: false, archivedAt: null,
+    activityDetail: room.activityDetail, executionError: room.executionError ?? room.error,
+    waitingOnAgents: room.waitingOnAgents, waitingForChildren: room.waitingForChildren, idleUnread: false, archivedAt: null,
   });
 }
 
@@ -96,11 +131,12 @@ export function attentionRank(status: ThreadStatus): number {
   if (status.key === "idle" && status.attention) return 2;
   switch (status.key) {
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering": case "tool": case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "waiting_for_capacity": case "waiting_to_retry": case "compacting": case "retrying": case "stopping": return 10;
-    case "awaiting": return 11;
+    case "awaiting": case "waiting_for_job": case "waiting_for_deployment": case "waiting_for_message": return 11;
     case "idle": return 21;
     case "archived": return 30;
     case "offline": return 40;
   }
+  return assertNever(status.key, "Status attention rank");
 }
 
 function elapsed(at: number, now: number): string {
@@ -115,7 +151,7 @@ export function activityTiming(status: ThreadStatus, now: number): { elapsed?: s
   if (!status.busy) return {};
   return {
     ...(status.since ? { elapsed: elapsed(status.since, now) } : {}),
-    ...(status.key !== "awaiting" && status.lastActivityAt && now - status.lastActivityAt >= 15_000
+    ...(!["awaiting", "waiting_for_job", "waiting_for_deployment", "waiting_for_message"].includes(status.key) && status.lastActivityAt && now - status.lastActivityAt >= 15_000
       ? { quiet: elapsed(status.lastActivityAt, now) } : {}),
   };
 }

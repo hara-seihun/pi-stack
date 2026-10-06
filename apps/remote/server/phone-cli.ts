@@ -70,9 +70,12 @@ export function parsePhoneArgs(argv: string[], readStdin: () => string = () => r
   if (!operation || operation === "help") return { ok: true, value: { kind: "help", options } };
   if (operation === "list") return values.length ? { ok: false, message: "list takes no arguments" } : { ok: true, value: { kind: "list", options } };
   if (operation === "catalogue" || operation === "catalog") return values.length > 1 ? { ok: false, message: "catalogue takes at most one command" } : { ok: true, value: { kind: "catalogue", name: values[0], options } };
+  const operations = ["command", "status", "tree", "screenshot", "notifications", "tap", "swipe", "text", "action", "say", "point", "overlay", "global", "launch", "open", "clipboard", "files"] as const;
+  const supported = operations.find(candidate => candidate === operation);
+  if (supported === undefined) return { ok: false, message: `Unknown operation ${operation}; run pi-phone --help` };
   let command: string; let args: Record<string, unknown>;
   const numeric = (index: number) => values[index] === undefined ? undefined : Number(values[index]);
-  switch (operation) {
+  switch (supported) {
     case "command": {
       if (!values[0] || values.length > 2) return { ok: false, message: "command requires NAME [JSON|-]" };
       command = values[0];
@@ -82,7 +85,7 @@ export function parsePhoneArgs(argv: string[], readStdin: () => string = () => r
     }
     case "status": case "tree": case "screenshot": case "notifications":
       if (values.length) return { ok: false, message: `${operation} takes no arguments` };
-      command = ({ status: "status", tree: "ui.tree", screenshot: "screen.capture", notifications: "notifications.list" })[operation]!; args = {}; break;
+      command = ({ status: "status", tree: "ui.tree", screenshot: "screen.capture", notifications: "notifications.list" })[supported]!; args = {}; break;
     case "tap": command = "ui.tap"; args = { x: numeric(0), y: numeric(1) }; if (values.length !== 2) return { ok: false, message: "tap requires X Y" }; break;
     case "swipe": command = "ui.swipe"; args = { x1: numeric(0), y1: numeric(1), x2: numeric(2), y2: numeric(3), ...(values[4] === undefined ? {} : { durationMs: numeric(4) }) }; if (values.length < 4 || values.length > 5) return { ok: false, message: "swipe requires X1 Y1 X2 Y2 [MS]" }; break;
     case "text": command = "ui.text"; args = { text: values[0], ...(values[1] === undefined ? {} : { nodeId: values[1] }) }; if (values.length < 1 || values.length > 2) return { ok: false, message: "text requires TEXT [NODE_ID]" }; break;
@@ -94,8 +97,8 @@ export function parsePhoneArgs(argv: string[], readStdin: () => string = () => r
       command = `overlay.${values[0]}`; args = {}; break;
     case "global": case "launch": case "open": case "clipboard":
       if (values.length !== 1) return { ok: false, message: `${operation} requires one argument` };
-      command = ({ global: "ui.global", launch: "app.launch", open: "url.open", clipboard: "clipboard.set" })[operation]!;
-      args = { [({ global: "action", launch: "package", open: "url", clipboard: "text" })[operation]!]: values[0] }; break;
+      command = ({ global: "ui.global", launch: "app.launch", open: "url.open", clipboard: "clipboard.set" })[supported]!;
+      args = { [({ global: "action", launch: "package", open: "url", clipboard: "text" })[supported]!]: values[0] }; break;
     case "files": {
       const [action, path] = values;
       if (!action || !["list", "read", "write", "mkdir", "delete"].includes(action) || values.length > 2 || (action !== "list" && !path)) return { ok: false, message: "files requires list|read|write|mkdir|delete [PHONE_PATH]" };
@@ -109,7 +112,6 @@ export function parsePhoneArgs(argv: string[], readStdin: () => string = () => r
       }
       break;
     }
-    default: return { ok: false, message: `Unknown operation ${operation}; run pi-phone --help` };
   }
   if (operation === "screenshot" && !options.output) return { ok: false, message: "screenshot requires --output PATH" };
   if (options.confirm) args = { ...args, confirm: true };

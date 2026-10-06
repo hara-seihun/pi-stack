@@ -82,6 +82,12 @@ it("marks accepted stream loss indeterminate and never retries provider dispatch
   expect(transport).toHaveBeenCalledTimes(1);
 });
 
+it("fences unknown provider SSE variants even when a completed result follows", async () => {
+  const transport = vi.fn(async () => new Response(event("response.new_variant", {}) + events()));
+  expect(await executeCompletion(input, run, options(transport))).toMatchObject({ state: "indeterminate", error: { code: "protocol", message: expect.stringContaining("Unknown provider response event type") } });
+  expect(transport).toHaveBeenCalledTimes(1);
+});
+
 it("refuses to invent token usage when a terminal provider response omits it", async () => {
   const transport = async () => new Response(events(true, false));
   expect(await executeCompletion(input, run, options(transport))).toMatchObject({ state: "failed", error: { code: "missing-provider-evidence" } });

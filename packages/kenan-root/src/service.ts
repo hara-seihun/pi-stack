@@ -80,7 +80,8 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
         } else if (record.state === "failed" || record.state === "interrupted") {
           reply = kenanRequestNotice(id, record.state);
           logged = await rpc("/v1/root/log-request-status", { rootSessionId: record.admission.rootSessionId, requestId: id, status: record.state });
-        } else return;
+        } else if (record.state === "executing" || record.state === "finalizing") return;
+        else throw new Error("Invalid root request delivery state");
         if (!logged.ok) return;
         const result = await options.bridge!.reply({ consentId: id, person: record.admission.person, threadId: record.admission.threadId, reply });
         if (result.ok && result.value.accepted) requests.save({ ...record, delivery: "delivered" });
@@ -117,9 +118,17 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       }
     } finally { active--; }
   };
-  const status = (record: RootRequest): Response => record.state === "completed"
-    ? rootReplyResponse(record.chosen.reply)
-    : Response.json({ requestId: record.id, status: ["executing", "finalizing"].includes(record.state) ? "pending" : record.state }, { status: record.state === "executing" || record.state === "finalizing" ? 202 : 200, headers: { "cache-control": "no-store" } });
+  const status = (record: RootRequest): Response => {
+    switch (record.state) {
+      case "completed": return rootReplyResponse(record.chosen.reply);
+      case "executing": case "finalizing":
+        return Response.json({ requestId: record.id, status: "pending" }, { status: 202, headers: { "cache-control": "no-store" } });
+      case "failed": case "interrupted":
+        return Response.json({ requestId: record.id, status: record.state }, { headers: { "cache-control": "no-store" } });
+    }
+    record satisfies never;
+    throw new Error("Invalid root request status");
+  };
   const authorize = (callerToken: string, record: RootRequest) => rpc("/v1/root/authorize-request", { callerToken, rootSessionId: record.admission.rootSessionId });
   const handle = async (request: Request): Promise<Response> => {
     if (!options.enabled()) return Response.json({ error: "Root Kenan is disabled" }, { status: 503 });
@@ -145,6 +154,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
         }).filter(Boolean) : [];
         return Response.json({ sessions }, { headers: { "cache-control": "no-store" } });
       }
+      if (admission.route.kind !== "transcript") throw new Error("Invalid root administrator route");
       const directory = join(options.sessionsDir, admission.route.sessionId);
       if (!existsSync(directory) || lstatSync(directory).isSymbolicLink()) return new Response("Not found", { status: 404 });
       const files = readdirSync(directory).filter(name => name.endsWith(".jsonl") && !lstatSync(join(directory, name)).isSymbolicLink());
