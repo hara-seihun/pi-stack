@@ -95,6 +95,7 @@ it.each([
     ? { PI_REMOTE_SESSION_ID: "mirror-owner", PI_REMOTE_SERVER_URL: "http://127.0.0.1:1" }
     : { PI_REMOTE_SESSION_ID: "", PI_REMOTE_SERVER_URL: "" }, raw);
   const answer = f.message([{ type: "text", text: "done" }], "stop");
+  answer.usage = { ...answer.usage, input: 12_000, output: 37, cacheRead: 2_000, cacheWrite: 300, totalTokens: 14_337 };
   f.native.agent.streamFunction = () => f.reply(answer);
   expect(await f.command("prompt", { workId: "capture", message: "capture" })).toMatchObject({ success: true });
   await f.waitFor(event => event.type === "agent_settled");
@@ -104,9 +105,13 @@ it.each([
   expect(updates).toMatchObject([
     { contextOwner, context: { tools: expect.any(Array), messages: [request] } },
     { contextOwner, context: { tools: expect.any(Array), messages: [request, answer] } },
+    { contextOwner, context: { tools: expect.any(Array), messages: [request, answer], contextModel: answer.model,
+      contextUsage: { tokens: 14_337, contextWindow: f.native.model!.contextWindow, percent: 14_337 / f.native.model!.contextWindow * 100 } } },
   ]);
+  expect((updates[1]!.context as any).contextUsage).toEqual((updates[0]!.context as any).contextUsage);
+  expect((updates[2]!.context as any).contextUsage).toEqual(f.native.getContextUsage());
   if (raw) for (const update of updates) expect(update.context).toMatchObject({ systemPrompt: "", tools: [] });
-  expect(f.events.indexOf(updates[1]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
+  expect(f.events.indexOf(updates[2]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
 }, 3000);
 
 it("reconnect state preserves observed streaming phase and production timestamps", async () => {
@@ -268,22 +273,35 @@ it("captures tool results before the next request without duplicating completed 
       execute: async () => ({ content: [{ type: "text", text: "tool output" }], details: {} }) });
   }`);
   const call = f.message([{ type: "toolCall", id: "result", name: "fixture_result", arguments: {} }], "toolUse");
+  call.usage = { ...call.usage, input: 10_000, output: 20, totalTokens: 10_020 };
   const answer = f.message([{ type: "text", text: "done" }], "stop");
+  answer.usage = { ...answer.usage, input: 11_000, output: 30, totalTokens: 11_030 };
   let requests = 0;
-  f.native.agent.streamFunction = () => f.reply(requests++ === 0 ? call : answer);
+  let nextRequestUsage: ReturnType<AgentSession["getContextUsage"]>;
+  f.native.agent.streamFunction = () => {
+    if (requests++ === 0) return f.reply(call);
+    nextRequestUsage = f.native.getContextUsage();
+    return f.reply(answer);
+  };
   expect(await f.command("prompt", { workId: "tool", message: "use tool" })).toMatchObject({ success: true });
   await f.waitFor(event => event.type === "agent_settled");
   const user = { role: "user", content: [{ type: "text", text: "use tool" }] };
   const result = { role: "toolResult", toolCallId: "result", toolName: "fixture_result", isError: false,
     content: [{ type: "text", text: "tool output" }] };
   expect(requests).toBe(2);
-  expect(f.events.filter(event => event.type === "context_update")).toMatchObject([
+  const updates = f.events.filter(event => event.type === "context_update");
+  expect(updates).toMatchObject([
     { context: { messages: [user] } },
     { context: { messages: [user, call] } },
     { context: { messages: [user, call, result] } },
-    { context: { messages: [user, call, result] } },
-    { context: { messages: [user, call, result, answer] } },
+    { context: { messages: [user, call, result], contextUsage: nextRequestUsage } },
+    { context: { messages: [user, call, result], contextUsage: nextRequestUsage } },
+    { context: { messages: [user, call, result, answer], contextUsage: nextRequestUsage } },
+    { context: { messages: [user, call, result, answer], contextModel: answer.model, contextUsage: f.native.getContextUsage() } },
   ]);
+  expect(nextRequestUsage?.tokens).toBeGreaterThanOrEqual(10_020);
+  expect((updates[6]!.context as any).contextUsage.tokens).toBe(11_030);
+  expect(f.events.indexOf(updates[6]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
 }, 3000);
 
 it("applies validated speed changes to this session's provider requests", async () => {
