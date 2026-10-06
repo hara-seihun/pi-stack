@@ -942,9 +942,14 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         ? <section className="empty-state"><strong>Opening…</strong></section>
         : <section className="empty-state"><strong>{route.tab === "workers" ? "Choose a worker" : "Choose a chat"}</strong></section>;
 
-  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
-    : route.tab === "workers" ? <Suspense fallback={<Loading label="Loading workers…" />}><WorkersTree sessions={workerSessions} selectedId={aiId} compactSelected={layout !== "phone"} filter={workersFilter} onFilter={setWorkersFilter} onOpen={openWorker} onPrefetch={prefetchSession} onSelectedVisibleChange={onSelectedVisibleChange} /></Suspense>
-    : null;
+  const list = (() => {
+    switch (route.tab) {
+      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
+      case "workers": return <Suspense fallback={<Loading label="Loading workers…" />}><WorkersTree sessions={workerSessions} selectedId={aiId} compactSelected={layout !== "phone"} filter={workersFilter} onFilter={setWorkersFilter} onOpen={openWorker} onPrefetch={prefetchSession} onSelectedVisibleChange={onSelectedVisibleChange} /></Suspense>;
+      case "calendar": case "machine": case "files": return null;
+    }
+    return assertNever(route, "App list route");
+  })();
 
   function filesScreen(mode: "stack" | "split") {
     const seen = new Set(["/", home]);
@@ -956,12 +961,15 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     return <Suspense fallback={<Loading label="Loading files…" />}><FilesScreen layout={mode} selectedPath={route.tab === "files" ? route.path : null} shortcuts={shortcuts} onAttach={selectedAiId(stateRef.current) ? path => void attachPath(path) : undefined} onSelect={path => navigate({ tab: "files", path }, { replace: mode === "split" || !path })} /></Suspense>;
   }
 
-  const detail = route.tab === "calendar"
-    ? <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>
-    : route.tab === "machine"
-    ? <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>
-    : route.tab === "files" ? filesScreen(layout === "phone" ? "stack" : "split")
-    : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
+  const detail = (() => {
+    switch (route.tab) {
+      case "calendar": return <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>;
+      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
+      case "files": return filesScreen(layout === "phone" ? "stack" : "split");
+      case "chats": case "workers": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
+    }
+    return assertNever(route, "App detail route");
+  })();
 
   const showTabs = route.tab === "calendar" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
