@@ -1,3 +1,4 @@
+import { isRunnerCapacityFailure } from "./runner-capacity.js";
 import { isCompactionFailure, isRateLimitError } from "../provider-errors.js";
 
 export type ExecutionPhase = "queued" | "admitting" | "starting" | "preparing" | "finishing" | "cancelling" | "recovering"
@@ -24,8 +25,9 @@ export function executionWaitActivity(metadata?: Record<string, any>): Execution
   const provider = metadata?.providerWait, admission = metadata?.admissionWait, startup = metadata?.startupFailure;
   const wait = provider ?? admission ?? startup;
   if (!wait) return undefined;
-  const capacity = provider ? isRateLimitError(String(provider.failure ?? "")) && !isCompactionFailure(String(provider.failure ?? "")) : !!admission;
-  let activityDetail = capacity ? "Waiting for model capacity" : provider ? "Waiting to retry a provider failure" : "Runtime startup failed; retry scheduled";
+  const runnerCapacity = !provider && !admission && !!startup && isRunnerCapacityFailure(String(startup.error ?? ""));
+  const capacity = provider ? isRateLimitError(String(provider.failure ?? "")) && !isCompactionFailure(String(provider.failure ?? "")) : !!admission || runnerCapacity;
+  let activityDetail = runnerCapacity ? "Waiting for runner capacity" : capacity ? "Waiting for model capacity" : provider ? "Waiting to retry a provider failure" : "Runtime startup failed; retry scheduled";
   if (Number.isFinite(wait.retryAt)) activityDetail += `; next retry ${new Date(wait.retryAt).toISOString()}`;
   const since = Number.isFinite(wait.since) ? wait.since : undefined;
   return { activity: capacity ? "waiting_for_capacity" : "waiting_to_retry", activitySince: since,
