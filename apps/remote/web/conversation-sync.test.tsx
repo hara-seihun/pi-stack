@@ -81,8 +81,9 @@ test("questions replace messaging, expose only the next answer, and preserve dic
 });
 
 test("offline status and reconnect take precedence even while a refresh is pending", () => {
-  const offline = render({ syncing: true, offline: "Connection lost" });
+  const offline = render({ syncing: true, offline: "Connection lost. Reconnecting…" });
   expect(header(offline)).toContain('data-status="offline"');
+  expect(header(offline)).toContain("Connection lost. Reconnecting…");
   expect(header(offline)).toContain("Reconnect");
   expect(header(offline)).not.toContain("Updating…");
   expect(offline).toContain("Cached conversation text");

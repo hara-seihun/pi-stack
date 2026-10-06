@@ -86,7 +86,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onDraw(): void;
   onDismissControlError(): void;
 }) {
-  const status = offline ? OFFLINE_STATUS : threadStatus(session);
+  const status = offline ? { ...OFFLINE_STATUS, label: offline, title: offline } : threadStatus(session);
   const running = session.state === "running";
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
   const queued = session.queuedMessages.length;

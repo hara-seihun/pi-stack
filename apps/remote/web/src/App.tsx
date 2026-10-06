@@ -457,6 +457,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const notificationsSubscribed = useRef(false);
   const carrying = useRef(false);
   useEffect(() => {
+    let protocolError = "";
+    let connectionError = "";
     const handle = (event: StreamEvent) => {
       carrying.current = true;
       switch (event.type) {
@@ -528,7 +530,10 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           stream.current?.remember({ notificationsAfter: event.feed.cursor });
           break;
         }
-        case "error": patch({ offline: event.message }); break;
+        case "error":
+          protocolError = event.message;
+          patch({ offline: connectionError || protocolError });
+          break;
       }
     };
     const opening = currentRoute();
@@ -541,7 +546,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       },
       onEvent: handle,
       onSelectionStatus: ({ sessionId, ready }) => {
-        if (sessionId === selectedAiId(stateRef.current)) patch({ threadSyncing: !ready });
+        if (sessionId !== selectedAiId(stateRef.current)) return;
+        if (ready) protocolError = "";
+        patch({ threadSyncing: !ready, offline: connectionError || protocolError });
       },
       onStatus: (status) => {
         if (status.state !== "open") carrying.current = false;
@@ -551,8 +558,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           sectionLoad.current?.finish();
           sectionLoad.current = null;
         }
+        connectionError = status.state === "offline" ? status.error || "Offline" : "";
         patch({
-          offline: status.state === "offline" ? status.error || "Offline" : "",
+          offline: connectionError || protocolError,
           syncing: status.state !== "open" || !carrying.current,
         });
       },
