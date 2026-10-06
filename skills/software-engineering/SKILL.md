@@ -1,7 +1,21 @@
 ---
 name: software-engineering
-description: Mandatory software-engineering principles and defaults. Load this skill whenever a task is even tangentially related to software engineering, including code, scripts, configuration, tests, debugging, architecture, APIs, databases, automation, CI/CD, deployment, infrastructure, operations, developer tooling, code review, technical planning, or software documentation.
+description: REQUIRED FIRST for every software-related task. Read SKILL.md before planning, coding, debugging, reviewing, delegating or operating software, including small UI changes, scripts, configuration, tests, APIs, databases, automation, deployment, infrastructure and technical documentation. Applies even tangentially. Invalid states must be unrepresentable; every path yields a valid state or an explicit typed error.
 ---
+
+# Software engineering — load before doing the work
+
+Read this skill whenever software is involved, before choosing an implementation or delegating it. Small changes, UI indicators, operational fixes and documentation are engineering work too. The advertised description is a routing instruction, not a substitute for loading this file.
+
+## Valid states or explicit errors
+
+**Invalid states must be unrepresentable. Every path must produce a valid state or an explicit typed error.** This applies end to end: producer, persistence, API, client and UI. Use discriminated unions and exhaustive handling so missing cases fail at compile time, and validate external input at the boundary before it enters the domain.
+
+- A success value contains everything its consumer needs. Optional fields, contradictory flags and nullable payloads must not permit half-success states.
+- Expected intermediate states such as loading or recalculating are explicit variants, with a named owner and a completion or failure path. They are not an indefinite escape hatch for missing data.
+- Missing, malformed, stale or unsupported required data produces a specific error that the caller handles. Do not turn it into `undefined`, an empty string, zero, a dash, a generic “unavailable”, or an apparently successful fallback. A real zero is a valid value, not a missing-value substitute.
+- A UI must show a valid result, a meaningful owned intermediate state, or a specific error. A placeholder that hides why a required value is absent is not a valid state. A context-token counter that silently displays a dash is an example of this defect.
+- Follow every branch through to what the consumer receives, including startup, restart, model changes, compaction, absent stored data and provider failure. Tests should distinguish valid results from explicit failures, not bless silent placeholders.
 
 ## Modern agents are first class engineers and operators
 
@@ -448,7 +462,7 @@ for await (
 
 ### Typing
 
-Strong typing is incredibly useful because it allows you to make certain guarantees about your program that let you reduce the amount of code that you write and the amount of conceptual area you have to keep track of. In almost all systems, you can make typing such that invalid states are unrepresentable.
+Make invalid states unrepresentable in the types, rather than detecting them after constructing them. Every transition returns a valid next state or a typed error; every consumer handles the complete union. Strong typing reduces both runtime checks and the conceptual area of the system.
 
 Here is an example of code written poorly, and code written properly
 
