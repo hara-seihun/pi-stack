@@ -33,19 +33,27 @@ test("abort cancels a silent response reader even if fetch stopped forwarding it
   assert.equal(cancelled, 1);
 });
 
-test("interrupted native requests retry after restart; terminal failures fence until explicit recovery", () => {
+test("interrupted native requests retry after restart; terminal failures fence with growing, expiring backoff", () => {
   const sm = SessionManager.inMemory();
   const first = sm.appendMessage({ role: "user", content: "fixture", timestamp: 1 });
   sm.appendCustomEntry(ATTEMPT, { state: "started", modelKey: "astra" });
   const branch = JSON.parse(JSON.stringify(sm.getBranch()));
   assert.equal(blockedAttempt(branch, "astra"), undefined);
   sm.appendCustomEntry(ATTEMPT, { state: "failed", modelKey: "astra", error: "provider rejected" });
-  assert.equal(blockedAttempt(sm.getBranch(), "astra").error, "provider rejected");
-  assert.equal(blockedAttempt(sm.getBranch(), "luna"), undefined);
-  sm.appendCustomEntry(ATTEMPT, { state: "started", modelKey: "astra", reason: "manual" });
-  assert.equal(blockedAttempt(JSON.parse(JSON.stringify(sm.getBranch())), "astra"), undefined);
+  const failedAt = Date.parse(sm.getBranch().at(-1).timestamp);
+  const held = blockedAttempt(sm.getBranch(), "astra", failedAt);
+  assert.equal(held.error, "provider rejected");
+  assert.equal(held.retryAt, failedAt + 60_000);
+  assert.equal(blockedAttempt(sm.getBranch(), "astra", held.retryAt), undefined);
+  assert.equal(blockedAttempt(sm.getBranch(), "luna", failedAt), undefined);
+  sm.appendCustomEntry(ATTEMPT, { state: "started", modelKey: "astra", reason: "threshold" });
+  assert.equal(blockedAttempt(JSON.parse(JSON.stringify(sm.getBranch())), "astra", failedAt), undefined);
+  for (let i = 0; i < 8; i++) sm.appendCustomEntry(ATTEMPT, { state: "failed", modelKey: "astra", error: "overloaded" });
+  const repeated = blockedAttempt(sm.getBranch(), "astra", failedAt);
+  assert.equal(repeated.failures, 9);
+  assert.ok(repeated.retryAt - Date.parse(sm.getBranch().at(-1).timestamp) === 30 * 60_000, "backoff is capped, never permanent");
   sm.appendCompaction("checkpoint", first, 100);
-  assert.equal(blockedAttempt(sm.getBranch(), "astra"), undefined);
+  assert.equal(blockedAttempt(sm.getBranch(), "astra", failedAt), undefined);
   sm.branch(first);
-  assert.equal(blockedAttempt(sm.getBranch(), "astra"), undefined);
+  assert.equal(blockedAttempt(sm.getBranch(), "astra", failedAt), undefined);
 });

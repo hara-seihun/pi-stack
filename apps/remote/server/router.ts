@@ -7,12 +7,19 @@ import { join } from "node:path";
 import { listPersons, publicPerson, type Person } from "./persons";
 import { configuredEnvironments, personEnvironments, publicEnvironments } from "./environments";
 import { RouterSessions } from "./router-sessions";
+import { rootDebugConfig, rootDebugResponse } from "./root-debug";
+import { rootConsentCapability, rootConsentHandler } from "./root-consent";
 import { proxyFetch } from "./proxy-fetch";
 import { proxyWebsocket, type ProxySocketData } from "./proxy-websocket";
 import { preflight, withCors } from "./cors";
 import { OidcLogin, readOidcSettings } from "./oidc";
 import type { HostAuthentication } from "./protocol";
 import { networkStatus, readPrivateNetwork } from "./private-network";
+import { Rooms, ROOM_CUSTODIAN } from "./rooms";
+import { loopbackPeer } from "pi-orchestrator/api";
+import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
+import { oneKenanEnabled } from "kenan-memory/config";
+import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -39,8 +46,27 @@ const login = oidcSettings ? new OidcLogin(oidcSettings) : null;
 const privateNetwork = readPrivateNetwork();
 const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
+const roomPeople = roomPersonUids(PEOPLE.map(person => person.user));
+
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
 const operations = new Map<string, Promise<unknown>>();
+let rooms: Rooms | null = null;
+function activeRooms(): Rooms | null {
+  if (!oneKenanEnabled()) { rooms?.close(); rooms = null; return null; }
+  return rooms ??= new Rooms(process.env.PI_REMOTE_ROOMS_DB ?? "/var/lib/pi-remote/one-kenan/rooms.sqlite3",
+  () => PEOPLE.map(({ user, displayName }) => ({ user, displayName })),
+  async (owner, actor, path, method, body) => {
+    const person = byUser.get(owner);
+    const origin = owner === ROOM_CUSTODIAN ? process.env.PI_REMOTE_ROOMS_OWNER_URL ?? "http://127.0.0.1:18822" : person ? `http://127.0.0.1:${person.port}` : null;
+    if (!origin) return Response.json({ error: "Room owner no longer registered" }, { status: 503 });
+    const endpoint = new URL(origin);
+    if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.pathname !== "/" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Room runtime must be a local loopback HTTP origin");
+    return proxy({ port: person?.port ?? Number(endpoint.port), user: actor }, origin,
+      new Request(`http://router${path}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) }),
+      new URL(`http://router${path}`), AbortSignal.timeout(10_000));
+  });
+}
+setInterval(() => { const current = activeRooms(); if (current) void current.tick().catch(error => console.error("Room reconciliation failed", error)); }, 2_000);
 
 async function serialized<T>(person: Person, operation: () => Promise<T>): Promise<T> {
   const previous = operations.get(person.user) ?? Promise.resolve();
@@ -95,6 +121,16 @@ async function waitForSupervisor(person: Person): Promise<boolean> {
 
 type StartResult = { ok: true } | { ok: false; error: string; status: number };
 async function start(person: Person, key: string): Promise<StartResult> {
+  const personal = await startPersonal(person, key);
+  const custody = oneKenanConfig();
+  if (personal.ok && custody && person.unlock) {
+    void custodyAuthenticate(custody, person.user, key).then(captured => {
+      if (!captured.ok) console.error(`Kenan custody capture for ${person.user} did not finish: ${captured.error}`);
+    });
+  }
+  return personal;
+}
+async function startPersonal(person: Person, key: string): Promise<StartResult> {
   if (person.unlock && !key) return { ok: false, error: "Key required", status: 400 };
   if (await unitActive(person)) {
     if (person.unlock) {
@@ -184,6 +220,7 @@ function requestIdentity(req: Request, url: URL): RequestIdentity {
 }
 
 function proxyDestination(person: Person, url: URL): ProxyDestination {
+  if (rooms && (url.pathname.startsWith("/v1/room-owner/") || /^\/v1\/remotes\/[^/]+\/v1\/(rooms|room-owner)(\/|$)/.test(url.pathname))) return { error: Response.json({ error: "Use this host's room directory" }, { status: 403 }) };
   if (url.pathname.startsWith("/v1/remotes/")) {
     const match = /^\/v1\/remotes\/([a-z][a-z0-9-]{0,31})(\/v1\/.*)$/.exec(url.pathname);
     if (!match) return { error: Response.json({ error: "Unknown remote route" }, { status: 404 }) };
@@ -267,7 +304,7 @@ async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySo
   return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
 }
 
-async function proxy(person: Person, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
+async function proxy(person: Pick<Person, "user" | "port">, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {
@@ -298,11 +335,16 @@ async function proxy(person: Person, origin: string, req: Request, url: URL, sig
 }
 
 const persons = login ? [] : PEOPLE.filter(person => person.auth !== "oidc").map(publicPerson);
-const lockedEnvironment = () => ({
+const lockedEnvironment = async () => {
+  const custody = oneKenanConfig();
+  return {
+  ...(custody ? { custody: { oneKenan: true, locked: (await custodyStatus(custody))?.locked ?? true,
+    message: "Kenan holds the folder keys. After a restart, the first enrolled person to log in opens custody and every known folder." } } : {}),
   id: ENVIRONMENT_ID, name: ENVIRONMENT_NAME, requiresUnlock: true, persons, profiles: [],
   ...(login ? { authentication: { type: "oidc", loginPath: "/v1/auth/login", label: "Sign in with Google" } satisfies HostAuthentication } : {}),
   capabilities: { voice: true, downloads: true, notifications: true, files: true },
-});
+  };
+};
 const locked = (user?: string) => Response.json({ error: "Unlock to continue", locked: true, ...(!user ? { choosePerson: true } : { user }), persons }, { status: 423 });
 
 for (const person of PEOPLE) {
@@ -367,7 +409,13 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
   catch { return failure("The host could not finish account setup. Please try again.", 503); }
 }
 
-async function route(req: Request, url: URL): Promise<Response> {
+const consentBridge = rootConsentHandler({ capability: rootConsentCapability, persons: listPersons,
+  roomsOrigin: process.env.PI_REMOTE_ROOMS_OWNER_URL });
+async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Response> {
+  if (/^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname)) return handleAgentRooms(req, peer, roomPeople, activeRooms());
+  const consent = await consentBridge(req);
+  if (consent) return consent;
+  activeRooms();
   if (url.pathname.startsWith("/calendar-feed/")) {
     const match = /^\/calendar-feed\/([a-z_][a-z0-9_-]*)\/([a-f0-9]{64})\.ics$/.exec(url.pathname);
     const person = match && PEOPLE.find(p => p.user === match[1]);
@@ -380,7 +428,9 @@ async function route(req: Request, url: URL): Promise<Response> {
   if (appUpdate) return appUpdate;
   if (url.pathname === "/v1/router-health") {
     const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
-    return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key" });
+    const custody = oneKenanConfig();
+    return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people, authentication: login ? "oidc" : "key",
+      ...(custody ? { custody: await custodyStatus(custody) } : {}) });
   }
   if (url.pathname === "/v1/network" && req.method === "GET") return Response.json(networkStatus(privateNetwork, req));
   const asset = webResponse(WEB_DIR, url.pathname, req.method, req);
@@ -389,7 +439,7 @@ async function route(req: Request, url: URL): Promise<Response> {
   const identity = requestIdentity(req, url);
   if (identity.error) return identity.error;
   const { authenticated, asserted, person } = identity;
-  if (url.pathname === "/v1/environment" && req.method === "GET" && !authenticated) return Response.json({ environment: lockedEnvironment() });
+  if (url.pathname === "/v1/environment" && req.method === "GET" && !authenticated) return Response.json({ environment: await lockedEnvironment() });
   if (asserted && !person) return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote.", persons }, { status: 403 });
 
   if (url.pathname === "/v1/unlock" && req.method === "POST") {
@@ -415,8 +465,19 @@ async function route(req: Request, url: URL): Promise<Response> {
     sessions.revoke(person.user);
     return locked(person.user);
   }
+  if (url.pathname === "/v1/admin/root-sessions" || url.pathname.startsWith("/v1/admin/root-sessions/")) {
+    try {
+      const rootDebug = await rootDebugResponse(req, { authenticatedUser: authenticated.user, persons: listPersons(), config: rootDebugConfig(), signal: authenticated.signal });
+      if (rootDebug) return rootDebug;
+    } catch {
+      return (await rootDebugResponse(req, { authenticatedUser: authenticated.user, persons: [], config: null }))!;
+    }
+  }
   if (url.pathname === "/v1/lock-status") return Response.json({ user: person.user, unlocked: true });
   if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments: publicEnvironments(grants.get(person.user)!) });
+  // The internal room owner API accepts only router-generated requests, never browser proxying.
+  if (rooms && (url.pathname.startsWith("/v1/room-owner/") || /^\/v1\/remotes\/[^/]+\/v1\/(rooms|room-owner)(\/|$)/.test(url.pathname))) return Response.json({ error: "Use this host's room directory" }, { status: 403 });
+  if (rooms && /^\/v1\/rooms(?:\/|$)/.test(url.pathname)) return rooms.handle(req, person.user);
   const destination = proxyDestination(person, url);
   if ("error" in destination) return destination.error;
   return proxy(person, destination.origin, req, destination.target, authenticated.signal, destination.upstream);
@@ -429,7 +490,10 @@ Bun.serve<ProxySocketData>({
     if (url.pathname.startsWith("/v1/auth/")) return oauthRoute(req, url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return preflight();
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);
-    const response = await route(req, url);
+    const socket = /^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
+    const peer = socket?.address === "127.0.0.1" && HOST === "127.0.0.1"
+      ? loopbackPeer({ address: socket.address, port: socket.port, localAddress: HOST, localPort: PORT }, "/proc", false) : undefined;
+    const response = await route(req, url, peer);
     if (!url.pathname.startsWith("/v1/")) return response;
     // A fresh cached private response must carry the authenticated session in
     // its URL. Header/cookie-only URLs can revalidate but cannot cross a later

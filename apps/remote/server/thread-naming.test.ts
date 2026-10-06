@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { generatedThreadName, localNamingPrompt, localReasoningEffort, namingOutcome, namingRequestId, namingStep, namingTranscript, parseThreadNamingModel, shouldNameThread, threadNamingModel } from "./thread-naming";
+import { generatedThreadName, localNamingPrompt, localReasoningEffort, namingOutcome, namingRequestId, namingRetryAt, namingStep, namingTranscript, parseThreadNamingModel, shouldNameThread, threadNamingModel } from "./thread-naming";
 import type { CompletionRecord } from "pi-orchestrator/api";
 
 describe("thread naming", () => {
@@ -74,6 +74,17 @@ describe("thread naming", () => {
     expect(namingStep({ name: "Named Thread", messageCount: 7, namedAtMessageCount: 0, attemptedCount: 7, hasReceipt: false })).toBe("idle");
   });
 
+  test("manual titles stay idle even when numbered, past an interval or carrying a receipt", () => {
+    for (const name of ["47", "Thread abcdef12", "Pinned Title"]) {
+      for (const hasReceipt of [false, true]) {
+        const view = { name, messageCount: 40, namedAtMessageCount: 0, attemptedCount: 0, hasReceipt };
+        expect(namingStep({ ...view, titleSource: "manual" })).toBe("idle");
+        expect(namingStep({ ...view, titleSource: "auto" })).toBe(hasReceipt ? "poll" : "generate");
+        expect(namingStep(view)).toBe(hasReceipt ? "poll" : "generate");
+      }
+    }
+  });
+
   test("a request ID names one prompt, so a filled-in mirror submits instead of conflicting", () => {
     const input = { model: "luna", prompt: "User: hello" };
     expect(namingRequestId("thread-1", 2, input)).toBe(namingRequestId("thread-1", 2, { ...input }));
@@ -83,21 +94,35 @@ describe("thread naming", () => {
     expect(namingTranscript([{ role: "user", text: "abcdef" }], 3)).toBe("User: abc");
   });
 
-  test("a rejected request is dropped and asked again; work in flight is resumed", () => {
+  test("configuration rejections require repair; retryable terminal receipts are dropped", () => {
     const record = (state: string, extra: Record<string, unknown> = {}) =>
       ({ ok: true as const, value: { requestId: "remote-name:t:1:abc", runId: "run", model: "luna", state, createdAt: 1, updatedAt: 2, ...extra } as unknown as CompletionRecord });
     expect(namingOutcome({ ok: false, error: { code: "invalid-request", message: "Invalid completion input." } }))
-      .toEqual({ kind: "failed", message: "Invalid completion input.", keepReceipt: false, regenerate: true });
+      .toEqual({ kind: "failed", message: "Invalid completion input.", keepReceipt: false, recovery: "required" });
     expect(namingOutcome({ ok: false, error: { code: "request-conflict", message: "conflict" } }))
-      .toMatchObject({ keepReceipt: false, regenerate: true });
+      .toMatchObject({ keepReceipt: false, recovery: "automatic" });
     expect(namingOutcome({ ok: false, error: { code: "transport", message: "connection refused" } }))
-      .toMatchObject({ kind: "failed", keepReceipt: true, regenerate: false });
+      .toMatchObject({ kind: "failed", keepReceipt: true, recovery: "automatic" });
     expect(namingOutcome(record("queued"))).toEqual({ kind: "pending" });
     expect(namingOutcome(record("running"))).toEqual({ kind: "pending" });
     expect(namingOutcome(record("completed", { result: { text: "Alert Delivery" } }))).toEqual({ kind: "title", text: "Alert Delivery" });
     expect(namingOutcome(record("failed", { error: { code: "provider", message: "provider said no" } })))
-      .toEqual({ kind: "failed", message: "provider said no", keepReceipt: false, regenerate: false });
-    expect(namingOutcome(record("cancelled"))).toMatchObject({ kind: "failed", keepReceipt: false, regenerate: false });
+      .toEqual({ kind: "failed", message: "provider said no", keepReceipt: false, recovery: "automatic" });
+    expect(namingOutcome(record("cancelled"))).toMatchObject({ kind: "failed", keepReceipt: false, recovery: "automatic" });
+  });
+
+  test("retries are delayed and bounded even without another message", () => {
+    const view = { name: "47", messageCount: 6, namedAtMessageCount: 0, attemptedCount: 6, hasReceipt: false };
+    expect(namingRetryAt(1, 1_000)).toBe(31_000);
+    expect(namingRetryAt(2, 31_000)).toBe(151_000);
+    expect(namingRetryAt(3, 151_000)).toBeNull();
+    expect(namingRetryAt(1, 1_000, true)).toBeNull();
+    expect(namingStep({ ...view, retryAt: 31_000, now: 30_999 })).toBe("idle");
+    expect(namingStep({ ...view, retryAt: 31_000, now: 31_000 })).toBe("generate");
+    expect(namingStep({ ...view, hasReceipt: true, retryAt: 31_000, now: 31_000 })).toBe("poll");
+    expect(namingStep({ ...view, hasReceipt: true, retryAt: null, now: 999_999 })).toBe("idle");
+    expect(namingStep({ ...view, titleSource: "manual", retryAt: 31_000, now: 31_000 })).toBe("idle");
+    expect(namingRequestId("thread", 6, { prompt: "ask" }, 1)).not.toBe(namingRequestId("thread", 6, { prompt: "ask" }));
   });
 
   test("normalizes the model's first output line", () => {

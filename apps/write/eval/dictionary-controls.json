@@ -1,0 +1,399 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "tune-hara",
+      "audio": "audio/tune-hara.wav",
+      "sha256": "288386fc258bbb7f0eef895e0e89cfefc8616d3a67eb3df53c5bab9bd925fe72",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "tune-synthetic-declared-before-recognition",
+      "split": "tune",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Hara is ready for the meeting."
+      },
+      "verbatim": "Hara is ready for the meeting.",
+      "target": "Hara is ready for the meeting.",
+      "expected_terms": [
+        "Hara"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Hara is ready for the meeting"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "tune-renia",
+      "audio": "audio/tune-renia.wav",
+      "sha256": "223567c857d49ace33fff0d9274b59396b01cbc65fbd6968bacc0196715d3949",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "tune-synthetic-declared-before-recognition",
+      "split": "tune",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please use Renia for this document."
+      },
+      "verbatim": "Please use Renia for this document.",
+      "target": "Please use Renia for this document.",
+      "expected_terms": [
+        "Renia"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please use Renia for this document"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "tune-harry",
+      "audio": "audio/tune-harry.wav",
+      "sha256": "bcf5d1b615aea5d0fca14f59ea06d48b60341ecac2a6533e35f36e6323df8f5a",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "tune-synthetic-declared-before-recognition",
+      "split": "tune",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Harry is ready for the meeting."
+      },
+      "verbatim": "Harry is ready for the meeting.",
+      "target": "Harry is ready for the meeting.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Harry is ready for the meeting"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "tune-ready",
+      "audio": "audio/tune-ready.wav",
+      "sha256": "0f2837a90c88cd414e453dc11a669a041baacd5e9b41078750beb563257955ac",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "tune-synthetic-declared-before-recognition",
+      "split": "tune",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Please be ready for this document."
+      },
+      "verbatim": "Please be ready for this document.",
+      "target": "Please be ready for this document.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Please be ready for this document"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-jodie",
+      "audio": "audio/held-jodie.wav",
+      "sha256": "664bc39e9e7992614eec4e69e5862efb0b8af6d2b0e9bf88bb07a950cedb7d8f",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Do not send twelve files to Jodie."
+      },
+      "verbatim": "Do not send twelve files to Jodie.",
+      "target": "Do not send twelve files to Jodie.",
+      "expected_terms": [
+        "Jodie"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Do not send twelve files to Jodie"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-seihun",
+      "audio": "audio/held-seihun.wav",
+      "sha256": "bc748ec63ef10d167b9aef7ec2de23d5016bfd360ce186a510836bf4f0d37f7f",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Seihun will arrive on the twenty fourth."
+      },
+      "verbatim": "Seihun will arrive on the twenty fourth.",
+      "target": "Seihun will arrive on the twenty fourth.",
+      "expected_terms": [
+        "Seihun"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Seihun will arrive on the twenty fourth"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-nebulani",
+      "audio": "audio/held-nebulani.wav",
+      "sha256": "a9636b5db8ecf726772a3475dd0341b9e2dbfedd1e9154930183708f11235133",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Use Nebulani for the new project."
+      },
+      "verbatim": "Use Nebulani for the new project.",
+      "target": "Use Nebulani for the new project.",
+      "expected_terms": [
+        "Nebulani"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Use Nebulani for the new project"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-jolly",
+      "audio": "audio/held-jolly.wav",
+      "sha256": "27418b565f5d87eab1fa7d2da63f719a5750f48fcff0b17e86a8c12f4d5cdcb5",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Do not send twelve files to Jolly."
+      },
+      "verbatim": "Do not send twelve files to Jolly.",
+      "target": "Do not send twelve files to Jolly.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Do not send twelve files to Jolly"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-say-when",
+      "audio": "audio/held-say-when.wav",
+      "sha256": "7c9a1b6e698906948caca3df18dc349d1f14855398995aa177b25d24fb752356",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Say when you will arrive on the twenty fourth."
+      },
+      "verbatim": "Say when you will arrive on the twenty fourth.",
+      "target": "Say when you will arrive on the twenty fourth.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Say when you will arrive on the twenty fourth"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-neighbor",
+      "audio": "audio/held-neighbor.wav",
+      "sha256": "5e8fcc282436204ae41a4f7d8350d980d1691cc4846f4df6d59a80c2e4e66703",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Ask the neighbor about the new project."
+      },
+      "verbatim": "Ask the neighbor about the new project.",
+      "target": "Ask the neighbor about the new project.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Ask the neighbor about the new project"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-canon",
+      "audio": "audio/held-canon.wav",
+      "sha256": "a411f1f2088d0a167f98f755fd0bced6e089bc5b82e3a6e4efe078418beb3916",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Do not send twelve files to Canon."
+      },
+      "verbatim": "Do not send twelve files to Canon.",
+      "target": "Do not send twelve files to Canon.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Do not send twelve files to Canon"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "held-call-anna",
+      "audio": "audio/held-call-anna.wav",
+      "sha256": "88ae2a5244e05c2384adaf8d6f589c18475a1e4ad7ca30e6d4f9a8132b147953",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "heldout-synthetic-declared-before-recognition",
+      "split": "heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "Call Anna on the twenty fourth."
+      },
+      "verbatim": "Call Anna on the twenty fourth.",
+      "target": "Call Anna on the twenty fourth.",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "Call Anna on the twenty fourth"
+          ]
+        ],
+        "forbidden": []
+      }
+    }
+  ],
+  "dictionary": {
+    "words": [
+      "Hara",
+      "Renia",
+      "Jodie",
+      "Seihun",
+      "Nebulani",
+      "Kenan",
+      "Kelana"
+    ],
+    "replacements": []
+  }
+}

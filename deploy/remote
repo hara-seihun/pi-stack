@@ -35,11 +35,14 @@ orchestrator_release=$(readlink -f "$orchestrator")
 
 node "$root/scripts/build-workspace.mjs" remote
 mkdir -p "$stage/release/node_modules" "$stage/release/web" "$stage/release/deploy"
-rsync -a --chmod=D755,Fu=rwX,Fgo=rX deploy/lib deploy/release-checkout deploy/meeting-census deploy/smoke "$stage/release/deploy/"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX deploy/lib deploy/release-checkout deploy/meeting-census deploy/smoke deploy/one-kenan-activate "$stage/release/deploy/"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server apps/remote/shared "$stage/release/"
 rsync -aL --chmod=D755,Fu=rwX,Fgo=rX apps/remote/skills "$stage/release/"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/web/dist "$stage/release/web/"
-for executable in pi-remote pi-phone pi-calendar pi-remote-launch pi-remote-supervise; do
+npm run build --workspace=kenan-root
+mkdir -p "$stage/release/kenan-root"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/kenan-root/src packages/kenan-root/dist packages/kenan-root/instructions.md packages/kenan-root/package.json "$stage/release/kenan-root/"
+for executable in pi-remote pi-phone pi-room pi-calendar pi-remote-launch pi-remote-supervise; do
   test -x "$stage/release/server/$executable" || {
     printf 'staged Pi Remote executable is not executable: %s\n' "$executable" >&2
     exit 1

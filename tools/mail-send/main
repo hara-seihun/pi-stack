@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Send mail through the local Proton Bridge SMTP endpoint.
+
+Composes UTF-8 mail, threads replies correctly, and refuses to send unless
+--send is given so a composed draft can be reviewed first. Credentials come
+from Proton Pass at runtime and are never printed. Bridge files the outgoing
+copy in Sent itself; this tool does not append.
+"""
+import argparse, email.utils, imaplib, json, mimetypes, os, smtplib, ssl, subprocess, sys
+from email.header import decode_header, make_header
+from email.message import EmailMessage
+
+BRIDGE_HOST = "127.0.0.1"
+IMAP_PORT = 1143
+SMTP_PORT = 1025
+
+
+def journal_enabled():
+    path = os.environ.get("PI_STACK_HOST_CONFIG") or os.environ.get("PI_STACK_HOST_FILE") or "/etc/pi-stack/host.json"
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as f:
+        return json.load(f).get("oneKenan") is True
+
+
+def journal(command, payload):
+    cli = os.environ.get("PI_KENAN_ACTION_JOURNAL_CLI", "/srv/pi/runtime/node_modules/kenan-memory/src/journal-cli.ts")
+    result = subprocess.run(["bun", cli, command], input=json.dumps(payload),
+                            capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        raise RuntimeError("Action journal: " + (result.stderr or result.stdout).strip())
+    return json.loads(result.stdout)
+
+
+def journal_finish(ticket, outcome, detail):
+    if ticket is None:
+        return
+    try:
+        journal("finish", {"ticket": ticket, "outcome": outcome, "detail": detail})
+    except Exception as error:
+        # A mail accepted by SMTP must not look like a failed send: repeating it duplicates mail.
+        print(f"# mail outcome {outcome}; journal outcome pending; do not resend: {error}", file=sys.stderr)
+
+
+def creds():
+    # Delegated access: a JSON file {"email":..., "password":...} named by
+    # MAIL_BRIDGE_CREDENTIAL_FILE bypasses Proton Pass. Used to grant another
+    # local account the mailbox without giving it the whole Agent vault.
+    import os
+    f = os.environ.get("MAIL_BRIDGE_CREDENTIAL_FILE")
+    if f:
+        with open(f, encoding="utf-8") as credential_file:
+            c = json.load(credential_file)
+        return c["email"], c["password"]
+    env = dict(os.environ)
+    env.setdefault("PROTON_PASS_AGENT_REASON", "Read Proton Bridge local mail-client credentials")
+    out = subprocess.run(["pass-cli", "item", "view", "--vault-name", "Agent",
+                          "--item-title", "Proton Mail Bridge", "--output", "json"],
+                         capture_output=True, text=True, check=True, env=env).stdout
+    c = json.loads(out)["item"]["content"]["content"]["Login"]
+    return c["email"], c["password"]
+
+
+def loopback_ctx():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def dec(s):
+    try:
+        return str(make_header(decode_header(s or "")))
+    except Exception:
+        return s or ""
+
+
+def parent_headers(folder, num, user, password):
+    """Message-ID, References, Subject and From of the message being replied to."""
+    m = imaplib.IMAP4(BRIDGE_HOST, IMAP_PORT)
+    m.starttls(loopback_ctx())
+    m.login(user, password)
+    quoted = '"' + folder.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    typ, _ = m.select(quoted, readonly=True)
+    if typ != "OK":
+        raise SystemExit(f"cannot select {folder}")
+    typ, d = m.fetch(num, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES SUBJECT FROM)])")
+    if typ != "OK" or not d or not isinstance(d[0], tuple):
+        raise SystemExit(f"cannot fetch {folder}/{num}")
+    h = email.message_from_bytes(d[0][1])
+    m.logout()
+    return {
+        "message_id": (h.get("Message-ID") or "").strip(),
+        "references": (h.get("References") or "").split(),
+        "subject": dec(h.get("Subject")),
+        "from": h.get("From", ""),
+    }
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--to", action="append", default=[], help="recipient; repeatable")
+    p.add_argument("--cc", action="append", default=[], help="cc; repeatable")
+    p.add_argument("--subject")
+    p.add_argument("--body-file", required=True, help="UTF-8 plain-text body")
+    p.add_argument("--from-name", default="Kenan")
+    p.add_argument("--from-addr", help="send as this address of the Proton account "
+                   "(default: the Bridge login address). Project threads use their own "
+                   "identity — keep replying from the address the thread already uses.")
+    p.add_argument("--reply-to", metavar="FOLDER/NUM",
+                   help="thread this as a reply to an existing message, e.g. INBOX/4493")
+    p.add_argument("--attach", action="append", default=[], metavar="FILE",
+                   help="attach a file; repeatable")
+    p.add_argument("--send", action="store_true",
+                   help="actually send; without it the composed message is printed only")
+    a = p.parse_args()
+
+    user, password = creds()
+    with open(a.body_file, encoding="utf-8") as body_file:
+        body = body_file.read()
+
+    msg = EmailMessage()
+    sender = a.from_addr or user
+    msg["From"] = email.utils.formataddr((a.from_name, sender))
+    msg["Date"] = email.utils.formatdate(localtime=True)
+    msg["Message-ID"] = email.utils.make_msgid(domain=sender.split("@")[-1])
+
+    if a.reply_to:
+        folder, _, num = a.reply_to.rpartition("/")
+        parent = parent_headers(folder, num, user, password)
+        if parent["message_id"]:
+            msg["In-Reply-To"] = parent["message_id"]
+            msg["References"] = " ".join(parent["references"] + [parent["message_id"]])
+        subject = a.subject or parent["subject"]
+        if not subject.lower().startswith("re:"):
+            subject = "Re: " + subject
+        msg["Subject"] = subject
+        if not a.to:
+            a.to = [parent["from"]]
+    else:
+        if not a.subject:
+            raise SystemExit("--subject is required unless --reply-to is used")
+        msg["Subject"] = a.subject
+
+    if not a.to:
+        raise SystemExit("no recipient: pass --to")
+    msg["To"] = ", ".join(a.to)
+    if a.cc:
+        msg["Cc"] = ", ".join(a.cc)
+    msg.set_content(body)
+
+    for path in a.attach:
+        ctype, _ = mimetypes.guess_type(path)
+        maintype, _, subtype = (ctype or "application/octet-stream").partition("/")
+        with open(path, "rb") as f:
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype,
+                               filename=os.path.basename(path))
+
+    if not a.send and a.attach:
+        # full MIME would dump base64; show headers, body, and attachment summary
+        print(f"To: {msg['To']}\nCc: {msg.get('Cc','')}\nSubject: {msg['Subject']}\n")
+        print(body)
+        for part in msg.iter_attachments():
+            print(f"# attachment: {part.get_filename()} "
+                  f"({part.get_content_type()}, {len(part.get_payload(decode=True))} bytes)")
+    else:
+        print(msg.as_string() if not a.send else
+              f"To: {msg['To']}\nCc: {msg.get('Cc','')}\nSubject: {msg['Subject']}")
+
+    if not a.send:
+        print("\n# not sent (pass --send)", file=sys.stderr)
+        return
+
+    s = smtplib.SMTP(BRIDGE_HOST, SMTP_PORT)
+    s.starttls(context=loopback_ctx())
+    s.login(user, password)
+    if not journal_enabled():
+        s.send_message(msg)
+        s.quit()
+        print(f"\n# sent {msg['Message-ID']}", file=sys.stderr)
+        return
+    ticket = None
+    try:
+        ticket = journal("begin", {"action": "email.send", "recipients": a.to + a.cc,
+                                   "summary": f"{msg['Subject']}: {body}",
+                                   "externalId": str(msg["Message-ID"])})
+        try:
+            refused = s.send_message(msg)
+        except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as error:
+            journal_finish(ticket, "failed", type(error).__name__)
+            raise
+        except Exception:
+            journal_finish(ticket, "unconfirmed", "SMTP did not confirm; mail may have been accepted. Do not resend automatically.")
+            raise
+        journal_finish(ticket, "confirmed", f"SMTP accepted {msg['Message-ID']}" + (f"; refused recipients: {list(refused)}" if refused else ""))
+    finally:
+        s.close()
+    print(f"\n# sent {msg['Message-ID']}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

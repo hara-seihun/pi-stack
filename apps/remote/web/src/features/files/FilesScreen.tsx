@@ -3,7 +3,8 @@ import { API } from "../../../../server/api";
 import type { FileBrowserEntry } from "../../../../server/protocol";
 import { api } from "../../client";
 import { breadcrumbSegments, cleanAbsolutePath, parentDirectory, rootShortcuts, routePath, type FileSelection, type FileSelectionKind, type FileShortcut } from "./file-navigation";
-import { FilePreview } from "./FilePreview";
+import { FilePreview, type FilePreviewHandle } from "./FilePreview";
+import { fileDrafts, fileDraftScope } from "./file-editor-drafts";
 import { FileTree, type FileTreeHandle } from "./FileTree";
 import "./files.css";
 
@@ -21,12 +22,14 @@ function RefreshIcon() {
 }
 
 export function FilesScreen({ layout, selectedPath, onSelect, shortcuts, onAttach, onRootCount }: FilesScreenProps) {
-  const initialPath = selectedPath ? cleanAbsolutePath(selectedPath) : "/";
+  const restorePath = useRef(selectedPath ? null : fileDrafts.peek(fileDraftScope())?.path ?? null);
+  const initialPath = selectedPath ? cleanAbsolutePath(selectedPath) : restorePath.current ?? "/";
   const [selection, setSelection] = useState<FileSelection>({ path: initialPath, kind: initialPath === "/" ? "directory" : "resolving" });
   const [goTo, setGoTo] = useState("");
   const [goToOpen, setGoToOpen] = useState(false);
   const [goToError, setGoToError] = useState<string | null>(null);
   const tree = useRef<FileTreeHandle>(null);
+  const preview = useRef<FilePreviewHandle>(null);
   const pendingPath = useRef<string | null>(null);
   const knownKinds = useRef(new Map<string, FileSelectionKind>([["/", "directory"]]));
 
@@ -57,12 +60,21 @@ export function FilesScreen({ layout, selectedPath, onSelect, shortcuts, onAttac
   }, []);
 
   useEffect(() => {
-    resolveSelection(selectedPath ? cleanAbsolutePath(selectedPath) : "/");
+    const clean = selectedPath ? cleanAbsolutePath(selectedPath) : restorePath.current ?? "/";
+    if (!selectedPath && restorePath.current) onSelect(routePath(clean));
+    restorePath.current = null;
+    if (clean !== selection.path && preview.current?.canLeave() === false) {
+      onSelect(routePath(selection.path));
+      return;
+    }
+    resolveSelection(clean);
     return () => { pendingPath.current = null; };
   }, [resolveSelection, selectedPath]);
 
   const selectEntry = (path: string, kind: FileSelectionKind) => {
     const clean = cleanAbsolutePath(path);
+    if (clean === selection.path && kind === selection.kind) return;
+    if (preview.current?.canLeave() === false) return;
     pendingPath.current = null;
     knownKinds.current.set(clean, kind);
     setSelection({ path: clean, kind });
@@ -75,6 +87,7 @@ export function FilesScreen({ layout, selectedPath, onSelect, shortcuts, onAttac
       setGoToError("Enter an absolute path.");
       return;
     }
+    if (preview.current?.canLeave() === false) return;
     setGoToError(null);
     setGoToOpen(false);
     setGoTo("");
@@ -104,7 +117,7 @@ export function FilesScreen({ layout, selectedPath, onSelect, shortcuts, onAttac
     {visibleShortcuts.length > 0 && <nav className="files-shortcuts" aria-label="Places">{visibleShortcuts.map(shortcut => <button type="button" key={shortcut.path} onClick={() => selectEntry(shortcut.path, "directory")}>{shortcut.label}</button>)}</nav>}
     <div className="files-content">
       <aside className="files-tree-pane" aria-label="File tree"><FileTree ref={tree} selectedPath={selection.kind === "resolving" ? null : selection.path} onSelect={selectEntry} onRootCount={onRootCount} /></aside>
-      <main className="files-preview-pane"><FilePreview path={fileSelected ? selection.path : null} onAttach={onAttach} /></main>
+      <main className="files-preview-pane"><FilePreview ref={preview} path={fileSelected ? selection.path : null} onAttach={onAttach} /></main>
     </div>
   </section>;
 }

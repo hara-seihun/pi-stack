@@ -1,4 +1,6 @@
+import { pathToFileURL } from "node:url";
 import { runJobs } from "./run-jobs.mjs";
+import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
 
 const jobs = [
   ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs"]],
@@ -6,22 +8,35 @@ const jobs = [
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],
   ["account deployment", "node", ["--test", "scripts/deploy-skills.test.mjs", "scripts/deploy-account.test.mjs", "scripts/deploy-person-configs.test.mjs"]],
-  ["deploy lock", "node", ["--test", "scripts/deploy-lock.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
+  ["deploy lock", "node", ["--test", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
   ["publication", "node", ["--test", "scripts/publication-config.test.mjs", "scripts/publication-roots.test.mjs", "scripts/publication.test.mjs", "scripts/publication-gate.test.mjs", "scripts/publication-source.test.mjs", "scripts/publication-progress.test.mjs", "scripts/publication-proof.test.mjs"]],
   ["Android publication", "node", ["--test", "scripts/android-update.test.mjs"]],
-  ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs", "scripts/deploy-voice.test.mjs", "scripts/write-service.test.mjs"]],
+  ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs", "scripts/deploy-voice.test.mjs", "scripts/write-service.test.mjs", "scripts/supervisor-health.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
-  ["agent workspace", "npm", ["test", "--workspace=@hara-seihun/agent-workspace"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
-  ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],
+  ["orchestrator routing runtime", "npm", ["test", "--workspace=pi-orchestrator", "--", "tests/routing-runtime.test.ts"]],
+  ...Array.from({ length: 6 }, (_, index) => [
+    `orchestrator ${index + 1}/6`, "npm",
+    ["test", "--workspace=pi-orchestrator", "--", "--exclude=tests/routing-runtime.test.ts", `--shard=${index + 1}/6`],
+  ]),
+  ...workspaceChecks,
+  ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
+  ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
+  ["mail send boundary", "python3", ["-B", "tools/mail-send/test_send.py"]],
+  ["Kenan memory", "npm", ["test", "--workspace=kenan-memory"]],
+  ["Root Kenan", "npm", ["test", "--workspace=kenan-root"]],
   ["remote", "npm", ["test", "--workspace=pi-remote"]],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],
   ["mcp-script", "npm", ["test", "--workspace=@hara-seihun/mcp-script"]],
   ["session readers", "npm", ["test", "--workspace=@hara-seihun/read-condensed-session"]],
 ];
 
-await runJobs(jobs.map(([name, command, args, ...options]) => [
+export const checkJobs = jobs.map(([name, command, args, ...options]) => [
   name, command, args[0] === "--test" ? ["scripts/test-node.mjs", ...args.slice(1)] : args, ...options,
-]));
+]);
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await runJobs(checkJobs);
+}

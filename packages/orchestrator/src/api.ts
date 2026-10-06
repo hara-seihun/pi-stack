@@ -19,16 +19,20 @@ export { createWorkspaceAdmission, createCwdAdmission,
   type WorkspaceAdmissionErrorCode, type ConfiguredWorkspace, type AdmittedWorkspace, type CwdAdmission,
 } from "./workspace-admission.js";
 export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, ThreadState, WorkOutcome,
-  ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, SpawnThread, SendThread, ThreadList, ThreadPage,
+  ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, SpawnThread, SendThread, ThreadList, ThreadPage,
   ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { ThreadService } from "./threads/service.js";
+export type { AgentWait, AgentWaitRequest, ThreadWakeSchedule, ThreadWakeRequest } from "./threads/contracts.js";
+export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";
+export { ModelAvailabilityStore, modelAvailabilityPath, modelAvailabilityKey } from "./threads/model-availability.js";
 export { threadSettingsMetadata } from "./threads/settings-metadata.js";
 export { THREAD_MODES, threadMode, type ThreadMode, type ThreadModeName } from "./threads/modes.js";
 export { loadThreadModelCatalog, type ThreadModelCatalog, type ThreadModelMetadata } from "./threads/model-catalog.js";
 export { threadHttp, createThreadClient } from "./threads/http.js";
 export { admissionFor, callerResolver, hostIdentityConfig, threadCapability, THREAD_TOKEN_HEADER, UPSTREAM_CREDENTIAL_HEADER } from "./threads/caller.js";
 export type { CallerResolver, CallerSource, ThreadCaller, ThreadCapability, ThreadCreator } from "./threads/caller.js";
+export { loopbackPeer } from "./threads/caller.js";
 export { openPiSession } from "./threads/pi-session.js";
 export { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 export { WatchList, watchInterval, DEFAULT_WATCH_INTERVAL_MS, type WatchRequest, type WatchResponse, type WatchItem } from "./threads/watch-list.js";

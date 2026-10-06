@@ -1,0 +1,14 @@
+[Unit]
+Description=Additive root Kenan UID gates
+Before=pi-kenan-broker.service pi-kenan-memory.service pi-kenan-root.service pi-rooms.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
+ExecStart=@ACCESS_COMMAND@ apply --config @ACCESS_CONFIG@
+ExecStop=@ACCESS_COMMAND@ remove --config @ACCESS_CONFIG@
+
+[Install]
+WantedBy=multi-user.target

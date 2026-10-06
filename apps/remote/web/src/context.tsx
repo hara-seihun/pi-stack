@@ -27,21 +27,21 @@ const subscribeRender = (listener: () => void) => {
 };
 const renderSnapshot = () => renderGeneration;
 
-export function renderMarkdown(source: string, sessionId: string, streaming = false, presentation: ImagePresentation = {}) {
+export function renderMarkdown(source: string, sessionId: string, streaming = false, presentation: ImagePresentation & { sessionMedia?: boolean } = {}) {
   const markdown = markdownRenderer();
   if (!markdown) return plainMarkdownHtml(source || "");
-  const prepared = presentInlineImages(source || "", sessionId, { ...presentation, streaming });
+  const prepared = presentInlineImages(source || "", sessionId, { ...presentation, assistant: presentation.sessionMedia !== false && presentation.assistant, streaming });
   const normalized = normalizeLatex(prepared.source);
-  return markdown.render(streaming ? streamingMarkdown(normalized) : normalized, { inlineImages: prepared.inlineImages, sessionId });
+  return markdown.render(streaming ? streamingMarkdown(normalized) : normalized, { inlineImages: prepared.inlineImages, sessionId, sessionMedia: presentation.sessionMedia });
 }
 
-export const Markdown = memo(function Markdown({ source, sessionId, streaming = false, assistant = false, className = "markdown-body" }: { source: string; sessionId: string; streaming?: boolean; assistant?: boolean; className?: string }) {
+export const Markdown = memo(function Markdown({ source, sessionId, streaming = false, assistant = false, sessionMedia = true, className = "markdown-body" }: { source: string; sessionId: string; streaming?: boolean; assistant?: boolean; sessionMedia?: boolean; className?: string }) {
   const element = useRef<HTMLDivElement>(null);
   const images = useContext(InlineImagesContext);
   const [failedUrls, setFailedUrls] = useState<ReadonlySet<string>>(() => new Set());
   const generation = useSyncExternalStore(subscribeRender, renderSnapshot, renderSnapshot);
   useEffect(() => { void ensureMarkdown().catch(console.error); }, []);
-  const html = useMemo(() => renderMarkdown(source, sessionId, streaming, { assistant, images, failedUrls }), [source, sessionId, streaming, assistant, images, failedUrls, generation]);
+  const html = useMemo(() => renderMarkdown(source, sessionId, streaming, { assistant, images, failedUrls, sessionMedia }), [source, sessionId, streaming, assistant, images, failedUrls, sessionMedia, generation]);
   useLayoutEffect(() => { if (element.current) applyHtml(element.current, html); }, [html]);
   return <div ref={element} className={className} onErrorCapture={(event) => {
     const image = event.target;

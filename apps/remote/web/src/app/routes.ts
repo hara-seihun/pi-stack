@@ -29,7 +29,7 @@ export function parseRoute(hash: string): Route {
     case "chats": {
       const kind = rest[0];
       const id = rest[1];
-      const chat = (kind === "ai" || kind === "human") && id ? `${kind}:${id}` as ChatId : null;
+      const chat = (kind === "ai" || kind === "human" || kind === "room") && id ? `${kind}:${id}` as ChatId : null;
       return { tab: "chats", chat, panel: chat ? panel(rest[2]) : null };
     }
     default: return { tab: "chats", chat: null, panel: null };

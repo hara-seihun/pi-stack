@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isValidElement, type ReactElement, type ReactNode } from "react";
-import { requestStop, runningDescendants, StopChoices, submitThreadControl } from "./src/thread-controls";
+import { requestStop, runningDescendants, submitThreadControl } from "./src/thread-controls";
 import { composerAction, conversationThreads, workerThreads, working } from "./src/thread-state";
 import { inboxRows, selectionAfterSync } from "./src/chats";
 import { streamSessions } from "../server/stream-sessions";
@@ -13,12 +12,6 @@ const session = (id: string, extra: Partial<Session> = {}): Session => ({
   activeTools: [], provider: "openai", createdAt: "", updatedAt: "", revision: 1, idleUnread: false,
   queuedMessages: [], archivedAt: null, ...extra,
 });
-
-function buttons(node: ReactNode): ReactElement<Record<string, any>>[] {
-  if (Array.isArray(node)) return node.flatMap(buttons);
-  if (!isValidElement<Record<string, any>>(node)) return [];
-  return [...(node.type === "button" ? [node] : []), ...buttons(node.props.children)];
-}
 
 async function withThreadClient(fetcher: typeof fetch, run: () => Promise<void>) {
   const names = ["window", "fetch"] as const;
@@ -55,7 +48,7 @@ describe("thread controls", () => {
     expect(tree.map(node => node.session.id)).toEqual(["root", "lane"]);
     expect(tree[0].children.map(node => node.session.id).sort()).toEqual(["existing-worker", "fleet-worker"]);
     expect(isActiveWorker(session("stopped", { held: true }))).toBe(false);
-    expect(isActiveWorker(session("busy", { state: "running", activity: "running" }))).toBe(true);
+    expect(isActiveWorker(session("busy", { state: "running", activity: "queued" }))).toBe(true);
   });
   test("watch checks appear in Workers, not Chats, without losing ownership, selection or stop scope", () => {
     const watch = session("watch", { watchList: true, state: "running", idleUnread: true });
@@ -74,11 +67,11 @@ describe("thread controls", () => {
     expect(root.session.idleUnread).toBe(true);
     expect(root.children.map(node => node.session.id)).toEqual([worker.id]);
     expect(selectionAfterSync("ai:watch", { sessions: live, messaging }, { sessions: live, messaging })).toBe("ai:watch");
-    const stopped: unknown[] = [], choices: Session[] = [];
-    requestStop(watch, (id, descendants) => stopped.push({ id, descendants }), row => choices.push(row));
-    expect(stopped).toEqual([{ id: watch.id, descendants: false }]);
-    requestStop({ ...watch, hasChildren: true }, () => {}, row => choices.push(row));
-    expect(choices).toHaveLength(1);
+    const stopped: unknown[] = [];
+    const stop = (id: string, descendants: false) => { stopped.push({ id, descendants }); };
+    requestStop(watch, stop);
+    requestStop({ ...watch, hasChildren: true }, stop);
+    expect(stopped).toEqual([{ id: watch.id, descendants: false }, { id: watch.id, descendants: false }]);
     expect(runningDescendants(watch.id, workers)).toEqual([worker]);
   });
   test("resume exposes an empty-queue error instead of reporting success", async () => {
@@ -91,18 +84,36 @@ describe("thread controls", () => {
     });
   });
 
-  test("stops a childless thread directly and asks for scope when children exist", () => {
-    const stopped: unknown[] = [], choices: Session[] = [];
-    const stop = (id: string, descendants: boolean) => stopped.push({ id, descendants });
-    requestStop(session("leaf"), stop, thread => choices.push(thread));
-    const parent = session("parent", { hasChildren: true });
-    requestStop(parent, stop, thread => choices.push(thread));
-    expect(stopped).toEqual([{ id: "leaf", descendants: false }]);
-    expect(choices).toEqual([parent]);
-    const controls = buttons(StopChoices({ pending: false, onStop: descendants => stop(parent.id, descendants) }));
-    for (const control of controls) control.props.onClick();
-    expect(stopped.slice(1)).toEqual([{ id: "parent", descendants: true }, { id: "parent", descendants: false }]);
-    expect(buttons(StopChoices({ pending: true, onStop() {} })).every(button => button.props.disabled)).toBe(true);
+  test("Stop immediately targets only the selected thread, even with running descendants", async () => {
+    const parent = session("parent", { hasChildren: true, state: "running" });
+    const child = session("child", { parentId: parent.id, hasChildren: true, state: "running" });
+    const grandchild = session("grandchild", { parentId: child.id, state: "running" });
+    const requests: unknown[] = [];
+    await withThreadClient((async (url, init) => {
+      requests.push({ url, body: JSON.parse(String(init?.body)) });
+      return Response.json({ ok: true });
+    }) as typeof fetch, async () => {
+      for (const selected of [parent, child, grandchild]) {
+        let sent: Promise<void> | undefined;
+        requestStop(selected, (threadId, descendants) => { sent = submitThreadControl({ threadId, action: "stop", descendants }); });
+        expect(sent).toBeDefined();
+        await sent;
+      }
+      expect(requests).toEqual([
+        { url: "/v1/sessions/parent/abort", body: { descendants: false } },
+        { url: "/v1/sessions/child/abort", body: { descendants: false } },
+        { url: "/v1/sessions/grandchild/abort", body: { descendants: false } },
+      ]);
+    });
+  });
+
+  test("idle waiting and scheduled work can be stopped without claiming a native execution exists", () => {
+    for (const parent of [session("waiting", { activity: "awaiting" }), session("timer", { wakeSchedule: { cadenceMs: 60000, nextDueAt: 1000, reason: "Job" } })]) {
+      expect(working(parent)).toBe(false);
+      expect(composerAction(parent, "")).toBe("stop");
+      expect(composerAction(parent, "Continue")).toBe("send");
+      expect(composerAction({ ...parent, held: true }, "")).toBe("send");
+    }
   });
 
   test("an awaiting parent displays child activity but remains available for messages", () => {
@@ -110,9 +121,10 @@ describe("thread controls", () => {
     const child = session("child", { parentId: parent.id, state: "running", activity: "thinking" });
     expect(working(parent)).toBe(false);
     expect(working(child)).toBe(true);
-    expect(threadStatus(parent)).toMatchObject({ key: "awaiting", label: "Waiting on workers", busy: true });
+    expect(threadStatus(parent)).toMatchObject({ key: "awaiting", label: "Waiting on agents", busy: true });
     expect(threadStatus(child)).toMatchObject({ key: "thinking", busy: true });
-    expect(composerAction(parent, "")).toBe("send");
+    expect(composerAction(parent, "")).toBe("stop");
+    expect(composerAction(parent, "Continue")).toBe("send");
     expect(working({ ...child, state: "idle", held: true })).toBe(false);
   });
 

@@ -1,0 +1,68 @@
+{
+  "authored": {
+    "baseline": {
+      "n": 6,
+      "token_errors": 7,
+      "gold_tokens": 49,
+      "exact": 3,
+      "errors": 0,
+      "required_content_pass": 4,
+      "latency_p50_ms": 19.109631510218605,
+      "latency_p95_ms": 60.498712002299726
+    },
+    "candidate": {
+      "n": 6,
+      "token_errors": 155,
+      "gold_tokens": 49,
+      "exact": 0,
+      "errors": 1,
+      "required_content_pass": 3,
+      "latency_p50_ms": 1432.324453489855,
+      "latency_p95_ms": 6424.666998005705
+    }
+  },
+  "real_audio_asr_previous_test_diagnostic": {
+    "baseline": {
+      "n": 3,
+      "token_errors": 13,
+      "gold_tokens": 64,
+      "exact": 0,
+      "errors": 0,
+      "required_content_pass": null,
+      "latency_p50_ms": 19.08762098173611,
+      "latency_p95_ms": 32.085137005196884
+    },
+    "candidate": {
+      "n": 3,
+      "token_errors": 28,
+      "gold_tokens": 64,
+      "exact": 0,
+      "errors": 0,
+      "required_content_pass": null,
+      "latency_p50_ms": 1209.1393070004415,
+      "latency_p95_ms": 1511.1900749907363
+    }
+  },
+  "verbatim_text_validation_not_asr": {
+    "baseline": {
+      "n": 2,
+      "token_errors": 2,
+      "gold_tokens": 44,
+      "exact": 0,
+      "errors": 0,
+      "required_content_pass": null,
+      "latency_p50_ms": 23.016585488221608,
+      "latency_p95_ms": 23.96353898802772
+    },
+    "candidate": {
+      "n": 2,
+      "token_errors": 3,
+      "gold_tokens": 44,
+      "exact": 1,
+      "errors": 0,
+      "required_content_pass": null,
+      "latency_p50_ms": 1515.202272508759,
+      "latency_p95_ms": 1649.9939920031466
+    }
+  }
+}

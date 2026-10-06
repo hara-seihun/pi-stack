@@ -17,30 +17,43 @@ public final class WriteOpusRecorderTest {
         final CountDownLatch stop = new CountDownLatch(1);
         boolean started, closed;
         int reads, stops, partial;
+        byte[] tail;
+        int tailOffset;
         RuntimeException startError, closeError;
         public void start() { if (startError != null) throw startError; started = true; }
-        public int read(byte[] frame, int offset, int length) throws IOException {
+        public synchronized int read(byte[] frame, int offset, int length) {
             if (reads++ == 0 && partial > 0) {
                 java.util.Arrays.fill(frame, offset, offset + partial, (byte) 7);
                 return partial;
             }
             reading.countDown();
-            try { if (!stop.await(2, TimeUnit.SECONDS)) throw new IOException("Read still blocked"); }
-            catch (InterruptedException error) { throw new IOException(error); }
-            return -3;
+            if (stop.getCount() == 0) return -3;
+            if (tail == null || tailOffset == tail.length) return 0;
+            int count = Math.min(length, tail.length - tailOffset);
+            System.arraycopy(tail, tailOffset, frame, offset, count);
+            tailOffset += count;
+            return count;
         }
+        synchronized void deliverTail(byte[] bytes) { tail = bytes; }
         public void stop() { stops++; stop.countDown(); }
         public void close() { closed = true; stop.countDown(); if (closeError != null) throw closeError; }
     }
     private static final class FakeEncoder implements WriteOpusRecorder.Encoder {
         boolean closed, finished;
+        WriteOpusRecorder.Listener listener;
         RuntimeException startError, closeError;
         final List<byte[]> frames = new ArrayList<>();
         final List<Long> timestamps = new ArrayList<>();
         long endPts;
         public void start() { if (startError != null) throw startError; }
-        public void frame(byte[] frame, long pts) { frames.add(frame.clone()); timestamps.add(pts); }
-        public void finish(long pts) { finished = true; endPts = pts; }
+        public void frame(byte[] frame, long pts) {
+            frames.add(frame.clone()); timestamps.add(pts);
+            listener.packet(frame.clone());
+        }
+        public void finish(long pts) {
+            finished = true; endPts = pts;
+            listener.packet(new byte[] { 99 });
+        }
         public void close() { closed = true; if (closeError != null) throw closeError; }
     }
     private static final class Capture implements WriteOpusRecorder.Resources, WriteOpusRecorder.Listener {
@@ -49,15 +62,20 @@ public final class WriteOpusRecorderTest {
         final CountDownLatch done = new CountDownLatch(1);
         int inputAllocations, encoderAllocations, terminals;
         String failure;
+        final List<byte[]> packets = new ArrayList<>();
+        int packetsAtCallback;
         boolean cleanedAtCallback;
         public WriteOpusRecorder.Input input() throws IOException { inputAllocations++; return input; }
-        public WriteOpusRecorder.Encoder encoder(WriteOpusRecorder.Listener listener) { encoderAllocations++; return encoder; }
-        public void packet(byte[] packet) {}
+        public WriteOpusRecorder.Encoder encoder(WriteOpusRecorder.Listener listener) {
+            encoderAllocations++; encoder.listener = listener; return encoder;
+        }
+        public void packet(byte[] packet) { packets.add(packet); }
         public void amplitude(int level) {}
         public void stopped() { terminal(null); }
         public void failed(String message) { terminal(message); }
         private void terminal(String message) {
             failure = message;
+            packetsAtCallback = packets.size();
             cleanedAtCallback = (inputAllocations == 0 || input.closed) && (encoderAllocations == 0 || encoder.closed);
             terminals++;
             done.countDown();
@@ -66,15 +84,18 @@ public final class WriteOpusRecorderTest {
         void settled() throws InterruptedException { await(done); assertTrue(cleanedAtCallback); assertEquals(1, terminals); }
     }
 
-    @Test public void stopUnblocksReadAndReleasesBeforeTerminalCallback() throws Exception {
+    @Test public void cancelReleasesBeforeTerminalCallbackWithoutFlushing() throws Exception {
         Capture capture = new Capture();
         WriteOpusRecorder recorder = capture.recorder();
         recorder.start();
         await(capture.input.reading);
-        recorder.stop();
+        long began = System.nanoTime();
+        recorder.cancel();
         capture.settled();
         assertNull(capture.failure);
-        assertTrue(capture.encoder.finished);
+        assertFalse(capture.encoder.finished);
+        assertTrue(capture.encoder.frames.isEmpty());
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - began) < WriteOpusRecorder.FINISH_TAIL_MILLIS);
         assertEquals(1, capture.input.stops);
     }
 
@@ -93,6 +114,46 @@ public final class WriteOpusRecorderTest {
         for (int i = 0; i < frame.length; i++) assertEquals(i < 100 ? 7 : 0, frame[i]);
         assertEquals(Long.valueOf(0), capture.encoder.timestamps.get(0));
         assertEquals(20_000, capture.encoder.endPts);
+    }
+
+    @Test public void immediateFinishKeepsMicrophoneOpenForBufferedTailAndPadsOnlyAtEnd() throws Exception {
+        Capture capture = new Capture();
+        capture.input.partial = 100;
+        WriteOpusRecorder recorder = capture.recorder();
+        recorder.start();
+        await(capture.input.reading);
+        recorder.stop(); recorder.stop();
+        assertEquals(0, capture.input.stops);
+        byte[] tail = new byte[704];
+        java.util.Arrays.fill(tail, (byte) 42);
+        capture.input.deliverTail(tail);
+        capture.settled();
+        assertNull(capture.failure);
+        assertEquals(704, capture.input.tailOffset);
+        assertEquals(1, capture.input.stops);
+        assertTrue(capture.encoder.finished);
+        assertEquals(2, capture.encoder.frames.size());
+        for (int i = 0; i < 1280; i++)
+            assertEquals(i < 100 ? 7 : i < 804 ? 42 : 0, capture.encoder.frames.get(i / 640)[i % 640]);
+        assertEquals(List.of(0L, 20_000L), capture.encoder.timestamps);
+        assertEquals(40_000, capture.encoder.endPts);
+        assertEquals(3, capture.packetsAtCallback);
+        assertArrayEquals(new byte[] { 99 }, capture.packets.get(2));
+    }
+
+    @Test public void cancelDuringFinishTailDoesNotWaitOrEmitFinal() throws Exception {
+        Capture capture = new Capture();
+        capture.input.partial = 100;
+        WriteOpusRecorder recorder = capture.recorder();
+        recorder.start();
+        await(capture.input.reading);
+        recorder.stop();
+        recorder.cancel(); recorder.cancel();
+        capture.settled();
+        assertNull(capture.failure);
+        assertFalse(capture.encoder.finished);
+        assertTrue(capture.encoder.frames.isEmpty());
+        assertEquals(1, capture.input.stops);
     }
 
     @Test public void codecStartupFailureStillReleasesCodec() throws Exception {
@@ -172,7 +233,7 @@ public final class WriteOpusRecorderTest {
             WriteOpusRecorder recorder = capture.recorder();
             recorder.start(); recorder.start();
             await(capture.input.reading);
-            recorder.stop(); recorder.stop();
+            recorder.cancel(); recorder.cancel();
             capture.settled();
             assertNull(capture.failure);
             assertEquals(1, capture.inputAllocations);

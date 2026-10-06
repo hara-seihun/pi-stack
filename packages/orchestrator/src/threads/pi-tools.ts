@@ -17,6 +17,7 @@ const watchFields = {
   how: Type.Optional(Type.String({ description: "Known way to check it." })),
   cadenceMs: Type.Optional(Type.Integer({ minimum: 60000, description: "Repeat interval in milliseconds; omitted uses the person's default." })),
   nextDueAt: Type.Optional(Type.Integer({ minimum: 0, description: "Next due time as Unix epoch milliseconds; new items default to now." })),
+  destination: Type.Optional(Type.String({ minLength: 1, description: "Destination whose workspace and chosen context check this item, such as personal or home; omitted on add uses this thread's own destination." })),
 };
 const settings = Type.Object({
   model: Type.Optional(Type.String()),
@@ -61,6 +62,30 @@ export function threadTools(options: PiSessionOptions) {
   }
   return [
     defineTool({
+      name: "thread_wait", label: "Wait on agents",
+      description: "Set or clear your own durable Waiting on agents status. Set with a reason and optional direct child threadIds/after cursors as your final tool call, then this turn ends without polling. Child settlements resume this same thread through ordinary result delivery. For external durable work omit threadIds and set thread_wake first as a recovery check. Holds and archives still win; explicit input clears the wait. Clear removes the status without creating work.",
+      parameters: Type.Union([
+        Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), threadIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 100, uniqueItems: true })), after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))) }),
+        Type.Object({ action: Type.Literal("clear") }),
+      ]),
+      execute: async (id, input, signal) => {
+        const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
+        return { ...result(waited), ...(waited.ok && input.action === "set" && waited.value.metadata?.agentWait ? { terminate: true } : {}) };
+      },
+    }),
+    defineTool({
+      name: "thread_wake", label: "Schedule own-thread wakes",
+      description: "Set, list, change or cancel one durable periodic recovery check for your own existing thread. Set replaces reason/cadence and retimes nextDueAt (epoch milliseconds, default now+cadence). Due checks coalesce while busy and pause during Stop/archive. Restart-safe ordinary messages resume the same thread through normal model admission; no watch-list item or polling model is created. List shows next due and last durable delivery/landing. Cancel when resolved. Prefer agent settlement events; wakes are fallback checks.",
+      parameters: Type.Union([
+        Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), cadenceMs: Type.Integer({ minimum: 60000 }), nextDueAt: Type.Optional(Type.Integer({ minimum: 0 })) }),
+        Type.Object({ action: Type.Literal("list") }),
+        Type.Object({ action: Type.Literal("cancel") }),
+      ]),
+      execute: async (id, input, signal) => result(await api(signal).wakeSchedule(input.action === "list"
+        ? { action: "list", threadId: options.threadId }
+        : { ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
+    defineTool({
       name: "watch_list_add", label: "Add to watch list",
       description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with Opus 5.5, handles routine follow-ups and asks the person about major decisions. An empty list makes no model calls.",
       parameters: Type.Object(watchFields),
@@ -68,9 +93,9 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "watch_list_update", label: "Update a watch item",
-      description: "Change a watch item's check, reason, method or timing. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
+      description: "Change a watch item's check, reason, method, timing or destination. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
       parameters: Type.Object({ id: Type.String({ minLength: 1 }), patch: Type.Object({
-        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt,
+        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt, destination: watchFields.destination,
         how: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         cadenceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 60000 }), Type.Null()])),
       }) }),
@@ -179,7 +204,7 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_read", label: "Read thread history",
-      description: "Read persisted native history without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
+      description: "Read persisted thread history, including root-consent answer receipts, without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
       parameters: Type.Object({ threadId: Type.String(), cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), entryId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
       execute: async (_id, input, signal) => {
         const value = await api(signal).read(input.entryId ? { threadId: input.threadId, entryId: input.entryId }
@@ -193,11 +218,12 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_control", label: "Control a thread",
-      description: "Stop local execution and hold pending messages, resume held messages, restore archived threads, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Restore unarchives the thread, and with descendants:true every thread below it; resume:true also puts back what the archive took out of play, continuing cancelled turns and releasing held messages, while leaving threads that were already stopped stopped. Omit threadId for this thread. Settings save future preferences; effectiveSettings names accepted/current work. To move dormant provider/admission waiting work to the saved model, use retryWaiting after settings. Live in-flight work is never relabelled or interrupted by settings. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
+      description: "Rename a thread, stop local execution and hold pending messages, resume held messages, restore archived threads, or change settings through the same thread owner humans use. Rename with title pins that name permanently against the automatic renamer; omit threadId to rename your own thread. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Restore unarchives the thread, and with descendants:true every thread below it; resume:true also puts back what the archive took out of play, continuing cancelled turns and releasing held messages, while leaving threads that were already stopped stopped. Omit threadId for this thread. Settings save future preferences; effectiveSettings names accepted/current work. To move dormant provider/admission waiting work to the saved model, use retryWaiting after settings. Live in-flight work is never relabelled or interrupted by settings. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
       parameters: Type.Union([
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("stop"), descendants: Type.Boolean() }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("resume") }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("restore"), descendants: Type.Boolean({ description: "Also restore every thread below it, such as workers archived with their conversation." }), resume: Type.Optional(Type.Boolean({ default: false, description: "Continue the work the archive interrupted." })) }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("rename"), title: Type.String({ minLength: 1, description: "Explicit thread name; automatic naming will not overwrite it." }) }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("settings"), settings }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("retryWaiting") }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("cancelMessage"), messageId: Type.String() }),

@@ -1,0 +1,218 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "final-kenan",
+      "audio": "audio/final-kenan.wav",
+      "sha256": "8328e7a318b13767a81200759a2a546e8b13075ff1935b2d5811e28810fa27ad",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "final-heldout-synthetic-declared-before-recognition",
+      "split": "final-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "We should send twelve files to Kenan tomorrow."
+      },
+      "verbatim": "We should send twelve files to Kenan tomorrow.",
+      "target": "We should send twelve files to Kenan tomorrow.",
+      "expected_terms": [
+        "Kenan"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "We should send twelve files to Kenan tomorrow"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "final-jodie-quote",
+      "audio": "audio/final-jodie-quote.wav",
+      "sha256": "6bbb932f9ee5f9ec00d046bb0cc80412b2e3a5858a0fa84dd624918befac4691",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "final-heldout-synthetic-declared-before-recognition",
+      "split": "final-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "She said open quote do not send twelve files to Jodie close quote."
+      },
+      "verbatim": "She said open quote do not send twelve files to Jodie close quote.",
+      "target": "She said \u201cDo not send twelve files to Jodie.\u201d",
+      "expected_terms": [
+        "Jodie"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "do not send twelve files to Jodie"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "final-canon-quote",
+      "audio": "audio/final-canon-quote.wav",
+      "sha256": "94ca5627495fc985c8f691905da088b944596eb4aa227524a385371e0947d507",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "final-heldout-synthetic-declared-before-recognition",
+      "split": "final-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "She said open quote do not send twelve files to Canon close quote."
+      },
+      "verbatim": "She said open quote do not send twelve files to Canon close quote.",
+      "target": "She said \u201cDo not send twelve files to Canon.\u201d",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "do not send twelve files to Canon"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "final-anna-quote",
+      "audio": "audio/final-anna-quote.wav",
+      "sha256": "9f7059f2468c79bc7da19aab8f4bf9b40946590bd540ec5d39de0392cd176022",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "final-heldout-synthetic-declared-before-recognition",
+      "split": "final-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "She said open quote please call Anna tomorrow close quote."
+      },
+      "verbatim": "She said open quote please call Anna tomorrow close quote.",
+      "target": "She said \u201cPlease call Anna tomorrow.\u201d",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "please call Anna tomorrow"
+          ]
+        ],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "final-replacement-quote",
+      "audio": "audio/final-replacement-quote.wav",
+      "sha256": "12fa877d8109b7342c30a33222b3e5270e9ea582d39f79e2f46d5e7b07a54f7f",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "final-heldout-synthetic-declared-before-recognition",
+      "split": "final-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "She said open quote please open the letter box close quote."
+      },
+      "verbatim": "She said open quote please open the letter box close quote.",
+      "target": "She said \u201cPlease open the letter box.\u201d",
+      "expected_terms": [
+        "LetterBox"
+      ],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-positive"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "please open"
+          ],
+          [
+            "letter box",
+            "LetterBox"
+          ]
+        ],
+        "forbidden": []
+      },
+      "dictionary_target": "She said \u201cPlease open the LetterBox.\u201d"
+    },
+    {
+      "id": "final-letter-quote",
+      "audio": "audio/final-letter-quote.wav",
+      "sha256": "3ec8b9e268bb7829e5cce29cd684698a1d4b4237b7dd0345a03b4e4f9b91492b",
+      "kind": "synthetic-espeak",
+      "license": "CC0-1.0",
+      "exposure": "final-heldout-synthetic-declared-before-recognition",
+      "split": "final-heldout",
+      "source": {
+        "generator": "eSpeak NG text-to-speech: 1.52.0  Data at: /usr/lib/x86_64-linux-gnu/espeak-ng-data",
+        "voice": "en-gb",
+        "speed": 155,
+        "text": "She said open quote open the letter and close the window close quote."
+      },
+      "verbatim": "She said open quote open the letter and close the window close quote.",
+      "target": "She said \u201cOpen the letter and close the window.\u201d",
+      "expected_terms": [],
+      "expectation": "strict",
+      "tags": [
+        "synthetic",
+        "dictionary-negative"
+      ],
+      "meaning": {
+        "required": [
+          [
+            "open the letter and close the window"
+          ]
+        ],
+        "forbidden": []
+      }
+    }
+  ],
+  "dictionary": {
+    "words": [
+      "Kenan",
+      "Kelana",
+      "Jodie",
+      "Qwen",
+      "Tailscale",
+      "LetterBox"
+    ],
+    "replacements": [
+      {
+        "from": "letter box",
+        "to": "LetterBox"
+      }
+    ]
+  }
+}

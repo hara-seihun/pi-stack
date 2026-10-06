@@ -8,16 +8,44 @@ import { shareFile } from "../shared-custody.js";
 import { openPiSession, piEnvironmentScope } from "./pi-session.js";
 import type { PiEvent, PiSession, PiSessionOptions } from "./contracts.js";
 
+type Resident = { close(): Promise<void>; id: string; key?: string; active: boolean; used: number; pending: number; priority: boolean };
 const [controlPath] = process.argv.slice(2);
 if (!controlPath) throw new Error("Thread runner requires a control socket");
-const sessions = new Map<string, { close(): Promise<void>; id: string }>();
-let stopping = false;
-let idleTimer: ReturnType<typeof setTimeout> | undefined;
-const maxSessions = Number(process.env.PI_THREAD_MAX_ACTIVE_SESSIONS || 64);
-const maxRss = Number(process.env.PI_THREAD_RUNNER_MAX_RSS_MB || 6144) * 1024 * 1024;
+const sessions = new Map<string, Resident>();
+let stopping = false, drainWhenEmpty = false;
+const shared = process.env.PI_THREAD_RUNNER_RESIDENT !== "0";
+let operations = Promise.resolve();
+function serial<T>(action: () => Promise<T>): Promise<T> {
+  const result = operations.then(action);
+  operations = result.then(() => {}, () => {});
+  return result;
+}
+function positive(value: string | undefined, fallback: number) { const number = Number(value); return Number.isSafeInteger(number) && number > 0 ? number : fallback; }
+const maxSessions = positive(process.env.PI_THREAD_MAX_ACTIVE_SESSIONS, 64);
+const maxResident = positive(process.env.PI_THREAD_MAX_RESIDENT_SESSIONS, maxSessions * 2);
+const maxRss = positive(process.env.PI_THREAD_RUNNER_MAX_RSS_MB, 6144) * 1024 * 1024;
+const pressure = () => process.memoryUsage().rss >= maxRss || underMemoryPressure();
+const activeCount = () => [...sessions.values()].filter(session => session.active).length;
 function availableSlots(priority = false) {
   const limit = priority ? maxSessions : Math.min(maxSessions, Math.max(1, maxSessions - 4));
-  return stopping || process.memoryUsage().rss >= maxRss || underMemoryPressure() ? 0 : Math.max(0, limit - sessions.size);
+  return stopping || pressure() ? 0 : Math.max(0, limit - activeCount());
+}
+async function reclaim(reserve = 0, exclude?: Resident) {
+  const idle = [...sessions.values()].filter(session => !session.active && !session.pending && session !== exclude).sort((a, b) => a.used - b.used);
+  for (const session of idle) {
+    if (sessions.size + reserve <= maxResident && !pressure()) break;
+    try { await session.close(); }
+    catch (error) { session.active = true; console.error(`Runner reclamation refused for ${session.id}:`, error); }
+    globalThis.gc?.();
+  }
+}
+async function activate(session: Resident) {
+  if (!session.active) {
+    await reclaim(0, session);
+    if (!availableSlots(session.priority)) throw new Error("Runner capacity busy; work remains queued");
+    session.active = true;
+  }
+  session.used = Date.now();
 }
 function lines(socket: Socket, receive: (value: any) => void) {
   const reader = createInterface({ input: socket, crlfDelay: Infinity });
@@ -34,9 +62,14 @@ function remove(path: string) {
 }
 async function open(options: PiSessionOptions & { socketPath: string; priority?: boolean }) {
   if (stopping) throw new Error("Runner is stopping");
-  if (sessions.has(options.socketPath)) return;
-  if (!availableSlots(options.priority)) throw new Error("Runner capacity busy; work remains queued");
-  clearTimeout(idleTimer);
+  const existing = sessions.get(options.socketPath);
+  if (existing) {
+    if (options.env.PI_THREAD_RECOVERING === "1") return;
+    if (existing.key === options.env.PI_THREAD_SESSION_KEY) { await activate(existing); return; }
+    await existing.close();
+  }
+  await reclaim(1);
+  if (sessions.size >= maxResident || !availableSlots(options.priority)) throw new Error("Runner capacity busy; work remains queued");
   const { socketPath } = options;
   const generation = basename(controlPath, ".sock");
   if (dirname(socketPath) !== join(dirname(controlPath), "..", "thread-sockets") || !basename(socketPath).startsWith(`${generation}.`)) throw new Error("Invalid thread socket");
@@ -48,6 +81,7 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   let closed = false;
   let adapter: PiSession;
   let ready: Promise<void>;
+  const resident: Resident = { close, id: options.threadId, key: env.PI_THREAD_SESSION_KEY, active: true, used: Date.now(), pending: 0, priority: options.priority !== false };
   const channel = createServer(socket => {
     client?.destroy(); client = socket; socket.setNoDelay(true);
     lines(socket, value => {
@@ -56,28 +90,34 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
         output.attach(socket, Number(value.after || 0));
       } else if (value.type === "ack") output.acknowledge(Number(value.sequence));
       else if (value.type === "command") {
-        void ready.then(() => piEnvironmentScope.run(env, () => adapter.command(value.value))).catch(error => publish({
+        resident.pending++;
+        const observing = /^(?:get_|set_session_name$|set_speed$|set_thinking_level$)/.test(String(value.value?.type));
+        void serial(async () => { if (!observing) await activate(resident); else resident.used = Date.now(); await ready; }).then(() => piEnvironmentScope.run(env, () => adapter.command(value.value))).catch(error => publish({
           id: value.value?.id, type: "response", command: value.value?.type, success: false, error: String(error),
-        }));
+        })).finally(() => { resident.pending--; });
       }
     });
     socket.on("close", () => { if (client === socket) client = null; });
   });
-  function publish(value: PiEvent) { if (!closed) output.publish(value); }
+  function publish(value: PiEvent) {
+    if (value.type === "response" && value.command === "get_state" && value.success) value = { ...value, data: { ...value.data as object, threadSessionKey: resident.key } };
+    if (!closed) output.publish(value);
+  }
   function finish(code = 0) {
     if (closed) return;
     closed = true;
     reply(client, { type: "exit", code }); client?.end(); channel.close(); output.close();
     for (const path of [socketPath, spoolPath]) remove(path);
     sessions.delete(socketPath);
-    if (!sessions.size && !stopping) idleTimer = setTimeout(() => void stop(), 5000);
+    if (!sessions.size && (drainWhenEmpty || !shared) && !stopping) void serial(stop);
   }
   async function close() {
     await ready;
+    if (resident.pending) throw new Error("Cannot close a session with unacknowledged commands");
     await piEnvironmentScope.run(env, () => adapter.close());
     finish();
   }
-  sessions.set(socketPath, { close, id: options.threadId });
+  sessions.set(socketPath, resident);
   try { await new Promise<void>((resolve, reject) => { channel.once("error", reject); channel.listen(socketPath, () => { shareFile(socketPath); resolve(); }); }); }
   catch (error) { finish(1); throw error; }
   ready = piEnvironmentScope.run(env, () => openPiSession(options, publish, finish)).then(value => { adapter = value; }).catch(error => {
@@ -90,26 +130,36 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
 }
 const server = createServer(socket => {
   lines(socket, value => {
-    if (value.type === "open") void open(value.options).then(() => reply(socket, { ok: true, pid: process.pid }), error => reply(socket, { error: String(error) }));
-    else if (value.type === "close") void Promise.resolve(sessions.get(value.socketPath)?.close()).then(() => reply(socket, { ok: true }), error => reply(socket, { error: String(error) }));
-    else if (value.type === "status") reply(socket, { ok: true, pid: process.pid, sessions: sessions.size, availableSlots: availableSlots(true),
-      backgroundSlots: availableSlots(false), threadIds: [...sessions.values()].map(session => session.id), maxSessions, rss: process.memoryUsage().rss });
+    const respond = (operation: Promise<unknown>) => void operation.then(() => reply(socket, { ok: true, pid: process.pid }), error => reply(socket, { error: String(error) }));
+    if (value.type === "open") respond(serial(() => open(value.options)));
+    else if (value.type === "close") respond(serial(async () => { await sessions.get(value.socketPath)?.close(); }));
+    else if (value.type === "activity") respond(serial(async () => {
+      const session = sessions.get(value.socketPath);
+      if (!session) throw new Error("Runner capacity busy: idle session was reclaimed; work remains queued");
+      if (value.active) await activate(session);
+      else { session.active = false; session.used = Date.now(); await reclaim(); }
+    }));
+    else if (value.type === "retain") { drainWhenEmpty = false; reply(socket, { ok: true }); }
+    else if (value.type === "drain") { drainWhenEmpty = true; reply(socket, { ok: true }); if (!sessions.size) void serial(stop); }
+    else if (value.type === "status") reply(socket, { ok: true, pid: process.pid, sessions: sessions.size, activeSessions: activeCount(), availableSlots: availableSlots(true),
+      backgroundSlots: availableSlots(false), threadIds: [...sessions.values()].map(session => session.id), maxSessions, maxResident, rss: process.memoryUsage().rss });
     else reply(socket, { error: "Unknown runner command" });
   });
 });
 server.on("error", error => { console.error(error); process.exitCode = 1; });
 remove(controlPath);
 server.listen(controlPath, () => shareFile(controlPath));
-idleTimer = setTimeout(() => { if (!sessions.size) void stop(); }, 5000);
+const maintenance = setInterval(() => void serial(() => reclaim()).catch(error => console.error("Runner reclamation failed:", error)), 5000);
+maintenance.unref();
 async function stop() {
   if (stopping) return;
-  stopping = true; clearTimeout(idleTimer);
+  stopping = true;
   const results = await Promise.allSettled([...sessions.values()].map(session => session.close()));
   if (results.some(result => result.status === "rejected")) {
     stopping = false;
     console.error("Runner shutdown refused: active sessions still own work");
     return;
   }
-  server.close(); remove(controlPath);
+  clearInterval(maintenance); server.close(); remove(controlPath);
 }
-for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => void stop());
+for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => void serial(stop));

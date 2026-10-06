@@ -22,6 +22,15 @@ CREATE TABLE IF NOT EXISTS error_feedback (
   occurrence TEXT NOT NULL,
   dismissed_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS error_diagnostics (
+  source TEXT PRIMARY KEY,
+  message TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  recovery TEXT NOT NULL CHECK(recovery IN ('automatic','required')),
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  resolved_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS idle_notifications (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,

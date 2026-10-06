@@ -71,7 +71,7 @@ it("retains native history, resources, thread tools and RPC session replacement"
   const names = (context.data as { tools: { name: string }[] }).tools.map(tool => tool.name);
   expect(names).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", "fixture_resource", "thread_await", "thread_spawn", "thread_read", "thread_list", "thread_send", "thread_control"]));
   expect(names.some(name => name.startsWith("core_"))).toBe(false);
-  expect(names.filter(name => name.startsWith("thread_")).sort()).toEqual(["thread_await", "thread_control", "thread_list", "thread_read", "thread_send", "thread_spawn"]);
+  expect(names.filter(name => name.startsWith("thread_")).sort()).toEqual(["thread_await", "thread_control", "thread_list", "thread_read", "thread_send", "thread_spawn", "thread_wait", "thread_wake"]);
   expect(await request({ type: "prompt", workId: "handled", message: "/fixture_command" })).toMatchObject({ success: true });
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(readFileSync(options.sessionFile, "utf8")).toContain('"workId":"handled"');

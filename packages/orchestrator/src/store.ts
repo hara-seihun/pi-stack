@@ -13,6 +13,7 @@ export const SCHEMA_VERSION = 3;
 /** One broker principal's live spending grant, owned by the running model broker. */
 export interface BrokerGrant { accounts: string[]; models: string[] }
 const GRANT_PREFIX = "broker-grant:";
+const GRANT_OWNER_PREFIX = "broker-grant-owner:";
 const USAGE_HOUR_SCHEMA = `
 CREATE TABLE usage_hour (
   account_id TEXT NOT NULL,
@@ -62,7 +63,8 @@ CREATE TABLE lane (
   updated_at INTEGER NOT NULL,
   admission TEXT,
   repair_readiness_command TEXT,
-  thinking_level TEXT
+  thinking_level TEXT,
+  max_active INTEGER CHECK (max_active > 0)
 ) STRICT;
 CREATE TABLE run (
   id TEXT PRIMARY KEY,
@@ -105,7 +107,7 @@ ${USAGE_HOUR_SCHEMA}`;
 function maybe<T>(value: T | null): T | undefined { return value === null ? undefined : value; }
 
 /** Lane columns added after the version 3 schema shipped, with the control rows they replaced. */
-const LANE_COLUMNS = [["admission", "TEXT"], ["repair_readiness_command", "TEXT"], ["thinking_level", "TEXT"]] as const;
+const LANE_COLUMNS = [["admission", "TEXT"], ["repair_readiness_command", "TEXT"], ["thinking_level", "TEXT"], ["max_active", "INTEGER CHECK (max_active > 0)"]] as const;
 
 function adoptLaneColumns(db: DatabaseSync): void {
   const present = new Set((db.prepare("SELECT name FROM pragma_table_info('lane')").all() as { name: string }[]).map((column) => column.name));
@@ -211,12 +213,23 @@ export class Store {
     const value=this.control(`${GRANT_PREFIX}${principal}`);
     return value?JSON.parse(value) as BrokerGrant:undefined;
   }
-  publishBrokerGrants(grants: readonly (BrokerGrant&{principal:string})[]): void {
+  publishBrokerGrants(grants: readonly (BrokerGrant&{principal:string})[], owner?: string): void {
     this.transaction(()=>{
       const keep=new Set(grants.map((grant)=>`${GRANT_PREFIX}${grant.principal}`));
-      for(const grant of grants)this.setControl(`${GRANT_PREFIX}${grant.principal}`,JSON.stringify({accounts:grant.accounts,models:grant.models} satisfies BrokerGrant));
-      const stale=(this.db.prepare("SELECT key FROM control WHERE key>=? AND key<?").all(GRANT_PREFIX,`${GRANT_PREFIX}\uffff`) as {key:string}[]).filter((row)=>!keep.has(row.key));
-      for(const row of stale)this.db.prepare("DELETE FROM control WHERE key=?").run(row.key);
+      for(const grant of grants){
+        const key=`${GRANT_PREFIX}${grant.principal}`,ownerKey=`${GRANT_OWNER_PREFIX}${grant.principal}`;
+        const currentOwner=this.control(ownerKey);
+        if(this.control(key)!==undefined&&currentOwner!==owner)
+          throw new Error(`Broker principal ${grant.principal} belongs to another grant owner`);
+        this.setControl(key,JSON.stringify({accounts:grant.accounts,models:grant.models} satisfies BrokerGrant));
+        if(owner!==undefined)this.setControl(ownerKey,owner);
+      }
+      const stale=(this.db.prepare("SELECT key FROM control WHERE key>=? AND key<?").all(GRANT_PREFIX,`${GRANT_PREFIX}\uffff`) as {key:string}[])
+        .filter((row)=>!keep.has(row.key)&&this.control(`${GRANT_OWNER_PREFIX}${row.key.slice(GRANT_PREFIX.length)}`)===owner);
+      for(const row of stale){
+        this.db.prepare("DELETE FROM control WHERE key=?").run(row.key);
+        this.db.prepare("DELETE FROM control WHERE key=?").run(`${GRANT_OWNER_PREFIX}${row.key.slice(GRANT_PREFIX.length)}`);
+      }
     });
   }
 
@@ -288,7 +301,9 @@ export class Store {
   }
 
   recordMeter(accountId:string,meterId:string,usedPercent:number,resetAt:number|undefined,observedAt=Date.now()): void {
-    this.db.prepare("INSERT OR IGNORE INTO meter VALUES(?,?,?,?,?)").run(accountId,meterId,observedAt,usedPercent,resetAt??null);
+    this.db.prepare(`INSERT INTO meter(account_id,meter_id,observed_at,used_percent,reset_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(account_id,meter_id,observed_at) DO UPDATE SET used_percent=excluded.used_percent,reset_at=excluded.reset_at`)
+      .run(accountId,meterId,observedAt,usedPercent,resetAt??null);
     this.db.prepare("DELETE FROM meter WHERE account_id=? AND meter_id=? AND observed_at<?")
       .run(accountId,meterId,observedAt-24*3_600_000);
   }
@@ -344,7 +359,8 @@ export class Store {
   reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {
     const ids=new Set<string>();
     for(const lane of lanes){
-      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe","repair","admission","thinkingLevel"].includes(key))throw new Error(`unsupported lane field ${key}`);
+      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe","repair","admission","thinkingLevel","maxActive"].includes(key))throw new Error(`unsupported lane field ${key}`);
+      if(lane.maxActive!==undefined&&(!Number.isSafeInteger(lane.maxActive)||lane.maxActive<=0))throw new Error(`lane ${lane.id} maxActive must be a positive safe integer`);
       if(lane.admission!==undefined&&!["force","background"].includes(lane.admission))throw new Error(`lane ${lane.id} admission must be force or background`);
       if(lane.thinkingLevel!==undefined&&!isThinkingLevel(lane.thinkingLevel))throw new Error(`lane ${lane.id} thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
       if(lane.repair!==undefined&&(!lane.repair||typeof lane.repair!=="object"||Object.keys(lane.repair).some(key=>key!=="readinessCommand")||typeof lane.repair.readinessCommand!=="string"||!lane.repair.readinessCommand.trim()))throw new Error(`lane ${lane.id} repair requires a readinessCommand`);
@@ -355,17 +371,17 @@ export class Store {
     }
     this.transaction(() => {
       const ids=new Set(lanes.map((lane)=>lane.id));
-      for (const lane of lanes) this.db.prepare(`INSERT INTO lane(id,prompt,cwd,profile,weight,priority,doctrine_url,opening_probe,updated_at,admission,repair_readiness_command,thinking_level)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET prompt=excluded.prompt,cwd=excluded.cwd,profile=excluded.profile,
+      for (const lane of lanes) this.db.prepare(`INSERT INTO lane(id,prompt,cwd,profile,weight,priority,doctrine_url,opening_probe,updated_at,admission,repair_readiness_command,thinking_level,max_active)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET prompt=excluded.prompt,cwd=excluded.cwd,profile=excluded.profile,
         weight=excluded.weight,priority=excluded.priority,doctrine_url=excluded.doctrine_url,
         opening_probe=excluded.opening_probe,updated_at=excluded.updated_at,admission=excluded.admission,
-        repair_readiness_command=excluded.repair_readiness_command,thinking_level=excluded.thinking_level`)
+        repair_readiness_command=excluded.repair_readiness_command,thinking_level=excluded.thinking_level,max_active=excluded.max_active`)
         .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at,
-          lane.admission??"force",lane.repair?.readinessCommand??null,lane.thinkingLevel??null);
+          lane.admission??"force",lane.repair?.readinessCommand??null,lane.thinkingLevel??null,lane.maxActive??null);
       for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
     });
   }
-  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe),admission:(maybe(r.admission)??"force") as BudgetClass,thinkingLevel:maybe(r.thinking_level) as ThinkingLevel|undefined,repair:maybe(r.repair_readiness_command)===undefined?undefined:{readinessCommand:r.repair_readiness_command as string}})); }
+  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,maxActive:maybe(r.max_active),priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe),admission:(maybe(r.admission)??"force") as BudgetClass,thinkingLevel:maybe(r.thinking_level) as ThinkingLevel|undefined,repair:maybe(r.repair_readiness_command)===undefined?undefined:{readinessCommand:r.repair_readiness_command as string}})); }
   lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
 
   createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;context?:RunContext}):string[]{

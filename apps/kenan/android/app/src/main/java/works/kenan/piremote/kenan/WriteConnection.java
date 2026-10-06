@@ -22,11 +22,12 @@ final class WriteConnection {
         void connected();
         void partial(String text);
         void finished(String text);
+        default void notice(String message) { }
         void failed(String message);
     }
 
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
-        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false)
         .addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
@@ -41,6 +42,7 @@ final class WriteConnection {
     private WebSocket socket;
     private boolean started;
     private boolean closed;
+    private boolean finishing;
     private boolean terminal;
 
     WriteConnection(Context context, RemoteSession.Identity identity, Events events) {
@@ -108,7 +110,17 @@ final class WriteConnection {
                                     case "partial" -> events.partial(event.optString("committed") + event.optString("tail"));
                                     case "final" -> {
                                         String text = event.getString("text");
-                                        if (terminate(true)) events.finished(text);
+                                        if (terminate(true)) {
+                                            JSONObject rewrite = event.optJSONObject("rewrite");
+                                            if (rewrite != null) {
+                                                String status = rewrite.optString("status");
+                                                if (status.equals("unavailable")) events.notice(rewrite.optString("reason").equals("warming")
+                                                    ? "Local rewrite is warming up; inserted the transcript."
+                                                    : "Local rewrite unavailable; inserted the transcript.");
+                                                else if (status.equals("guarded")) events.notice("Kept the original wording to avoid changing its meaning.");
+                                            }
+                                            events.finished(text);
+                                        }
                                     }
                                     case "error" -> fail(event.optString("message", "Recognition failed"));
                                     default -> { }
@@ -153,14 +165,15 @@ final class WriteConnection {
     }
     synchronized boolean audio(byte[] packet) {
         if (!current.getAsBoolean()) { cancel(); return false; }
-        return !closed && socket != null && socket.queueSize() < 10_000
+        return !closed && !finishing && socket != null && socket.queueSize() < 10_000
             && socket.send(ByteString.of(packet));
     }
     synchronized long queueSize() { return socket == null ? 0 : socket.queueSize(); }
     synchronized boolean ended() { return terminal; }
     synchronized void finish() {
         if (!current.getAsBoolean()) { cancel(); return; }
-        if (socket == null || closed) return;
+        if (socket == null || closed || finishing) return;
+        finishing = true;
         if (!socket.send("{\"type\":\"finish\"}")) fail("Could not finish dictation");
     }
     void cancel() { terminate(false); }

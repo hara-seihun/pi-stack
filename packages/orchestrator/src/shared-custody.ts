@@ -55,11 +55,17 @@ export function custodyWriteFileSync(path: string | number, data: string, option
   shareFile(path);
 }
 
+export function custodyPrivateFileMode(path: string, env = process.env): number {
+  if (custodyFs.existsSync(path)) return custodyFs.statSync(path).mode & 0o777;
+  return env.PI_REMOTE_ROOMS_RUNTIME === "1" ? 0o640 : 0o600;
+}
+
 export function custodyReplaceFileSync(path: string, data: string): void {
   const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
-    const fd = custodyOpenSync(temporary, "wx", 0o600);
-    try { custodyFs.writeFileSync(fd, data); custodyFs.fsyncSync(fd); }
+    const mode = custodyPrivateFileMode(path);
+    const fd = custodyOpenSync(temporary, "wx", mode);
+    try { custodyFs.fchmodSync(fd, mode); custodyFs.writeFileSync(fd, data); custodyFs.fsyncSync(fd); }
     finally { custodyFs.closeSync(fd); }
     custodyFs.renameSync(temporary, path);
     const directory = custodyFs.openSync(custodyDirname(path), "r");

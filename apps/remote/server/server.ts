@@ -1,14 +1,54 @@
 import { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { WatchList, watchInterval, loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
-import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
+import {
+  WatchList,
+  watchInterval,
+  loadThreadModelCatalog,
+  threadSettingsMetadata,
+  modelBrokerUrl,
+  createWorkspaceAdmission,
+  ORCHESTRATOR_CATALOG,
+  OrchestratorClient,
+  CompletionClient,
+  type CompletionInput,
+  catalogAgentType,
+  createSharedImageGenerationService,
+  resolveDelivery,
+  ThreadService,
+  ModelAvailabilityStore,
+  modelAvailabilityPath,
+  modelAvailabilityKey,
+  ThreadDirectory,
+  createThreadClient,
+  importRemoteThreads,
+  createSharedPiSessionOpener,
+  threadHttp,
+  admissionFor,
+  callerResolver,
+  hostIdentityConfig,
+  threadCapability,
+  type CallerSource,
+  type ThreadCreator,
+  type ThreadInspection,
+  type Thread,
+  type ThreadMessage,
+  type PiEvent,
+  type Result,
+  type SharedImageGenerationService,
+  THREAD_MODES,
+  type ThreadModeName,
+  type PlanUsageSnapshot,
+  type PersonalUsage,
+  readBrokerUsage,
+} from "pi-orchestrator/api";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -18,23 +58,30 @@ import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
+import { questionAnswerContext } from "./question-answer-context";
 import { appendContextPatch, readContext } from "./context-journal";
-import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor } from "./database";
-import { dismissError, observeError } from "./error-feedback";
+import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
+import { oneKenanEnabled } from "kenan-memory/config";
+import { handleRoomOwner } from "./rooms-owner";
+import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
+import { readThreadHistory } from "pi-orchestrator/history";
+import { dismissError, observeError, observeFailure } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
+import { createThreadViewRecorder } from "./thread-viewing";
 import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
+import { observeExecutionActivity } from "pi-orchestrator/api";
 import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "./meet/handoff";
 import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
-import { contextFilesPrompt, listContextFiles, selectContextFiles, type ContextFileSources } from "./thread-context-files";
+import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
 import { CalendarStore } from "./calendar";
@@ -47,6 +94,7 @@ import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webResponse } from "./files";
+import { fileEditResponse } from "./file-edit";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
@@ -74,6 +122,8 @@ import {
   LOCAL_THREAD_NAMING_MAX_TOKENS,
   namingOutcome,
   namingRequestId,
+  namingRetryAt,
+  NamingConfigurationError,
   unnamedThread,
   namingStep,
   namingTranscript,
@@ -93,6 +143,7 @@ if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_E
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
 const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
+const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
@@ -145,10 +196,19 @@ function assertContextMirrorLoadsLast() {
   }
 }
 
-assertContextMirrorLoadsLast();
+if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
+const modelAvailability = new ModelAvailabilityStore(modelAvailabilityPath());
+function availableThreadModels() {
+  const policy = modelAvailability.disabled();
+  observeError(db, "model-availability", policy.ok ? null : policy.error.message);
+  const offered = new Set([...THREAD_DESTINATIONS.values()].flatMap(destination => destination.models));
+  return [...new Map([...THREAD_MODELS.values()].filter(model => offered.has(model.id)).map(model => [model.id, model])).values()]
+    .map(model => ({ id: model.id, label: model.label, icon: model.icon, accent: model.accent,
+      enabled: policy.ok && !policy.value.has(modelAvailabilityKey(`${model.provider}/${model.modelId}`)) }));
+}
 // Live meeting threads answer in the room, so their first call must be quick. On September 28, 2026,
 // astra at low thinking placed live-research placeholders 5.8 s after a request, against 11.1 s at
 // the destination's high default; Sara chose it over sol at medium.
@@ -193,6 +253,7 @@ function noteModelRecency(thread: Thread, lookup: ThreadLookup = liveThread): bo
 }
 function threadStartProfiles() {
   const history = [...modelRecency.values()];
+  const enabled = new Set(availableThreadModels().filter(model => model.enabled).map(model => model.id));
   return [...THREAD_DESTINATIONS.values()].map((destination) => {
     const contextSources = destinationContextSources(destination);
     return {
@@ -201,7 +262,7 @@ function threadStartProfiles() {
       icon: destination.icon,
       accent: destination.accent,
       defaultModel: destination.defaultModel,
-      models: recentThreadModels(destination, history, THREAD_MODELS).map((id) => {
+      models: recentThreadModels(destination, history, THREAD_MODELS).filter(id => enabled.has(id)).map((id) => {
         const model = THREAD_MODELS.get(id);
         if (!model) throw new Error(`Unknown thread model ${id} in profile ${destination.id}`);
         return { id: model.id, label: model.label, icon: model.icon, accent: model.accent };
@@ -262,6 +323,7 @@ const capability = threadCapability();
 const callers = callerResolver({ capability, host: hostIdentityConfig() });
 const threads = new ThreadService({
   capability,
+  admitNewThread: settings => modelAvailability.admit(settings.model),
   attachSession: runner.attachSession,
   databasePath: join(DATA, "threads.sqlite3"),
   sessionsDir: join(DATA, "threads"),
@@ -276,7 +338,7 @@ unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "thread
 ensureSupervisorSchema(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
-const fleetUrl = configuredOrchestratorThreadUrl();
+const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 const namingUrl = modelBrokerUrl() ?? fleetUrl;
 const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
@@ -288,16 +350,27 @@ threads.setDirectory(directory, (parent, input) => {
   const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
   return privatePath(parent.cwd) || privatePath(input.cwd) ? undefined : fleet ?? undefined;
 });
+// Each watch item is checked in the destination it came from, with that destination's chosen context.
+const WATCH_DESTINATIONS = [...THREAD_DESTINATIONS.values()].filter(destination => !destination.raw && !destination.sandbox).map(destination => destination.id);
+const DEFAULT_WATCH_DESTINATION = process.env.PI_REMOTE_WATCH_DESTINATION
+  ?? (WATCH_DESTINATIONS.includes("home") ? "home" : WATCH_DESTINATIONS[0] ?? "home");
 const watchList = new WatchList({
   databasePath: join(DATA, "threads.sqlite3"), threads,
   intervalMs: watchInterval(process.env.PI_REMOTE_WATCH_INTERVAL_MS),
   enabled: process.env.PI_REMOTE_WATCH_ENABLED !== "0",
-  placement: () => {
-    const profileId = process.env.PI_REMOTE_WATCH_DESTINATION ?? "home";
+  destinations: WATCH_DESTINATIONS,
+  defaultDestination: DEFAULT_WATCH_DESTINATION,
+  destinationOf: threadId => {
+    const thread = threads.get(threadId);
+    const profileId = thread ? remotePlacement(thread, id => threads.get(id)).profileId : undefined;
+    return typeof profileId === "string" ? profileId : undefined;
+  },
+  placement: profileId => {
     const destination = THREAD_DESTINATIONS.get(profileId);
     if (!destination || destination.sandbox || destination.raw) return { ok: false, error: { code: "invalid_request", message: `Watch destination ${profileId} must be an offered full-context destination` } };
     const admitted = workspaceAdmission.resolve(destination.workspaceId);
-    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId } } }
+    const contextFiles = watchContextFiles(destination.watchContextFiles, destinationContextSources(destination)?.directory);
+    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId, ...(contextFiles.length ? { contextFiles } : {}) } } }
       : { ok: false, error: { code: "unavailable", message: admitted.error.message } };
   },
   onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
@@ -307,6 +380,21 @@ const peerThreads = new Map<string, Thread>();
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
 let peerError: string | null = null;
+let peerRecovery: "automatic" | "required" = "automatic";
+class PeerOwnershipError extends Error {}
+function peerFeedback(message: string | null) {
+  return observeFailure(db, "peer:fleet", !message ? null : peerRecovery === "required" ? {
+    message, recovery: "required", impact: "Worker status cannot be reconciled because a thread has conflicting owners.",
+    action: "Ask Kenan to repair the conflicting thread ownership.",
+  } : {
+    message, recovery: "automatic", impact: "Worker status updates are delayed; the last available listing is retained.", attentionAfterMs: 60_000,
+  });
+}
+function notificationFeedback(owner: string, message: string | null) {
+  return observeFailure(db, `notifications:${owner}`, message ? {
+    message, recovery: "automatic", impact: "Idle notifications are delayed; existing notifications are retained.", attentionAfterMs: 60_000,
+  } : null);
+}
 const notificationErrors = new Map<string, string>();
 let peerRefresh: Promise<void> | null = null;
 const notificationRefreshes = new Map<string, Promise<void>>();
@@ -318,13 +406,13 @@ function refreshThreadNotifications(): Promise<void> {
     const refresh = (async () => {
       do {
         notificationRefreshAgain.delete(owner.id);
-        await projectThreadNotifications(db, owner.id, owner.api);
+        await projectThreadNotifications(db, owner.id, owner.api, directory);
       } while (notificationRefreshAgain.has(owner.id));
     })()
-      .then(() => { observeError(db, `notifications:${owner.id}`, null); if (notificationErrors.delete(owner.id)) signalSync(); })
+      .then(() => { notificationFeedback(owner.id, null); if (notificationErrors.delete(owner.id)) signalSync(); })
       .catch(cause => {
         const message = cause instanceof Error ? cause.message : String(cause);
-        observeError(db, `notifications:${owner.id}`, message);
+        notificationFeedback(owner.id, message);
         if (notificationErrors.get(owner.id) !== message) { notificationErrors.set(owner.id, message); signalSync(); }
       })
       .finally(() => { notificationRefreshes.delete(owner.id); signalSync(); pushNotifications(); });
@@ -340,16 +428,16 @@ async function refreshPeers() {
     let cursor: string | undefined;
     do {
       const page = await fleet.list({ limit: 100, cursor });
-      if (!page.ok) { observeError(db, "peer:fleet", page.error.message); if (peerError !== page.error.message) { peerError = page.error.message; signalSync(); } return; }
+      if (!page.ok) { peerRecovery = "automatic"; peerError = page.error.message; peerFeedback(peerError); signalSync(); return; }
       for (const thread of page.value.threads) {
-        if (threads.get(thread.id)) throw new Error(`Thread ${thread.id} has two owners`);
+        if (threads.get(thread.id)) throw new PeerOwnershipError(`Thread ${thread.id} has two owners`);
         next.set(thread.id, thread);
       }
       cursor = page.value.nextCursor;
     } while (cursor);
     const changed = peerError !== null || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
     peerError = null;
-    observeError(db, "peer:fleet", null);
+    peerFeedback(null);
     const updated = [...next.values()].filter(thread => peerThreads.get(thread.id)?.revision !== thread.revision);
     for (const thread of updated) if (!peerThreads.has(thread.id)) ensureThreadView(db, thread.id);
     peerThreads.clear();
@@ -361,8 +449,10 @@ async function refreshPeers() {
     if (changed) { signalSync(); void refreshThreadNotifications(); }
   })().catch(cause => {
     const message = cause instanceof Error ? cause.message : String(cause);
-    observeError(db, "peer:fleet", message);
-    if (peerError !== message) { peerError = message; signalSync(); }
+    peerRecovery = cause instanceof PeerOwnershipError ? "required" : "automatic";
+    peerFeedback(message);
+    peerError = message;
+    signalSync();
   }).finally(() => { peerRefresh = null; });
   return peerRefresh;
 }
@@ -394,7 +484,15 @@ async function inspectThread(id: string, local: boolean) {
   while (peerInspections.size > 12) peerInspections.delete(peerInspections.keys().next().value!);
   ensureThreadView(db, id);
   if (changed) signalSync();
-  if (inspection.live) restoreLiveProjection(liveFor(id), inspection.live);
+  if (inspection.live) {
+    const live = liveFor(id);
+    const previous = JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]]);
+    restoreLiveProjection(live, inspection.live);
+    if (previous !== JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]])) {
+      signalSync();
+      signalLiveSync();
+    }
+  }
 }
 function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -509,6 +607,8 @@ async function buildDashboard(): Promise<Dashboard> {
     actions,
     machine: readMachineUsage(),
     modelCounts: agents.models,
+    modelAvailability: availableThreadModels(),
+    canManageModels: HOST_ADMINISTRATOR,
     people: peopleUsage,
     allowance,
   };
@@ -536,6 +636,10 @@ function refreshDashboard(): Promise<void> {
   dashboardRefreshes = run;
   return run;
 }
+watchFile(modelAvailability.path, { persistent: false, interval: 1_000 }, () => {
+  signalSync();
+  if (!shuttingDown && dashboardSubscribers()) void refreshDashboard();
+});
 const dashboardTicker = setInterval(() => {
   if (!dashboardBusy && dashboardSubscribers()) void refreshDashboard();
 }, DASHBOARD_TICK_MS);
@@ -661,6 +765,10 @@ function invalidateDisplayContext(sessionId: string) {
 }
 
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
+  return questionAnswerContext(threads, sessionId, baseStoredContext(sessionId));
+}
+
+function baseStoredContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
   const peer = peerInspections.get(sessionId);
   if (peer) {
     if (inspectedContexts.has(peer)) return inspectedContexts.get(peer)!;
@@ -778,6 +886,7 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
   return [
     audience === "thread" ? chosenContextFiles(sessionId) : "",
     meetingInstructions(sessionId, audience),
+    ROOMS_ENABLED ? roomInstructions(threads.get(sessionId)?.metadata?.room) : "",
     registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
     piReactions.session(sessionId).size ? `Message reactions, keyed by stable message ID: ${JSON.stringify(Object.fromEntries(piReactions.session(sessionId)))}` : "",
     slackReactions.instructions(),
@@ -851,8 +960,6 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
   const meta = { ...remotePlacement(thread, lookup), ...thread.metadata };
   const [provider, ...modelParts] = (thread.effectiveSettings ?? thread.settings).model.split("/");
   const model = { provider, modelId: modelParts.join("/") };
-  // A failed execution is a notice in the thread's own transcript and an unread
-  // marker on its row; it is not a second status the person has to dismiss.
   return { ...thread, name: thread.title, workspace_id: meta.workspaceId ?? thread.cwd,
     session_path: thread.sessionFile,
     initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
@@ -923,7 +1030,11 @@ function recordResponseMetrics(sessionId: string, metrics: ResponseMetrics | nul
 }
 
 function touchSession(_id: string) { signalSync(); }
-function markSessionViewed(id: string) {
+const recordThreadView = createThreadViewRecorder(directory, liveThread, thread => {
+  if (!threads.get(thread.id)) peerThreads.set(thread.id, thread);
+});
+async function markSessionViewed(id: string, reopened = false) {
+  await recordThreadView(id, reopened);
   const result = db.query("UPDATE thread_views SET idle_unread=0 WHERE id=? AND idle_unread<>0").run(id);
   if (result.changes) signalSync();
 }
@@ -954,10 +1065,14 @@ function recentThreadMessages(sessionId: string): NamingMessage[] {
 // Naming is background work, so it holds the engine's maintenance reservation for the whole attempt
 // and gives up immediately when somebody else has it.
 async function localThreadName(messages: NamingMessage[]): Promise<string> {
-  const selection = parseThreadNamingModel(THREAD_NAMING_MODEL);
-  if (selection.kind !== "local") throw new Error("Thread naming model is not a local engine");
+  let selection;
+  try { selection = parseThreadNamingModel(THREAD_NAMING_MODEL); }
+  catch (cause) { throw new NamingConfigurationError(cause instanceof Error ? cause.message : String(cause)); }
+  if (selection.kind !== "local") throw new NamingConfigurationError("Thread naming model is not a local engine");
   const prompt = localNamingPrompt(messages);
-  const engine = await loadLocalEngine(AGENT_DIR, selection.engine);
+  const engine = await loadLocalEngine(AGENT_DIR, selection.engine).catch(cause => {
+    throw new NamingConfigurationError(cause instanceof Error ? cause.message : String(cause));
+  });
   return withLocalEngine(engine, BACKGROUND_RESERVATION_WAIT_SECONDS, async () => {
     await ensureLocalEngine(engine);
     return localNamingCompletion(engine, { model: selection.model, systemPrompt: LOCAL_THREAD_NAMING_INSTRUCTION, prompt,
@@ -974,23 +1089,94 @@ interface NamingView { id: string; message_count: number; named_at_message_count
 const namingViewRows = db.query("SELECT id,message_count,named_at_message_count,naming_attempted_count,naming_request FROM thread_views");
 function namingInput(transcript: string): CompletionInput {
   const parts = THREAD_NAMING_MODEL.split(":");
-  if (parts.length > 2) throw new Error("Invalid naming model selection");
+  if (parts.length > 2) throw new NamingConfigurationError("Invalid naming model selection");
   const physical = parts[0]!.split("/").at(-1)!;
   const model = ORCHESTRATOR_CATALOG.models.find(candidate => candidate.id === physical || candidate.model === physical);
-  if (model?.id !== "luna") throw new Error("Thread naming completion currently supports Luna");
+  if (model?.id !== "luna") throw new NamingConfigurationError("Thread naming completion currently supports Luna");
   const thinkingLevel = parts[1];
-  if (thinkingLevel && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingLevel)) throw new Error("Invalid naming thinking level");
+  if (thinkingLevel && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingLevel)) throw new NamingConfigurationError("Invalid naming thinking level");
   return { model: "luna", systemPrompt: THREAD_NAMING_INSTRUCTION, prompt: transcript,
     speed: "standard", ...(thinkingLevel ? { thinkingLevel } : {}) } as CompletionInput;
 }
+interface NamingRecovery { id: string; model: string; message_count: number; failures: number; retry_at: number | null }
+db.exec(`CREATE TABLE IF NOT EXISTS thread_naming_recovery (
+  id TEXT PRIMARY KEY, model TEXT NOT NULL, message_count INTEGER NOT NULL,
+  failures INTEGER NOT NULL, retry_at INTEGER
+)`);
+// Previous releases could leave a visible occurrence behind even after naming_error was cleared.
+for (const row of db.query("SELECT source,message,occurrence FROM error_feedback WHERE source LIKE 'naming:%'").all() as { source: string; message: string; occurrence: string }[]) {
+  observeFailure(db, row.source, { message: row.message, recovery: "automatic", impact: "The thread keeps its current title." }, row.occurrence);
+  const view = db.query("SELECT naming_error FROM thread_views WHERE id=?").get(row.source.slice("naming:".length)) as { naming_error: string | null } | null;
+  if (!view?.naming_error) observeFailure(db, row.source, null);
+}
+function namingRecovery(id: string, messageCount: number): NamingRecovery | null {
+  const recovery = db.query("SELECT * FROM thread_naming_recovery WHERE id=?").get(id) as NamingRecovery | null;
+  if (recovery && (recovery.model !== THREAD_NAMING_MODEL || messageCount > recovery.message_count)) {
+    db.query("DELETE FROM thread_naming_recovery WHERE id=?").run(id);
+    db.query("UPDATE thread_views SET naming_request=NULL,naming_attempted_count=named_at_message_count WHERE id=?").run(id);
+    namingError(id, null);
+    return null;
+  }
+  return recovery;
+}
+function namingFeedback(id: string, message: string | null) {
+  return observeFailure(db, `naming:${id}`, message ? {
+    message, recovery: "automatic", impact: "The thread keeps its current title.",
+  } : null);
+}
+function namingAttention() {
+  const paused = (db.query(`SELECT v.id FROM thread_views v JOIN thread_naming_recovery r ON r.id=v.id
+    WHERE r.retry_at IS NULL AND v.naming_error IS NOT NULL`).all() as { id: string }[])
+    .some(row => { const thread = threads.get(row.id); return thread && !thread.metadata?.archived && thread.metadata?.titleSource !== "manual"; });
+  return observeFailure(db, "naming", paused ? {
+    message: "Automatic naming cannot proceed after bounded recovery or a configuration rejection.",
+    recovery: "required", impact: "Some threads could not be named automatically; their current titles are unchanged.",
+    action: "Rename them manually or ask Kenan to repair naming.",
+  } : null);
+}
 function namingError(id: string, message: string | null) {
-  const view = db.query("SELECT naming_attempted_count FROM thread_views WHERE id=?").get(id) as any;
-  observeError(db, `naming:${id}`, message, String(view?.naming_attempted_count ?? 0));
+  namingFeedback(id, message);
   const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
   if (result.changes) signalSync();
 }
+function namingFailed(id: string, messageCount: number, message: string, required = false) {
+  const previous = namingRecovery(id, messageCount);
+  const failures = (previous?.failures ?? 0) + 1;
+  const retryAt = namingRetryAt(failures, Date.now(), required);
+  db.query(`INSERT INTO thread_naming_recovery(id,model,message_count,failures,retry_at) VALUES(?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET model=excluded.model,message_count=excluded.message_count,failures=excluded.failures,retry_at=excluded.retry_at`)
+    .run(id, THREAD_NAMING_MODEL, messageCount, failures, retryAt);
+  namingError(id, message);
+  signalSync();
+}
+function namingResolved(id: string) {
+  db.query("DELETE FROM thread_naming_recovery WHERE id=?").run(id);
+  namingError(id, null);
+}
+function clearPinnedThreadNaming(sessionId: string): boolean {
+  if (threads.get(sessionId)?.metadata?.titleSource !== "manual") return false;
+  reservedNames.delete(sessionId);
+  if (ownsSupervisorLease()) {
+    db.query("UPDATE thread_views SET naming_request=NULL WHERE id=? AND naming_request IS NOT NULL").run(sessionId);
+    namingResolved(sessionId);
+  }
+  return true;
+}
+function restoreThreadNaming(thread: Pick<Thread, "id" | "title" | "metadata">) {
+  if (clearPinnedThreadNaming(thread.id)) return;
+  if (thread.metadata?.archived) { namingResolved(thread.id); return; }
+  let view = db.query("SELECT message_count,naming_error FROM thread_views WHERE id=?").get(thread.id) as any;
+  const recovery = namingRecovery(thread.id, Number(view?.message_count ?? 0));
+  view = db.query("SELECT message_count,naming_error FROM thread_views WHERE id=?").get(thread.id) as any;
+  if (view?.naming_error) {
+    if (!recovery) namingFailed(thread.id, Number(view.message_count ?? 0), view.naming_error);
+    else namingFeedback(thread.id, view.naming_error);
+  } else if (!recovery && unnamedThread(thread.title)) {
+    db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
+  }
+}
 async function nameThread(sessionId: string): Promise<void> {
-  if (namingThreads.has(sessionId) || shuttingDown) return;
+  if (clearPinnedThreadNaming(sessionId) || namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
   namingThreads.add(sessionId);
   try {
     const row = sessionRow.get(sessionId);
@@ -998,9 +1184,12 @@ async function nameThread(sessionId: string): Promise<void> {
     ensureThreadView(db, sessionId);
     const view = db.query("SELECT * FROM thread_views WHERE id=?").get(sessionId) as any;
     const messageCount = Number(view.message_count ?? 0);
-    let receipt = view.naming_request ? JSON.parse(view.naming_request) as NamingReceipt : null;
-    const attemptedBefore = Number(view.naming_attempted_count ?? 0);
-    const step = namingStep({ name: row.name, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt });
+    const recovery = namingRecovery(sessionId, messageCount);
+    const current = db.query("SELECT naming_request,naming_attempted_count FROM thread_views WHERE id=?").get(sessionId) as any;
+    let receipt = current.naming_request ? JSON.parse(current.naming_request) as NamingReceipt : null;
+    const attemptedBefore = Number(current.naming_attempted_count ?? 0);
+    const step = namingStep({ name: row.name, titleSource: row.metadata?.titleSource, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt,
+      now: Date.now(), ...(recovery ? { retryAt: recovery.retry_at } : {}) });
     if (step === "idle") { reservedNames.delete(sessionId); return; }
     // Naming reads the conversation from the context mirror. Until the mirror holds this thread's
     // messages there is nothing to title, and an empty prompt is a request no completion owner
@@ -1018,6 +1207,7 @@ async function nameThread(sessionId: string): Promise<void> {
       let output: string;
       try { output = await localThreadName(messages); }
       catch (cause) {
+        if (clearPinnedThreadNaming(sessionId)) return;
         if (!(cause instanceof EngineReservedError)) throw cause;
         // Maintenance is not a naming failure. Leave the thread due, keep it out of the error feed and
         // let the reconcile tick try again after the lease.
@@ -1026,45 +1216,51 @@ async function nameThread(sessionId: string): Promise<void> {
         if (ownsSupervisorLease()) namingError(sessionId, null);
         return;
       }
+      if (clearPinnedThreadNaming(sessionId)) return;
       reservedNames.delete(sessionId);
       const title = generatedThreadName(output);
       if (!ownsSupervisorLease() || shuttingDown) return;
-      unwrap(threads.update(sessionId, { title }));
-      db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(messageCount, sessionId);
+      unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
+      db.query("UPDATE thread_views SET named_at_message_count=? WHERE id=?").run(messageCount, sessionId);
+      namingResolved(sessionId);
       signalSync();
       return;
     }
     if (!namingClient) {
       db.query("UPDATE thread_views SET naming_request=NULL,naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
-      namingError(sessionId, "Thread naming has no explicitly permitted same-person completion owner");
+      namingFailed(sessionId, messageCount, "Thread naming has no explicitly permitted same-person completion owner", true);
       return;
     }
     if (!receipt) {
       const messages = conversation();
       if (!messages.length) return;
       const input = namingInput(namingTranscript(messages));
-      receipt = { requestId: namingRequestId(sessionId, messageCount, input), messageCount, input };
+      receipt = { requestId: namingRequestId(sessionId, messageCount, input, recovery?.failures ?? 0), messageCount, input };
       db.query("UPDATE thread_views SET naming_request=?,naming_attempted_count=? WHERE id=?").run(JSON.stringify(receipt), messageCount, sessionId);
     }
     const submitted = step === "generate";
     let result = submitted ? await namingClient.submit(receipt.requestId, receipt.input) : await namingClient.get(receipt.requestId);
+    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
     if (!result.ok && result.error.code === "not-found") result = await namingClient.submit(receipt.requestId, receipt.input);
-    if (!ownsSupervisorLease() || shuttingDown) return;
+    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
     const outcome = namingOutcome(result);
     if (outcome.kind === "pending") { namingError(sessionId, null); return; }
     if (outcome.kind === "failed") {
       if (!outcome.keepReceipt) db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-      if (outcome.regenerate) db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(Number(view.named_at_message_count ?? 0), sessionId);
-      namingError(sessionId, outcome.message);
+      namingFailed(sessionId, messageCount, outcome.message, outcome.recovery === "required");
       return;
     }
     db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
     const title = generatedThreadName(outcome.text);
-    unwrap(threads.update(sessionId, { title }));
-    db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(receipt.messageCount, sessionId);
+    unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
+    db.query("UPDATE thread_views SET named_at_message_count=? WHERE id=?").run(receipt.messageCount, sessionId);
+    namingResolved(sessionId);
     signalSync();
   } catch (cause) {
-    if (ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
+    if (!clearPinnedThreadNaming(sessionId) && ownsSupervisorLease()) {
+      const view = db.query("SELECT message_count FROM thread_views WHERE id=?").get(sessionId) as any;
+      namingFailed(sessionId, Number(view?.message_count ?? 0), cause instanceof Error ? cause.message : String(cause), cause instanceof NamingConfigurationError);
+    }
   } finally { namingThreads.delete(sessionId); }
 }
 function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId); }
@@ -1072,23 +1268,25 @@ function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId)
  * a local engine, or was left numbered by an earlier process. */
 function reconcileThreadNames() {
   const due = new Set(reservedNames);
+  for (const row of db.query("SELECT id FROM thread_naming_recovery WHERE retry_at IS NOT NULL AND retry_at<=?").all(Date.now()) as {id: string}[]) due.add(row.id);
   for (const row of db.query("SELECT id FROM thread_views WHERE naming_request IS NOT NULL").all() as {id: string}[]) due.add(row.id);
   const views = new Map((namingViewRows.all() as NamingView[]).map(view => [view.id, view]));
   const live = new Set<string>();
   for (const thread of threads.snapshot({ archived: false })) {
     live.add(thread.id);
+    if (clearPinnedThreadNaming(thread.id)) { due.delete(thread.id); continue; }
     const view = views.get(thread.id);
-    if (namingStep({ name: thread.title, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
+    if (namingStep({ name: thread.title, titleSource: thread.metadata?.titleSource, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
       attemptedCount: Number(view?.naming_attempted_count ?? 0), hasReceipt: !!view?.naming_request }) !== "idle") due.add(thread.id);
   }
   // An archived or departed thread will never be named again, so its last failure is not something
   // the person can act on. It leaves the error feed with the conversation.
   if (ownsSupervisorLease()) {
-    for (const row of db.query("SELECT id FROM thread_views WHERE naming_error IS NOT NULL").all() as {id: string}[]) {
-      if (!live.has(row.id)) namingError(row.id, null);
+    for (const row of db.query("SELECT id FROM thread_views WHERE naming_error IS NOT NULL UNION SELECT id FROM thread_naming_recovery").all() as {id: string}[]) {
+      if (!live.has(row.id)) namingResolved(row.id);
     }
   }
-  for (const id of due) void nameThread(id);
+  for (const id of due) if (live.has(id)) void nameThread(id);
 }
 
 const agentModelOrder = new Map(ORCHESTRATOR_CATALOG.agentOrder.map((key, index) => [key, index]));
@@ -1123,11 +1321,9 @@ function supervisorState(): SupervisorState {
     sessions: publicSessions(table.rows().filter(row => !row.archived_at), table.local),
     archivedTotal: threads.archivedCount() + peerArchived,
     ownerErrors: [
-      { owner: "fleet", feedback: peerError ? observeError(db, "peer:fleet", peerError) : null },
-      ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: observeError(db, `notifications:${owner}`, message) })),
-      ...(db.query("SELECT id,naming_error,naming_attempted_count FROM thread_views WHERE naming_error IS NOT NULL").all() as any[])
-        .map(row => ({ owner: `Thread ${sessionRow.get(row.id)?.name ?? row.id} naming`,
-          feedback: observeError(db, `naming:${row.id}`, row.naming_error, String(row.naming_attempted_count)) })),
+      { owner: "fleet", feedback: peerFeedback(peerError) },
+      ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: notificationFeedback(owner, message) })),
+      { owner: "Thread names", feedback: namingAttention() },
     ].flatMap(({ owner, feedback }) => feedback ? [{ owner, ...feedback }] : []),
   };
 }
@@ -1139,7 +1335,7 @@ function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archiv
   const parents = new Set(local.map(thread => thread.parentId));
   const runningParents = runningChildParents(local, peerThreads.values());
   const localIds = new Set(local.map(thread => thread.id));
-  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
+  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
     localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
 }
 function pendingMessages(id: string) {
@@ -1172,11 +1368,12 @@ function publicSession(row: any,
     hasChildren,
     origin,
     watchList: row.metadata?.watchList === true,
+    waitingOnAgents: row.waitingOnAgents,
+    wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
-    activity: row.metadata?.providerWait || row.metadata?.admissionWait ? "retrying" : threadActivity(row.state, live, hasRunningChildren),
-    activeTools: [...(live?.activeTools.values() ?? [])],
+    ...projectThreadActivity(row.state, live, hasRunningChildren, row.executionActivity, row.metadata, Boolean(row.held)),
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
     createdAt: row.created_at, updatedAt: row.updated_at, revision: row.revision,
     idleUnread: Boolean(row.idle_unread),
@@ -1193,7 +1390,7 @@ function publicSession(row: any,
 // hold, which it remembers on the ClientStream.
 
 function bootstrap(): Bootstrap {
-  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null };
+  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
 }
 
 let stateEncoded = "";
@@ -1215,7 +1412,8 @@ function projectState(): void {
 
 function refreshState(): void {
   for (const stream of streams.values()) {
-    if (stream.subscription.viewing && stream.subscription.session) markSessionViewed(stream.subscription.session);
+    if (stream.subscription.viewing && stream.subscription.session) void markSessionViewed(stream.subscription.session)
+      .catch(error => console.error("[supervisor] recording thread view failed", error));
   }
   projectState();
   for (const stream of streams.values()) sendState(stream);
@@ -1287,7 +1485,7 @@ function pushNotifications(target?: ClientStream): void {
   for (const stream of target ? [target] : [...streams.values()]) {
     const cursor = stream.subscription.notificationsAfter;
     if (cursor === undefined || cursor === null) continue;
-    const feed = idleNotifications(db, cursor, id => threads.get(id) ?? null);
+    const feed = idleNotifications(db, cursor, notificationThread);
     if (!feed.notifications.length) continue;
     stream.subscription.notificationsAfter = feed.cursor;
     stream.send({ type: "notifications", feed });
@@ -1352,7 +1550,8 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
   const sessionId = stream.subscription.session ?? null;
   const changedSession = (before.session ?? null) !== sessionId;
   if (changedSession) releaseOpenDisplayContexts();
-  if (sessionId && stream.subscription.viewing) markSessionViewed(sessionId);
+  if (sessionId && stream.subscription.viewing) await markSessionViewed(sessionId,
+    changedSession || !before.viewing || before.selectionId !== stream.subscription.selectionId);
   if (sessionId) {
     const captured = storedContext(sessionId);
     if (captured) refreshTranscript(sessionId);
@@ -1467,9 +1666,18 @@ function handlePiEvent(sessionId: string, event: any) {
   try { phoneOverlay?.event(sessionId, event); } catch (cause) { console.error("phone overlay event failed", cause); }
   ensureThreadView(db, sessionId);
   const rt = liveFor(sessionId);
+  if (observeExecutionActivity(rt, event)) {
+    rt.compacting = rt.activity === "compacting";
+    rt.retrying = rt.activity === "retrying";
+    rt.thinkingActive = rt.activity === "thinking";
+    signalSync();
+    signalLiveSync();
+  }
+  if (event.type === "agent_end" || event.type === "agent_settled") settleLiveProjection(rt);
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
     restoreLiveProjection(rt, event.data.live);
     invalidateDisplayContext(sessionId);
+    signalSync();
     signalLiveSync();
     return;
   }
@@ -1653,6 +1861,7 @@ function threadEnvironment(thread: Thread) {
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
     PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
+    ...(ROOMS_ENABLED && roomMetadata(thread.metadata?.room) ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
@@ -1708,7 +1917,7 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   if (previous) return { response: JSON.parse(previous.response), status: previous.status };
   const response = name === "compact"
     ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
-    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, "queue");
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}));
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
@@ -1776,6 +1985,13 @@ const handoffHistory: HandoffHistory = {
 };
 
 async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Promise<Result<{text: string; images?: unknown[]}>> {
+  const room = ROOMS_ENABLED && roomMetadata(thread.metadata?.room);
+  if (room && message.id.startsWith("question-answer:")) {
+    const stored = db.query("SELECT value FROM metadata WHERE key=?").get(`room-answer:${message.id}`) as { value: string } | null;
+    const sender = stored && roomMembers([JSON.parse(stored.value)])?.[0];
+    if (!sender) return { ok: false, error: { code: "unavailable", message: "Room question answer has no authenticated speaker" } };
+    return { ok: true, value: { text: roomInput(sender, message.text), images: message.images } };
+  }
   const meetingId = remotePlacement(thread).meetingId;
   if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
@@ -1788,6 +2004,12 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   } catch (cause) {
     return { ok: false, error: { code: "unavailable", message: cause instanceof Error ? cause.message : String(cause) } };
   }
+}
+
+function notificationThread(id: string): { parentId: string | null; role?: "conversation" | "worker" } | null {
+  const thread = threads.get(id);
+  if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
+  return thread ?? (ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null);
 }
 
 async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
@@ -1814,7 +2036,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); signalSync(); void refreshThreadNotifications(); }
+  else { ensureThreadView(db, change.threadId); clearPinnedThreadNaming(change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();
@@ -1830,8 +2052,8 @@ const meet = new MeetServer((id) => {
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    activity: threadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id)),
-    tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+    activity: projectThreadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id), row.executionActivity, row.metadata, Boolean(row.held)).activity,
+    tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
 
 
@@ -1871,8 +2093,6 @@ const server = Bun.serve<SocketData>({
   async fetch(req, httpServer) {
     return jsonHttp(req, await (async () => {
     const url = new URL(req.url);
-    const peer = httpServer.requestIP(req);
-    const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
       return new Response(null, {
         status: 204,
@@ -1881,6 +2101,63 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
+    const peer = httpServer.requestIP(req);
+    const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
+    if (url.pathname.startsWith("/v1/room-owner/")) {
+      if (!ROOMS_ENABLED) return error("Not found", 404);
+      if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || resolved.kind !== "person" || resolved.via !== "router") return error("Rooms require the authenticated local router", 403);
+      return handleRoomOwner(req, {
+        get: id => threads.get(id) ?? null,
+        create: async (id, title, members) => {
+          const destination = meetingDestination();
+          if (destination.raw || destination.sandbox) throw new Error("Rooms require a full-context destination");
+          const admitted = workspaceAdmission.resolve(destination.workspaceId);
+          if (!admitted.ok) throw new Error(admitted.error.message);
+          unwrap(await directory.spawn({ id, requestId: id, title, cwd: admitted.value.cwd,
+            settings: { model: destination.defaultModel }, createdBy: { kind: "person", via: "router" },
+            metadata: { workspaceId: destination.workspaceId, profileId: destination.id, room: { id, members } } }));
+          ensureThreadView(db, id);
+        },
+        update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
+        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
+        history: async id => {
+          const thread = threads.get(id)!;
+          const messages = readThreadHistory(thread.sessionFile).map(entry => entry.type === "message"
+            ? { ...entry.message, identity: { id: `pi/${id}/${entry.id}` } }
+            : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
+          if (!storedContext(id)) await refreshThreadInspection(id);
+          const context = storedContext(id);
+          const questions = unwrap(await directory.questions(id));
+          const current = threads.get(id)!;
+          const settlement = threads.latestSettlement(id);
+          const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
+          const failure = current.state !== "running" && settlement?.outcome === "failed"
+            ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
+          return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+            execution: projectThreadActivity(current.state, liveProjections.get(id), false, current.executionActivity, current.metadata, Boolean(current.held)),
+            context: context ? JSON.parse(context.document) : null, questions };
+        },
+        stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },
+        answer: async (id, questionId, sender, body) => {
+          const key = `room-answer:question-answer:${questionId}`;
+          const previous = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
+          if (previous && JSON.parse(previous.value).user !== sender.user) throw new Error("Another room member already answered this question");
+          db.query("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)").run(key, JSON.stringify(sender));
+          const answered = await directory.answer({ threadId: id, questionId, selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
+          if (!answered.ok && !previous) db.query("DELETE FROM metadata WHERE key=?").run(key);
+          unwrap(answered);
+        },
+        notify: (id, receiptId, title, body, time) => {
+          const target = `room:${id}`;
+          db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`room-link:${target}`, "1");
+          recordIdleNotification(db, receiptId, { id: target, title }, time, { kind: "idle", body });
+          signalSync();
+        },
+      });
+    }
     if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
       const feed = url.pathname.startsWith("/v1/calendar/feed/");
       if (!feed) {
@@ -2080,7 +2357,6 @@ const server = Bun.serve<SocketData>({
     }
     const web = webResponse(WEB_DIR, url.pathname, req.method, req);
     if (web) return web;
-    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
     if (API.requestTimingsRead.match(req.method, url.pathname)) return json({ requests: requestTimings.list() });
     if (API.requestTimings.match(req.method, url.pathname)) {
       const result = requestTimings.receive(await readBody(req));
@@ -2095,6 +2371,8 @@ const server = Bun.serve<SocketData>({
     if (API.loopLag.match(req.method, url.pathname)) return json(await measureLoopLag(Math.min(60, Math.max(1, Number(url.searchParams.get("seconds")) || 5)) * 1000));
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
     if (API.environments.match(req.method, url.pathname)) return json({ environments: [ownEnvironment()] });
+    if (API.fileEdit.match(req.method, url.pathname) || API.fileSave.match(req.method, url.pathname))
+      return fileEditResponse(req, join(DATA, "file-edit-backups"));
     if (API.fileInfo.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute path required");
@@ -2149,6 +2427,22 @@ const server = Bun.serve<SocketData>({
         await refreshDashboard();
         return json({ governors });
       } catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
+    }
+    const modelAvailabilityUpdate = API.setModelAvailability.match(req.method, url.pathname);
+    if (modelAvailabilityUpdate) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change global model availability", 403);
+      const model = THREAD_MODELS.get(modelAvailabilityUpdate.id);
+      if (!model || !availableThreadModels().some(option => option.id === model.id)) return error("Unknown offered model", 404);
+      let body: unknown;
+      try { body = await readBody(req); }
+      catch { return error("Expected JSON with an enabled boolean", 400); }
+      if (!body || typeof body !== "object" || !("enabled" in body) || typeof body.enabled !== "boolean") return error("enabled must be a boolean", 400);
+      const saved = modelAvailability.set(`${model.provider}/${model.modelId}`, body.enabled);
+      if (!saved.ok) return threadError(saved.error);
+      signalSync();
+      pushBootstrap();
+      await refreshDashboard();
+      return json({ models: availableThreadModels() });
     }
     if (API.actions.match(req.method, url.pathname)) {
       try { return json({ actions: await machineActions.refresh() }); }
@@ -2272,7 +2566,7 @@ const server = Bun.serve<SocketData>({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications();
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, id => threads.get(id)) });
+      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
@@ -2413,6 +2707,7 @@ const server = Bun.serve<SocketData>({
     const id = sessionMatch.params.sessionId;
     const action = sessionMatch.action;
     const row = sessionRow.get(id) as any;
+    if (ROOMS_ENABLED && roomMetadata(row?.metadata?.room) && ["prompt", "fork", "command"].includes(action ?? "")) return error("Use the room API for room messages", 403);
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
     if (action === "unarchive" && req.method === "POST") {
@@ -2590,7 +2885,7 @@ const server = Bun.serve<SocketData>({
         const text = String(body.text ?? "").trim();
         if (!text) return error("Prompt is empty");
         if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        const delivery = body.delivery ?? "queue";
+        const delivery = resolveDelivery(body);
         if (!["queue", "steer", "hardSteer"].includes(delivery)) return error("delivery must be queue, steer or hardSteer");
 
         const roomImages = body.includeMeetingImages === true && row.meeting_id
@@ -2720,12 +3015,8 @@ function pruneUploadTransfers() {
 }
 pruneUploadTransfers();
 
-// A naming attempt that failed leaves the thread parked until its next message, which never comes for
-// a finished conversation. Starting the supervisor is new evidence — a repaired release, a reachable
-// engine, a restored account — so every thread still carrying its number gets one more attempt.
-for (const thread of threads.snapshot({ archived: false })) {
-  if (unnamedThread(thread.title)) db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
-}
+// Adopt prior diagnostic-only failures into bounded recovery; restarts must not reset the budget.
+for (const thread of threads.snapshot()) restoreThreadNaming(thread);
 
 const uploadPruner = setInterval(pruneUploadTransfers, 60_000);
 const namingReceipts = setInterval(reconcileThreadNames, 15_000);
@@ -2743,6 +3034,7 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  unwatchFile(modelAvailability.path);
   watchList.stop();
   stopAutoArchive();
   clearInterval(uploadPruner);

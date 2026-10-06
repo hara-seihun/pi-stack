@@ -3,6 +3,7 @@ import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { Store } from "./store.js";
 import type { SharedOAuthAuth } from "./auth/shared-oauth.js";
 import { meterCredential } from "./auth/meter-credential.js";
+import { claimCodexReset, codexResetAttempt, confirmCodexReset, recordCodexResetResult } from "./codex-resets.js";
 
 /**
  * Codex meter sampling.
@@ -93,6 +94,8 @@ export interface CodexWindowUsage {
 export type CodexSampleOutcome =
   | "recorded"
   | "reset-credits-unreadable"
+  | "reset-pending"
+  | "reset-failed"
   | "not-due"
   | "no-credential"
   | "credential-failed"
@@ -165,6 +168,7 @@ export function parseCodexUsage(value: unknown, now = Date.now()): CodexWindowUs
 export interface CodexResetCredits {
   readonly available: number;
   readonly nextExpiresAt: number | undefined;
+  readonly creditIds?: readonly string[];
 }
 
 export async function fetchCodexResetCredits(
@@ -203,7 +207,11 @@ export function parseCodexResetCredits(value: unknown): CodexResetCredits {
   const counted = typeof raw.available_count === "number" && Number.isFinite(raw.available_count)
     ? Math.max(0, Math.round(raw.available_count))
     : spendable.length;
-  return { available: counted, nextExpiresAt: expiries[0] };
+  const creditIds = spendable
+    .filter((credit) => typeof credit.id === "string" && (credit.expires_at === undefined || (typeof credit.expires_at === "string" && Date.parse(credit.expires_at) > Date.now())))
+    .sort((a, b) => Date.parse(String(a.expires_at ?? "9999-12-31")) - Date.parse(String(b.expires_at ?? "9999-12-31")))
+    .map((credit) => credit.id as string);
+  return { available: counted, nextExpiresAt: expiries[0], creditIds };
 }
 
 /** A usage request the provider refused on the credential, not the request. */
@@ -252,6 +260,7 @@ export interface CodexMeterSamplerOptions {
   readonly intervalMs?: number;
   readonly requestTimeoutMs?: number;
   readonly fetch?: FetchLike;
+  readonly autoReset?: boolean;
 }
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
@@ -266,6 +275,7 @@ export class CodexMeterSampler {
   private readonly intervalMs: number;
   private readonly requestTimeoutMs: number;
   private readonly fetchFn: FetchLike;
+  private readonly autoReset: boolean;
 
   constructor(
     private readonly ledger: Store,
@@ -276,6 +286,7 @@ export class CodexMeterSampler {
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchFn = options.fetch ?? httpsFetch;
+    this.autoReset = options.autoReset ?? false;
   }
 
   /** The meter that measures this window, or undefined if none is declared. */
@@ -370,13 +381,49 @@ export class CodexMeterSampler {
    * in place and is reported without raising a meter alarm, because metering
    * itself is unaffected.
    */
-  private async readResetCredits(accountId: string, accessToken: string, chatgptAccountId: string): Promise<CodexSampleReport> {
+  private async readResetCredits(accountId: string, accessToken: string, chatgptAccountId: string): Promise<{ report: CodexSampleReport; credits?: CodexResetCredits }> {
     try {
       const credits = await fetchCodexResetCredits(accessToken, chatgptAccountId, this.fetchFn, this.requestTimeoutMs);
       this.ledger.recordResetCredits(accountId, { at: Date.now(), available: credits.available, nextExpiresAt: credits.nextExpiresAt });
-      return { accountId, outcome: "recorded", bankedResets: credits.available };
+      return { report: { accountId, outcome: "recorded", bankedResets: credits.available }, credits };
     } catch (thrown) {
-      return { accountId, outcome: "reset-credits-unreadable", detail: String(thrown) };
+      return { report: { accountId, outcome: "reset-credits-unreadable", detail: String(thrown) } };
+    }
+  }
+
+  private async resetExhausted(accountId: string, access: string, chatgptAccountId: string, windows: CodexWindowUsage[], credits: CodexResetCredits | undefined, observedAt: number): Promise<CodexSampleReport | undefined> {
+    if (!this.autoReset || !this.ledger.accounts().some((account) => account.id === accountId && account.enabled)) return;
+    const weekly = windows.find((usage) => Math.abs(usage.windowSeconds - 604800) <= 60480);
+    if (!weekly) return;
+    if (weekly.usedPercent < 100) {
+      confirmCodexReset(this.ledger, accountId, weekly.usedPercent, observedAt);
+      return;
+    }
+    const standing = codexResetAttempt(this.ledger, accountId);
+    if (standing && standing.status !== "confirmed") {
+      const overdue = Date.now() - standing.at > 2 * this.intervalMs;
+      return { accountId, outcome: standing.status === "failed" || overdue ? "reset-failed" : "reset-pending", detail: overdue ? "redemption has not produced quota recovery; automatic spending remains fenced" : standing.detail ?? "awaiting provider quota drop" };
+    }
+    const creditId = credits?.creditIds?.[0];
+    if (!creditId) return;
+    const attempt = claimCodexReset(this.ledger, accountId, creditId, weekly.resetAt);
+    if (!attempt) return;
+    try {
+      const response = await this.fetchFn(`${RESET_CREDITS_URL}/consume`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${access}`, "chatgpt-account-id": chatgptAccountId, Accept: "application/json", "Content-Type": "application/json", "User-Agent": USER_AGENT, originator: USER_AGENT },
+        body: JSON.stringify({ credit_id: creditId, redeem_request_id: attempt.requestId, account_id: chatgptAccountId }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs), redirect: "error",
+      });
+      const value = await response.json() as { code?: string };
+      const accepted = response.ok && (value.code === "reset" || value.code === "already_redeemed");
+      const detail = accepted ? "awaiting provider quota drop" : `reset HTTP ${response.status}`;
+      recordCodexResetResult(this.ledger, accountId, attempt, accepted, detail);
+      return { accountId, outcome: accepted ? "reset-pending" : "reset-failed", detail };
+    } catch {
+      const detail = "redemption outcome unknown; waiting for quota evidence, no automatic POST retry";
+      recordCodexResetResult(this.ledger, accountId, attempt, false, detail);
+      return { accountId, outcome: "reset-failed", detail };
     }
   }
 
@@ -393,7 +440,10 @@ export class CodexMeterSampler {
         return [{ accountId, outcome: "request-failed", detail: String(thrown) }];
       }
       const windows = read.windows;
-      reports.push(await this.readResetCredits(accountId, read.access, chatgptAccountId));
+      const resetCredits = await this.readResetCredits(accountId, read.access, chatgptAccountId);
+      reports.push(resetCredits.report);
+      const reset = await this.resetExhausted(accountId, read.access, chatgptAccountId, windows, resetCredits.credits, now);
+      if (reset) reports.push(reset);
       if (windows.length === 0) return [...reports, { accountId, outcome: "unreadable-response" }];
       for (const usage of windows) {
         const meterId = this.meterFor(usage.windowSeconds);

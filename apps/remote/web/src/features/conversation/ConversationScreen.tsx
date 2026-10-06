@@ -19,7 +19,8 @@ import { QuestionsComposer } from "./questions";
 import type { ThreadQuestion } from "../../../../server/protocol";
 import "./conversation.css";
 
-export type Delivery = "queue" | "steer" | "hardSteer";
+import { resolveDelivery, type Delivery } from "../../../../../../packages/orchestrator/src/threads/contracts";
+export type { Delivery } from "../../../../../../packages/orchestrator/src/threads/contracts";
 
 export function BackIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>; }
 function InfoIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8v.2" /></svg>; }
@@ -85,17 +86,17 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onDraw(): void;
   onDismissControlError(): void;
 }) {
-  const status = offline ? OFFLINE_STATUS : threadStatus(session);
+  const status = offline ? { ...OFFLINE_STATUS, label: offline, title: offline } : threadStatus(session);
   const running = session.state === "running";
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
   const queued = session.queuedMessages.length;
   const action = composerAction(session, prompt);
-  const [delivery, setDelivery] = useState<Delivery>("queue");
+  const [delivery, setDelivery] = useState<Delivery>(resolveDelivery({}));
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
   const modeToggleRef = useRef<HTMLButtonElement>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (!running) { setDelivery("queue"); setModeOpen(false); } }, [running, session.id]);
+  useEffect(() => { setDelivery(resolveDelivery({})); setModeOpen(false); }, [running, session.id]);
   useEffect(() => {
     if (!modeOpen) return;
     modeMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
@@ -108,7 +109,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const modelShort = session.model.split("/").at(-1) || session.model;
   return <div className="conversation-screen">
     <ConversationHeader title={session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<span className="conversation-meta">{modelShort}</span>} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
-      trailing={<>{questions.length > 0 && running && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Stop thread</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
+      trailing={<>{questions.length > 0 && composerAction(session, "") === "stop" && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Stop thread</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {ancestors.length > 0 && <nav className="ancestry" aria-label="Parent threads">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <ConversationView key={session.id} active label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
       <Transcript entries={entries} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}

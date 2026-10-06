@@ -1,0 +1,11 @@
+[Unit]
+Description=Drain Kenan's outbound action journal after startup and every ten seconds
+
+[Timer]
+OnActiveSec=1s
+OnUnitInactiveSec=10s
+AccuracySec=1s
+Unit=pi-kenan-journal.service
+
+[Install]
+WantedBy=timers.target

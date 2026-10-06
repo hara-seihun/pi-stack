@@ -116,16 +116,19 @@ public final class PhoneControlService extends Service {
     static JSONObject capabilities(Context context) {
         try {
             JSONObject caps = PhoneData.capabilities(context);
-            caps.put("accessibility", PhoneAccessibilityService.current != null)
-                .put("screenshots", PhoneAccessibilityService.current != null && Build.VERSION.SDK_INT >= 30)
+            boolean accessibility = PhoneAccessibilityService.current != null && NativeAccess.accessibility(context, PhoneAccessibilityService.class);
+            caps.put("accessibility", accessibility)
+                .put("writeAccessibility", NativeAccess.accessibility(context, WriteAccessibilityService.class))
+                .put("screenshots", accessibility && Build.VERSION.SDK_INT >= 30)
                 .put("notificationAccess", androidx.core.app.NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.getPackageName()))
                 .put("notificationListenerConnected", PhoneNotificationService.current != null)
-                .put("notifications", androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled())
+                .put("notifications", NativeAccess.notifications(context))
                 .put("battery", ((PowerManager) context.getSystemService(POWER_SERVICE)).isIgnoringBatteryOptimizations(context.getPackageName()))
+                .put("overlay", android.provider.Settings.canDrawOverlays(context))
+                .put("installPackages", Build.VERSION.SDK_INT < 26 || context.getPackageManager().canRequestPackageInstalls())
                 .put("camera", ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("microphone", ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("cameraCapture", false).put("microphoneCapture", false).put("clipboardRead", false)
-                .put("deviceLocked", ((android.app.KeyguardManager) context.getSystemService(KEYGUARD_SERVICE)).isDeviceLocked())
                 .put("deviceLocked", ((android.app.KeyguardManager) context.getSystemService(KEYGUARD_SERVICE)).isDeviceLocked())
                 .put("transport", "outbound-websocket").put("requiresAdb", false).put("requiresWifi", false);
             return caps;

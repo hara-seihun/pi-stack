@@ -50,6 +50,7 @@ class OnnxPunctuator:
                  for match in _WORD.finditer(text)]
         if not spans:
             return list(tokens)
+        final_word_end = {index: match.end() for index, match in spans}
         normalized = ' '.join(match.group().lower() for _, match in spans)
         ends = {}
         position = 0
@@ -76,6 +77,8 @@ class OnnxPunctuator:
             if not mark:
                 continue
             index, match = ends[end]
+            if match.end() != final_word_end[index]:
+                continue
             suffix = tokens[index][match.end():]
             # Never insert inside an identifier, URL, path, decimal or acronym.
             if suffix and not suffix[0].isspace() and suffix[0] not in '.,?!:;)]}\"':

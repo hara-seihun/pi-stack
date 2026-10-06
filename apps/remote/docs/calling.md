@@ -1,6 +1,6 @@
 # Telephone calls
 
-`pi-call` connects either a host-owned Vonage number or an explicitly provisioned physical SIM audio gateway to Pi Stack Voice's `gpt-live-1` through a headless Chromium WebRTC bridge. This is separate from `pi-phone` (Android device control). The host installs an optional `pi-stack-phone.service`; hosts without it acquire no telephone account or public endpoint. `deploy/phone` activates configured services and refuses publication during a live call.
+`pi-call` connects either a host-owned Vonage number or an explicitly provisioned physical SIM audio gateway to Pi Stack Voice's `gpt-live-1` through a headless Chromium WebRTC bridge. This is separate from `pi-phone` (Android device control). The host installs an optional `pi-stack-phone.service`; hosts without it acquire no telephone account or public endpoint. `deploy/phone` activates configured services and refuses publication during a live call. If host activation or its checks reject a release, `deploy/host` reactivates telephone and Voice services against the restored Remote source; a configured service absent from that source is stopped.
 
 ## External context boundary
 

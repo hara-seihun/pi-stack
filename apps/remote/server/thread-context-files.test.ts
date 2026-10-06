@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countTokens } from "gpt-tokenizer/encoding/o200k_base";
-import { contextFilesPrompt, listContextFiles, measureContextFile, selectContextFiles, type ContextFileSources } from "./thread-context-files";
+import { contextFilesPrompt, listContextFiles, measureContextFile, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -140,4 +140,16 @@ test("a non-file workspace AGENTS is skipped rather than replaced by home", () =
   mkdirSync(workspaceAgents);
   writeFileSync(homeAgents, "home instructions");
   expect(listContextFiles(sources).map(offer => offer.name)).toEqual(["HARA.md", "NEBULANI.md"]);
+});
+
+test("watch checks load a destination's configured context files, else its whole context folder, and none without one", () => {
+  const { context, sources } = folder();
+  expect(watchContextFiles(undefined, context)).toEqual(["HARA.md", "NEBULANI.md"]);
+  expect(watchContextFiles(["HARA.md"], context)).toEqual(["HARA.md"]);
+  expect(watchContextFiles([], context)).toEqual([]);
+  expect(watchContextFiles(["HARA.md"], undefined)).toEqual([]);
+  const prompt = contextFilesPrompt(sources, watchContextFiles(["HARA.md"], context));
+  expect(prompt).toContain("# Context files chosen for this thread");
+  expect(prompt).toContain("Who she is.");
+  expect(prompt).not.toContain("# Nebulani");
 });

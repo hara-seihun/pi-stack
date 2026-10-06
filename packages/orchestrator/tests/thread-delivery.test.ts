@@ -6,7 +6,7 @@ const modes: Delivery[] = ["queue", "steer", "hardSteer"];
 afterEach(() => vi.restoreAllMocks());
 
 it.each([undefined, "sender"])("defaults API delivery for sender %s and preserves explicit choices", senderId => {
-  expect(resolveDelivery({ senderId })).toBe(senderId ? "steer" : "queue");
+  expect(resolveDelivery({ senderId })).toBe("steer");
   for (const delivery of modes) expect(resolveDelivery({ senderId, delivery })).toBe(delivery);
 });
 

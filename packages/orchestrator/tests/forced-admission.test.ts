@@ -51,7 +51,8 @@ it("fills every ready forced lane above machine capacity in a bounded readiness 
   const daemon = new Daemon(store, { ...loadConfig("/missing"), modelBrokerUrl: "http://127.0.0.1:2461", maxConcurrentSessions: 1 }) as any;
   store.reconcileLanes(Array.from({ length: 8 }, (_, i) => ({ id: `lane:${i}`, prompt: "work", cwd: "/tmp", profile: "sol", weight: 1 })));
   const spawned: string[] = [];
-  daemon.threads.snapshot = () => [{ state: "running" }];
+  daemon.threads.snapshot = () => { throw new Error("Scheduling must not project historical threads"); };
+  daemon.threads.runningSummary = () => ({ total: 1, lanes: new Map(), repairOwner: undefined });
   daemon.threads.spawn = async (input: any) => { spawned.push(input.metadata.laneId); return { ok: true, value: { id: input.metadata.laneId } }; };
   try {
     await daemon.fillCapacity();

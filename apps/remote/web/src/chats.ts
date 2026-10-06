@@ -1,13 +1,15 @@
 import type { ChatId } from "../../server/protocol";
+import type { Room } from "../../shared/rooms";
 export type { ChatId } from "../../server/protocol";
 import type { MessagingBackendInfo, MessagingConversation, MessagingSnapshot } from "../../server/messaging/protocol";
 import type { Session, ThreadStart } from "./types";
 import { messagingAvatarUrl } from "./messaging-avatar";
 import { conversationThreads } from "./thread-state";
-import { attentionRank, threadStatus, type ThreadStatus } from "./features/status/thread-status";
+import { attentionRank, threadStatus, roomThreadStatus, type ThreadStatus } from "./features/status/thread-status";
 
 export type Chat =
   | { id: ChatId; kind: "ai"; title: string; icon: string; label: string; session: Session }
+  | { id: ChatId; kind: "room"; title: string; icon: string; label: string; room: Room }
   | { id: ChatId; kind: "human"; title: string; icon: string; label: string; /** The contact's or group's picture, when the backend has one. */ avatar?: string; conversation: MessagingConversation; backend?: MessagingBackendInfo };
 
 export function aiChat(session: Session, starts: ThreadStart[]): Chat {
@@ -21,10 +23,14 @@ export function humanChat(conversation: MessagingConversation, backends: Messagi
   return { id: `human:${conversation.id}`, kind: "human", title: conversation.title, icon: backend?.icon || "cloud", label: backend?.label || conversation.backendId, ...(avatar ? { avatar } : {}), conversation, backend };
 }
 
+export function roomChat(room: Room): Chat {
+  return { id: `room:${room.id}`, kind: "room", title: room.title, icon: "room", label: "Room", room };
+}
+
 export type InboxSection = "attention" | "working" | "quiet";
 export const INBOX_SECTIONS: { id: InboxSection; label: string }[] = [
   { id: "attention", label: "Needs you" },
-  { id: "working", label: "Working" },
+  { id: "working", label: "Active" },
   { id: "quiet", label: "Quiet" },
 ];
 
@@ -43,6 +49,13 @@ export function inboxRow(chat: Chat): InboxRow {
     const section: InboxSection = status.attention ? "attention" : status.busy ? "working" : "quiet";
     return { chat, section, status, rank, updatedAt: Date.parse(chat.session.updatedAt) || 0 };
   }
+  if (chat.kind === "room") {
+    const busy = chat.room.state === "running";
+    const attention = (chat.room.unreadCount ?? 0) > 0 || (chat.room.pendingQuestions ?? 0) > 0;
+    const reported = roomThreadStatus(chat.room);
+    const status: ThreadStatus = { ...reported, attention: attention || reported.attention };
+    return { chat, section: status.attention ? "attention" : busy ? "working" : "quiet", status, rank: reported.attention ? attentionRank(reported) : attention ? 3 : busy ? 10 : 22, updatedAt: chat.room.updatedAt ?? 0 };
+  }
   const { section, rank } = humanStatus(chat.conversation, chat.backend);
   return { chat, section, status: null, rank, updatedAt: chat.conversation.updatedAt || 0 };
 }
@@ -50,8 +63,8 @@ export function inboxRow(chat: Chat): InboxRow {
 /** The inbox: every current chat, AI and human alike, ordered by what needs
  * the person first and by recency within a rank. Nothing here is stored;
  * the same inputs give the same list on every device. */
-export function inboxRows(sessions: Session[], starts: ThreadStart[], messaging: MessagingSnapshot): InboxRow[] {
-  const chats = [...conversationThreads(sessions).map(session => aiChat(session, starts)), ...messaging.conversations.filter(item => item.current).map(item => humanChat(item, messaging.backends))];
+export function inboxRows(sessions: Session[], starts: ThreadStart[], messaging: MessagingSnapshot, rooms: Room[] = []): InboxRow[] {
+  const chats = [...conversationThreads(sessions).map(session => aiChat(session, starts)), ...messaging.conversations.filter(item => item.current).map(item => humanChat(item, messaging.backends)), ...rooms.filter(room => room.current !== false).map(roomChat)];
   return chats.map(inboxRow).sort((a, b) => a.rank - b.rank || b.updatedAt - a.updatedAt || a.chat.title.localeCompare(b.chat.title));
 }
 
@@ -65,9 +78,9 @@ export function reconcileDiscoveredSessions(discovered: Session[], sessions: Ses
   return discovered.filter(session => !present.has(session.id));
 }
 
-export interface ChatSnapshot { sessions: Session[]; messaging: MessagingSnapshot }
+export interface ChatSnapshot { sessions: Session[]; messaging: MessagingSnapshot; rooms?: Room[] }
 export function selectionAfterSync(selected: ChatId | null, previous: ChatSnapshot, next: ChatSnapshot): ChatId | null {
-  const contains = (snapshot: ChatSnapshot) => snapshot.sessions.some(item => `ai:${item.id}` === selected) || snapshot.messaging.conversations.some(item => item.current && `human:${item.id}` === selected);
+  const contains = (snapshot: ChatSnapshot) => snapshot.sessions.some(item => `ai:${item.id}` === selected) || snapshot.messaging.conversations.some(item => item.current && `human:${item.id}` === selected) || (snapshot.rooms ?? []).some(room => room.current !== false && `room:${room.id}` === selected);
   return contains(previous) && !contains(next) ? null : selected;
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -24,6 +24,7 @@ function fixture(t) {
   mkdirSync(join(repo, "deploy"));
   copyFileSync(lib, join(repo, "deploy/lib"));
   copyFileSync(helper, join(repo, "deploy/release-checkout"));
+  copyFileSync(resolve(".gitignore"), join(repo, ".gitignore"));
   writeFileSync(join(repo, "source"), "first\n");
   git(repo, "add", ".");
   git(repo, "commit", "-qm", "first");
@@ -39,6 +40,36 @@ function fixture(t) {
   const select = (sha, rollback) => spawnSync("bash", args(sha, rollback), { encoding: "utf8", timeout: 5000, env });
   return { dir, repo, state, marker, first, second, args, select, env, hostLock };
 }
+
+test("dependency directories and symlinks stay outside source custody", (t) => {
+  const trackedDependencies = git(resolve("."), "ls-files", "-z").split("\0")
+    .filter(path => path.split("/").includes("node_modules"));
+  assert.deepEqual(trackedDependencies, [], "generated dependencies must not be committed");
+  const f = fixture(t);
+  const dependencies = join(f.dir, "dependencies");
+  mkdirSync(dependencies);
+  writeFileSync(join(dependencies, "package.json"), "{}\n");
+  for (const parent of [f.repo, join(f.repo, "apps/example")]) {
+    mkdirSync(parent, { recursive: true });
+    const modules = join(parent, "node_modules");
+    symlinkSync(dependencies, modules);
+    git(f.repo, "add", ".");
+    assert.equal(git(f.repo, "status", "--porcelain"), "", "dependency symlinks must be ignored");
+    rmSync(modules);
+    mkdirSync(modules);
+    writeFileSync(join(modules, "package.json"), "{}\n");
+    git(f.repo, "add", ".");
+    assert.equal(git(f.repo, "status", "--porcelain"), "", "dependency directories must be ignored");
+  }
+  assert.equal(f.select(f.first).status, 0);
+  const modules = join(f.state, "repository/node_modules");
+  symlinkSync(dependencies, modules);
+  assert.equal(f.select(f.second).status, 0);
+  rmSync(modules);
+  mkdirSync(modules);
+  writeFileSync(join(modules, "package.json"), "{}\n");
+  assert.equal(f.select(f.second).status, 0, "installing dependencies must not dirty the release");
+});
 
 test("release selects committed source without changing a dirty writer or its refs", (t) => {
   const f = fixture(t);

@@ -1,13 +1,14 @@
-import { closeSync, existsSync, fsyncSync, readSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fchmodSync, fsyncSync, readSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { custodyMkdirSync, custodyOpenSync } from "../shared-custody.js";
+import { custodyMkdirSync, custodyOpenSync, custodyPrivateFileMode } from "../shared-custody.js";
 
 export function writePiSessionFile(path: string, value: string): void {
   custodyMkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.next`;
-  const fd = custodyOpenSync(temp, "w", 0o600);
-  try { writeFileSync(fd, value); fsyncSync(fd); } finally { closeSync(fd); }
+  const mode = custodyPrivateFileMode(path);
+  const fd = custodyOpenSync(temp, "w", mode);
+  try { fchmodSync(fd, mode); writeFileSync(fd, value); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temp, path);
   const directory = custodyOpenSync(dirname(path), "r");
   try { fsyncSync(directory); } finally { closeSync(directory); }

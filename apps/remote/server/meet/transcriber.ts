@@ -41,7 +41,7 @@ export class MeetTranscriber {
       };
       socket.addEventListener("open", () => {
         if (settled) return;
-        socket.send(JSON.stringify({ type: "start", dictation: id, dictionary: new WriteDictionary(this.store.db).get() }));
+        socket.send(JSON.stringify({ type: "start", dictation: id, dictionary: new WriteDictionary(this.store.db).get(), rewrite: false }));
         sendNext();
       });
       socket.addEventListener("message", event => {

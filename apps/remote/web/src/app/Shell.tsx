@@ -17,13 +17,18 @@ function TabIcon({ tab }: { tab: Tab }) {
 
 export interface TabBadge { count: number; attention?: boolean }
 
-export function TabNav({ layout, active, badges, onSelect }: { layout: Layout; active: Tab; badges: Partial<Record<Tab, TabBadge>>; onSelect(tab: Tab): void }) {
+export interface UpdateTab { visible: boolean; busy: boolean; status: string; onClick(): void }
+
+export function TabNav({ layout, active, badges, onSelect, update }: { layout: Layout; active: Tab; badges: Partial<Record<Tab, TabBadge>>; onSelect(tab: Tab): void; update?: UpdateTab }) {
   return <nav className={layout === "phone" ? "tabbar" : "rail"} aria-label="Sections">
     {TABS.map(tab => {
       const badge = badges[tab];
-      const showBadge = active !== tab && badge && badge.count > 0;
-      return <button key={tab} type="button" className="tab" aria-current={active === tab ? "page" : undefined} aria-label={showBadge ? `${LABELS[tab]}, ${badge.count}` : LABELS[tab]} title={LABELS[tab]} onClick={() => onSelect(tab)}>
-        <span className="tab-icon"><TabIcon tab={tab} />{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
+      const updating = tab === "machine" && update?.visible;
+      const showBadge = !updating && active !== tab && badge && badge.count > 0;
+      const label = updating ? "Update" : LABELS[tab];
+      return <button key={tab} type="button" className={`tab${updating ? " tab-update" : ""}`} aria-current={!updating && active === tab ? "page" : undefined} aria-label={showBadge ? `${label}, ${badge.count}` : label} aria-busy={updating ? update.busy : undefined} disabled={updating && update.busy} title={updating ? update.status : label} onClick={() => updating ? update.onClick() : onSelect(tab)}>
+        <span className="tab-icon">{updating ? <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" /></svg> : <TabIcon tab={tab} />}{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
+        {updating && <span className="tab-update-label">Update</span>}
       </button>;
     })}
   </nav>;

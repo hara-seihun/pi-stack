@@ -1,5 +1,6 @@
 export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
 import type { ThreadCreator } from "./caller.js";
+import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
 export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
@@ -39,6 +40,9 @@ export interface Thread {
   createdAt: number;
   updatedAt: number;
   pendingMessages: number;
+  executionActivity?: ExecutionActivitySnapshot & { activeTools: string[] };
+  wakeSchedule?: ThreadWakeSchedule;
+  waitingOnAgents?: AgentWait;
   metadata?: Record<string, unknown>;
 }
 export interface ThreadQuestion {
@@ -68,6 +72,10 @@ export interface AnswerThreadQuestion {
   dismissed?: boolean;
 }
 export interface QuestionReceipt { accepted: true; questionId: string }
+export interface QuestionState {
+  question: ThreadQuestion;
+  answer?: { text: string; selectedSuggestions: string[]; dismissed: boolean; acceptedAt: number };
+}
 export interface QuestionEvents {
   cursor: number;
   items: Array<{ seq: number; questionId: string; threadId: string; question: string; time: number }>;
@@ -113,7 +121,7 @@ export interface SendThread {
   replyTo?: string;
 }
 export function resolveDelivery(input: Pick<SendThread, "senderId" | "delivery">): Delivery {
-  return input.delivery ?? (input.senderId ? "steer" : "queue");
+  return input.delivery ?? "steer";
 }
 export interface ThreadList {
   id?: string;
@@ -179,17 +187,36 @@ export type ThreadControl =
   | { threadId: string; action: "resume" }
   /** Unarchive a thread, or its whole subtree; `resume` continues the turns and held work its archive interrupted. */
   | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
+  /** Record an idle human view using the owner's clock, without changing execution activity or emitting changed. */
+  | { threadId: string; action: "view" }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
+  | { threadId: string; action: "rename"; title: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   /** Retry dormant waiting work on the saved model, without interrupting live native work. */
   | { threadId: string; action: "retryWaiting" }
   | { threadId: string; action: "cancelMessage"; messageId: string }
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
   | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };
+export interface AgentWait { reason: string; threadIds: string[]; after: Record<string, number>; since: number }
+export type AgentWaitRequest = { threadId: string; requestId: string } & (
+  | { action: "set"; reason: string; threadIds?: string[]; after?: Record<string, number> }
+  | { action: "clear" });
+export interface ThreadWakeSchedule {
+  reason: string; cadenceMs: number; nextDueAt: number;
+  lastDueAt?: number; lastDeliveredAt?: number; lastMessageId?: string; lastLandedAt?: number;
+  deferredReason?: "stopped" | "archived" | "busy";
+}
+export type ThreadWakeRequest = { threadId: string } & (
+  | { action: "list" }
+  | { action: "set"; requestId: string; reason: string; cadenceMs: number; nextDueAt?: number }
+  | { action: "cancel"; requestId: string });
 export interface ThreadApi {
+  agentWait(input: AgentWaitRequest): Promise<Result<Thread>>;
+  wakeSchedule(input: ThreadWakeRequest): Promise<Result<ThreadWakeSchedule | null>>;
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;
   questions(threadId: string): Promise<Result<ThreadQuestion[]>>;
+  questionState(threadId: string, questionId: string): Promise<Result<QuestionState>>;
   questionEvents(after?: number, limit?: number): Result<QuestionEvents> | Promise<Result<QuestionEvents>>;
   answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>>;
   spawn(input: SpawnThread): Promise<Result<Thread>>;
@@ -208,6 +235,8 @@ export interface ThreadApi {
 export type PiEvent = Record<string, unknown> & { type: string; emittedAt?: number };
 export type PiCommand = Record<string, unknown> & { type: string; id?: string };
 export interface PiSession {
+  /** Reserve execution capacity, or release it while retaining an idle native session. */
+  setActive?(active: boolean): Promise<void>;
   command(command: PiCommand): Promise<void>;
   close(): Promise<void>;
 }

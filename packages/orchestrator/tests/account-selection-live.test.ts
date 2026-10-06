@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { chooseInteractiveAccount, interactiveRetryAvailability } from "../src/auth/account-selection.js";
 import { catalogModel } from "../src/catalog.js";
 import { Store } from "../src/store.js";
@@ -20,6 +20,7 @@ it("puts a live session on the least loaded account and ordinary sessions on the
 it("never probes fresh exhausted model windows, even when cooling capacity is the only alternative", () => {
   const store = Store.open(":memory:");
   const model=catalogModel("opus")!.model,auth={has:()=>true} as never,now=Date.now();
+  const clock=vi.spyOn(Date,"now").mockReturnValue(now);
   try {
     for(const id of ["anthropic-1","anthropic-2","anthropic-3"])store.upsertAccount({id,provider:"anthropic"});
     store.recordMeter("anthropic-1","anthropic-5h",100,now+3_600_000);
@@ -31,10 +32,11 @@ it("never probes fresh exhausted model windows, even when cooling capacity is th
     expect(chooseInteractiveAccount(store,auth,"anthropic",undefined,{model,includeCooling:true})?.id).toBe("anthropic-2");
     expect(chooseInteractiveAccount(store,auth,"anthropic",new Set(["anthropic-2"]),{model,includeCooling:true})).toBeUndefined();
     expect(interactiveRetryAvailability(store,auth,"anthropic",model,now)).toEqual({available:false,retryAt:now+3_600_000});
+    clock.mockReturnValue(now+1);
     store.recordMeter("anthropic-1","anthropic-5h",0,now+3_600_000,now+1);
     expect(interactiveRetryAvailability(store,auth,"anthropic",model,now+1).available).toBe(true);
     expect(chooseInteractiveAccount(store,auth,"anthropic",undefined,{model:catalogModel("fable")!.model,includeCooling:true})?.id).toBe("anthropic-1");
-  } finally { store.close(); }
+  } finally { clock.mockRestore();store.close(); }
 });
 
 it("does not mistake a stale or reset exhausted reading for current exhaustion",()=>{

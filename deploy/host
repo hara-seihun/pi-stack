@@ -10,8 +10,11 @@
 # tools, the skills, and each account's Pi settings and command links.
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")/.." && pwd)
-source "$root/deploy/lib"
+control=$(cd "$(dirname "$0")/.." && pwd)
+root=$control
+source "$control/deploy/lib"
+# Host phases below own independent deadlines; child deployment scripts inherit custody.
+export PI_STACK_DEPLOY_DEADLINE_ACTIVE=1
 pi_stack_enter_deployment "$0" "$root" "$@"
 export PI_STACK_HOST_FILE=${1:-$(pi_stack_host_file)}
 [[ -f $PI_STACK_HOST_FILE ]] || { echo "usage: deploy/host [HOST_FILE]; $PI_STACK_HOST_FILE does not exist" >&2; exit 64; }
@@ -22,7 +25,7 @@ services=1
 if [[ -n ${PI_STACK_REMOTE_DEST:-}${PI_STACK_ORCHESTRATOR_DEST:-}${PI_STACK_RUNTIME_DEST:-} && ${PI_STACK_SERVICES:-0} != 1 ]]; then
   services=0
 fi
-if (( services )); then
+if (( services )) && [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
   pi_stack_check_person_configs
   "$root/deploy/voice" --check
   "$root/deploy/phone" --check
@@ -61,8 +64,95 @@ if (( services )); then
   if [[ -n $daemon_units ]]; then mapfile -t daemons <<< "$daemon_units"; fi
 fi
 
+write_base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
+previous_write=$(readlink -f "$write_base" 2>/dev/null || true)
+write_was_active=0
+write_was_enabled=0
+write_started=0
+write_pid=""
+if (( write )); then
+  systemctl is-active --quiet pi-stack-write.service && write_was_active=1
+  systemctl is-enabled --quiet pi-stack-write.service && write_was_enabled=1
+fi
+restore_write() {
+  local status=$? candidate="$write_base.rollback.$$"
+  trap - EXIT TERM INT HUP
+  if (( status != 0 && write_started )); then
+    # Stop the readiness job before restoring: it must not restart the rejected
+    # engine after the selection has gone back. Queue the old unit immediately;
+    # cold rollback readiness cannot fit inside an already failed deadline.
+    if [[ -n $write_pid ]]; then
+      kill "$write_pid" 2>/dev/null || true
+      wait "$write_pid" 2>/dev/null || true
+    fi
+    echo 'release failed; restoring previous Write selection and service state' >&2
+    if [[ -n $previous_write && -d $previous_write ]]; then
+      pi_stack_as_root ln -s "$previous_write" "$candidate" &&
+        pi_stack_as_root mv -Tf "$candidate" "$write_base" || echo 'Write selection rollback failed' >&2
+    else
+      pi_stack_as_root rm -f "$write_base"
+    fi
+    if (( write_was_active )); then
+      pi_stack_as_root systemctl reset-failed pi-stack-write.service || true
+      pi_stack_as_root systemctl restart --no-block pi-stack-write.service || echo 'Write rollback restart failed' >&2
+    else
+      pi_stack_as_root systemctl stop --no-block pi-stack-write.service || echo 'Write rollback stop failed' >&2
+    fi
+    (( write_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-write.service || true
+    pi_stack_as_root rm -f "$candidate"
+  fi
+  exit "$status"
+}
+trap restore_write EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
+if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
+  remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+  export PI_STACK_PREVIOUS_REMOTE=$(cat "$remote/.pi-stack-commit" 2>/dev/null || true)
+  export PI_STACK_PREVIOUS_REMOTE_RELEASE=$(readlink -f "$remote" || true)
+  phase() {
+    local name=$1 seconds=$2; shift 2
+    echo "release phase=$name started deadline=${seconds}s"
+    local status=0
+    timeout --signal=TERM --kill-after=5s "${seconds}s" "$@" || status=$?
+    echo "release phase=$name completed status=$status"
+    return "$status"
+  }
+  (( ! write )) || write_started=1
+  phase publication 50 env PI_STACK_HOST_PHASE=publication "$0" "$@"
+  if (( services )); then
+    (
+      phase browser-doctor 120 "$control/deploy/runtime-doctors" browser "$root" "${fleet:-${users[0]}}" "$control" &&
+      phase model-doctor 30 "$control/deploy/runtime-doctors" model "$root" "${fleet:-${users[0]}}" "$control"
+    ) &
+    doctor_pid=$!
+    activation_failed=0; doctor_failed=0
+    phase activation 50 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_failed=1
+    wait "$doctor_pid" || doctor_failed=1
+    if (( doctor_failed )); then
+      echo 'runtime doctor failed' >&2
+      if (( ! activation_failed )); then
+        phase rollback 50 env PI_STACK_HOST_PHASE=activation PI_STACK_FORCE_ROLLBACK=1 "$0" "$@" || true
+      fi
+    fi
+    (( ! activation_failed && ! doctor_failed )) || exit 1
+  fi
+  echo "deployed Pi stack $(git -C "$root" rev-parse HEAD) for ${users[*]}"
+  exit 0
+fi
+expected=$(git -C "$root" rev-parse HEAD)
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+skills=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
+tools=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
+previous_remote=${PI_STACK_PREVIOUS_REMOTE:-}
+previous_remote_release=${PI_STACK_PREVIOUS_REMOTE_RELEASE:-}
+if [[ $PI_STACK_HOST_PHASE == publication ]]; then
 # Builds share checkout dependencies, not output directories. Prepare them
-# together while selecting the prepared Write engine on hosts that own it.
+# together while selecting and warming Write on hosts that own it.
 # The Write engine's 1.2 GB model is fetched by deploy/prepare, outside this
 # deadline; here it is only selected, and a missing preparation fails loudly.
 pi_stack_prepare_builds "$root" &
@@ -70,31 +160,21 @@ builds_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
 if (( write )); then
-  "$root/deploy/write-engine" --select &
-  write_pid=$!
+  # Join selection in this shell: an orphan selector must not overwrite a
+  # rollback after an independent build failure or signal.
+  write_started=1
+  "$root/deploy/write-engine" --select
 else
   echo 'Pi Stack Write: no pi-stack-write.service on this host; skipping the engine' >&2
-  true &
-  write_pid=$!
 fi
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1
-wait "$runtime_pid" || preparation_failed=1
-wait "$write_pid" || preparation_failed=1
-(( preparation_failed == 0 )) || exit 1
-
-expected=$(git -C "$root" rev-parse HEAD)
-runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
-orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
-remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
-skills=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
-tools=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
-previous_remote=""
-previous_remote_release=""
-if [[ -f $remote/.pi-stack-commit ]]; then
-  previous_remote=$(<"$remote/.pi-stack-commit")
-  previous_remote_release=$(readlink -f "$remote")
+# prepare already selected this immutable runtime. Its repeated custody proof
+# can overlap component staging; a cold deployment still needs it selected first.
+if [[ ! -f $runtime/.pi-stack-commit || $(<"$runtime/.pi-stack-commit") != "$expected" ]]; then
+  wait "$runtime_pid" || preparation_failed=1
 fi
+(( preparation_failed == 0 )) || exit 1
 "$root/deploy/orchestrator"
 # Once Orchestrator is selected, Remote, the tools and the accounts touch
 # disjoint state: separate release directories, ~/.local/bin, and ~/.pi/agent.
@@ -106,20 +186,23 @@ remote_pid=$!
 tools_pid=$!
 (
   set -euo pipefail
+  "$root/deploy/skills" "${users[0]}"
+  account_pids=()
   for user in "${users[@]}"; do
-    "$root/deploy/skills" "$user"
-  done
-  settings_pids=()
-  for user in "${users[@]}"; do
+    if [[ $user != "${users[0]}" ]]; then
+      "$root/deploy/skills" --links-only "$user" &
+      account_pids+=($!)
+    fi
     "$root/deploy/settings" "$user" &
-    settings_pids+=($!)
+    account_pids+=($!)
   done
-  settings_failed=0
-  for pid in "${settings_pids[@]}"; do wait "$pid" || settings_failed=1; done
-  exit "$settings_failed"
+  accounts_failed=0
+  for pid in "${account_pids[@]}"; do wait "$pid" || accounts_failed=1; done
+  exit "$accounts_failed"
 ) &
 accounts_pid=$!
 publish_failed=0
+wait "$runtime_pid" || publish_failed=1
 wait "$remote_pid" || publish_failed=1
 wait "$tools_pid" || publish_failed=1
 wait "$accounts_pid" || publish_failed=1
@@ -132,20 +215,9 @@ for artifact in "$runtime" "$orchestrator" "$remote" "$skills" "$tools"; do
   }
 done
 
-if (( ! services )); then
-  printf 'deployed Pi stack %s for %s into overridden destinations; services left alone\n' "$expected" "${users[*]}"
   exit 0
 fi
-
-# Disposable browser and model-admission checks use the selected runtime and
-# touch no service, so they run alongside activation. Failures reject acceptance.
-doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-runtime-doctors.XXXXXXXX")
-(
-  pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs"
-  pi_stack_run_as "${fleet:-${users[0]}}" node "$runtime/node_modules/.bin/pi-model-selection-doctor"
-) >"$doctor_log" 2>&1 &
-doctor_pid=$!
-
+[[ $PI_STACK_HOST_PHASE == activation ]] || exit 64
 # Every enabled or running person's daemon restarts on release; live workers keep the
 # release they recorded. The front door restarts only when Pi Remote changed, and each
 # running supervisor is then handed the new release without ending active turns.
@@ -196,16 +268,30 @@ activate_remote() {
     return 1
   done
 }
+# A daemon's graceful stop can consume its full systemd stop budget. Remote
+# handoff does not depend on it; join both jobs before smoke instead of spending
+# that budget before the supervisors even receive their reload (PUB-bf877cd4).
+(
+  failed=0
+  if (( ${#daemons[@]} )); then
+    pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1
+  fi
+  broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1
+  mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
+  if (( ${#brokers[@]} )); then
+    pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
+  fi
+  exit "$failed"
+) &
+daemon_activation_pid=$!
 activation_failed=0
-if (( ${#daemons[@]} )); then
-  pi_stack_as_root systemctl restart "${daemons[@]}" || activation_failed=1
-fi
-broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || activation_failed=1
-mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
-if (( ${#brokers[@]} )); then
-  pi_stack_as_root systemctl restart "${brokers[@]}" || activation_failed=1
-fi
-if { (( write )) && ! "$root/deploy/write-service" --activate; } || ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then
+if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
+  if (( write )); then
+    write_started=1
+    "$root/deploy/write-service" --activate &
+    write_pid=$!
+  fi
+if ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then
   activation_failed=1
 elif [[ $previous_remote != "$expected" ]]; then
   activate_remote "$expected" || activation_failed=1
@@ -215,16 +301,25 @@ elif ! remote_matches_release "$expected"; then
   activate_remote "$expected" || activation_failed=1
 fi
 
+# Refresh the additive gates before rolling the shared-room supervisor. Root,
+# memory and encrypted custody remain untouched by the ordinary host release.
+if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
+  activation_failed=1
+elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
+  pi_stack_as_root python3 "$root/deploy/one-kenan-activate" rooms --host "$PI_STACK_HOST_FILE" --expected "$expected" || activation_failed=1
+fi
+if (( write )); then
+  wait "$write_pid" || activation_failed=1
+fi
+wait "$daemon_activation_pid" || activation_failed=1
+
+fi
 # Then walk the front door the way the clients do. A release that locks a
 # person out of the app goes back to the previous Pi Remote release on the
 # spot, and the deployment fails loudly instead of quietly.
 smoke_failed=0
-if (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
-doctor_failed=0
-wait "$doctor_pid" || doctor_failed=1
-cat "$doctor_log"; rm -f "$doctor_log"
-(( doctor_failed == 0 )) || echo 'runtime doctor failed' >&2
-if (( smoke_failed || doctor_failed )); then
+if [[ ${PI_STACK_FORCE_ROLLBACK:-0} == 1 ]] || (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
+if (( smoke_failed )); then
     if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
       echo "activation, smoke or runtime doctor failed; returning Pi Remote to $previous_remote" >&2
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
@@ -234,11 +329,13 @@ if (( smoke_failed || doctor_failed )); then
       # start limit; the previous release cannot come back through a unit
       # systemd refuses to start.
       pi_stack_as_root systemctl reset-failed 'pi-remote@*.service' 2>/dev/null || true
-      if [[ -f $previous_remote_release/server/voice/service.ts ]]; then
-        "$root/deploy/voice" --activate || echo 'Voice rollback failed' >&2
-      else
-        pi_stack_as_root systemctl stop pi-stack-voice.service
-      fi
+      for service in voice phone; do
+        if [[ -f $previous_remote_release/server/$service/service.ts ]]; then
+          "$root/deploy/$service" --activate || echo "$service rollback failed" >&2
+        elif [[ $(systemctl show "pi-stack-$service.service" -p LoadState --value) == loaded ]]; then
+          pi_stack_as_root systemctl stop "pi-stack-$service.service"
+        fi
+      done
       activate_remote "$previous_remote" || true
       if [[ -x $previous_remote_release/deploy/smoke ]]; then
         "$previous_remote_release/deploy/smoke" || echo 'The restored release failed its own smoke check' >&2
@@ -246,5 +343,8 @@ if (( smoke_failed || doctor_failed )); then
     fi
     echo "Pi stack $expected is not accepted on this host" >&2
     exit 1
+fi
+if (( write )); then
+  "$root/deploy/write-engine" --retain || echo 'Write retention failed; retained store needs collection' >&2
 fi
 printf 'deployed Pi stack %s for %s\n' "$expected" "${users[*]}"
