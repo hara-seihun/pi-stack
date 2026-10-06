@@ -10,6 +10,7 @@ import { ClientCacheContext } from "./cached-media";
 import { api, piFetch, ensureUnlocked, registerUnlockHandler } from "./client";
 import { fetchPersonChooser, reportWebReady, bootstrapUrl, pinnedFetch } from "./native";
 import { PromptOutbox, type PromptOutboxEntry, type PromptOutboxScope, type PromptOutboxTransport } from "./prompt-outbox";
+import { PromptSubmissions } from "./prompt-submissions";
 import { PromptOutboxStatus } from "./PromptOutboxStatus";
 import { useChatDrawing } from "./chat-drawing";
 import type { ReplyTarget } from "./message-reply";
@@ -459,6 +460,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const [outboxEntries, setOutboxEntries] = useState<PromptOutboxEntry[]>([]);
   const [outboxBusy, setOutboxBusy] = useState<string | null>(null);
   const ownedPrompts = useRef(new Map<string, string>());
+  const promptSubmissions = useRef(new PromptSubmissions());
   const drainingPrompts = useRef(false);
   const refreshOutbox = useCallback(async () => {
     const owner = outbox.current;
@@ -493,24 +495,26 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     })().catch(error => { if (active) toast.error(`Could not open saved prompts: ${String(error)}`); });
     return () => { active = false; ownedPrompts.current.clear(); outbox.current?.store.dispose(); outbox.current = null; };
   }, [person, refreshOutbox]);
-  const submitSavedPrompt = useCallback(async (requestId: string) => {
+  const submitSavedPrompt = useCallback((requestId: string) => {
     const owner = outbox.current;
-    if (!owner) return;
-    setOutboxBusy(requestId);
-    try {
-      const result = await owner.store.submit(requestId, owner.transport);
-      if (outbox.current !== owner) return;
-      if (!result.ok) { ownedPrompts.current.delete(requestId); toast.error(result.error.message); }
-      else if (result.value.outcome.kind !== "pending") {
-        ownedPrompts.current.delete(requestId);
-        if (result.value.outcome.kind === "accepted") {
-          const removed = await owner.store.acknowledge(requestId);
-          if (!removed.ok) toast.error(removed.error.message);
-          kick();
+    if (!owner) return Promise.resolve();
+    return promptSubmissions.current.run(owner.store, requestId, async () => {
+      setOutboxBusy(requestId);
+      try {
+        const result = await owner.store.submit(requestId, owner.transport);
+        if (outbox.current !== owner) return;
+        if (!result.ok) { ownedPrompts.current.delete(requestId); toast.error(result.error.message); }
+        else if (result.value.outcome.kind !== "pending") {
+          ownedPrompts.current.delete(requestId);
+          if (result.value.outcome.kind === "accepted") {
+            const removed = await owner.store.acknowledge(requestId);
+            if (!removed.ok) toast.error(removed.error.message);
+            kick();
+          }
         }
-      }
-      await refreshOutbox();
-    } finally { setOutboxBusy(current => current === requestId ? null : current); }
+        await refreshOutbox();
+      } finally { setOutboxBusy(current => current === requestId ? null : current); }
+    });
   }, [kick, refreshOutbox]);
   const interruptPrompts = useCallback((sessionId: string, descendants: boolean) => {
     const ids = new Set([sessionId]);
