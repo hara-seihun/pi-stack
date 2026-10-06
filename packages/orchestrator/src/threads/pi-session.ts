@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, createBashTool,
-  convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
+  buildSessionContext, convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession } from "./contracts.js";
 import { threadTools } from "./pi-tools.js";
 import { convergeTools } from "./converge.js";
@@ -125,17 +125,29 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       // model call, so without this a raw thread's context never held its final answer: the transcript kept it
       // as live text and the supervisor's response metrics, keyed to that message, had nothing to attach to.
       const threadContext = { name: "thread-context", factory: (pi: Parameters<typeof threadSpeed>[0]) => {
-        let reported: { systemPrompt: string; tools: unknown[]; messages: ReturnType<typeof convertToLlm> } | null = null;
+        let reported: { systemPrompt: string; tools: unknown[]; messages: ReturnType<typeof convertToLlm>;
+          contextUsage?: ReturnType<ExtensionContext["getContextUsage"]>; contextModel?: string } | null = null;
+        const usage = (ctx: ExtensionContext) => ({ contextUsage: ctx.getContextUsage(), contextModel: ctx.model?.id });
         pi.on("context", (event, ctx) => {
           const active = new Set(pi.getActiveTools());
           reported = { systemPrompt: ctx.getSystemPrompt(),
             tools: pi.getAllTools().filter(tool => active.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters })),
-            messages: convertToLlm(event.messages) };
+            messages: convertToLlm(event.messages), ...usage(ctx) };
           output({ type: "context_update", contextOwner, context: reported });
         });
         pi.on("message_end", event => {
           if (!reported || (event.message.role !== "assistant" && event.message.role !== "toolResult")) return;
           reported = { ...reported, messages: [...reported.messages, ...convertToLlm([event.message])] };
+          output({ type: "context_update", contextOwner, context: reported });
+        });
+        pi.on("turn_end", (_event, ctx) => {
+          if (!reported) return;
+          reported = { ...reported, ...usage(ctx) };
+          output({ type: "context_update", contextOwner, context: reported });
+        });
+        pi.on("session_compact", (_event, ctx) => {
+          if (!reported) return;
+          reported = { ...reported, messages: convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages), ...usage(ctx) };
           output({ type: "context_update", contextOwner, context: reported });
         });
       } };

@@ -58,6 +58,12 @@ export function isThreadColor(value: unknown): value is ThreadColor {
   return THREAD_COLORS.some(color => color === value);
 }
 
+export interface ContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
 export interface Session {
   id: string;
   parentId: string | null;
@@ -66,6 +72,8 @@ export interface Session {
   /** Scheduled watch checks belong in Workers without changing their owning supervisor. */
   watchList?: boolean;
   model: string;
+  /** Native Pi context estimate, not cumulative billed tokens. Null after compaction until fresh usage arrives. */
+  contextUsage?: ContextUsage;
   name: string;
   color?: ThreadColor | null;
   cwd: string;

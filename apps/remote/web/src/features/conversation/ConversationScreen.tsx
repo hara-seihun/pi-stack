@@ -15,6 +15,7 @@ import { OFFLINE_STATUS, threadStatus } from "../status/thread-status";
 import { composerAction } from "../../thread-state";
 import { DELIVERY_LABELS } from "../queue/delivery";
 import { Transcript } from "./Transcript";
+import { ConversationModelMeta } from "./ContextTokens";
 import { QuestionsComposer } from "./questions";
 import type { ThreadQuestion } from "../../../../server/protocol";
 import "./conversation.css";
@@ -106,9 +107,8 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   }, [modeOpen]);
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
-  const modelShort = session.model.split("/").at(-1) || session.model;
   return <div className="conversation-screen">
-    <ConversationHeader title={session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<span className="conversation-meta">{modelShort}</span>} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
+    <ConversationHeader title={session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<ConversationModelMeta session={session} />} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
       trailing={<>{questions.length > 0 && composerAction(session, "") === "stop" && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Stop thread</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {ancestors.length > 0 && <nav className="ancestry" aria-label="Parent threads">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <ConversationView key={session.id} active label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>

@@ -85,6 +85,31 @@ function assistant(text: string, stopReason = "pending") {
 }
 
 describe("context mirror", () => {
+  test("publishes native usage after persistence and clears pre-compaction counts", async () => {
+    captures.length = 0;
+    document = "";
+    const handlers = new Map<string, Handler>();
+    contextMirror({
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { return []; },
+      getAllTools() { return []; },
+    } as unknown as ExtensionAPI);
+    let usage: { tokens: number | null; contextWindow: number; percent: number | null } = { tokens: 100, contextWindow: 1000, percent: 10 };
+    const ctx = { mode: "rpc", getSystemPrompt: () => "System", model: { id: "sol" },
+      getContextUsage: () => usage, sessionManager: { getBranch: () => [] } };
+    await handlers.get("context")?.({ messages: [] }, ctx);
+    expect(captures.at(-1)?.context.contextUsage).toEqual(usage);
+    expect(captures.at(-1)?.context.contextModel).toBe("sol");
+    usage = { tokens: 200, contextWindow: 1000, percent: 20 };
+    await handlers.get("turn_end")?.({}, ctx);
+    expect(captures.at(-1)?.context.contextUsage).toEqual(usage);
+    usage = { tokens: null, contextWindow: 1000, percent: null };
+    await handlers.get("session_compact")?.({}, ctx);
+    expect(captures.at(-1)?.context.contextUsage).toEqual(usage);
+    expect(captures.at(-1)?.replacement).toBe("compaction");
+    delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
+  });
+
   test("diagnostic and nested sessions cannot overwrite the parent thread", async () => {
     captures.length = 0;
     const handlers = new Map<string, Handler>();
