@@ -25,8 +25,21 @@ export function childModelError(model: string): { code: "invalid_request"; messa
   return undefined;
 }
 
+const settingFields = ["model", "thinkingLevel", "speed"];
+
+export function validateThreadSettings(input: unknown): Result<ThreadSettings> {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || Object.keys(input).some(key => !settingFields.includes(key))
+    || !("model" in input) || typeof input.model !== "string" || !input.model.trim()
+    || !("thinkingLevel" in input) || !isThinkingLevel(input.thinkingLevel)
+    || !("speed" in input) || !isSpeed(input.speed)) {
+    return { ok: false, error: { code: "invalid_request", message: "Complete thread settings require model, thinkingLevel and speed" } };
+  }
+  return resolveThreadSettings({ model: input.model, thinkingLevel: input.thinkingLevel, speed: input.speed });
+}
+
 export function resolveThreadSettings(input: SettingsOverrides = {}, current?: ThreadSettings): Result<ThreadSettings> {
-  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key => !["model", "thinkingLevel", "speed"].includes(key))) return { ok: false, error: { code: "invalid_request", message: "Expected model, thinkingLevel and speed overrides" } };
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key => !settingFields.includes(key))) return { ok: false, error: { code: "invalid_request", message: "Expected model, thinkingLevel and speed overrides" } };
   const requested = input.model ?? current?.model ?? "astra";
   if (typeof requested !== "string") return { ok: false, error: { code: "invalid_request", message: "Model must be a catalog name or provider/model" } };
   const separator = requested.indexOf("/");

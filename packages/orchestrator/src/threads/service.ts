@@ -11,7 +11,7 @@ import { isRunContext } from "../isolated-context-contract.js";
 import { isCompactionFailure, isModelConfigurationError, isRateLimitError, isTransientFailure, transientRetryAt } from "../provider-errors.js";
 import { POOLED_ACCOUNT_WAIT, pooledRetryAvailability } from "../extension/routing.js";
 import { modelBrokerUrl } from "../model-broker-contract.js";
-import { resolveSpawnSettings, resolveThreadSettings, childModelError } from "./settings.js";
+import { resolveSpawnSettings, resolveThreadSettings, validateThreadSettings, childModelError } from "./settings.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
 import { inputReceipts } from "./pi-input-receipts.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
@@ -1639,7 +1639,7 @@ export class ThreadService implements ThreadApi {
       if (input.metadata?.context !== undefined && (!isRunContext(input.metadata.context) || input.metadata.execution === "root-repair")) return bad("invalid_request", "Invalid imported isolated execution boundary");
       if (!validSandboxBoundary(input.metadata ?? {}) || input.metadata?.sandbox && input.cwd !== join(this.options.sessionsDir, "sandboxes", input.id)) return bad("invalid_request", "Invalid imported sandbox boundary");
       if (input.metadata?.raw !== undefined && (input.metadata.raw !== true || input.metadata.context !== undefined || input.metadata.execution === "root-repair")) return bad("invalid_request", "Invalid imported raw execution boundary");
-      const settings = resolveThreadSettings(input.settings); if (!settings.ok) return settings;
+      const settings = validateThreadSettings(input.settings); if (!settings.ok) return settings;
       this.sql("INSERT INTO thread(id,parent_id,title,cwd,session_file,settings,admission,state,held,created_at,updated_at,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
         .run(input.id, input.parentId ?? null, input.title, input.cwd, input.sessionFile, JSON.stringify(settings.value), input.parentId ? "force" : input.admission ?? "force", "idle", input.held ? 1 : 0, input.createdAt ?? Date.now(), input.updatedAt ?? Date.now(), JSON.stringify(input.metadata ?? {}));
       return good(this.get(input.id)!);
@@ -1650,14 +1650,16 @@ export class ThreadService implements ThreadApi {
       const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Import the thread before its input");
       const prior = this.sql("SELECT * FROM thread_work WHERE id=?").get(input.id) as Json | undefined;
       if (prior) return prior.thread_id === input.threadId && prior.text === input.text ? good(this.message(prior)) : bad("conflict", "Imported message identity has different input");
+      const settings = validateThreadSettings(input.settings === undefined ? thread.settings : input.settings);
+      if (!settings.ok) return settings;
       this.transaction(() => {
-        this.insertMessage(input.id, { requestId: input.requestId ?? input.id, threadId: input.threadId, senderId: input.senderId ?? undefined, text: input.text, images: input.images, delivery: resolveDelivery({ senderId: input.senderId ?? undefined, delivery: input.delivery }), source: input.source, replyTo: input.replyTo }, input.settings ?? thread.settings);
+        this.insertMessage(input.id, { requestId: input.requestId ?? input.id, threadId: input.threadId, senderId: input.senderId ?? undefined, text: input.text, images: input.images, delivery: resolveDelivery({ senderId: input.senderId ?? undefined, delivery: input.delivery }), source: input.source, replyTo: input.replyTo }, settings.value);
         this.sql("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,'import','import-message',?)").run(input.requestId ?? input.id, input.id);
         const done = input.state === "done";
         const executionId = input.executionId ?? `import:${input.id}`;
-        if (input.state === "dispatched") this.sql("INSERT OR IGNORE INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, input.threadId, input.id, JSON.stringify(input.settings ?? thread.settings), input.createdAt ?? Date.now());
+        if (input.state === "dispatched") this.sql("INSERT OR IGNORE INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, input.threadId, input.id, JSON.stringify(settings.value), input.createdAt ?? Date.now());
         if (done) this.sql("INSERT OR IGNORE INTO thread_execution(id,thread_id,work_id,settings,created_at,ended_at,outcome,final_message) VALUES(?,?,?,?,?,?,?,?)")
-          .run(executionId, input.threadId, input.id, JSON.stringify(input.settings ?? thread.settings), input.createdAt ?? Date.now(), input.createdAt ?? Date.now(), input.outcome ?? "complete", JSON.stringify(input.finalMessage ?? null));
+          .run(executionId, input.threadId, input.id, JSON.stringify(settings.value), input.createdAt ?? Date.now(), input.createdAt ?? Date.now(), input.outcome ?? "complete", JSON.stringify(input.finalMessage ?? null));
         this.sql("UPDATE thread_work SET status=?,execution_id=?,created_at=?,inserted_at=?,outcome=?,final_message=? WHERE id=?")
           .run(input.state ?? "queued", done || input.state === "dispatched" ? executionId : null, input.createdAt ?? Date.now(), input.insertedAt ?? null, input.outcome ?? (done ? "complete" : null), input.finalMessage === undefined ? null : JSON.stringify(input.finalMessage), input.id);
         if (!done && !this.row(input.threadId)?.held) this.sql("UPDATE thread SET state='running' WHERE id=?").run(input.threadId);

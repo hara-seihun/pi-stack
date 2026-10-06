@@ -1,11 +1,18 @@
 import { pathToFileURL } from "node:url";
 import { runJobs } from "./run-jobs.mjs";
 import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
+import { orchestratorTestChecks } from "../packages/orchestrator/scripts/check.mjs";
 
 const jobs = [
-  ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs", "scripts/check-state-dispatch.test.mjs"]],
+  ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs", "scripts/orchestrator-check.test.mjs", "scripts/check-state-dispatch.test.mjs"]],
   ["explicit state dispatch", "node", ["scripts/check-state-dispatch.mjs"]],
-  ["orchestrator types", "npm", ["run", "typecheck", "--workspace=pi-orchestrator"]],
+  ...orchestratorTestChecks([
+    { name: "orchestrator routing runtime", args: ["tests/routing-runtime.test.ts"] },
+    ...Array.from({ length: 6 }, (_, index) => ({
+      name: `orchestrator ${index + 1}/6`,
+      args: ["--exclude=tests/routing-runtime.test.ts", `--shard=${index + 1}/6`],
+    })),
+  ]),
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],
   ["account deployment", "node", ["--test", "scripts/deploy-skills.test.mjs", "scripts/deploy-account.test.mjs", "scripts/deploy-person-configs.test.mjs"]],
@@ -17,11 +24,6 @@ const jobs = [
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
-  ["orchestrator routing runtime", "npm", ["test", "--workspace=pi-orchestrator", "--", "tests/routing-runtime.test.ts"]],
-  ...Array.from({ length: 6 }, (_, index) => [
-    `orchestrator ${index + 1}/6`, "npm",
-    ["test", "--workspace=pi-orchestrator", "--", "--exclude=tests/routing-runtime.test.ts", `--shard=${index + 1}/6`],
-  ]),
   ...workspaceChecks,
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
