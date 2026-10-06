@@ -288,6 +288,23 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
+    const runtimeOverlap = `
+if [[ \${REQUIRE_RUNTIME_OVERLAP:-0} == 1 ]]; then
+  if [[ $name == orchestrator ]]; then touch "$ORCHESTRATOR_STAGED"; fi
+  if [[ $name == runtime ]]; then
+    for i in $(seq 1 100); do
+      if [[ -f $ORCHESTRATOR_STAGED ]]; then
+        touch "$RUNTIME_CHECKED"
+        exit "\${RUNTIME_CHECK_EXIT:-0}"
+      fi
+      sleep 0.01
+    done
+    echo 'Prepared runtime proof serialized component staging' >&2
+    exit 91
+  fi
+fi
+`;
+    for (const name of ["runtime", "orchestrator"]) writeFileSync(join(deploy, name), component + runtimeOverlap);
     writeFileSync(join(deploy, "skills"), component.replace('name=$(basename "$0")', 'name=$(basename "$0")\nprintf "%s\\n" "$*" >> "$SKILLS_TRACE"'));
     writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nif [ \"${REQUIRE_ACTIVATION_OVERLAP:-0}\" = 1 ]; then test -f \"$DAEMON_ACTIVATED\" || exit 92; fi\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
     for (const service of ["voice", "phone"]) {
@@ -451,12 +468,21 @@ exit 64
     assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
     assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
     rmSync(systemctlTrace,{force:true});
-    const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
+    const overlapEnv = { ...env, REQUIRE_RUNTIME_OVERLAP: "1", ORCHESTRATOR_STAGED: join(directory, "orchestrator.staged"), RUNTIME_CHECKED: join(directory, "runtime.checked") };
+    const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:overlapEnv});assert.equal(unchanged.status,0,unchanged.stderr);
+    assert.equal(existsSync(overlapEnv.RUNTIME_CHECKED), true, "prepared runtime proof overlaps component staging and is joined");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     const again = readFileSync(systemctlTrace, "utf8");
     assert.deepEqual(restartedDaemons(again), expectedDaemons, "unchanged releases still reconcile every daemon");
     assert.doesNotMatch(again, /restart pi-remote-router/);
 
+    rmSync(systemctlTrace,{force:true});
+    rmSync(overlapEnv.ORCHESTRATOR_STAGED);
+    rmSync(overlapEnv.RUNTIME_CHECKED);
+    const runtimeFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...overlapEnv, RUNTIME_CHECK_EXIT: "23" } });
+    assert.equal(runtimeFailure.status, 1, runtimeFailure.stderr);
+    assert.equal(existsSync(overlapEnv.RUNTIME_CHECKED), true, "failed runtime proof was not skipped");
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed overlapped runtime proof vetoes service activation");
     rmSync(systemctlTrace,{force:true});
     const disabled=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,GUEST_UNIT_STATE:"disabled",ALICE_UNIT_STATE:"disabled"}});
     assert.equal(disabled.status,0,disabled.stderr);
