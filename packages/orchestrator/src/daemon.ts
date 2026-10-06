@@ -80,6 +80,7 @@ export class Daemon {
     this.threads=new ThreadService({workersOnly:true,databasePath:threadDatabasePath,sessionsDir:join(dataDir,"threads"),capability:this.capability,
       admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
       attachSession:this.opener.attachSession,
+      retireIdleSession:thread=>typeof thread.metadata?.laneId==="string"&&thread.metadata.mode!=="live"&&this.store.lane(thread.metadata.laneId)?.maxActive!==undefined,
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
         if(context)throw new Error("An isolated thread must be imported into its application ThreadService before execution");
