@@ -98,6 +98,11 @@ restore_write() {
     (( write_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-write.service || true
     pi_stack_as_root rm -f "$candidate"
   fi
+  # Early staging failure must not leave the proof job holding deployment
+  # locks after its owner exits. The host deadline still bounds this join.
+  if [[ -n ${doctor_pid:-} ]]; then
+    wait "$doctor_pid" || true
+  fi
   exit "$status"
 }
 trap restore_write EXIT
@@ -133,6 +138,25 @@ if [[ ! -f $runtime/.pi-stack-commit || $(<"$runtime/.pi-stack-commit") != "$exp
   wait "$runtime_pid" || preparation_failed=1
 fi
 (( preparation_failed == 0 )) || exit 1
+
+# The selected runtime is ready before component staging. Give its disposable
+# proofs the whole remaining activation budget, not only the tail after staging
+# (PUB-132a73041c61450e935ffe36 timed out during a passing browser proof).
+# Neither doctor touches a service or depends on the other doctor's result.
+if (( services )); then
+  doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-runtime-doctors.XXXXXXXX")
+  (
+    pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs" &
+    browser_doctor_pid=$!
+    pi_stack_run_as "${fleet:-${users[0]}}" node "$runtime/node_modules/.bin/pi-model-selection-doctor" &
+    model_doctor_pid=$!
+    failed=0
+    wait "$browser_doctor_pid" || failed=1
+    wait "$model_doctor_pid" || failed=1
+    exit "$failed"
+  ) >"$doctor_log" 2>&1 &
+  doctor_pid=$!
+fi
 orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
 skills=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
@@ -187,15 +211,6 @@ if (( ! services )); then
   printf 'deployed Pi stack %s for %s into overridden destinations; services left alone\n' "$expected" "${users[*]}"
   exit 0
 fi
-
-# Disposable browser and model-admission checks use the selected runtime and
-# touch no service, so they run alongside activation. Failures reject acceptance.
-doctor_log=$(mktemp "${TMPDIR:-/tmp}/pi-runtime-doctors.XXXXXXXX")
-(
-  pi_stack_run_as "${fleet:-${users[0]}}" node "$root/packages/runtime/browser-doctor.mjs"
-  pi_stack_run_as "${fleet:-${users[0]}}" node "$runtime/node_modules/.bin/pi-model-selection-doctor"
-) >"$doctor_log" 2>&1 &
-doctor_pid=$!
 
 # Every enabled or running person's daemon restarts on release; live workers keep the
 # release they recorded. The front door restarts only when Pi Remote changed, and each
@@ -293,6 +308,7 @@ smoke_failed=0
 if (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
 doctor_failed=0
 wait "$doctor_pid" || doctor_failed=1
+doctor_pid=""
 cat "$doctor_log"; rm -f "$doctor_log"
 (( doctor_failed == 0 )) || echo 'runtime doctor failed' >&2
 if (( smoke_failed || doctor_failed )); then
