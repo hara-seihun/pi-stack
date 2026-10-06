@@ -25,7 +25,7 @@ function fixture() {
   };
   vi.stubEnv("PI_ORCHESTRATOR_ASSIGNED", "0");
   vi.stubEnv("PI_ORCHESTRATOR_RUN_ID", "");
-  return { store, auth, request, run: () => runProviderOperation(request, store, auth as unknown as SharedOAuthAuth, request.signal) };
+  return { store, auth, request, run: () => runProviderOperation(request, store, auth as unknown as SharedOAuthAuth, request.signal, process.env) };
 }
 
 test("nested operation refreshes the exact refused credential once and records successful usage", async () => {
@@ -98,7 +98,7 @@ test("broker leaves deadline ownership with the caller and drains leases on shut
     events: { on(_name: string, handler: typeof receive) { receive = handler; return unsubscribe; } },
     on(_name: string, handler: typeof shutdown) { shutdown = handler; },
   };
-  installProviderOperations(pi as any, f.store, new Map([["openai-codex", f.auth as unknown as SharedOAuthAuth]]));
+  installProviderOperations(pi as any, f.store, new Map([["openai-codex", f.auth as unknown as SharedOAuthAuth]]), process.env);
   f.request.handled = false;
   f.request.resolve = vi.fn();
   f.request.run = vi.fn(async (_model, options) => await new Promise<Awaited<ReturnType<ProviderOperation["run"]>>>(resolve => {
@@ -113,6 +113,75 @@ test("broker leaves deadline ownership with the caller and drains leases on shut
   expect(f.request.resolve).toHaveBeenCalledExactlyOnceWith({ ok: false, error: "Provider operation stopped by session shutdown", usage });
   expect(f.store.activeLeases()).toHaveLength(0);
   expect(f.store.db.prepare("SELECT SUM(tokens) n FROM usage_hour").get()).toEqual({ n: 12 });
+});
+
+test("shared-runner operations use their session environment and shutdown only their own requests", async () => {
+  const f = fixture();
+  vi.stubEnv("PI_ORCHESTRATOR_ASSIGNED", "1");
+  vi.stubEnv("PI_ORCHESTRATOR_RUN_ID", "runner-launch");
+  f.store.createLease("run:runner-launch", "openai-codex-3", "fleet");
+  f.store.createLease("run:assigned-session", "openai-codex-2", "fleet");
+  const install = (environment: NodeJS.ProcessEnv) => {
+    let receive!: (request: ProviderOperation) => void;
+    let shutdown!: () => Promise<void>;
+    const pi = {
+      events: { on(_name: string, handler: typeof receive) { receive = handler; return () => {}; } },
+      on(_name: string, handler: typeof shutdown) { shutdown = handler; },
+      getThinkingLevel: () => "high", setThinkingLevel: vi.fn(), setModel: vi.fn(async () => true),
+    };
+    installProviderOperations(pi as any, f.store, new Map([["openai-codex", f.auth as unknown as SharedOAuthAuth]]), environment);
+    return { receive: (request: ProviderOperation) => receive(request), shutdown: () => shutdown(), pi };
+  };
+  const interactive = install({});
+  const fleet = install({ PI_ORCHESTRATOR_ASSIGNED: "1", PI_ORCHESTRATOR_RUN_ID: "assigned-session" });
+  let finishInteractive!: () => void;
+  let interactiveSignal!: AbortSignal;
+  let interactiveEntered!: () => void;
+  const entered = new Promise<void>(resolve => { interactiveEntered = resolve; });
+  let fleetEntered!: () => void;
+  const fleetReady = new Promise<void>(resolve => { fleetEntered = resolve; });
+  let interactiveResolved!: ProviderOperation["resolve"];
+  const interactiveResult = new Promise(resolve => { interactiveResolved = resolve; });
+  let fleetResolved!: ProviderOperation["resolve"];
+  const fleetResult = new Promise(resolve => { fleetResolved = resolve; });
+  interactive.receive({ ...f.request, handled: false, sessionId: "interactive-session", resolve: interactiveResolved,
+    run: async (model, options) => {
+      expect(f.store.activeLeases(model.provider).filter(lease => lease.kind === "interactive")).toHaveLength(1);
+      if (model.provider === "openai-codex-2") return { ok: false, error: "429 rate limit" };
+      interactiveSignal = options!.signal;
+      interactiveEntered();
+      await new Promise<void>(resolve => { finishInteractive = resolve; });
+      return { ok: true, value: "interactive checkpoint", usage };
+    },
+  });
+  fleet.receive({ ...f.request, handled: false, sessionId: "fleet-session", resolve: fleetResolved,
+    run: async (_model, options) => {
+      expect(f.store.activeLeases().filter(lease => lease.kind === "fleet").map(lease => lease.id).sort())
+        .toEqual(["run:assigned-session", "run:runner-launch"]);
+      fleetEntered();
+      return await new Promise(resolve => options!.signal.addEventListener("abort", () => resolve({ ok: false, error: "aborted" }), { once: true }));
+    },
+  });
+  await Promise.all([entered, fleetReady]);
+  await fleet.shutdown();
+  expect(await fleetResult).toEqual({ ok: false, error: "Provider operation stopped by session shutdown" });
+  expect(interactiveSignal.aborted).toBe(false);
+  finishInteractive();
+  expect(await interactiveResult).toEqual({ ok: true, value: "interactive checkpoint", usage });
+  expect(interactive.pi.setModel).toHaveBeenCalledWith(expect.objectContaining({ provider: "openai-codex-3" }));
+  expect(f.store.activeLeases().map(lease => lease.id).sort()).toEqual(["run:assigned-session", "run:runner-launch"]);
+  await interactive.shutdown();
+});
+
+test("an assigned session cannot rotate accounts even when the runner launched interactive", async () => {
+  const f = fixture();
+  f.store.createLease("run:assigned-session", "openai-codex-2", "fleet");
+  f.request.run = vi.fn(async () => ({ ok: false as const, error: "429 rate limit" }));
+  const result = await runProviderOperation(f.request, f.store, f.auth as unknown as SharedOAuthAuth, f.request.signal,
+    { PI_ORCHESTRATOR_ASSIGNED: "1", PI_ORCHESTRATOR_RUN_ID: "assigned-session" });
+  expect(result.ok).toBe(false);
+  expect(f.request.run).toHaveBeenCalledTimes(1);
+  expect(f.store.activeLeases().map(lease => lease.id)).toEqual(["run:assigned-session"]);
 });
 
 test("abort and thrown callbacks always release operation leases", async () => {

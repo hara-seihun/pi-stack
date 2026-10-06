@@ -111,7 +111,7 @@ export default function routing(pi:ExtensionAPI):void{
     pi.registerProvider(family.id==="openai-codex"?withCodexTierGuard(pooled,store,auth,account.id):pooled);
   }
   installImageGeneration(pi, store, shared.get("openai-codex"));
-  installProviderOperations(pi, store, shared);
+  installProviderOperations(pi, store, shared, environment);
   // The bundled CLI and extension providers have separate pi-ai resource registries.
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
