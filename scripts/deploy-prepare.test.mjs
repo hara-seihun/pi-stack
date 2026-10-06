@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { copyDeploymentOwner, copyWriteSources } from "./deployment-fixture.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const timeout = spawnSync("bash", ["-c", "command -v timeout"], { encoding: "utf8" }).stdout.trim();
@@ -15,7 +16,7 @@ function fixture() {
   const repo = join(directory, "repo"), bin = join(directory, "bin");
   mkdirSync(join(repo, "deploy"), { recursive: true });
   mkdirSync(bin);
-  for (const name of ["lib", "release-checkout", "prepare", "runtime", "retain", "write-retain"]) copyFileSync(join(root, "deploy", name), join(repo, "deploy", name));
+  copyDeploymentOwner(root, repo);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", PI_STACK_WRITE_GPU_ENABLED: "0", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp"), PI_STACK_RUNTIME_DEST: join(directory, "srv/runtime"), PI_STACK_DEPENDENCIES_ROOT: join(directory, "srv/dependencies") };
   mkdirSync(env.TMPDIR);
   function executable(path, source) { writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${source}\n`, { mode: 0o755 }); }
@@ -32,12 +33,11 @@ function fixture() {
 }
 
 function rewriteFixture(f) {
+  copyWriteSources(root, f.repo);
   const manifests = join(f.repo, "apps/write/rewrite-runtime");
   const cache = join(f.directory, "rewrite-cache");
   mkdirSync(manifests, { recursive: true });
   mkdirSync(cache);
-  copyFileSync(join(root, "deploy/write-rewrite-runtime"), join(f.repo, "deploy/write-rewrite-runtime"));
-  copyFileSync(join(root, "apps/write/rewrite-runtime/install.py"), join(manifests, "install.py"));
   const archive = join(cache, "runtime.zip");
   const packed = spawnSync("python3", ["-c", `import sys, zipfile
 with zipfile.ZipFile(sys.argv[1], 'w') as bundle:
@@ -103,13 +103,6 @@ printf 'discovery\\n' >> "$TRACE"
 printf '%s\\n' '${writeLoadState}'`);
     f.executable(join(f.bin, "uv"), 'printf "uv\\n" >> "$TRACE"; exit 23');
     f.executable(join(f.bin, "curl"), 'echo "fixture must not download weights" >&2; exit 64');
-    const sources = spawnSync("git", ["-C", root, "ls-files", "-z", "--", "apps/write/engine"], { encoding: "utf8" });
-    assert.equal(sources.status, 0, sources.stderr);
-    assert.notEqual(sources.stdout, "", "the fixture needs the tracked Write engine inputs");
-    for (const file of sources.stdout.split("\0").filter(Boolean)) {
-      mkdirSync(dirname(join(f.repo, file)), { recursive: true });
-      copyFileSync(join(root, file), join(f.repo, file));
-    }
     f.commit();
     const destination = join(f.directory, "write-engine");
     const result = f.run("prepare", { PI_STACK_WRITE_ENGINE_DEST: destination, PI_STACK_WRITE_ENGINE_FORCE: "0" });
