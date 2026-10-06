@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, it, vi } from "vitest";
+import { Type } from "typebox";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
@@ -24,6 +25,60 @@ vi.mock("@earendil-works/pi-coding-agent", async original => {
 const unwrap = <T>(value: Result<T>): T => { if (!value.ok) throw new Error(value.error.message); return value.value; };
 const boundary = () => new Promise<void>(resolve => setImmediate(resolve));
 async function until(check: () => boolean) { const deadline = performance.now() + 3000; while (performance.now() < deadline) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); } throw new Error("Native lifecycle did not reach boundary"); }
+
+it.each(["refused", "accepted", "clear", "ordinary"] as const)("real retained legacy-tool %s ends only through the correct native boundary and settles once", async mode => {
+  const root = mkdtempSync(join(tmpdir(), "wait-legacy-native-"));
+  let modelCalls = 0;
+  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"),
+    environment: () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1" }),
+    openSession: (options, output, exit) => openPiSession({ ...options, args: [] }, output, exit),
+  });
+  native.prepare = session => {
+    session.agent.state.model = session.modelRuntime.getModel("anthropic", "claude-sonnet-4-5")!;
+    vi.spyOn(session.modelRuntime, "hasConfiguredAuth").mockReturnValue(true);
+    session.agent.streamFunction = () => {
+      modelCalls++;
+      const wait = session.agent.state.tools.find(tool => tool.name === "thread_wait")!;
+      wait.parameters = Type.Union([
+        Type.Object({ action: Type.Literal("set"), reason: Type.String(), threadIds: Type.Optional(Type.Array(Type.String())) }),
+        Type.Object({ action: Type.Literal("clear") }),
+      ]);
+      const call = modelCalls === 1 && mode !== "ordinary";
+      const arguments_: Record<string, string | string[]> = mode === "accepted" ? { action: "set", reason: "actual child", threadIds: ["dependency"] }
+        : mode === "clear" ? { action: "clear" } : { action: "set", reason: "finished, available" };
+      const model = session.agent.state.model;
+      const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(),
+        content: call ? [{ type: "toolCall", id: "legacy-call", name: "thread_wait", arguments: arguments_ }] : [{ type: "text", text: "Ordinary final result" }],
+        stopReason: call ? "toolUse" : "stop", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      const stream = createAssistantMessageEventStream(); stream.push({ type: "done", reason: call ? "toolUse" : "stop", message }); stream.end(); return stream;
+    };
+  };
+  try {
+    unwrap(await owner.spawn({ requestId: "parent", id: "parent", cwd: root }));
+    const self = unwrap(await owner.spawn({ requestId: "self", id: "self", ...(mode === "accepted" ? {} : { parentId: "parent", ephemeral: true }), cwd: root, message: "work", settings: { model: "anthropic/claude-sonnet-4-5", thinkingLevel: "off" } }));
+    if (mode === "accepted") unwrap(await owner.spawn({ requestId: "dependency", id: "dependency", parentId: "self", cwd: root }));
+    unwrap(await owner.control({ action: "stop", threadId: "parent", descendants: false }));
+    unwrap(await owner.start());
+    await until(() => !!owner.latestSettlement("self"));
+    const settlement = owner.latestSettlement("self")!;
+    expect(settlement).toMatchObject({ outcome: "complete" });
+    expect(modelCalls).toBe(mode === "accepted" || mode === "ordinary" ? 1 : 2);
+    expect(owner.pending("parent")).toHaveLength(mode === "accepted" ? 0 : 1);
+    if (mode === "accepted") {
+      expect(owner.get("self")?.waitingOnAgents).toMatchObject({ kind: "agents", threadIds: ["dependency"] });
+      expect(owner.get("self")?.metadata?.archived).not.toBe(true);
+    } else {
+      expect(owner.get("self")?.waitingOnAgents).toBeUndefined();
+      expect(owner.get("self")?.metadata?.archived).toBe(true);
+      expect(readFileSync(self.sessionFile, "utf8")).toContain("Ordinary final result");
+    }
+    if (mode === "refused") expect(readFileSync(self.sessionFile, "utf8")).toContain("no waiting status was recorded");
+    owner.reconcile(); await boundary();
+    expect(owner.latestSettlement("self")).toEqual(settlement); expect(owner.pending("parent")).toHaveLength(mode === "accepted" ? 0 : 1);
+  } finally {
+    native.prepare = undefined; await owner.detach(); vi.restoreAllMocks(); rmSync(root, { recursive: true, force: true });
+  }
+}, 10000);
 
 it("real native end-turn, same-thread restart wake and shared browser/Android status cross authenticated HTTP", async () => {
   const { projectThreadActivity } = await import("../../../apps/remote/server/live-projection.ts" as string);

@@ -88,7 +88,7 @@ Deliver through ordinary messaging, with stable receipt identity and restart-saf
 
 ## Durable dependency waits and own-thread wakes
 
-Use `thread_wait` as the final tool call when no useful local work remains. It stores the reason and optional direct child dependencies, then ends the native turn without another model request:
+Use `thread_wait` as the final tool call when no useful local work remains and a concrete dependency is outstanding. It stores the reason and named dependency, then ends the native turn without another model request:
 
 ```json
 { "action": "set", "kind": "agents", "reason": "Need the build worker's result", "threadIds": ["build-worker"], "after": { "build-worker": 12 } }
@@ -104,6 +104,16 @@ The thread remains `state: "idle"`, with a discriminated `waitingOnAgents` value
 - `message`: an accessible collaborator `fromThreadId`, not the calling thread.
 
 There is no generic external-work or available-for-assignment wait. Invalid, missing or mixed dependency variants are rejected without changing existing custody. Stored waits from before the typed contract retain their reason, scheduling and result routing; the client reports a missing wait type as an instrumentation defect rather than guessing a dependency. The next explicit input or scheduled recovery clears that retained wait normally.
+
+**Advertised contract and retained runner handoff**
+
+[`wait-contract.ts`](../packages/orchestrator/src/threads/wait-contract.ts) owns the object-shaped native advertisement and runner-input normalization. The canonical schema retains discriminated alternatives, but also declares every field at the object root: Pi's non-strict Anthropic projection keeps only root `properties` and `required`, dropping a root union entirely. Its projected schema advertises `kind` and the four identities but cannot enforce the conditional alternatives; the owner always validates them. OpenAI Responses/Completions retain the alternatives. This projection defect is independently reproduced; it does not establish the cause or runtime of the October 6 worker's earlier refusal.
+
+Retained pre-typed runners may submit `set` with nonempty explicit `threadIds` and no `kind`. The owner interprets only that unambiguous dependency as `agents`, then applies the same uniqueness, cursor and authorized direct-child checks. The original wire input remains the durable receipt identity: changing the input under the same request ID conflicts, and retrying after a clear or settlement does not reinstall waiting. Missing/empty dependencies are refused with guidance to finish normally if work is done; no job, release or collaborator is invented. Refusal does not terminate the native turn, and `clear` does not terminate or create work. Successful registration terminates only if a wait still exists (an already-arrived result never terminates into stale waiting).
+
+An already-running old runner cannot gain new tools safely mid-execution. `runner-transport.ts` preserves its accepted session under `PI_THREAD_RECOVERING=1`, drains the old generation without interrupting its residents, and moves non-recovering sessions to the current generation. Drain is acknowledged before closing the last idle resident, because that close may remove the control socket; an already-empty generation needs no close request. ThreadService invalidates an adopted session's unmatched environment/session key and retires it after native and durable execution settle; the next open uses current tools with the same history. No replay, shared restart, or live session replacement is needed. The remaining limitation is explicit: an old runner cannot express typed job/deployment/message waits until that safe boundary, and a legacy reason-only wait remains invalid meanwhile. Accepted execution attribution, work receipts and ordinary settlement/result routing remain unchanged.
+
+Focused proof includes `thread-wait-schema.test.ts` (real provider payloads), `thread-wake.test.ts` (authenticated wire/receipts), `thread-wake-native.test.ts` (real native refusal/termination/ordinary settlement), and `thread-runner.test.ts` (legacy advertisement, active generation handoff, idle tool refresh and receipt dedup across reopen).
 
 A wait releases its model lease and stops inference; its idle native session remains eligible for warm reuse and ordinary idle reclamation. Remote and Android say **Waiting on agents**, **Waiting for job**, **Waiting for deployment** or **Waiting for message**, show the concrete dependency and wait time, and do not issue a completion notification while a root or descendant still waits. A live `thread_await` tool also reports an observed `waiting_on_agents` execution phase. Human questions, account admission, provider/backoff waits, stopped/archived threads and ordinary idle stay distinct. Stop/archive labels take precedence and retain the wait information for inspection. Waiting/scheduled threads resist inactivity archiving; an ephemeral worker keeps custody while it waits or owns a wake.
 

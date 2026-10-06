@@ -262,13 +262,14 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
       try { status = await runnerRequest(retained.control, { type: "status" }); }
       catch (error) { if (!socketAbsent(error)) throw error; }
       const recoveringLive = options.env.PI_THREAD_RECOVERING === "1" && status?.threadIds?.includes(options.threadId);
-      if (!recoveringLive && status) {
-        try { await runnerRequest(retained.control, { type: "close", socketPath: retained.socketPath }, 35_000); }
-        catch (error) { if (!socketAbsent(error)) throw error; }
-      }
+      // Request drain before closing the last idle resident: its close can remove the control socket.
       // Recovery keeps accepted sessions, not obsolete empty generations, even after a controller crash.
       if (typeof status?.activeSessions === "number") {
         try { await runnerRequest(retained.control, { type: "drain" }); }
+        catch (error) { if (!socketAbsent(error)) throw error; }
+      }
+      if (!recoveringLive && status && status.sessions !== 0) {
+        try { await runnerRequest(retained.control, { type: "close", socketPath: retained.socketPath }, 35_000); }
         catch (error) { if (!socketAbsent(error)) throw error; }
       }
       if (!recoveringLive) retained = undefined;
