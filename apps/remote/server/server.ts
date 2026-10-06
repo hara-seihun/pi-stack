@@ -1337,6 +1337,7 @@ function pendingMessages(id: string) {
   return threads.get(id) ? threads.pending(id) : peerInspections.get(id)?.pending ?? [];
 }
 function queuedMessagesFor(id: string): QueuedMessage[] {
+  const acknowledgement = liveThread(id)?.metadata?.acknowledgementWait as { overdue?: boolean } | undefined;
   return pendingMessages(id).filter(message => !message.landedAt).map(message => {
     // A message the runtime has taken cannot be edited, steered or removed;
     // one still waiting can be all three, whether or not the thread is held.
@@ -1344,6 +1345,7 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
     return {
       id: message.id, text: decodeMessageReply(message.text).text, delivery: message.delivery,
       state: waiting ? "queued" as const : "dispatched" as const,
+      ...(!waiting && message.insertedAt === null ? { acknowledgement: acknowledgement?.overdue ? "unconfirmed" as const : "pending" as const } : {}),
       canSteer: waiting && message.delivery === "queue",
       canHardSteer: waiting,
       canCancel: waiting,

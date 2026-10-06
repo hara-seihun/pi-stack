@@ -22,6 +22,9 @@ export function executionActivitySnapshot(state: ExecutionActivitySnapshot): Exe
 const phases = new Set<ExecutionPhase>(["queued", "admitting", "starting", "preparing", "finishing", "cancelling", "recovering", "thinking", "responding", "preparing_tool", "waiting_for_model", "waiting_on_agents", "waiting_on_tool", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry"]);
 
 export function executionWaitActivity(metadata?: Record<string, any>): ExecutionActivitySnapshot | undefined {
+  const acknowledgement = metadata?.acknowledgementWait;
+  if (acknowledgement) return { activity: "recovering", activitySince: acknowledgement.since, lastActivityAt: acknowledgement.since,
+    activityDetail: acknowledgement.overdue ? "Input acknowledgement unconfirmed; checking native custody without replay" : "Input acknowledgement pending; native recovery may still be compacting" };
   const provider = metadata?.providerWait, admission = metadata?.admissionWait, startup = metadata?.startupFailure;
   const wait = provider ?? admission ?? startup;
   if (!wait) return undefined;
