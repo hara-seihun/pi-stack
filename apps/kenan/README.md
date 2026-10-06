@@ -81,6 +81,19 @@ Accessibility capture supplies rate-limited ordinary screenshots, not unrestrict
 - `writeStatus()` reports accessibility, overlay, microphone and battery-exemption states, the keyboard requirement and `overlayEnabled` (default true). `overlay` is the Android display permission, not the enable choice. `writeSetup({step:"enabled",enabled:boolean})` persists the Write-only enable choice and reconciles the live service immediately; missing/nonboolean `enabled` is rejected. Older shells without `overlayEnabled` show an Android update prompt instead of an operable toggle. Other `writeSetup({step,required?})` calls open Android settings or request microphone permission; for `step:"keyboard"`, `required` changes the visibility preference and immediately refreshes the service.
 - `phoneStatus()` reports phone-control enablement, connection, device identity and effective capabilities. `phoneConfigure({enabled,user,environment,name?})` explicitly enables/disables control for a verified person/environment. `phoneSetup({step})` requests a one-time runtime permission or opens Android special-access settings and resolves with fresh phone status only after the prompt/settings activity returns; overlapping requests are rejected. It cannot provision Device Owner. [Phone control](../remote/docs/phone-control.md) owns the steps, command wire format and CLI.
 
+## Explicit native states
+
+`NativeState.java` owns the native wire domains: setup steps, haptics, Write events and rewrite outcomes, phone frames and commands, overlay animation, notification kinds, settings namespaces and permission grants. Wire parsing rejects unknown values before dispatch. Dispatch uses exhaustive enum switch expressions, so adding a state without describing its handling fails Java compilation. Android cursor and motion discriminants have closed numeric adapters too; unknown cursor values cannot become strings, and the dot explicitly declines hover, scroll, outside and button events while accepting only its described touch actions.
+
+Write protocol failures terminate transport without inserting text. Phone protocol failures close the connection and report `protocol_error`; `ready` is an explicitly accepted hello acknowledgement. Unknown setup, command and haptic values are rejected, not treated as another valid choice. Missing optional settings still use their documented initial values; an omitted rewrite object still means no rewrite metadata. APK and web updates are separate typed choices, and an install request with no available update is rejected. Back results and Capacitor permission states also have explicit dispatch. The Write dot has one phase (`IDLE`, `CONNECTING`, `BUFFERING`, `RECORDING`, `FINISHING_CONNECTING`, `FINISHING`, `CLIPBOARD_READY`), not overlapping state flags; finishing before the socket opens stays finishing when it connects.
+
+Focused regression checks:
+
+```sh
+cd apps/kenan/android
+./gradlew testDebugUnitTest --tests '*NativeStateTest' --tests '*NativeHapticsTest' --tests '*WriteConnectionTest' --tests '*AppUpdatesTest' --tests '*WriteAccessibilityServiceTest' --tests '*WriteSetupTest' --tests '*PhoneSetupTest' --tests '*KenanOverlayTest'
+```
+
 ## Build configuration
 
 Copy [`android/local.properties.example`](android/local.properties.example) to ignored `android/local.properties` and set the router URL to an address the phone can reach. The build requires Android SDK 36, Java 21, and Bun for the connection tests. Android Studio may add `sdk.dir` to the same local file. Never put signing keys or passwords in it.

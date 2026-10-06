@@ -106,26 +106,30 @@ final class WriteConnection {
                             if (!valid(webSocket)) { cancel(); return; }
                             try {
                                 JSONObject event = new JSONObject(message);
-                                switch (event.getString("type")) {
-                                    case "partial" -> events.partial(event.optString("committed") + event.optString("tail"));
-                                    case "final" -> {
+                                NativeState.WriteEvent type = NativeState.require(NativeState.WriteEvent.class, event.getString("type"));
+                                boolean handled = switch (type) {
+                                    case PARTIAL -> {
+                                        events.partial(event.getString("committed") + event.getString("tail"));
+                                        yield true;
+                                    }
+                                    case FINAL -> {
                                         String text = event.getString("text");
+                                        Object rewrite = event.opt("rewrite");
+                                        if (rewrite != null && rewrite != JSONObject.NULL && !(rewrite instanceof JSONObject))
+                                            throw new JSONException("Rewrite metadata must be an object or null");
+                                        String notice = rewriteNotice(rewrite instanceof JSONObject ? (JSONObject) rewrite : null);
                                         if (terminate(true)) {
-                                            JSONObject rewrite = event.optJSONObject("rewrite");
-                                            if (rewrite != null) {
-                                                String status = rewrite.optString("status");
-                                                if (status.equals("unavailable")) events.notice(rewrite.optString("reason").equals("warming")
-                                                    ? "Local rewrite is warming up; inserted the transcript."
-                                                    : "Local rewrite unavailable; inserted the transcript.");
-                                                else if (status.equals("guarded")) events.notice("Kept the original wording to avoid changing its meaning.");
-                                            }
+                                            if (notice != null) events.notice(notice);
                                             events.finished(text);
                                         }
+                                        yield true;
                                     }
-                                    case "error" -> fail(event.optString("message", "Recognition failed"));
-                                    default -> { }
-                                }
-                            } catch (JSONException error) { fail("Invalid dictation response"); }
+                                    case ERROR -> {
+                                        fail(event.optString("message", "Recognition failed"));
+                                        yield true;
+                                    }
+                                };
+                            } catch (JSONException | IllegalArgumentException error) { fail("Invalid dictation response: " + error.getMessage()); }
                         }
                         @Override public void onFailure(WebSocket webSocket, Throwable error, Response response) {
                             try {
@@ -147,6 +151,18 @@ final class WriteConnection {
                 }
             } catch (IOException | RuntimeException error) { fail("Write server unreachable: " + error.getMessage()); }
         }, "write-connect").start();
+    }
+
+    static String rewriteNotice(JSONObject rewrite) throws JSONException {
+        if (rewrite == null) return null;
+        return switch (NativeState.require(NativeState.RewriteStatus.class, rewrite.getString("status"))) {
+            case APPLIED, UNCHANGED -> null;
+            case GUARDED -> "Kept the original wording to avoid changing its meaning.";
+            case UNAVAILABLE -> switch (NativeState.require(NativeState.UnavailableRewrite.class, rewrite.getString("reason"))) {
+                case WARMING -> "Local rewrite is warming up; inserted the transcript.";
+                case WARMUP_FAILED, QUEUE_BUSY, RUNTIME_CLOSED, INFERENCE_FAILED -> "Local rewrite unavailable; inserted the transcript.";
+            };
+        };
     }
 
     private synchronized boolean valid(WebSocket candidate) {

@@ -68,7 +68,7 @@ final class KenanOverlay {
     private String draft = "";
     private String threadId;
     private String foregroundPackage;
-    private String state = "idle";
+    private NativeState.OverlayAnimation state = NativeState.OverlayAnimation.IDLE;
     private ValueAnimator flight;
     private boolean visible, closed, dragging, pressed;
     private OverlayPolicy.Mode mode = OverlayPolicy.Mode.HIDDEN;
@@ -156,51 +156,51 @@ final class KenanOverlay {
 
     PhoneResult command(String command, JSONObject args, Function<String, Rect> resolve) throws Exception {
         if (closed) return PhoneResult.error("unavailable", "Kenan overlay is not running");
-        switch (command) {
-            case "overlay.show", "overlay.hide" -> {
+        var parsed = NativeState.parse(NativeState.OverlayCommand.class, command);
+        if (parsed.isEmpty()) return PhoneResult.error("unsupported", "Unknown overlay command");
+        return switch (parsed.get()) {
+            case SHOW, HIDE -> {
                 setVisible(service, command.equals("overlay.show"));
-                return PhoneResult.success(new JSONObject().put("visible", visible));
+                yield PhoneResult.success(new JSONObject().put("visible", visible));
             }
-            case "overlay.clear" -> {
+            case CLEAR -> {
                 main.removeCallbacks(clearBubble); main.removeCallbacks(clearHighlight); main.removeCallbacks(home);
                 scene.words = null; scene.highlight = null; scene.tip = false; goHome(); scene.invalidate();
+                yield PhoneResult.success(new JSONObject());
             }
-            case "overlay.state" -> {
-                String next = args.getString("state");
-                if (!next.equals("idle") && !next.equals("thinking") && !next.equals("working"))
-                    return PhoneResult.error("invalid_args", "state must be idle, thinking or working");
-                state(next);
+            case STATE -> {
+                state(args.getString("state"));
+                yield PhoneResult.success(new JSONObject());
             }
-            case "overlay.move", "overlay.point", "overlay.say" -> {
+            case MOVE, POINT, SAY -> {
                 String text = args.has("text") ? args.getString("text") : null;
-                if (command.equals("overlay.say") && text == null) return PhoneResult.error("invalid_args", "text is required");
-                if (text != null && text.length() > 2000) return PhoneResult.error("invalid_args", "Overlay text exceeds 2000 characters");
+                if (command.equals("overlay.say") && text == null) yield PhoneResult.error("invalid_args", "text is required");
+                if (text != null && text.length() > 2000) yield PhoneResult.error("invalid_args", "Overlay text exceeds 2000 characters");
                 long duration = args.optLong("durationMs", text == null ? 0 : Math.min(20000, 3000 + 50L * text.length()));
-                if (duration < 0) return PhoneResult.error("invalid_args", "durationMs must be nonnegative");
+                if (duration < 0) yield PhoneResult.error("invalid_args", "durationMs must be nonnegative");
                 Rect bounds = null;
                 float x = 0, y = 0;
                 boolean target = args.has("nodeId") || args.has("x") || args.has("y") || args.has("left");
                 if (command.equals("overlay.move") && (!args.has("x") || !args.has("y")))
-                    return PhoneResult.error("invalid_args", "move needs x and y");
-                if (command.equals("overlay.point") && !target) return PhoneResult.error("invalid_args", "point needs a target");
+                    yield PhoneResult.error("invalid_args", "move needs x and y");
+                if (command.equals("overlay.point") && !target) yield PhoneResult.error("invalid_args", "point needs a target");
                 if (args.has("nodeId")) {
                     bounds = resolve.apply(args.getString("nodeId"));
-                    if (bounds == null) return PhoneResult.error("stale_node", "Read ui.tree again before pointing at this node");
+                    if (bounds == null) yield PhoneResult.error("stale_node", "Read ui.tree again before pointing at this node");
                     x = bounds.exactCenterX(); y = bounds.exactCenterY();
                 } else if (args.has("left")) {
                     bounds = new Rect(args.getInt("left"), args.getInt("top"), args.getInt("right"), args.getInt("bottom"));
-                    if (bounds.isEmpty()) return PhoneResult.error("invalid_args", "Target bounds must have positive size");
+                    if (bounds.isEmpty()) yield PhoneResult.error("invalid_args", "Target bounds must have positive size");
                     x = bounds.exactCenterX(); y = bounds.exactCenterY();
                 } else if (target) { x = (float) args.getDouble("x"); y = (float) args.getDouble("y"); }
                 if (target && (!Float.isFinite(x) || !Float.isFinite(y) || x < 0 || y < 0 || x >= width() || y >= height()))
-                    return PhoneResult.error("invalid_args", "Target must be within the display");
+                    yield PhoneResult.error("invalid_args", "Target must be within the display");
                 if (target) moveToTarget(x, y, 200);
                 if (command.equals("overlay.point")) highlight(bounds, x, y, 5000);
                 if (text != null) say(text, command.equals("overlay.say") ? duration : Math.min(20000, 3000 + text.length() * 50L));
+                yield PhoneResult.success(new JSONObject());
             }
-            default -> { return PhoneResult.error("unsupported", "Unknown overlay command"); }
-        }
-        return PhoneResult.success(new JSONObject());
+        };
     }
 
     private WindowManager.LayoutParams placement(int w, int h, boolean untouchable) {
@@ -246,7 +246,7 @@ final class KenanOverlay {
     private void activity() {
         if (closed) return;
         main.removeCallbacks(home);
-        if (state.equals("idle") && gestures == 0 && !micVisible()) main.postDelayed(home, 6000);
+        if (state == NativeState.OverlayAnimation.IDLE && gestures == 0 && !micVisible()) main.postDelayed(home, 6000);
     }
     private void position(int x, int y) {
         if (closed) return;
@@ -297,7 +297,17 @@ final class KenanOverlay {
             update(panel, panelAt);
         }
     }
-    void state(String next) { if (closed) return; state = next; dot.invalidate(); if (next.equals("idle")) activity(); else main.removeCallbacks(home); }
+    void state(String next) {
+        NativeState.OverlayAnimation parsed = NativeState.require(NativeState.OverlayAnimation.class, next);
+        if (closed) return;
+        state = parsed;
+        dot.invalidate();
+        Runnable reconcile = switch (state) {
+            case IDLE -> this::activity;
+            case THINKING, WORKING -> () -> main.removeCallbacks(home);
+        };
+        reconcile.run();
+    }
     void say(String text, long duration) {
         main.removeCallbacks(clearBubble);
         scene.words = StaticLayout.Builder.obtain(text, 0, text.length(), scene.textPaint, Math.max(dp(100), Math.round(width() * .75f) - dp(28)))
@@ -463,15 +473,15 @@ final class KenanOverlay {
             velocity.addMovement(raw); raw.recycle();
         }
         @Override public boolean onTouch(View view, MotionEvent event) {
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN -> {
+            return switch (NativeState.Touch.require(event.getActionMasked())) {
+                case DOWN -> {
                     if (flight != null) flight.cancel(); main.removeCallbacks(home);
                     downX = event.getRawX(); downY = event.getRawY(); startX = dotAt.x; startY = dotAt.y;
                     dragging = false; pressed = true; refresh();
                     velocity = VelocityTracker.obtain(); track(event);
-                    return true;
+                    yield true;
                 }
-                case MotionEvent.ACTION_MOVE -> {
+                case MOVE -> {
                     track(event);
                     if (WriteBubblePosition.dragged(downX, downY, event.getRawX(), event.getRawY(), ViewConfiguration.get(service).getScaledTouchSlop())) dragging = true;
                     if (dragging) {
@@ -492,9 +502,9 @@ final class KenanOverlay {
                         } else position(wanted.x(), wanted.y());
                         scene.invalidate();
                     }
-                    return true;
+                    yield true;
                 }
-                case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                case UP, CANCEL -> {
                     float vx = 0;
                     if (velocity != null) { track(event); velocity.computeCurrentVelocity(1000); vx = velocity.getXVelocity(); velocity.recycle(); velocity = null; }
                     boolean moved = dragging;
@@ -504,13 +514,19 @@ final class KenanOverlay {
                     else if (moved) snap(vx);
                     else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
                         dot.performClick();
-                        if (mode == OverlayPolicy.Mode.MIC) writer().tapped(); else openPanel();
+                        Runnable tap = switch (mode) {
+                            case MIC -> () -> writer().tapped();
+                            case KENAN -> KenanOverlay.this::openPanel;
+                            case HIDDEN -> () -> { }; // A queued up after the dot was hidden cannot open it again.
+                        };
+                        tap.run();
                     }
                     refresh();
-                    return true;
+                    yield true;
                 }
-                default -> { return true; }
-            }
+                case POINTER_DOWN, POINTER_UP -> true; // The shared dot tracks the first pointer only.
+                case OUTSIDE, HOVER_MOVE, HOVER_ENTER, HOVER_EXIT, SCROLL, BUTTON_PRESS, BUTTON_RELEASE -> false;
+            };
         }
     }
     private final class Dot extends View {
@@ -535,18 +551,19 @@ final class KenanOverlay {
                 if (writer().busy()) postDelayed(frame, 55);
                 return;
             }
-            String animation = gestures > 0 ? "working" : state;
-            float pulse = (float) (.5 + .5 * Math.sin(now / (animation.equals("working") ? 170.0 : 850.0)));
+            NativeState.OverlayAnimation animation = gestures > 0 ? NativeState.OverlayAnimation.WORKING : state;
+            double period = switch (animation) { case WORKING -> 170.0; case IDLE, THINKING -> 850.0; };
+            float pulse = (float) (.5 + .5 * Math.sin(now / period));
             paint.setStyle(Paint.Style.FILL); paint.setColor(ACCENT); paint.setAlpha(25 + Math.round(pulse * 35));
             canvas.drawCircle(cx, cy, dp(22), paint);
             paint.setColor(CARD); paint.setAlpha(255); canvas.drawCircle(cx, cy, dp(17), paint);
             paint.setColor(ACCENT); canvas.drawCircle(cx, cy, dp(7) + dp(1) * pulse, paint);
-            if (animation.equals("thinking")) {
+            if (animation == NativeState.OverlayAnimation.THINKING) {
                 paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2)); paint.setStrokeCap(Paint.Cap.ROUND);
                 canvas.drawArc(cx - dp(13), cy - dp(13), cx + dp(13), cy + dp(13), (now % 1400) * 360f / 1400, 100, false, paint);
             }
             removeCallbacks(frame);
-            postDelayed(frame, animation.equals("idle") ? 200 : 40);
+            postDelayed(frame, switch (animation) { case IDLE -> 200; case THINKING, WORKING -> 40; });
         }
     }
     private final class Scene extends View {

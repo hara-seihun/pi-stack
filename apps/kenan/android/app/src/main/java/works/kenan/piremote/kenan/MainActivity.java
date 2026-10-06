@@ -46,8 +46,17 @@ public class MainActivity extends BridgeActivity {
             @Override
             public void handleOnBackPressed() {
                 if (bridge == null) { moveTaskToBack(true); return; }
-                bridge.eval("typeof window.PiRemoteBack === 'function' && window.PiRemoteBack() === true", handled -> {
-                    if (!"true".equals(handled)) moveTaskToBack(true);
+                bridge.eval("typeof window.PiRemoteBack === 'function' ? window.PiRemoteBack() : false", handled -> {
+                    var parsed = NativeState.parse(NativeState.BackResult.class, handled);
+                    if (parsed.isEmpty()) {
+                        android.widget.Toast.makeText(MainActivity.this, "Client returned an invalid Back result", android.widget.Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    Runnable back = switch (parsed.get()) {
+                        case HANDLED -> () -> { }; // The web client already performed the navigation.
+                        case UNHANDLED -> () -> moveTaskToBack(true);
+                    };
+                    back.run();
                 });
             }
         });

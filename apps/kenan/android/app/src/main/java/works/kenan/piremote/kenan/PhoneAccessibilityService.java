@@ -72,17 +72,19 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     void dispatch(String command, JSONObject args, long deadline, BooleanSupplier authorized, Consumer<PhoneResult> done) {
         try {
             KenanOverlay visual = ensureOverlay();
-            if (command.startsWith("overlay.")) { done.accept(visual.command(command, args, this::nodeBounds)); return; }
-            if (command.startsWith("ui.")) visual.closePanel();
-            switch (command) {
-                case "ui.tree" -> {
+            if (NativeState.parse(NativeState.OverlayCommand.class, command).isPresent()) { done.accept(visual.command(command, args, this::nodeBounds)); return; }
+            var parsed = NativeState.parse(NativeState.AccessibilityCommand.class, command);
+            if (parsed.isEmpty()) { done.accept(PhoneResult.error("unsupported", "Unknown accessibility command")); return; }
+            if (parsed.get() != NativeState.AccessibilityCommand.CAPTURE) visual.closePanel();
+            NativeState.Action dispatchAction = switch (parsed.get()) {
+                case TREE -> () -> {
                     clearNodes(); snapshot++; remainingText = 500000; truncated = false;
                     AccessibilityNodeInfo root = appRoot();
                     if (root == null) { done.accept(PhoneResult.error("unavailable", "No accessible active window; unlock the phone if needed")); return; }
                     JSONObject tree = walk(root, "" + snapshot + ":0", 0);
                     done.accept(PhoneResult.success(new JSONObject().put("root", tree).put("nodes", nodes.size()).put("truncated", truncated || nodes.size() >= 1500)));
-                }
-                case "ui.tap", "ui.swipe" -> {
+                };
+                case TAP, SWIPE -> () -> {
                     float x = (float) args.getDouble(command.equals("ui.tap") ? "x" : "x1");
                     float y = (float) args.getDouble(command.equals("ui.tap") ? "y" : "y1");
                     float x2 = command.equals("ui.tap") ? x : (float) args.getDouble("x2");
@@ -114,8 +116,8 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                     };
                     if (delay == 0) inject.run();
                     else new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(inject, delay);
-                }
-                case "ui.text", "ui.action" -> {
+                };
+                case TEXT, ACTION -> () -> {
                     String id = args.optString("nodeId", "");
                     AccessibilityNodeInfo node = id.isEmpty() ? focused() : nodes.get(id);
                     boolean owned = id.isEmpty();
@@ -130,33 +132,31 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                             action = AccessibilityNodeInfo.ACTION_SET_TEXT;
                             bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
                         } else {
-                            action = switch (args.getString("action")) {
-                                case "click" -> AccessibilityNodeInfo.ACTION_CLICK;
-                                case "longClick", "long_click" -> AccessibilityNodeInfo.ACTION_LONG_CLICK;
-                                case "focus" -> AccessibilityNodeInfo.ACTION_FOCUS;
-                                case "scrollForward", "scroll_forward" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;
-                                case "scrollBackward", "scroll_backward" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
-                                case "paste" -> AccessibilityNodeInfo.ACTION_PASTE;
-                                default -> 0;
+                            action = switch (NativeState.require(NativeState.NodeAction.class, args.getString("action"))) {
+                                case CLICK -> AccessibilityNodeInfo.ACTION_CLICK;
+                                case LONG_CLICK, LONG_CLICK_ALIAS -> AccessibilityNodeInfo.ACTION_LONG_CLICK;
+                                case FOCUS -> AccessibilityNodeInfo.ACTION_FOCUS;
+                                case SCROLL_FORWARD, SCROLL_FORWARD_ALIAS -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;
+                                case SCROLL_BACKWARD, SCROLL_BACKWARD_ALIAS -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+                                case PASTE -> AccessibilityNodeInfo.ACTION_PASTE;
                             };
-                            if (action == 0) { done.accept(PhoneResult.error("invalid_args", "Unknown node action")); return; }
                         }
                         Rect bounds = new Rect(); node.getBoundsInScreen(bounds); visual.highlight(bounds);
                         if (!authorized.getAsBoolean() || System.currentTimeMillis() >= deadline) { done.accept(PhoneResult.error("expired", "Action authorization or deadline expired")); return; }
                         done.accept(node.performAction(action, bundle) ? PhoneResult.success(new JSONObject())
                             : PhoneResult.error("unavailable", "Application refused the accessibility action"));
                     } finally { if (owned && node != null) node.recycle(); }
-                }
-                case "ui.global" -> {
-                    int action = switch (args.getString("action")) {
-                        case "back" -> GLOBAL_ACTION_BACK; case "home" -> GLOBAL_ACTION_HOME; case "recents" -> GLOBAL_ACTION_RECENTS;
-                        case "notifications" -> GLOBAL_ACTION_NOTIFICATIONS; case "quickSettings" -> GLOBAL_ACTION_QUICK_SETTINGS;
-                        case "lock" -> GLOBAL_ACTION_LOCK_SCREEN; default -> 0;
+                };
+                case GLOBAL -> () -> {
+                    int global = switch (NativeState.require(NativeState.GlobalAction.class, args.getString("action"))) {
+                        case BACK -> GLOBAL_ACTION_BACK; case HOME -> GLOBAL_ACTION_HOME; case RECENTS -> GLOBAL_ACTION_RECENTS;
+                        case NOTIFICATIONS -> GLOBAL_ACTION_NOTIFICATIONS; case QUICK_SETTINGS -> GLOBAL_ACTION_QUICK_SETTINGS;
+                        case LOCK -> GLOBAL_ACTION_LOCK_SCREEN;
                     };
-                    done.accept(action == 0 ? PhoneResult.error("invalid_args", "Unknown global action") : performGlobalAction(action)
+                    done.accept(performGlobalAction(global)
                         ? PhoneResult.success(new JSONObject()) : PhoneResult.error("unavailable", "Android refused the global action"));
-                }
-                case "screen.capture" -> {
+                };
+                case CAPTURE -> () -> {
                     visual.suspendCapture();
                     android.view.Choreographer.getInstance().postFrameCallback(first ->
                         android.view.Choreographer.getInstance().postFrameCallback(second -> {
@@ -166,9 +166,9 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                             try { capture(result -> { visual.restoreCapture(); done.accept(result); }); }
                             catch (RuntimeException failure) { visual.restoreCapture(); done.accept(PhoneResult.error("unavailable", failure.getMessage())); }
                         }));
-                }
-                default -> done.accept(PhoneResult.error("unsupported", "Unknown accessibility command"));
-            }
+                };
+            };
+            dispatchAction.run();
         } catch (SecurityException failure) { done.accept(PhoneResult.error("permission_denied", failure.getMessage())); }
         catch (Exception failure) { done.accept(PhoneResult.error("invalid_args", failure.getMessage() == null ? "Invalid accessibility arguments" : failure.getMessage())); }
     }
