@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
 import { MemoryStore } from "./store.js";
 import { validateRequest } from "./validation.js";
+import { unreachable } from "./explicit-state.js";
 export interface MemoryAuth {
   supervisors: { person: string; token: string; displayName?: string }[];
   publisherToken?: string;
@@ -120,6 +121,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
           const admission = store.admitRoot(session.person, session.threadId, audience?.people ?? [session.person], subjects, audience?.roomId, input.rootSessionId);
           return send(200, { ok: true, value: admission });
         }
+        if (request.url !== "/v1/root/finalize-reply") return invalid("Unknown root operation");
         if (!fields(input, ["rootSessionId", "reply", "recipients", "subjects"]) || typeof input.rootSessionId !== "string" || typeof input.reply !== "string" || input.reply.length > 100_000
           || !strings(input.subjects) || input.recipients !== undefined && !strings(input.recipients)) return invalid("Invalid root reply finalization");
         const admitted = store.rootAdmission(input.rootSessionId);
@@ -172,4 +174,5 @@ function dispatch(store: MemoryStore, person: string, role: MemoryRole, request:
     case "disclosures": return store.disclosures(person, request.context, request.limit, role, request.about);
     case "finalize-turn": return store.finalize(person, request.context, request.reply);
   }
+  return unreachable(request);
 }

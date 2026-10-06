@@ -1,5 +1,13 @@
-import type { DisclosureInput, MemoryInput, MemoryRequest, MemorySetting, ReadContext } from "./contract.js";
+import type { DisclosureInput, MemoryError, MemoryInput, MemoryRequest, MemoryResult, MemorySetting, ReadContext } from "./contract.js";
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
+const memoryErrors = { disabled: true, unauthenticated: true, "invalid-request": true, unavailable: true } satisfies Record<MemoryError, true>;
+export function validateResult<T>(value: unknown): MemoryResult<T> | undefined {
+  if (!object(value)) return undefined;
+  if (value.ok === true && Object.hasOwn(value, "value") && !Object.hasOwn(value, "error")) return { ok: true, value: value.value };
+  if (value.ok === false && !Object.hasOwn(value, "value") && typeof value.error === "string" && Object.hasOwn(memoryErrors, value.error) && typeof value.message === "string")
+    return { ok: false, error: value.error as MemoryError, message: value.message };
+  return undefined;
+}
 const text = (v: unknown): v is string => typeof v === "string" && !!v.trim() && v.length <= 100_000;
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 100 && v.every(text);
 const date = (v: unknown) => v === undefined || typeof v === "string" && Number.isFinite(Date.parse(v));

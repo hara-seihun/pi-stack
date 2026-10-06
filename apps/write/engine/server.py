@@ -20,8 +20,9 @@ from rewrite import LocalRewriter
 from cleanup.tagger import JointOnnxTagger
 from cleanup.punctuation import OnnxPunctuator
 from nemotron import Nemotron
-from gpu_encoder import maybe_load
+from gpu_encoder import device_mode, maybe_load
 from opus import OpusDecoder
+from protocol import Phase, parse_control
 
 LOG = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class Engine:
         Replace the model *object*, not its gpu field: existing CPU dictations
         retain their independent cache representation until their sockets close.
         """
-        if os.getenv('PI_STACK_WRITE_DEVICE', 'cpu') not in ('auto', 'gpu'):
+        if device_mode() == 'cpu':
             return
         while self.recognizer.gpu is None:
             await asyncio.sleep(self.GPU_RETRY_SECONDS)
@@ -87,6 +88,7 @@ class Engine:
 
     async def handle(self, socket):
         connected_at = time.perf_counter()
+        phase = Phase.AWAITING_START
         state = {'last_audio_at': None, 'samples': 0, 'format': 'pcm', 'rewrite': True}
         pending = []
         arrived = asyncio.Event()
@@ -188,18 +190,20 @@ class Engine:
         try:
             async for frame in socket:
                 if isinstance(frame, bytes):
-                    if stream is None:
+                    if phase is not Phase.STREAMING:
                         raise ValueError('start must precede audio')
                     state['last_audio_at'] = time.perf_counter()
                     if state['format'] == 'opus':
                         samples = opus_decoder.decode(frame)
-                    else:
+                    elif state['format'] == 'pcm':
                         data = remainder[0] + frame
                         remainder[0] = data[len(data) & ~1:]
                         data = data[:len(data) & ~1]
                         if not data:
                             continue
                         samples = np.frombuffer(data, dtype='<i2').astype(np.float32) / 32768
+                    else:
+                        raise ValueError('invalid audio format')
                     rms = float(np.sqrt(np.mean(samples * samples)))
                     peak_rms = max(peak_rms, rms)
                     state['samples'] += len(samples)
@@ -212,17 +216,13 @@ class Engine:
                         cpu_pending.append(samples)
                         cpu_arrived.set()
                     continue
-                command = json.loads(frame)
-                kind = command.get('type')
-                if kind == 'start' and stream is None:
-                    dictionary = command.get('dictionary') or {}
-                    context = command.get('context') or ''
-                    state['format'] = command.get('audio', 'pcm')
-                    state['rewrite'] = command.get('rewrite', True)
-                    if not isinstance(state['rewrite'], bool):
-                        raise ValueError('rewrite must be a boolean')
-                    if not isinstance(dictionary.get('words', []), list) or not isinstance(context, str) or state['format'] not in ('pcm', 'opus'):
-                        raise ValueError('invalid dictionary, context or audio format')
+                command = parse_control(frame, phase)
+                kind = command['type']
+                if kind == 'start':
+                    dictionary = command['dictionary']
+                    context = command['context']
+                    state['format'] = command['audio']
+                    state['rewrite'] = command['rewrite']
                     opus_decoder = OpusDecoder() if state['format'] == 'opus' else None
                     remainder = [b'']
                     stream = self.recognizer.create_stream(dictionary)
@@ -235,9 +235,10 @@ class Engine:
                         cpu_cleaner = IncrementalCleaner(dictionary, context, tagger=self.tagger,
                                                          punctuator=self.punctuator)
                         cpu_task = asyncio.create_task(cpu_decode())
-                elif kind == 'cancel' and stream is not None:
+                    phase = Phase.STREAMING
+                elif kind == 'cancel':
                     return
-                elif kind == 'finish' and stream is not None:
+                elif kind == 'finish':
                     began = time.perf_counter()
                     gap = state['last_audio_at']
                     received = state['samples']

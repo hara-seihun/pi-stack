@@ -33,6 +33,13 @@ Tools: `memory_search`, `memory_read`, `memory_write`, `memory_forget`, `memory_
 
 `POST /v1/memory` accepts the `MemoryRequest` union and returns `MemoryResult`. All routes use `x-kenan-memory-session`. The client never throws network failures. Default memory listener is IPv4 loopback port 18820.
 
+[Explicit state selection](src/explicit-state.ts) and [boundary validation](src/validation.ts)
+reject unknown role, operation, result/error, forget, consent, request-status and action-outcome
+variants rather than assigning a known behavior. A corrupt persisted session role cannot obtain
+unrestricted reads; missing tool-role configuration still explicitly means `person`. Root reply
+and receipt variants stay separate: an unknown status cannot be accepted because it also carries
+reply text. [Focused rejection tests](tests/explicit-state.test.ts) cover these boundaries.
+
 - `write`: text, subjects, source (`saidBy` or `actedFor`, optional action/external ID), verified setting, occurrence time and privacy. Recorded time/person are server-owned. Person writes require own provenance/subjects, except actions performed for that person may tag those affected.
 - `search` / `read`: ranked OR retrieval with Porter stemming and diacritic-tolerant tokenization. Extra natural-language terms do not make all matches disappear. Empty queries list recent accessible items. About filters use registered person IDs. Returned items carry `readReport`; root cross-person consultations are logged automatically before data returns. This is a consultation record, not a claim that the person saw its contents.
 - `forget`: `delete` removes the current item, securely deletes SQLite/FTS storage and checkpoints/truncates WAL; `stop-using` keeps custody but excludes it from every normal read/search. Tool calls without a mode post a clarification and change nothing. A person may only forget their own exclusively tagged stored records; shared forgetting goes through root.

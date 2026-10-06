@@ -5,6 +5,12 @@ import { dirname } from "node:path";
 import type { Disclosure, DisclosureInput, ForgetMode, MemoryInput, MemoryItem, MemoryRead, ReadContext, MemoryRole, MemoryResult, MemorySession, RootAdmission, RootFinalizeReply, RootResumeConsent, RootLogConsent, RootLogNotification, RootLogRequestStatus } from "./contract.js";
 
 import { kenanRequestNotice } from "./contract.js";
+import { isMemoryRole, memoryRoles, stateValue } from "./explicit-state.js";
+const forgetModes = { delete: "delete", "stop-using": "stop-using" } satisfies Record<ForgetMode, ForgetMode>;
+const consentKinds = {
+  question: { kind: "consent-question", recipient: "subject" },
+  answer: { kind: "consent-answer", recipient: "kenan" },
+} as const satisfies Record<RootLogConsent["kind"], { kind: Disclosure["kind"]; recipient: "subject" | "kenan" }>;
 
 export class MemoryStore {
   readonly db: Database;
@@ -57,6 +63,7 @@ export class MemoryStore {
     })();
   }
   search(person: string, context: ReadContext, query: string, about?: string[], limit = 20, role: MemoryRole = "root"): MemoryRead<MemoryItem[]> {
+    stateValue(memoryRoles, role);
     const terms = query.match(/[\p{L}\p{N}]+/gu) ?? [];
     if (query.trim() && !terms.length) return this.report(person, context, []);
     const clauses: string[] = [];
@@ -80,18 +87,20 @@ export class MemoryStore {
     return this.report(person, context, rows.map(row => JSON.parse(row.body)));
   }
   read(person: string, context: ReadContext, ids: string[], role: MemoryRole = "root"): MemoryRead<MemoryItem[]> {
+    stateValue(memoryRoles, role);
     const query = this.db.query(`SELECT body FROM memories WHERE id=? AND stopped=0 ${role === "person" ? `AND ${this.ownClause()}` : ""}`);
     const items = ids.flatMap(id => { const row = query.get(id, ...(role === "person" ? [person, person, person] : [])) as { body: string } | null; return row ? [JSON.parse(row.body)] : []; });
     return this.report(person, context, items);
   }
   forget(ids: string[], mode: ForgetMode): { forgotten: string[]; mode: ForgetMode } {
+    stateValue(forgetModes, mode);
     const result = this.db.transaction(() => {
       const forgotten: string[] = [];
       for (const id of ids) {
         const row = this.db.query("SELECT body FROM memories WHERE id=?").get(id) as { body: string } | null;
         if (!row) continue;
         if (mode === "delete") this.db.query("DELETE FROM memories WHERE id=?").run(id);
-        else this.db.query("UPDATE memories SET stopped=1,body=? WHERE id=?").run(JSON.stringify({ ...JSON.parse(row.body), stoppedAt: new Date().toISOString() }), id);
+        else if (mode === "stop-using") this.db.query("UPDATE memories SET stopped=1,body=? WHERE id=?").run(JSON.stringify({ ...JSON.parse(row.body), stoppedAt: new Date().toISOString() }), id);
         forgotten.push(id);
       }
       return { forgotten, mode };
@@ -105,18 +114,21 @@ export class MemoryStore {
     return disclosure;
   }
   disclosures(person: string, context: ReadContext, limit = 50, role: MemoryRole = "root", subject = person): MemoryRead<Disclosure[]> {
+    stateValue(memoryRoles, role);
     const own = role === "person" ? "AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(disclosures.body,'$.about')) WHERE value<>?)" : "";
     const rows = this.db.query(`SELECT body FROM disclosures WHERE EXISTS(SELECT 1 FROM json_each(json_extract(disclosures.body,'$.about')) WHERE value=?) ${own} ORDER BY json_extract(body,'$.occurredAt') DESC,id DESC LIMIT ?`).all(subject, ...(role === "person" ? [person] : []), Math.min(100, Math.max(1, limit))) as { body: string }[];
     return this.report(person, context, rows.map(row => JSON.parse(row.body)));
   }
   session(person: string, threadId: string, role: MemoryRole = "person"): MemorySession {
+    stateValue(memoryRoles, role);
     const token = randomUUID() + randomUUID();
     this.db.query("INSERT INTO sessions(token,person,thread,role) VALUES(?,?,?,?)").run(token, person, threadId, role);
     return { person, threadId, token, role };
   }
   resolveSession(token: string): { person: string; threadId: string; role: MemoryRole } | undefined {
     const row = this.db.query("SELECT person,thread,role FROM sessions WHERE token=?").get(token) as { person: string; thread: string; role: MemoryRole } | null;
-    return row ? { person: row.person, threadId: row.thread, role: row.role } : undefined;
+    if (!row || !isMemoryRole(row.role)) return undefined;
+    return { person: row.person, threadId: row.thread, role: row.role };
   }
   canForget(person: string, ids: string[]): boolean {
     const query = this.db.query("SELECT id FROM memories WHERE id=? AND json_extract(body,'$.recordedBy')=? AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value<>?)");
@@ -141,6 +153,8 @@ export class MemoryStore {
     return createHash("sha256").update(JSON.stringify([rootSessionId, consentId])).digest("hex");
   }
   logConsent(input: RootLogConsent): MemoryResult<Disclosure> {
+    if (!Object.hasOwn(consentKinds, input.kind)) return { ok: false, error: "invalid-request", message: "Unknown consent kind" };
+    const consent = stateValue(consentKinds, input.kind);
     return this.db.transaction((): MemoryResult<Disclosure> => {
       const admission = this.rootAdmission(input.rootSessionId);
       if (!admission) return { ok: false, error: "invalid-request", message: "Unknown original root session" };
@@ -158,9 +172,9 @@ export class MemoryStore {
         return { ok: false, error: "invalid-request", message: "Consent answers require a logged question to the same subject" };
       const now = new Date().toISOString();
       const disclosure: Disclosure = { id, rootSessionId: input.rootSessionId, consentId: input.consentId, consentSubject: input.subject,
-        kind: input.kind === "question" ? "consent-question" : "consent-answer", text: input.text,
+        kind: consent.kind, text: input.text,
         about: [...new Set([...admission.subjects, admission.person, input.subject])],
-        to: input.kind === "question" ? [input.subject] : ["kenan"],
+        to: [consent.recipient === "subject" ? input.subject : consent.recipient],
         setting: { person: admission.person, threadId: admission.threadId, ...(admission.roomId ? { roomId: admission.roomId } : {}) },
         occurredAt: now, recordedBy: "kenan" };
       this.db.query("INSERT INTO disclosures(id,body) VALUES(?,?)").run(id, JSON.stringify(disclosure));
@@ -168,6 +182,7 @@ export class MemoryStore {
     })();
   }
   logRequestStatus(input: RootLogRequestStatus): MemoryResult<{ id: string }> {
+    if (input.status !== "failed" && input.status !== "interrupted") return { ok: false, error: "invalid-request", message: "Unknown request status" };
     return this.db.transaction((): MemoryResult<{ id: string }> => {
       const admission = this.rootAdmission(input.rootSessionId);
       if (!admission) return { ok: false, error: "invalid-request", message: "Request status requires an admitted root session" };

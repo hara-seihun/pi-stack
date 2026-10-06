@@ -54,6 +54,25 @@ class MetricsTest(unittest.TestCase):
 
 
 class ProtocolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_engine_messages_and_replay_modes_are_rejected(self):
+        from websockets.asyncio.server import serve
+        manifest = evaluate.load_manifest()
+        fixture = manifest["fixtures"][0]
+        for message in ({"type": "future"}, None):
+            async def handle(socket):
+                async for frame in socket:
+                    if isinstance(frame, str) and json.loads(frame)["type"] == "finish":
+                        await socket.send(json.dumps(message))
+                        await socket.send(json.dumps({"type": "final", "raw": fixture["verbatim"], "text": fixture["target"]}))
+                        return
+            async with serve(handle, "127.0.0.1", 0) as server:
+                args = SimpleNamespace(url=f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}", chunk_ms=20, pace="burst", final_timeout=1)
+                with self.assertRaises(ValueError):
+                    await evaluate.replay_one(fixture, manifest, args, True, "immediate")
+        for pace, finish in (("future", "immediate"), ("burst", "future")):
+            with self.assertRaises(ValueError):
+                await evaluate.replay_one(fixture, manifest, SimpleNamespace(pace=pace), True, finish)
+
     async def test_finish_follows_all_pcm_without_waiting_for_partials(self):
         from websockets.asyncio.server import serve
         manifest = evaluate.load_manifest()
