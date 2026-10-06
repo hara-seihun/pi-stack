@@ -53,7 +53,7 @@ export interface ImportMessage {
 class NativeRejection extends Error {}
 class AdmissionWait extends Error {}
 interface Runtime {
-  session?: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings;
+  session?: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings; environmentKey?: string; parked?: boolean;
   finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -401,7 +401,7 @@ export class ThreadService implements ThreadApi {
       if (row.held) void this.halt(row.id);
       else if (!this.operations.has(row.id) && !this.halts.has(row.id)) this.wake(row.id);
     }
-    for (const [id, runtime] of this.runtimes) if (!runtime.busy && !runtime.executionId && !this.operations.has(id) && !this.halts.has(id) && !this.opening.has(id)) void this.serial(id, () => this.retire(id, runtime)).catch(error => {
+    for (const [id, runtime] of this.runtimes) if (!runtime.busy && !runtime.executionId && !this.operations.has(id) && !this.halts.has(id) && !this.opening.has(id)) void this.serial(id, () => this.park(id, runtime)).catch(error => {
       if (!this.suspended && !this.closed) { this.sql("UPDATE thread SET metadata=json_set(metadata,'$.cleanupError',?) WHERE id=?").run(errorText(error), id); this.changed(id); }
     });
   }
@@ -800,7 +800,7 @@ export class ThreadService implements ThreadApi {
     const runtime = this.runtimes.get(thread.id);
     return !!(thread.metadata?.agentWait || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id)
-      || this.execution(thread.id) || thread.metadata?.runnerReference || runtime?.busy || runtime?.commandRunning
+      || this.execution(thread.id) || (!runtime && thread.metadata?.runnerReference) || runtime?.busy || runtime?.commandRunning
       || this.opening.has(thread.id) || this.operations.has(thread.id) || this.halts.has(thread.id));
   }
   async control(input: ThreadControl): Promise<Result<Thread>> {
@@ -1010,6 +1010,7 @@ export class ThreadService implements ThreadApi {
         const observing = ["get_state", "get_context", "get_messages", "get_session_stats", "get_available_models", "get_available_thinking_levels", "get_commands", "get_fork_messages", "set_session_name", "extension_ui_response"].includes(command.type);
         if (!observing && (runtime.busy || execution)) return bad("conflict", "Wait for this thread's current execution to settle");
         if (durable && !receipt) { this.recordRequest(command.id!, { threadId: id, command }, "command", id); receipt = true; }
+        if (!observing) { await runtime.session?.setActive?.(true); runtime.parked = false; }
         runtime.commandRunning = command.type;
         if (durable) this.state(id, "running");
         let result: any;
@@ -1024,7 +1025,7 @@ export class ThreadService implements ThreadApi {
         if (runtime.busy) this.state(id, "running");
         else if (!this.execution(id)) {
           this.state(id, this.row(id)?.held ? "idle" : this.pending(id).length ? "running" : "idle");
-          await this.retire(id, runtime);
+          await this.park(id, runtime);
         }
         return response;
       } catch (error) {
@@ -1071,6 +1072,11 @@ export class ThreadService implements ThreadApi {
     if (this.suspended || this.closed || this.runtimes.get(id) !== runtime) return;
     for (const waiter of runtime.waiters.values()) { clearTimeout(waiter.timer); waiter.reject(new Error(`Pi session exited (${code ?? "unknown"})`)); }
     runtime.waiters.clear(); this.runtimes.delete(id);
+    if (!runtime.executionId && !this.execution(id)) {
+      this.projections.delete(id);
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
+      this.changed(id);
+    }
     if (runtime.executionId) {
       const projection = this.projections.get(id);
       if (projection) { projection.activity.activityTools.clear(); projection.live.tools = []; }
@@ -1090,6 +1096,11 @@ export class ThreadService implements ThreadApi {
       if (!this.closed && !this.suspended) this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
       this.runtimes.delete(id); return undefined;
     } catch (error) { this.runtimes.delete(id); throw error; }
+  }
+  private environmentKey(thread: Thread, extraEnv: Record<string, string | undefined>): string {
+    return digest([import.meta.url, thread.cwd, thread.metadata?.context, thread.metadata?.raw, thread.metadata?.sandbox,
+      thread.metadata?.execution, sandboxPolicy(thread.metadata ?? {}), thread.role, thread.metadata?.watchList, thread.metadata?.mode,
+      this.options.environment?.(thread), extraEnv]);
   }
   private open(id: string, settings: ThreadSettings, recovering: boolean, extraEnv: Record<string, string | undefined> = {}): Promise<Runtime> {
     const opening = this.opening.get(id); if (opening) return opening;
@@ -1129,7 +1140,7 @@ export class ThreadService implements ThreadApi {
       this.clearAdmissionWait(id);
       recoveredAdmission = admitted.value; extraEnv = { ...extraEnv, ...admitted.value.env }; settings = admitted.value.settings ?? settings;
     }
-    const runtime: Runtime = { epoch: randomUUID(), busy: true, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings };
+    const runtime: Runtime = { epoch: randomUUID(), busy: true, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings, environmentKey: this.environmentKey(thread, extraEnv) };
     const [provider, ...model] = settings.model.split("/");
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
@@ -1144,7 +1155,9 @@ export class ThreadService implements ThreadApi {
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",
       PI_THREAD_CAN_SPAWN: sandbox || thread.role === "worker" || thread.metadata?.watchList ? "0" : "1",
       PI_THREAD_MODE: isThreadModeName(thread.metadata?.mode) ? thread.metadata.mode : undefined,
-      PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined };
+      PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined,
+      PI_THREAD_RECOVERING: recovering ? "1" : "0",
+      PI_THREAD_SESSION_KEY: digest([runtime.environmentKey, settings]) };
     const brokerUrl = modelBrokerUrl(env);
     if (brokerUrl) env.PI_MODEL_BROKER_URL = brokerUrl;
     runtime.broker=!!brokerUrl;
@@ -1155,6 +1168,7 @@ export class ThreadService implements ThreadApi {
         args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(sandbox ? [SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, JSON.stringify(sandboxPolicy(thread.metadata ?? {}))] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
       const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
+      if (env.PI_THREAD_RUNNER_REFERENCE && state.threadSessionKey !== env.PI_THREAD_SESSION_KEY) runtime.environmentKey = undefined;
       runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
       await this.rpc(runtime, { type: "set_session_name", name: thread.title });
       const execution = this.execution(id);
@@ -1253,7 +1267,7 @@ export class ThreadService implements ThreadApi {
         if (this.runtimes.get(id) !== runtime || event.type !== "agent_settled" && runtime.executionId) return;
         const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
         if (this.busy(state)) return;
-        if (!runtime.executionId) { runtime.busy = false; this.state(id, this.row(id)?.held ? "idle" : this.pending(id).length ? "running" : "idle"); await this.retire(id, runtime); return; }
+        if (!runtime.executionId) { runtime.busy = false; this.state(id, this.row(id)?.held ? "idle" : this.pending(id).length ? "running" : "idle"); await this.park(id, runtime); return; }
         const last = "lastAssistantMessage" in event ? event.lastAssistantMessage as Json | null : state.lastAssistantMessage ?? runtime.finalMessage;
         const outcome = ["complete", "failed", "cancelled"].includes(String(event.outcome)) ? event.outcome as WorkOutcome : last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete";
         const settledOutcome = this.row(id)?.held ? "cancelled" : outcome;
@@ -1276,11 +1290,11 @@ export class ThreadService implements ThreadApi {
     if ((execution || runtime || thread.metadata?.runnerReference) && this.pending(id).some(work => work.delivery === "hardSteer" && work.state === "queued")) {
       const halted = await this.halt(id); if (!halted.ok) return;
       execution = undefined; runtime = undefined;
-    } else if (!execution && !runtime && thread.metadata?.runnerReference) runtime = await this.open(id, thread.settings, false);
+    }
     if (execution && !runtime) runtime = await this.open(id, JSON.parse(execution.settings), true);
     execution = this.execution(id);
     const work = this.sql(`SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ${execution ? "AND delivery IN ('steer','hardSteer')" : ""} ORDER BY front DESC,ordinal LIMIT 1`).get(id) as Json | undefined;
-    if (!work) { if (!execution && !runtime?.busy) { this.state(id, "idle"); if (runtime) await this.retire(id, runtime); } return; }
+    if (!work) { if (!execution && !runtime?.busy) { this.state(id, "idle"); if (runtime) await this.park(id, runtime); } return; }
     if (!execution && runtime?.busy) return;
     if (work.prepared === null) {
       if (!execution) this.phase(id, "preparing", "Preparing queued input and attachments");
@@ -1302,13 +1316,25 @@ export class ThreadService implements ThreadApi {
       }
       this.clearAdmissionWait(id);
       if (this.suspended || this.row(id)?.held || this.halts.has(id)) { await admission.value.release(); return; }
-      if (runtime) { await this.retire(id, runtime); runtime = undefined; }
+      const effectiveSettings = admission.value.settings ?? settings;
       this.state(id, "running");
-      try { runtime = await this.open(id, admission.value.settings ?? settings, false, admission.value.env); }
-      catch (error) { await admission.value.release(); throw error; }
+      try {
+        if (runtime && (runtime.environmentKey !== this.environmentKey(thread, admission.value.env ?? {}) || digest(runtime.settings ?? null) !== digest(effectiveSettings))) {
+          await this.retire(id, runtime); runtime = undefined;
+        }
+        runtime = await this.open(id, effectiveSettings, false, admission.value.env);
+        try { await runtime.session?.setActive?.(true); }
+        catch (error) {
+          if (this.runtimes.get(id) === runtime) throw error;
+          // Reclamation raced admission. No work has entered native custody yet.
+          runtime = await this.open(id, effectiveSettings, false, admission.value.env);
+          await runtime.session?.setActive?.(true);
+        }
+        runtime.parked = false;
+      } catch (error) { await admission.value.release(); throw error; }
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.startupFailure') WHERE id=?").run(id);
       runtime.lease = admission.value;
-      if (this.suspended || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id)) { await admission.value.release(); runtime.lease = undefined; await this.retire(id, runtime); return; }
+      if (this.suspended || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id)) { await admission.value.release(); runtime.lease = undefined; if (!this.halts.has(id)) await this.retire(id, runtime); return; }
       this.transaction(() => {
         this.sql("INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, id, work.id, JSON.stringify(admission.value.settings ?? settings), Date.now());
         this.sql("UPDATE thread_work SET status='dispatched',execution_id=? WHERE id=?").run(executionId, work.id);
@@ -1404,7 +1430,12 @@ export class ThreadService implements ThreadApi {
     void this.routeNotifications();
     const settled = this.sql("SELECT settlement_seq,ended_at FROM thread_execution WHERE id=?").get(execution.id) as Json;
     for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, time: settled.ended_at, finalMessage, ...(error ? { error } : {}) } });
-    if (runtime) await this.retire(id, runtime);
+    if (runtime) await this.park(id, runtime);
+  }
+  private async park(id: string, runtime: Runtime): Promise<void> {
+    if (this.suspended || this.halts.has(id) || !runtime.session || runtime.busy || runtime.executionId || this.runtimes.get(id) !== runtime) return;
+    if (!runtime.environmentKey || this.get(id)?.metadata?.archived || this.row(id)?.held) { await this.retire(id, runtime); return; }
+    if (!runtime.parked) { await runtime.session.setActive?.(false); runtime.parked = true; }
   }
   private async retire(id: string, runtime: Runtime): Promise<void> {
     if (this.suspended || !runtime.session || runtime.busy || runtime.executionId || this.runtimes.get(id) !== runtime) return;
@@ -1482,7 +1513,10 @@ export class ThreadService implements ThreadApi {
     this.suspend();
     await Promise.allSettled([...this.operations.values(), ...this.halts.values(), ...this.opening.values()]);
     for (const [id, runtime] of this.runtimes) if (runtime.session && !runtime.busy && !runtime.executionId && !this.execution(id)) {
-      try { await runtime.session.close(); } catch (error) { return bad("unavailable", errorText(error)); }
+      try {
+        await runtime.session.close();
+        this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
+      } catch (error) { return bad("unavailable", errorText(error)); }
     }
     this.runtimes.clear(); this.listeners.clear();
     if (!this.closed) { this.closed = true; this.db.close(); }
@@ -1493,7 +1527,7 @@ export class ThreadService implements ThreadApi {
     if (this.sql("SELECT 1 FROM thread_execution WHERE ended_at IS NULL LIMIT 1").get() || [...this.runtimes.values()].some(runtime => runtime.busy) || this.operations.size || this.opening.size || this.halts.size) return bad("conflict", "Active execution must settle before controller handoff");
     this.started = false; clearInterval(this.timer);
     try {
-      for (const [id, runtime] of this.runtimes) { await runtime.session?.close(); this.runtimes.delete(id); }
+      for (const [id, runtime] of this.runtimes) { await runtime.session?.close(); this.runtimes.delete(id); this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id); }
       this.closed = true;
       for (const cancel of this.awaiting) cancel();
       this.db.close(); this.listeners.clear(); return good(undefined);
