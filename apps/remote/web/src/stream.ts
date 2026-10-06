@@ -1,17 +1,13 @@
-// One push stream per client. `POST /v1/stream` answers with
-// `text/event-stream` and keeps sending until the connection dies; selection
-// changes go up as small posts to `POST /v1/stream/:streamId`. There is no
-// poll and no per-wake request: a token batch costs one frame.
-//
-// The client owns reconnection. A stream that has sent nothing for 30 seconds
-// is dead even when the socket is still open (a sleeping phone, a proxy that
-// dropped the body), so the watchdog aborts it and the backoff reconnects.
+// A retained replica reconciles through a finite request. Push is a disposable
+// accelerator: no stream identity is needed to select, refresh or recover state.
+// A generation fences the two transports so a late response cannot rewind it.
 
 import { API } from "../../server/api";
 import type { StreamEvent, StreamSnapshot, StreamSubscription, StreamWireEvent } from "../../server/protocol";
 import { ReconcileReplica, revisionOf } from "../../shared/reconcile";
 import { isStreamSnapshot, streamResource, streamWants } from "../../shared/stream-resources";
 import { piFetch } from "./client";
+import { abortable } from "./abortable";
 import { assertNever, requireState } from "../../shared/explicit-state";
 import { stateObject, stateString, stateArray, validateStreamSnapshot } from "../../shared/state-validation";
 
@@ -23,6 +19,7 @@ export interface StreamFrame { event: string; data: string }
 /** No bytes for this long means the stream is gone, comments included. */
 export const DEAD_STREAM_MS = 30_000;
 const MAX_RETRY_MS = 5_000;
+export const RECONCILE_TIMEOUT_MS = 5_000;
 export const RECONNECT_GRACE_MS = 5_000;
 
 class StreamHttpError extends Error {
@@ -127,13 +124,16 @@ export interface StreamClientOptions {
   /** Reconnect on `online`, `pageshow`, `focus` and visibility. */
   listen?: boolean;
   now?: () => number;
+  /** Ordinary app feeds sleep when hidden; intentional Voice/Meet feeds do not. */
+  suspendWhenHidden?: boolean;
+  beforeReconcile?(): Promise<Partial<StreamSubscription>>;
+  onActivity?(healthy: boolean): void;
 }
 
 export function createStreamClient(options: StreamClientOptions): StreamClient {
   const send = options.fetch ?? ((path, init) => piFetch(path, init));
   let subscription: StreamSubscription = { ...options.subscription };
   const replica = new ReconcileReplica();
-  let streamId = "";
   let stopped = true;
   let state: StreamState = "connecting";
   let controller: AbortController | null = null;
@@ -146,9 +146,9 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   let authenticationError = "";
   let failures = 0;
   let generation = 0;
-  let posting: Promise<void> = Promise.resolve();
-  let postingSelection: { selectionId: string | undefined } | null = null;
-  let sentSubscription = "";
+  let pushFailures = 0;
+  let acknowledged = false;
+  const runnable = () => !stopped && (!options.suspendWhenHidden || document.visibilityState === "visible");
   const declaration = (): StreamSubscription => {
     const want = streamWants(subscription);
     const resident = replica.have();
@@ -157,6 +157,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   };
 
   const beginSelection = () => {
+    acknowledged = false;
     subscription = { ...subscription, selectionId: crypto.randomUUID() };
     options.onSelectionStatus?.({ sessionId: subscription.session ?? null, ready: false });
   };
@@ -189,6 +190,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     authenticationError = "";
   };
   const recovered = () => {
+    acknowledged = true;
     failures = 0;
     clearRecovery();
     setStatus("open");
@@ -210,10 +212,8 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
 
   const deliver = (event: StreamWireEvent) => {
     if (event.type === "hello") {
-      streamId = event.streamId;
       if (!subscription.session || !subscription.viewing) recovered();
       options.onEvent(event);
-      if (JSON.stringify(declaration()) !== sentSubscription) post();
       return;
     }
     if (event.type === "selection-ready") {
@@ -231,9 +231,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       if (!result.ok) {
         if (result.reason !== "Base revision mismatch") throw new StreamProtocolError(`Invalid ${event.resource} frame: ${result.reason}`);
         replica.forget(event.resource);
-        sentSubscription = "";
-        post();
-        return;
+        throw new StreamProtocolError(`Lost base for ${event.resource}; requesting retained state again`);
       }
       try { validateStreamSnapshot(event.resource, result.value); }
       catch (error) {
@@ -255,20 +253,51 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   async function connect(mine: number) {
     const active = new AbortController();
     controller = active;
-    streamId = "";
     beginSelection();
     beginRecovery();
-    armWatchdog(active);
-    const initial = declaration();
-    sentSubscription = JSON.stringify(initial);
-    const response = await send(API.stream.path(), {
+    const deadline = setTimeout(() => active.abort(new Error("State synchronization timed out")), RECONCILE_TIMEOUT_MS);
+    try {
+      if (options.beforeReconcile) {
+        const patch = await abortable(options.beforeReconcile(), active.signal);
+        if (mine !== generation || !runnable()) return;
+        subscription = { ...subscription, ...patch };
+      }
+      const response = await abortable(send(API.reconcile.path(), {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(declaration()), signal: active.signal, cache: "no-store",
+      }), active.signal);
+      if (mine !== generation || !runnable()) return;
+      if (!response.ok) throw new StreamHttpError(response.status, `State synchronization returned HTTP ${response.status}`);
+      let events: unknown[];
+      try {
+        const result = stateObject(await abortable(response.json(), active.signal), "Reconciliation response");
+        events = stateArray(result.events, "Reconciliation events");
+      } catch (error) {
+        if (active.signal.aborted) throw active.signal.reason;
+        throw new StreamProtocolError(`Invalid reconciliation response: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      for (const value of events) {
+        if (mine !== generation || !runnable()) return;
+        const event = streamEventFromFrame({ event: "", data: JSON.stringify(value) });
+        if (event) deliver(event);
+        if (event?.type === "error") throw new StreamProtocolError(event.message);
+      }
+      if (!acknowledged) throw new StreamProtocolError("State synchronization did not acknowledge this selection");
+      options.onActivity?.(true);
+    } finally { clearTimeout(deadline); }
+    if (mine !== generation || !runnable()) return;
+    const connectedAt = (options.now ?? Date.now)();
+    const openingDeadline = setTimeout(() => active.abort(new Error("Push opening timed out")), RECONCILE_TIMEOUT_MS);
+    try {
+    const response = await abortable(send(API.stream.path(), {
       method: "POST",
       headers: { accept: "text/event-stream", "content-type": "application/json" },
-      body: sentSubscription,
+      body: JSON.stringify(declaration()),
       signal: active.signal,
       cache: "no-store",
-    });
-    if (mine !== generation || stopped) return;
+    }), active.signal);
+    clearTimeout(openingDeadline);
+    if (mine !== generation || !runnable()) return;
     if (!response.ok) throw new StreamHttpError(response.status, `The stream returned HTTP ${response.status}`);
     if (!response.body) throw new Error("The stream returned no body");
     const reader = response.body.getReader();
@@ -277,33 +306,42 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     armWatchdog(active);
     try {
       for (;;) {
-        const { value, done } = await reader.read();
-        if (mine !== generation || stopped) return;
+        const { value, done } = await abortable(reader.read(), active.signal);
+        if (mine !== generation || !runnable()) return;
         if (done) throw new Error("The stream closed");
+        if ((options.now ?? Date.now)() - connectedAt >= 10_000) pushFailures = 0;
         armWatchdog(active);
         for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
           if (mine !== generation || stopped) return;
           const event = streamEventFromFrame(frame);
           if (event) deliver(event);
         }
+        options.onActivity?.(true);
       }
     } finally {
       if (mine === generation) clearWatchdog();
       reader.cancel().catch(() => {});
     }
+    } catch (error) {
+      if (mine !== generation || !runnable()) return;
+      options.onActivity?.(false);
+      if (error instanceof StreamProtocolError || authenticationMessage(error)) throw error;
+      // The replica was reconciled independently. A push failure does not undo it.
+      schedule(pushFailures++ === 0 ? 0 : Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(pushFailures, 5)));
+    } finally { clearTimeout(openingDeadline); }
   }
 
   const schedule = (delay: number) => {
-    if (stopped || retry) return;
+    if (!runnable() || retry) return;
     retry = setTimeout(() => { retry = null; open(); }, delay);
   };
 
   function open() {
-    if (stopped) return;
+    if (!runnable()) return;
     if (retry) { clearTimeout(retry); retry = null; }
     controller?.abort();
-    posting = Promise.resolve();
-    postingSelection = null;
+    clearWatchdog();
+    options.onActivity?.(false);
     const mine = ++generation;
     void connect(mine).then(
       () => {}, // Returns only when a newer connection replaced this one or the client stopped.
@@ -311,47 +349,31 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
         if (mine !== generation || stopped) return;
         clearWatchdog();
         failed(controller?.signal.aborted ? controller.signal.reason : error);
-        schedule(Math.min(MAX_RETRY_MS, 1_000 * 2 ** Math.min(failures++, 3)));
+        schedule(failures++ === 0 ? 0 : Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(failures, 5)));
       },
     );
   }
 
-  function post() {
-    const id = streamId;
-    const mine = generation;
-    const active = controller;
-    if (!id || !active) return;
-    posting = posting.then(async () => {
-      if (stopped || streamId !== id || generation !== mine || active.signal.aborted) return;
-      const next = declaration();
-      const encoded = JSON.stringify(next);
-      if (encoded === sentSubscription) return;
-      const request = { selectionId: next.selectionId };
-      postingSelection = request;
-      try {
-        const response = await send(API.streamUpdate.path({ streamId: id }), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: encoded,
-          cache: "no-store",
-          signal: active.signal,
-        });
-        if (stopped || streamId !== id || generation !== mine || active.signal.aborted) return;
-        if (response.status === 404) { open(); return; }
-        if (!response.ok) throw new StreamHttpError(response.status, `The stream rejected the change with HTTP ${response.status}`);
-        sentSubscription = encoded;
-      } catch (error) {
-        if (stopped || streamId !== id || generation !== mine) return;
-        failed(active.signal.aborted ? active.signal.reason : error);
-        open();
-      } finally {
-        if (postingSelection === request) postingSelection = null;
-      }
-    });
+  function suspend() {
+    generation++;
+    controller?.abort();
+    controller = null;
+    clearWatchdog();
+    clearRecovery();
+    if (retry) clearTimeout(retry);
+    retry = null;
+    options.onActivity?.(false);
   }
-
-  const wake = () => { if (!stopped && state !== "open") open(); };
-  const visible = () => { if (document.visibilityState === "visible") wake(); };
+  let wakeQueued = false;
+  const wake = () => {
+    if (!runnable() || wakeQueued) return;
+    wakeQueued = true;
+    queueMicrotask(() => { wakeQueued = false; if (runnable()) { failures = 0; pushFailures = 0; open(); } });
+  };
+  const visible = () => {
+    if (document.visibilityState === "visible") wake();
+    else if (options.suspendWhenHidden) suspend();
+  };
   const listen = options.listen ?? true;
 
   return {
@@ -361,6 +383,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       failures = 0;
       if (listen) {
         window.addEventListener("online", wake);
+        window.addEventListener("pi-network-changed", wake);
         window.addEventListener("pageshow", wake);
         window.addEventListener("focus", wake);
         document.addEventListener("visibilitychange", visible);
@@ -369,16 +392,10 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     },
     stop() {
       stopped = true;
-      generation++;
-      controller?.abort();
-      controller = null;
-      clearWatchdog();
-      clearRecovery();
-      if (retry) clearTimeout(retry);
-      retry = null;
-      streamId = "";
+      suspend();
       if (listen) {
         window.removeEventListener("online", wake);
+        window.removeEventListener("pi-network-changed", wake);
         window.removeEventListener("pageshow", wake);
         window.removeEventListener("focus", wake);
         document.removeEventListener("visibilitychange", visible);
@@ -386,39 +403,29 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     },
     update(change) {
       const previous = streamWants(subscription);
-      const previousSession = subscription.session;
-      const previousViewing = subscription.viewing;
+      if (Object.entries(change).every(([key, value]) => subscription[key as keyof StreamSubscription] === value)) return;
       subscription = { ...subscription, ...change };
-      if (previousSession !== subscription.session || (!previousViewing && subscription.viewing)) beginSelection();
       if (stopped) return;
-      if (subscription.session && subscription.viewing) {
-        if (previousSession !== subscription.session || !previousViewing) beginRecovery();
-      } else if (streamId && recovering) recovered();
       for (const resource of streamWants(subscription)) {
         if (previous.includes(resource)) continue;
         const held = replica.get(resource);
         if (held && isStreamSnapshot(resource, held.value)) options.onEvent(held.value);
       }
-      if (previousSession !== subscription.session && postingSelection?.selectionId !== undefined
-        && postingSelection.selectionId !== subscription.selectionId) {
-        // A superseded selection POST can stall indefinitely. Replace its stream rather
-        // than race two updates against the same server-side subscription.
-        open();
-      } else if (streamId) post();
+      open();
     },
     remember(change) { subscription = { ...subscription, ...change }; },
-    reconnect() { failures = 0; open(); },
+    reconnect() { failures = 0; pushFailures = 0; open(); },
     subscription: () => ({ ...subscription }),
     invalidate(resource) {
       replica.forget(resource);
-      if (!stopped) post();
+      open();
     },
     restore(snapshot) {
       const resource = streamResource(snapshot);
       validateStreamSnapshot(resource, snapshot);
       if (replica.get(resource)) return;
       replica.seed(resource, revisionOf(snapshot), snapshot);
-      if (!stopped && streamWants(subscription).includes(resource)) post();
+      if (streamWants(subscription).includes(resource)) open();
     },
     state: () => state,
   };

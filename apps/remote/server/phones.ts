@@ -61,6 +61,14 @@ export class PhoneBroker {
       if (!connection.closed) this.hooks.ready?.(connection.device);
       return;
     }
+    if (connection.device && frame.type === "heartbeat") {
+      const registered = this.devices.get(connection.device.id);
+      if (registered?.connection !== connection) { this.close(connection, 1008, "Phone connection replaced"); return; }
+      registered.lastSeen = Date.now();
+      try { if (connection.transport.send(JSON.stringify({ type: "ready" })) === 0) this.close(connection, 1011, "Phone send failed"); }
+      catch { this.close(connection, 1011, "Phone send failed"); }
+      return;
+    }
     if (connection.device && frame.type === "overlay.message") { this.overlayMessage(connection, connection.device, frame); return; }
     if (!connection.device || frame.type !== "result" || typeof frame.id !== "string" || typeof frame.ok !== "boolean"
       || (!frame.ok && (!object(frame.error) || typeof frame.error.code !== "string" || typeof frame.error.message !== "string"))

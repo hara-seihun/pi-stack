@@ -41,7 +41,9 @@ interface RemoteBridge {
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
   notificationTarget?(): Promise<{ environment?: string; sessionId?: string; user?: string }>;
   notificationThread?(options: { user: string; environment: string; sessionId: string }): Promise<void>;
-  notificationFeed?(options: { user: string; environment: string; name: string; feed: IdleNotificationFeed }): Promise<void>;
+  notificationCursor?(options: { user: string; session: string; environment: string }): Promise<{ after: number | null }>;
+  notificationLease?(options: { user: string; session: string; environment: string; state: "healthy" | "released" }): Promise<{ accepted: boolean; after: number | null }>;
+  notificationFeed?(options: { user: string; session: string; environment: string; name: string; feed: IdleNotificationFeed; replay: boolean; after: number | null }): Promise<{ after: number | null } | void>;
   checkAppUpdate?(): Promise<AppUpdateCheck>;
   installAppUpdate?(): Promise<AppUpdateInstall>;
   webReady?(): Promise<void>;
@@ -109,6 +111,8 @@ export const remote: RemoteBridge = !nativePlatform
         notificationTarget: () => capacitor.nativePromise("KenanRemote", "notificationTarget", {}),
         notificationThread: (options) => capacitor.nativePromise("KenanRemote", "notificationThread", options),
         notificationFeed: (options) => capacitor.nativePromise("KenanRemote", "notificationFeed", options),
+        notificationCursor: (options) => capacitor.nativePromise("KenanRemote", "notificationCursor", options),
+        notificationLease: (options) => capacitor.nativePromise("KenanRemote", "notificationLease", options),
         checkAppUpdate: () => capacitor.nativePromise("KenanRemote", "checkAppUpdate", {}),
         installAppUpdate: () => capacitor.nativePromise("KenanRemote", "installAppUpdate", {}),
         webReady: () => capacitor.nativePromise("KenanRemote", "webReady", {}),
@@ -283,6 +287,24 @@ async function getState(): Promise<EnvironmentState> {
   const selected = endpoints.find(endpoint => endpoint.id === selectedId) ?? endpoints[0]!;
   current = await verifiedState(selected, endpoints);
   return current;
+}
+
+export async function pinnedFetch(endpoint: Endpoint, user: string, path: string, init: RequestInit): Promise<Response> {
+  const revision = generation;
+  const selected = await getState();
+  if (revision !== generation || user !== auth.user || selected.id !== endpoint.id || selected.baseUrl !== endpoint.baseUrl) {
+    throw new DOMException("Request owner changed", "AbortError");
+  }
+  const signal = init.signal ? AbortSignal.any([init.signal, personRequests.signal]) : personRequests.signal;
+  signal.throwIfAborted();
+  const headers = auth.headers(init.headers);
+  const token = auth.session;
+  const settle = beginRequest(init.method ?? "GET", path);
+  try {
+    const response = await abortable(browserFetch(new URL(`${endpoint.baseUrl}${path}`, location.href), { ...init, headers, signal, redirect: "error" }), signal);
+    if (response.status === 423) auth.clear(token);
+    return response;
+  } finally { settle(); }
 }
 
 function apiPath(input: RequestInfo | URL) {

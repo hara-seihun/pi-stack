@@ -1,4 +1,8 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { roomFeed } from "./room-feed";
+import { consumeRoomFeed, type RoomRevisions } from "../shared/room-sync";
+import { ReconcilePublisher } from "../shared/reconcile";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { validateThreadObservation } from "../shared/state-validation";
@@ -14,8 +18,9 @@ interface StoredRoom extends Room {
   pendingQuestions: number;
   questionIds: string;
 }
-interface Inbox { current: number; unreadCount: number }
-type Transport = (owner: string, actor: string, path: string, method: string, body?: unknown) => Promise<Response>;
+interface Inbox { current: number; unreadCount: number; received: number }
+type Transport = (owner: string, actor: string, path: string, method: string, body?: unknown, signal?: AbortSignal) => Promise<Response>;
+const revision = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const fail = (error: string, status = 400) => Response.json({ error }, { status });
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
 
@@ -25,6 +30,82 @@ export class Rooms {
   private busy = false;
   private locks = new Map<string, Promise<unknown>>();
   private statuses = new Map<string, RoomActivity>();
+  private snapshotRevisions = new Map<string, string>();
+  private publisher = new ReconcilePublisher({ maxEntries: 128, maxBytes: 64 * 1024 * 1024, maxValueBytes: 32 * 1024 * 1024, maxHistoryPerResource: 2 });
+  private listeners = new Set<() => void>();
+  private followers = new Map<string, AbortController>();
+  private started = false;
+  private closed = false;
+  private lifetime = new AbortController();
+  private notifyChanges() { for (const listener of this.listeners) listener(); }
+  private revisions(actor: string): RoomRevisions {
+    const inbox = this.inbox(actor);
+    const rooms = this.rows().filter(room => room.ready && room.members.some(member => member.user === actor));
+    const directory = revision({ rooms: rooms.map(room => this.visible(room, actor, inbox.get(room.id)!)), people: this.people() });
+    const snapshots = Object.fromEntries(rooms.map(room => [room.id, this.snapshotRevisions.get(room.id) ?? revision({ unknown: room.id })]));
+    return { directory, rooms: snapshots, cursor: revision({ directory, rooms: snapshots }) };
+  }
+  start() {
+    if (this.started || this.closed) return;
+    this.started = true;
+    for (const room of this.rows().filter(room => room.ready && room.owner === ROOM_CUSTODIAN)) this.follow(room);
+  }
+  private follow(room: StoredRoom) {
+    if (!this.started || this.closed || this.followers.has(room.id)) return;
+    const controller = new AbortController();
+    this.followers.set(room.id, controller);
+    const signal = controller.signal;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let scheduled: ReturnType<typeof setTimeout> | undefined;
+    let dirty = false;
+    let refreshing = false;
+    let failures = 0;
+    let refreshFailures = 0;
+    const refresh = async () => {
+      scheduled = undefined;
+      if (signal.aborted || refreshing) return;
+      dirty = false; refreshing = true;
+      try {
+        const response = await this.serialized(room.id, () => this.closed ? Promise.resolve(fail("Rooms stopped", 503)) : this.refresh(this.get(room.id)!, room.members[0]!.user));
+        if (response.ok) refreshFailures = 0;
+        else { refreshFailures++; dirty = true; }
+        await this.deliver();
+      } catch (cause) {
+        if (!signal.aborted) {
+          this.statusFailure(room.id, `Room reconciliation failed: ${String(cause)}`);
+          refreshFailures++; dirty = true;
+        }
+      } finally {
+        refreshing = false;
+        if (dirty && !signal.aborted) scheduled = setTimeout(() => void refresh(), Math.min(30_000, 1_000 * 2 ** Math.min(refreshFailures, 5)));
+      }
+    };
+    const changed = () => {
+      dirty = true;
+      if (!refreshing && scheduled === undefined) scheduled = setTimeout(() => void refresh(), 1_000);
+    };
+    const connect = async () => {
+      try {
+        const response = await this.transport(room.owner, room.members[0]!.user, `/v1/room-owner/${room.id}/changes`, "GET", undefined, signal);
+        if (!response.ok || !response.body) {
+          await response.body?.cancel();
+          throw new Error(`Room change feed returned HTTP ${response.status}`);
+        }
+        await consumeRoomFeed(response.body, value => {
+          if (!value || typeof value !== "object" || (value as any).changed !== true || typeof (value as any).authorized !== "boolean") throw new Error("Invalid room change event");
+          if (!(value as any).authorized) throw new Error("Room owner membership revoked");
+          failures = 0; changed();
+        });
+        if (!signal.aborted) throw new Error("Room change feed ended");
+      } catch (cause) {
+        if (signal.aborted) return;
+        this.statusFailure(room.id, String(cause));
+        retry = setTimeout(() => void connect(), Math.min(30_000, 1_000 * 2 ** Math.min(failures++, 5)));
+      }
+    };
+    signal.addEventListener("abort", () => { clearTimeout(retry); clearTimeout(scheduled); }, { once: true });
+    void connect();
+  }
   constructor(path: string, private people: () => RoomMember[], private transport: Transport) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
@@ -55,7 +136,15 @@ export class Rooms {
     }
     for (const file of [`${path}-wal`, `${path}-shm`]) if (existsSync(file)) chmodSync(file, 0o640);
   }
-  close() { this.db.close(); }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const follower of this.followers.values()) follower.abort();
+    this.followers.clear();
+    this.lifetime.abort();
+    this.listeners.clear();
+    this.db.close();
+  }
   private rows(): StoredRoom[] {
     return (this.db.query("SELECT * FROM rooms ORDER BY rowid").all() as any[]).map(row => ({ ...row, members: JSON.parse(row.members) }));
   }
@@ -64,15 +153,15 @@ export class Rooms {
     return row ? { ...row, members: JSON.parse(row.members) } : undefined;
   }
   private inbox(actor: string, id?: string): Map<string, Inbox> {
-    const rows = this.db.query(`SELECT r.id,COALESCE(i.current,1) AS current,COALESCE(i.received-i.readReceived,0) AS unreadCount
+    const rows = this.db.query(`SELECT r.id,COALESCE(i.current,1) AS current,COALESCE(i.received-i.readReceived,0) AS unreadCount,COALESCE(i.received,0) AS received
       FROM rooms r LEFT JOIN room_inbox i ON i.room=r.id AND i.person=?
       ${id ? "WHERE r.id=?" : ""}`).all(...(id ? [actor, id] : [actor])) as (Inbox & { id: string })[];
     return new Map(rows.map(row => [row.id, row]));
   }
   private visible(room: StoredRoom, actor: string, inbox = this.inbox(actor, room.id).get(room.id)!): Room {
     return { id: room.id, title: room.title, members: room.members, current: inbox.current !== 0,
-      updatedAt: room.updatedAt, state: room.state, unreadCount: inbox.unreadCount, pendingQuestions: room.pendingQuestions,
-      ...(this.statuses.get(room.id) ?? this.statusFailure(room.id, "Room owner status has not been retrieved")) };
+      updatedAt: room.updatedAt, state: room.state, unreadCount: inbox.unreadCount, readThrough: inbox.received, pendingQuestions: room.pendingQuestions,
+      ...(this.statuses.get(room.id) ?? { activity: "status_error" as const, activityDetail: "Room owner status has not been retrieved", error: "Room owner status has not been retrieved", activeTools: [] }) };
   }
   private setCurrent(id: string, actor: string, current: boolean) {
     this.db.query("INSERT INTO room_inbox(room,person,current) VALUES(?,?,?) ON CONFLICT(room,person) DO UPDATE SET current=excluded.current").run(id, actor, Number(current));
@@ -104,24 +193,33 @@ export class Rooms {
   private statusFailure(id: string, detail: string): RoomActivity {
     const status: RoomActivity = { activity: "status_error", activityDetail: detail, error: detail, activeTools: [] };
     this.statuses.set(id, status);
+    this.snapshotRevisions.set(id, revision(status));
+    this.notifyChanges();
     return status;
   }
   private async refresh(room: StoredRoom, actor: string): Promise<Response> {
+    if (this.closed) return fail("Rooms stopped", 503);
     if (room.owner !== ROOM_CUSTODIAN) {
       this.statusFailure(room.id, "Room status requires custody migration into the unprivileged room runtime");
       return fail("This room needs custody migration into the unprivileged room runtime", 503);
     }
     try {
-      const response = await this.transport(room.owner, actor, `/v1/room-owner/${room.id}`, "GET");
+      const response = await this.transport(room.owner, actor, `/v1/room-owner/${room.id}`, "GET", undefined, AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(10_000)]));
+      if (this.closed) return fail("Rooms stopped", 503);
       if (!response.ok) {
         const detail = `Room owner status retrieval failed: HTTP ${response.status}`;
+        await response.body?.cancel();
         this.statusFailure(room.id, detail);
         return fail(detail, response.status);
       }
       const snapshot = await response.json() as RoomSnapshot;
+      if (this.closed) return fail("Rooms stopped", 503);
       this.reconcile(room, snapshot);
+      this.snapshotRevisions.set(room.id, revision(snapshot));
+      this.notifyChanges();
       return Response.json({ ...snapshot, room: this.visible(this.get(room.id)!, actor) });
     } catch {
+      if (this.closed) return fail("Rooms stopped", 503);
       this.statusFailure(room.id, "Room owner status retrieval failed");
       return fail("Room owner status retrieval failed", 503);
     }
@@ -144,10 +242,43 @@ export class Rooms {
     try { return await next; } finally { if (this.locks.get(id) === next) this.locks.delete(id); }
   }
   async handle(req: Request, actor: string, senderKind: "person" | "agent" = "person"): Promise<Response> {
+    if (this.closed) return fail("Rooms stopped", 503);
+    if (req.signal.aborted) return fail("Room request ended", 423);
+    const response = await this.handleRequest(req, actor, senderKind);
+    if (req.signal.aborted) return fail("Room request ended", 423);
+    if (req.method !== "GET") this.notifyChanges();
     const url = new URL(req.url);
+    if (req.method !== "GET" || !response.ok || url.searchParams.get("sync") !== "1" || url.pathname.endsWith("/changes")) return response;
+    const resource = url.pathname;
+    const key = `${actor}:${resource}`;
+    try {
+      const value = await response.json();
+      if (req.signal.aborted) return fail("Room request ended", 423);
+      this.publisher.publish(key, value);
+      const frame = this.publisher.reconcile(key, url.searchParams.get("have"));
+      return frame ? Response.json({ ...frame, resource }) : new Response(null, { status: 304 });
+    } catch (cause) { return fail(`Room synchronization failed: ${String(cause)}`, 503); }
+  }
+  private async handleRequest(req: Request, actor: string, senderKind: "person" | "agent"): Promise<Response> {
+    const url = new URL(req.url);
+    if (url.pathname === "/v1/rooms/changes" && req.method === "GET") {
+      return roomFeed(AbortSignal.any([req.signal, this.lifetime.signal]), send => {
+        let cursor = url.searchParams.get("cursor");
+        const publish = () => {
+          if (this.closed) return;
+          const current = this.revisions(actor);
+          if (cursor === current.cursor) return;
+          cursor = current.cursor;
+          send(current);
+        };
+        this.listeners.add(publish);
+        publish();
+        return () => { this.listeners.delete(publish); };
+      });
+    }
     if (url.pathname === "/v1/rooms" && req.method === "GET") {
       const visible = this.rows().filter(room => room.ready && room.members.some(member => member.user === actor));
-      await Promise.all(visible.map(room => this.serialized(room.id, () => this.refresh(this.get(room.id)!, actor))));
+      await Promise.all(visible.filter(room => !this.statuses.has(room.id)).map(room => this.serialized(room.id, () => this.refresh(this.get(room.id)!, actor))));
       const inbox = this.inbox(actor);
       return Response.json({ rooms: visible.map(room => this.visible(this.get(room.id)!, actor, inbox.get(room.id)!)), people: this.people() });
     }
@@ -174,6 +305,7 @@ export class Rooms {
           })();
         }
         await this.refresh(this.get(id)!, actor);
+        this.follow(this.get(id)!);
         void this.deliver();
         return Response.json({ room: this.visible(this.get(id)!, actor) }, { status: 201 });
       });
@@ -185,9 +317,15 @@ export class Rooms {
       let room = this.get(id);
       if (!room?.ready || !room.members.some(member => member.user === actor)) return fail("Room not found", 404);
       if ((action === "close" || action === "open" || action === "read") && req.method === "POST") {
-        if (action === "read") this.db.query(`INSERT INTO room_inbox(room,person) VALUES(?,?)
-          ON CONFLICT(room,person) DO UPDATE SET readReceived=room_inbox.received`).run(id, actor);
-        else this.setCurrent(id, actor, action === "open");
+        if (action === "read") {
+          if (!body || typeof body !== "object" || Array.isArray(body)) return fail("Room read request must be an object");
+          if (body.through !== undefined && (!Number.isSafeInteger(body.through) || body.through < 0)) return fail("Invalid room read cursor");
+          const received = this.inbox(actor, id).get(id)!.received;
+          if (body.through !== undefined && body.through > received) return fail("Room read cursor is ahead of inbox");
+          const through = body.through === undefined ? received : body.through;
+          this.db.query(`INSERT INTO room_inbox(room,person,readReceived) VALUES(?,?,?)
+            ON CONFLICT(room,person) DO UPDATE SET readReceived=MAX(room_inbox.readReceived,excluded.readReceived)`).run(id, actor, through);
+        } else this.setCurrent(id, actor, action === "open");
         return Response.json({ room: this.visible(room, actor) });
       }
       if (room.owner !== ROOM_CUSTODIAN) return fail("This room needs custody migration into the unprivileged room runtime", 503);
@@ -254,21 +392,23 @@ export class Rooms {
   }
   private delivery: Promise<void> | null = null;
   private deliver(): Promise<void> {
+    if (this.closed) return Promise.resolve();
     if (this.delivery) return this.delivery;
     this.delivery = (async () => {
       const rows = this.db.query("SELECT * FROM deliveries WHERE delivered=0 ORDER BY time LIMIT 100").all() as any[];
       await Promise.all(rows.map(async row => {
         try {
           const response = await this.transport(row.person, row.person, `/v1/room-owner/${row.room}/notify`, "POST", { receiptId: row.receipt, title: row.title, body: row.body, time: row.time });
-          if (response.ok) this.db.query("UPDATE deliveries SET delivered=1 WHERE receipt=? AND person=?").run(row.receipt, row.person);
+          if (response.ok && !this.closed) this.db.query("UPDATE deliveries SET delivered=1 WHERE receipt=? AND person=?").run(row.receipt, row.person);
           else console.warn(`Room notice ${row.receipt} for ${row.person}: HTTP ${response.status}; retained for retry`);
         } catch (error) { console.warn(`Room notice ${row.receipt} for ${row.person}: ${String(error)}; retained for retry`); }
       }));
     })().finally(() => { this.delivery = null; });
     return this.delivery;
   }
+  retryNotifications(): Promise<void> { return this.deliver(); }
   async tick(): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || this.closed) return;
     this.busy = true;
     try {
       await Promise.all(this.rows().filter(room => room.ready && room.owner === ROOM_CUSTODIAN).map(room => this.serialized(room.id, () => {

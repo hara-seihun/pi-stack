@@ -36,6 +36,7 @@ export function entryFromHead(head: TranscriptItemHead, bodyLoaded = false): Con
     kind: head.kind,
     label: entryLabel(head),
     itemId: head.id,
+    seq: head.seq,
     size: head.size,
     bodyLoaded,
     responseMetrics: metrics,

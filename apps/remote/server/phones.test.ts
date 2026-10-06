@@ -12,6 +12,33 @@ function result(broker: PhoneBroker, connection: PhoneConnection, id: string, pa
 }
 
 describe("phone broker custody", () => {
+  test("heartbeat maintains the same connection without rediscovering grants or replaying commands", async () => {
+    let announcements = 0;
+    const broker = new PhoneBroker({ ready: () => announcements++ });
+    const phone = connect(broker);
+    const pending = broker.execute("device-1", { command: "status" });
+    const command = phone.sent[1];
+    for (let i = 0; i < 3; i++) broker.receive(phone.connection, JSON.stringify({ type: "heartbeat" }));
+    expect(announcements).toBe(1);
+    expect(phone.sent.slice(2)).toEqual([{ type: "ready" }, { type: "ready" }, { type: "ready" }]);
+    expect(phone.connection.pending.size).toBe(1);
+    expect(broker.online("device-1")).toBe(true);
+    expect(phone.closes).toEqual([]);
+    result(broker, phone.connection, command.id);
+    expect((await pending).ok).toBe(true);
+    broker.stop();
+  });
+
+  test("heartbeat cannot enroll an unannounced phone", () => {
+    const broker = new PhoneBroker();
+    const closes: number[] = [];
+    const connection = broker.open({ send() {}, close(code) { closes.push(code); } });
+    broker.receive(connection, JSON.stringify({ type: "heartbeat" }));
+    expect(closes).toEqual([1008]);
+    expect(broker.list().phones).toEqual([]);
+    broker.stop();
+  });
+
   test("request results correlate only on their owning connection; refreshed grants preserve identity", async () => {
     const broker = new PhoneBroker(); const a = connect(broker); const b = connect(broker, "device-2");
     const pending = broker.execute("device-1", { command: "ui.tap", args: { x: 1, y: 2 } });

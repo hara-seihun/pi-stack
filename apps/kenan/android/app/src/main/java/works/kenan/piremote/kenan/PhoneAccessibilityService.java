@@ -13,7 +13,6 @@ import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.util.Base64;
-import java.io.ByteArrayOutputStream;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -28,7 +27,11 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     private long snapshot;
     private int remainingText;
     private boolean truncated;
-    private String foregroundPackage;
+    private String foregroundPackage, foregroundCandidate;
+    private int candidateWindow;
+    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final java.util.concurrent.ExecutorService screenshots = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private boolean captureInFlight;
     @Override protected void onServiceConnected() { current = this; ensureOverlay(); PhoneControlService.refresh(); }
     private KenanOverlay ensureOverlay() {
         KenanOverlay overlay = SharedOverlay.phone(this);
@@ -38,19 +41,25 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     void overlayAck(JSONObject frame) { if (SharedOverlay.current() != null) SharedOverlay.current().ack(frame); }
     void overlayDisconnected() { if (SharedOverlay.current() != null) SharedOverlay.current().disconnected(); }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (isOverlayWindow(event.getWindowId())) return;
-        ensureOverlay();
-        for (AccessibilityWindowInfo window : getWindows()) if (window.getId() == event.getWindowId()
-            && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return;
-        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        if (SharedOverlay.overlayWindow(event.getWindowId())) return;
+        int type = event.getEventType();
+        if (type == AccessibilityEvent.TYPE_WINDOWS_CHANGED || type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            SharedOverlay.requestRefresh(false);
+        if (SharedOverlay.inputMethodWindow(event.getWindowId())) return;
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             CharSequence name = event.getPackageName();
-            if (name != null && !getPackageName().contentEquals(name)) {
-                foregroundPackage = name.toString();
-                if (SharedOverlay.current() != null) SharedOverlay.current().foreground(foregroundPackage);
-            }
+            if (name != null) { foregroundCandidate = name.toString(); candidateWindow = event.getWindowId(); }
         }
         if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
             || event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) clearNodes();
+    }
+    void reconcileForeground() {
+        if (foregroundCandidate == null) return;
+        if (SharedOverlay.applicationWindow(candidateWindow)) {
+            foregroundPackage = foregroundCandidate;
+            if (SharedOverlay.current() != null) SharedOverlay.current().foreground(foregroundPackage);
+        }
+        foregroundCandidate = null;
     }
     private boolean isOverlayWindow(int id) {
         for (AccessibilityWindowInfo window : getWindows()) if (window.getId() == id)
@@ -63,10 +72,10 @@ public final class PhoneAccessibilityService extends AccessibilityService {
             active.clearNodes(); if (SharedOverlay.current() != null) SharedOverlay.current().resetSession();
         });
     }
-    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); ensureOverlay(); }
+    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); SharedOverlay.requestRefresh(false); }
     @Override public void onInterrupt() { clearNodes(); closeOverlay(); }
     private void closeOverlay() { SharedOverlay.detach(this); }
-    @Override public void onDestroy() { if (current == this) current = null; clearNodes(); closeOverlay(); PhoneControlService.refresh(); super.onDestroy(); }
+    @Override public void onDestroy() { if (current == this) current = null; screenshots.shutdown(); clearNodes(); closeOverlay(); PhoneControlService.refresh(); super.onDestroy(); }
 
     private void clearNodes() { for (AccessibilityNodeInfo node : nodes.values()) node.recycle(); nodes.clear(); }
     void dispatch(String command, JSONObject args, long deadline, BooleanSupplier authorized, Consumer<PhoneResult> done) {
@@ -163,7 +172,8 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                             if (!authorized.getAsBoolean() || SharedOverlay.current() != visual || System.currentTimeMillis() >= deadline) {
                                 visual.restoreCapture(); done.accept(PhoneResult.error("expired", "Screenshot authorization or deadline expired")); return;
                             }
-                            try { capture(result -> { visual.restoreCapture(); done.accept(result); }); }
+                            try { capture(deadline, () -> authorized.getAsBoolean() && current == PhoneAccessibilityService.this
+                                && SharedOverlay.current() == visual, result -> { visual.restoreCapture(); done.accept(result); }); }
                             catch (RuntimeException failure) { visual.restoreCapture(); done.accept(PhoneResult.error("unavailable", failure.getMessage())); }
                         }));
                 };
@@ -232,26 +242,53 @@ public final class PhoneAccessibilityService extends AccessibilityService {
         remainingText -= length;
         return value.subSequence(0, length).toString();
     }
-    private void capture(Consumer<PhoneResult> done) {
+    private void capture(long deadline, BooleanSupplier authorized, Consumer<PhoneResult> done) {
         if (Build.VERSION.SDK_INT < 30) { done.accept(PhoneResult.error("unsupported", "Accessibility screenshots require Android 11 or newer")); return; }
-        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+        if (captureInFlight) { done.accept(PhoneResult.error("rate_limited", "A screenshot is already being encoded")); return; }
+        captureInFlight = true;
+        Consumer<PhoneResult> complete = result -> main.post(() -> {
+            captureInFlight = false;
+            done.accept(authorized.getAsBoolean() && System.currentTimeMillis() < deadline ? result
+                : PhoneResult.error("expired", "Screenshot authorization or deadline expired"));
+        });
+        try { takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
             @Override public void onFailure(int code) {
-                done.accept(PhoneResult.error(code == 3 ? "rate_limited" : code == 6 ? "protected_content" : "unavailable", "Android screenshot error " + code));
+                complete.accept(PhoneResult.error(code == 3 ? "rate_limited" : code == 6 ? "protected_content" : "unavailable", "Android screenshot error " + code));
             }
             @Override public void onSuccess(ScreenshotResult screenshot) {
-                try (HardwareBuffer buffer = screenshot.getHardwareBuffer()) {
-                    Bitmap hardware = Bitmap.wrapHardwareBuffer(buffer, screenshot.getColorSpace());
-                    if (hardware == null) { done.accept(PhoneResult.error("unavailable", "Android returned no screenshot bitmap")); return; }
-                    Bitmap bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false); hardware.recycle();
-                    if (bitmap == null) { done.accept(PhoneResult.error("unavailable", "Could not copy screenshot")); return; }
-                    try {
-                        ByteArrayOutputStream bytes = new ByteArrayOutputStream(); bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes);
-                        if (bytes.size() > 10 * 1024 * 1024) { done.accept(PhoneResult.error("too_large", "Screenshot exceeds 10 MiB")); return; }
-                        done.accept(PhoneResult.success(new JSONObject().put("mime", "image/png")
-                            .put("base64", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)).put("width", bitmap.getWidth()).put("height", bitmap.getHeight())));
-                    } finally { bitmap.recycle(); }
-                } catch (Exception failure) { done.accept(PhoneResult.error("unavailable", "Could not encode screenshot: " + failure.getMessage())); }
+                HardwareBuffer buffer = screenshot.getHardwareBuffer();
+                try { screenshots.execute(() -> complete.accept(encodeScreenshot(buffer, screenshot.getColorSpace(), deadline, authorized))); }
+                catch (java.util.concurrent.RejectedExecutionException stopped) {
+                    buffer.close(); complete.accept(PhoneResult.error("disconnected", "Screenshot service stopped"));
+                }
             }
-        });
+        }); } catch (RuntimeException failure) { captureInFlight = false; throw failure; }
+    }
+    private PhoneResult encodeScreenshot(HardwareBuffer buffer, android.graphics.ColorSpace colorSpace,
+        long deadline, BooleanSupplier authorized) {
+        try (buffer) {
+            if (!authorized.getAsBoolean() || System.currentTimeMillis() >= deadline)
+                return PhoneResult.error("expired", "Screenshot authorization or deadline expired");
+            if ((long) buffer.getWidth() * buffer.getHeight() > 16_000_000)
+                return PhoneResult.error("too_large", "Screenshot exceeds 16 million pixels");
+            Bitmap hardware = Bitmap.wrapHardwareBuffer(buffer, colorSpace);
+            if (hardware == null) return PhoneResult.error("unavailable", "Android returned no screenshot bitmap");
+            Bitmap bitmap;
+            try { bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false); } finally { hardware.recycle(); }
+            if (bitmap == null) return PhoneResult.error("unavailable", "Could not copy screenshot");
+            try {
+                BoundedImageBytes bytes = new BoundedImageBytes(10 * 1024 * 1024);
+                boolean compressed = bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes);
+                if (bytes.exceeded()) return PhoneResult.error("too_large", "Screenshot exceeds 10 MiB");
+                if (!compressed) return PhoneResult.error("unavailable", "PNG encoder refused screenshot");
+                if (!authorized.getAsBoolean() || System.currentTimeMillis() >= deadline)
+                    return PhoneResult.error("expired", "Screenshot authorization or deadline expired");
+                return PhoneResult.success(new JSONObject().put("mime", "image/png")
+                    .put("base64", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP))
+                    .put("width", bitmap.getWidth()).put("height", bitmap.getHeight()));
+            } finally { bitmap.recycle(); }
+        } catch (Exception failure) {
+            return PhoneResult.error("unavailable", "Could not encode screenshot: " + failure.getMessage());
+        }
     }
 }

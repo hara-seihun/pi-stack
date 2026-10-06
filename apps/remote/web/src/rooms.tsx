@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, piFetch } from "./client";
+import { api } from "./client";
+import { watchRoomRevision, RoomResource, RoomResourceError } from "./room-sync";
 import type { Room, RoomMember, RoomSnapshot } from "../../shared/rooms";
 import { ChatMessage, agentAvatar } from "./chat-message";
 import { Composer } from "./Composer";
@@ -19,28 +20,18 @@ export function useRooms(enabled: boolean) {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [people, setPeople] = useState<RoomMember[]>([]);
   const [error, setError] = useState("");
+  const resource = useMemo(() => new RoomResource<{ rooms: Room[]; people: RoomMember[] }>("/v1/rooms"), [enabled]);
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    if (!enabled) return;
-    const response = await piFetch("/v1/rooms", { signal, cache: "no-store" });
-    if (!response.ok) throw new Error(`Rooms returned HTTP ${response.status}`);
-    const value = await response.json() as { rooms: Room[]; people: RoomMember[] };
+    if (!enabled || document.visibilityState !== "visible") return;
+    const value = await resource.read(signal);
+    if (value === null) { if (!signal?.aborted) setError(""); return; }
     stateArray(value.rooms, "Room directory").forEach(validateThreadObservation);
+    if (signal?.aborted) return;
     setRooms(value.rooms); setPeople(value.people); setError("");
-  }, [enabled]);
+  }, [enabled, resource]);
   useEffect(() => {
-    if (!enabled) { setRooms([]); setPeople([]); return; }
-    const controller = new AbortController();
-    let running = false;
-    const load = async () => {
-      if (running || controller.signal.aborted) return;
-      running = true;
-      try { await refresh(controller.signal); } catch (cause) { if (!controller.signal.aborted) setError(String(cause)); }
-      finally { running = false; }
-    };
-    void load();
-    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 2_000);
-    window.addEventListener("focus", load);
-    return () => { controller.abort(); clearInterval(timer); window.removeEventListener("focus", load); };
+    if (!enabled) { setRooms([]); setPeople([]); setError(""); return; }
+    return watchRoomRevision(value => value.directory, refresh, setError);
   }, [enabled, refresh]);
   return useMemo(() => ({ rooms, people, error, refresh }), [rooms, people, error, refresh]);
 }
@@ -126,6 +117,7 @@ function RoomQuestion({ question, roomId, onAnswered }: { question: NonNullable<
 
 export function RoomConversation({ id, people, onBack, onRefresh, showBack = true, showIdentity = true }: { id: string; people: RoomMember[]; onBack(): void; onRefresh(): Promise<void>; showBack?: boolean; showIdentity?: boolean }) {
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
+  const resource = useMemo(() => new RoomResource<RoomSnapshot>(`/v1/rooms/${encodeURIComponent(id)}`), [id]);
   const draftKey = appStorageKey(`pi-remote-room-draft:${window.PiRemotePerson.get()}:${id}`);
   const [saved] = useState(() => {
     try {
@@ -139,7 +131,7 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
   const [text, setText] = useState(saved.text);
   const [error, setError] = useState(saved.error);
   const [details, setDetails] = useState(false);
-  const readMarker = useRef<string | null>(null);
+  const readMarker = useRef<number | null>(null);
   const directoryRefresh = useRef(onRefresh);
   directoryRefresh.current = onRefresh;
   const [pending, setPending] = useState(false);
@@ -147,34 +139,26 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
   const [members, setMembers] = useState<string[]>([]);
   const [receipt, setReceipt] = useState<string | null>(saved.receipt);
   const load = useCallback(async (signal?: AbortSignal) => {
-    const response = await piFetch(`/v1/rooms/${encodeURIComponent(id)}`, { signal, cache: "no-store" });
-    if (!response.ok) throw new Error(`Room returned HTTP ${response.status}`);
-    const value = await response.json() as RoomSnapshot;
+    if (document.visibilityState !== "visible") return;
+    let value: RoomSnapshot | null;
+    try { value = await resource.read(signal); }
+    catch (cause) {
+      if (!signal?.aborted && cause instanceof RoomResourceError && (cause.status === 403 || cause.status === 404)) setSnapshot(null);
+      throw cause;
+    }
+    if (value === null) { if (!signal?.aborted) setError(""); return; }
     validateThreadObservation(value);
     if (signal?.aborted) return;
-    setSnapshot(value);
-    const marker = value.messages.at(-1)?.id ?? "empty";
-    if (document.visibilityState === "visible" && readMarker.current !== marker) {
-      await api("POST", `/v1/rooms/${id}/read`, {});
+    setSnapshot(value); setError("");
+    const marker = value.room.readThrough;
+    if (marker !== undefined && (value.room.unreadCount ?? 0) > 0 && document.visibilityState === "visible" && readMarker.current !== marker) {
+      await api("POST", `/v1/rooms/${id}/read`, { through: marker });
       if (signal?.aborted) return;
       readMarker.current = marker;
-      await directoryRefresh.current();
     }
-  }, [id]);
+  }, [id, resource]);
   useEffect(() => {
-    const controller = new AbortController();
-    let running = false;
-    const refresh = async () => {
-      if (running || controller.signal.aborted) return;
-      running = true;
-      try { await load(controller.signal); } catch (cause) { if (!controller.signal.aborted) setError(String(cause)); }
-      finally { running = false; }
-    };
-    void refresh();
-    const timer = setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 1_000);
-    const visible = () => { if (document.visibilityState === "visible") void refresh(); };
-    document.addEventListener("visibilitychange", visible);
-    return () => { controller.abort(); clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
+    return watchRoomRevision(value => value.rooms[id], load, setError);
   }, [load]);
   const changeText = (value: string) => {
     if (pending || receipt) return;

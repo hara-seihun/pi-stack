@@ -22,6 +22,7 @@ final class NotificationIdentity {
             context.getSharedPreferences("notification-identity", Context.MODE_PRIVATE).edit()
                 .clear().putString("user", user).putString("session", session).apply();
             context.getSharedPreferences("idle-notifications", Context.MODE_PRIVATE).edit().clear().apply();
+            NotificationFeedLease.clear();
             ThreadNotifications.clear(context);
             WriteAccessibilityService.sessionChanged();
             PhoneControlService.sessionChanged(context);

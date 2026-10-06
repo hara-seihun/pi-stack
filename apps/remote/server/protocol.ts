@@ -466,18 +466,16 @@ export interface TranscriptPage {
 // ---------------------------------------------------------------------------
 // The stream
 //
-// `POST /v1/stream` with a StreamSubscription body answers with
-// `text/event-stream`. The first event is `hello`. `POST /v1/stream/:streamId`
-// with a partial StreamSubscription changes what the stream carries; the
-// server answers 204 and pushes whatever the change now requires. Every event
-// is JSON; `event:` names the StreamEvent variant. The server writes a comment
-// line at least every 15 seconds so proxies and the client can detect a dead
-// connection.
+// `POST /v1/reconcile` returns finite {events: StreamWireEvent[]} from the
+// client's retained revisions, without a prior connection or stream identity.
+// `POST /v1/stream` adds disposable text/event-stream push. Both begin with
+// hello and share resource declarations and selected-owner acknowledgement.
+// Push comments every ten seconds carry liveness, never canonical state.
 
 export interface StreamSubscription {
   /** Thread whose transcript, live output and images this stream carries. */
   session?: string | null;
-  /** Client identity for this opening; changes on selection and reconnection. */
+  /** Client identity for this reconciliation generation, also used by its push attachment. */
   selectionId?: string;
   /** True only while the person can see that conversation. */
   viewing?: boolean;

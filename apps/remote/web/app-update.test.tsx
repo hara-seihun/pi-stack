@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { AppUpdater, type UpdatePort } from "./src/app-update-state";
+import { AppUpdater, APP_UPDATE_FRESHNESS_MS, APP_UPDATE_RETRY_MS, startAppUpdateChecks, type UpdatePort } from "./src/app-update-state";
 import type { AppUpdateCheck, AppUpdateInstall } from "./src/native";
 
 const revision = "a".repeat(40);
@@ -92,4 +92,71 @@ test("a failed check does not claim an available update or hide Machine; the nex
   await f.updater.check();
   expect(f.installs()).toBe(1);
   expect(f.updater.snapshot().error).toBe("");
+});
+
+test("automatic lifecycle checks share a five-minute freshness budget; manual retry bypasses it", async () => {
+  const f = fixture("apk");
+  f.setCheck({ installed: {} as any, update: null });
+  let now = 1_000;
+  const updater = new AppUpdater(f.port, () => now);
+  await Promise.all([updater.checkFresh(), updater.checkFresh(), updater.checkFresh()]);
+  expect(f.checks()).toBe(1);
+  now += APP_UPDATE_FRESHNESS_MS - 1;
+  await updater.checkFresh();
+  expect(f.checks()).toBe(1);
+  now++;
+  await updater.checkFresh();
+  expect(f.checks()).toBe(2);
+  await updater.check(true);
+  expect(f.checks()).toBe(3);
+  expect(updater.freshnessDelay()).toBe(APP_UPDATE_FRESHNESS_MS);
+});
+
+test("failed automatic checks have an explicit retry budget instead of retrying every lifecycle event", async () => {
+  let now = 0;
+  let checks = 0;
+  const f = fixture("apk");
+  f.port.check = async () => { checks++; throw new Error("Offline"); };
+  const updater = new AppUpdater(f.port, () => now);
+  await updater.checkFresh();
+  await updater.checkFresh();
+  expect(checks).toBe(1);
+  expect(updater.freshnessDelay()).toBe(APP_UPDATE_RETRY_MS);
+  now += APP_UPDATE_RETRY_MS;
+  await updater.checkFresh();
+  expect(checks).toBe(2);
+});
+
+test("update lifecycle owns one freshness timer, none while hidden, and resumes without an event storm", async () => {
+  const f = fixture("apk");
+  f.setCheck({ installed: {} as any, update: null });
+  let now = 0;
+  let visible = true;
+  let changed: (() => void) | null = null;
+  const timers = new Map<() => void, number>();
+  const updater = new AppUpdater(f.port, () => now);
+  const dispose = startAppUpdateChecks(updater, {
+    visible: () => visible,
+    subscribe: listener => { changed = listener; return () => { changed = null; }; },
+    schedule: (listener, delay) => { timers.set(listener, delay); return () => { timers.delete(listener); }; },
+  });
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  await flush();
+  expect(f.checks()).toBe(1);
+  expect([...timers.values()]).toEqual([APP_UPDATE_FRESHNESS_MS]);
+  visible = false; changed!();
+  expect(timers.size).toBe(0);
+  now += 100;
+  changed!(); await flush();
+  expect(f.checks()).toBe(1);
+  visible = true; changed!(); changed!(); changed!(); await flush();
+  expect(f.checks()).toBe(1);
+  expect([...timers.values()]).toEqual([APP_UPDATE_FRESHNESS_MS - 100]);
+  now += APP_UPDATE_FRESHNESS_MS;
+  changed!(); changed!(); await flush();
+  expect(f.checks()).toBe(2);
+  expect(timers.size).toBe(1);
+  dispose();
+  expect(timers.size).toBe(0);
+  expect(changed).toBeNull();
 });

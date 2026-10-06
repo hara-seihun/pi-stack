@@ -19,13 +19,51 @@ export interface UpdatePort {
 const initial: UpdateState = { visible: false, busy: false, status: "", error: "", approval: false };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+export interface UpdateLifecycle {
+  visible(): boolean;
+  subscribe(listener: () => void): () => void;
+  schedule(listener: () => void, delayMs: number): () => void;
+}
+
+export function startAppUpdateChecks(updater: AppUpdater, lifecycle: UpdateLifecycle): () => void {
+  let disposed = false;
+  let running = false;
+  let cancelTimer: (() => void) | null = null;
+  const check = () => {
+    cancelTimer?.(); cancelTimer = null;
+    if (disposed || !lifecycle.visible() || running) return;
+    running = true;
+    void updater.checkFresh().finally(() => {
+      running = false;
+      if (!disposed && lifecycle.visible() && !updater.snapshot().busy) cancelTimer = lifecycle.schedule(check, updater.freshnessDelay());
+    });
+  };
+  const unsubscribe = updater.subscribe(() => {
+    if (!running && !updater.snapshot().busy) check();
+  });
+  const detach = lifecycle.subscribe(check);
+  check();
+  return () => {
+    disposed = true;
+    cancelTimer?.();
+    unsubscribe(); detach();
+  };
+}
+
+export const APP_UPDATE_FRESHNESS_MS = 5 * 60_000;
+export const APP_UPDATE_RETRY_MS = 60_000;
+
 export class AppUpdater {
   private state = initial;
   private update: AppUpdate | null = null;
   private checking: Promise<void> | null = null;
   private listeners = new Set<() => void>();
   private attempts = new Set<string>();
-  constructor(private port: UpdatePort) {}
+  private automaticAfter: number | null = null;
+  constructor(private port: UpdatePort, private now: () => number = Date.now) {}
+
+  freshnessDelay = () => this.automaticAfter === null ? 0 : Math.max(0, this.automaticAfter - this.now());
+  checkFresh = (): Promise<void> => this.freshnessDelay() > 0 ? Promise.resolve() : this.check();
 
   snapshot = () => this.state;
   subscribe = (listener: () => void) => {
@@ -40,7 +78,10 @@ export class AppUpdater {
   check = (manual = false): Promise<void> => {
     if (this.state.busy) return Promise.resolve();
     if (this.checking) return this.checking;
-    const operation = this.run(manual).finally(() => { this.checking = null; });
+    const operation = this.run(manual).finally(() => {
+      this.automaticAfter = this.now() + (this.state.error ? APP_UPDATE_RETRY_MS : APP_UPDATE_FRESHNESS_MS);
+      this.checking = null;
+    });
     this.checking = operation;
     return operation;
   };

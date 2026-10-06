@@ -13,6 +13,7 @@ export interface Room extends RoomActivity {
   updatedAt?: number;
   state?: "idle" | "running";
   unreadCount?: number;
+  readThrough?: number;
   pendingQuestions?: number;
 }
 export interface RoomSender extends RoomMember { agent?: true }

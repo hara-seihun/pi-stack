@@ -4,6 +4,7 @@ import { CACHED_HEADS, deleteCachedWindow, readCachedBody, readCachedWindow, rea
 
 export interface CachedThread { transcript: CachedWindow | null; images: InlineImageSnapshot | null }
 export interface BodyCache {
+  retainBody(id: string): () => void;
   getBody(id: string): TranscriptItemBody | undefined;
   acceptBody(id: string, body: TranscriptItemBody, size: number): void;
   loadBody(id: string, size: number, fetcher: () => Promise<TranscriptItemBody>): Promise<TranscriptItemBody>;
@@ -19,6 +20,8 @@ export class ClientCache implements BodyCache {
   private threads = new ResourceCache<CachedThread>({ entries: 32, bytes: 8 * MiB, idleMs: 30 * 60_000 });
   private bodies = new ResourceCache<TranscriptItemBody>({ entries: 2_000, bytes: 32 * MiB });
   private pendingBodies = new Map<string, Promise<TranscriptItemBody>>();
+  private bodyLeases = new Map<string, { users: number; body?: TranscriptItemBody }>();
+  private bodyGeneration = 0;
   private writes = new Map<string, { window: CachedWindow; timer: ReturnType<typeof setTimeout> }>();
   private diskAvailable = true;
   private mediaValues = new Set<MediaValue>();
@@ -75,26 +78,48 @@ export class ClientCache implements BodyCache {
     void this.disk(async () => deleteCachedWindow(`${await this.scope()}:${id}`), undefined);
   }
 
-  getBody(id: string) { return this.bodies.get(id); }
+  getBody(id: string) { return this.bodyLeases.get(id)?.body ?? this.bodies.get(id); }
+
+  retainBody(id: string): () => void {
+    let lease = this.bodyLeases.get(id);
+    if (!lease) this.bodyLeases.set(id, lease = { users: 0, body: this.bodies.get(id) });
+    lease.users++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      lease.users--;
+      if (!lease.users && this.bodyLeases.get(id) === lease) this.bodyLeases.delete(id);
+    };
+  }
 
   acceptBody(id: string, body: TranscriptItemBody, size: number) {
-    if (this.bodies.get(id)) return;
+    if (this.getBody(id)) return;
+    const lease = this.bodyLeases.get(id);
+    if (lease) lease.body = body;
     this.bodies.set(id, body);
     void this.disk(async () => writeCachedBody(`${await this.scope()}:body:${id}`, body, size), undefined);
   }
 
   loadBody(id: string, size: number, fetcher: () => Promise<TranscriptItemBody>): Promise<TranscriptItemBody> {
-    const body = this.bodies.get(id);
+    const body = this.getBody(id);
     if (body) return Promise.resolve(body);
     const running = this.pendingBodies.get(id);
     if (running) return running;
+    const generation = this.bodyGeneration;
     const pending = (async () => {
       const cached = await this.disk(async () => readCachedBody(`${await this.scope()}:body:${id}`), null);
-      const value = this.bodies.get(id) ?? cached ?? await fetcher();
+      const value = this.getBody(id) ?? cached ?? await fetcher();
+      if (generation !== this.bodyGeneration) return value;
+      const lease = this.bodyLeases.get(id);
+      if (lease) lease.body = value;
       if (cached) this.bodies.set(id, value);
-      else this.acceptBody(id, value, size);
+      else {
+        this.bodies.set(id, value);
+        void this.disk(async () => writeCachedBody(`${await this.scope()}:body:${id}`, value, size), undefined);
+      }
       return value;
-    })().finally(() => { this.pendingBodies.delete(id); });
+    })().finally(() => { if (this.pendingBodies.get(id) === pending) this.pendingBodies.delete(id); });
     this.pendingBodies.set(id, pending);
     return pending;
   }
@@ -153,6 +178,9 @@ export class ClientCache implements BodyCache {
     }
     this.writes.clear();
     this.threads.clear();
+    this.bodyGeneration++;
+    this.pendingBodies.clear();
+    this.bodyLeases.clear();
     this.bodies.clear();
     this.mediaController.abort();
     this.mediaController = new AbortController();

@@ -74,7 +74,7 @@ export const API = Object.freeze({
   requestTimingsRead: route("GET", "/v1/diagnostics/requests"),
   /** Measure timer lateness for `seconds`: how long requests wait behind synchronous work. */
   loopLag: route("GET", "/v1/diagnostics/loop-lag"),
-  workspaces: route("GET", "/v1/workspaces"), stream: route("POST", "/v1/stream"), streamUpdate: route("POST", "/v1/stream/:streamId"), sessions: route("GET", "/v1/sessions"), createSession: route("POST", "/v1/sessions"), archivedSessions: route("GET", "/v1/sessions/archived"),
+  workspaces: route("GET", "/v1/workspaces"), reconcile: route("POST", "/v1/reconcile"), stream: route("POST", "/v1/stream"), streamUpdate: route("POST", "/v1/stream/:streamId"), sessions: route("GET", "/v1/sessions"), createSession: route("POST", "/v1/sessions"), archivedSessions: route("GET", "/v1/sessions/archived"),
   session: route("GET", "/v1/sessions/:sessionId"), archiveSession: route("DELETE", "/v1/sessions/:sessionId"), rejectSessionEdit: route("PUT", "/v1/sessions/:sessionId"), sessionColor: route("PUT", "/v1/sessions/:sessionId/color"), sessionFiles: route("GET", "/v1/sessions/:sessionId/files"), sessionFilesHead: route("HEAD", "/v1/sessions/:sessionId/files"), unarchiveSession: route("POST", "/v1/sessions/:sessionId/unarchive"),
   sessionMeeting: route("GET", "/v1/sessions/:sessionId/meeting"),
   sessionMeetingVoice: route("POST", "/v1/sessions/:sessionId/meeting/voice"),

@@ -130,8 +130,21 @@ final class KenanOverlay {
     private WriteAccessibilityService writer() { return SharedOverlay.writer(); }
     private boolean micVisible() { return writer() != null && writer().visible(); }
     private boolean kenanVisible() { return SharedOverlay.hasPhone() && visible; }
+    void refreshGeometry() {
+        if (closed) return;
+        WriteBubblePosition.Bounds previous = lastBounds;
+        lastBounds = readAvailable();
+        if (!dragging && !lastBounds.equals(previous)) {
+            if (flight != null) flight.cancel();
+            position(homeX(), homeY());
+        }
+        refresh();
+    }
+    private String renderedDot;
     void refresh() {
         if (closed) return;
+        boolean wasVisible = visible;
+        OverlayPolicy.Mode previousMode = mode;
         visible = isVisible(service);
         OverlayPolicy.Mode next = OverlayPolicy.mode(kenanVisible(), micVisible());
         if (mode != next) {
@@ -143,14 +156,10 @@ final class KenanOverlay {
         dot.setContentDescription(mode == OverlayPolicy.Mode.MIC ? writer().description() : "Kenan. Tap to chat, drag to move.");
         dot.setAlpha(mode == OverlayPolicy.Mode.MIC && !writer().busy() && !pressed ? .6f : 1f);
         if (!kenanVisible()) { closePanel(); scene.words = null; }
-        WriteBubblePosition.Bounds bounds = available();
-        if (!dragging && !bounds.equals(lastBounds)) {
-            lastBounds = bounds;
-            if (flight != null) flight.cancel();
-            position(homeX(), homeY());
-        }
         restoreVisibility();
-        dot.invalidate(); scene.invalidate();
+        String visual = mode + ":" + pressed + ":" + (mode == OverlayPolicy.Mode.MIC ? writer().visualState() : state);
+        if (!visual.equals(renderedDot)) { renderedDot = visual; dot.invalidate(); }
+        if (wasVisible != visible || previousMode != mode) scene.invalidate();
     }
     void haptic() { dot.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); }
 
@@ -217,6 +226,10 @@ final class KenanOverlay {
     private int width() { return service.getResources().getDisplayMetrics().widthPixels; }
     private int height() { return service.getResources().getDisplayMetrics().heightPixels; }
     private WriteBubblePosition.Bounds available() {
+        if (lastBounds == null) lastBounds = readAvailable();
+        return lastBounds;
+    }
+    private WriteBubblePosition.Bounds readAvailable() {
         int left = dp(6), top = dp(30), right = width() - dp(6), bottom = height() - dp(30);
         if (Build.VERSION.SDK_INT >= 30) {
             WindowMetrics metrics = windows.getCurrentWindowMetrics();
@@ -251,6 +264,7 @@ final class KenanOverlay {
     private void position(int x, int y) {
         if (closed) return;
         WriteBubblePosition.Point at = WriteBubblePosition.clamp(x, y, available(), dp(50));
+        if (dotAt.x == at.x() && dotAt.y == at.y()) return;
         dotAt.x = at.x(); dotAt.y = at.y();
         update(dot, dotAt); scene.invalidate();
     }
@@ -258,6 +272,7 @@ final class KenanOverlay {
         if (flight != null) flight.cancel();
         if (duration == 0) { position(x, y); return; }
         int fromX = dotAt.x, fromY = dotAt.y;
+        if (fromX == x && fromY == y) { flight = null; return; }
         flight = ValueAnimator.ofFloat(0, 1); flight.setDuration(duration);
         flight.setInterpolator(new android.view.animation.DecelerateInterpolator());
         flight.addUpdateListener(frame -> {
@@ -299,7 +314,7 @@ final class KenanOverlay {
     }
     void state(String next) {
         NativeState.OverlayAnimation parsed = NativeState.require(NativeState.OverlayAnimation.class, next);
-        if (closed) return;
+        if (closed || state == parsed) return;
         state = parsed;
         dot.invalidate();
         Runnable reconcile = switch (state) {
@@ -333,9 +348,12 @@ final class KenanOverlay {
         }
     }
     void disconnected() {
-        if (pending.isEmpty()) return;
+        if (closed) return;
+        boolean uncertain = !pending.isEmpty();
         for (Runnable timeout : pending.values()) main.removeCallbacks(timeout);
-        pending.clear(); error("Connection lost. Your message may not have reached Kenan.");
+        pending.clear();
+        state("idle");
+        if (uncertain) say("Connection lost. Your message may not have reached Kenan.", 5000);
     }
     void resetSession() {
         closePanel(); main.removeCallbacksAndMessages(null); pending.clear(); transcript.clear(); threadId = null; draft = "";
@@ -548,12 +566,12 @@ final class KenanOverlay {
             if (mode == OverlayPolicy.Mode.MIC && writer() != null) {
                 writer().draw(canvas, paint, cx, cy, service.getResources().getDisplayMetrics().density);
                 removeCallbacks(frame);
-                if (writer().busy()) postDelayed(frame, 55);
+                if (writer().animates()) postDelayed(frame, 55);
                 return;
             }
             NativeState.OverlayAnimation animation = gestures > 0 ? NativeState.OverlayAnimation.WORKING : state;
             double period = switch (animation) { case WORKING -> 170.0; case IDLE, THINKING -> 850.0; };
-            float pulse = (float) (.5 + .5 * Math.sin(now / period));
+            float pulse = animation == NativeState.OverlayAnimation.IDLE ? .5f : (float) (.5 + .5 * Math.sin(now / period));
             paint.setStyle(Paint.Style.FILL); paint.setColor(ACCENT); paint.setAlpha(25 + Math.round(pulse * 35));
             canvas.drawCircle(cx, cy, dp(22), paint);
             paint.setColor(CARD); paint.setAlpha(255); canvas.drawCircle(cx, cy, dp(17), paint);
@@ -563,7 +581,7 @@ final class KenanOverlay {
                 canvas.drawArc(cx - dp(13), cy - dp(13), cx + dp(13), cy + dp(13), (now % 1400) * 360f / 1400, 100, false, paint);
             }
             removeCallbacks(frame);
-            postDelayed(frame, switch (animation) { case IDLE -> 200; case THINKING, WORKING -> 40; });
+            if (animation != NativeState.OverlayAnimation.IDLE) postDelayed(frame, 40);
         }
     }
     private final class Scene extends View {

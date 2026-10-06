@@ -10,6 +10,7 @@ import { handleRoomOwner, publicRoomSnapshot } from "./rooms-owner";
 import { roomAudienceResolver } from "./room-audience.mjs";
 import { roomInput, roomInstructions, readRoomInput } from "../shared/rooms";
 import type { RoomMember } from "../shared/rooms";
+import { ReconcileReplica } from "../shared/reconcile";
 
 const people: RoomMember[] = [{ user: "alice", displayName: "Alice" }, { user: "bob", displayName: "Bob" }, { user: "cara", displayName: "Cara" }];
 const cleanup: (() => void)[] = [];
@@ -28,12 +29,14 @@ function fixture() {
   let unavailable = false;
   let statusUnavailable = false;
   const sent = new Set<string>();
-  const transport = async (owner: string, actor: string, path: string, method: string, body?: unknown) => {
+  const listeners = new Set<(id: string) => void>();
+  const transport = async (owner: string, actor: string, path: string, method: string, body?: unknown, signal?: AbortSignal) => {
     calls.push({ path, method });
     if (unavailable && path.endsWith("/notify")) return Response.json({}, { status: 503 });
     if (statusUnavailable && method === "GET") return Response.json({}, { status: 503 });
-    return handleRoomOwner(request(path, method, body, actor), {
+    return handleRoomOwner(new Request(request(path, method, body, actor), { signal }), {
       get: id => threads.get(id) ?? null,
+      subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
       create: async (id, title, members) => { threads.set(id, { id, title, state: "idle", metadata: { room: { id, members } } }); history.set(id, []); },
       update: async (id, members) => { threads.get(id).metadata.room.members = members; },
       send: async (id, receipt, text) => {
@@ -52,7 +55,8 @@ function fixture() {
   const rooms = new Rooms(path, () => people, transport); cleanup.push(() => rooms.close());
   const id = crypto.randomUUID();
   const create = () => rooms.handle(request("/v1/rooms", "POST", { requestId: id, title: "House", members: ["bob"] }), "alice");
-  return { rooms, id, create, path, threads, history, questions, calls, notices, inputs, transport, unavailable: (value: boolean) => { unavailable = value; }, statusUnavailable: (value: boolean) => { statusUnavailable = value; } };
+  return { rooms, id, create, path, threads, history, questions, calls, notices, inputs, transport, listeners,
+    changed: () => { for (const listener of listeners) listener(id); }, unavailable: (value: boolean) => { unavailable = value; }, statusUnavailable: (value: boolean) => { statusUnavailable = value; } };
 }
 
 test("rooms are off unless the host explicitly opts in; reading doesn't create state", () => {
@@ -268,7 +272,7 @@ test("room owner transports owned phases, clocks, tools and failures without unr
   expect(publicRoomSnapshot(thread, { messages: [], live: "" })).toMatchObject({ activity: "status_error", error: "Room owner did not report an execution phase" });
 });
 
-test("directory polling refreshes actual owner evidence after restart and reports retrieval failure instead of stale work", async () => {
+test("directory startup and owner reconciliation refresh evidence and expose retrieval failures", async () => {
   const f = fixture(); await f.create();
   const thread = f.threads.get(f.id);
   thread.state = "running";
@@ -286,6 +290,7 @@ test("directory polling refreshes actual owner evidence after restart and report
   expect(failed.activitySince).toBeUndefined(); expect(failed.lastActivityAt).toBeUndefined();
   thread.state = "idle"; thread.held = true; thread.metadata.executionError = "Room execution failed";
   f.statusUnavailable(false);
+  await restarted.tick();
   expect(await directoryRoom(restarted)).toMatchObject({ state: "idle", activity: "idle", held: true, error: "Room execution failed", activeTools: [] });
   const calls = f.calls.length;
   expect((await (await restarted.handle(request("/v1/rooms"), "cara")).json()).rooms).toEqual([]);
@@ -377,4 +382,97 @@ test("agent posts use verified attribution and preserve receipt custody across r
   await f.rooms.handle(request(`/v1/rooms/${f.id}/prompt`, "POST", { requestId: humanReceipt, text: "Human", senderKind: "agent" }), "alice");
   expect(readRoomInput(f.inputs.at(-1)!.text)?.sender).toEqual(people[0]);
   expect((await handleAgentRooms(request(`/v1/agent-rooms/${f.id}/prompt`, "POST", { requestId: humanReceipt, text: "Human" }), { uid: 1002 }, uids, f.rooms)).status).toBe(409);
+});
+
+test("unchanged directory reads do not inspect room history; owner events coalesce and idle feeds do no full work", async () => {
+  const f = fixture(); await f.create();
+  const fullReads = () => f.calls.filter(call => call.path === `/v1/room-owner/${f.id}` && call.method === "GET").length;
+  const before = fullReads();
+  await directoryRoom(f.rooms); await directoryRoom(f.rooms);
+  expect(fullReads()).toBe(before);
+  f.rooms.start();
+  await Bun.sleep(1_050);
+  const initial = fullReads();
+  expect(initial).toBe(before + 1);
+  f.changed(); f.changed(); f.changed();
+  f.history.get(f.id)!.push({ role: "assistant", timestamp: 20, identity: { id: "event-final" }, content: [{ type: "text", text: "Changed" }] });
+  await Bun.sleep(1_050);
+  expect(fullReads()).toBe(initial + 1);
+  expect(f.notices.get("alice")?.has(`room-reply:${f.id}:event-final`)).toBe(true);
+  await Bun.sleep(1_050);
+  expect(fullReads()).toBe(initial + 1);
+  f.rooms.close();
+  expect(f.listeners.size).toBe(0);
+});
+
+test("member revisions reconnect by cursor, ignore unrelated changes, and close on authenticated-session revocation", async () => {
+  const f = fixture(); await f.create();
+  const controller = new AbortController();
+  const response = await f.rooms.handle(new Request(request("/v1/rooms/changes"), { signal: controller.signal }), "bob");
+  const reader = response.body!.getReader();
+  const first = new TextDecoder().decode((await reader.read()).value);
+  const revisions = JSON.parse(first.slice(6));
+  expect(Object.keys(revisions.rooms)).toEqual([f.id]);
+  const empty = await f.rooms.handle(request("/v1/rooms/changes"), "cara");
+  const outsider = empty.body!.getReader();
+  expect(JSON.parse(new TextDecoder().decode((await outsider.read()).value).slice(6)).rooms).toEqual({});
+  await outsider.cancel();
+  let settled = false;
+  const pending = reader.read().then(value => { settled = true; return value; });
+  await f.rooms.handle(request(`/v1/rooms/${f.id}/close`, "POST", {}), "cara");
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  await f.rooms.handle(request(`/v1/rooms/${f.id}/close`, "POST", {}), "bob");
+  const second = JSON.parse(new TextDecoder().decode((await pending).value).slice(6));
+  expect(second.cursor).not.toBe(revisions.cursor);
+  expect(second.rooms).toEqual(revisions.rooms);
+  const resume = new AbortController();
+  const resumed = await f.rooms.handle(new Request(request(`/v1/rooms/changes?cursor=${second.cursor}`), { signal: resume.signal }), "bob");
+  const resumedReader = resumed.body!.getReader();
+  let replayed = false;
+  const next = resumedReader.read().then(value => { replayed = true; return value; });
+  await Promise.resolve(); expect(replayed).toBe(false);
+  resume.abort(); expect((await next).done).toBe(true);
+  controller.abort(); expect((await reader.read()).done).toBe(true);
+});
+
+test("room sync sends small patches, stays actor-partitioned, and checks membership before reconciliation", async () => {
+  const f = fixture(); await f.create();
+  f.history.get(f.id)!.push({ role: "assistant", timestamp: 20, identity: { id: "large-final" }, content: [{ type: "text", text: "x".repeat(10_000) }] });
+  const path = `/v1/rooms/${f.id}`;
+  const replica = new ReconcileReplica();
+  const full = await (await f.rooms.handle(request(`${path}?sync=1`), "alice")).json();
+  expect(replica.apply(full).ok).toBe(true);
+  expect((await f.rooms.handle(request(`${path}?sync=1&have=${full.revision}`), "alice")).status).toBe(304);
+  f.questions.set(f.id, [{ id: "new-question", question: "When?", suggestions: [], createdAt: 30 }]);
+  const patch = await (await f.rooms.handle(request(`${path}?sync=1&have=${full.revision}`), "alice")).json();
+  expect(patch.kind).toBe("patch");
+  expect(JSON.stringify(patch).length).toBeLessThan(1_000);
+  expect(replica.apply(patch).ok).toBe(true);
+  const bob = await (await f.rooms.handle(request(`${path}?sync=1&have=${full.revision}`), "bob")).json();
+  expect(bob.kind).toBe("full");
+  expect((await f.rooms.handle(request(`${path}?sync=1&have=${full.revision}`), "cara")).status).toBe(404);
+});
+
+test("awaited room history rechecks membership before returning any body", async () => {
+  const id = crypto.randomUUID();
+  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const response = await handleRoomOwner(request(`/v1/room-owner/${id}`), {
+    get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
+    history: async () => {
+      thread.metadata.room.members = [people[1]!];
+      return { messages: [{ role: "assistant", content: "No longer shared" }], live: "" };
+    },
+  });
+  expect(response.status).toBe(403);
+  expect(await response.text()).not.toContain("No longer shared");
+});
+
+test("read cursors acknowledge only displayed events, not a later arrival", async () => {
+  const f = fixture(); await f.create();
+  const shown = await directoryRoom(f.rooms, "bob");
+  await f.rooms.handle(request(`/v1/rooms/${f.id}/prompt`, "POST", { requestId: crypto.randomUUID(), text: "Later" }), "alice");
+  expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/read`, "POST", { through: shown.readThrough }), "bob")).status).toBe(200);
+  expect((await directoryRoom(f.rooms, "bob")).unreadCount).toBe(1);
+  expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/read`, "POST", { through: shown.readThrough + 100 }), "bob")).status).toBe(400);
 });

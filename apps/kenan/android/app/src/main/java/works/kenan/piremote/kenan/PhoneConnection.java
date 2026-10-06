@@ -18,8 +18,9 @@ final class PhoneConnection {
         void overlayAck(PhoneConnection connection, JSONObject frame);
         void closed(PhoneConnection connection, NativeState.PhoneFailure code, String message);
     }
+    static final long HEARTBEAT_SECONDS = 25;
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder().connectTimeout(7, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS).pingInterval(25, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false).addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
     private final RemoteSession.Identity identity;
@@ -28,6 +29,8 @@ final class PhoneConnection {
     private final Events events;
     private volatile WebSocket socket;
     private volatile boolean cancelled;
+    private volatile long lastAcknowledged;
+    private String announcedDevice;
     PhoneConnection(Context context, RemoteSession.Identity identity, String environment, BooleanSupplier authorized, Events events) {
         this.context = context; this.identity = identity; this.environment = environment; this.authorized = authorized; this.events = events;
     }
@@ -48,7 +51,8 @@ final class PhoneConnection {
                 socket = CLIENT.newWebSocket(request, new WebSocketListener() {
                     @Override public void onOpen(WebSocket ws, Response response) {
                         if (!valid()) { ws.cancel(); return; }
-                        if (!hello()) { fail(NativeState.PhoneFailure.DISCONNECTED, "Could not announce phone"); return; }
+                        lastAcknowledged = android.os.SystemClock.elapsedRealtime();
+                        if (!announceChanges()) { fail(NativeState.PhoneFailure.DISCONNECTED, "Could not announce phone"); return; }
                         events.opened(PhoneConnection.this);
                     }
                     @Override public void onMessage(WebSocket ws, String message) {
@@ -58,7 +62,7 @@ final class PhoneConnection {
                             boolean handled = switch (NativeState.require(NativeState.PhoneFrame.class, frame.getString("type"))) {
                                 case COMMAND -> { events.command(PhoneConnection.this, frame); yield true; }
                                 case OVERLAY_ACK -> { events.overlayAck(PhoneConnection.this, frame); yield true; }
-                                case READY -> true; // Acknowledges hello; no command to execute.
+                                case READY -> { lastAcknowledged = android.os.SystemClock.elapsedRealtime(); yield true; }
                             };
                         } catch (Exception invalid) { fail(NativeState.PhoneFailure.PROTOCOL_ERROR, "Malformed phone command"); }
                     }
@@ -79,9 +83,27 @@ final class PhoneConnection {
         catch (Exception failure) { fail(NativeState.PhoneFailure.DISCONNECTED, "Phone discovery failed: " + failure.getMessage()); }
     }
     boolean valid() { return !cancelled && NotificationIdentity.get(context).isCurrent(identity) && authorized.getAsBoolean(); }
-    boolean hello() {
-        try { return send(new JSONObject().put("type", "hello").put("device", PhoneControlService.device(context))); }
-        catch (Exception failure) { fail(NativeState.PhoneFailure.INTERNAL_ERROR, "Could not build phone status"); return false; }
+    synchronized boolean announceChanges() {
+        if (!valid()) return false;
+        try {
+            JSONObject device = PhoneControlService.device(context);
+            String serialized = device.toString();
+            if (serialized.equals(announcedDevice)) return true;
+            if (!send(new JSONObject().put("type", "hello").put("device", device))) {
+                fail(NativeState.PhoneFailure.DISCONNECTED, "Could not announce phone status"); return false;
+            }
+            announcedDevice = serialized;
+            return true;
+        } catch (Exception failure) { fail(NativeState.PhoneFailure.INTERNAL_ERROR, "Could not build phone status"); return false; }
+    }
+    void heartbeat() {
+        if (!valid()) return;
+        if (android.os.SystemClock.elapsedRealtime() - lastAcknowledged >= 40_000) {
+            fail(NativeState.PhoneFailure.DISCONNECTED, "Phone heartbeat was not acknowledged"); return;
+        }
+        try {
+            if (!send(new JSONObject().put("type", "heartbeat"))) fail(NativeState.PhoneFailure.DISCONNECTED, "Could not send phone heartbeat");
+        } catch (org.json.JSONException defect) { throw new IllegalStateException(defect); }
     }
     boolean send(JSONObject frame) { WebSocket active = socket; return valid() && active != null && active.queueSize() < 24 * 1024 * 1024 && active.send(frame.toString()); }
     private void fail(NativeState.PhoneFailure code, String message) {
