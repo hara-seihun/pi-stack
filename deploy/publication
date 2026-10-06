@@ -396,9 +396,19 @@ function retry(requestId) {
   checkCancellation(request);
   const repair = readRepair(requestId);
   if (request.repairedRetry?.repairId === repair?.id) return;
-  if (request.status !== "failed" || request.repairedRetry || repair?.outcome?.status !== "infrastructure-fixed")
+  if (repair?.explicitStop || repair?.failure?.at !== request.failure?.at || repair?.failure?.attempt !== request.failure?.attempt) throw new Error("Repair evidence is not bound to the latest failed attempt or was explicitly stopped");
+  if (request.status !== "failed" || repair?.outcome?.status !== "infrastructure-fixed")
     throw new Error("Retry requires the dedicated repair's infrastructure-fixed evidence and is allowed once");
-  request.repairedRetry = { repairId: repair.id, at: new Date().toISOString(), evidence: repair.outcome.evidence };
+  if (request.repairedRetry) request.repairedRetries = [...(request.repairedRetries ?? []), request.repairedRetry];
+  request.repairedRetry = { failureAt: request.failure.at, failedAttempt: request.failure.attempt, repairId: repair.id, at: new Date().toISOString(), evidence: repair.outcome.evidence };
+  if (repair.outcome.ownerSourceSha) {
+    request.ownerRepairSourceSha = repair.outcome.ownerSourceSha;
+    request.integrationHistory = [...(request.integrationHistory ?? []), { attempt: request.attempt, integrationSha: request.integrationSha, checks: request.checks, android: request.android }];
+    checked("git", ["-C", checkout, "update-ref", `refs/pi-stack-publication/${request.requestId}/before-owner-repair-attempt-${request.attempt}`, request.integrationSha]);
+    delete request.integrationSha; delete request.checks; delete request.android;
+  }
+  request.hostProofHistory = [...(request.hostProofHistory ?? []), { attempt: request.attempt, hosts: request.hosts }];
+  request.hosts = {}; // Both hosts must supply fresh proof for the repaired attempt.
   request.status = "queued";
   request.recoveryAttempts = 0;
   request.attemptLimit = request.attempt + 1;
@@ -781,6 +791,12 @@ function createIntegration(request, logPath) {
     );
     if (!result.ok) return result;
   }
+  if (request.ownerRepairSourceSha && !commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.ownerRepairSourceSha, "HEAD"]).ok) {
+    const retained = checked("git", ["-C", checkout, "rev-parse", `${ownerSourceRef}^{commit}`]);
+    if (retained !== request.ownerRepairSourceSha) throw new Error("Owner repair source changed; fresh bound evidence required");
+    result = runLogged(request, "merge-bound-owner-repair", "git", ["-C", checkout, "-c", `user.name=${config.mergeAuthor.name}`, "-c", `user.email=${config.mergeAuthor.email}`, "merge", "--no-ff", "--no-edit", "-m", `Repair publication owner for ${request.requestId} within existing publication`, retained], 60, logPath);
+    if (!result.ok) return result;
+  }
   const integrationSha = runCapture("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"]);
   checkOwnerSource(checkout, integrationSha);
   const localProperties = config.androidProperties;
@@ -958,8 +974,8 @@ export function deployTarget(request, target, logPath) {
   const start = fstatSync(fd).size;
   closeSync(fd);
   const result = target.sshHost
-    ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "env", `PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 240, logPath)
-    : runLogged(request, `deploy-${target.id}`, "env", [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 180, logPath);
+    ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "env", `PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 420, logPath)
+    : runLogged(request, `deploy-${target.id}`, "env", [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 420, logPath);
   const tail = result.status === 75 ? logTail(logPath, start) : "";
   if (/^another Pi stack deployment owns \/[^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy" };
   if (/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
@@ -1884,14 +1900,25 @@ function writeRepair(repair) {
 }
 
 function ensureRepair(request) {
-  if (isCancelled(request) || readRepair(request.requestId)) return;
+  if (isCancelled(request)) return;
+  const previous = readRepair(request.requestId);
+  if (previous && (previous.failure?.at === request.failure?.at || previous.explicitStop)) return;
+  if (previous) {
+    if (serviceBusy(previous.unit)) throw new Error("Previous repair still owns the service");
+    const archive = join(repairRoot, request.requestId, "retained", `attempt-${previous.failure?.attempt ?? 1}`);
+    mkdirSync(archive, { recursive: true });
+    for (const key of ["path", "result", "outcome"]) {
+      const file = key === "outcome" ? previous.outcome?.evidence : previous[key];
+      if (file && existsSync(file)) copyFileSync(file, join(archive, key === "path" ? "receipt.json" : key === "result" ? "result.json" : "evidence"));
+    }
+  }
   const directory = join(repairRoot, request.requestId);
-  const exhausted = (request.repairDepth ?? 0) >= policy.maxRepairDepth;
-  writeRepair({ id: repairId(request.requestId), requestId: request.requestId, sourceSha: request.sourceSha,
+  const exhausted = !!previous || (request.repairDepth ?? 0) >= policy.maxRepairDepth;
+  writeRepair({ id: previous ? `${repairId(request.requestId)}-attempt-${request.failure.attempt}` : repairId(request.requestId), priorRepairs: previous ? [...(previous.priorRepairs ?? []), { id: previous.id, failure: previous.failure, status: previous.status, explicitStop: previous.explicitStop }] : [], requestId: request.requestId, sourceSha: request.sourceSha,
     integrationSha: request.integrationSha, failure: request.failure, status: exhausted ? "blocked" : "pending",
     ...(exhausted ? { summary: "Automatic repair chain exhausted; Hara must assign the remaining blocker" } : {}),
     createdAt: new Date().toISOString(), path: repairPath(request.requestId), requestPath: requestPath(request.requestId),
-    session: join(directory, "session.jsonl"), log: join(directory, "agent.log"), result: join(directory, "result.json"),
+    session: join(directory, previous ? `attempt-${request.failure.attempt}.session.jsonl` : "session.jsonl"), log: join(directory, previous ? `attempt-${request.failure.attempt}.agent.log` : "agent.log"), result: join(directory, previous ? `attempt-${request.failure.attempt}.result.json` : "result.json"),
     prompt: join(directory, "prompt.md"), unit: repairUnit(request.requestId), launchAttempts: 0 });
 }
 
@@ -2078,6 +2105,8 @@ function repairRun(requestId) {
 }
 
 function acceptRepairResult(repair) {
+  const request = readRequest(repair.requestId);
+  if (repair.explicitStop || repair.failure?.at !== request.failure?.at || repair.failure?.attempt !== request.failure?.attempt) throw new Error("Stale or explicitly stopped repair result");
   if (!existsSync(repair.result)) throw new Error(`Repair agent returned without ${repair.result}`);
   const outcome = JSON.parse(readFileSync(repair.result, "utf8"));
   if (!["source-fixed", "infrastructure-fixed", "blocked"].includes(outcome.status) || !outcome.summary?.trim()) throw new Error("Repair result needs a status and cause/repair summary");
@@ -2087,9 +2116,14 @@ function acceptRepairResult(repair) {
     validateSha(outcome.sourceSha);
     if (!(outcome.workspace ?? repair.workspace)) throw new Error("Source repair must identify its registered workspace");
   }
+  if (outcome.ownerSourceSha) {
+    if (outcome.status !== "infrastructure-fixed") throw new Error("Owner control source belongs to an existing-publication infrastructure repair");
+    validateSha(outcome.ownerSourceSha);
+    if (checked("git", ["-C", checkout, "rev-parse", `${ownerSourceRef}^{commit}`]) !== outcome.ownerSourceSha) throw new Error("Owner repair source must be installed and retained first");
+  }
   if (outcome.status !== "blocked") {
     const evidenceSource = resolve(outcome.evidence);
-    const evidence = join(dirname(repair.path), "evidence");
+    const evidence = join(dirname(repair.path), `evidence-attempt-${repair.failure?.attempt ?? 1}`);
     atomicWrite(evidence, readFileSync(evidenceSource));
     outcome.evidence = evidence;
     outcome.evidenceSource = evidenceSource;
@@ -2114,6 +2148,7 @@ function acceptRepairResult(repair) {
 
 function completeRepair(requestId) {
   validateRequestId(requestId);
+  ensureRepair(readRequest(requestId));
   const repair = readRepair(requestId);
   if (!repair) throw new Error("No dedicated repair receipt exists for this request");
   if (["submitted", "retry-submitted", "ready-to-retry"].includes(repair.status)) {
@@ -2230,7 +2265,7 @@ function main() {
   if (operation === "repair-run" && args.length === 1) return locked("repair-agent", "repair-run", args);
   if (operation === "_repair-run" && args.length === 1) return repairRun(args[0]);
   if (operation === "repair-result" && args.length === 1) return locked("watchdog", "repair-result", args);
-  if (operation === "_repair-result" && args.length === 1) return locked("repair-agent", "complete-repair", args);
+  if (operation === "_repair-result" && args.length === 1) { validateRequestId(args[0]); return locked(`repair-result-${args[0]}`, "complete-repair", args); }
   if (operation === "_complete-repair" && args.length === 1) return completeRepair(args[0]);
   if (operation === "repair" && args.length === 1) return locked("worker", "repair", args);
   if (operation === "_repair" && args.length === 1) return requestRepair(args[0]);

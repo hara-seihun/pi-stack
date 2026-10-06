@@ -14,6 +14,12 @@ preparation. No pooled/cloud inference receives dictation. Public artifact
 downloads are installation, not inference.
 
 The engine starts and owns the subprocess and waits for model/HTTP readiness.
+It disables llama.cpp's built-in empty inference warmup (`--no-warmup`): that
+redundant run kept health at 503 beyond the 20-second load deadline on Converge
+and failed publication PUB-2e4a866c428b4b2d9c9b6879. An isolated candidate startup
+on that host reached health 200 in 3.679 seconds with the same pinned assets and
+unchanged deadline, then reported explicit `unavailable/warming`; shutdown reaped
+the child and removed its key. This is startup proof, not full release acceptance.
 Static prefix warmup is owned background work, not a prerequisite for ASR listening:
 Converge's cold prefix exceeded the 18-second dictation request timeout and then
 40 seconds even with a one-token warm, repeatedly crashing the previous startup.

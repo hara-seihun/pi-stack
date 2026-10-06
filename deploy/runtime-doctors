@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+phase=$1 root=$2 user=$3 control=$4
+source "$control/deploy/lib"
+case $phase in
+  browser) pi_stack_run_as "$user" node "$control/packages/runtime/browser-doctor.mjs" ;;
+  model) pi_stack_run_as "$user" node "${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}/node_modules/.bin/pi-model-selection-doctor" ;;
+  *) exit 64 ;;
+esac
