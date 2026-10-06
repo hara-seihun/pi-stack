@@ -211,30 +211,28 @@ export class Daemon {
     }));
   }
 
-  private laneReady(id:string):boolean{
+  private laneReady(id:string,repairOwner?:string):boolean{
     if(this.store.lane(id)?.repair){
       if(this.config.modelBrokerUrl)return false;
       const probe=this.repairReadiness.get(id);
-      return !this.threads.snapshot().some(thread=>thread.metadata?.execution==="root-repair"&&thread.state==="running")&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
+      return !repairOwner&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
     }
     return this.store.control("ordinary-launches")!=="paused"&&(!this.snapshotCommand||(this.readiness?.lanes[id]?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<this.readinessAt));
   }
 
   private laneEnabled(id:string):boolean{return !!this.store.lane(id)&&this.store.control(`complete:${id}`)===undefined;}
 
-  private share(lane:LaneSpec):number{
-    return (1+this.laneActive(lane.id))/lane.weight;
-  }
-
   private async fillCapacity():Promise<void>{
     if(this.store.control("launches")==="paused")return;
     const failed=new Set<string>(),admittedForced=new Set<string>();
     let backgroundAdmissions=0;
     while(true){
-      const atBackgroundCeiling=backgroundAdmissions>=this.config.maxConcurrentSessions||this.threads.snapshot().filter(thread=>thread.state==="running").length>=this.config.maxConcurrentSessions;
-      const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id)
+      const running=this.threads.runningSummary();
+      const atBackgroundCeiling=backgroundAdmissions>=this.config.maxConcurrentSessions||running.total>=this.config.maxConcurrentSessions;
+      const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id,running.repairOwner)
         &&(lane.admission==="background"&&!lane.repair?!atBackgroundCeiling:!admittedForced.has(lane.id)));
-      lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||this.share(a)-this.share(b)||a.id.localeCompare(b.id));
+      const share=(lane:LaneSpec)=>(1+(running.lanes.get(lane.id)??0))/lane.weight;
+      lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||share(a)-share(b)||a.id.localeCompare(b.id));
       let admitted=false;
       for(const lane of lanes){
         const key=`lane:${lane.id}`;
@@ -315,7 +313,6 @@ export class Daemon {
     for (const service of this.isolated.values()) service.setWatchList(directory);
     return directory;
   }
-  private laneActive(laneId:string):number{return this.threads.snapshot().filter(thread=>thread.metadata?.laneId===laneId&&thread.state==="running").length;}
   private profileModel(profile:string):string{
     const candidate=this.config.profiles[profile]?.[0];
     if(!candidate)throw new Error(`Unknown model profile ${profile}`);
@@ -493,13 +490,15 @@ export class Daemon {
     }catch(error){json(res,500,{error:String(error)});}
   }
 
-  private status():unknown{return{
-    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:this.threads.snapshot().find(thread=>thread.metadata?.execution==="root-repair"&&thread.state==="running")?.id,laneBudget:this.laneBudget,
+  private status():unknown{
+    const running=this.threads.runningSummary();
+    return{
+    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:running.repairOwner,laneBudget:this.laneBudget,
     repairReadiness:this.store.lanes().filter(lane=>lane.repair).map(lane=>({lane:lane.id,...this.repairReadiness.get(lane.id),error:this.store.control(`repair-readiness-error:${lane.id}`)||undefined})),
     readinessError:this.store.control("readiness_error")||undefined,
     meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),
     capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,this.laneBudget,this.config)})),
-    accounts:this.store.accounts(),codexCapabilities:readCodexCapabilities(this.store),lanes:this.store.lanes().map((lane)=>({...lane,active:this.laneActive(lane.id)})),
+    accounts:this.store.accounts(),codexCapabilities:readCodexCapabilities(this.store),lanes:this.store.lanes().map((lane)=>({...lane,active:running.lanes.get(lane.id)??0})),
     threads:this.threads.snapshot(),leases:this.store.activeLeases(),
   };}
 }
