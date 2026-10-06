@@ -1,4 +1,6 @@
+import { pathToFileURL } from "node:url";
 import { runJobs } from "./run-jobs.mjs";
+import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
 
 const jobs = [
   ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs"]],
@@ -13,9 +15,9 @@ const jobs = [
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
-  ["agent workspace", "npm", ["test", "--workspace=@hara-seihun/agent-workspace"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
   ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],
+  ...workspaceChecks,
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
   ["mail send boundary", "python3", ["-B", "tools/mail-send/test_send.py"]],
@@ -27,6 +29,10 @@ const jobs = [
   ["session readers", "npm", ["test", "--workspace=@hara-seihun/read-condensed-session"]],
 ];
 
-await runJobs(jobs.map(([name, command, args, ...options]) => [
+export const checkJobs = jobs.map(([name, command, args, ...options]) => [
   name, command, args[0] === "--test" ? ["scripts/test-node.mjs", ...args.slice(1)] : args, ...options,
-]));
+]);
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await runJobs(checkJobs);
+}

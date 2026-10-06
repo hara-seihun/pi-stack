@@ -1088,7 +1088,9 @@ describe("ThreadService", () => {
     expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
     value(await command);
     await turn();
-    expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBe(Date.now());
+    const viewedAt = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(viewedAt);
+    expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBe(viewedAt);
   });
 
   it("does not arm idle views with held messages, questions, agent waits or scheduled wakes", async () => {
