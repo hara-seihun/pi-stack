@@ -130,15 +130,16 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   ready = piEnvironmentScope.run(env, () => openPiSession(options, publish, finish)).then(value => { adapter = value; }).catch(error => {
     publish({ type: "extension_error", error: String(error) });
     console.error(`Runner thread ${options.threadId}:`, error);
-    setTimeout(() => finish(1), 100);
+    finish(1);
     throw error;
   });
-  void ready.catch(() => {});
+  try { await ready; }
+  catch (error) { throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { nativeNotReady: true }); }
 }
 const server = createServer(socket => {
   lines(socket, input => {
     const value = requireRunnerControlRequest(input);
-    const respond = (operation: Promise<unknown>) => void operation.then(() => reply(socket, { ok: true, pid: process.pid }), error => reply(socket, { error: String(error) }));
+    const respond = (operation: Promise<unknown>) => void operation.then(() => reply(socket, { ok: true, pid: process.pid }), error => reply(socket, { error: String(error), ...((error as { nativeNotReady?: boolean }).nativeNotReady ? { nativeNotReady: true } : {}) }));
     switch (value.type) {
       case "open": respond(serial(() => open(value.options))); return;
       case "close": respond(serial(async () => { await sessions.get(value.socketPath)?.close(); })); return;

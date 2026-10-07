@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { AttachPiSession, OpenPiSession, PiCommand, PiEvent, PiRunnerReference, PiSession, PiSessionOptions } from "./contracts.js";
 import { underMemoryPressure } from "./runner-memory.js";
+import { RunnerStartupError } from "./runner-startup.js";
 import { isolatePiEnvironment } from "./pi-environment.js";
 import { prepareRunnerSlices, managerCommand, RUNNER_MEMORY, RUNNER_HEAP_MB } from "./runner-resources.js";
 import { assertNever, requireRuntimeEvent } from "./runtime-events.js";
@@ -30,7 +31,7 @@ function runnerRequest(path: string, value: unknown, timeout = 5000): Promise<an
       const end = input.indexOf("\n");
       if (end < 0) return;
       clearTimeout(timer); socket.end();
-      try { const response = JSON.parse(input.slice(0, end)); response.error ? reject(new Error(response.error)) : resolve(response); }
+      try { const response = JSON.parse(input.slice(0, end)); response.error ? reject(response.nativeNotReady === true ? new RunnerStartupError(response.error) : new Error(response.error)) : resolve(response); }
       catch (error) { reject(error); }
     });
     socket.on("error", error => { clearTimeout(timer); reject(error); });
@@ -287,7 +288,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     await starting;
     const { threads: _threads, ...serializable } = options;
     if (!options.env.PI_THREAD_API_URL) throw new Error("Shared Pi sessions require their owning PI_THREAD_API_URL");
-    await runnerRequest(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } });
+    await runnerRequest(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } }, 35_000);
     const status = retained ? await runnerRequest(control, { type: "status" }) : undefined;
     return attach(reference, output, exit, !status || typeof status.activeSessions === "number");
   };

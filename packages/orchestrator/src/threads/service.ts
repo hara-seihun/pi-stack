@@ -1,4 +1,5 @@
 import { isRunnerCapacityFailure } from "./runner-capacity.js";
+import { RunnerStartupError, isPooledStartupWait } from "./runner-startup.js";
 import { parseRuntimeEvent, requireAssistantStopReason, assertNever } from "./runtime-events.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
@@ -387,8 +388,11 @@ export class ThreadService implements ThreadApi {
         if (this.closed || this.suspended || error instanceof AdmissionWait) return;
         if (this.runtimes.has(id) || this.row(id)?.held || this.halts.has(id)) throw error;
         const message = errorText(error);
-        if(/No eligible pooled account|(?:Saved|Pinned) model .*has no (?:eligible pooled|available) account/.test(message)){
-          this.admissionWait(id,{code:"unavailable",message});return;
+        if (isPooledStartupWait(message)) {
+          const execution = this.execution(id);
+          if (execution) await this.waitForProvider(id, undefined, execution, message);
+          else this.admissionWait(id, { code: "unavailable", message, retryAt: Date.now() + 60_000 });
+          return;
         }
         const work = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
         if (!work) throw error;
@@ -399,7 +403,7 @@ export class ThreadService implements ThreadApi {
         const sameFailure = prior && prior.workId === work && (prior.kind === "runner_capacity") === runnerCapacity;
         const attempts = sameFailure ? Number(prior.attempts) + 1 : 1;
         const permanent = isModelConfigurationError(message) || /Pi cwd admission rejected|Invalid recorded (?:runner|isolated)|Compiled thread runner is missing/.test(message);
-        const failure = { workId: work, attempts, ...(runnerCapacity ? { kind: "runner_capacity" } : {}), error: message, since: sameFailure ? prior!.since ?? Date.now() : Date.now(),
+        const failure = { workId: work, attempts, ...(error instanceof RunnerStartupError && !this.execution(id) ? { nativeNotReady: true } : {}), ...(runnerCapacity ? { kind: "runner_capacity" } : {}), error: message, since: sameFailure ? prior!.since ?? Date.now() : Date.now(),
           lastActivityAt: Date.now(), retryAt: Date.now() + Math.min(attempts * 5_000, 30_000) };
         this.sql("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure',json(?),'$.executionError',?) WHERE id=?").run(JSON.stringify(failure), message, id);
         this.changed(id);
@@ -776,7 +780,7 @@ export class ThreadService implements ThreadApi {
       const message = this.transaction(() => {
         const held = !!this.row(thread.id)?.held, explicit = input.source !== "notification";
         const result = this.insertMessage(input.requestId, input, thread.settings, explicit && held || input.delivery === "hardSteer");
-        if (explicit && held) this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(thread.id);
+        if (explicit && held) this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.watchStopped') WHERE id=?").run(thread.id);
         else if (!held && thread.state === "idle") this.sql("UPDATE thread SET state='running' WHERE id=?").run(thread.id);
         this.recordRequest(input.requestId, input, "send", result.id); return result;
       });
@@ -1007,7 +1011,7 @@ export class ThreadService implements ThreadApi {
       if (this.row(input.threadId)?.held && (this.execution(input.threadId) || this.runtimes.has(input.threadId) || this.halts.has(input.threadId))) {
         const halted = await this.halt(input.threadId); if (!halted.ok) return halted;
       }
-      this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(input.threadId);
+      this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.watchStopped') WHERE id=?").run(input.threadId);
       this.changed(input.threadId); this.wake(input.threadId); return good(this.get(input.threadId)!);
     }
     if (input.action !== "stop" || typeof input.descendants !== "boolean") return bad("invalid_request", "Stop must explicitly select whether descendants stop too");
@@ -1021,7 +1025,7 @@ export class ThreadService implements ThreadApi {
       const row = this.row(id), execution = this.execution(id);
       if (input.reason === "archive" && row && !row.held) this.sql("UPDATE thread SET metadata=json_set(metadata,'$.archiveInterruption',json(?)) WHERE id=?").run(JSON.stringify({ at, ...(execution ? { executionId: execution.id } : {}) }), id);
       else if (input.reason !== "archive") this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(id);
-      this.sql("UPDATE thread SET held=1 WHERE id=?").run(id); this.changed(id);
+      this.sql("UPDATE thread SET held=1,metadata=CASE WHEN json_extract(metadata,'$.watchList')=1 THEN json_set(metadata,'$.watchStopped',json('true')) ELSE metadata END WHERE id=?").run(id); this.changed(id);
     }
     const results = await Promise.all([...ids].map(id => this.halt(id)));
     const failure = results.find(result => !result.ok); if (failure && !failure.ok) return failure;
@@ -1048,7 +1052,7 @@ export class ThreadService implements ThreadApi {
     }
     if (!this.pending(id).some(work => work.state === "queued")) {
       // It was waiting for results rather than working; let them wake it again.
-      this.sql("UPDATE thread SET held=0,metadata=json_remove(metadata,'$.archiveInterruption') WHERE id=?").run(id); this.changed(id);
+      this.sql("UPDATE thread SET held=0,metadata=json_remove(metadata,'$.archiveInterruption','$.watchStopped') WHERE id=?").run(id); this.changed(id);
       return good(this.get(id)!);
     }
     return this.control({ threadId: id, action: "resume" });
@@ -1448,6 +1452,8 @@ export class ThreadService implements ThreadApi {
   private async drain(id: string): Promise<void> {
     if (this.suspended || this.closed) return;
     const thread = this.get(id); if (!thread || this.row(id)?.held || this.halts.has(id) || this.closed) return;
+    const admissionWait = thread.metadata?.admissionWait as Json | undefined;
+    if (Number(admissionWait?.retryAt) > Date.now()) return;
     const startup = thread.metadata?.startupFailure as Json | undefined;
     const nextWork = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
     if (startup && startup.workId === nextWork && Number(startup.retryAt) > Date.now()) return;
@@ -1535,6 +1541,21 @@ export class ThreadService implements ThreadApi {
         await this.finish(id, runtime, "failed", null);
       } else throw error;
     }
+  }
+  watchRecoveryEvidence(id: string): Result<import("./watch-list.js").WatchRecoveryEvidence> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    try {
+      const thread = this.get(id);
+      if (!thread) return good("uncertain");
+      if (thread.state === "running" || thread.pendingMessages || thread.metadata?.archived || thread.metadata?.watchStopped || this.execution(id) || this.runtimes.has(id) || this.opening.has(id)) return good("ineligible");
+      const failure = thread.metadata?.startupFailure as Json | undefined;
+      const settlement = this.sql("SELECT work_id,outcome FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,settlement_seq DESC,id DESC LIMIT 1").get(id) as Json | undefined;
+      if (settlement?.outcome === "complete") return good("checked");
+      if (settlement?.outcome === "cancelled") return good("ineligible");
+      if (thread.metadata?.watchList !== true || !failure?.nativeNotReady || settlement?.outcome !== "failed" || settlement.work_id !== failure.workId || thread.metadata?.runnerReference) return good("uncertain");
+      const work = this.sql("SELECT inserted_at,landed_at FROM thread_work WHERE id=? AND thread_id=?").get(settlement.work_id, id) as Json | undefined;
+      return good(work && work.inserted_at === null && work.landed_at === null ? "unlanded" : "uncertain");
+    } catch (error) { return bad("unavailable", errorText(error)); }
   }
   private async rejectStartup(id: string, error: string): Promise<void> {
     // Startup acknowledgements can be lost. Confirm absence or cancellation before settling.
