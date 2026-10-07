@@ -81,8 +81,8 @@ No bridge is installed if this map is absent.
 
 ## Prepare, activate, roll back
 
-From the selected committed release checkout (on kenan-server this is
-`/home/kenan/.local/state/pi-stack-release/repository`):
+From the host's selected committed release checkout (normally
+`~/.local/state/pi-stack-release/repository` for the publication account):
 
 ```sh
 sudo deploy/one-kenan prepare \

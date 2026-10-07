@@ -34,6 +34,8 @@ npm run android:test --workspace=kenan
 
 ## Deployments
 
+The maintained fleet uses an Ubuntu local server and a Debian remote VM, both CPU-only for Write. Linux hosts supply systemd services and their own package provisioning; NixOS support remains available without making it the current publishing platform. See [host platforms](docs/deployment.md#host-platforms) for the migration boundary and historical GPU report.
+
 `deploy/publication submit SHA` hands a reviewed source commit to the durable worker for integration and deployment on every configured target. Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout and serialize host deployment across source checkouts. Preparation shares the publication owner's deadline; host activation and standalone component deployment enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
 ### Account onboarding

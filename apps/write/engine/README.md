@@ -3,7 +3,9 @@
 `server.py` owns resident recognition, incremental cleanup and final local rewrite;
 `deploy/write-engine` installs the engine, Python environment, and pinned models. Android's `WriteOpusRecorder` owns
 capture and Opus encoding, `WriteConnection` owns the phone protocol, and Pi Remote
-and the orchestrator forward frames in order. See [GPU behavior](GPU_REPORT.md) and
+and the orchestrator forward frames in order. The maintained Ubuntu server and
+Debian VM use the ONNX INT8 CPU recognizer; a GPU is not required. See
+[historical GPU measurements and opt-in behavior](GPU_REPORT.md) and
 [cleanup](cleanup/README.md) for those components. [Final rewrite](REWRITE.md)
 owns the resident CPU Qwen3-4B-Instruct-2507 path, guards, limits and reproduction;
 [runtime installation](../rewrite-runtime/README.md) owns its pinned artifacts.

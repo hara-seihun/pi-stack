@@ -12,7 +12,7 @@ service, changes no running service and sends no dictation to a remote API.
 - Source pins, URLs, sizes, hashes and license provenance: `runtime.json` and
   `model.json`. The runtime includes upstream's MIT/dependency licenses; the model
   includes its vendored Apache-2.0 `LICENSE` and attribution/quantization `NOTICE`.
-- Ubuntu 26.04 kenan-server and Debian 12 converge-kenan use the same upstream
+- The maintained Ubuntu 26.04 server and Debian 12 VM use the same upstream
   Ubuntu 22.04 x64 CPU archive. The installer rejects non-x86_64 Linux, non-glibc,
   glibc older than 2.34 and CPUs without the pinned required flags. Missing native
   dependencies fail the executable's bounded `--version` probe. No Nix interpreter,
