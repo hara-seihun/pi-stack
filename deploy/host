@@ -145,12 +145,15 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
     ) &
     doctor_pid=$!
     activation_failed=0; doctor_failed=0
-    phase activation 50 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_failed=1
+    # Supervisors own a 90-second start and 10-second stop budget. Activation
+    # overlaps the doctors; the shared generation wait must include both plus
+    # the front door's 20-second readiness budget.
+    phase activation 120 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_failed=1
     wait "$doctor_pid" || doctor_failed=1
     if (( doctor_failed )); then
       echo 'runtime doctor failed' >&2
       if (( ! activation_failed )); then
-        phase rollback 50 env PI_STACK_HOST_PHASE=activation PI_STACK_FORCE_ROLLBACK=1 "$0" "$@" || true
+        phase rollback 120 env PI_STACK_HOST_PHASE=activation PI_STACK_FORCE_ROLLBACK=1 "$0" "$@" || true
       fi
     fi
     (( ! activation_failed && ! doctor_failed )) || exit 1
@@ -274,15 +277,18 @@ activate_remote() {
     [[ $(supervisor_commit "$user") == "$target_commit" ]] && continue
     PI_REMOTE_SERVICE="pi-remote@$user.service" "$root/apps/remote/activate"
   done
-  for user in "${unlocked_users[@]}"; do
-    deadline=$((SECONDS + 20))
-    while (( SECONDS < deadline )); do
-      [[ $(supervisor_commit "$user") == "$target_commit" ]] && continue 2
-      sleep 0.1
+  deadline=$((SECONDS + 100))
+  local -a pending=()
+  while (( SECONDS < deadline )); do
+    pending=()
+    for user in "${unlocked_users[@]}"; do
+      [[ $(supervisor_commit "$user") == "$target_commit" ]] || pending+=("$user")
     done
-    echo "pi-remote@$user.service did not activate Pi Remote $target_commit" >&2
-    return 1
+    (( ${#pending[@]} == 0 )) && return 0
+    sleep 0.1
   done
+  printf 'supervisors did not activate Pi Remote %s within their start/stop budget: %s\n' "$target_commit" "${pending[*]}" >&2
+  return 1
 }
 # A daemon's graceful stop can consume its full systemd stop budget. Remote
 # handoff does not depend on it; join both jobs before smoke instead of spending
@@ -336,8 +342,9 @@ fi
 smoke_failed=0
 if [[ ${PI_STACK_FORCE_ROLLBACK:-0} == 1 ]] || (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
 if (( smoke_failed )); then
-    if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
-      echo "activation, smoke or runtime doctor failed; returning Pi Remote to $previous_remote" >&2
+    if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]] &&
+       node "$root/deploy/remote-rollback-compatible.mjs" "$(readlink -f "$remote")" "$previous_remote_release"; then
+      echo "activation, smoke or runtime doctor failed; returning Pi Remote to schema-compatible $previous_remote" >&2
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
       pi_stack_as_root ln -s "$previous_remote_release" "$candidate"
       pi_stack_as_root mv -Tf "$candidate" "$remote"

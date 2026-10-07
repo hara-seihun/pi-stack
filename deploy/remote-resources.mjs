@@ -17,6 +17,7 @@ export const remoteResources = [
   })),
   { source: "apps/remote/package.json", destination: "package.json", kind: "file" },
   { source: "apps/remote/meeting-runtime.json", destination: "meeting-runtime.json", kind: "file" },
+  { source: "apps/remote/data-contract.json", destination: "data-contract.json", kind: "file" },
   {
     source: "apps/remote/server", destination: "server", kind: "tree",
     required: ["voice/delegation-policy.md", "meet/transcriber.ts", "write.ts", "file-edit.py"],
