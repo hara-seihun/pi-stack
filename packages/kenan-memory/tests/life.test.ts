@@ -101,8 +101,10 @@ test("steering effect receipts survive revocation but new effects cannot borrow 
   const { life } = stores();
   const policy = { ...conservativeLifePolicy("alice", at), steering: { mode: "silent-permitted" as const, instruction: "Example grant" }, provenance: provenance() };
   value(life.request("alice", actor, { operation: "policy-write", target, expectedRevision: 0, policy }));
-  const steering = { policyRevision: 1, goalIds: [], preferenceIds: [], evidence: [], action: "Example effect", rationale: "Example rationale", visibility: "silent" as const, state: "executing" as const, outcome: null, receipt: null, compensation: null };
+  value(life.request("alice", actor, { operation: "put-entity", target, id: "preference", expectedRevision: 0, entity: preference() }));
+  const steering = { policyRevision: 1, goalIds: [], preferenceIds: ["preference"], evidence: [], action: "Example effect", rationale: "Example rationale", visibility: "silent" as const, state: "executing" as const, outcome: null, receipt: null, compensation: null };
   value(life.request("alice", actor, { operation: "steering-write", target, id: "effect", expectedRevision: 0, steering }));
+  value(life.request("alice", actor, { operation: "retract-entity", target, id: "preference", expectedRevision: 1, reason: "Supporting observation corrected during the effect" }));
   value(life.request("alice", actor, { operation: "policy-write", target, expectedRevision: 1, policy: { ...policy, status: "revoked" } }));
   expect(life.request("alice", actor, { operation: "steering-write", target, id: "new", expectedRevision: 0, steering })).toMatchObject({ ok: false, error: "invalid-request" });
   expect(life.request("alice", actor, { operation: "steering-write", target, id: "effect", expectedRevision: 1, steering: { ...steering, state: "succeeded", outcome: "Receipt received", receipt: { kind: "receipt", id: "receipt1", relation: null } } })).toMatchObject({ ok: true, value: { revision: 2, value: { policyRevision: 1, state: "succeeded" } } });

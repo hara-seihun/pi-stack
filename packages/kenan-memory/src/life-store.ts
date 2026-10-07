@@ -125,7 +125,7 @@ export class LifeStore {
         const mode = policy.value.steering.mode;
         if (mode === "off" || request.steering.visibility === "silent" && mode !== "silent-permitted") return invalid("Steering visibility is outside current authority");
         for (const [ids, kind] of [[request.steering.goalIds, "goal"], [request.steering.preferenceIds, "preference"]] as const) {
-          if (ids.some(id => { const entity = this.current<LifeEntity>(subject, "entity", id); return !entity || entity.status !== "current" || entity.value.kind !== kind || kind === "preference" && !this.currentValidity(entity.value.provenance); })) return invalid("Steering links must identify current goals and preferences in this aggregate");
+          if (ids.some(id => { const entity = this.current<LifeEntity>(subject, "entity", id); return !entity || entity.value.kind !== kind || starting && (entity.status !== "current" || kind === "preference" && !this.currentValidity(entity.value.provenance)); })) return invalid("Starting steering requires current goal and preference links; outcome receipts may retain historical links");
         }
         if (prior && (prior.value.policyRevision !== request.steering.policyRevision || prior.value.action !== request.steering.action || prior.value.visibility !== request.steering.visibility)) return invalid("A steering effect cannot be reassigned to another policy, action or visibility");
         if (prior && !this.steeringTransition(prior.value.state, request.steering.state)) return invalid("Invalid steering effect transition");
