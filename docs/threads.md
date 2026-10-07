@@ -62,6 +62,10 @@ Every thread an owner creates records `metadata.createdBy` from that caller: `{k
 
 Everything runs as the person's own Unix user. A process that deliberately reads another session's environment or the key file can still impersonate that thread. The boundary stops ordinary API use, the CLI and thread tools from forging custody; it is not a defense against a determined process with the same uid.
 
+## Thread HTTP request lifetime
+
+Nested owner calls share the active HTTP caller's deadline and cancellation. The request context finishes when the handler returns or fails; asynchronous event/timer descendants retained after that response receive a new budget when they next call an owner. A completed request must not permanently poison later background question reads, view recording or synchronization with its expired deadline. Explicit client cancellation remains authoritative. Transport failures name the operation and sanitized owner endpoint; safe reads retry that same endpoint within their own budget without inventing empty results. Regression proof: `packages/orchestrator/tests/thread-request-lifetime.test.ts`.
+
 ## Asynchronous user questions
 
 `request_user_input_async` stores a pending question with its thread owner and returns immediately. Suggestions have no fixed count; one may be explicitly recommended. Human answers combine zero or more selections with free text, with only an entirely empty answer rejected. An explicit dismissal settles a question without answering or authorizing a suggestion and delivers a correlated human steer saying it was skipped. Durable question identity correlates the answer to its question, and ordinary human steer delivery supplies it at a safe boundary without cancelling work. Questions remain pending beyond the current turn and across restarts. Asking also atomically records an owner-local sequenced occurrence for client notifications; accepted questions advance notification cursors without replaying an alert. The [Remote question contract](../apps/remote/docs/questions.md) describes the shared client and API.
