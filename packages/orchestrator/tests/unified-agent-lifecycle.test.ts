@@ -42,10 +42,10 @@ class Native implements PiSession {
   async close() {}
 }
 const roots: string[] = [], services: ThreadService[] = [];
-function fixture() {
+function fixture(workersOnly = false) {
   const root = mkdtempSync(join(tmpdir(), "unified-agent-")); roots.push(root);
   const sessions = new Map<string, Native>();
-  const options = { capacity: { mode: "unmanaged" } as const, databasePath: join(root, "threads.sqlite"), sessionsDir: root,
+  const options = { workersOnly, capacity: { mode: "unmanaged" } as const, databasePath: join(root, "threads.sqlite"), sessionsDir: root,
     openSession: async (input: PiSessionOptions, output: (event: PiEvent) => void) => { const session = new Native(input, output); sessions.set(input.threadId, session); return session; } };
   const service = new ThreadService(options); services.push(service);
   return { service, root, sessions, options };
@@ -226,6 +226,19 @@ it("historical holds and resume inputs reopen without replaying their discarded 
     expect(f.service.get(id)?.agentName).toBeUndefined();
   }
   expect(f.sessions.size).toBe(0);
+});
+
+it("projects historical placement from original owner custody without renaming old titles", () => {
+  const person = fixture(), fleet = fixture(true);
+  const settings = { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" } as const;
+  const root = value(person.service.importThread({ id: "legacy-person", title: "Existing topic", cwd: person.root, sessionFile: join(person.root, "person.jsonl"), settings }));
+  const child = value(person.service.importThread({ id: "legacy-child", parentId: root.id, title: "Existing child", cwd: person.root, sessionFile: join(person.root, "child.jsonl"), settings }));
+  const watch = value(person.service.importThread({ id: "legacy-watch", title: "Watch", cwd: person.root, sessionFile: join(person.root, "watch.jsonl"), metadata: { watchList: true }, settings }));
+  const worker = value(fleet.service.importThread({ id: "legacy-fleet", title: "Existing fleet", cwd: fleet.root, sessionFile: join(fleet.root, "fleet.jsonl"), settings }));
+  expect(root.metadata?.foreground).toBe(true);
+  for (const thread of [child, watch, worker]) expect(thread.metadata?.foreground).toBe(false);
+  expect(root.title).toBe("Existing topic"); expect(worker.title).toBe("Existing fleet");
+  for (const thread of [root, child, watch, worker]) expect(thread.agentName).toBeUndefined();
 });
 
 it("caller identity protects human placement and another agent's dependency ownership", async () => {
