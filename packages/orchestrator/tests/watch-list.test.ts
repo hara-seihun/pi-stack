@@ -50,13 +50,13 @@ it("makes no calls when empty or not due, and creates exactly one visible Opus 5
   await Promise.all([watch.tick(200), watch.tick(200)]);
   expect(spawn).toHaveBeenCalledTimes(1);
   const thread = value(await owner.list()).threads[0]!;
-  expect(thread).toMatchObject({ parentId: null, role: "conversation", title: "Watch list check", metadata: { watchList: true }, settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" } });
+  expect(thread).toMatchObject({ parentId: null, role: "agent", title: "Watch list check", metadata: { watchList: true }, settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" } });
   expect(owner.pending(thread.id)[0]?.text).toContain("request_user_input_async");
   expect(owner.pending(thread.id)[0]?.text).toContain("A future check");
   expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastThreadId: thread.id, nextDueAt: 200 + 45 * 60_000 }] });
   value(await watch.tick(1e8)); expect(spawn).toHaveBeenCalledTimes(1);
   expect(opened).toHaveLength(0);
-  expect(await owner.spawn({ requestId: "recursive", parentId: thread.id, cwd: thread.cwd, message: "delegate" })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(await owner.spawn({ requestId: "recursive", parentId: thread.id, cwd: thread.cwd, message: "delegate" })).toMatchObject({ ok: true, value: { role: "agent", parentId: thread.id } });
 });
 it("dispatches a real ordinary thread with the pinned model and watch tools, then settles without another wake", async () => {
   let emit: (event: PiEvent) => void = () => {};
@@ -72,9 +72,9 @@ it("dispatches a real ordinary thread with the pinned model and watch tools, the
   for (let i = 0; i < 50 && !commands.some(command => command.type === "prompt"); i++) await new Promise<void>(resolve => setImmediate(resolve));
   expect(commands.find(command => command.type === "prompt")?.message).toContain("Check a fixture");
   expect(opened[0]?.args).toEqual(expect.arrayContaining(["anthropic", "claude-opus-5-5", "high"]));
-  expect(opened[0]?.env.PI_THREAD_CAN_SPAWN).toBe("0");
+  expect(opened[0]?.env.PI_THREAD_CAN_SPAWN).toBe("1");
   expect(threadTools(opened[0]!).map(tool => tool.name)).toContain("watch_list_update");
-  expect(threadTools(opened[0]!).map(tool => tool.name)).not.toContain("thread_spawn");
+  expect(threadTools(opened[0]!).map(tool => tool.name)).toContain("thread_spawn");
   const finalMessage = { role: "assistant", content: [{ type: "text", text: "Fixture checked." }], stopReason: "stop" };
   emit({ type: "agent_settled", lastAssistantMessage: finalMessage });
   for (let i = 0; i < 50 && !value(await owner.list()).threads.every(thread => thread.state === "idle"); i++) await new Promise<void>(resolve => setImmediate(resolve));
@@ -85,14 +85,14 @@ it("keeps unanswered decisions from repeating while checking unrelated due items
   const { watch, owner, add } = fixture();
   await add(); value(await watch.tick(100));
   const first = value(await owner.list()).threads[0]!;
-  value(await owner.control({ threadId: first.id, action: "stop", descendants: false }));
+  value(await owner.control({ threadId: first.id, action: "cancel" }));
   const asked = value(await owner.ask({ threadId: first.id, requestId: "decision", questions: [{ question: "Commit to this?" }] }));
   value(await watch.tick(1e8)); expect(value(await owner.list()).threads).toHaveLength(1);
   await add("Unrelated check", 150); value(await watch.tick(1e8));
   const second = value(await owner.list()).threads.find(thread => thread.id !== first.id)!;
   expect(owner.pending(second.id)[0]?.text).toContain("Unrelated check");
   expect(owner.pending(second.id)[0]?.text).not.toContain('"what": "Check a fixture"');
-  value(await owner.control({ threadId: second.id, action: "stop", descendants: false }));
+  value(await owner.control({ threadId: second.id, action: "cancel" }));
   value(await owner.answer({ threadId: first.id, questionId: asked.questionIds[0]!, selectedSuggestionIds: [], text: "No commitment" }));
   expect(owner.pending(first.id)[0]?.text).toContain("No commitment");
   value(await watch.tick(2e8)); expect(value(await owner.list()).threads).toHaveLength(2);

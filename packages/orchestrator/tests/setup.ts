@@ -8,10 +8,12 @@ process.env.HOME = home;
 // /missing only suppresses the config file; ledger symlinks and inherited
 // runtime settings otherwise still lead admission tests to the host's OAuth.
 for (const key of Object.keys(process.env)) {
-  if (key.startsWith("PI_ORCHESTRATOR_") || [
+  if (key.startsWith("PI_ORCHESTRATOR_") || key.startsWith("PI_AGENT_CAPACITY_") || [
     "PI_MODEL_BROKER_URL", "PI_CODEX_ULTRAFAST_BROKER_URL",
     "PI_AGENT_DIR", "PI_CODING_AGENT_DIR",
   ].includes(key)) delete process.env[key];
 }
+
+process.env.PI_AGENT_CAPACITY_CONFIG = join(home, "agent-capacity-client.json");
 
 afterAll(() => rmSync(home, { recursive: true, force: true }));

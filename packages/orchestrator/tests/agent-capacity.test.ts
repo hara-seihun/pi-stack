@@ -65,6 +65,8 @@ it("admits at most 100 parallel HTTP executions across two authenticated owners 
 });
 
 it("fails closed before census cutover and for missing client configuration", async () => {
+  const root = mkdtempSync(join(tmpdir(), "capacity-missing-client-"));
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const authority = memoryAuthority(false);
   const execution = { agentId: "agent", executionId: "execution" };
   expect(authority.acquire(owners[0]!.id, execution)).toMatchObject({ ok: false, error: {
@@ -74,7 +76,7 @@ it("fails closed before census cutover and for missing client configuration", as
   const url = await listen(createAgentCapacityServer(authority, owners));
   const client = createAgentCapacityClient({ url, ownerId: owners[0]!.id, token: owners[0]!.token });
   expect(await client.acquire(execution)).toMatchObject({ ok: false, error: { code: "unavailable", retryAt: expect.any(Number) } });
-  expect(await configuredAgentCapacity({}).acquire(execution)).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  expect(await configuredAgentCapacity({ PI_AGENT_CAPACITY_CONFIG: join(root, "missing-client.json") }).acquire(execution)).toMatchObject({ ok: false, error: { code: "unavailable" } });
   expect(authority.status().active).toBe(0);
   value(authority.initialize([]));
   value(await client.acquire(execution));

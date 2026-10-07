@@ -138,6 +138,9 @@ promoting the recipient. Merely inspecting an agent is not a human view.
 Retained Stop/restore requests select only the named agent; old descendant or
 resume flags never revive a cancellation tree or replay archived input. A closed
 agent's old pending messages do not resume simply because the person reopened it.
+Confirmed close/cancel also removes its recovery wake schedule; reopening does not
+recreate it. An explicit answer to a retained question reopens the thread with
+that answer, not the cancelled queue.
 
 Ephemeral creation is retention policy, not another kind of agent. It may archive
 only after the assignment really settles: no active work, dependencies, waits,

@@ -50,6 +50,8 @@ Focused checks:
 node --test scripts/publication-adoption.test.mjs scripts/publication-config.test.mjs scripts/publication-roots.test.mjs scripts/publication-proof.test.mjs scripts/publication.test.mjs scripts/publication-gate.test.mjs scripts/publication-source.test.mjs scripts/publication-meetings.test.mjs scripts/publication-progress.test.mjs
 ```
 
+Publication fixtures never acquire capacity from the host's live authority: Orchestrator setup removes inherited capacity settings and points at a missing manifest in its temporary home. Missing-configuration tests select their own absent absolute manifest. Browser-doctor preflight tests bundle the source-owned standalone guard into their fixture, so they need no generated Orchestrator `dist`. Host-deployment fixtures provide an explicit synthetic readiness receipt and exercise both initialized and uninitialized gates.
+
 ## Release checkout ownership
 
 Host release wrappers use [`deploy/release-checkout`](../deploy/release-checkout), not an editable working tree. Install that reviewed helper as `~/machine/pi-stack-release-checkout` and source it from the host's release wrapper. The wrapper selects committed source in `~/.local/state/pi-stack-release/repository`, runs [`deploy/prepare`](../deploy/prepare) and [`deploy/host`](../deploy/host), then checks host-specific invariants. The publication target's `releaseRepository` must name that same release-owned checkout.
