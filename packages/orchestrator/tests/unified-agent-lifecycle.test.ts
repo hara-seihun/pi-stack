@@ -130,11 +130,38 @@ it("endpoint reservations fence a concurrent cross-owner close after its graph s
   };
   const closing = b.service.control({ action: "close", threadId: "b" });
   await read;
-  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "late-wait", threadId: "a", reason: "Need b", fromThreadId: "b" }));
   release();
   expect(await closing).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
   expect(b.service.get("b")?.metadata?.archived).not.toBe(true);
   value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: [] }));
+});
+
+it("an inert dependency (settled target, dependent not waiting) shows idle, never blocks close and is released by it", async () => {
+  const a = fixture(), b = fixture();
+  const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  expect(a.service.get("a")).toMatchObject({ state: "idle", dependencies: ["b"] });
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
+  value(await directory.control({ action: "close", threadId: "a" }));
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(b.service.get("b")?.metadata?.peerDependents).toEqual([]);
+  value(await directory.control({ action: "close", threadId: "b" }));
+});
+
+it("closing the target of an inert dependency releases the dependent's edge across owners", async () => {
+  const a = fixture(), b = fixture();
+  const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  value(await directory.control({ action: "close", threadId: "b" }));
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(b.service.get("b")?.metadata?.peerDependents).toEqual([]);
 });
 
 it("turn settlement while waiting or questioning is not an assignment result or ephemeral completion", async () => {
@@ -187,7 +214,7 @@ it("accepted cross-owner reservations remain protected after controller replacem
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", reason: "Need b", fromThreadId: "b" }));
   value(await b.service.close()); services.splice(services.indexOf(b.service), 1);
   const replacement = new ThreadService(b.options); services.push(replacement);
   directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: replacement }]);

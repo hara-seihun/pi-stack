@@ -18,6 +18,7 @@ import type { ReplyTarget } from "./message-reply";
 import { ReplyDrafts } from "./reply-drafts";
 import type { MessagingSnapshot } from "../../server/messaging/protocol";
 import { inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync, type Chat, type ChatId } from "./chats";
+import { agentName } from "./agent-name";
 import { SignInDialog } from "./SignInDialog";
 import { DismissibleError } from "./dismissible-error";
 import { dismissServerError } from "./error-feedback";
@@ -919,6 +920,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     });
     return () => { toast.dismiss(id); };
   }, [undoState, undoClose]);
+  const dismissChatError = useCallback(() => setChatError(""), []);
   const openInboxChat = useCallback((chat: Chat) => { void selectChat(chat).catch(cause => setChatError(String(cause))); }, [selectChat]);
   const requestCloseChat = useCallback((chat: Chat) => { void closeChat(chat); }, [closeChat]);
   const closeInboxChat = requestCloseChat;
@@ -1143,6 +1145,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [patch, stateRef]);
   const threadDirectory = useMemo<ThreadDirectory>(() => ({
     name: id => knownSessions.find(session => session.id === id)?.name || null,
+    agentName: id => { const session = knownSessions.find(item => item.id === id); return session ? agentName(session) : null; },
     busy: id => { const session = knownSessions.find(item => item.id === id); return session ? working(session) : false; },
     open: id => openThreadId(id),
     discover: discoverThreads,
@@ -1177,7 +1180,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   const list = (() => {
     switch (route.tab) {
-      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
+      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
       case "agents": case "notifications": case "calendar": case "machine": case "files": return null;
     }
     return assertNever(route, "App list route");
@@ -1216,7 +1219,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         {closeDependencies.length > 0 && <div className="dependency-close-error" role="alert"><strong>Close is protected by an explicit dependency.</strong>{closeDependencies.map((dependency, index) => <button key={index} type="button" onClick={() => { setCloseDependencies([]); openThreadId(dependency.threadId); }}>Open dependency owner · {knownSessions.find(item => item.id === dependency.threadId)?.name ?? dependency.threadId}</button>)}<button type="button" onClick={() => setCloseDependencies([])}>Dismiss</button></div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
+        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
           void api(API.sessionPlacement.method, API.sessionPlacement.path({ sessionId: selected.id }), { foreground: false }).then(() => { panelPushed.current = false; navigate({ tab: "chats", chat: null, panel: null }); kick(); }, cause => setControlError({ sessionId: selected.id, message: String(cause) }));
         }} debug={debugTools} /></Suspense>}
         {selected && !messagingActive && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}

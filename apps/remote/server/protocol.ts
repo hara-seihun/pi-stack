@@ -445,8 +445,9 @@ export interface ToolCallItem extends TranscriptItemBase {
   name: string;
   /** What names the step: strings cut at 120 characters, arrays at five entries, and
    * fields that are bodies rather than names (a written file's `content`, an edit's
-   * `edits` replaced by `editCount`, a delegated `message`) left out.
-   * `argumentsTruncated` says the body has more. */
+   * `edits` replaced by `editCount`, other tools' delegated `message`) left out.
+   * `thread_send` and `thread_spawn` keep their full `message`: it is rendered as an
+   * agent-to-agent message bubble. `argumentsTruncated` says the body has more. */
   arguments: unknown;
   argumentsTruncated: boolean;
   /** Trailing output of a still-running tool, at most 4,000 characters. */

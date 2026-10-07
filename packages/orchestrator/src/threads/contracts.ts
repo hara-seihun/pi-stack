@@ -198,6 +198,8 @@ export type ThreadControl =
   | { threadId: string; action: "dependencies"; threadIds: string[] }
   /** Owner-to-owner durable endpoint reservation, never a model operation. */
   | { threadId: string; action: "dependencyClaim"; dependentId: string; active: boolean }
+  /** Owner-to-owner release of an inert edge threadId → dependsOn while closing dependsOn; refused while threadId waits on it. */
+  | { threadId: string; action: "dependencyRelease"; dependsOn: string }
   /** Retained callers' stop/restore act on the selected agent only; no recursive control or replay. */
   | { threadId: string; action: "stop"; descendants: boolean; reason?: "archive" }
   | { threadId: string; action: "resume" }

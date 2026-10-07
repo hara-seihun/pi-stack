@@ -1,4 +1,4 @@
-import type { Thread, ThreadApi } from "pi-orchestrator/api";
+import { liveDependency, type Thread, type ThreadApi } from "pi-orchestrator/api";
 
 export function autoArchiveDelay(value: string | undefined): number {
   const delay = Number(value ?? 0);
@@ -36,7 +36,7 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
       if (wait.kind === "agents") for (const id of wait.threadIds) blocked.add(id);
       if (wait.kind === "message") blocked.add(wait.fromThreadId);
     }
-    for (const id of thread.dependencies ?? []) { blocked.add(thread.id); blocked.add(id); }
+    for (const id of thread.dependencies ?? []) if (liveDependency(thread, id, threads.get(id))) { blocked.add(thread.id); blocked.add(id); }
   }
   let archived = 0;
   for (const thread of threads.values()) {

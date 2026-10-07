@@ -16,6 +16,7 @@ import { POOLED_ACCOUNT_WAIT, pooledRetryAvailability } from "../extension/routi
 import { modelBrokerUrl } from "../model-broker-contract.js";
 import { resolveSpawnSettings, resolveThreadSettings, validateThreadSettings } from "./settings.js";
 import { getRandomName } from "../nebulani-names.js";
+import { liveDependency, waitsOn } from "./dependency-liveness.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
 import { inputReceipts } from "./pi-input-receipts.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
@@ -243,7 +244,7 @@ export class ThreadService implements ThreadApi {
         activityDetail: fallback === "queued" ? "Waiting for execution dispatch" : fallback === "recovering" ? "Reattaching the retained execution" : "Awaiting cancellation confirmation" }),
         activeTools: projection?.live.tools.map((tool: Json) => String(tool.toolName)) ?? [] };
     return { executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: { ...JSON.parse(row.wake_data), ...(row.wake_landed_at ? { lastLandedAt: row.wake_landed_at } : {}), deferredReason: metadata.archived ? "archived" : row.held ? "stopped" : row.state === "running" ? "busy" : undefined } } : {}), id: row.id, parentId: row.parent_id, role: "agent", ...(typeof metadata.agentName === "string" ? { agentName: metadata.agentName } : {}), dependencies: metadata.peerDependencies ?? [], title: row.title, cwd: row.cwd, sessionFile: row.session_file,
-      settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state === "idle" && !metadata.archived && (metadata.agentWait || metadata.peerDependencies?.length) ? "waiting" : row.state, held: !!row.held, revision: row.revision,
+      settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state === "idle" && !metadata.archived && metadata.agentWait ? "waiting" : row.state, held: !!row.held, revision: row.revision,
       createdAt: row.created_at, updatedAt: row.updated_at, ...(row.last_user_message_at !== null ? { lastUserMessageAt: row.last_user_message_at } : {}), pendingMessages: pending, metadata };
   }
   get(id: string): Thread | null { const row = this.row(id); return row ? this.project(row) : null; }
@@ -566,15 +567,87 @@ export class ThreadService implements ThreadApi {
     }
     return good(undefined);
   }
-  private async closeProtection(id: string): Promise<Result<void>> {
-    const graph = await this.dependencyGraph(); if (!graph.ok) return graph;
-    const dependencies = this.dependencyEdges(graph.value, id);
-    return dependencies.length ? { ok: false, error: { code: "dependency_conflict", message: "This agent is part of an unresolved dependency. Ask the dependent agent to resolve or release it before closing either endpoint.", dependencies } } : good(undefined);
+  /** Edges whose result is still owed. Inert edges (settled target, dependent not waiting on it) protect nothing. */
+  private liveEdges(threads: Thread[], id: string): import("./contracts.js").ThreadDependency[] {
+    const byId = new Map(threads.map(thread => [thread.id, thread]));
+    return this.dependencyEdges(threads, id).filter(edge => liveDependency(byId.get(edge.threadId), edge.dependsOn, byId.get(edge.dependsOn)));
   }
+  /** Authoritative across owners. On success returns the graph it checked, for releasing the inert edges. */
+  private async closeProtection(id: string): Promise<Result<Thread[]>> {
+    const graph = await this.dependencyGraph(); if (!graph.ok) return graph;
+    const dependencies = this.liveEdges(graph.value, id);
+    return dependencies.length ? { ok: false, error: { code: "dependency_conflict", message: "This agent is part of an unresolved dependency. Ask the dependent agent to resolve or release it before closing either endpoint.", dependencies } } : good(graph.value);
+  }
+  /** Local view: in-flight registration or a live edge. Edges to other owners count as live until closeProtection releases them. */
   private localDependencyProtection(id: string): boolean {
     const thread = this.get(id);
-    return !!(thread?.dependencies?.length || (thread?.metadata?.peerDependents as string[] | undefined)?.length || thread?.metadata?.dependencyUpdate
-      || this.sql("SELECT 1 FROM thread t,json_each(COALESCE(json_extract(t.metadata,'$.peerDependencies'),'[]')) d WHERE d.value=? LIMIT 1").get(id));
+    if (!thread) return false;
+    if (thread.metadata?.dependencyUpdate || this.dependencyOperations.has(id) || this.dependencyRegistering.has(id)) return true;
+    if ((thread.dependencies ?? []).some(target => liveDependency(thread, target, this.get(target) ?? "unknown"))) return true;
+    const local = (this.sql("SELECT t.id FROM thread t,json_each(COALESCE(json_extract(t.metadata,'$.peerDependencies'),'[]')) d WHERE d.value=?").all(id) as Array<{ id: string }>).map(row => row.id);
+    const dependents = new Set([...((thread.metadata?.peerDependents as string[] | undefined) ?? []), ...local]);
+    for (const dependentId of dependents) {
+      const dependent = this.get(dependentId);
+      if (dependent ? liveDependency(dependent, id, thread) : !thread.held && !thread.metadata?.archived) return true;
+    }
+    return false;
+  }
+  /** Drops every inert edge touching this agent, in both directions and across owners. Live edges were refused by closeProtection. */
+  private async releaseInertDependencies(id: string, graph: Thread[]): Promise<Result<void>> {
+    const api = this.directory ?? this;
+    const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
+    if (thread.dependencies?.length) {
+      const released = await this.dropDependencies(id, thread.dependencies); if (!released.ok) return released;
+    }
+    for (const dependent of graph.filter(peer => peer.id !== id && peer.dependencies?.includes(id))) {
+      const released = await api.control({ action: "dependencyRelease", threadId: dependent.id, dependsOn: id });
+      if (!released.ok && released.error.code !== "not_found") return released;
+    }
+    // A reservation is stale when a fresh read of its dependent shows no edge to this agent. Reads are fresh, not the
+    // snapshot, so a dependency registered after the snapshot still fences the close.
+    const reservations = (this.get(id)?.metadata?.peerDependents as string[] | undefined) ?? [];
+    const stale: string[] = [];
+    for (const dependentId of reservations) {
+      const found = this.get(dependentId) ? good({ threads: [this.get(dependentId)!] }) : await api.list({ id: dependentId, limit: 1 });
+      if (!found.ok) return found;
+      const dependent = found.value.threads[0];
+      if (!dependent || dependent.metadata?.archived || !dependent.dependencies?.includes(id)) stale.push(dependentId);
+    }
+    if (stale.length) {
+      const kept = ((this.get(id)?.metadata?.peerDependents as string[] | undefined) ?? []).filter(dependentId => !stale.includes(dependentId));
+      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?)) WHERE id=?").run(JSON.stringify(kept), id);
+      this.changed(id);
+    }
+    return good(undefined);
+  }
+  /** Removes targets from this agent's outgoing dependencies through the durable release phase, valid while held or archived. */
+  private async dropDependencies(id: string, targets: string[]): Promise<Result<void>> {
+    if (this.dependencyOperations.has(id) || this.dependencyRegistering.has(id)) return bad("conflict", "A dependency update is already in progress");
+    const previous = this.get(id)?.dependencies ?? [];
+    const desired = previous.filter(target => !targets.includes(target));
+    if (desired.length === previous.length) return good(undefined);
+    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate',json(?)) WHERE id=?").run(JSON.stringify({ previous, desired, phase: "release" }), id);
+    return this.recoverDependencies(id);
+  }
+  /** After its last dependent releases it, a settled ephemeral worker archives as it would have on settlement. */
+  private async archiveSettledEphemeral(id: string): Promise<void> {
+    const thread = this.get(id);
+    if (!thread?.metadata?.ephemeral || thread.metadata.attentionSummary || thread.metadata.archived || thread.held || this.hasAutoArchiveWork(thread)) return;
+    const protection = await this.closeProtection(id);
+    const latest = this.get(id);
+    if (!protection.ok || !latest || this.suspended || this.closed || latest.metadata?.archived || latest.held || this.hasAutoArchiveWork(latest)) return;
+    this.sql("UPDATE thread SET held=0,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
+    this.changed(id);
+  }
+  /** At the end of a turn, dependencies whose result has been delivered and is no longer awaited are released. */
+  private async pruneSettledDependencies(id: string): Promise<void> {
+    const thread = this.get(id);
+    if (!thread?.dependencies?.length || thread.metadata?.dependencyUpdate || this.dependencyOperations.has(id) || this.dependencyRegistering.has(id)) return;
+    const graph = await this.dependencyGraph(); if (!graph.ok || this.suspended || this.closed) return;
+    const byId = new Map(graph.value.map(peer => [peer.id, peer]));
+    const current = this.get(id); if (!current) return;
+    const settled = (current.dependencies ?? []).filter(target => !liveDependency(current, target, byId.get(target)));
+    if (settled.length) await this.dropDependencies(id, settled);
   }
   private async updateDependencies(id: string, desired: string[]): Promise<Result<void>> {
     if (!Array.isArray(desired) || desired.length > 100 || desired.some(target => typeof target !== "string" || !target.trim() || target === id) || new Set(desired).size !== desired.length)
@@ -1006,7 +1079,7 @@ export class ThreadService implements ThreadApi {
     const clauses: string[] = [], values: (string | null | number)[] = [];
     if (input.id !== undefined) { clauses.push("t.id=?"); values.push(input.id); }
     if (input.parentId !== undefined) { clauses.push("t.parent_id IS ?"); values.push(input.parentId); }
-    const waiting = "(json_extract(t.metadata,'$.agentWait') IS NOT NULL OR COALESCE(json_array_length(json_extract(t.metadata,'$.peerDependencies')),0)>0) AND json_extract(t.metadata,'$.archived') IS NOT 1";
+    const waiting = "json_extract(t.metadata,'$.agentWait') IS NOT NULL AND json_extract(t.metadata,'$.archived') IS NOT 1";
     if (input.state === "waiting") clauses.push(`t.state='idle' AND (${waiting})`);
     else if (input.state === "idle") clauses.push(`t.state='idle' AND NOT (${waiting})`);
     else if (input.state === "running") clauses.push("t.state='running'");
@@ -1092,7 +1165,7 @@ export class ThreadService implements ThreadApi {
   }
   private hasAutoArchiveWork(thread: Thread): boolean {
     const runtime = this.runtimes.get(thread.id);
-    return !!(thread.metadata?.agentWait || thread.dependencies?.length || this.localDependencyProtection(thread.id) || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
+    return !!(thread.metadata?.agentWait || this.localDependencyProtection(thread.id) || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id)
       || this.execution(thread.id) || (!runtime && thread.metadata?.runnerReference) || runtime?.busy || runtime?.commandRunning
       || this.opening.has(thread.id) || this.operations.has(thread.id) || this.halts.has(thread.id));
@@ -1108,6 +1181,16 @@ export class ThreadService implements ThreadApi {
       const dependents = input.active ? [...new Set([...incoming, input.dependentId])] : incoming.filter(id => id !== input.dependentId);
       this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?)) WHERE id=?").run(JSON.stringify(dependents), current.id);
       this.changed(current.id);
+      if (!input.active && !dependents.length) void this.archiveSettledEphemeral(current.id);
+      return good(this.get(current.id)!);
+    }
+    if (input.action === "dependencyRelease") {
+      if (typeof input.dependsOn !== "string" || !input.dependsOn.trim() || input.dependsOn === input.threadId) return bad("invalid_request", "Invalid dependency release");
+      const current = this.get(input.threadId)!;
+      if (!(current.dependencies ?? []).includes(input.dependsOn)) return good(current);
+      if (!current.held && !current.metadata?.archived && waitsOn(current, input.dependsOn))
+        return { ok: false, error: { code: "dependency_conflict", message: "The dependent agent is waiting on this result", dependencies: [{ threadId: current.id, dependsOn: input.dependsOn }] } };
+      const released = await this.dropDependencies(current.id, [input.dependsOn]); if (!released.ok) return released;
       return good(this.get(current.id)!);
     }
     if (input.action === "dependencies") {
@@ -1146,6 +1229,8 @@ export class ThreadService implements ThreadApi {
       if (input.action !== "cancel") {
         const protection = await this.closeProtection(id); if (!protection.ok) return protection;
         if (this.closed || this.suspended) return bad("unavailable", "Close remains with its owner during handoff");
+        const released = await this.releaseInertDependencies(id, protection.value); if (!released.ok) return released;
+        if (this.closed || this.suspended) return bad("unavailable", "Close remains with its owner during handoff");
         if (this.localDependencyProtection(id)) return { ok: false, error: { code: "dependency_conflict", message: "A dependency endpoint reservation protects this agent. Its dependent must resolve or release it first.", dependencies: [...this.dependencyEdges(this.snapshot(), id), ...((this.get(id)?.metadata?.peerDependents as string[] | undefined) ?? []).map(threadId => ({ threadId, dependsOn: id }))] } };
       }
       this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.cancellationRequest',?) WHERE id=?").run(input.action === "cancel" ? "cancel" : "close", id);
@@ -1168,6 +1253,7 @@ export class ThreadService implements ThreadApi {
       const viewedAt = this.autoArchiveViewedAt(current);
       if (viewedAt === undefined || viewedAt >= input.inactiveBefore) return good(current);
       const protection = await this.closeProtection(input.threadId); if (!protection.ok) return good(this.get(input.threadId)!);
+      const released = await this.releaseInertDependencies(input.threadId, protection.value); if (!released.ok) return good(this.get(input.threadId)!);
       const latest = this.get(input.threadId)!;
       if (latest.updatedAt >= input.inactiveBefore || (this.autoArchiveViewedAt(latest) ?? Infinity) >= input.inactiveBefore || this.hasAutoArchiveWork(latest)) return good(latest);
       return this.update(input.threadId, { archived: true });
@@ -1865,8 +1951,10 @@ export class ThreadService implements ThreadApi {
       await this.waitForProvider(id,runtime,execution,failure);return;
     }
     this.phase(id, "finishing", "Saving turn receipts and notifying dependents");
+    await this.pruneSettledDependencies(id);
+    if (this.suspended || this.closed) return;
     const thread = this.get(id)!;
-    const assignmentPending = !!(thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule
+    const assignmentPending = !!(thread.metadata?.agentWait || thread.dependencies?.some(target => liveDependency(thread, target, this.get(target) ?? "unknown")) || thread.wakeSchedule
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(id));
     const assignments = assignmentPending ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
       AND (w.status='done' OR w.execution_id=?) AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id, execution.id) as Array<{ id: string; sender_id: string }>;

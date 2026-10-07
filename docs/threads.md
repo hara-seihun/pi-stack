@@ -41,8 +41,9 @@ Only creation/control override requests resolve partial preferences.
 
 Native execution and assignment completion are distinct. `running` includes
 accepted runnable input, admission, startup, execution and cancellation until
-confirmed. `waiting` describes an agent with a durable dependency but no local
-execution. `idle` is genuinely available with no current work. Archived agents
+confirmed. `waiting` describes an agent with a current `thread_wait` (agent, job,
+deployment or message) but no local execution. Holding a dependency edge without a
+wait is not waiting. `idle` is genuinely available with no current work. Archived agents
 retain history but accept no automatic execution. There is no persistent Stopped
 product state.
 
@@ -65,12 +66,20 @@ outgoing peer dependencies. Agent callers can change only their own edges.
 Dependencies reference accessible peers, not only agents they launched. Cycles
 and invalid/inaccessible targets are rejected.
 
-A dependency A → B protects **both A and B** from close/archive. A refusal uses
-`dependency_conflict` with the actual edges, so the person can visit A and ask it
-to resolve or release the dependency. Creator provenance alone protects neither
-endpoint. An unrelated message or recovery wake does not erase dependency
-protection. Dependency changes and close must enforce the invariant at the owner,
-not just in a client's confirmation dialog.
+A dependency A → B exists so a result is not lost. It is **live** while A's
+current wait names B, or while B still owes a result (B is running, waiting or has
+queued input). A live edge protects **both A and B** from close/archive; a refusal
+uses `dependency_conflict` with the actual edges, so the person can visit A and ask
+it to resolve or release the dependency. Once B has settled and A is not waiting on
+it, the edge is **inert**: it protects nothing, does not make either endpoint
+`waiting`, does not keep A's assignment pending, and closing either endpoint
+releases it on both owners (`dependencyRelease`/`dependencyClaim` owner-to-owner
+controls). At the end of each of A's turns, inert outgoing edges are released; a
+settled ephemeral B archives once its last dependent releases it. Creator
+provenance alone protects neither endpoint. Dependency liveness and close must be
+enforced at the owner (`threads/dependency-liveness.ts`), not just in a client's
+confirmation dialog. Hara's October 7 ruling: idle dependencies must not block
+closing.
 
 `thread_wait` sets a scheduling wait and ends the native turn without polling:
 
@@ -121,7 +130,8 @@ promoting the recipient. Merely inspecting an agent is not a human view.
 
 ## Controls
 
-- `close`: cancel and archive only the selected agent. Dependencies veto it.
+- `close`: cancel and archive only the selected agent. Live dependencies veto it;
+  inert ones are released.
   Failed cancellation leaves visible custody and never permits overlapping work.
 - `reopen`: restore the conversation without resuming interrupted or queued work.
 - `open`: human opening also promotes foreground placement.
@@ -143,7 +153,7 @@ recreate it. An explicit answer to a retained question reopens the thread with
 that answer, not the cancelled queue.
 
 Ephemeral creation is retention policy, not another kind of agent. It may archive
-only after the assignment really settles: no active work, dependencies, waits,
+only after the assignment really settles: no active work, live dependencies, waits,
 wakes, attention awaiting the person or unanswered questions. Foreground and
 unread human attention remain discoverable. Automatic retention cannot bypass
 explicit dependency protection.

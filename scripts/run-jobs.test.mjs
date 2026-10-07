@@ -76,10 +76,11 @@ test("the Node test driver expands file patterns and propagates failures without
 });
 
 test("publication schedules every workspace shard directly under the shared budget", async () => {
-  const shards = checkJobs.filter(([name]) => name.startsWith("agent workspace "));
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
   assert.equal(shards.length, 6);
   assert.deepEqual(shards.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD), ["0/6", "1/6", "2/6", "3/6", "4/6", "5/6"]);
-  assert.deepEqual(shards.map(job => job[0]), workspaceChecks.map(job => job[0]));
+  assert.deepEqual(shards.map(job => job[0]), workspaceChecks.filter(([name]) => /^agent workspace \d+\/6$/.test(name)).map(job => job[0]));
+  assert.equal(checkJobs.filter(([name]) => name === "agent workspace component deployment").length, 1);
   assert.equal(checkJobs.some(([, command, args]) => command === "npm" && args.includes("--workspace=@hara-seihun/agent-workspace")), false);
   let active = 0, peak = 0;
   const results = await runJobs(shards.map(([name, , , options]) => [name, process.execPath,
@@ -96,7 +97,7 @@ test("publication schedules every workspace shard directly under the shared budg
 });
 
 test("workspace shards execute a selected contract exactly once across the publication plan", async () => {
-  const shards = checkJobs.filter(([name]) => name.startsWith("agent workspace "));
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
   let output = "";
   const results = await runJobs(shards.map(([name, command, args, options]) => [name, command,
     [args[0], "--test-name-pattern=cache discovery walks each directory once", ...args.slice(1)], options]), {

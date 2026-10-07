@@ -64,11 +64,14 @@ describe("transcript item derivation", () => {
     expect(boundedArguments({ short: "ok" })).toEqual({ value: { short: "ok" }, truncated: false });
   });
 
-  test("argument bodies stay out of the head: written content, edit texts, delegated messages", () => {
+  test("argument bodies stay out of the head, except words one agent says to another", () => {
     expect(boundedArguments({ path: "/a", content: "x".repeat(10) }, 120, "Write")).toEqual({ value: { path: "/a" }, truncated: true });
     expect(boundedArguments({ path: "/a", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }, 120, "Edit"))
       .toEqual({ value: { path: "/a", editCount: 2 }, truncated: true });
-    expect(boundedArguments({ title: "t", message: "m".repeat(5) }, 120, "thread_spawn")).toEqual({ value: { title: "t" }, truncated: true });
+    const message = "m".repeat(500);
+    expect(boundedArguments({ title: "t", message }, 120, "thread_spawn")).toEqual({ value: { title: "t", message }, truncated: false });
+    expect(boundedArguments({ threadId: "peer", text: message }, 120, "functions.thread_send")).toEqual({ value: { threadId: "peer", text: message }, truncated: false });
+    expect(boundedArguments({ threadId: "peer", message }, 120, "thread_control")).toEqual({ value: { threadId: "peer" }, truncated: true });
     expect(boundedArguments({ args: ["a", "b", "c", "d", "e", "f", "g"] }, 120, "agent_browser"))
       .toEqual({ value: { args: ["a", "b", "c", "d", "e"] }, truncated: true });
     expect(boundedArguments({ deep: { deeper: { deepest: 1 } } })).toEqual({ value: { deep: { deeper: {} } }, truncated: true });

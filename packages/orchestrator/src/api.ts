@@ -74,3 +74,4 @@ export {
   type PlanUsage,
   type PlanUsageSnapshot,
 } from "./client.js";
+export { liveDependency, owesResult, waitsOn } from "./threads/dependency-liveness.js";

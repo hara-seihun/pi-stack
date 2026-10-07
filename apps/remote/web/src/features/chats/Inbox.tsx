@@ -5,7 +5,9 @@ import { useVisibleSelection } from "../../app/use-visible-selection";
 import { ChatAvatar } from "../../chat-row";
 import { INBOX_SECTIONS, type Chat, type ChatId, type InboxRow } from "../../chats";
 import { DismissibleError } from "../../dismissible-error";
-import { StatusPill } from "../status/StatusPill";
+import { StatusIcon } from "../status/StatusIcon";
+import { StatusQuiet } from "../status/StatusPill";
+import { statusGlyph } from "../status/thread-status";
 import { modelShortName } from "../status/model-glyph";
 import "./inbox.css";
 
@@ -32,23 +34,31 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
   useEffect(() => setColor(session?.color ?? null), [session?.color]);
   const colour = useThreadColor({ id: session?.id, name: chat.title, color: session?.color, onPreview: setColor });
   const titleOnly = selected && compactSelected;
-  const showStatusLine = !titleOnly && Boolean(session || room || unread || status);
-  const closeTitle = chat.kind === "ai" ? `Close ${chat.title}: stops only this agent, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
+  const name = chat.kind === "ai" ? chat.name : null;
+  const subtitle = name ? chat.title : room ? room.members.map(member => member.displayName).join(", ") : "";
+  const queued = session && session.queuedMessages.length > 0 && !session.held ? session.queuedMessages.length : 0;
+  const quietable = Boolean(status?.busy && status.lastActivityAt);
+  const showMetaLine = !titleOnly && Boolean(unread || place || queued || quietable);
+  const closeTitle = chat.kind === "ai" ? `Close ${name ?? chat.title}: stops only this agent, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
   return <div className={`inbox-row${selected ? " selected" : ""}${titleOnly ? " title-only" : ""}`} data-section={row.section} style={threadColorStyle(color)}>
     {/* The press starts before the tap lands: that is when this thread's
         newest window is worth asking for. */}
     <button ref={colour.button} type="button" className="inbox-open" {...colour.handlers} onClick={event => { colour.handlers.onClick(event); if (!event.defaultPrevented) onOpen(chat); }} onPointerDown={event => { colour.handlers.onPointerDown(event); onPrefetch?.(chat); }} aria-current={selected || undefined} aria-expanded={colour.expanded} aria-controls={colour.controls} aria-description={session ? "Long press, right click or press Shift+F10 to change thread colour" : undefined} title={session ? "Long press to change thread colour" : undefined}>
-      <span className="inbox-glyph"><ChatAvatar avatar={chat.kind === "human" ? chat.avatar : undefined} icon={chat.icon} color={color ? "var(--thread-color)" : undefined} /></span>
+      <span className="inbox-glyph"><ChatAvatar avatar={chat.kind === "human" ? chat.avatar : undefined} icon={chat.icon} color={color ? "var(--thread-color)" : undefined} />{status && <StatusIcon status={status} className="inbox-status" />}</span>
       <span className="inbox-main">
-        <span className="inbox-title-line"><span className="inbox-title">{chat.title}</span>{session?.idleUnread && <span className="inbox-unread-dot" aria-label="Unread" title="Unread" />}{!titleOnly && <time className="inbox-time">{relativeTime(row.updatedAt)}</time>}</span>
+        <span className="inbox-title-line">
+          <span className="inbox-title">{name ?? chat.title}</span>
+          {session?.idleUnread && status && statusGlyph(status) !== "unread" && <span className="inbox-unread-dot" aria-label="Unread" title="Unread" />}
+          {!titleOnly && session && <span className="inbox-model" title={session.model}>{modelShortName(session.model)}</span>}
+          {!titleOnly && <time className="inbox-time">{relativeTime(row.updatedAt)}</time>}
+        </span>
+        {!titleOnly && subtitle && <span className="inbox-subtitle">{subtitle}</span>}
         {!titleOnly && session?.attentionSummary && <span className="inbox-attention-summary">{session.attentionSummary}</span>}
-        {showStatusLine && <span className="inbox-status-line">
-          {status ? <StatusPill status={status} compact /> : null}
+        {showMetaLine && <span className="inbox-status-line">
           {unread > 0 && <span className="inbox-unread">{unread} unread</span>}
-          {room && <span className="inbox-meta">{room.members.map(member => member.displayName).join(", ")}</span>}
-          {session && <span className="inbox-meta">{modelShortName(session.model)}</span>}
           {place && <span className="inbox-meta">{place}</span>}
-          {session && session.queuedMessages.length > 0 && !session.held && <span className="inbox-chip">{session.queuedMessages.length} queued</span>}
+          {queued > 0 && <span className="inbox-meta">{queued} queued</span>}
+          {status && quietable && <StatusQuiet status={status} />}
         </span>}
       </span>
     </button>
@@ -59,12 +69,14 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
 
 // Memoized with its rows and handlers: typing in the composer, a live frame or
 // a dashboard tick must not walk this list again.
-export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactSelected = false, error, picker, onOpen, onPrefetch, onClose, onSearchArchived, onSelectedVisibleChange }: {
+export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactSelected = false, error, onDismissError, picker, onOpen, onPrefetch, onClose, onSearchArchived, onSelectedVisibleChange }: {
   rows: InboxRow[];
   selectedId: ChatId | null;
   showPlace: boolean;
   compactSelected?: boolean;
   error: string;
+  /** Clears the owning error so a dismissed message stays dismissed when the inbox remounts. */
+  onDismissError(): void;
   picker: ReactNode;
   onOpen(chat: Chat): void;
   onPrefetch?(chat: Chat): void;
@@ -75,7 +87,7 @@ export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactS
   const [query, setQuery] = useState("");
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return needle ? rows.filter(row => row.chat.title.toLowerCase().includes(needle) || (row.chat.kind === "ai" && row.chat.session.model.toLowerCase().includes(needle))) : rows;
+    return needle ? rows.filter(row => row.chat.title.toLowerCase().includes(needle) || (row.chat.kind === "ai" && (row.chat.name?.toLowerCase().includes(needle) || row.chat.session.model.toLowerCase().includes(needle)))) : rows;
   }, [rows, query]);
   const defaultPlace = useMemo(() => {
     const counts = new Map<string, number>();
@@ -94,7 +106,7 @@ export const Inbox = memo(function Inbox({ rows, selectedId, showPlace, compactS
       </div>
       {picker}
     </header>
-    <DismissibleError message={error} />
+    <DismissibleError message={error} onDismiss={async () => { onDismissError(); return { ok: true }; }} />
     <div className="inbox-list">
       {INBOX_SECTIONS.map(section => {
         const items = filtered.filter(row => row.section === section.id);

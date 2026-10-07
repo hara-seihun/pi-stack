@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "../server/protocol";
 import { activityTiming, attentionRank, threadStatus, roomThreadStatus } from "./src/features/status/thread-status";
-import { StatusPill } from "./src/features/status/StatusPill";
+import { StatusPill, StatusQuiet } from "./src/features/status/StatusPill";
 import { ACTIVITIES, validateStreamSnapshot } from "../shared/state-validation";
 
 const running = (patch: Partial<Session> = {}) => ({
@@ -47,7 +47,7 @@ test("worker activity is display-only, keeps unread attention and never shows pa
   expect(attentionRank(status)).toBe(11);
   expect(activityTiming(status, 80000)).toEqual({});
   expect(activityTiming({ ...status, since: 1000, lastActivityAt: 1000 }, 80000)).toEqual({});
-  expect(renderToStaticMarkup(createElement(StatusPill, { status, compact: true }))).toContain("Agents working");
+  expect(renderToStaticMarkup(createElement(StatusPill, { status }))).toContain("Agents working");
   expect(attentionRank(threadStatus({ ...parent, idleUnread: true }))).toBe(2);
   expect(threadStatus({ ...parent, held: true }).key).toBe("idle");
   expect(threadStatus({ ...parent, archivedAt: "2026-10-05" }).key).toBe("archived");
@@ -116,8 +116,7 @@ test("confirmed failure and pending cancellation are not confused with idle or s
 
 test("lack of activity updates is visible in dense rows, not hidden in a desktop tooltip", () => {
   const status = threadStatus(running({ activity: "waiting_on_tool", activeTools: ["bash"], activitySince: Date.now() - 70_000, lastActivityAt: Date.now() - 60_000 }));
-  const markup = renderToStaticMarkup(createElement(StatusPill, { status, compact: true }));
-  expect(markup).toMatch(/class="status-quiet">\d+[smh](?: \d+[sm])?<\/span>/);
-  expect(markup).toContain('data-status="tool"');
+  const markup = renderToStaticMarkup(createElement(StatusQuiet, { status }));
+  expect(markup).toMatch(/class="status-quiet">Quiet for \d+[smh](?: \d+[sm])?<\/span>/);
   expect(markup).not.toContain("Failed");
 });

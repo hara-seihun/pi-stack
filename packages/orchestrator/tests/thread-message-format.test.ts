@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { agentMessagePresentation, formatThreadMessage } from "../src/threads/message-format.js";
+import { agentMessagePresentation, agentSenderLabel, formatThreadMessage } from "../src/threads/message-format.js";
 import type { ThreadMessage } from "../src/threads/contracts.js";
 
 const senderId = "7c925d87-bc2b-4293-933a-f9ffee9b3592";
@@ -45,4 +45,10 @@ it.each([
 it("recognizes historical completion envelopes without inventing a name", () => {
   const historical = { ...message, source: "notification" as const, senderName: undefined, text: '{"type":"thread_idle","outcome":"complete","finalText":"Done."}' };
   expect(agentMessagePresentation(formatThreadMessage(historical, historical.text))).toEqual({ sender: { threadId: senderId }, text: "Done." });
+});
+
+it("labels senders by first name, including threads named before single names", () => {
+  expect(agentSenderLabel({ threadId: senderId, name: "Tainetaimu Sizhukein" })).toBe("Tainetaimu");
+  expect(agentSenderLabel({ threadId: senderId, name: "Kelana" })).toBe("Kelana");
+  expect(agentSenderLabel({ threadId: senderId })).toBe("Agent · 7c925d87");
 });
