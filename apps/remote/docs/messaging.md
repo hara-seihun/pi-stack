@@ -62,7 +62,7 @@ The host's supervisor wrapper owns the replacement. Accepted agent turns keep th
 
 ## Signal
 
-The built-in adapter uses the maintained [signal-cli](https://github.com/AsamK/signal-cli) project. Install a current host package. NixOS should declare `pkgs.signal-cli` in `environment.systemPackages`; its wrapper supplies Java and the matching native libsignal library. Do not put an unpacked foreign Linux binary in a user's temporary directory. Signal can stop accepting clients more than a few months out of date, so the package belongs to normal host maintenance.
+The built-in adapter uses the maintained [signal-cli](https://github.com/AsamK/signal-cli) project. Install a current host-managed package. Ubuntu and Debian hosts can install the official Java distribution under `/opt` with its required JRE and expose its wrapper on the supervisor's PATH; keep the bundled native libsignal library matched to that release. NixOS hosts should declare `pkgs.signal-cli` in `environment.systemPackages`; its wrapper supplies Java and the matching native library. Do not put an unpacked foreign Linux binary in a user's temporary directory. Signal can stop accepting clients more than a few months out of date, so the package belongs to normal host maintenance.
 
 Options are:
 

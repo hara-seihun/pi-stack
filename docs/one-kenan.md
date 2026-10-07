@@ -78,10 +78,10 @@ Integrated staging must prove:
 
 ## Exact cutover and rollback
 
-After publication is deployed on the host, provision the root-owned plan described in [deployment](one-kenan-deployment.md). From the selected release checkout on kenan-server:
+After publication is deployed on the host, provision the root-owned plan described in [deployment](one-kenan-deployment.md). From the host's selected release checkout as its publication account:
 
 ```sh
-cd /home/kenan/.local/state/pi-stack-release/repository
+cd ~/.local/state/pi-stack-release/repository
 sudo deploy/one-kenan prepare --config /etc/pi-stack/one-kenan-plan.json --state /var/lib/pi-kenan-deploy
 # Run only after Hara says go:
 sudo deploy/one-kenan cutover --authorize-cutover --config /etc/pi-stack/one-kenan-plan.json --state /var/lib/pi-kenan-deploy
