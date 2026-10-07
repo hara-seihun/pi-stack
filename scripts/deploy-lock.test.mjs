@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -285,8 +285,9 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
     copyDeploymentOwner(root, repository);
+    writeFileSync(join(remoteApp, "data-contract.json"), readFileSync(join(root, "apps/remote/data-contract.json")));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
-    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
+    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; cp "$(cd "$(dirname "$0")/.." && pwd)/apps/remote/data-contract.json" "$release/data-contract.json"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
     const runtimeOverlap = `
 if [[ \${REQUIRE_RUNTIME_OVERLAP:-0} == 1 ]]; then
@@ -570,6 +571,24 @@ exit 64
     assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST), before);
     assert.equal(readFileSync(env.PHONE_TRACE, "utf8"), "--check\n--activate\n");
     assert.match(readFileSync(systemctlTrace, "utf8"), /^stop pi-stack-phone.service$/m);
+
+    // Unknown or incompatible persistent schemas must retain forward selection,
+    // not reactivate an older supervisor against migrated data.
+    const contractPath = join(before, "data-contract.json");
+    for (const previousContract of [null, { version: 1, schema: "incompatible-fixture-schema" }]) {
+      if (previousContract === null) rmSync(contractPath);
+      else writeFileSync(contractPath, JSON.stringify(previousContract));
+      rmSync(destinations.PI_STACK_REMOTE_DEST);
+      symlinkSync(before, destinations.PI_STACK_REMOTE_DEST);
+      writeFileSync(supervisorCommit, readFileSync(join(before, ".pi-stack-commit")));
+      rmSync(activationTrace, { force: true });
+      const incompatible = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, SMOKE_EXIT: "1" } });
+      assert.equal(incompatible.status, 1, incompatible.stderr);
+      assert.match(incompatible.stderr, /Remote rollback refused/);
+      assert.doesNotMatch(incompatible.stderr, /returning Pi Remote to/);
+      assert.notEqual(readlinkSync(destinations.PI_STACK_REMOTE_DEST), before, "failed candidate remains selected for forward repair");
+      assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote@alice.service\n", "incompatible old release never receives activation");
+    }
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 
