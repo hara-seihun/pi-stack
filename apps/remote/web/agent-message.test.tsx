@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { formatThreadMessage } from "../../../packages/orchestrator/src/threads/message-format";
-import { presentAgentMessage } from "./src/features/conversation/agent-message";
+import { outgoingAgentMessage, presentAgentMessage } from "./src/features/conversation/agent-message";
 import { entryFromHead, entriesFromHeads } from "./src/features/conversation/transcript-entries";
 import { Transcript } from "./src/features/conversation/Transcript";
 import { deriveTranscriptItems } from "../server/transcript-items";
@@ -31,13 +31,13 @@ test("new incoming agent words render under the immutable sender name, without a
   expect(incoming.identity?.id).toBe("incoming");
   for (const autoCollapse of [true, false]) {
     const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
-    expect(html).toContain('class="message-label">KELANA</span>');
+    expect(html).toMatch(/<span class="agent-route incoming"><span class="agent-route-name">Kelana<\/span><svg[^>]*aria-label="to".*?<span class="agent-route-name self">Kenan<\/span>/);
     expect(html).toContain('class="message-label">KENAN</span>');
     expect(html).not.toContain("Agent message");
     expect(html).not.toContain("agent-message-step");
     expect(html).not.toContain("agent_message");
-    expect(html.indexOf('data-transcript-seq="1"')).toBeLessThan(html.indexOf("KELANA"));
-    expect(html.indexOf("KELANA")).toBeLessThan(html.indexOf('data-transcript-seq="3"'));
+    expect(html.indexOf('data-transcript-seq="1"')).toBeLessThan(html.indexOf("agent-route incoming"));
+    expect(html.indexOf("agent-route incoming")).toBeLessThan(html.indexOf('data-transcript-seq="3"'));
   }
   expect(JSON.stringify(context)).toBe(native);
 });
@@ -106,4 +106,28 @@ test("changing a head's sender label invalidates memoized message presentation",
   const unnamed = entryFromHead(original);
   const named = entryFromHead({ ...original, agentSender: { threadId: sender, name: "Kelana" } });
   expect(named.signature).not.toBe(unnamed.signature);
+});
+
+test("sends and spawns read as this agent's own messages, routed to their recipient, and replace the tool step", () => {
+  const words = "Please **review** this.\n\n" + "Details. ".repeat(40);
+  const spawned = { ok: true, value: { id: sender, agentName: "Kelana Tazatozaten", title: "Review" } };
+  const context = { messages: [
+    { role: "assistant", timestamp: 1, content: [
+      { type: "toolCall", id: "send", name: "thread_send", arguments: { threadId: sender, text: words } },
+      { type: "toolCall", id: "spawn", name: "thread_spawn", arguments: { title: "Review", message: words } },
+      { type: "toolCall", id: "refused", name: "thread_send", arguments: { threadId: sender, text: "Closed?" } },
+    ] },
+    { role: "toolResult", toolCallId: "send", content: [{ type: "text", text: '{"ok":true}' }] },
+    { role: "toolResult", toolCallId: "spawn", content: [{ type: "text", text: JSON.stringify(spawned) }] },
+    { role: "toolResult", toolCallId: "refused", isError: true, content: [{ type: "text", text: "Thread is closed" }] },
+  ] };
+  const entries = entriesFromHeads(deriveTranscriptItems(context).map(item => item.head));
+  const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} onEdit={() => {}} onReply={() => {}} />);
+  expect(html.match(/class="message assistant agent-outgoing"/g)).toHaveLength(3);
+  expect(entries.filter(entry => entry.kind === "toolCall").map(entry => outgoingAgentMessage(entry)?.text)).toEqual([words, words, "Closed?"]);
+  expect(html).toMatch(/<span class="agent-route outgoing"><span class="agent-route-name self">Kenan<\/span><svg[^>]*><path[^>]*><\/path><\/svg><span class="agent-route-name">Thread 7c925d87<\/span>/);
+  expect(html).toContain('class="agent-route-name new" title="Review">New agent</span>');
+  expect(html).toContain('class="message-status failed">failed · Thread is closed</footer>');
+  expect(html).not.toContain("tool-step");
+  expect(html).not.toContain("thread_send");
 });

@@ -4,18 +4,19 @@ export type { ChatId } from "../../server/protocol";
 import type { MessagingBackendInfo, MessagingConversation, MessagingSnapshot } from "../../server/messaging/protocol";
 import type { Session, ThreadStart } from "./types";
 import { messagingAvatarUrl } from "./messaging-avatar";
+import { agentName } from "./agent-name";
 import { conversationThreads } from "./thread-state";
 import { attentionRank, threadStatus, roomThreadStatus, type ThreadStatus } from "./features/status/thread-status";
 import { assertNever } from "../../shared/explicit-state";
 
 export type Chat =
-  | { id: ChatId; kind: "ai"; title: string; icon: string; label: string; session: Session }
+  | { id: ChatId; kind: "ai"; title: string; /** The agent's first name, or null for threads the service never named. */ name: string | null; icon: string; label: string; session: Session }
   | { id: ChatId; kind: "room"; title: string; icon: string; label: string; room: Room }
   | { id: ChatId; kind: "human"; title: string; icon: string; label: string; /** The contact's or group's picture, when the backend has one. */ avatar?: string; conversation: MessagingConversation; backend?: MessagingBackendInfo };
 
 export function aiChat(session: Session, starts: ThreadStart[]): Chat {
   const start = starts.find(candidate => candidate.id === session.environment);
-  return { id: `ai:${session.id}`, kind: "ai", title: session.agentName ? `${session.agentName} · ${session.name}` : session.name || "Agent", icon: start?.icon || (["openai", "anthropic"].includes(session.provider) ? session.provider : "cloud"), label: start?.label || session.provider, session };
+  return { id: `ai:${session.id}`, kind: "ai", title: session.name || "Agent", name: agentName(session), icon: start?.icon || (["openai", "anthropic"].includes(session.provider) ? session.provider : "cloud"), label: start?.label || session.provider, session };
 }
 
 export function humanChat(conversation: MessagingConversation, backends: MessagingBackendInfo[]): Chat {

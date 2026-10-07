@@ -10,8 +10,9 @@ Remote, schedules, tools and the CLI use the same ThreadService operations.
 ## Identity, custody and placement
 
 New threads receive an immutable Nebulani `agentName`, separate from the mutable
-conversation title and UUID. Historical unnamed threads retain their identity;
-a name is not an authorization credential. `parentId` records the agent that
+conversation title and UUID. Startup backfills historical threads without a name
+once and stores it with the thread, so imports, projections and restarts preserve
+the same identity. A name is not an authorization credential. `parentId` records the agent that
 launched this one. It supplies the direct launched-agent list and result
 provenance, not recursive cancellation or a leaf-worker restriction. The runtime
 projects one role, `agent`.
@@ -28,8 +29,16 @@ human open promotes the selected agent. Agent reads, subscriptions and attention
 requests cannot promote it. Opening from a notification or launched-agent link
 selects the same identity, not a copied conversation.
 
+Completed background tasks archive as soon as their final assignment settles,
+regardless of unread results or attention notices. Startup also reconciles already
+completed background tasks. Transcripts, results, assignment receipts and notification
+history remain accessible; opening a notification restores and promotes the original
+thread. Foreground Chats keep their unread behavior. Pending input/questions, typed
+waits, wake schedules, live dependency protection and persistent watch threads remain
+open because their work is not complete.
+
 `lastUserMessageAt` records accepted explicit input without an agent sender.
-Automatic notices, agent messages, tool activity, naming and settlements do not
+Automatic notices, agent messages, tool activity, titles and settlements do not
 change it. Imports retain original timestamps. Creation time orders threads with
 no person input.
 
@@ -41,10 +50,13 @@ Only creation/control override requests resolve partial preferences.
 
 Native execution and assignment completion are distinct. `running` includes
 accepted runnable input, admission, startup, execution and cancellation until
-confirmed. `waiting` describes an agent with a durable dependency but no local
-execution. `idle` is genuinely available with no current work. Archived agents
+confirmed. `waiting` describes an agent with a current `thread_wait` (agent, job,
+deployment or message) but no local execution. Holding a dependency edge without a
+wait is not waiting. `idle` is genuinely available with no current work. Archived agents
 retain history but accept no automatic execution. There is no persistent Stopped
-product state.
+product state. An inactive or stopped agent with no explicit dependencies is
+idle even if agents it previously launched are still active. Launch provenance
+never supplies a non-idle status or icon; each agent owns its own activity.
 
 Execution activity names observed phases: queuing, admission, opening, inference,
 tools, compaction, cancellation or provider recovery. Missing instrumentation is
@@ -65,12 +77,20 @@ outgoing peer dependencies. Agent callers can change only their own edges.
 Dependencies reference accessible peers, not only agents they launched. Cycles
 and invalid/inaccessible targets are rejected.
 
-A dependency A → B protects **both A and B** from close/archive. A refusal uses
-`dependency_conflict` with the actual edges, so the person can visit A and ask it
-to resolve or release the dependency. Creator provenance alone protects neither
-endpoint. An unrelated message or recovery wake does not erase dependency
-protection. Dependency changes and close must enforce the invariant at the owner,
-not just in a client's confirmation dialog.
+A dependency A → B exists so a result is not lost. It is **live** while A's
+current wait names B, or while B still owes a result (B is running, waiting or has
+queued input). A live edge protects **both A and B** from close/archive; a refusal
+uses `dependency_conflict` with the actual edges, so the person can visit A and ask
+it to resolve or release the dependency. Once B has settled and A is not waiting on
+it, the edge is **inert**: it protects nothing, does not make either endpoint
+`waiting`, does not keep A's assignment pending, and closing either endpoint
+releases it on both owners (`dependencyRelease`/`dependencyClaim` owner-to-owner
+controls). At the end of each of A's turns, inert outgoing edges are released; a
+settled background B archives once its last dependent releases it. Creator
+provenance alone protects neither endpoint. Dependency liveness and close must be
+enforced at the owner (`threads/dependency-liveness.ts`), not just in a client's
+confirmation dialog. Hara's October 7 ruling: idle dependencies must not block
+closing.
 
 `thread_wait` sets a scheduling wait and ends the native turn without polling:
 
@@ -121,15 +141,28 @@ promoting the recipient. Merely inspecting an agent is not a human view.
 
 ## Controls
 
-- `close`: cancel and archive only the selected agent. Dependencies veto it.
+- `close`: cancel and archive only the selected agent. Live dependencies veto it;
+  inert ones are released.
   Failed cancellation leaves visible custody and never permits overlapping work.
 - `reopen`: restore the conversation without resuming interrupted or queued work.
 - `open`: human opening also promotes foreground placement.
 - `cancel`: end the selected agent's current work without archiving it or leaving
   a persistent stopped state.
 - `placement`: explicit human-controlled foreground/background change.
-- `rename`: pin a nonblank conversation title against automatic naming. This does
-  not rename the agent's Nebulani identity.
+- `rename`: a person's nonblank conversation title, recorded with
+  `metadata.titleSource: "manual"`. It pins the title: the thread's agent cannot
+  retitle it until a person renames it again. Agents cannot call `rename`. This
+  does not rename the agent's Nebulani identity.
+- `title`: the thread's own agent titles its conversation through the
+  `thread_title` tool, self only, recorded with `metadata.titleSource: "agent"`.
+  The agent names its thread when it starts and again whenever it judges the topic
+  has changed enough. Nothing else titles a thread automatically. While a person's
+  rename pins the title, `title` returns a conflict and changes nothing. Older
+  `titleSource: "auto"` titles count as agent titles and are not pinned. The optional
+  `taskDescription` is a nonempty sentence of at most 240 characters describing the
+  task's intended outcome. It is stored with the title and projected into the
+  Orchestrator; omitted descriptions stay unset or retain an already supplied one.
+  No model is called to infer a description from private transcript content.
 - `settings`: future model/thinking/speed preferences; `effectiveSettings` names
   already accepted current/queued work.
 - `retryWaiting`: apply selected settings to dormant provider/admission waiting
@@ -143,7 +176,7 @@ recreate it. An explicit answer to a retained question reopens the thread with
 that answer, not the cancelled queue.
 
 Ephemeral creation is retention policy, not another kind of agent. It may archive
-only after the assignment really settles: no active work, dependencies, waits,
+only after the assignment really settles: no active work, live dependencies, waits,
 wakes, attention awaiting the person or unanswered questions. Foreground and
 unread human attention remain discoverable. Automatic retention cannot bypass
 explicit dependency protection.
@@ -210,6 +243,14 @@ failure. Lost acknowledgements retain custody. Restart recovery may release a
 persisted cwd failure only with `nativeNotReady`, the exact failed/unlanded work
 and settlement, matching work-capacity source, and no current native reference,
 runtime or execution. Result notices do not become reply assignments.
+
+Startup exits preserve their native reference until ownership is reconciled.
+Missing-reference recovery enumerates the owner's retained runner generations,
+reattaches an existing thread socket, and fences queued opens through the native
+serial close before accepting absence. An unreachable generation must also have
+no process-lifetime lock owner. Unknown generations, conflicting ownership or an
+unacknowledged fence retain the original capacity identity. Recovery never
+replays stopped input or changes an already-completed assignment receipt.
 
 Provider capacity refusals preserve execution/work identity, retire inactive
 native resources, and retry through durable admission without emitting a false

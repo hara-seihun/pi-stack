@@ -5,6 +5,9 @@ import { api } from "./client";
 import { validateSession, stateArray } from "../../shared/state-validation";
 import { ChatIcon } from "./chat-row";
 import { aiChat, humanChat, roomChat, type Chat } from "./chats";
+import { agentName } from "./agent-name";
+import { StatusIcon } from "./features/status/StatusIcon";
+import { threadStatus } from "./features/status/thread-status";
 import type { Room, RoomMember } from "../../shared/rooms";
 import { RoomCreator } from "./rooms";
 import { DismissibleError } from "./dismissible-error";
@@ -217,7 +220,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
         {category.kind === "agents" && <label>Placement <select aria-label="Agent placement" value={placement} onChange={event => setPlacement(event.target.value as typeof placement)}><option value="background">Background</option><option value="foreground">Foreground</option><option value="all">All</option></select></label>}
         <div className="chat-picker-list">
           {category.kind === "agents" && agents === null && !archiveError && <p role="status">Loading agents…</p>}
-          {category.kind === "agents" && agentOptions.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><span>{item.agentName ? `${item.agentName} · ` : ""}{item.name}<small>{item.foreground ? "Foreground" : "Background"}</small></span></button>)}
+          {category.kind === "agents" && agentOptions.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><StatusIcon status={threadStatus(item)} /><span>{agentName(item) ?? item.name}<small>{[agentName(item) && item.name, item.foreground ? "Foreground" : "Background"].filter(Boolean).join(" · ")}</small></span></button>)}
           {category.kind === "models" && modelGroups.map(group => <section className="chat-picker-model-group" key={group.id} aria-label={[group.title, group.description].filter(Boolean).join(" · ")}>
             <h3>{group.title}{group.description && <small>{group.description}</small>}</h3>
             <div className="chat-picker-identities">{group.models.map(choice => {
@@ -226,7 +229,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
             })}</div>
           </section>)}
           {category.kind === "backend" && recipients.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(humanChat(item, messaging.backends))}><span>{item.title}<small>{item.kind === "group" ? "Group" : item.externalId}</small></span></button>)}
-          {category.kind === "archived" && archiveReady && archivePage.sessions.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><ChatIcon icon={aiChat(item, starts).icon} /><span>{item.agentName ? `${item.agentName} · ` : ""}{item.name || "Agent"}</span></button>)}
+          {category.kind === "archived" && archiveReady && archivePage.sessions.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><ChatIcon icon={aiChat(item, starts).icon} /><span>{agentName(item) ?? (item.name || "Agent")}{agentName(item) && item.name && <small>{item.name}</small>}</span></button>)}
         </div>
         {category.kind === "archived" && !archiveReady && !archiveError ? <p role="status">Loading chats…</p> : !archiveError && <p className="chat-picker-count" role="status">{total === 0 ? (query ? "No matches" : "No options yet") : total > PICKER_RESULT_LIMIT ? `Showing ${PICKER_RESULT_LIMIT} of ${total}. Search to narrow the list.` : ""}</p>}
         {backend && backend.status === "ready" && <details className="chat-picker-address"><summary>Open by address</summary><form onSubmit={event => { event.preventDefault(); void openRecipient(); }}><input aria-label="Recipient address or group ID" value={address} onChange={event => setAddress(event.target.value)} placeholder="Address or group ID" /><button type="submit" disabled={busy || !address.trim() || backend.status !== "ready"}>Open recipient</button></form></details>}

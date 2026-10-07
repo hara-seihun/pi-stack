@@ -38,8 +38,7 @@ function header(html: string) {
 
 test("cached idle transcript stays visible while the header updates, then idle returns when ready", () => {
   const updating = render({ syncing: true });
-  expect(header(updating)).toContain('class="conversation-syncing" role="status"');
-  expect(header(updating)).toContain("Updating…");
+  expect(header(updating)).toContain('class="conversation-syncing" role="status" aria-label="Updating"');
   expect(header(updating)).toContain('class="conversation-syncing-spinner" aria-hidden="true"');
   expect(header(updating)).not.toContain("Idle");
   expect(updating).toContain('class="message user"');
@@ -47,8 +46,8 @@ test("cached idle transcript stays visible while the header updates, then idle r
 
   const ready = render({ syncing: false });
   expect(header(ready)).toContain('data-status="idle"');
-  expect(header(ready)).toContain("Idle");
-  expect(header(ready)).not.toContain("Updating…");
+  expect(header(ready)).toContain('aria-label="Idle"');
+  expect(header(ready)).not.toContain("Updating");
   expect(ready).toContain("Cached conversation text");
 });
 
@@ -87,6 +86,14 @@ test("questions replace messaging, expose only the next answer, and preserve dic
     expect(html).not.toContain('checked=""');
     expect(render({ prompt: "Unsent message" })).toContain("Unsent message");
   } finally { Object.assign(globalThis, { window: originalWindow, localStorage: originalStorage }); }
+});
+
+test("question loading leaves the composer layout unchanged instead of flashing a banner", () => {
+  const ready = render({ prompt: "Unsent message", questionsResource: { state: "ready", questions: [] } });
+  const loading = render({ prompt: "Unsent message", questionsResource: { state: "loading", questions: [] } });
+  expect(loading).toBe(ready);
+  expect(loading).toContain('id="prompt"');
+  expect(loading).toContain("Unsent message");
 });
 
 test("question resource failure never marks chat offline and a ready resource clears its own error", () => {

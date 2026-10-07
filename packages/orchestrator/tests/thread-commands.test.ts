@@ -20,7 +20,7 @@ it("generates names locally without creating agents or contacting a service",asy
   await dispatch(["names","--count","10"]);
   const result=JSON.parse(vi.mocked(console.log).mock.calls[0]![0]);
   expect(result.names).toHaveLength(10);
-  for(const name of result.names)expect(name).toMatch(/^[A-Z][a-z]+ [A-Z][a-z]+n$/);
+  for(const name of result.names)expect(name).toMatch(/^[A-Z][a-z]+$/);
   expect(calls).toHaveLength(0);
 });
 

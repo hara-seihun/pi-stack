@@ -1,5 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { API } from "../../server/api";
+import { prioritizeQuestion } from "./features/conversation/question-drafts";
 import { assertNever } from "../../shared/explicit-state";
 import { voiceActionLabel, type VoiceState } from "./voice-state";
 import { validateSession, validateStreamSnapshot } from "../../shared/state-validation";
@@ -18,6 +19,7 @@ import type { ReplyTarget } from "./message-reply";
 import { ReplyDrafts } from "./reply-drafts";
 import type { MessagingSnapshot } from "../../server/messaging/protocol";
 import { inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync, type Chat, type ChatId } from "./chats";
+import { agentName } from "./agent-name";
 import { SignInDialog } from "./SignInDialog";
 import { DismissibleError } from "./dismissible-error";
 import { dismissServerError } from "./error-feedback";
@@ -70,6 +72,7 @@ const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module 
 const AgentsScreen = lazy(() => import("./features/agents/AgentsScreen").then(module => ({ default: module.AgentsScreen })));
 const NotificationsScreen = lazy(() => import("./features/notifications/NotificationsScreen").then(module => ({ default: module.NotificationsScreen })));
 const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
+const NeedsYouScreen = lazy(() => import("./needs-you").then(module => ({ default: module.NeedsYouScreen })));
 const CalendarScreen = lazy(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
 const MachineTab = lazy(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
 
@@ -919,6 +922,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     });
     return () => { toast.dismiss(id); };
   }, [undoState, undoClose]);
+  const dismissChatError = useCallback(() => setChatError(""), []);
   const openInboxChat = useCallback((chat: Chat) => { void selectChat(chat).catch(cause => setChatError(String(cause))); }, [selectChat]);
   const requestCloseChat = useCallback((chat: Chat) => { void closeChat(chat); }, [closeChat]);
   const closeInboxChat = requestCloseChat;
@@ -1143,13 +1147,14 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [patch, stateRef]);
   const threadDirectory = useMemo<ThreadDirectory>(() => ({
     name: id => knownSessions.find(session => session.id === id)?.name || null,
+    agentName: id => { const session = knownSessions.find(item => item.id === id); return session ? agentName(session) : null; },
     busy: id => { const session = knownSessions.find(item => item.id === id); return session ? working(session) : false; },
     open: id => openThreadId(id),
     discover: discoverThreads,
   }), [knownSessions, openThreadId, discoverThreads]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "agents" || route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;
+  const showDetail = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;
 
   const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
     [threadStarts, state.messaging, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
@@ -1166,7 +1171,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation outbox={<PromptOutboxStatus entries={outboxEntries.filter(entry => entry.sessionId === selected.id)} busyRequestId={outboxBusy} storage={{ state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         onVisibleRange={onVisibleHeads} newerAvailable={hasNewer(state.transcript)} onShowNewer={() => void showNewer(false)} onJumpLatest={() => void showNewer(true)} earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} questionsResource={pendingQuestions?.sessionId === aiId ? pendingQuestions : undefined} onRetryQuestions={retryQuestions} showBack={layout === "phone"} showIdentity={showConversationIdentity}
-        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? pendingQuestions.questions : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
+        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? prioritizeQuestion(pendingQuestions.questions, route.tab === "chats" ? route.questionId : undefined) : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : messagingActive && humanConversation
       ? <div className="conversation-screen"><ConversationHeader title={humanConversation.title} avatar={messagingAvatarUrl(humanConversation.backendId, humanConversation.externalId, humanConversation.avatar)} showIdentity={showConversationIdentity} meta={<span className="conversation-meta">{humanBackend?.label || "Messaging"}{humanBackend && humanBackend.status !== "ready" ? ` · ${humanBackend.status}` : ""}</span>} trailing={<SignalCallButton conversation={humanConversation} available={humanBackend?.plugin === "signal"} enabled={humanBackend?.status === "ready" && humanBackend.capabilities.calls === true} />} onBack={layout === "phone" ? closeDetail : null} onOpenInspector={null} />
@@ -1177,8 +1182,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   const list = (() => {
     switch (route.tab) {
-      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
-      case "agents": case "notifications": case "calendar": case "machine": case "files": return null;
+      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
+      case "agents": case "needs-you": case "notifications": case "calendar": case "machine": case "files": return null;
     }
     return assertNever(route, "App list route");
   })();
@@ -1197,6 +1202,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     switch (route.tab) {
       case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
       case "notifications": return <Suspense fallback={<Loading label="Loading notifications…" />}><NotificationsScreen version={notificationVersion} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
+      case "needs-you": return <Suspense fallback={<Loading label="Loading Needs you…" />}><NeedsYouScreen version={notificationVersion} /></Suspense>;
       case "calendar": return <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>;
       case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
@@ -1205,7 +1211,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     return assertNever(route, "App detail route");
   })();
 
-  const showTabs = route.tab === "agents" || route.tab === "calendar" || route.tab === "machine" || route.tab === "notifications" || (route.tab === "files" && !route.path) || !showDetail;
+  const showTabs = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "notifications" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
@@ -1216,7 +1222,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         {closeDependencies.length > 0 && <div className="dependency-close-error" role="alert"><strong>Close is protected by an explicit dependency.</strong>{closeDependencies.map((dependency, index) => <button key={index} type="button" onClick={() => { setCloseDependencies([]); openThreadId(dependency.threadId); }}>Open dependency owner · {knownSessions.find(item => item.id === dependency.threadId)?.name ?? dependency.threadId}</button>)}<button type="button" onClick={() => setCloseDependencies([])}>Dismiss</button></div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
+        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
           void api(API.sessionPlacement.method, API.sessionPlacement.path({ sessionId: selected.id }), { foreground: false }).then(() => { panelPushed.current = false; navigate({ tab: "chats", chat: null, panel: null }); kick(); }, cause => setControlError({ sessionId: selected.id, message: String(cause) }));
         }} debug={debugTools} /></Suspense>}
         {selected && !messagingActive && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}

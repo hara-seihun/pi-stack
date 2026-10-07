@@ -18,8 +18,6 @@ import {
   createWorkspaceAdmission,
   ORCHESTRATOR_CATALOG,
   OrchestratorClient,
-  CompletionClient,
-  type CompletionInput,
   catalogAgentType,
   createSharedImageGenerationService,
   resolveDelivery,
@@ -50,7 +48,7 @@ import {
   type PersonalUsage,
   readBrokerUsage,
 } from "pi-orchestrator/api";
-import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, projectThreadActivity, activeWorkerParents, type LiveProjection } from "./live-projection";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -61,9 +59,13 @@ import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { questionAnswerContext } from "./question-answer-context";
+import { QuestionFeed } from "./question-feed";
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
 import { oneKenanEnabled } from "kenan-memory/config";
+import { lifeClient } from "kenan-memory/life-client";
+import type { LifePolicyView, LifeSnapshot } from "kenan-memory/life-contract";
+import { projectNeedsYou, readNeedsYouQuestions } from "./needs-you";
 import { handleRoomOwner } from "./rooms-owner";
 import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
 import { readThreadHistory } from "pi-orchestrator/history";
@@ -73,7 +75,7 @@ import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
 import { createThreadViewRecorder } from "./thread-viewing";
 import { VoiceClient } from "./voice/client";
-import { MeetServer } from "./meet/server";
+import { MeetGateway } from "./meet/gateway";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
 import { observeExecutionActivity } from "pi-orchestrator/api";
@@ -100,13 +102,13 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { fileEditResponse } from "./file-edit";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
-import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, type ThreadQuestion, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
 import { ResourceCache } from "../shared/resource-cache";
-import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-items";
+import { TranscriptItems } from "./transcript-items";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
@@ -119,26 +121,6 @@ import { createSpeechService } from "./speech/service";
 import { closeAiChat } from "./chat-lifecycle";
 import { archivedSessions } from "./archived-sessions";
 import { availableUploadPath, storeUpload, uploadName } from "./uploads";
-import {
-  generatedThreadName,
-  localNamingPrompt,
-  localReasoningEffort,
-  LOCAL_THREAD_NAMING_INSTRUCTION,
-  LOCAL_THREAD_NAMING_MAX_TOKENS,
-  namingOutcome,
-  namingRequestId,
-  namingRetryAt,
-  NamingConfigurationError,
-  unnamedThread,
-  namingStep,
-  namingTranscript,
-  parseThreadNamingModel,
-  THREAD_NAMING_HISTORY,
-  THREAD_NAMING_INSTRUCTION,
-  type NamingMessage,
-} from "./thread-naming";
-import { ensureLocalEngine, loadLocalEngine, localNamingCompletion, withLocalEngine } from "./local-naming";
-import { BACKGROUND_RESERVATION_WAIT_SECONDS, EngineReservedError } from "./engine-reservation";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -151,7 +133,6 @@ const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().userna
 const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
-const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
 const AUTO_ARCHIVE_AFTER_MS = autoArchiveDelay(process.env.PI_REMOTE_AUTO_ARCHIVE_AFTER_MS);
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
@@ -304,6 +285,7 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
+const transcripts = new TranscriptItems(db);
 const piReactions = new PiReactions(db, MESSAGE_OWNER);
 const slackReactions = new SlackReactions(process.env.PI_REMOTE_SLACK_REACTIONS);
 const orchestrator = new OrchestratorClient({
@@ -326,6 +308,7 @@ const threads = new ThreadService({
   capacity: configuredAgentCapacity(),
   admitNewThread: settings => modelAvailability.admit(settings.model),
   attachSession: runner.attachSession,
+  recoverSession: runner.recoverSession,
   databasePath: join(DATA, "threads.sqlite3"),
   sessionsDir: join(DATA, "threads"),
   openSession: (options, output, exit) => runner.openSession({ ...options,
@@ -342,8 +325,6 @@ beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
 const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
-const namingUrl = modelBrokerUrl() ?? fleetUrl;
-const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
 /** Assigned once the phone broker exists; thread events can arrive earlier. */
 let phoneOverlay: PhoneOverlay | null = null;
 const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
@@ -585,11 +566,15 @@ const reconciledState = new ReconcilePublisher({ maxHistoryPerResource: 32 });
 // stream only hears about it when its own rows differ.
 const STATE_COALESCE_MS = 25;
 let statePushTimer: ReturnType<typeof setTimeout> | null = null;
+let stateSyncPhase: "initializing" | "ready" = "initializing";
+let stateSyncPending = false;
 function signalSync() {
-  if (statePushTimer || shuttingDown) return;
+  if (shuttingDown) return;
+  if (stateSyncPhase === "initializing") { stateSyncPending = true; return; }
+  if (statePushTimer) return;
   statePushTimer = setTimeout(() => {
     statePushTimer = null;
-    refreshState();
+    if (!shuttingDown) refreshState();
   }, STATE_COALESCE_MS);
 }
 
@@ -658,6 +643,7 @@ const LIVE_SYNC_INTERVAL_MS = 33;
 let liveSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let liveSyncPending = false;
 function signalLiveSync() {
+  if (shuttingDown) return;
   if (liveSyncTimer) {
     liveSyncPending = true;
     return;
@@ -665,7 +651,7 @@ function signalLiveSync() {
   pushLive();
   liveSyncTimer = setTimeout(() => {
     liveSyncTimer = null;
-    if (liveSyncPending) {
+    if (liveSyncPending && !shuttingDown) {
       liveSyncPending = false;
       signalLiveSync();
     }
@@ -681,8 +667,8 @@ const inspectedContexts = new WeakMap<ThreadInspection, StoredContext | null>();
 const openDisplayContexts = new Map<string, NonNullable<ReturnType<typeof displayContexts.get>>>();
 
 /** The newest user and assistant messages of this thread, from the context the
- * agent actually holds. Naming and Voice both want to read the conversation,
- * and the captured context is where the conversation is. */
+ * agent actually holds. Voice reads the conversation from the captured context,
+ * which is where the conversation is. */
 function recentContextMessages(sessionId: string, limit: number): Array<{ role: "user" | "assistant"; text: string }> {
   const stored = storedContext(sessionId);
   if (!stored) return [];
@@ -765,6 +751,7 @@ function releaseOpenDisplayContexts() {
 function invalidateDisplayContext(sessionId: string) {
   displayContexts.delete(sessionId);
   openDisplayContexts.delete(sessionId);
+  transcripts.invalidate(sessionId);
   signalTranscript(sessionId);
 }
 
@@ -794,6 +781,7 @@ function clearStoredContext(sessionId: string) {
     db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
   })();
   cacheStoredContext(sessionId, null);
+  transcripts.forget(sessionId);
   invalidateDisplayContext(sessionId);
   signalSync();
 }
@@ -939,9 +927,9 @@ function remotePlacement(thread: Thread, lookup: ThreadLookup = liveThread): Rec
   }
   return placement;
 }
-interface ThreadView { id: string; idle_unread: number; named_at_message_count: number; color: Session["color"] }
-const threadViewRow = db.query("SELECT id,idle_unread,named_at_message_count,color FROM thread_views WHERE id=?");
-const threadViewRows = db.query("SELECT id,idle_unread,named_at_message_count,color FROM thread_views");
+interface ThreadView { id: string; idle_unread: number; color: Session["color"] }
+const threadViewRow = db.query("SELECT id,idle_unread,color FROM thread_views WHERE id=?");
+const threadViewRows = db.query("SELECT id,idle_unread,color FROM thread_views");
 /**
  * One consistent read of the threads this supervisor shows. Everything a
  * projection derives, placement, views, parents, comes from this read rather
@@ -972,7 +960,7 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
     service_tier: thread.settings.speed === "standard" ? "default" : thread.settings.speed,
     bash_timeout_seconds: meta.bashTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS,
     archived_at: meta.archived ? meta.archivedAt ?? new Date(thread.updatedAt).toISOString() : null,
-    idle_unread: view?.idle_unread ?? 0, named_at_message_count: view?.named_at_message_count ?? 0,
+    idle_unread: view?.idle_unread ?? 0,
     color: view?.color ?? null,
     created_at: new Date(thread.createdAt).toISOString(), updated_at: new Date(thread.updatedAt).toISOString() };
 }
@@ -996,20 +984,11 @@ function emit(sessionId: string, type: string, payload: Record<string, unknown> 
   if (!ownsSupervisorLease()) return 0;
   const seq = activity.add(sessionId, type, payload, receiptId);
   if (!seq) return 0;
-  if (type === "user" || type === "assistant") countThreadMessage(sessionId);
   signalSync();
   // Deliver with the next live frame rather than waiting for the thread's
   // state to move.
   signalLiveSync();
   return seq;
-}
-
-/** Naming asks how far the conversation has come. The count has to keep
- * climbing across a compaction that shortens the context, so the supervisor
- * counts message boundaries as it sees them. */
-function countThreadMessage(sessionId: string) {
-  ensureThreadView(db, sessionId);
-  db.query("UPDATE thread_views SET message_count=message_count+1 WHERE id=?").run(sessionId);
 }
 
 function recordMessageFact(sessionId: string, finalizesMessage: string, column: "thinking" | "metrics", value: string) {
@@ -1058,240 +1037,6 @@ function creationName(requestId: string): string {
   })();
 }
 
-const namingThreads = new Set<string>();
-
-function recentThreadMessages(sessionId: string): NamingMessage[] {
-  return recentContextMessages(sessionId, THREAD_NAMING_HISTORY);
-}
-
-// A local engine answers in a couple of seconds and keeps no ledger receipt: the supervisor waits for
-// the title in place, and a restart mid-request simply leaves the thread for its next naming point.
-// Naming is background work, so it holds the engine's maintenance reservation for the whole attempt
-// and gives up immediately when somebody else has it.
-async function localThreadName(messages: NamingMessage[]): Promise<string> {
-  let selection;
-  try { selection = parseThreadNamingModel(THREAD_NAMING_MODEL); }
-  catch (cause) { throw new NamingConfigurationError(cause instanceof Error ? cause.message : String(cause)); }
-  if (selection.kind !== "local") throw new NamingConfigurationError("Thread naming model is not a local engine");
-  const prompt = localNamingPrompt(messages);
-  const engine = await loadLocalEngine(AGENT_DIR, selection.engine).catch(cause => {
-    throw new NamingConfigurationError(cause instanceof Error ? cause.message : String(cause));
-  });
-  return withLocalEngine(engine, BACKGROUND_RESERVATION_WAIT_SECONDS, async () => {
-    await ensureLocalEngine(engine);
-    return localNamingCompletion(engine, { model: selection.model, systemPrompt: LOCAL_THREAD_NAMING_INSTRUCTION, prompt,
-      reasoningEffort: localReasoningEffort(selection.thinkingLevel), maxTokens: LOCAL_THREAD_NAMING_MAX_TOKENS });
-  });
-}
-
-// Threads whose naming met a maintenance reservation. They are due again, and the naming reconcile
-// tick retries them once the engine is free instead of waiting for the thread's next message.
-const reservedNames = new Set<string>();
-
-type NamingReceipt = { requestId: string; messageCount: number; input: CompletionInput };
-interface NamingView { id: string; message_count: number; named_at_message_count: number; naming_attempted_count: number; naming_request: string | null }
-const namingViewRows = db.query("SELECT id,message_count,named_at_message_count,naming_attempted_count,naming_request FROM thread_views");
-function namingInput(transcript: string): CompletionInput {
-  const parts = THREAD_NAMING_MODEL.split(":");
-  if (parts.length > 2) throw new NamingConfigurationError("Invalid naming model selection");
-  const physical = parts[0]!.split("/").at(-1)!;
-  const model = ORCHESTRATOR_CATALOG.models.find(candidate => candidate.id === physical || candidate.model === physical);
-  if (model?.id !== "luna") throw new NamingConfigurationError("Thread naming completion currently supports Luna");
-  const thinkingLevel = parts[1];
-  if (thinkingLevel && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingLevel)) throw new NamingConfigurationError("Invalid naming thinking level");
-  return { model: "luna", systemPrompt: THREAD_NAMING_INSTRUCTION, prompt: transcript,
-    speed: "standard", ...(thinkingLevel ? { thinkingLevel } : {}) } as CompletionInput;
-}
-interface NamingRecovery { id: string; model: string; message_count: number; failures: number; retry_at: number | null }
-db.exec(`CREATE TABLE IF NOT EXISTS thread_naming_recovery (
-  id TEXT PRIMARY KEY, model TEXT NOT NULL, message_count INTEGER NOT NULL,
-  failures INTEGER NOT NULL, retry_at INTEGER
-)`);
-// Previous releases could leave a visible occurrence behind even after naming_error was cleared.
-for (const row of db.query("SELECT source,message,occurrence FROM error_feedback WHERE source LIKE 'naming:%'").all() as { source: string; message: string; occurrence: string }[]) {
-  observeFailure(db, row.source, { message: row.message, recovery: "automatic", impact: "The thread keeps its current title." }, row.occurrence);
-  const view = db.query("SELECT naming_error FROM thread_views WHERE id=?").get(row.source.slice("naming:".length)) as { naming_error: string | null } | null;
-  if (!view?.naming_error) observeFailure(db, row.source, null);
-}
-function namingRecovery(id: string, messageCount: number): NamingRecovery | null {
-  const recovery = db.query("SELECT * FROM thread_naming_recovery WHERE id=?").get(id) as NamingRecovery | null;
-  if (recovery && (recovery.model !== THREAD_NAMING_MODEL || messageCount > recovery.message_count)) {
-    db.query("DELETE FROM thread_naming_recovery WHERE id=?").run(id);
-    db.query("UPDATE thread_views SET naming_request=NULL,naming_attempted_count=named_at_message_count WHERE id=?").run(id);
-    namingError(id, null);
-    return null;
-  }
-  return recovery;
-}
-function namingFeedback(id: string, message: string | null) {
-  return observeFailure(db, `naming:${id}`, message ? {
-    message, recovery: "automatic", impact: "The thread keeps its current title.",
-  } : null);
-}
-function namingAttention() {
-  const paused = (db.query(`SELECT v.id FROM thread_views v JOIN thread_naming_recovery r ON r.id=v.id
-    WHERE r.retry_at IS NULL AND v.naming_error IS NOT NULL`).all() as { id: string }[])
-    .some(row => { const thread = threads.get(row.id); return thread && !thread.metadata?.archived && thread.metadata?.titleSource !== "manual"; });
-  return observeFailure(db, "naming", paused ? {
-    message: "Automatic naming cannot proceed after bounded recovery or a configuration rejection.",
-    recovery: "required", impact: "Some threads could not be named automatically; their current titles are unchanged.",
-    action: "Rename them manually or ask Kenan to repair naming.",
-  } : null);
-}
-function namingError(id: string, message: string | null) {
-  namingFeedback(id, message);
-  const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
-  if (result.changes) signalSync();
-}
-function namingFailed(id: string, messageCount: number, message: string, required = false) {
-  const previous = namingRecovery(id, messageCount);
-  const failures = (previous?.failures ?? 0) + 1;
-  const retryAt = namingRetryAt(failures, Date.now(), required);
-  db.query(`INSERT INTO thread_naming_recovery(id,model,message_count,failures,retry_at) VALUES(?,?,?,?,?)
-    ON CONFLICT(id) DO UPDATE SET model=excluded.model,message_count=excluded.message_count,failures=excluded.failures,retry_at=excluded.retry_at`)
-    .run(id, THREAD_NAMING_MODEL, messageCount, failures, retryAt);
-  namingError(id, message);
-  signalSync();
-}
-function namingResolved(id: string) {
-  db.query("DELETE FROM thread_naming_recovery WHERE id=?").run(id);
-  namingError(id, null);
-}
-function clearPinnedThreadNaming(sessionId: string): boolean {
-  if (threads.get(sessionId)?.metadata?.titleSource !== "manual") return false;
-  reservedNames.delete(sessionId);
-  if (ownsSupervisorLease()) {
-    db.query("UPDATE thread_views SET naming_request=NULL WHERE id=? AND naming_request IS NOT NULL").run(sessionId);
-    namingResolved(sessionId);
-  }
-  return true;
-}
-function restoreThreadNaming(thread: Pick<Thread, "id" | "title" | "metadata">) {
-  if (clearPinnedThreadNaming(thread.id)) return;
-  if (thread.metadata?.archived) { namingResolved(thread.id); return; }
-  let view = db.query("SELECT message_count,naming_error FROM thread_views WHERE id=?").get(thread.id) as any;
-  const recovery = namingRecovery(thread.id, Number(view?.message_count ?? 0));
-  view = db.query("SELECT message_count,naming_error FROM thread_views WHERE id=?").get(thread.id) as any;
-  if (view?.naming_error) {
-    if (!recovery) namingFailed(thread.id, Number(view.message_count ?? 0), view.naming_error);
-    else namingFeedback(thread.id, view.naming_error);
-  } else if (!recovery && unnamedThread(thread.title)) {
-    db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
-  }
-}
-async function nameThread(sessionId: string): Promise<void> {
-  if (clearPinnedThreadNaming(sessionId) || namingThreads.has(sessionId) || shuttingDown || ROOMS_ENABLED && roomMetadata(threads.get(sessionId)?.metadata?.room)) return;
-  namingThreads.add(sessionId);
-  try {
-    const row = sessionRow.get(sessionId);
-    if (!row) { reservedNames.delete(sessionId); return; }
-    ensureThreadView(db, sessionId);
-    const view = db.query("SELECT * FROM thread_views WHERE id=?").get(sessionId) as any;
-    const messageCount = Number(view.message_count ?? 0);
-    const recovery = namingRecovery(sessionId, messageCount);
-    const current = db.query("SELECT naming_request,naming_attempted_count FROM thread_views WHERE id=?").get(sessionId) as any;
-    let receipt = current.naming_request ? JSON.parse(current.naming_request) as NamingReceipt : null;
-    const attemptedBefore = Number(current.naming_attempted_count ?? 0);
-    const step = namingStep({ name: row.name, titleSource: row.metadata?.titleSource, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt,
-      now: Date.now(), ...(recovery ? { retryAt: recovery.retry_at } : {}) });
-    if (step === "idle") { reservedNames.delete(sessionId); return; }
-    // Naming reads the conversation from the context mirror. Until the mirror holds this thread's
-    // messages there is nothing to title, and an empty prompt is a request no completion owner
-    // accepts, so the thread stays due for the next message or reconcile tick.
-    const conversation = () => {
-      const messages = recentThreadMessages(sessionId);
-      if (!messages.length && ownsSupervisorLease()) namingError(sessionId, null);
-      return messages;
-    };
-    if (THREAD_NAMING_MODEL.startsWith("local/")) {
-      if (receipt) db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-      const messages = conversation();
-      if (!messages.length) return;
-      db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
-      let output: string;
-      try { output = await localThreadName(messages); }
-      catch (cause) {
-        if (clearPinnedThreadNaming(sessionId)) return;
-        if (!(cause instanceof EngineReservedError)) throw cause;
-        // Maintenance is not a naming failure. Leave the thread due, keep it out of the error feed and
-        // let the reconcile tick try again after the lease.
-        db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(attemptedBefore, sessionId);
-        reservedNames.add(sessionId);
-        if (ownsSupervisorLease()) namingError(sessionId, null);
-        return;
-      }
-      if (clearPinnedThreadNaming(sessionId)) return;
-      reservedNames.delete(sessionId);
-      const title = generatedThreadName(output);
-      if (!ownsSupervisorLease() || shuttingDown) return;
-      unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
-      db.query("UPDATE thread_views SET named_at_message_count=? WHERE id=?").run(messageCount, sessionId);
-      namingResolved(sessionId);
-      signalSync();
-      return;
-    }
-    if (!namingClient) {
-      db.query("UPDATE thread_views SET naming_request=NULL,naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
-      namingFailed(sessionId, messageCount, "Thread naming has no explicitly permitted same-person completion owner", true);
-      return;
-    }
-    if (!receipt) {
-      const messages = conversation();
-      if (!messages.length) return;
-      const input = namingInput(namingTranscript(messages));
-      receipt = { requestId: namingRequestId(sessionId, messageCount, input, recovery?.failures ?? 0), messageCount, input };
-      db.query("UPDATE thread_views SET naming_request=?,naming_attempted_count=? WHERE id=?").run(JSON.stringify(receipt), messageCount, sessionId);
-    }
-    const submitted = step === "generate";
-    let result = submitted ? await namingClient.submit(receipt.requestId, receipt.input) : await namingClient.get(receipt.requestId);
-    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
-    if (!result.ok && result.error.code === "not-found") result = await namingClient.submit(receipt.requestId, receipt.input);
-    if (clearPinnedThreadNaming(sessionId) || !ownsSupervisorLease() || shuttingDown) return;
-    const outcome = namingOutcome(result);
-    if (outcome.kind === "pending") { namingError(sessionId, null); return; }
-    if (outcome.kind === "failed") {
-      if (!outcome.keepReceipt) db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-      namingFailed(sessionId, messageCount, outcome.message, outcome.recovery === "required");
-      return;
-    }
-    db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-    const title = generatedThreadName(outcome.text);
-    unwrap(threads.update(sessionId, { title }, { automaticTitle: true }));
-    db.query("UPDATE thread_views SET named_at_message_count=? WHERE id=?").run(receipt.messageCount, sessionId);
-    namingResolved(sessionId);
-    signalSync();
-  } catch (cause) {
-    if (!clearPinnedThreadNaming(sessionId) && ownsSupervisorLease()) {
-      const view = db.query("SELECT message_count FROM thread_views WHERE id=?").get(sessionId) as any;
-      namingFailed(sessionId, Number(view?.message_count ?? 0), cause instanceof Error ? cause.message : String(cause), cause instanceof NamingConfigurationError);
-    }
-  } finally { namingThreads.delete(sessionId); }
-}
-function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId); }
-/** Every thread this supervisor owns that still needs a title, whether it is mid-request, waiting for
- * a local engine, or was left numbered by an earlier process. */
-function reconcileThreadNames() {
-  const due = new Set(reservedNames);
-  for (const row of db.query("SELECT id FROM thread_naming_recovery WHERE retry_at IS NOT NULL AND retry_at<=?").all(Date.now()) as {id: string}[]) due.add(row.id);
-  for (const row of db.query("SELECT id FROM thread_views WHERE naming_request IS NOT NULL").all() as {id: string}[]) due.add(row.id);
-  const views = new Map((namingViewRows.all() as NamingView[]).map(view => [view.id, view]));
-  const live = new Set<string>();
-  for (const thread of threads.snapshot({ archived: false })) {
-    live.add(thread.id);
-    if (clearPinnedThreadNaming(thread.id)) { due.delete(thread.id); continue; }
-    const view = views.get(thread.id);
-    if (namingStep({ name: thread.title, titleSource: thread.metadata?.titleSource, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
-      attemptedCount: Number(view?.naming_attempted_count ?? 0), hasReceipt: !!view?.naming_request }) !== "idle") due.add(thread.id);
-  }
-  // An archived or departed thread will never be named again, so its last failure is not something
-  // the person can act on. It leaves the error feed with the conversation.
-  if (ownsSupervisorLease()) {
-    for (const row of db.query("SELECT id FROM thread_views WHERE naming_error IS NOT NULL UNION SELECT id FROM thread_naming_recovery").all() as {id: string}[]) {
-      if (!live.has(row.id)) namingResolved(row.id);
-    }
-  }
-  for (const id of due) if (live.has(id)) void nameThread(id);
-}
 
 const agentModelOrder = new Map(ORCHESTRATOR_CATALOG.agentOrder.map((key, index) => [key, index]));
 function addAgentModel(models: Map<string, AgentModelCount>, raw: string, count = 1) {
@@ -1327,7 +1072,6 @@ function supervisorState(): SupervisorState {
     ownerErrors: [
       { owner: "fleet", feedback: peerFeedback(peerError) },
       ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: notificationFeedback(owner, message) })),
-      { owner: "Thread names", feedback: namingAttention() },
     ].flatMap(({ owner, feedback }) => feedback ? [{ owner, ...feedback }] : []),
   };
 }
@@ -1338,9 +1082,8 @@ function supervisorState(): SupervisorState {
 function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archived: false })): Session[] {
   const parents = new Set(local.map(thread => thread.parentId));
   const localIds = new Set(local.map(thread => thread.id));
-  const workerParents = activeWorkerParents(local, peerThreads.values());
   return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), false,
-    localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet", workerParents.has(row.id)));
+    localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
 }
 function pendingMessages(id: string) {
   return threads.get(id) ? threads.pending(id) : peerInspections.get(id)?.pending ?? [];
@@ -1366,7 +1109,6 @@ function publicSession(row: any,
   hasChildren = threads.snapshot({ archived: false }).some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id)),
   queued = true,
   origin: Session["origin"] = threads.get(row.id) ? "person" : "fleet",
-  hasActiveWorkers = activeWorkerParents(threads.snapshot({ archived: false }), peerThreads.values()).has(row.id),
 ): Session {
   const live = liveProjections.get(row.id);
   return {
@@ -1375,16 +1117,17 @@ function publicSession(row: any,
     origin,
     watchList: row.metadata?.watchList === true,
     foreground: typeof row.metadata?.foreground === "boolean" ? row.metadata.foreground : origin === "person" && !row.parentId && !row.metadata?.watchList,
-    agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : undefined,
+    agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : liveThread(row.id)?.agentName,
     dependencies: row.metadata?.peerDependencies,
     attentionSummary: typeof row.metadata?.attentionSummary === "string" ? row.metadata.attentionSummary : undefined,
+    taskDescription: typeof row.metadata?.taskDescription === "string" ? row.metadata.taskDescription : undefined,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
     ...(queued ? { contextUsage: capturedContextUsage(baseStoredContext(row.id), (row.effectiveSettings ?? row.settings).model) } : {}),
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
-    ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held), hasActiveWorkers),
+    ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held)),
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
     createdAt: row.created_at, updatedAt: row.updated_at,
     ...(row.lastUserMessageAt !== undefined ? { lastUserMessageAt: new Date(row.lastUserMessageAt).toISOString() } : {}),
@@ -1472,23 +1215,11 @@ function sendImages(stream: ClientStream): void {
 function readSessionQuestions(id: string) {
   return threads.get(id) ? threads.questions(id) : peerThreads.has(id) && fleet ? fleet.questions(id) : directory.questions(id);
 }
-const questionReads = new Map<string, ReturnType<typeof readSessionQuestions>>();
-const questionSnapshots = new Map<string, ThreadQuestion[]>();
+const questionFeed = new QuestionFeed(readSessionQuestions);
 async function sendQuestions(stream: ClientStream): Promise<void> {
   const sessionId = stream.subscription.session;
   if (!sessionId || !sessionRow.get(sessionId)) return;
-  let read = questionReads.get(sessionId);
-  if (!read) {
-    read = readSessionQuestions(sessionId).finally(() => questionReads.delete(sessionId));
-    questionReads.set(sessionId, read);
-  }
-  stream.publish({ type: "questions", sessionId, state: "loading", questions: questionSnapshots.get(sessionId) ?? [] });
-  const result = await read;
-  if (result.ok) questionSnapshots.set(sessionId, result.value);
-  if (stream.closed || stream.subscription.session !== sessionId) return;
-  if (result.ok) {
-    stream.publish({ type: "questions", sessionId, state: "ready", questions: result.value });
-  } else stream.publish({ type: "questions", sessionId, state: "failed", questions: questionSnapshots.get(sessionId) ?? [], error: result.error.message });
+  await questionFeed.send(stream);
 }
 
 function sendEvents(stream: ClientStream): void {
@@ -1530,7 +1261,6 @@ function pushLive(): void {
   }
 }
 
-const transcripts = new TranscriptItems();
 const TRANSCRIPT_COALESCE_MS = 100;
 const transcriptTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -1541,8 +1271,11 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
 /** Project a captured context once; the reconciler owns each client's differences. */
 function refreshTranscript(sessionId: string) {
   const stored = storedContext(sessionId);
-  const display = stored ? displayContext(sessionId, stored.hash, stored.document) : null;
-  const update = display ? transcripts.derive(sessionId, display.hash, () => JSON.parse(display.document), id => {
+  if (!stored) transcripts.forget(sessionId);
+  const update = stored ? transcripts.derive(sessionId, `${SUPERVISOR_EPOCH}:${stored.hash}`, () => {
+    const display = displayContext(sessionId, stored.hash, stored.document);
+    return JSON.parse(display.document);
+  }, id => {
     const thread = liveThread(id);
     return thread?.agentName ?? (typeof thread?.metadata?.agentName === "string" ? thread.metadata.agentName : undefined);
   }) : null;
@@ -1563,9 +1296,9 @@ function sendTranscript(stream: ClientStream, update: ReturnType<typeof refreshT
   if (!sessionId) return;
   const current = update?.current;
   const from = stream.subscription.transcriptFrom;
-  const limit = from == null ? 60 : Math.min(600, Math.max(60, (current?.items.length ?? 0) - from));
-  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.items.length ?? 0,
-    items: current ? transcriptWindow(current.items, limit) : [] });
+  const limit = from == null ? 60 : Math.min(600, Math.max(60, (current?.total ?? 0) - from));
+  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.total ?? 0,
+    items: current ? transcripts.window(sessionId, limit) : [] });
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
@@ -1586,9 +1319,8 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
       sendLive(stream);
     }
     sendImages(stream);
-    void sendQuestions(stream).catch(cause => {
-      if (!stream.closed && stream.subscription.session === sessionId) stream.publish({ type: "questions", sessionId, state: "failed", questions: questionSnapshots.get(sessionId) ?? [], error: cause instanceof Error ? cause.message : String(cause) });
-    });
+    if (mode === "finite") pending.push(sendQuestions(stream));
+    else void sendQuestions(stream);
     sendEvents(stream);
     const fresh = changedSession || before.selectionId !== stream.subscription.selectionId;
     pending.push(stream.synchronizeSelection(
@@ -1737,7 +1469,6 @@ function handlePiEvent(sessionId: string, event: any) {
     const handoff = annotation ? meetingHandoffText(JSON.parse(annotation.meeting_transcript)) : "";
     emit(sessionId, "user", { text: [event.message.text, handoff].filter(Boolean).join("\n\n"),
       delivery: event.message.delivery, workId: event.workId }, `inserted:${event.workId}`);
-    scheduleThreadNameIfDue(sessionId);
     return;
   }
   if (event.type === "thread_settled") {
@@ -1815,7 +1546,6 @@ function handlePiEvent(sessionId: string, event: any) {
     }
     if (text && event.message?.role === "assistant") {
       emit(sessionId, "assistant", { text }, `assistant:${messageFinalizationKey(event.message)}`);
-      scheduleThreadNameIfDue(sessionId);
     }
   } else if (event.type === "tool_execution_start") {
     const toolCallId = String(event.toolCallId ?? crypto.randomUUID());
@@ -2077,7 +1807,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); clearPinnedThreadNaming(change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
+  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();
@@ -2085,19 +1815,23 @@ const unsubscribeThreads = threads.subscribe(change => {
 }
 await inlineImages.start();
 
-const meet = new MeetServer((id) => {
-  const row = sessionRow.get(id) as any;
-  return Boolean(row && !row.archived_at);
-}, undefined, db, (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
+const meetingRuntime = await MeetGateway.connect(db, {
+  sessionExists: (id) => {
+    const row = sessionRow.get(id) as any;
+    return Boolean(row && !row.archived_at);
+  },
+  threadActivity: (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
   const runtime = liveProjections.get(row.id);
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    ...projectThreadActivity(row.state, runtime, row.executionActivity, row.metadata, Boolean(row.held),
-      activeWorkerParents(threads.snapshot({ archived: false }), peerThreads.values()).has(row.id)),
+    ...projectThreadActivity(row.state, runtime, row.executionActivity, row.metadata, Boolean(row.held)),
     waitingOnAgents: row.waitingOnAgents,
     tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
-}));
+  }),
+});
+if (!meetingRuntime.ok) throw new Error(`Meeting runtime unavailable: ${meetingRuntime.error}`);
+const meet = meetingRuntime.value;
 
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
@@ -2144,7 +1878,7 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
-    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
+    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT, meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } });
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
@@ -2182,8 +1916,7 @@ const server = Bun.serve<SocketData>({
           const failure = current.state !== "running" && settlement?.outcome === "failed"
             ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
           return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
-            execution: projectThreadActivity(current.state, liveProjections.get(id), current.executionActivity, current.metadata, Boolean(current.held),
-              activeWorkerParents(threads.snapshot({ archived: false }), peerThreads.values()).has(id)),
+            execution: projectThreadActivity(current.state, liveProjections.get(id), current.executionActivity, current.metadata, Boolean(current.held)),
             context: context ? JSON.parse(context.document) : null, questions };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "cancel" })); },
@@ -2203,6 +1936,20 @@ const server = Bun.serve<SocketData>({
           signalSync();
         },
       });
+    }
+    if (API.needsYou.match(req.method, url.pathname)) {
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Needs you requires this person's authorized router or local caller", 403);
+      if (process.env.PI_REMOTE_ROOMS_RUNTIME === "1") return error("Life projections are not available in rooms", 403);
+      if (url.search) return error("Needs you accepts no person or scope parameters", 400);
+      const client = lifeClient();
+      const [life, pending, watch, policy] = await Promise.all([
+        client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } }),
+        readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room)),
+        watchList.watch({ action: "list", threadId: "needs-you-projection" }).catch(cause => ({ ok: false as const, error: { code: "unavailable" as const, message: cause instanceof Error ? cause.message : String(cause) } })),
+        client.request<LifePolicyView>({ operation: "policy-read", target: { scope: "self" }, includeHistory: false }),
+      ]);
+      return json(projectNeedsYou(life, pending, watch, policy, Date.now()));
     }
     if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
       const feed = url.pathname.startsWith("/v1/calendar/feed/");
@@ -2269,9 +2016,7 @@ const server = Bun.serve<SocketData>({
             return { ok: false, error: { code: "not_found", message: "Message not found in this account's thread" } };
           }
           const reactions = piReactions.set(target, emoji, actor, remove);
-          displayContexts.delete(target.sessionId);
-          openDisplayContexts.delete(target.sessionId);
-          signalTranscript(target.sessionId);
+          invalidateDisplayContext(target.sessionId);
           return { ok: true, value: reactions };
         },
         messaging: (id, emoji, remove) => messaging.react(id, emoji, remove),
@@ -2341,29 +2086,29 @@ const server = Bun.serve<SocketData>({
       if (!storedContext(id)) await refreshThreadInspection(id);
       const update = refreshTranscript(id);
       if (!update) return json({ sessionId: id, generation: "", total: 0, items: [] });
-      const items = update.current.items;
+      const total = update.current.total;
       const generation = url.searchParams.get("generation") ?? "";
       if (generation && generation !== update.current.generation) {
         // The client's window is gone; answer with the one that replaced it.
         return json({ error: "The transcript generation has been replaced", sessionId: id,
-          generation: update.current.generation, total: items.length, items: transcriptWindow(items) }, 409);
+          generation: update.current.generation, total, items: transcripts.window(id) }, 409);
       }
-      const requestedBefore = Number(url.searchParams.get("before") ?? items.length);
-      const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : items.length;
+      const requestedBefore = Number(url.searchParams.get("before") ?? total);
+      const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : total;
       const requestedLimit = Number(url.searchParams.get("limit") ?? 60);
       const limit = Math.min(200, Math.max(1, Number.isSafeInteger(requestedLimit) ? requestedLimit : 60));
-      return json({ sessionId: id, generation: update.current.generation, total: items.length,
-        items: transcriptPage(items, before, limit) });
+      return json({ sessionId: id, generation: update.current.generation, total,
+        items: transcripts.page(id, before, limit) });
     }
     const itemRequest = API.sessionItem.match(req.method, url.pathname);
     if (itemRequest) {
       const id = itemRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      let body = transcripts.get(id)?.bodies.get(itemRequest.itemId);
-      if (!body) {
+      if (!transcripts.get(id)) {
         if (!storedContext(id)) await refreshThreadInspection(id);
-        body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
+        refreshTranscript(id);
       }
+      const body = transcripts.body(id, itemRequest.itemId);
       if (!body) return error("Transcript item not found", 404);
       const headers: Record<string, string> = {
         ...API_CORS_HEADERS,
@@ -2733,7 +2478,7 @@ const server = Bun.serve<SocketData>({
         const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
           selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
         if (!result.ok) return threadError(result.error);
-        if (questionReads.has(answerRequest.sessionId)) await questionReads.get(answerRequest.sessionId);
+        await questionFeed.settle(answerRequest.sessionId);
         for (const stream of sessionSubscribers(answerRequest.sessionId)) void sendQuestions(stream);
         signalSync();
         return json(result.value);
@@ -2785,7 +2530,7 @@ const server = Bun.serve<SocketData>({
           if (row.archived_at) return { ok: false, error: { code: "conflict", message: "Thread is archived" } };
           if (forkingSessions.has(id)) return { ok: false, error: { code: "conflict", message: "Wait for the conversation edit to finish" } };
           const roomImages = input.includeMeetingImages === true && row.meeting_id
-            ? meet.captureDelegation(row.meeting_id) : { images: [], note: "" };
+            ? await meet.captureDelegation(row.meeting_id) : { images: [], note: "" };
           let text = input.text.trim() + (roomImages.note ? `\n\n${roomImages.note}` : "");
           if (input.replyTo !== undefined) {
             const target = parseMessageReference(input.replyTo);
@@ -3047,6 +2792,7 @@ console.log(`Pi Remote listening on http://${server.hostname}:${server.port}`);
 // slow enough to matter to an activation handshake and to a request in flight,
 // and urgent to nobody, so it happens a slice at a time between requests.
 const journalRemoval = setInterval(() => {
+  if (shuttingDown) return;
   try { if (removeEventJournal(db) === "removed") clearInterval(journalRemoval); }
   catch (cause) {
     clearInterval(journalRemoval);
@@ -3068,6 +2814,7 @@ process.on("uncaughtException", (cause) => {
 refreshPlanUsageIfDue();
 void refreshPeers();
 
+signalSync();
 unwrap(await threads.start());
 watchList.start();
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
@@ -3089,12 +2836,7 @@ function pruneUploadTransfers() {
 }
 pruneUploadTransfers();
 
-// Adopt prior diagnostic-only failures into bounded recovery; restarts must not reset the budget.
-for (const thread of threads.snapshot()) restoreThreadNaming(thread);
-
 const uploadPruner = setInterval(pruneUploadTransfers, 60_000);
-const namingReceipts = setInterval(reconcileThreadNames, 15_000);
-reconcileThreadNames();
 
 const stopThreadRefresh = startThreadRefresh({
   subscriptions: () => [...streams.values()].map(stream => stream.subscription),
@@ -3108,11 +2850,17 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  if (statePushTimer) clearTimeout(statePushTimer);
+  statePushTimer = null;
+  stateSyncPending = false;
+  if (liveSyncTimer) clearTimeout(liveSyncTimer);
+  liveSyncTimer = null;
+  liveSyncPending = false;
+  clearInterval(journalRemoval);
   unwatchFile(modelAvailability.path);
   watchList.stop();
   stopAutoArchive();
   clearInterval(uploadPruner);
-  clearInterval(namingReceipts);
   clearInterval(dashboardTicker);
   stopThreadRefresh();
   for (const timer of transcriptTimers.values()) clearTimeout(timer);
@@ -3151,3 +2899,5 @@ process.on("SIGTERM", () => void releaseSupervisor(0));
 process.on("SIGINT", () => void releaseSupervisor(0));
 process.on("SIGUSR2", () => void releaseSupervisor(75));
 process.on("SIGHUP", () => void releaseSupervisor(75));
+stateSyncPhase = "ready";
+if (stateSyncPending) signalSync();

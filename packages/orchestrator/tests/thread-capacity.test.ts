@@ -164,6 +164,52 @@ it("uncertain native startup and failed cancellation never free capacity or crea
   expect(f.sessions.size).toBe(0);
 });
 
+it.each(["absent", "unknown", "live"] as const)("missing startup reference recovery requires positive native proof: %s", async proof => {
+  const shared = authority(), f = fixture(client(shared, "host-a/alice"));
+  const open = vi.fn(async (): Promise<PiSession> => { throw new Error("Native open acknowledgement lost"); });
+  f.options.openSession = open;
+  unwrap(await f.service.spawn({ id: "uncertain", requestId: "original-work", cwd: f.root, message: "work" }));
+  unwrap(await f.service.start());
+  await until(() => !!f.service.get("uncertain")?.metadata?.startupFailure);
+  const custody = shared.entries()[0]!;
+  const recover = vi.fn(async (_id: string, output: (event: PiEvent) => void): Promise<PiSession | null> => {
+    if (proof === "unknown") throw new Error("Runner generation ownership unconfirmed");
+    if (proof === "absent") return null;
+    const native = new Native({ threadId: "uncertain", cwd: f.root, sessionFile: join(f.root, "uncertain.jsonl"), args: [], env: {} }, output);
+    native.busy = true; native.abortFails = true; f.sessions.set("uncertain", native);
+    output({ type: "runner_attached", control: join(f.root, "control.sock"), socketPath: join(f.root, "uncertain") });
+    return native;
+  });
+  f.options.recoverSession = recover;
+  const result = await f.service.control({ threadId: "uncertain", action: "cancel" });
+  expect(recover).toHaveBeenCalledTimes(1);
+  expect(open).toHaveBeenCalledTimes(1);
+  if (proof === "absent") {
+    expect(result.ok).toBe(true); expect(shared.status().active).toBe(0);
+    expect(f.service.pending("uncertain")).toEqual([]);
+    expect((f.service as any).db.prepare("SELECT * FROM thread_capacity WHERE execution_id=?").get(custody.executionId)).toMatchObject({ state: "released", logical_execution_id: custody.executionId, source_id: "original-work" });
+  } else {
+    expect(result).toMatchObject({ ok: false, error: { code: "cancellation_failed" } });
+    expect(shared.entries()).toEqual([custody]);
+  }
+});
+
+it("startup exit preserves its runner reference until the serial absence fence settles custody", async () => {
+  const shared = authority(), f = fixture(client(shared, "host-a/alice"));
+  const reference = { control: join(f.root, "control.sock"), socketPath: join(f.root, "uncertain") };
+  f.options.openSession = async (_options, output, exit) => {
+    output({ type: "runner_attached", ...reference }); exit(1);
+    throw new Error("Native open acknowledgement lost");
+  };
+  unwrap(await f.service.spawn({ id: "uncertain", requestId: "original-work", cwd: f.root, message: "work" }));
+  unwrap(await f.service.start()); await until(() => !!f.service.get("uncertain")?.metadata?.startupFailure);
+  expect(f.service.get("uncertain")?.metadata?.runnerReference).toEqual(reference);
+  expect(shared.status().active).toBe(1);
+  const attach = vi.fn(async () => null); f.options.attachSession = attach;
+  unwrap(await f.service.control({ threadId: "uncertain", action: "cancel" }));
+  expect(attach).toHaveBeenCalledTimes(1); expect(shared.status().active).toBe(0);
+});
+
 it.each([false, true])("failed pre-native startup releases its original identity and never replies to a result notice, reference=%s", async reference => {
   const shared = authority(), f = fixture(client(shared, "host-a/alice"));
   (f.options as any).retireIdleSession = () => true;
@@ -172,6 +218,7 @@ it.each([false, true])("failed pre-native startup releases its original identity
   unwrap(f.service.importThread({ id: "worker", parentId: "parent", title: "Worker", cwd: f.root, sessionFile: join(f.root, "worker.jsonl"),
     settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
   unwrap(f.service.importMessage({ id: "assignment", threadId: "worker", senderId: "parent", text: "work", source: "explicit" }));
+  unwrap(await f.service.control({ threadId: "worker", action: "placement", foreground: true }));
   unwrap(await f.service.start()); await until(() => f.sessions.get("worker")?.busy === true);
   f.sessions.get("worker")!.settle(); await until(() => f.service.latestSettlement("worker")?.outcome === "complete" && shared.status().active === 0 && !(f.service as any).runtimes.has("worker"));
   const originalReply = f.service.pending("parent");

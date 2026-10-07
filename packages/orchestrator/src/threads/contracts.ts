@@ -198,6 +198,8 @@ export type ThreadControl =
   | { threadId: string; action: "dependencies"; threadIds: string[] }
   /** Owner-to-owner durable endpoint reservation, never a model operation. */
   | { threadId: string; action: "dependencyClaim"; dependentId: string; active: boolean }
+  /** Owner-to-owner release of an inert edge threadId → dependsOn while closing dependsOn; refused while threadId waits on it. */
+  | { threadId: string; action: "dependencyRelease"; dependsOn: string }
   /** Retained callers' stop/restore act on the selected agent only; no recursive control or replay. */
   | { threadId: string; action: "stop"; descendants: boolean; reason?: "archive" }
   | { threadId: string; action: "resume" }
@@ -206,7 +208,10 @@ export type ThreadControl =
   /** Record an idle human view using the owner's clock, without changing execution activity or emitting changed. */
   | { threadId: string; action: "view" }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
+  /** A person's title, pinned against the agent's own naming until they rename again. */
   | { threadId: string; action: "rename"; title: string }
+  /** The thread's own agent naming its thread; refused while a person's rename pins the title. */
+  | { threadId: string; action: "title"; title: string; taskDescription?: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   /** Retry dormant waiting work on the saved model, without interrupting live native work. */
   | { threadId: string; action: "retryWaiting" }

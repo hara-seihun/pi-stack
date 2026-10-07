@@ -111,6 +111,7 @@ it("preserves queued continuation and warm interactive, unbounded, live and wait
     f.sessions[0]!.settle(); await until(() => f.sessions[0]!.closed);
     for (const id of ["interactive", "uncapped", "waiting", "scheduled", "live"]) {
       const created = unwrap(await f.service.spawn({ requestId: id, cwd: f.root, message: id, settings: { model: "sol" }, metadata: id === "interactive" ? {} : { laneId: id, ...(id === "live" ? { mode: "live" } : {}) } }));
+      if (["interactive", "uncapped", "live"].includes(id)) unwrap(await f.service.control({ threadId: created.id, action: "placement", foreground: true }));
       await until(() => f.sessions.at(-1)?.streaming === true);
       const session = f.sessions.at(-1)!;
       if (id === "waiting") {

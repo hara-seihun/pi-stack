@@ -1,7 +1,9 @@
 import type { Session } from "../../types";
+import { agentName } from "../../agent-name";
 import { assertNever } from "../../../../shared/explicit-state";
 import { conversationThreads } from "../../thread-state";
 import { attentionRank, threadStatus } from "../status/thread-status";
+import { agentActivity } from "./agent-task";
 
 export type AgentFilter = "all" | "active" | "waiting" | "idle";
 export interface AgentCounts { total: number; active: number; waiting: number; idle: number }
@@ -46,10 +48,13 @@ export function groupAgents(sessions: Session[], query: string, filter: AgentFil
   for (const agent of backgroundAgents(sessions)) {
     const launcher = agent.parentId ? byId.get(agent.parentId) : undefined;
     const id = agent.parentId ? `launcher:${agent.parentId}` : agent.watchList || agent.origin === "fleet" ? "system" : "detached";
-    const label = agent.parentId ? launcher?.agentName || `Launcher ${agent.parentId.slice(0, 8)}` : id === "system" ? "Scheduled & system" : "No launcher";
+    const label = agent.parentId ? (launcher && agentName(launcher)) || `Launcher ${agent.parentId.slice(0, 8)}` : id === "system" ? "Scheduled & system" : "No launcher";
     const task = launcher?.name ?? null;
     if (filter === "active" && agent.state !== "running" || filter === "waiting" && agent.state !== "waiting" || filter === "idle" && agent.state !== "idle") continue;
-    if (search && ![agent.agentName, agent.name, agent.id, label, task].some(value => value?.toLocaleLowerCase().includes(search))) continue;
+    if (search) {
+      const activity = agentActivity(agent);
+      if (![agent.agentName, agent.name, agent.taskDescription, agent.id, label, task, activity.label, activity.detail, agent.attentionSummary].some(value => value?.toLocaleLowerCase().includes(search))) continue;
+    }
     let group = groups.get(id);
     if (!group) { group = { id, label, task, agents: [], counts: { total: 0, active: 0, waiting: 0, idle: 0 } }; groups.set(id, group); }
     group.agents.push(agent);

@@ -5,7 +5,7 @@ import { validateThreadObservation } from "../../../../shared/state-validation";
 
 export type StatusKey =
   | "queued" | "admitting" | "starting" | "preparing" | "finishing" | "cancelling" | "recovering" | "reporting_error" | "thinking" | "responding" | "preparing_tool" | "waiting_for_model" | "waiting_for_capacity" | "waiting_to_retry"
-  | "tool" | "compacting" | "retrying" | "awaiting" | "waiting_on_workers" | "waiting_for_job" | "waiting_for_deployment" | "waiting_for_message" | "stopping" | "error"
+  | "tool" | "compacting" | "retrying" | "awaiting" | "waiting_for_job" | "waiting_for_deployment" | "waiting_for_message" | "stopping" | "error"
   | "archived" | "idle" | "offline";
 
 export interface ThreadStatus {
@@ -56,7 +56,7 @@ function executionStatus(session: Pick<Session, "activity" | "activeTools">): Th
     case "compacting": return { key: "compacting", label: "Compacting context", short: "Compacting", busy: true, attention: false };
     case "retrying": return { key: "retrying", label: "Retrying model request", short: "Retrying", busy: true, attention: false };
     case "status_error": return STATUS_REPORTING_ERROR;
-    case "idle": case "awaiting": case "waiting_on_workers": return { ...STATUS_REPORTING_ERROR, title: `Running execution reports the non-execution phase ${session.activity}.` };
+    case "idle": case "awaiting": return { ...STATUS_REPORTING_ERROR, title: `Running execution reports the non-execution phase ${session.activity}.` };
   }
   return assertNever(session.activity, "Execution activity");
 }
@@ -86,7 +86,6 @@ export function threadStatus(session: StatusSession): ThreadStatus {
   if (session.state === "waiting") return { key: "awaiting", label: "Waiting on agents", short: "Waiting", busy: true, attention: session.idleUnread };
   switch (session.activity) {
     case "awaiting": return dependencyStatus(session);
-    case "waiting_on_workers": return { key: "waiting_on_workers", label: "Agents working", short: "Agents working", busy: true, attention: session.idleUnread };
     case "status_error": return { ...STATUS_REPORTING_ERROR, busy: false, title: session.activityDetail || STATUS_REPORTING_ERROR.title };
     case "idle": return { key: "idle", label: "Idle", short: "Idle", busy: false, attention: session.idleUnread };
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering":
@@ -129,15 +128,34 @@ export const OFFLINE_STATUS: ThreadStatus = { key: "offline", label: "Offline", 
 
 export function attentionRank(status: ThreadStatus): number {
   if (status.key === "error" || status.key === "reporting_error") return 0;
-  if ((status.key === "idle" || status.key === "waiting_on_workers") && status.attention) return 2;
+  if (status.key === "idle" && status.attention) return 2;
   switch (status.key) {
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering": case "tool": case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "waiting_for_capacity": case "waiting_to_retry": case "compacting": case "retrying": case "stopping": return 10;
-    case "awaiting": case "waiting_on_workers": case "waiting_for_job": case "waiting_for_deployment": case "waiting_for_message": return 11;
+    case "awaiting": case "waiting_for_job": case "waiting_for_deployment": case "waiting_for_message": return 11;
     case "idle": return 21;
     case "archived": return 30;
     case "offline": return 40;
   }
   return assertNever(status.key, "Status attention rank");
+}
+
+export type StatusGlyph = "working" | "agents" | "job" | "deployment" | "message" | "held" | "stopping" | "done" | "unread" | "error" | "archived" | "offline";
+
+export function statusGlyph(status: ThreadStatus): StatusGlyph {
+  switch (status.key) {
+    case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "recovering": case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "tool": case "compacting": case "retrying": return "working";
+    case "awaiting": return "agents";
+    case "waiting_for_job": return "job";
+    case "waiting_for_deployment": return "deployment";
+    case "waiting_for_message": return "message";
+    case "waiting_for_capacity": case "waiting_to_retry": return "held";
+    case "cancelling": case "stopping": return "stopping";
+    case "idle": return status.attention ? "unread" : "done";
+    case "error": case "reporting_error": return "error";
+    case "archived": return "archived";
+    case "offline": return "offline";
+  }
+  return assertNever(status.key, "Status glyph");
 }
 
 function elapsed(at: number, now: number): string {
@@ -149,7 +167,7 @@ function elapsed(at: number, now: number): string {
 }
 
 export function activityTiming(status: ThreadStatus, now: number): { elapsed?: string; quiet?: string } {
-  if (!status.busy || status.key === "waiting_on_workers") return {};
+  if (!status.busy) return {};
   return {
     ...(status.since ? { elapsed: elapsed(status.since, now) } : {}),
     ...(!["awaiting", "waiting_for_job", "waiting_for_deployment", "waiting_for_message"].includes(status.key) && status.lastActivityAt && now - status.lastActivityAt >= 15_000

@@ -123,6 +123,8 @@ test("tool completion and a final answer both render all thought, argument, and 
   const runningSteps = expectExpanded(runningHtml, work.length);
   expect(runningSteps.at(-1)).toContain('aria-busy="true"');
   expect(runningSteps.at(-1)).toContain("partial tool output");
+  expect(runningSteps.at(-1)).toContain('class="step-arguments" tabindex="0" aria-label="Tool arguments"');
+  expect(runningSteps.at(-1)).toContain('class="step-result" tabindex="0" role="region" aria-label="Tool result"');
 
   for (const entries of [[...previous, completed], [...previous, completed, answer]]) {
     const html = render({ autoCollapse: false, entries }, bodies);
@@ -136,5 +138,7 @@ test("tool completion and a final answer both render all thought, argument, and 
     expect(details.at(-1)).toContain("complete argument detail");
     expect(details.at(-1)).toContain("complete result beyond the head preview");
     expect(details.at(-1)).not.toContain("short head preview");
+    expect(details.at(-1)).toContain('class="step-arguments" tabindex="0" aria-label="Tool arguments"');
+    expect(details.at(-1)).toContain('class="step-result" tabindex="0" role="region" aria-label="Tool result"');
   }
 });

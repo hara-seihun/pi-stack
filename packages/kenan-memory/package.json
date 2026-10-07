@@ -6,6 +6,10 @@
   "exports": {
     ".": { "types": "./dist/client.d.ts", "bun": "./src/client.ts", "default": "./dist/client.js" },
     "./contract": { "types": "./dist/contract.d.ts", "bun": "./src/contract.ts", "default": "./dist/contract.js" },
+    "./life-contract": { "types": "./dist/life-contract.d.ts", "bun": "./src/life-contract.ts", "default": "./dist/life-contract.js" },
+    "./life-client": { "types": "./dist/life-client.d.ts", "bun": "./src/life-client.ts", "default": "./dist/life-client.js" },
+    "./life-store": { "types": "./dist/life-store.d.ts", "bun": "./src/life-store.ts", "default": "./dist/life-store.js" },
+    "./life-policy": { "types": "./dist/life-policy.d.ts", "bun": "./src/life-policy.ts", "default": "./dist/life-policy.js" },
     "./config": { "types": "./dist/config.d.ts", "bun": "./src/config.ts", "default": "./dist/config.js" },
     "./diagnostics": { "types": "./dist/diagnostics.d.ts", "bun": "./src/diagnostics.ts", "default": "./dist/diagnostics.js" },
     "./private-store": { "types": "./dist/private-store.d.ts", "bun": "./src/private-store.ts", "default": "./dist/private-store.js" },

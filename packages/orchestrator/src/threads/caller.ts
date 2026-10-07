@@ -267,10 +267,13 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
     },
     async admit(operation, input, caller) {
       if (operation === "control") {
-        if (input.action === "dependencyClaim" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Dependency endpoint reservations require an owning runtime or service");
+        if ((input.action === "dependencyClaim" || input.action === "dependencyRelease") && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Dependency endpoint reservations require an owning runtime or service");
         if (input.action === "open" || input.action === "placement" || input.action === "view") {
           if (caller.kind !== "person" && caller.kind !== "service") return refuse("Only a human opening or placing an agent can change foreground placement");
         }
+        if (input.action === "title" && (caller.kind === "thread" ? input.threadId !== caller.threadId : caller.kind !== "runtime" && caller.kind !== "service"))
+          return refuse("Only a thread's own agent names it; people rename it");
+        if (input.action === "rename" && caller.kind === "thread") return refuse("Agents name their own thread with thread_title; renaming is a person's pin");
         if (input.action === "dependencies" && caller.kind === "thread" && input.threadId !== caller.threadId)
           return refuse("Only the dependent agent can resolve or release its outgoing dependencies");
         if (input.action === "dependencies" && caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service")

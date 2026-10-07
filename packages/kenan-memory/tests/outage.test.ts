@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { memoryExtension } from "../src/tools.js";
 import { prepareMemoryEnvironment } from "../src/session.js";
 
-test("custody outage does not gate person or room initialization/turns; only requested tools fail", async () => {
+test("custody outage permits turns with explicitly unavailable authority; rooms make no policy requests", async () => {
   const root = mkdtempSync(join(tmpdir(), "memory-outage-")); const path = join(root, "host.json"); writeFileSync(path, JSON.stringify({ oneKenan: true }));
   let calls = 0;
   const service = createServer((_req, response) => { calls++; response.writeHead(503, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: false, error: "unavailable", message: "Custody is unavailable" })); });
@@ -24,8 +24,11 @@ test("custody outage does not gate person or room initialization/turns; only req
       const before = handlers.find(h => h[0] === "before_agent_start")[1];
       const result = await before({ systemPrompt: "ordinary-turn" });
       expect(result.systemPrompt).toStartWith("ordinary-turn");
-      expect(calls).toBe(beforeCalls);
-      if (!room) expect(active).toContain("bash");
+      expect(calls).toBe(beforeCalls + (room ? 0 : 1));
+      if (!room) {
+        expect(active).toContain("bash");
+        expect(result.systemPrompt).toContain("Current life authority is unavailable");
+      }
       const ask = await tools.find(t => t.name === "ask_kenan").execute("ask", { request: "Cross-person question" });
       expect(ask.isError).toBe(true); expect(ask.details.memoryResult).toMatchObject({ ok: false, error: "unavailable" });
       expect(env.PI_KENAN_MEMORY_TOKEN).toBeUndefined();
@@ -34,7 +37,7 @@ test("custody outage does not gate person or room initialization/turns; only req
         expect(read.isError).toBe(true); expect(read.details.memoryResult).toMatchObject({ ok: false, error: "unavailable" });
       }
       const afterFailure = calls;
-      await before({ systemPrompt: "next-turn" }); expect(calls).toBe(afterFailure);
+      await before({ systemPrompt: "next-turn" }); expect(calls).toBe(afterFailure + (room ? 0 : 1));
     }
   } finally { await new Promise<void>(resolve => service.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
 });

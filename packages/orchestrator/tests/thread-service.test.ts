@@ -220,6 +220,7 @@ describe("warm execution residency", () => {
       openSession: async (options, output) => { const session = new FakePiSession(options, output); session.setActive = activity; sessions.push(session); return session; } });
     services.push(service); value(await service.start());
     const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     await waitFor(() => sessions[0]?.isStreaming === true);
     await settle(sessions[0]!, service, thread.id);
     await waitFor(() => activity.mock.calls.some(([active]) => !active));
@@ -263,6 +264,7 @@ describe("warm execution residency", () => {
       } });
     services.push(service); value(await service.start());
     const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     await waitFor(() => sessions[0]?.isStreaming === true); await settle(sessions[0]!, service, thread.id);
     value(await service.send({ requestId: "second", threadId: thread.id, text: "second" }));
     await waitFor(() => sessions[1]?.isStreaming === true);
@@ -282,6 +284,7 @@ describe("warm execution residency", () => {
       openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
     services.push(service); value(await service.start());
     const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first", settings: { model: "sol" } }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     await waitFor(() => sessions[0]?.isStreaming === true); await settle(sessions[0]!, service, thread.id);
     if (change === "account") admissionEnv = { PI_ORCHESTRATOR_ACCOUNT_ID: "two" };
     if (change === "broker") admissionEnv = { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" };
@@ -550,37 +553,44 @@ it("reports queue, preparation, admission, runtime startup, model wait and cance
   expect(value(await stopping)).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
 });
 
-it("pins self-renames through the model tool across automatic results and controller restarts", async () => {
+it("the thread's own agent names it with thread_title; a person's rename pins it across restarts", async () => {
   const { service, directory, sessions } = fixture();
   value(await service.start());
   const thread = value(await service.spawn({ requestId: "rename-self", cwd: directory, message: "Work" }));
   await waitFor(() => sessions.length === 1 && sessions[0]!.isStreaming);
-  expect(value(service.update(thread.id, { title: "First generated title" }, { automaticTitle: true })).metadata?.titleSource).toBe("auto");
-  expect(value(service.update(thread.id, { title: "Later generated title" }, { automaticTitle: true })).title).toBe("Later generated title");
-  const tool = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service }).find(item => item.name === "thread_control")!;
-  const renamed = await tool.execute("rename-call", { action: "rename", title: "  My chosen title  " }, undefined, undefined, undefined as never);
-  expect(renamed.details).toMatchObject({ ok: true, value: { id: thread.id, title: "My chosen title", state: "running", metadata: { titleSource: "manual" } } });
-  const pinned = service.get(thread.id)!;
-  expect(value(service.update(thread.id, { title: "Stale in-flight result" }, { automaticTitle: true }))).toEqual(pinned);
-  await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "My chosen title"));
-  expect(await service.control({ threadId: thread.id, action: "rename", title: " " })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  expect(await service.control({ threadId: thread.id, action: "rename" } as never)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  expect(service.update(thread.id, { metadata: { titleSource: "auto" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  const tools = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service });
+  expect(tools.find(item => item.name === "thread_control")!.parameters.anyOf.some((variant: { properties: { action: { const?: string } } }) => variant.properties.action.const === "rename")).toBe(false);
+  const title = tools.find(item => item.name === "thread_title")!;
+  const first = await title.execute("title-1", { title: "  First topic  ", taskDescription: "  Publish the task-first Orchestrator on both hosts.  " }, undefined, undefined, undefined as never);
+  expect(first.details).toMatchObject({ ok: true, value: { id: thread.id, title: "First topic", metadata: { titleSource: "agent", taskDescription: "Publish the task-first Orchestrator on both hosts." } } });
+  for (const taskDescription of ["", " ", "x".repeat(241)]) {
+    expect(await service.control({ threadId: thread.id, action: "title", title: "Invalid description", taskDescription })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  }
+  expect(service.get(thread.id)?.title).toBe("First topic");
+  await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "First topic"));
+  expect((await title.execute("title-2", { title: "Changed topic" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: true, value: { title: "Changed topic" } });
+  value(await service.control({ threadId: thread.id, action: "rename", title: "My chosen title" }));
+  const pinned = await title.execute("title-3", { title: "Agent override" }, undefined, undefined, undefined as never);
+  expect(pinned.details).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(service.get(thread.id)).toMatchObject({ title: "My chosen title", metadata: { titleSource: "manual" } });
+  expect(await service.control({ threadId: thread.id, action: "title", title: " " })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(service.update(thread.id, { metadata: { titleSource: "agent" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
   sessions[0]!.settle("Done");
   await waitFor(() => service.get(thread.id)?.state === "idle");
   await service.close();
   const restored = fixture(directory).service;
   value(await restored.start());
-  expect(value(restored.update(thread.id, { title: "Generated after restart" }, { automaticTitle: true }))).toMatchObject({ title: "My chosen title", metadata: { titleSource: "manual" } });
+  expect(await restored.control({ threadId: thread.id, action: "title", title: "After restart" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(value(await restored.control({ threadId: thread.id, action: "rename", title: "Next chosen title" })).title).toBe("Next chosen title");
+  expect(restored.get(thread.id)?.metadata?.taskDescription).toBe("Publish the task-first Orchestrator on both hosts.");
 });
 
-it("pins human title updates, including accepting the current automatic title", async () => {
+it("a person accepting the agent's title through update pins it", async () => {
   const { service, directory } = fixture();
   const thread = value(await service.spawn({ requestId: "rename-human", cwd: directory }));
-  value(service.update(thread.id, { title: "Generated" }, { automaticTitle: true }));
-  expect(value(await service.control({ threadId: thread.id, action: "update", title: "Generated" })).metadata?.titleSource).toBe("manual");
-  expect(value(service.update(thread.id, { title: "New generated title" }, { automaticTitle: true })).title).toBe("Generated");
+  value(await service.control({ threadId: thread.id, action: "title", title: "Agent topic" }));
+  expect(value(await service.control({ threadId: thread.id, action: "update", title: "Agent topic" })).metadata?.titleSource).toBe("manual");
+  expect(await service.control({ threadId: thread.id, action: "title", title: "New agent topic" })).toMatchObject({ ok: false, error: { code: "conflict" } });
 });
 
 it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch and retains its visible receipt across restart", async choice => {
@@ -852,6 +862,7 @@ it("persists a bounded startup retry budget across owner restart", async () => {
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
   const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
+  value(await first.control({ threadId: thread.id, action: "placement", foreground: true }));
   await first.start();
   await waitFor(() => (first.get(thread.id)?.metadata?.startupFailure as { attempts: number })?.attempts === 1);
   first.reconcile(); await turn();
@@ -961,6 +972,32 @@ it("keeps provider-exhausted accepted work unsettled across restart and resumes 
   expect(reopened.latestSettlement("child")).toMatchObject({executionId,workId:"accepted",outcome:"complete"});
   expect(admit.mock.calls.at(-1)?.[2]).toBe(false);
   expect(admit.mock.calls.at(-1)?.[3]).toBe(executionId);
+});
+
+it("re-admits accepted work at once when one Codex account's plan refuses the model, instead of failing the thread",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-model-refusal-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];
+  const refusal="Codex error: The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.";
+  const admit=vi.fn(async(..._args:unknown[])=>({ok:true as const,value:{release(){},env:{PI_ORCHESTRATOR_ACCOUNT_ID:`openai-codex-${admit.mock.calls.length}`}}}));
+  const openSession:OpenPiSession=async(options,output)=>{
+    const session=new FakePiSession(options,output);
+    if(sessions.length){session.acceptedWorkIds.add("accepted");session.completedWorkIds.add("accepted");session.lastAssistantMessage={role:"assistant",stopReason:"error",errorMessage:refusal};}
+    sessions.push(session);return session;
+  };
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit,capacity:{mode:"unmanaged"}});services.push(service);
+  value(service.importThread({id:"sol",parentId:"parent",title:"sol",cwd:directory,sessionFile:join(directory,"sol.jsonl"),settings:{model:"openai-codex/gpt-6.1-sol",thinkingLevel:"high",speed:"standard"}}));
+  value(service.importMessage({id:"accepted",threadId:"sol",text:"finish the real work"}));
+  await service.start();await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:refusal});
+  // The refusing account is already excluded, so the zero-length provider wait re-admits immediately.
+  await waitFor(()=>sessions[0]!.closed&&sessions[1]?.isStreaming===true);
+  expect(service.get("sol")?.metadata?.providerRetry).toMatchObject({attempts:1});
+  expect(service.latestSettlement("sol")).toBeNull();
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({workId:"accepted",resume:true,resumeProviderWait:true});
+  expect(admit).toHaveBeenCalledTimes(2);
+  expect(admit.mock.calls[1]?.[2]).toBe(false);
+  sessions[1]!.settle("artifact delivered");await waitFor(()=>service.latestSettlement("sol")!==null);
+  expect(service.latestSettlement("sol")).toMatchObject({workId:"accepted",outcome:"complete"});
 });
 
 it.each([
@@ -1073,6 +1110,7 @@ it("keeps the effective model and timed activity through transient retry backoff
     openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
   services.push(service); value(await service.start());
   const thread = value(await service.spawn({ requestId: "model-backoff", cwd: directory, message: "work", settings: { model: "opus" } }));
+  value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
   await waitFor(() => sessions[0]?.isStreaming === true);
   value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "sol" } }));
   const db = new DatabaseSync(join(directory, "threads.sqlite"));
@@ -1263,8 +1301,9 @@ it("settles a thread whose admission refusal can never succeed instead of waitin
   const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
     admit: async () => ({ ok: false, error: { code: "invalid_request", message: error } }) });
   services.push(service);
-  await service.start();
   const thread = value(await service.spawn({ requestId: "rejected", cwd: directory, message: "work" }));
+  value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
+  await service.start();
   await waitFor(() => service.get(thread.id)?.state === "idle" && service.get(thread.id)?.held === true);
   expect(service.get(thread.id)?.metadata?.executionError).toBe(error);
   expect(service.latestSettlement(thread.id)).toMatchObject({ outcome: "failed", error });
@@ -1711,6 +1750,7 @@ describe("ThreadService", () => {
   it("does not arm views during queued or running work, or pending owner operations", async () => {
     const { service, directory, sessions } = fixture();
     const thread = value(await service.spawn({ requestId: "busy-view", cwd: directory, message: "work" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
     value(await service.start());
     await waitFor(() => sessions[0]?.isStreaming === true);

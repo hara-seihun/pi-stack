@@ -8,7 +8,7 @@ import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
-import { presentAgentMessage } from "./agent-message";
+import { AgentRoute, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
@@ -101,9 +101,11 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
 }) {
   const presented = presentAgentMessage(entry);
   const text = presented.text || "";
+  const sender = presented.agentSender;
   return <div data-transcript-seq={entry.seq}><ChatMessage
     kind={entry.kind}
     label={entry.kind === "assistant" ? AGENT_NAME : presented.label || entry.kind}
+    heading={sender ? <AgentRoute direction="incoming" from={{ kind: "peer", threadId: sender.threadId, name: presented.label ?? null }} to={{ kind: "self", threadId: sessionId }} /> : undefined}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
     text={text}
     timestamp={entry.messageTimestamp || undefined}
@@ -117,6 +119,29 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
     menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
   /></div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
+
+const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId }: { entry: ContextEntry; sessionId: string }) {
+  const message = outgoingAgentMessage(entry);
+  const spawn = message?.tool === "spawn" && message.delivery.state === "delivered";
+  const body = useItemBody(entry.itemId, spawn, entry.size);
+  if (!message) return null;
+  const created = message.tool === "spawn" ? spawnedThread(body.body) : null;
+  const to = message.tool === "send" ? { kind: "peer" as const, threadId: message.recipientId, name: null }
+    : created ? { kind: "peer" as const, threadId: created.id, name: created.name } : { kind: "new" as const, title: message.title };
+  const status = message.delivery.state === "sending" ? { status: "sending", canCheck: false, canRetry: false }
+    : message.delivery.state === "failed" ? { status: "failed", error: message.delivery.error, canCheck: false, canRetry: false } : undefined;
+  return <div data-transcript-seq={entry.seq}><ChatMessage
+    kind="assistant agent-outgoing"
+    label={AGENT_NAME}
+    heading={<AgentRoute direction="outgoing" from={{ kind: "self", threadId: sessionId }} to={to} />}
+    avatar={agentAvatar()}
+    text={message.text}
+    timestamp={Number(entry.time) || undefined}
+    delivery={status}
+    contentFormat="markdown"
+    renderMarkdown={source => <Markdown source={source} sessionId={sessionId} assistant />}
+  /></div>;
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId);
 
 function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {
   switch (entry.kind) {
@@ -167,8 +192,8 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
     </summary>
     <div className="step-detail">
       <span className="step-detail-label">Arguments</span>
-      <pre>{json(args)}</pre>
-      {(previewOutput || completeOutput.length > 0) && <><span className="step-detail-label">Result</span><div className="step-result">
+      <pre className="step-arguments" tabIndex={0} aria-label="Tool arguments">{json(args)}</pre>
+      {(previewOutput || completeOutput.length > 0) && <><span className="step-detail-label">Result</span><div className="step-result" tabIndex={0} role="region" aria-label="Tool result">
         {previewOutput && <pre>{previewOutput}</pre>}
         {completeOutput.map((part, index) => part.kind === "image"
           ? <AttachmentImage key={index} src={imageUrl(part.image)} alt={`Tool result image, ${String(part.image.mimeType || "application/octet-stream")}`} downloadQuery />
@@ -315,7 +340,9 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
         ? <WorkCard item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />
         : item.kind === "step"
           ? <Step entry={item.entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />
-          : <MessageEntry entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />} />
+          : item.kind === "outgoing"
+            ? <OutgoingEntry entry={item.entry} sessionId={sessionId} />
+            : <MessageEntry entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />} />
       {newerAvailable && <button type="button" className="context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
     </div>
   </InlineImagesContext.Provider>;

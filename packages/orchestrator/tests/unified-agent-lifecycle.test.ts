@@ -8,6 +8,7 @@ import { ThreadDirectory } from "../src/threads/directory.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 import { modeConversation } from "../src/threads/pi-mode.js";
 import { callerResolver } from "../src/threads/caller.js";
+import { openSqlite } from "../src/sqlite.js";
 
 function value<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -130,11 +131,38 @@ it("endpoint reservations fence a concurrent cross-owner close after its graph s
   };
   const closing = b.service.control({ action: "close", threadId: "b" });
   await read;
-  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "late-wait", threadId: "a", reason: "Need b", fromThreadId: "b" }));
   release();
   expect(await closing).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
   expect(b.service.get("b")?.metadata?.archived).not.toBe(true);
   value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: [] }));
+});
+
+it("an inert dependency (settled target, dependent not waiting) shows idle, never blocks close and is released by it", async () => {
+  const a = fixture(), b = fixture();
+  const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  expect(a.service.get("a")).toMatchObject({ state: "idle", dependencies: ["b"] });
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
+  value(await directory.control({ action: "close", threadId: "a" }));
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(b.service.get("b")?.metadata?.peerDependents).toEqual([]);
+  value(await directory.control({ action: "close", threadId: "b" }));
+});
+
+it("closing the target of an inert dependency releases the dependent's edge across owners", async () => {
+  const a = fixture(), b = fixture();
+  const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  value(await directory.control({ action: "close", threadId: "b" }));
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(b.service.get("b")?.metadata?.peerDependents).toEqual([]);
 });
 
 it("turn settlement while waiting or questioning is not an assignment result or ephemeral completion", async () => {
@@ -174,6 +202,8 @@ it("a later final turn discharges the original assignment reply exactly once wit
   const replies = f.service.pending("requester").filter(message => message.senderId === "assigned");
   expect(replies).toHaveLength(1); expect(replies[0]?.senderName).toBe(assigned.agentName);
   expect(f.service.latestSettlement("assigned")?.assignmentPending).toBeUndefined();
+  expect(f.service.get("assigned")?.metadata?.archived).toBe(true);
+  value(await f.service.control({ threadId: "assigned", action: "open" }));
   value(await f.service.send({ requestId: "unrelated", threadId: "assigned", text: "Independent task" }));
   await until(() => !!f.sessions.get("assigned")?.active);
   f.sessions.get("assigned")!.settle("independent result");
@@ -187,7 +217,7 @@ it("accepted cross-owner reservations remain protected after controller replacem
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", reason: "Need b", fromThreadId: "b" }));
   value(await b.service.close()); services.splice(services.indexOf(b.service), 1);
   const replacement = new ThreadService(b.options); services.push(replacement);
   directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: replacement }]);
@@ -223,7 +253,7 @@ it("historical holds and resume inputs reopen without replaying their discarded 
   value(await f.service.control({ action: "resume", threadId: "resumed" }));
   for (const id of ["opened", "resumed"]) {
     expect(f.service.get(id)).toMatchObject({ title: "Historical title", state: "idle", held: false, pendingMessages: 0 });
-    expect(f.service.get(id)?.agentName).toBeUndefined();
+    expect(f.service.get(id)?.agentName).toBeTruthy();
   }
   expect(f.sessions.size).toBe(0);
 });
@@ -238,7 +268,30 @@ it("projects historical placement from original owner custody without renaming o
   expect(root.metadata?.foreground).toBe(true);
   for (const thread of [child, watch, worker]) expect(thread.metadata?.foreground).toBe(false);
   expect(root.title).toBe("Existing topic"); expect(worker.title).toBe("Existing fleet");
-  for (const thread of [root, child, watch, worker]) expect(thread.agentName).toBeUndefined();
+  for (const thread of [root, child, watch, worker]) expect(thread.agentName).toBeTruthy();
+});
+
+it("imports keep names and startup migration durably names historical threads", async () => {
+  const f = fixture();
+  const imported = value(f.service.importThread({ id: "imported", title: "Imported", cwd: f.root, sessionFile: join(f.root, "imported.jsonl"),
+    settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" }, metadata: { agentName: "Preserved Nebulani" } }));
+  expect(imported.agentName).toBe("Preserved Nebulani");
+  const legacy = value(f.service.importThread({ id: "legacy", title: "Legacy", cwd: f.root, sessionFile: join(f.root, "legacy.jsonl"),
+    settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" } }));
+  expect(legacy.agentName).toBeTruthy();
+  const db = openSqlite(f.options.databasePath);
+  db.prepare("UPDATE thread SET metadata=json_remove(metadata,'$.agentName') WHERE id=?").run("legacy");
+  db.close();
+  services.splice(services.indexOf(f.service), 1);
+  await f.service.close();
+  const reopened = new ThreadService(f.options); services.push(reopened);
+  const migratedName = reopened.get("legacy")?.agentName;
+  expect(migratedName).toBeTruthy();
+  expect(reopened.get("imported")?.agentName).toBe("Preserved Nebulani");
+  services.splice(services.indexOf(reopened), 1);
+  await reopened.close();
+  const restarted = new ThreadService(f.options); services.push(restarted);
+  expect(restarted.get("legacy")?.agentName).toBe(migratedName);
 });
 
 it("caller identity protects human placement and another agent's dependency ownership", async () => {

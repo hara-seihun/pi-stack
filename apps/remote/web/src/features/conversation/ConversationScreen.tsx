@@ -10,7 +10,8 @@ import { DismissibleError } from "../../dismissible-error";
 import type { ChatDrawing } from "../../chat-drawing";
 import type { InlineImage } from "../../../../server/inline-image-contract";
 import type { ContextEntry, Session, SlashCommand } from "../../types";
-import { StatusPill } from "../status/StatusPill";
+import { StatusIcon } from "../status/StatusIcon";
+import { agentName } from "../../agent-name";
 import { OFFLINE_STATUS, threadStatus } from "../status/thread-status";
 import { composerAction } from "../../thread-state";
 import { DELIVERY_LABELS } from "../queue/delivery";
@@ -28,13 +29,14 @@ export function BackIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true">
 function InfoIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8v.2" /></svg>; }
 function ChevronIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>; }
 
-export function ConversationHeader({ title, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true }: { title: string; status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
+export function ConversationHeader({ title, subtitle, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true }: { title: string; /** A second identity line, such as an agent's task under its name. */ subtitle?: string; /** A status glyph, shown at the leading edge. */ status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
   return <header className="conversation-header">
     {onBack && <button type="button" className="header-icon" aria-label="Back" onClick={onBack}><BackIcon /></button>}
     {avatar && showIdentity && <CachedImage className="conversation-avatar" src={avatar} alt="" decoding="async" />}
+    {status && (onOpenInspector ? <button type="button" className="conversation-status" onClick={onOpenInspector}>{status}</button> : <span className="conversation-status">{status}</span>)}
     <div className="conversation-title">
-      {showIdentity && <span className="conversation-title-text">{title}</span>}
-      {(status || meta) && <span className="conversation-subtitle">{status}{meta}</span>}
+      {showIdentity ? <span className="conversation-title-line"><span className="conversation-title-text">{title}</span>{meta}</span> : meta}
+      {showIdentity && subtitle && <span className="conversation-subtitle" title={subtitle}>{subtitle}</span>}
     </div>
     {trailing}
     {onOpenInspector && <button type="button" className="header-icon" aria-label={`${title}. Thread details`} onClick={onOpenInspector}><InfoIcon /></button>}
@@ -95,6 +97,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onDraw(): void;
   onDismissControlError(): void;
 }) {
+  const name = agentName(session);
   const status = offline ? { ...OFFLINE_STATUS, label: offline, title: offline } : threadStatus(session);
   const running = session.state === "running";
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
@@ -116,9 +119,9 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   return <div className="conversation-screen">
-    <ConversationHeader title={session.agentName ? `${session.agentName} · ${session.name}` : session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<ConversationModelMeta session={session} />} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
+    <ConversationHeader title={name ?? (session.name || "Agent")} subtitle={name ? session.name || undefined : undefined} status={syncing && !offline ? <span className="conversation-syncing" role="status" aria-label="Updating" title="Updating"><span className="conversation-syncing-spinner" aria-hidden="true" /></span> : <StatusIcon status={status} />} meta={<ConversationModelMeta session={session} />} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
       trailing={<>{questions.length > 0 && composerAction(session, "") === "stop" && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Cancel work</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
-    {ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
+    {ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{agentName(ancestor) ?? (ancestor.name || ancestor.id)}</button>)}</nav>}
     <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
     {outbox}
     <ConversationView key={session.id} active newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
@@ -127,7 +130,6 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
       {liveText && <div className="live-answer"><ChatMessage kind="assistant" label={AGENT_NAME} avatar={agentAvatar()} text={liveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
     </InlineImagesContext.Provider>}>
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
-      {questionsResource?.state === "loading" && <p role="status">Loading questions…{questions.length > 0 && " Showing previous questions."}</p>}
       {questionsResource?.state === "failed" && <div className="conversation-error" role="alert">Could not load questions: {questionsResource.error}. {questions.length > 0 ? "Showing previous questions; their status may have changed." : "Chat remains available."} <button type="button" onClick={onRetryQuestions}>Retry questions</button></div>}
       {questions.length > 0 ? <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} /> : <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}

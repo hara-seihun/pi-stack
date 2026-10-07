@@ -4,7 +4,7 @@ import { loadConfig } from "../src/config.js";
 import { Store } from "../src/store.js";
 import { chooseInteractiveAccount, interactiveRetryAvailability } from "../src/auth/account-selection.js";
 import { accountModelUnsupported, MODEL_UNSUPPORTED_TTL_MS, modelUnsupportedEvidence, recordAccountModelUnsupported } from "../src/auth/model-entitlement.js";
-import { isCredentialError, isModelConfigurationError, isRateLimitError, isTransientFailure } from "../src/provider-errors.js";
+import { isCredentialError, isModelConfigurationError, isRateLimitError, isTransientFailure, transientRetryAt } from "../src/provider-errors.js";
 import type { Thread } from "../src/threads/contracts.js";
 
 const refusal = (model: string) => `{"detail":"The '${model}' model is not supported when using Codex with a ChatGPT account."}`;
@@ -13,11 +13,12 @@ const thread: Thread = { id: "worker", parentId: "root", title: "work", cwd: "/t
   state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 const auth = { has: () => true } as never;
 
-it("classifies an account entitlement refusal as model configuration, never capacity or credential", () => {
+it("classifies an account entitlement refusal as model configuration that reroutes accepted work at once, never capacity or credential", () => {
   for (const message of [refusal("gpt-6.1-sol"), "Codex error: The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."]) {
     expect(isModelConfigurationError(message)).toBe(true);
     expect(isRateLimitError(message)).toBe(false);
-    expect(isTransientFailure(message)).toBe(false);
+    expect(isTransientFailure(message)).toBe(true);
+    expect(transientRetryAt(message, 3, 1_000)).toBe(1_000);
     expect(isCredentialError(message)).toBe(false);
   }
   expect(accountModelUnsupported(refusal("gpt-6.1-sol"))).toBe("gpt-6.1-sol");

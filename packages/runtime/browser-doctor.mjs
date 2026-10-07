@@ -26,7 +26,7 @@ entrypoint with the host's pi-stack-release command, not pi install npm.`);
 const runtime = realpathSync(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime");
 const host = realpathSync(values["worker-release"] ?? runtime);
 const sdk = realpathSync(join(host, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
-const { createAgentSession, DefaultResourceLoader, SessionManager } = await import(pathToFileURL(sdk).href);
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager } = await import(pathToFileURL(sdk).href);
 const selected = createRequire(join(runtime, "package.json"));
 const browserPackage = selected.resolve("agent-browser/package.json");
 const bin = realpathSync(join(dirname(dirname(browserPackage)), ".bin"));
@@ -72,6 +72,21 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { "content-type": "text/html" });
+  if (req.url === "/sensitive") {
+    res.end(`<title>Sensitive input probe</title><iframe title="Sensitive input frame" src="http://localhost:${server.address().port}/sensitive-frame"></iframe>`);
+    return;
+  }
+  if (req.url === "/sensitive-frame") {
+    res.end(`<title>Sensitive frame</title>
+      <label>Card number<input id="cardnumber" autocomplete="cc-number" value="4242 4242 4242 4242"></label>
+      <label>Expiration<input id="exp-date" autocomplete="cc-exp" value="12/39"></label>
+      <label>Security code<input id="cvc" autocomplete="cc-csc" value="937"></label>
+      <label>Password<input id="secret-password" type="password" value="fixture-password-82"></label>
+      <label>One-time code<input id="otp" autocomplete="one-time-code" value="681295"></label>
+      <label>Cardholder<input id="cardholder" autocomplete="cc-name" value="Public Test Name"></label>
+      <div id="shadow"></div><script>document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML = '<label>Shadow card<input autocomplete="cc-number" value="4000 0000 0000 0077"></label>';</script>`);
+    return;
+  }
   if (req.url === "/frame") {
     res.end('<title>Frame probe</title><label>Frame input<input id="frame-input"></label>');
     return;
@@ -88,8 +103,11 @@ try {
   const agentDir = join(homedir(), ".pi/agent");
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
+  const modelRuntime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json"), allowModelNetwork: false });
+  const model = modelRuntime.getModel("openai-codex", "gpt-6-luna");
+  assert.ok(model, "browser doctor requires its explicit offline catalog model; no inference is dispatched");
   const opened = await createAgentSession({
-    cwd: directory, agentDir, resourceLoader, tools: ["agent_browser"],
+    cwd: directory, agentDir, resourceLoader, modelRuntime, model, thinkingLevel: "off", tools: ["agent_browser"],
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
   });
   session = opened.session;
@@ -101,7 +119,9 @@ try {
   const extensionErrors = [];
   await session.bindExtensions({ mode: "print", onError: (error) => extensionErrors.push(error) });
   assert.deepEqual(extensionErrors, [], "configured extensions must initialize");
-  assert.equal(process.env.PATH.split(delimiter)[0], bin, "the selected browser must own executable resolution");
+  const expectedFront = process.platform === "linux" && process.env.PI_THREAD_RESOURCE_BOUNDARY
+    ? join(runtime, "extensions/browser/bin") : bin;
+  assert.equal(process.env.PATH.split(delimiter)[0], expectedFront, "the selected browser must own executable resolution");
   assert.equal(execFileSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 5000 }).trim(), `agent-browser ${browserVersion}`);
   const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
   assert.equal(tools.length, 1, "exactly one native browser tool must be active");
@@ -121,7 +141,7 @@ try {
     },
   });
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, frameEval: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

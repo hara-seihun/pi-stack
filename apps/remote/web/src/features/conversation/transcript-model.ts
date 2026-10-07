@@ -1,5 +1,6 @@
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
+import { outgoingAgentMessage } from "./agent-message";
 
 export interface WorkSummary {
   toolCalls: number;
@@ -14,6 +15,8 @@ export interface WorkSummary {
 export type TranscriptItem =
   | { kind: "user"; entry: ContextEntry }
   | { kind: "assistant"; entry: ContextEntry }
+  /** A thread_send or thread_spawn call, shown as the message this agent sent. */
+  | { kind: "outgoing"; entry: ContextEntry }
   | {
       kind: "work";
       key: string;
@@ -24,11 +27,12 @@ export type TranscriptItem =
       summary: WorkSummary;
     };
 
-function visibleKind(entry: ContextEntry): "user" | "assistant" | undefined {
+function visibleKind(entry: ContextEntry): "user" | "assistant" | "outgoing" | undefined {
   switch (entry.kind) {
     case "user": return "user";
     case "assistant": return "assistant";
-    case "system": case "tool": case "toolCall": case "thinking": case "notice": return undefined;
+    case "toolCall": return outgoingAgentMessage(entry) ? "outgoing" : undefined;
+    case "system": case "tool": case "thinking": case "notice": return undefined;
   }
   return assertNever(entry.kind, "Transcript visible kind");
 }

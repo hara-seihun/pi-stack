@@ -7,6 +7,8 @@
  * ever going to clear — and each answer has exactly one implementation.
  */
 
+import { accountModelUnsupported } from "./auth/model-entitlement.js";
+
 /**
  * An assistant message the provider actually answered. Pi stamps `timestamp`
  * when it creates the message, before sending the request, so it orders the
@@ -60,8 +62,17 @@ const TRANSIENT_PATTERNS = [
   /\b(?:50[0-4]|52\d)\b/,
 ];
 
+/**
+ * Accepted work that one Codex account refused because its plan lacks the model is not broken either: admission
+ * now excludes that account/model pair, so the work waits zero time and re-admits on an entitled sibling. When every
+ * account refuses, admission fails with an actionable model-configuration error instead of waiting.
+ */
+export function isCodexModelUnsupportedError(message: string): boolean {
+  return accountModelUnsupported(message) !== undefined;
+}
+
 export function isTransientFailure(message: string): boolean {
-  return isRateLimitError(message) || TRANSIENT_PATTERNS.some((p) => p.test(message));
+  return isRateLimitError(message) || isCodexModelUnsupportedError(message) || TRANSIENT_PATTERNS.some((p) => p.test(message));
 }
 
 /**
@@ -69,6 +80,7 @@ export function isTransientFailure(message: string): boolean {
  * believed; otherwise the wait doubles with each consecutive failure and is capped, so it always runs again.
  */
 export function transientRetryAt(message: string, attempts: number, now = Date.now()): number {
+  if (isCodexModelUnsupportedError(message)) return now;
   const named = Date.parse(/retries after (\S+?Z)/.exec(message)?.[1] ?? "");
   const backoff = Math.min(30_000 * 2 ** Math.max(0, attempts - 1), 30 * 60_000);
   const floor = isRateLimitError(message) ? rateLimitCooldownMs(message) : 0;

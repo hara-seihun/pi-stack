@@ -117,9 +117,12 @@ it.each([
 it("reconnect state preserves observed streaming phase and production timestamps", async () => {
   const f = await fixture();
   const stream = createAssistantMessageEventStream();
+  cleanups.push(async () => stream.end(f.message([], "aborted")));
   f.native.agent.streamFunction = () => stream;
-  await f.command("prompt", { workId: "phase", message: "stream" });
-  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "preparing", isThinking: false } } });
+  expect(await f.command("prompt", { workId: "phase", message: "stream" })).toMatchObject({ success: true });
+  const started = await f.waitFor(event => event.type === "agent_start");
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "preparing", isThinking: false,
+    activitySince: started.emittedAt, lastActivityAt: started.emittedAt } } });
   const partial = f.message([{ type: "thinking", thinking: "reason" }], "stop");
   stream.push({ type: "start", partial });
   stream.push({ type: "thinking_delta", contentIndex: 0, delta: "reason", partial });

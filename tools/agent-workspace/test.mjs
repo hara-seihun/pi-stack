@@ -1835,6 +1835,158 @@ test("keeps a unique detached HEAD even when local branches are remote", () => {
   }
 });
 
+test("registration refuses explicit metadata mismatches without changing the retained row", () => {
+  const f = fixture();
+  try {
+    const record = JSON.parse(run(["create", "--root", f.workspaces, "--name", "metadata", "--repo", f.remote,
+      "--owner", "original", "--min-free-gib", "0", "--json"], f.env));
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const before = database.prepare("SELECT * FROM workspace WHERE id=?").get(record.id);
+    for (const flags of [["--owner", "borrower"], ["--source-commit", "a".repeat(40)], ["--mode", "review"]]) {
+      assert.throws(() => run(["register", "--path", record.path, "--cache", "extra", ...flags, "--json"], f.env), error => {
+        assert.equal(error.status, 2);
+        assert.equal(JSON.parse(error.stdout).error.code, "registration-metadata-mismatch");
+        return true;
+      });
+      assert.deepEqual(database.prepare("SELECT * FROM workspace WHERE id=?").get(record.id), before);
+    }
+    const same = JSON.parse(run(["register", "--path", record.path, "--owner", record.owner,
+      "--source-commit", record.sourceCommit, "--json"], f.env));
+    assert.equal(same.owner, record.owner);
+    assert.equal(same.leaseExpiresAt, record.leaseExpiresAt);
+    database.close();
+  } finally { f.close(); }
+});
+
+test("reassignment journals responsibility but never grants new deletion custody or changes reservations", () => {
+  const f = fixture();
+  try {
+    const [record, peer] = ["handoff", "peer"].map(name => JSON.parse(run(["create", "--root", f.workspaces,
+      "--name", name, "--repo", f.source, "--owner", "author", "--group", "paired", "--intent", "source-only",
+      "--headroom-gib", "1", "--growth-mib", "1", "--json"], f.env)));
+    git(record.path, "config", "user.name", "Test");
+    git(record.path, "config", "user.email", "test@example.invalid");
+    writeFileSync(path.join(record.path, "file.txt"), "unpublished author work\n");
+    git(record.path, "commit", "-am", "unpublished author work");
+    const head = git(record.path, "rev-parse", "HEAD");
+    writeFileSync(path.join(record.path, "file.txt"), "borrower edits already in progress\n");
+    mkdirSync(path.join(record.path, "ignored-output"));
+    writeFileSync(path.join(record.path, "ignored-output", "proof"), "keep\n");
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const before = database.prepare("SELECT * FROM workspace WHERE id=?").get(record.id);
+    const capacityBefore = database.prepare("SELECT * FROM workspace_capacity ORDER BY workspace_id").all();
+    const peerBefore = database.prepare("SELECT * FROM workspace WHERE id=?").get(peer.id);
+    const handoff = ["reassign", "--id", record.id, "--path", record.path, "--from-owner", "author",
+      "--from-source-commit", record.sourceCommit, "--from-state", "active", "--owner", "borrower",
+      "--source-commit", head, "--authorization", "author ended and both parties approved in receipt 123", "--json"];
+    const assigned = JSON.parse(run(handoff, f.env));
+    assert.equal(assigned.ok, true);
+    assert.equal(assigned.record.owner, "borrower");
+    assert.equal(assigned.record.sourceCommit, head);
+    assert.equal(assigned.record.durableSourceCommit, record.sourceCommit);
+    const after = database.prepare("SELECT * FROM workspace WHERE id=?").get(record.id);
+    assert.deepEqual({ ...after, owner: before.owner, updated_at: before.updated_at }, { ...before });
+    assert.deepEqual(database.prepare("SELECT * FROM workspace_capacity ORDER BY workspace_id").all(), capacityBefore);
+    assert.deepEqual(database.prepare("SELECT * FROM workspace WHERE id=?").get(peer.id), peerBefore);
+    const event = database.prepare("SELECT * FROM workspace_reassignment WHERE workspace_id=?").get(record.id);
+    assert.equal(event.old_owner, "author");
+    assert.equal(event.old_source_commit, record.sourceCommit);
+    assert.equal(event.new_owner, "borrower");
+    assert.equal(event.new_source_commit, head);
+    assert.equal(event.authorization, assigned.transfer.authorization);
+    assert.equal(readFileSync(path.join(record.path, "file.txt"), "utf8"), "borrower edits already in progress\n");
+    assert.equal(readFileSync(path.join(record.path, "ignored-output", "proof"), "utf8"), "keep\n");
+    assert.equal(git(record.path, "rev-parse", "HEAD"), head);
+    const status = JSON.parse(run(["status", "--path", record.path, "--json"], f.env)).records[0];
+    assert.equal(status.sourceCommit, head);
+    assert.equal(status.durableSourceCommit, record.sourceCommit);
+    assert.throws(() => run(handoff, f.env), error => JSON.parse(error.stdout).error.code === "owner-mismatch");
+    assert.throws(() => run(["register", "--path", record.path, "--source-commit", record.sourceCommit, "--json"], f.env));
+    const registered = JSON.parse(run(["register", "--path", record.path, "--owner", "borrower", "--source-commit", head, "--json"], f.env));
+    assert.equal(registered.sourceCommit, head);
+    const second = JSON.parse(run(["reassign", "--id", record.id, "--path", record.path, "--from-owner", "borrower",
+      "--from-source-commit", head, "--from-state", "active", "--owner", "successor", "--source-commit", head,
+      "--authorization", "second explicit handoff", "--json"], f.env));
+    assert.equal(second.record.durableSourceCommit, record.sourceCommit);
+    assert.equal(database.prepare("SELECT count(*) AS n FROM workspace_reassignment").get().n, 2);
+    git(record.path, "restore", "file.txt");
+    rmSync(path.join(record.path, "ignored-output"), { recursive: true });
+    const retained = JSON.parse(run(["release", "--id", record.id, "--json"], f.env));
+    assert.equal(retained.find(item => item.record.id === record.id).inspection.classification, "repair-required");
+    assert.equal(existsSync(record.path), true);
+    database.close();
+  } finally { f.close(); }
+});
+
+test("reassignment refuses unknown and mismatched writer state without mutation", () => {
+  const f = fixture();
+  try {
+    const record = JSON.parse(run(["create", "--root", f.workspaces, "--name", "refused", "--repo", f.remote,
+      "--owner", "author", "--min-free-gib", "0", "--json"], f.env));
+    const args = ["reassign", "--id", record.id, "--path", record.path, "--from-owner", "author",
+      "--from-source-commit", record.sourceCommit, "--from-state", "active", "--owner", "borrower",
+      "--source-commit", record.sourceCommit, "--authorization", "explicit consent receipt", "--json"];
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const check = (change, code) => {
+      const before = database.prepare("SELECT * FROM workspace WHERE id=?").get(record.id);
+      assert.throws(() => run(change, f.env), error => {
+        assert.equal(error.status, 2);
+        assert.equal(JSON.parse(error.stdout).error.code, code);
+        return true;
+      });
+      assert.deepEqual(database.prepare("SELECT * FROM workspace WHERE id=?").get(record.id), before);
+      assert.equal(database.prepare("SELECT count(*) AS n FROM workspace_reassignment").get().n, 0);
+    };
+    const flag = (name, value) => { const copy = [...args]; copy[copy.indexOf(name) + 1] = value; return copy; };
+    check(flag("--id", "unknown"), "workspace-not-registered");
+    check(flag("--path", path.join(f.root, "different")), "path-mismatch");
+    check(flag("--from-owner", "other"), "owner-mismatch");
+    check(flag("--from-source-commit", "a".repeat(40)), "source-mismatch");
+    check(flag("--from-state", "referenced"), "state-mismatch");
+    check(flag("--source-commit", "a".repeat(40)), "head-mismatch");
+    for (const state of ["creating", "released", "reclaiming", "unknown"]) {
+      database.prepare("UPDATE workspace SET state=? WHERE id=?").run(state, record.id);
+      check(args, "state-not-reassignable");
+    }
+    database.prepare("UPDATE workspace SET state='active', mode='review' WHERE id=?").run(record.id);
+    check(args, "mode-not-writer");
+    database.prepare("UPDATE workspace SET mode='writer' WHERE id=?").run(record.id);
+    git(record.path, "checkout", "--detach");
+    check(args, "writer-branch-unknown");
+    git(record.path, "checkout", "agent/refused");
+    git(record.path, "remote", "set-url", "origin", "https://example.invalid/replaced.git");
+    check(args, "repository-mismatch");
+    git(record.path, "remote", "set-url", "origin", f.remote);
+    rmSync(record.path, { recursive: true });
+    check(args, "checkout-inspection-failed");
+    database.close();
+  } finally { f.close(); }
+});
+
+test("concurrent reassignment has one winner and preserves unset durable source", async () => {
+  const f = fixture();
+  try {
+    const workspace = path.join(f.root, "registered");
+    execFileSync("git", ["clone", f.remote, workspace]);
+    const record = JSON.parse(run(["register", "--path", workspace, "--owner", "author", "--json"], f.env));
+    const args = ["reassign", "--id", record.id, "--path", workspace, "--from-owner", "author",
+      "--from-source-commit", "unset", "--from-state", "active", "--source-commit", git(workspace, "rev-parse", "HEAD"),
+      "--authorization", "both parties approved", "--json"];
+    const results = await Promise.allSettled(["one", "two"].map(owner => runAsync([...args, "--owner", owner], f.env)));
+    assert.equal(results.filter(item => item.status === "fulfilled").length, 1);
+    const assigned = JSON.parse(results.find(item => item.status === "fulfilled").value);
+    assert.equal(assigned.record.durableSourceCommit, null);
+    assert.equal(assigned.transfer.oldSourceCommit, null);
+    const rejected = results.find(item => item.status === "rejected").reason;
+    assert.match(rejected.message, /owner-mismatch/);
+    assert.throws(() => run(args, f.env), error => JSON.parse(error.stdout).error.code === "invalid-request");
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    assert.equal(database.prepare("SELECT count(*) AS n FROM workspace_reassignment").get().n, 1);
+    assert.equal(database.prepare("SELECT source_commit FROM workspace WHERE id=?").get(record.id).source_commit, null);
+    database.close();
+  } finally { f.close(); }
+});
+
 test("same-path registration refreshes a linked worktree replaced by a shared clone without granting source custody", () => {
   const f = fixture();
   try {

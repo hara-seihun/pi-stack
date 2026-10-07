@@ -33,7 +33,7 @@ export type ContextSplice = {
   insertBase64: string;
 };
 
-export type Activity = "idle" | "awaiting" | "waiting_on_workers" | "status_error" | ExecutionPhase;
+export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
@@ -83,6 +83,8 @@ export interface Session {
   /** Explicitly promoted background threads also belong in Chats. */
   foreground?: boolean;
   attentionSummary?: string;
+  /** Agent-authored sentence describing the task's intended outcome; absent until provided. */
+  taskDescription?: string;
   model: string;
   /** Native Pi context estimate, not cumulative billed tokens. Null after compaction until fresh usage arrives. */
   contextUsage?: ContextUsage;
@@ -445,8 +447,9 @@ export interface ToolCallItem extends TranscriptItemBase {
   name: string;
   /** What names the step: strings cut at 120 characters, arrays at five entries, and
    * fields that are bodies rather than names (a written file's `content`, an edit's
-   * `edits` replaced by `editCount`, a delegated `message`) left out.
-   * `argumentsTruncated` says the body has more. */
+   * `edits` replaced by `editCount`, other tools' delegated `message`) left out.
+   * `thread_send` and `thread_spawn` keep their full `message`: it is rendered as an
+   * agent-to-agent message bubble. `argumentsTruncated` says the body has more. */
   arguments: unknown;
   argumentsTruncated: boolean;
   /** Trailing output of a still-running tool, at most 4,000 characters. */

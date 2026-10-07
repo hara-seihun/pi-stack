@@ -589,6 +589,8 @@ test("repair-run launches the registered local Pi process once and accepts each 
       assert.match(piCalls[0], new RegExp(`@${fixture.repair.prompt.replaceAll("/", "\\/")}`));
       const workspaceCalls = readFileSync(environment.AGENT_WORKSPACE_LOG, "utf8");
       assert.match(workspaceCalls, new RegExp(`create .*--repo ${join(fixture.root, "repository").replaceAll("/", "\\/")} .*--owner REPAIR-${requestId}`));
+      assert.match(workspaceCalls, new RegExp(`--ref ${fixture.request.sourceSha} `));
+      assert.match(workspaceCalls, /--intent source-only --headroom-gib 2 --growth-mib 512 --creation-timeout-seconds 40/);
       const prompt = readFileSync(fixture.repair.prompt, "utf8");
       assert.match(prompt, /integration checks exited 17/);
       assert.match(prompt, /ERR fixture dependency unavailable/);

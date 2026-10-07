@@ -69,6 +69,15 @@ function creationTimeout(args) {
 
 class CliError extends Error {}
 class ResourceBusyError extends CliError {}
+class RegistrationMismatchError extends CliError {
+  constructor(field, requested, recorded) {
+    super(`registration metadata mismatch for ${field}: requested ${requested}, recorded ${recorded}; use reassign for an authorized owner/source handoff`);
+    this.code = "registration-metadata-mismatch";
+    this.field = field;
+    this.requested = requested;
+    this.recorded = recorded;
+  }
+}
 
 let inspectionDeadline;
 let creationDeadline;
@@ -213,7 +222,21 @@ function hasCapacityLedger(database) {
   return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_capacity'").get() !== undefined;
 }
 
+function hasReassignmentLedger(database) {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_reassignment'").get() !== undefined;
+}
+
+const ASSIGNMENT_SOURCE = `(SELECT new_source_commit FROM workspace_reassignment
+  WHERE workspace_id = workspace.id ORDER BY sequence DESC LIMIT 1) AS assignment_source_commit`;
+
 function initializeRegistry(database) {
+  database.exec(`CREATE TABLE IF NOT EXISTS workspace_reassignment (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL, path TEXT NOT NULL,
+    old_owner TEXT NOT NULL, old_source_commit TEXT,
+    new_owner TEXT NOT NULL, new_source_commit TEXT NOT NULL,
+    authorization TEXT NOT NULL, occurred_at INTEGER NOT NULL
+  ); CREATE INDEX IF NOT EXISTS workspace_reassignment_record ON workspace_reassignment(workspace_id, sequence)`);
   database.exec(`CREATE TABLE IF NOT EXISTS workspace_capacity (
     workspace_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, plan_json TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS workspace_capacity_device ON workspace_capacity(device_id)`);
@@ -271,7 +294,7 @@ function openRegistry(statePath = DEFAULT_STATE) {
   registryPaths.set(database, statePath);
   try {
     database.exec("PRAGMA busy_timeout = 5000");
-    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION || !hasPendingIndex(database) || !hasCapacityLedger(database) ||
+    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION || !hasPendingIndex(database) || !hasCapacityLedger(database) || !hasReassignmentLedger(database) ||
       database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
       withResourceLock(statePath, "registry-schema", () => initializeRegistry(database));
     }
@@ -291,7 +314,8 @@ function rowToRecord(row) {
     mode: row.mode,
     owner: row.owner,
     repository: row.repository,
-    sourceCommit: row.source_commit,
+    sourceCommit: row.assignment_source_commit ?? row.source_commit,
+    durableSourceCommit: row.source_commit,
     checkoutType: row.checkout_type,
     cachePaths: JSON.parse(row.cache_paths),
     createdAt: row.created_at,
@@ -306,16 +330,16 @@ function rowToRecord(row) {
 
 function recordBy(database, selector) {
   const row = selector.id !== undefined
-    ? database.prepare("SELECT * FROM workspace WHERE id = ?").get(selector.id)
-    : database.prepare("SELECT * FROM workspace WHERE path = ?").get(path.resolve(selector.path));
+    ? database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE id = ?`).get(selector.id)
+    : database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE path = ?`).get(path.resolve(selector.path));
   if (row === undefined) fail(`workspace not registered: ${selector.id ?? selector.path}`);
   return rowToRecord(row);
 }
 
 function listRecords(database, root) {
   const rows = root === undefined
-    ? database.prepare("SELECT * FROM workspace ORDER BY root, path").all()
-    : database.prepare("SELECT * FROM workspace WHERE root = ? ORDER BY path").all(path.resolve(root));
+    ? database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace ORDER BY root, path`).all()
+    : database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE root = ? ORDER BY path`).all(path.resolve(root));
   return rows.map(rowToRecord);
 }
 
@@ -434,10 +458,16 @@ function registrationInspection(workspace) {
 }
 
 function registerWorkspace(database, input, inspectedInfo) {
-  const info = inspectedInfo ?? registrationInspection(input.path);
   const now = Date.now();
-  const existing = database.prepare("SELECT * FROM workspace WHERE path = ?").get(path.resolve(input.path));
+  const existing = database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE path = ?`).get(path.resolve(input.path));
+  if (existing !== undefined && existing.state !== "released") {
+    const recorded = rowToRecord(existing);
+    for (const [field, requested] of Object.entries(input.assertMetadata ?? {})) {
+      if (recorded[field] !== requested) throw new RegistrationMismatchError(field, requested, recorded[field]);
+    }
+  }
   if (existing?.state === "creating") return rowToRecord(existing);
+  const info = inspectedInfo ?? registrationInspection(input.path);
   if (existing !== undefined && existing.state !== "released") {
     if (input.groupId != null && existing.group_id !== null && existing.group_id !== input.groupId) {
       fail(`workspace ${path.resolve(input.path)} already belongs to group ${existing.group_id}; requested ${input.groupId}`);
@@ -460,6 +490,7 @@ function registerWorkspace(database, input, inspectedInfo) {
     owner: input.owner,
     repository: info.repository,
     sourceCommit: input.sourceCommit ?? null,
+    durableSourceCommit: input.sourceCommit ?? null,
     checkoutType: info.checkoutType,
     cachePaths: input.cachePaths,
     createdAt: now,
@@ -891,14 +922,14 @@ function gitDisposition(record, nestedWorkspaces = []) {
       .filter(Boolean)
     : [];
   const candidates = [...refs, "HEAD"];
-  const durableSource = record.sourceCommit === null ? [] : [record.sourceCommit];
+  const durableSource = record.durableSourceCommit === null ? [] : [record.durableSourceCommit];
   const local = [];
   for (const ref of candidates) {
     const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes", ...durableSource]));
     if (count > 0) local.push(`${ref}:${count}`);
   }
   if (local.length > 0) return { safe: false, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
-  if (head === record.sourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };
+  if (head === record.durableSourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };
   return { safe: true, reason: "every local branch commit exists on a remote ref or in durable source ancestry", head };
 }
 
@@ -1208,7 +1239,7 @@ function reconcileRecord(database, record, options) {
 
 function recordsInGroup(database, record) {
   if (record.groupId === null) return [record];
-  return database.prepare("SELECT * FROM workspace WHERE group_id = ? ORDER BY root, path")
+  return database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE group_id = ? ORDER BY root, path`)
     .all(record.groupId)
     .map(rowToRecord)
     .filter((candidate) => candidate.state !== "released" || existsSync(candidate.path));
@@ -1408,11 +1439,114 @@ function registerCommand(database, args) {
     owner: one(args, "owner", "unowned"),
     groupId: one(args, "group"),
     sourceCommit: one(args, "source-commit"),
+    assertMetadata: Object.fromEntries([
+      ["owner", one(args, "owner")], ["sourceCommit", one(args, "source-commit")],
+      ["mode", one(args, "mode")], ["kind", one(args, "kind")],
+      ["root", one(args, "root") === undefined ? undefined : path.resolve(one(args, "root"))],
+    ].filter(([, value]) => value !== undefined)),
     leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS),
     cachePaths: cachePathsForRepository(selectedPath, args),
     replaceCachePaths: bool(args, "replace-cache"),
   });
   print(record, bool(args, "json"));
+}
+
+/** @typedef {'workspace-not-registered' | 'path-mismatch' | 'state-not-reassignable' | 'state-mismatch' | 'mode-not-writer' | 'owner-mismatch' | 'source-mismatch' | 'assignment-unchanged' | 'assignment-history-mismatch' | 'checkout-type-mismatch' | 'repository-mismatch' | 'writer-branch-unknown' | 'head-mismatch' | 'checkout-inspection-failed' | 'resource-busy' | 'reassignment-failed'} ReassignmentErrorCode */
+/** @typedef {{ok: true, record: object, transfer: object} | {ok: false, error: {code: ReassignmentErrorCode, detail: string}}} ReassignmentResult */
+
+/** @returns {ReassignmentResult} */
+function reassignWorkspace(database, input) {
+  const refuse = (code, detail) => ({ ok: false, error: { code, detail } });
+  const row = database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE id = ?`).get(input.id);
+  if (row === undefined) return refuse("workspace-not-registered", input.id);
+  const record = rowToRecord(row);
+  if (record.path !== input.path) return refuse("path-mismatch", `recorded ${record.path}, requested ${input.path}`);
+  if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) {
+    return refuse("state-not-reassignable", record.state);
+  }
+  if (record.state !== input.fromState) return refuse("state-mismatch", `recorded ${record.state}, expected ${input.fromState}`);
+  if (record.mode !== "writer") return refuse("mode-not-writer", record.mode);
+  if (record.owner !== input.fromOwner) return refuse("owner-mismatch", `recorded ${record.owner}, expected ${input.fromOwner}`);
+  if (record.sourceCommit !== input.fromSourceCommit) {
+    return refuse("source-mismatch", `recorded ${record.sourceCommit}, expected ${input.fromSourceCommit}`);
+  }
+  if (record.owner === input.owner && record.sourceCommit === input.sourceCommit) {
+    return refuse("assignment-unchanged", "owner and source already match; no handoff recorded");
+  }
+  const last = database.prepare("SELECT new_owner, new_source_commit FROM workspace_reassignment WHERE workspace_id = ? ORDER BY sequence DESC LIMIT 1").get(record.id);
+  if (last !== undefined && (last.new_owner !== record.owner || last.new_source_commit !== record.sourceCommit)) {
+    return refuse("assignment-history-mismatch", "current assignment differs from its last handoff");
+  }
+  let info;
+  try {
+    info = gitInfo(record.path);
+    if (info.checkoutType !== record.checkoutType) return refuse("checkout-type-mismatch", `recorded ${record.checkoutType}, observed ${info.checkoutType}`);
+    if (info.repository === null || info.repository !== record.repository) {
+      return refuse("repository-mismatch", `recorded ${record.repository}, observed ${info.repository}`);
+    }
+    const branch = command("git", ["-C", record.path, "symbolic-ref", "--quiet", "HEAD"]);
+    if (branch.status !== 0) return refuse("writer-branch-unknown", "writer HEAD must be attached to a branch");
+    if (info.head !== input.sourceCommit) return refuse("head-mismatch", `observed ${info.head}, requested ${input.sourceCommit}`);
+  } catch (error) {
+    return refuse("checkout-inspection-failed", error instanceof Error ? error.message : String(error));
+  }
+  const transfer = {
+    workspaceId: record.id, path: record.path,
+    oldOwner: record.owner, oldSourceCommit: record.sourceCommit,
+    newOwner: input.owner, newSourceCommit: input.sourceCommit,
+    authorization: input.authorization, occurredAt: Date.now(),
+  };
+  const event = database.prepare(`INSERT INTO workspace_reassignment
+    (workspace_id, path, old_owner, old_source_commit, new_owner, new_source_commit, authorization, occurred_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.path, record.owner, record.sourceCommit,
+    input.owner, input.sourceCommit, input.authorization, transfer.occurredAt);
+  // source_commit stays immutable so clients from an earlier release cannot discard a new, unpublished baseline.
+  database.prepare("UPDATE workspace SET owner = ?, updated_at = ? WHERE id = ?").run(input.owner, transfer.occurredAt, record.id);
+  return { ok: true, record: recordBy(database, { id: record.id }), transfer: { sequence: Number(event.lastInsertRowid), ...transfer } };
+}
+
+function reassignCommand(database, args) {
+  assertOnly(args, ["id", "path", "from-owner", "from-source-commit", "from-state", "owner", "source-commit", "authorization", "json"]);
+  const fromSource = required(args, "from-source-commit");
+  const sourceCommit = required(args, "source-commit");
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(sourceCommit) ||
+    (fromSource !== "unset" && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(fromSource))) {
+    fail("source commits must be full lowercase Git object IDs; --from-source-commit may also be unset");
+  }
+  const input = {
+    id: required(args, "id"), path: path.resolve(required(args, "path")),
+    fromOwner: required(args, "from-owner"), fromSourceCommit: fromSource === "unset" ? null : fromSource,
+    fromState: required(args, "from-state"), owner: required(args, "owner"), sourceCommit,
+    authorization: required(args, "authorization"),
+  };
+  if ([input.fromOwner, input.owner, input.authorization].some(value => !value.trim())) {
+    fail("handoff owners and authorization must be nonempty");
+  }
+  let result;
+  try {
+    result = withWorkspaceLock(database, input.path, () => {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const outcome = reassignWorkspace(database, input);
+        database.exec(outcome.ok ? "COMMIT" : "ROLLBACK");
+        return outcome;
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  } catch (error) {
+    result = { ok: false, error: {
+      code: error instanceof ResourceBusyError ? "resource-busy" : "reassignment-failed",
+      detail: error instanceof Error ? error.message : String(error),
+    } };
+  }
+  if (bool(args, "json")) print(result, true);
+  else if (result.ok) print(result.record, false);
+  if (!result.ok) {
+    process.stderr.write(`agent-workspace: ${result.error.code}: ${result.error.detail}\n`);
+    process.exitCode = result.error.code === "resource-busy" ? 75 : 2;
+  }
 }
 
 function gitRoot(candidate) {
@@ -2310,7 +2444,7 @@ function statusCommand(database, args) {
   }
   const pageWhere = pagePredicates.length ? ` WHERE ${pagePredicates.join(" AND ")}` : "";
   // Cache declarations and pending creation payloads belong to lifecycle operations, not pool status.
-  const rows = database.prepare(`SELECT id, path, root, kind, mode, owner, repository, source_commit, checkout_type,
+  const rows = database.prepare(`SELECT id, path, root, kind, mode, owner, repository, source_commit, ${ASSIGNMENT_SOURCE}, checkout_type,
     length(cache_paths) AS cache_bytes, length(creation_request) AS creation_bytes,
     created_at, updated_at, lease_expires_at, state, detail, group_id
     FROM workspace${pageWhere} ORDER BY root, path, id LIMIT ?`).all(...pageParameters, limit + 1);
@@ -2353,6 +2487,8 @@ function help() {
   agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...] [--creation-timeout-seconds 300] [--sparse-pattern PATTERN ...]
                          [--intent source-only|budgeted --headroom-gib N --growth-mib N]
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
+  agent-workspace reassign --id ID --path PATH --from-owner ID --from-source-commit SHA|unset --from-state STATE
+                           --owner ID --source-commit HEAD_SHA --authorization RECEIPT [--json]
   agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
   agent-workspace cancel-creation (--id ID|--path PATH)
   agent-workspace finalize-creation (--id ID|--path PATH)
@@ -2412,12 +2548,13 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     }
     creationDeadline = Date.now() + budgetMs;
   }
-  if (!["status", "list", "maintain", "cancel-creation", "finalize-creation"].includes(commandName)
+  if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign"].includes(commandName)
     && (commandName !== "reconcile" || bool(args, "execute"))) drainGc(statePath);
   const database = openRegistry(statePath);
   try {
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
+    else if (commandName === "reassign") reassignCommand(database, args);
     else if (commandName === "adopt") adoptCommand(database, args, statePath);
     else if (["heartbeat", "release", "cancel-creation", "finalize-creation"].includes(commandName)) {
       const record = recordBy(database, selectorFrom(args));
@@ -2452,6 +2589,18 @@ if (process.argv[1] !== undefined && existsSync(process.argv[1])
   try {
     main();
   } catch (error) {
+    if (process.argv.some(value => value === "--json" || value === "--json=true")) {
+      if (error instanceof RegistrationMismatchError) {
+        process.stdout.write(`${JSON.stringify({ ok: false, error: {
+          code: error.code, field: error.field, requested: error.requested, recorded: error.recorded,
+        } })}\n`);
+      } else if (process.argv[2] === "reassign") {
+        process.stdout.write(`${JSON.stringify({ ok: false, error: {
+          code: error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "reassignment-failed",
+          detail: error instanceof Error ? error.message : String(error),
+        } })}\n`);
+      }
+    }
     process.stderr.write(`agent-workspace: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(error instanceof ResourceBusyError ? 75 : error instanceof CliError ? 2 : 1);
   }

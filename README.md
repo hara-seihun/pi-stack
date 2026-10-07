@@ -6,7 +6,7 @@ Pi Stack runs persistent agents through [Pi](https://github.com/badlogic/pi-mono
 
 - [`packages/runtime`](packages/runtime/README.md) pins Pi and owns the runtime extensions.
 - [`packages/orchestrator`](packages/orchestrator/README.md) schedules and hosts persistent agent work.
-- [`packages/kenan-memory`](packages/kenan-memory/README.md) owns optional shared host memory, discretion tools and the disclosure log.
+- [`packages/kenan-memory`](packages/kenan-memory/README.md) owns optional shared host memory, discretion tools and the disclosure log. The [life model](docs/life-model.md) owns versioned per-person authority, goals, commitments, preferences, steering history and Remote's Needs-you projection.
 - [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, shared client, and context mirror extension.
 - [`apps/kenan`](apps/kenan/README.md) packages the shared client for Android.
 - [`skills`](skills/README.md) contains the shared first-party skills loaded by interactive and fleet agents.
@@ -36,7 +36,9 @@ npm run android:test --workspace=kenan
 
 The maintained fleet uses an Ubuntu local server and a Debian remote VM, both CPU-only for Write. Linux hosts supply systemd services and their own package provisioning; NixOS support remains available without making it the current publishing platform. See [host platforms](docs/deployment.md#host-platforms) for the migration boundary and historical GPU report.
 
-`deploy/publication submit SHA` hands a reviewed source commit to the durable worker for integration and deployment on every configured target. Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout and serialize host deployment across source checkouts. Preparation shares the publication owner's deadline; host activation and standalone component deployment enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
+`deploy/publication submit SHA` hands a reviewed source commit to the durable worker for one checked integration and independent delivery to every configured target. Each ready host receives its matching Android/web artifact before server activation, retains durable delivery proof and releases its reservation immediately. Meetings, native prerequisites, locks or failure on another host do not hold it back. Newer checked requests can advance ready hosts while older deliveries wait; older requests accept checked descendant proofs without downgrading source or artifacts. Full completion still requires valid source and artifact delivery on every target.
+
+Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout and serialize host deployment across source checkouts. Preparation shares the publication owner's deadline; host activation and standalone component deployment enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
 ### Account onboarding
 
