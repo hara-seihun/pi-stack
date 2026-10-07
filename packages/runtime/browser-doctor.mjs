@@ -26,7 +26,7 @@ entrypoint with the host's pi-stack-release command, not pi install npm.`);
 const runtime = realpathSync(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime");
 const host = realpathSync(values["worker-release"] ?? runtime);
 const sdk = realpathSync(join(host, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
-const { createAgentSession, DefaultResourceLoader, SessionManager } = await import(pathToFileURL(sdk).href);
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager } = await import(pathToFileURL(sdk).href);
 const selected = createRequire(join(runtime, "package.json"));
 const browserPackage = selected.resolve("agent-browser/package.json");
 const bin = realpathSync(join(dirname(dirname(browserPackage)), ".bin"));
@@ -88,8 +88,11 @@ try {
   const agentDir = join(homedir(), ".pi/agent");
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
+  const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+  const model = modelRuntime.getModel("openai-codex", "gpt-6-luna");
+  assert.ok(model, "browser doctor requires its explicit offline catalog model; no inference is dispatched");
   const opened = await createAgentSession({
-    cwd: directory, agentDir, resourceLoader, tools: ["agent_browser"],
+    cwd: directory, agentDir, resourceLoader, modelRuntime, model, tools: ["agent_browser"],
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
   });
   session = opened.session;
@@ -101,7 +104,9 @@ try {
   const extensionErrors = [];
   await session.bindExtensions({ mode: "print", onError: (error) => extensionErrors.push(error) });
   assert.deepEqual(extensionErrors, [], "configured extensions must initialize");
-  assert.equal(process.env.PATH.split(delimiter)[0], bin, "the selected browser must own executable resolution");
+  const expectedFront = process.platform === "linux" && process.env.PI_THREAD_RESOURCE_BOUNDARY
+    ? join(runtime, "extensions/browser/bin") : bin;
+  assert.equal(process.env.PATH.split(delimiter)[0], expectedFront, "the selected browser must own executable resolution");
   assert.equal(execFileSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 5000 }).trim(), `agent-browser ${browserVersion}`);
   const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
   assert.equal(tools.length, 1, "exactly one native browser tool must be active");
