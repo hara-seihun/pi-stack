@@ -12,7 +12,7 @@ function api() {
   return { tools, handlers, registerTool: (tool: unknown) => tools.push(tool), on: (...args: any[]) => handlers.push(args),
     getAllTools: () => tools, getActiveTools: () => active, setActiveTools: (names: string[]) => { active = names; } };
 }
-test("an already-open flag-off session lazily mints from verified UID and rolls back its toolset", async () => {
+test("an already-open flag-off session loads authenticated authority before the turn and rolls back its toolset", async () => {
   const root = mkdtempSync(join(tmpdir(), "memory-lazy-")); const path = join(root, "host.json"); writeFileSync(path, "{}");
   const store = new MemoryStore(":memory:");
   const server = memoryService({ store, auth: { supervisors: [], uidPersons: { "12345": "bob" } }, peerUid: () => 12345, enabled: () => true });
@@ -27,8 +27,9 @@ test("an already-open flag-off session lazily mints from verified UID and rolls 
     expect(store.db.query("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
     writeFileSync(path, JSON.stringify({ oneKenan: true }));
     expect((await before({ systemPrompt: "base" })).systemPrompt).toBeTypeOf("string");
-    expect(env.PI_KENAN_MEMORY_PERSON).toBeUndefined();
-    expect(store.db.query("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+    expect(env.PI_KENAN_MEMORY_PERSON).toBe("bob");
+    expect(store.db.query("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
+    expect(pi.getActiveTools()).toContain("life_policy");
     expect(pi.getActiveTools()).toContain("ask_kenan"); expect(pi.getActiveTools()).toContain("root_reply");
     const found = await pi.tools.find(t => t.name === "memory_search").execute("id", { query: "" });
     expect(found.details.kenanMemoryRead).toMatchObject({ person: "bob", threadId: "b", touchedOtherPeople: false });
@@ -42,7 +43,7 @@ test("room registers only ask; root preserves fixed nonmemory tools and exposes 
   try {
     const make = async (role: string, room = false) => {
       const pi = api();
-      memoryExtension({ env: { PI_STACK_HOST_CONFIG: path, PI_THREAD_ID: "session", PI_KENAN_MEMORY_PERSON: room ? "pi-rooms" : "bob", PI_KENAN_MEMORY_ROLE: role, PI_KENAN_MEMORY_TOKEN: "verified", ...(room ? { PI_REMOTE_ROOMS_RUNTIME: "1" } : {}) }, ask: async () => ({}) })(pi as any);
+      memoryExtension({ env: { PI_STACK_HOST_CONFIG: path, PI_THREAD_ID: "session", PI_KENAN_MEMORY_PERSON: room ? "pi-rooms" : "bob", PI_KENAN_MEMORY_ROLE: role, PI_KENAN_MEMORY_TOKEN: "verified", ...(room ? { PI_REMOTE_ROOMS_RUNTIME: "1" } : {}) }, lifeClient: { request: async () => ({ ok: false, error: "unavailable", message: "Test authority unavailable" }) }, ask: async () => ({}) })(pi as any);
       await pi.handlers.find(h => h[0] === "before_agent_start")[1]({ systemPrompt: "fixed" }); return pi;
     };
     const room = await make("person", true); expect(room.tools.map(t => t.name)).toEqual(["ask_kenan"]);
