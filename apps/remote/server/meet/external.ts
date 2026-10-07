@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { API_CORS_HEADERS } from "../cors";
-import type { MeetServer } from "./server";
+import type { MeetJoined } from "./protocol";
+import type { MeetTranscriptStore } from "./transcript";
+
+export interface ExternalMeet {
+  readonly transcripts: MeetTranscriptStore;
+  handle(req: Request): Promise<Response | null>;
+  openExternal(id: string, sessionId: string, apiUrl: string, platformTranscript?: boolean): MeetJoined | Promise<MeetJoined>;
+  stopExternal(id: string): void | Promise<void>;
+}
 
 function identity(namespace: string, eventKey: string, kind: string): string {
   const hash = createHash("sha256").update(JSON.stringify(["pistack-meet", namespace, eventKey, kind])).digest("hex");
@@ -8,7 +16,7 @@ function identity(namespace: string, eventKey: string, kind: string): string {
 }
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
 
-export async function externalMeetingRequest(req: Request, meet: MeetServer,
+export async function externalMeetingRequest(req: Request, meet: ExternalMeet,
   ensureThread: (sessionId: string, meetingId: string, name: string) => void | Promise<void>): Promise<Response | null> {
   const url = new URL(req.url);
   if (!/^\/v1\/meet\/external(?:\/|$)/.test(url.pathname)) return null;
@@ -16,7 +24,7 @@ export async function externalMeetingRequest(req: Request, meet: MeetServer,
     const stop = /^\/v1\/meet\/external\/([0-9a-f-]{36})\/stop$/.exec(url.pathname);
     if (stop && req.method === "POST") {
       if (!meet.transcripts.has(stop[1]!)) return json({ error: "Meeting not found" }, 404);
-      meet.stopExternal(stop[1]!);
+      await meet.stopExternal(stop[1]!);
       return json({ stopped: true, meetingId: stop[1] });
     }
     const start = req.method === "POST" && url.pathname === "/v1/meet/external";
@@ -37,7 +45,7 @@ export async function externalMeetingRequest(req: Request, meet: MeetServer,
       return response;
     }
     await ensureThread(sessionId, meetingId, typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 120) : `${body.namespace} meeting`);
-    return json(meet.openExternal(meetingId, sessionId, `${url.origin}/v1/meet/${meetingId}`, body.transcript === "platform"));
+    return json(await meet.openExternal(meetingId, sessionId, `${url.origin}/v1/meet/${meetingId}`, body.transcript === "platform"));
   } catch (cause) {
     return json({ error: cause instanceof Error ? cause.message : String(cause) }, 400);
   }

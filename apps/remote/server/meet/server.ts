@@ -9,7 +9,8 @@ import { addressesAgent } from "./mention";
 import { TranscriptHook } from "./transcript-hook";
 import type { MeetEnvelope, MeetParticipant, MeetSignal, MeetSnapshot, MeetThreadState, MeetJoined, MeetVoiceWake } from "./protocol";
 
-type Member = { participant: MeetParticipant; seen: number; messages: MeetEnvelope[]; frame: Buffer | null; frameAt: number };
+type Member = { participant: MeetParticipant; seen: number; messages: MeetEnvelope[]; frame: Buffer | null; frameAt: number;
+  acceptedSignals: Map<string, { payload: string; at: number }> };
 type PendingFlush = { resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 type Room = {
   id: string; sessionId: string; apiUrl: string; members: Map<string, Member>; speakers: Map<string, MeetParticipant>; seq: number;
@@ -53,7 +54,8 @@ export class MeetServer {
   private readonly transcriber: MeetTranscriber;
   constructor(private readonly sessionExists: (id: string) => boolean, private readonly openBrowser = MeetBrowser.open, db?: Database,
     private readonly threadActivity: (meetingId: string, sessionId: string) => MeetThreadState[] = () => [],
-    private readonly transcriptHook = new TranscriptHook()) {
+    private readonly transcriptHook = new TranscriptHook(),
+    private readonly roomLifecycle: (event: { kind: "created"; id: string; sessionId: string } | { kind: "closed"; id: string }) => void = () => {}) {
     this.transcripts = new MeetTranscriptStore(db ?? new Database(":memory:"));
     this.transcriber = new MeetTranscriber(this.transcripts);
     this.timer = setInterval(() => {
@@ -70,10 +72,13 @@ export class MeetServer {
       browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0, voiceWake: null, wokenTurns: new Set(), hookedTurns: new Set(),
       transcriptFlushRevision: 0, flushes: new Map(), platformTranscript, threads: () => this.threadActivity(id, sessionId) };
     const participant: MeetParticipant = { id: participantId, name: name.slice(0, 80), host: true };
-    room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0 });
+    room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0, acceptedSignals: new Map() });
     room.speakers.set(participant.id, participant);
-    if (this.transcripts.has(id)) this.transcripts.resume(id);
-    else this.transcripts.create(id, sessionId);
+    this.transcripts.db.transaction(() => {
+      if (this.transcripts.has(id)) this.transcripts.resume(id);
+      else this.transcripts.create(id, sessionId);
+      this.roomLifecycle({ kind: "created", id, sessionId });
+    })();
     this.rooms.set(id, room);
     return { room: snapshot(room), participant };
   }
@@ -88,6 +93,10 @@ export class MeetServer {
     }
     if (this.rooms.size >= 16) throw new Error("This supervisor already has 16 meetings");
     return this.createRoom(id, sessionId, apiUrl, "Mixed meeting audio", "external", platformTranscript);
+  }
+
+  liveRooms(): Array<{ id: string; sessionId: string }> {
+    return [...this.rooms.values()].filter(room => !room.closed).map(({ id, sessionId }) => ({ id, sessionId }));
   }
 
   /** Whether this meeting has an open room, so its threads must stay reachable. */
@@ -124,22 +133,31 @@ export class MeetServer {
 
   private leave(room: Room, id: string) {
     const member = room.members.get(id);
-    room.members.delete(id);
     if (member?.participant.host) {
+      this.transcripts.db.transaction(() => {
+        this.transcripts.end(room.id);
+        this.roomLifecycle({ kind: "closed", id: room.id });
+      })();
       room.closed = true;
       this.rejectFlushes(room);
-      this.transcripts.end(room.id);
       this.rooms.delete(room.id);
       void room.browser?.close().catch((cause) => console.error("Meet browser cleanup failed", cause));
     }
+    room.members.delete(id);
   }
 
   async close() {
     clearInterval(this.timer);
     this.transcriber.close();
     const rooms = [...this.rooms.values()];
+    this.transcripts.db.transaction(() => {
+      for (const room of rooms) {
+        this.transcripts.end(room.id);
+        this.roomLifecycle({ kind: "closed", id: room.id });
+      }
+    })();
     this.rooms.clear();
-    for (const room of rooms) { room.closed = true; this.rejectFlushes(room); this.transcripts.end(room.id); }
+    for (const room of rooms) { room.closed = true; this.rejectFlushes(room); }
     await Promise.all(rooms.map(async (room) => { await room.opening; await room.browser?.close(); }));
   }
 
@@ -235,7 +253,7 @@ export class MeetServer {
         ? "This external room is full, maximum 32 camera sources plus the host"
         : "This peer-to-peer room is full, maximum 12 people", 409);
       const participant: MeetParticipant = { id: crypto.randomUUID(), name: body.name.trim().slice(0, 80), host: false };
-      room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0 });
+      room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0, acceptedSignals: new Map() });
       room.speakers.set(participant.id, participant);
       return json({ room: snapshot(room), participant }, 201);
     }
@@ -329,12 +347,21 @@ export class MeetServer {
     if (parts[3] === "leave" && req.method === "POST") { this.leave(room, member.participant.id); return json({ ok: true }); }
     if (parts[3] === "signal" && req.method === "POST") {
       const body = await this.body(req);
-      const target = body && room.members.get(body.to);
       const signal = body && signalValue(body.signal);
+      if (body?.requestId !== undefined && (typeof body.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.requestId))) return fail("Invalid signal request identity");
+      const payload = JSON.stringify([body?.to, body?.signal]);
+      const accepted = body?.requestId && member.acceptedSignals.get(body.requestId);
+      if (accepted) return accepted.payload === payload ? json({ ok: true }) : fail("Signal request identity reused with a different payload");
+      const target = body && room.members.get(body.to);
       if (!target) return fail("Participant has left the meeting", 410);
       if (!signal || target === member) return fail("Invalid signaling message or recipient");
       if (!member.participant.host && Object.values(signal.streams ?? {}).some((kind) => kind.startsWith("pi-"))) return fail("Only the host publishes PiStack streams", 403);
       if (target.messages.length >= 256) return fail("The recipient stopped consuming signaling messages", 409);
+      if (body.requestId) {
+        for (const [id, previous] of member.acceptedSignals) if (Date.now() - previous.at > 60_000) member.acceptedSignals.delete(id);
+        if (member.acceptedSignals.size >= 2048) return fail("Signal request identity window is full", 429);
+        member.acceptedSignals.set(body.requestId, { payload, at: Date.now() });
+      }
       target.messages.push({ seq: ++room.seq, from: member.participant.id, signal });
       return json({ ok: true });
     }
