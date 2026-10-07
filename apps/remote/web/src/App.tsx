@@ -67,6 +67,7 @@ import { SpeechBar } from "./SpeechBar";
 const PasteTextDialog = lazy(() => import("./PasteTextDialog").then(module => ({ default: module.PasteTextDialog })));
 const InspectorSheet = lazy(() => import("./features/inspector/InspectorSheet").then(module => ({ default: module.InspectorSheet })));
 const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
+const AgentsScreen = lazy(() => import("./features/agents/AgentsScreen").then(module => ({ default: module.AgentsScreen })));
 const NotificationsScreen = lazy(() => import("./features/notifications/NotificationsScreen").then(module => ({ default: module.NotificationsScreen })));
 const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
 const CalendarScreen = lazy(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
@@ -363,7 +364,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const selectTab = useCallback((tab: Tab) => {
     if (tab === route.tab) navigate(routeHome(route));
     else if (tab === "chats") navigate({ tab, chat: null, panel: null });
-    else if (tab === "workers") navigate({ tab: "chats", chat: null, panel: null });
     else if (tab === "files") navigate({ tab, path: null });
     else navigate({ tab });
   }, [route]);
@@ -768,7 +768,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       viewing: visible && !messagingActive && !!aiId,
       thinking: !autoCollapse && visible && !messagingActive && !!aiId,
       dashboard: route.tab === "machine",
-      workers: false,
+      workers: route.tab === "agents",
       transcriptFrom: null,
     };
     const same = (held.session ?? null) === next.session && !!held.viewing === next.viewing && !!held.dashboard === next.dashboard && !!held.workers === next.workers && !!held.thinking === next.thinking;
@@ -1149,7 +1149,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }), [knownSessions, openThreadId, discoverThreads]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;
+  const showDetail = route.tab === "agents" || route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;
 
   const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
     [threadStarts, state.messaging, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
@@ -1178,7 +1178,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const list = (() => {
     switch (route.tab) {
       case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
-      case "workers": case "notifications": case "calendar": case "machine": case "files": return null;
+      case "agents": case "notifications": case "calendar": case "machine": case "files": return null;
     }
     return assertNever(route, "App list route");
   })();
@@ -1195,16 +1195,17 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   const detail = (() => {
     switch (route.tab) {
+      case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
       case "notifications": return <Suspense fallback={<Loading label="Loading notifications…" />}><NotificationsScreen version={notificationVersion} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
       case "calendar": return <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>;
       case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
-      case "chats": case "workers": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
+      case "chats": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
     }
     return assertNever(route, "App detail route");
   })();
 
-  const showTabs = route.tab === "calendar" || route.tab === "machine" || route.tab === "notifications" || (route.tab === "files" && !route.path) || !showDetail;
+  const showTabs = route.tab === "agents" || route.tab === "calendar" || route.tab === "machine" || route.tab === "notifications" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>

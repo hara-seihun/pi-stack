@@ -33,7 +33,7 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
   const colour = useThreadColor({ id: session?.id, name: chat.title, color: session?.color, onPreview: setColor });
   const titleOnly = selected && compactSelected;
   const showStatusLine = !titleOnly && Boolean(session || room || unread || status);
-  const closeTitle = chat.kind === "ai" ? `Close ${chat.title}: stops it and its workers, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
+  const closeTitle = chat.kind === "ai" ? `Close ${chat.title}: stops only this agent, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
   return <div className={`inbox-row${selected ? " selected" : ""}${titleOnly ? " title-only" : ""}`} data-section={row.section} style={threadColorStyle(color)}>
     {/* The press starts before the tap lands: that is when this thread's
         newest window is worth asking for. */}

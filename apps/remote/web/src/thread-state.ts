@@ -10,7 +10,7 @@ export function conversationThreads(sessions: Session[]) {
   return sessions.filter(session => session.foreground === true || session.foreground === undefined && !session.parentId && session.origin !== "fleet" && !session.watchList);
 }
 
-export function conversationTab(session: Session): "chats" | "workers" {
+export function conversationTab(session: Session): "chats" {
   return "chats";
 }
 
