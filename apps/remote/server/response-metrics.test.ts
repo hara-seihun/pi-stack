@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { displayContextDocument } from "./context-display";
 import { messageFinalizationKey } from "./sync";
 import { deriveTranscriptItems, TranscriptItems } from "./transcript-items";
@@ -115,11 +116,15 @@ describe("delivery to the transcript", () => {
 
   test("a measurement arriving after the text reaches clients holding that generation", () => {
     const metrics = { ttftMs: 900, generationMs: 1_000, outputTokens: 30, tokensPerSecond: 30 };
-    const items = new TranscriptItems();
-    const first = items.derive("session", "hash-1", () => ({ messages: [assistant()] }));
-    const second = items.derive("session", "hash-2", () => ({ messages: [assistant(metrics)] }));
-    expect(second.current.generation).toBe(first.current.generation);
-    expect(second.current.items.at(-1)!.head).toMatchObject({ kind: "assistant", responseMetrics: metrics });
-    expect(first.current.items.at(-1)!.head.responseMetrics).toBeUndefined();
+    const db = new Database(":memory:");
+    try {
+      const items = new TranscriptItems(db);
+      const first = items.derive("session", "hash-1", () => ({ messages: [assistant()] }));
+      const firstHead = items.window("session").at(-1)!;
+      const second = items.derive("session", "hash-2", () => ({ messages: [assistant(metrics)] }));
+      expect(second.current.generation).toBe(first.current.generation);
+      expect(items.window("session").at(-1)!).toMatchObject({ kind: "assistant", responseMetrics: metrics });
+      expect(firstHead.responseMetrics).toBeUndefined();
+    } finally { db.close(); }
   });
 });

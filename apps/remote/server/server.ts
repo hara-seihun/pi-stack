@@ -105,7 +105,7 @@ import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
 import { ResourceCache } from "../shared/resource-cache";
-import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-items";
+import { TranscriptItems } from "./transcript-items";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
@@ -282,6 +282,7 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
+const transcripts = new TranscriptItems(db);
 const piReactions = new PiReactions(db, MESSAGE_OWNER);
 const slackReactions = new SlackReactions(process.env.PI_REMOTE_SLACK_REACTIONS);
 const orchestrator = new OrchestratorClient({
@@ -744,6 +745,7 @@ function releaseOpenDisplayContexts() {
 function invalidateDisplayContext(sessionId: string) {
   displayContexts.delete(sessionId);
   openDisplayContexts.delete(sessionId);
+  transcripts.invalidate(sessionId);
   signalTranscript(sessionId);
 }
 
@@ -773,6 +775,7 @@ function clearStoredContext(sessionId: string) {
     db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
   })();
   cacheStoredContext(sessionId, null);
+  transcripts.forget(sessionId);
   invalidateDisplayContext(sessionId);
   signalSync();
 }
@@ -1251,7 +1254,6 @@ function pushLive(): void {
   }
 }
 
-const transcripts = new TranscriptItems();
 const TRANSCRIPT_COALESCE_MS = 100;
 const transcriptTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -1262,8 +1264,11 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
 /** Project a captured context once; the reconciler owns each client's differences. */
 function refreshTranscript(sessionId: string) {
   const stored = storedContext(sessionId);
-  const display = stored ? displayContext(sessionId, stored.hash, stored.document) : null;
-  const update = display ? transcripts.derive(sessionId, display.hash, () => JSON.parse(display.document), id => {
+  if (!stored) transcripts.forget(sessionId);
+  const update = stored ? transcripts.derive(sessionId, `${SUPERVISOR_EPOCH}:${stored.hash}`, () => {
+    const display = displayContext(sessionId, stored.hash, stored.document);
+    return JSON.parse(display.document);
+  }, id => {
     const thread = liveThread(id);
     return thread?.agentName ?? (typeof thread?.metadata?.agentName === "string" ? thread.metadata.agentName : undefined);
   }) : null;
@@ -1284,9 +1289,9 @@ function sendTranscript(stream: ClientStream, update: ReturnType<typeof refreshT
   if (!sessionId) return;
   const current = update?.current;
   const from = stream.subscription.transcriptFrom;
-  const limit = from == null ? 60 : Math.min(600, Math.max(60, (current?.items.length ?? 0) - from));
-  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.items.length ?? 0,
-    items: current ? transcriptWindow(current.items, limit) : [] });
+  const limit = from == null ? 60 : Math.min(600, Math.max(60, (current?.total ?? 0) - from));
+  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.total ?? 0,
+    items: current ? transcripts.window(sessionId, limit) : [] });
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
@@ -1990,9 +1995,7 @@ const server = Bun.serve<SocketData>({
             return { ok: false, error: { code: "not_found", message: "Message not found in this account's thread" } };
           }
           const reactions = piReactions.set(target, emoji, actor, remove);
-          displayContexts.delete(target.sessionId);
-          openDisplayContexts.delete(target.sessionId);
-          signalTranscript(target.sessionId);
+          invalidateDisplayContext(target.sessionId);
           return { ok: true, value: reactions };
         },
         messaging: (id, emoji, remove) => messaging.react(id, emoji, remove),
@@ -2062,29 +2065,29 @@ const server = Bun.serve<SocketData>({
       if (!storedContext(id)) await refreshThreadInspection(id);
       const update = refreshTranscript(id);
       if (!update) return json({ sessionId: id, generation: "", total: 0, items: [] });
-      const items = update.current.items;
+      const total = update.current.total;
       const generation = url.searchParams.get("generation") ?? "";
       if (generation && generation !== update.current.generation) {
         // The client's window is gone; answer with the one that replaced it.
         return json({ error: "The transcript generation has been replaced", sessionId: id,
-          generation: update.current.generation, total: items.length, items: transcriptWindow(items) }, 409);
+          generation: update.current.generation, total, items: transcripts.window(id) }, 409);
       }
-      const requestedBefore = Number(url.searchParams.get("before") ?? items.length);
-      const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : items.length;
+      const requestedBefore = Number(url.searchParams.get("before") ?? total);
+      const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : total;
       const requestedLimit = Number(url.searchParams.get("limit") ?? 60);
       const limit = Math.min(200, Math.max(1, Number.isSafeInteger(requestedLimit) ? requestedLimit : 60));
-      return json({ sessionId: id, generation: update.current.generation, total: items.length,
-        items: transcriptPage(items, before, limit) });
+      return json({ sessionId: id, generation: update.current.generation, total,
+        items: transcripts.page(id, before, limit) });
     }
     const itemRequest = API.sessionItem.match(req.method, url.pathname);
     if (itemRequest) {
       const id = itemRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      let body = transcripts.get(id)?.bodies.get(itemRequest.itemId);
-      if (!body) {
+      if (!transcripts.get(id)) {
         if (!storedContext(id)) await refreshThreadInspection(id);
-        body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
+        refreshTranscript(id);
       }
+      const body = transcripts.body(id, itemRequest.itemId);
       if (!body) return error("Transcript item not found", 404);
       const headers: Record<string, string> = {
         ...API_CORS_HEADERS,
