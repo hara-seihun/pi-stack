@@ -50,7 +50,7 @@ export function queueStallReason(request, observation, now = Date.now()) {
 }
 
 export function progressBudgetExhausted(request, now = Date.now()) {
-  if (["live-meeting", "native-source"].includes(request.waiting?.kind)) return false;
+  if (["live-meeting", "native-source", "hosts"].includes(request.waiting?.kind)) return false;
   return (request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
     || !!request.blockedSince && now - Date.parse(request.blockedSince) > policy.blockedLimitMs;
 }

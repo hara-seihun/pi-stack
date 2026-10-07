@@ -27,9 +27,11 @@ Run `npm ci --ignore-scripts` and `npm run check` in an environment appropriate 
 
 ## Client before server activation
 
-After checks and the live-meeting gate, publication installs and verifies the matching APK/web artifact on every host **before** activating any server. An older mobile bundle may reject a new server state and show an empty directory; the matching bundle must already be downloadable when the server changes. Existing open clients still need to apply the update.
+After source integration and checks, publication delivers independently to each ready host. It installs and verifies that host's matching APK/web artifact **before activating that host's server**, not before activating every server. A meeting, native prerequisite, lock, transfer failure or activation failure on one host never prevents another ready host's client and server delivery. An older mobile bundle may reject a new server state and show an empty directory; the matching bundle must already be downloadable when that server changes. Existing open clients still need to apply the update.
 
-`deploy/android-update bundle FILE` packages the checked installer and its validators into one portable Bun script. Publication transfers it with the artifact and verifies its hash before use, so publishing the client does not require changing the remote server checkout or its rollback selection. An artifact failure prevents server activation. Retries reuse the immutable APK/web bytes.
+`deploy/android-update bundle FILE` packages the checked installer and its validators into one portable Bun script. Publication transfers it with the artifact and verifies its hash before use, so publishing the client does not require changing the remote server checkout or its rollback selection. An artifact failure prevents only that host's server activation. Retries reuse the immutable APK/web bytes and retain successful delivery elsewhere.
+
+Each host's durable outcome records source, artifact and service proof. Its reservation ends after that proof, rather than after fleet completion. Newer checked requests may advance ready hosts while an older request waits remotely; the older request accepts valid checked descendant source and matching-artifact proofs instead of reinstalling its older bundle or requiring an exact selected SHA. Full success still means every configured host has the requested source or a checked descendant and valid matching artifacts. A source marker alone does not establish delivery.
 
 ## Publication transport custody
 
@@ -39,7 +41,9 @@ its bounded lifetime. A configured shared master can belong to an unrelated
 thread's systemd scope; stopping that scope previously cut a release off with
 exit 255 during preparation. Releases, host proofs and recovery must not inherit
 that other owner's connection lifetime. Host authentication configuration remains
-unchanged, and transport failures still fail publication rather than retrying it.
+unchanged. A transport failure remains an explicit failure of that target's delivery,
+with its command log and repair/retry custody; it does not undo another host's
+proved delivery or prevent ready targets from advancing.
 
 ## Public history
 

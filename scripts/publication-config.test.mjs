@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -48,8 +48,16 @@ test("installation renders host-owned paths and target IDs stay explicit", t => 
   assert.equal(readFileSync(commandPath, "utf8"), "retain active owner\n");
   const initialized = spawnSync("git", ["init", "--quiet", join(stateRoot, "repository")], options);
   assert.equal(initialized.status, 0, initialized.stderr);
-  const codeOnly = spawnSync(process.execPath, [command.pathname, "install", "--code-only"], options);
-  assert.equal(codeOnly.status, 0, codeOnly.stderr);
+  const source = join(root, "candidate");
+  cpSync(new URL("../deploy", import.meta.url), join(source, "deploy"), { recursive: true });
+  for (const args of [["init", "--quiet"], ["add", "."],
+    ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "core.hooksPath=/dev/null",
+      "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Installation fixture"]]) {
+    const result = spawnSync("git", ["-C", source, ...args], options);
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  }
+  const codeOnly = spawnSync(process.execPath, [join(source, "deploy/publication"), "install", "--code-only"], options);
+  assert.equal(codeOnly.status, 0, codeOnly.error?.message ?? codeOnly.stderr);
   assert.equal(readFileSync(unit, "utf8"), "retain host unit\n");
   assert.equal(readFileSync(commandPath, "utf8"), readFileSync(command, "utf8"));
   assert.equal(readFileSync(join(root, "owner", "meeting-census"), "utf8"), readFileSync(new URL("../deploy/meeting-census", import.meta.url), "utf8"));
