@@ -5,7 +5,7 @@ const run = promisify(execFile);
 export const RUNNER_MEMORY = "4G";
 export const RUNNER_HEAP_MB = 3072;
 export const TOOL_MEMORY = "3G";
-export const TOOLS_MEMORY = "3G";
+export const TOOLS_MEMORY = "8G";
 export const BOUNDARY_MEMORY = "8G";
 
 export function runnerSlices(id: string) {
