@@ -95,7 +95,7 @@ it("routes only authenticated self attention across authorized owners and tool c
   expect(unwrap(person.service.attentionEvents()).items).toHaveLength(0);
 });
 
-it.each([true, false])("an explicit-notice ephemeral agent still reports its result and remains reachable (foreground=%s)", async foreground => {
+it.each([true, false])("an explicit-notice background agent archives after reporting its result (notice foreground=%s)", async foreground => {
   const f = fixture(); await spawn(f, "parent"); unwrap(await f.service.start());
   unwrap(await f.service.spawn({ id: "child", requestId: "child", cwd: f.root, parentId: "parent", ephemeral: true, message: "Check" }));
   await until(() => f.sessions.length > 0);
@@ -104,12 +104,11 @@ it.each([true, false])("an explicit-notice ephemeral agent still reports its res
   f.sessions[0]!.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Checked" }], stopReason: "stop" } });
   f.sessions[0]!.emit({ type: "agent_settled" });
   await until(() => f.service.get("child")?.state === "idle");
-  expect(f.service.get("child")?.metadata?.archived).not.toBe(true);
+  expect(f.service.get("child")?.metadata?.archived).toBe(true);
   expect(f.service.get("child")?.metadata?.foreground).toBe(false);
   expect(f.service.pending("parent")).toHaveLength(1);
-  const now = Date.now() + 7200000; vi.spyOn(Date, "now").mockReturnValue(now);
-  unwrap(await f.service.control({ threadId: "child", action: "archiveInactive", inactiveBefore: now - 3600000 }));
-  expect(f.service.get("child")?.metadata?.archived).not.toBe(true);
+  expect(f.service.pending("parent")[0]?.text).toContain("Checked");
+  unwrap(await f.service.control({ threadId: "child", action: "open" }));
   expect((await f.service.spawn({ id: "grandchild", requestId: "grandchild", parentId: "child", cwd: f.root })).ok).toBe(true);
 });
 

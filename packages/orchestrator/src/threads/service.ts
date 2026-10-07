@@ -506,6 +506,7 @@ export class ThreadService implements ThreadApi {
     if (!this.started) {
       this.started = true;
       this.timer = setInterval(() => this.reconcile(), 5_000); this.timer.unref();
+      this.archiveCompletedBackground();
       this.reconcile();
     }
     return good(undefined);
@@ -636,15 +637,29 @@ export class ThreadService implements ThreadApi {
     this.sql("UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate',json(?)) WHERE id=?").run(JSON.stringify({ previous, desired, phase: "release" }), id);
     return this.recoverDependencies(id);
   }
-  /** After its last dependent releases it, a settled ephemeral worker archives as it would have on settlement. */
-  private async archiveSettledEphemeral(id: string): Promise<void> {
+  /** Archive settled background work after its last dependency protection is released. */
+  private async archiveSettledBackground(id: string): Promise<void> {
     const thread = this.get(id);
-    if (!thread?.metadata?.ephemeral || thread.metadata.attentionSummary || thread.metadata.archived || thread.held || this.hasAutoArchiveWork(thread)) return;
+    const settledWork = this.sql(`SELECT 1 FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL
+      UNION ALL SELECT 1 FROM thread_work WHERE thread_id=? AND status='done' LIMIT 1`).get(id, id);
+    if (!thread || !settledWork || thread.metadata?.foreground === true || thread.metadata?.watchList
+      || thread.metadata?.archived || this.hasAutoArchiveWork(thread)) return;
     const protection = await this.closeProtection(id);
     const latest = this.get(id);
-    if (!protection.ok || !latest || this.suspended || this.closed || latest.metadata?.archived || latest.held || this.hasAutoArchiveWork(latest)) return;
+    if (!protection.ok || !latest || this.suspended || this.closed || latest.metadata?.foreground === true
+      || latest.metadata?.watchList || latest.metadata?.archived || this.hasAutoArchiveWork(latest)) return;
     this.sql("UPDATE thread SET held=0,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
     this.changed(id);
+  }
+  private archiveCompletedBackground(): void {
+    const rows = this.sql(`SELECT t.id FROM thread t WHERE t.state='idle'
+      AND json_extract(t.metadata,'$.archived') IS NOT 1
+      AND json_extract(t.metadata,'$.foreground') IS NOT 1
+      AND json_extract(t.metadata,'$.watchList') IS NOT 1
+      AND (EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NOT NULL)
+        OR EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=t.id AND w.status='done'))`)
+      .all() as Array<{ id: string }>;
+    for (const row of rows) void this.archiveSettledBackground(row.id);
   }
   /** At the end of a turn, dependencies whose result has been delivered and is no longer awaited are released. */
   private async pruneSettledDependencies(id: string): Promise<void> {
@@ -1188,7 +1203,7 @@ export class ThreadService implements ThreadApi {
       const dependents = input.active ? [...new Set([...incoming, input.dependentId])] : incoming.filter(id => id !== input.dependentId);
       this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?)) WHERE id=?").run(JSON.stringify(dependents), current.id);
       this.changed(current.id);
-      if (!input.active && !dependents.length) void this.archiveSettledEphemeral(current.id);
+      if (!input.active && !dependents.length) void this.archiveSettledBackground(current.id);
       return good(this.get(current.id)!);
     }
     if (input.action === "dependencyRelease") {
@@ -1998,13 +2013,7 @@ export class ThreadService implements ThreadApi {
     const settled = this.sql("SELECT settlement_seq,ended_at FROM thread_execution WHERE id=?").get(execution.id) as Json;
     for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, ...(assignmentPending ? { assignmentPending: true } : {}), time: settled.ended_at, finalMessage, ...(error ? { error } : {}) } });
     if (runtime) await this.park(id, runtime);
-    if (thread.metadata?.ephemeral && !thread.metadata.attentionSummary && !assignmentPending && !this.localDependencyProtection(id)) {
-      const protection = await this.closeProtection(id);
-      if (protection.ok && !this.suspended && !this.closed && !this.execution(id) && !this.pending(id).length && !this.localDependencyProtection(id)) {
-        this.sql("UPDATE thread SET held=0,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
-        this.changed(id);
-      }
-    }
+    if (!assignmentPending && !this.localDependencyProtection(id)) await this.archiveSettledBackground(id);
   }
   private async park(id: string, runtime: Runtime): Promise<void> {
     if (this.suspended || this.halts.has(id) || !runtime.session || runtime.busy || runtime.commandRunning || runtime.executionId || this.execution(id) || this.runtimes.get(id) !== runtime) return;
