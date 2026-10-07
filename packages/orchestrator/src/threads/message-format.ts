@@ -1,7 +1,7 @@
 import type { ThreadMessage } from "./contracts.js";
 
 const PREFIX = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
-const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isThreadId = (value: unknown): value is string => typeof value === "string" && !!value.trim();
 
 export interface AgentMessagePresentation {
   sender: { threadId: string; name?: string };
@@ -22,12 +22,12 @@ export function agentMessagePresentation(text: string): AgentMessagePresentation
   try { metadata = JSON.parse(text.slice(PREFIX.length, metadataEnd)); }
   catch { return null; }
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
-    || typeof metadata.senderThreadId !== "string" || !THREAD_ID.test(metadata.senderThreadId)) return null;
+    || !isThreadId(metadata.senderThreadId)) return null;
   if (metadata.senderName !== undefined && (typeof metadata.senderName !== "string" || !metadata.senderName.trim())) return null;
   const keys = Object.keys(metadata);
   const notification = keys.every(key => key === "senderThreadId" || key === "senderName");
   if (!notification && (metadata.source !== "explicit"
-    || typeof metadata.recipientThreadId !== "string" || !THREAD_ID.test(metadata.recipientThreadId)
+    || !isThreadId(metadata.recipientThreadId)
     || typeof metadata.messageId !== "string" || !metadata.messageId
     || keys.some(key => !["senderThreadId", "senderName", "recipientThreadId", "messageId", "source", "replyTo"].includes(key))
     || metadata.replyTo !== undefined && (typeof metadata.replyTo !== "string" || !metadata.replyTo))) return null;

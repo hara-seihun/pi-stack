@@ -28,6 +28,20 @@ it("completion transport includes the name while human projection retains the fi
   expect(agentMessagePresentation(formatThreadMessage(empty, empty.text))?.text).toBe("Work cancelled.");
 });
 
+it.each([
+  ["schedule:digest:100000", "schedule:followup:100001"],
+  ["root:notification", "home"],
+])("native identifiers %s and %s retain named sends and completion presentation", (senderId, threadId) => {
+  const scheduled = { ...message, senderId, threadId };
+  const native = formatThreadMessage(scheduled, scheduled.text);
+  expect(agentMessagePresentation(native)).toEqual({ sender: { threadId: senderId, name: "Kelana" }, text: scheduled.text });
+  const notice = { ...scheduled, source: "notification" as const, text: '{"type":"thread_idle","outcome":"complete","finalText":"Done."}' };
+  expect(agentMessagePresentation(formatThreadMessage(notice, notice.text))).toEqual({ sender: { threadId: senderId, name: "Kelana" }, text: "Done." });
+  for (const invalid of [native.replace(`"senderThreadId":"${senderId}"`, '"senderThreadId":" "'), native.replace(`"recipientThreadId":"${threadId}"`, '"recipientThreadId":""'), native.replace('"source":"explicit"', '"source":"unknown"')]) {
+    expect(agentMessagePresentation(invalid)).toBeNull();
+  }
+});
+
 it("recognizes historical completion envelopes without inventing a name", () => {
   const historical = { ...message, source: "notification" as const, senderName: undefined, text: '{"type":"thread_idle","outcome":"complete","finalText":"Done."}' };
   expect(agentMessagePresentation(formatThreadMessage(historical, historical.text))).toEqual({ sender: { threadId: senderId }, text: "Done." });

@@ -65,6 +65,13 @@ test("historical senders resolve to their known name, or an explicitly unidentif
   expect(unknown.text).toBe(message.text);
 });
 
+test("scheduled senders and recipients render by name just like UUID threads", () => {
+  const scheduled = { ...message, senderId: "schedule:digest:100000", threadId: "schedule:followup:100001" };
+  const incoming = entriesFromHeads(deriveTranscriptItems({ messages: [{ role: "user", content: formatThreadMessage(scheduled, scheduled.text) }] }).map(item => item.head)).at(-1)!;
+  expect(incoming).toMatchObject({ label: "Kelana", text: scheduled.text, agentSender: { threadId: scheduled.senderId, name: "Kelana" } });
+  expect(presentAgentMessage(entry(formatThreadMessage(scheduled, scheduled.text))).text).toBe(scheduled.text);
+});
+
 test("completion reports hide both transport and thread_idle JSON, retaining final words, errors and attachments", () => {
   const notice = { ...message, source: "notification" as const, text: '{"type":"thread_idle","outcome":"failed","finalText":"Here is the result.","error":"publish failed"}' };
   const incoming = presentAgentMessage(entry(formatThreadMessage(notice, notice.text) + "\n\n![Context image](/image)"));
@@ -73,7 +80,7 @@ test("completion reports hide both transport and thread_idle JSON, retaining fin
 });
 
 test("ordinary human text, quoted examples and malformed envelopes are not relabelled or stripped", () => {
-  for (const human of ["Hello", "Please explain <agent_message>", "```\n" + text + "\n```", "> " + text, text.replace(sender, "not-a-thread"), text.replace('"source":"explicit"', '"source":"unknown"'), text.replace("</agent_message>", ""), text.replace('"senderThreadId"', '"sender"'), text.replace('{"senderThreadId"', '{oops"senderThreadId"'), text.replace('"senderName":"Kelana"', '"senderName":3')]) {
+  for (const human of ["Hello", "Please explain <agent_message>", "```\n" + text + "\n```", "> " + text, text.replace(sender, " "), text.replace('"source":"explicit"', '"source":"unknown"'), text.replace("</agent_message>", ""), text.replace('"senderThreadId"', '"sender"'), text.replace('{"senderThreadId"', '{oops"senderThreadId"'), text.replace('"senderName":"Kelana"', '"senderName":3')]) {
     const original = entry(human);
     expect(presentAgentMessage(original)).toBe(original);
   }
