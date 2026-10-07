@@ -14,8 +14,10 @@ import { AccountTransfer, prepareWithDrainWait, transferEndpoint, transferPeer }
 import { fetchAccountFromPeer, resolveFetchPeer, resolvePeerHost } from "./auth/account-peers.js";
 import { isAccountReservation } from "./admission-reservation.js";
 import { isSpeed, SPEEDS } from "./threads/speed.js";
+import { getRandomName } from "./nebulani-names.js";
 
 export const COMMANDS=[
+  ["names","Generate Nebulani agent names locally: --count N"],
   ["daemon","Run reconciliation and the local API"],
   ["status","Print accounts, lanes, leases, and active threads"],
   ["usage-evidence","Print a read-only 24-hour quota and token snapshot; optional --ledger FILE"],
@@ -107,6 +109,13 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command===undefined||command==="help"||command==="--help"){
     console.log(USAGE);
     return;
+  }
+  if(command==="names"){
+    const count=rest.length===2&&rest[0]==="--count"&&/^[1-9]\d*$/.test(rest[1]!)?Number(rest[1]):NaN;
+    if(!Number.isSafeInteger(count)||count<1||count>1000){
+      console.error("usage: pi-orchestrator names --count N (1..1000)");process.exitCode=1;return;
+    }
+    output({names:Array.from({length:count},()=>getRandomName())});return;
   }
   if(command==="daemon"){const store=Store.open(ledgerPath());try{await new Daemon(store,loadConfig()).start();}finally{store.close();}return;}
   if(command==="usage-evidence"){
