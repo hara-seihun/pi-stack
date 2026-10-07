@@ -2,6 +2,7 @@ import type { Store } from "../store.js";
 import { allowsAccountUse } from "../domain.js";
 import { modelDrainsMeter } from "../catalog.js";
 import type { SharedOAuthAuth } from "./shared-oauth.js";
+import { accountModelExcluded } from "./model-entitlement.js";
 
 const METER_MAX_AGE_MS = 90 * 60_000;
 
@@ -19,6 +20,7 @@ export function interactiveQuotaExhausted(store: Store, id: string, family: stri
 function usableInteractiveAccounts(store: Store, auth: SharedOAuthAuth | undefined, family: string, exclude: Set<string>, model?: string) {
   return store.accounts().filter(account => account.provider === family
     && allowsAccountUse(account, "interactive") && !exclude.has(account.id) && auth?.has(account.id)
+    && !accountModelExcluded(store, account.id, model)
     && !interactiveQuotaExhausted(store, account.id, family, model));
 }
 
@@ -47,7 +49,8 @@ export function chooseInteractiveAccount(store: Store, auth: SharedOAuthAuth | u
 
 /** Reconciliation reads evidence, never submits a model request to test capacity. */
 export function interactiveRetryAvailability(store: Store, auth: SharedOAuthAuth | undefined, family: string, model: string, now = Date.now()): { available: boolean; retryAt: number } {
-  const accounts = store.accounts().filter(account => account.provider === family && allowsAccountUse(account, "interactive") && auth?.has(account.id));
+  const accounts = store.accounts().filter(account => account.provider === family && allowsAccountUse(account, "interactive") && auth?.has(account.id)
+    && !accountModelExcluded(store, account.id, model, now));
   const times = accounts.map(account => Math.max(now, account.cooldownUntil ?? now,
     ...bindingMeters(store, account.id, family, model, now).filter(meter => meter.used_percent >= 100)
       .map(meter => meter.reset_at ?? now + METER_MAX_AGE_MS)));

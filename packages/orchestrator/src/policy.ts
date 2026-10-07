@@ -4,6 +4,7 @@ import { reservationMatchesRun } from "./admission-reservation.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
 import type { Store } from "./store.js";
 import { sharedCredentialRejection } from "./auth/shared-oauth.js";
+import { modelUnsupportedEvidence, modelUnsupportedReason } from "./auth/model-entitlement.js";
 
 function credentialRefusal(cfg: OrchestratorConfig, alias: string): string | undefined {
   const state = sharedCredentialRejection(cfg.authPath, alias);
@@ -90,6 +91,8 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
       if(excludedAccounts.has(account.id)){refusals.push({accountId:account.id,reason:"requested service tier unavailable"});continue;}
+      const unsupported=modelUnsupportedEvidence(store,account.id,candidate.model,now);
+      if(unsupported){refusals.push({accountId:account.id,reason:modelUnsupportedReason(unsupported)});continue;}
       const capacity=accountCapacity(store,account.id,budget,cfg,now,runId,candidate.model);
       const active=store.activeSessionLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
@@ -134,11 +137,12 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){
-      const meters=store.latestMeters(account.id),credential=credentialRefusal(cfg,account.id);
+      const meters=store.latestMeters(account.id),credential=credentialRefusal(cfg,account.id),unsupported=modelUnsupportedEvidence(store,account.id,candidate.model,now);
       const reason=principal!==undefined&&!grant?`no live model broker grant for ${principal}`
         :grant&&(!grant.accounts.includes(account.id)||!grant.models.includes(`${candidate.provider}/${candidate.model}`))?"account or model not shared with completion owner"
         :!allowsAccountUse(account,"fleet")?"account unavailable"
         :credential?credential
+        :unsupported?modelUnsupportedReason(unsupported)
         :account.reservation&&!reservationMatchesRun(store,account.reservation,runId)?"reserved for another completion queue"
         :account.cooldownUntil&&account.cooldownUntil>now?"account cooling down"
         :!meters.length||meters.some(meter=>now-meter.observed_at>cfg.meterMaxAgeMs||meter.observed_at>now+60_000)?"missing or stale provider quota"
