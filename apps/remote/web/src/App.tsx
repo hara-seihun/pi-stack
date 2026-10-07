@@ -919,6 +919,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     });
     return () => { toast.dismiss(id); };
   }, [undoState, undoClose]);
+  const dismissChatError = useCallback(() => setChatError(""), []);
   const openInboxChat = useCallback((chat: Chat) => { void selectChat(chat).catch(cause => setChatError(String(cause))); }, [selectChat]);
   const requestCloseChat = useCallback((chat: Chat) => { void closeChat(chat); }, [closeChat]);
   const closeInboxChat = requestCloseChat;
@@ -1177,7 +1178,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   const list = (() => {
     switch (route.tab) {
-      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
+      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
       case "agents": case "notifications": case "calendar": case "machine": case "files": return null;
     }
     return assertNever(route, "App list route");
