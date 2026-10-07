@@ -30,11 +30,16 @@ test("placement and provenance never override unread, unseen or live retention",
   expect(calls.at(-1)).toEqual({ threadId: "read", action: "archiveInactive", inactiveBefore: 9000 });
 });
 
-test("explicit dependencies and waits protect both endpoints, while independent agents can archive", async () => {
+test("live dependencies and waits protect both endpoints, while independent agents and inert edges can archive", async () => {
   const calls: unknown[] = [];
-  const rows = [row("dependent", { dependencies: ["dependency"] }), row("dependency"), row("waiting", { waitingOnAgents: { kind: "message", fromThreadId: "sender", since: 1, reason: "Need answer" } }), row("sender"), row("independent")];
+  const rows = [row("dependent", { dependencies: ["dependency"] }), row("dependency", { state: "running" }), row("waiting", { waitingOnAgents: { kind: "message", fromThreadId: "sender", since: 1, reason: "Need answer" } }), row("sender"), row("independent")];
   expect(await archiveInactiveThreads(apiFor(rows, calls), 1000, 10000)).toBe(1);
   expect(calls.at(-1)).toEqual({ threadId: "independent", action: "archiveInactive", inactiveBefore: 9000 });
+});
+
+test("an inert dependency (settled target, dependent not waiting) does not protect either endpoint", async () => {
+  const calls: unknown[] = [];
+  expect(await archiveInactiveThreads(apiFor([row("dependent", { dependencies: ["settled"] }), row("settled")], calls), 1000, 10000)).toBe(2);
 });
 
 test("a racing owner dependency refusal is retained without aborting the sweep", async () => {
