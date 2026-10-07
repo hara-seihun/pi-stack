@@ -63,6 +63,9 @@ import { QuestionFeed } from "./question-feed";
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
 import { oneKenanEnabled } from "kenan-memory/config";
+import { lifeClient } from "kenan-memory/life-client";
+import type { LifePolicyView, LifeSnapshot } from "kenan-memory/life-contract";
+import { projectNeedsYou, readNeedsYouQuestions } from "./needs-you";
 import { handleRoomOwner } from "./rooms-owner";
 import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
 import { readThreadHistory } from "pi-orchestrator/history";
@@ -1933,6 +1936,20 @@ const server = Bun.serve<SocketData>({
           signalSync();
         },
       });
+    }
+    if (API.needsYou.match(req.method, url.pathname)) {
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Needs you requires this person's authorized router or local caller", 403);
+      if (process.env.PI_REMOTE_ROOMS_RUNTIME === "1") return error("Life projections are not available in rooms", 403);
+      if (url.search) return error("Needs you accepts no person or scope parameters", 400);
+      const client = lifeClient();
+      const [life, pending, watch, policy] = await Promise.all([
+        client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } }),
+        readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room)),
+        watchList.watch({ action: "list", threadId: "needs-you-projection" }).catch(cause => ({ ok: false as const, error: { code: "unavailable" as const, message: cause instanceof Error ? cause.message : String(cause) } })),
+        client.request<LifePolicyView>({ operation: "policy-read", target: { scope: "self" }, includeHistory: false }),
+      ]);
+      return json(projectNeedsYou(life, pending, watch, policy, Date.now()));
     }
     if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
       const feed = url.pathname.startsWith("/v1/calendar/feed/");

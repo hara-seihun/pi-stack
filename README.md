@@ -6,7 +6,7 @@ Pi Stack runs persistent agents through [Pi](https://github.com/badlogic/pi-mono
 
 - [`packages/runtime`](packages/runtime/README.md) pins Pi and owns the runtime extensions.
 - [`packages/orchestrator`](packages/orchestrator/README.md) schedules and hosts persistent agent work.
-- [`packages/kenan-memory`](packages/kenan-memory/README.md) owns optional shared host memory, discretion tools and the disclosure log.
+- [`packages/kenan-memory`](packages/kenan-memory/README.md) owns optional shared host memory, discretion tools and the disclosure log. The [life model](docs/life-model.md) owns versioned per-person authority, goals, commitments, preferences, steering history and Remote's Needs-you projection.
 - [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, shared client, and context mirror extension.
 - [`apps/kenan`](apps/kenan/README.md) packages the shared client for Android.
 - [`skills`](skills/README.md) contains the shared first-party skills loaded by interactive and fleet agents.
