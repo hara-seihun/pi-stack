@@ -780,6 +780,10 @@ test("budgeted source creation shares existing objects and records immutable who
     assert.throws(() => run(args.map(arg => arg === "8" ? "9" : arg), f.env), /different creation request/);
     const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
     const device = String(statSync(f.workspaces).dev);
+    const fullPlan = { intent: "unestimated", estimate: "unknown", constructionBytes: 30 * 1024 ** 3, growthBytes: 0, headroomBytes: 0 };
+    db.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(fullPlan), created.id);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [30 * 1024 ** 3], unpricedDormant: 0 });
+    db.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(created.capacity), created.id);
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });
     db.prepare("UPDATE workspace SET lease_expires_at=0 WHERE id=?").run(created.id);
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });

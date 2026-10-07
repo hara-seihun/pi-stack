@@ -1613,7 +1613,8 @@ function capacityReservations(database, device, reservedPath) {
       if (!["source-only", "budgeted", "unestimated"].includes(plan.intent) ||
         plan.estimate !== (plan.intent === "unestimated" ? "unknown" : "whole-tree-upper-bound")) fail("invalid capacity ledger intent or estimate");
       capacityRequirement(plan, []);
-      return plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
+      return plan.intent === "unestimated" ? plan.constructionBytes
+        : plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
     });
   return { priced, unpricedDormant };
 }
@@ -1897,7 +1898,6 @@ function createWorkspace(database, args, statePath) {
     let plan;
     if (intent === null) {
       assertCapacity(root, args, database);
-      sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
       plan = { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 };
     } else {
       if (!existsSync(repository)) fail("source capacity estimate unknown: budgeted intent requires an existing local Git object source; remote import remains unestimated");
@@ -1907,6 +1907,10 @@ function createWorkspace(database, args, statePath) {
     const device = String(statSync(root).dev);
     withResourceLock(statePath, `capacity:${device}`, () => {
       plan.admission = assertCapacity(root, args, database, destination, plan);
+      if (intent === null) {
+        sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
+        plan.admission = assertCapacity(root, args, database, destination, plan);
+      }
       database.exec("BEGIN IMMEDIATE");
       try {
         const now = Date.now();
