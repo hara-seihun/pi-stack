@@ -9,7 +9,7 @@ Orchestrator owns the shared Pi runner, execution receipts and thread lifecycle.
 - Tool start/update/end events produce bounded previews. Completed native tool output remains in Pi's transcript.
 - Retry and compaction events annotate current local activity. They do not create another work receipt.
 - Successful `get_state` responses restore live progress after a shared runner reconnect.
-- `thread_message_inserted` supplies the owner-confirmed message receipt for voice, naming and meeting-transcript presentation.
+- `thread_message_inserted` supplies the owner-confirmed message receipt for voice and meeting-transcript presentation.
 - `thread_settled` clears disposable live activity and requests replay of the owner's durable settlement feed.
 
 A child is another persistent thread with its own ID and subscription. There are no child-event envelopes to flatten into the parent, no aggregate parent completion test and no root-scoped child inspection route.

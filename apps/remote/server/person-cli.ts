@@ -9,12 +9,11 @@ import { chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listPersons, parsePerson, personPath, writePerson, type Person } from "./persons";
-import { threadNamingModel } from "./thread-naming";
 import { defaultThreadDestinations } from "./thread-model-defaults";
 
 const USAGE = `usage:
   pi-remote person list
-  pi-remote person add USER --display-name NAME --thread-naming-model PROVIDER/MODEL:THINKING
+  pi-remote person add USER --display-name NAME
                             [--folder NAME] [--no-encrypt] [--existing] [--port N] [--key-file PATH]
                             [--environment ID] [--environment-name NAME]
   pi-remote person update USER < person.json
@@ -58,7 +57,7 @@ function requireRoot(): void {
   if (process.getuid?.() !== 0) throw new Error("this command needs root; run it with sudo");
 }
 
-function defaultEnvironment(person: Omit<Person, "environment">, folder: string, home: string, homeName: string, environmentId: string, environmentName: string, threadNamingModel: string) {
+function defaultEnvironment(person: Omit<Person, "environment">, folder: string, home: string, homeName: string, environmentId: string, environmentName: string) {
   const privateDir = person.unlock?.mountpoint ?? join(home, folder);
   return {
     PI_REMOTE_ENVIRONMENT_ID: environmentId,
@@ -71,7 +70,6 @@ function defaultEnvironment(person: Omit<Person, "environment">, folder: string,
     PI_REMOTE_DATA: join(privateDir, ".pi-remote"),
     PI_REMOTE_INGESTION: join(privateDir, ".ingestion"),
     PI_REMOTE_PORT: person.port,
-    PI_REMOTE_THREAD_NAMING_MODEL: threadNamingModel,
     PI_REMOTE_DESTINATIONS: "personal,home,raw,sandbox",
     PI_REMOTE_ORCHESTRATOR_DB: join(home, ".local/share/pi-orchestrator/ledger.sqlite3"),
     PI_REMOTE_ORCHESTRATOR_RUNS: join(home, ".local/share/pi-orchestrator/runs"),
@@ -91,9 +89,6 @@ function add(args: string[]): void {
   if (existsSync(personPath(user))) throw new Error(`${user} is already a Pi Remote person (${personPath(user)})`);
   const displayName = named.get("display-name");
   if (!displayName) throw new Error("--display-name is required");
-  const namingModel = named.get("thread-naming-model");
-  if (!namingModel) throw new Error("--thread-naming-model is required");
-  const configuredNamingModel = threadNamingModel(namingModel);
   const { uid, gid, home } = account(user);
   const folder = named.get("folder") ?? user;
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(folder)) throw new Error("--folder must be a short lowercase name");
@@ -139,7 +134,7 @@ function add(args: string[]): void {
     ...(encrypt ? { unlock: { cipherDir, mountpoint } } : {}),
   };
   const homeName = named.get("home-name") ?? user.charAt(0).toUpperCase() + user.slice(1);
-  const person: Person = { ...base, environment: defaultEnvironment(base, folder, home, homeName, environmentId, environmentName, configuredNamingModel) };
+  const person: Person = { ...base, environment: defaultEnvironment(base, folder, home, homeName, environmentId, environmentName) };
   writePerson(person);
   console.log(`added ${user} (${displayName}) on port ${port}; registry file ${personPath(user)}`);
   console.log(`use pi-remote person update ${user} with JSON on stdin to change this file; the front door reads it on restart`);

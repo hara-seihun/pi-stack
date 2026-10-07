@@ -26,7 +26,7 @@ No model requests, quota polling, unlocks, or database writes. Defaults to yours
 Encrypted persons must already be unlocked. Cross-person reads enter their running
 supervisor's mount namespace as that person using passwordless sudo.
 API value comes from logged prices. Plan dollars are estimates, never invoices.
-Only recorded conversation responses count, not voice, fleet work, or unsaved naming calls.`;
+Only recorded conversation responses count, not voice, fleet work, or unsaved compaction calls.`;
 
 function command(program, args, input) {
   const result = spawnSync(program, args, { input, encoding: "utf8", timeout: 45_000, maxBuffer: 32 * 1024 * 1024 });

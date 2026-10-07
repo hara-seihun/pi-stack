@@ -27,7 +27,7 @@ test("the activity window opens on the tail, follows a cursor and forgets a thre
   expect(activity.since("b", 0)).toHaveLength(1);
 });
 
-test("retiring the event journal keeps the thinking, measurements and message count it held", () => {
+test("retiring the event journal keeps the thinking and measurements it held", () => {
   const db = new Database(":memory:");
   try {
     db.exec(`CREATE TABLE thread_views (id TEXT PRIMARY KEY, idle_unread INTEGER NOT NULL DEFAULT 0, named_at_message_count INTEGER NOT NULL DEFAULT 0);
@@ -54,10 +54,9 @@ test("retiring the event journal keeps the thinking, measurements and message co
     const fact = db.query("SELECT thinking,metrics FROM message_facts WHERE session_id='a' AND finalizes_message='m1'").get() as { thinking: string; metrics: string };
     expect(fact.thinking).toBe("weighing it");
     expect(JSON.parse(fact.metrics).tokensPerSecond).toBe(50);
-    expect((db.query("SELECT message_count FROM thread_views WHERE id='a'").get() as { message_count: number }).message_count).toBe(2);
     expect((db.query("SELECT session_id FROM message_annotations WHERE work_id='work'").get() as { session_id: string }).session_id).toBe("a");
 
     ensureSupervisorSchema(db); // opening again changes nothing
-    expect((db.query("SELECT message_count FROM thread_views WHERE id='a'").get() as { message_count: number }).message_count).toBe(2);
+    expect((db.query("SELECT thinking FROM message_facts WHERE session_id='a'").get() as { thinking: string }).thinking).toBe("weighing it");
   } finally { db.close(); }
 });

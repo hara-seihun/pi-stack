@@ -6,7 +6,7 @@ import threadContext from "./thread-context";
 import { threadStateInstructions } from "./thread-context-state";
 
 describe("thread lifecycle context", () => {
-  test("describes new and continuing threads without a naming tool", () => {
+  test("describes new and continuing threads without an initialization tool", () => {
     const fresh = threadStateInstructions({ name: "83", prompt: "Fix it", fileTag: "pi-file", home: "/home/a" });
     expect(fresh).toContain("starting a new thread");
     expect(fresh).not.toContain("initialize_thread");
