@@ -38,7 +38,7 @@ One daemon timer renews active completion leases in one transaction and applies 
 
 `GET /v1/plans` returns account, meter, lease and admission-control data, not completion records, run-context payloads or child tasks. Read completion records through their request-ID endpoint. This prevents dashboard polling from serializing the entire inference history.
 
-`pi-orchestrator status` reports durable queued and running runs and all active leases. Multiplexed completion runs carry `workerUnit: completion:RUN_ID`; this identifies their daemon execution, not a systemd unit. A queued run's `refusal:RUN_ID` control names the actual admission blocker. The focused concurrency test admits and holds 315 independent requests simultaneously with both agent ceilings set to one, then checks unique requests, leases and once-only usage settlement.
+`pi-orchestrator status` reports durable queued and running runs and all active leases. Multiplexed completion runs carry `workerUnit: completion:RUN_ID`; this identifies their daemon execution, not a systemd unit. A queued run's `refusal:RUN_ID` control names the actual admission blocker. The focused concurrency test admits and holds 315 independent provider requests simultaneously despite occupied paced account sessions, then checks unique requests, leases and once-only usage settlement. Plain inference does not create a Pi agent execution or consume its global slot.
 
 ## Explicit provider rejection recovery
 

@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import customModelConfig from "../src/models.json" with { type: "json" };
+import { withCustomModels } from "../src/models.js";
 import { calibrateRate, modelPrices, personUsage, weekResetsAt, weekStart } from "../src/person-usage.js";
 
 const HOUR = 3_600_000, DAY = 24 * HOUR;
@@ -20,7 +23,7 @@ function ledger(run: (store: Store) => void) {
   const store = Store.open(join(root, "ledger.sqlite3"));
   try { run(store); } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 }
-const record = (store: Store, accountId: string, source: string, runId: string, component: "input" | "output" | "cacheRead", tokens: number, hour: number, model = "priced") =>
+const record = (store: Store, accountId: string, source: string, runId: string, component: "input" | "output" | "cacheRead" | "cacheWrite", tokens: number, hour: number, model = "priced") =>
   store.recordUsage({ accountId, hour, source, runId, model, component, tokens });
 
 test("dollars come from consumed quota and are split by list-price value among principals and the ledger owner", () => ledger(store => {
@@ -31,19 +34,20 @@ test("dollars come from consumed quota and are split by list-price value among p
   record(store, "codex-1", "interactive", "broker:sybil:2", "cacheRead", 1_000_000, hour);
   record(store, "codex-2", "interactive", "owner-session", "output", 1_000_000, hour);
   record(store, "codex-2", "fleet", "fleet-run", "input", 1_000_000, hour);
-  record(store, "codex-1", "completion", "completion-run", "output", 500, hour, "unpriced");
+  record(store, "codex-1", "completion", "completion-run", "output", 500, hour);
   store.setControl("completion-run:completion-run", "broker-abc");
   store.setControl("completion:broker-abc", JSON.stringify({ access: { principal: "jodie" } }));
-  // Together the two accounts used 30 points of their weeks for $14.50 of list-price value.
+  // Together the two accounts used 30 points of their weeks for $14.505 of list-price value.
   store.recordMeter("codex-1", "codex-7d", 10, now + DAY, now);
   store.recordMeter("codex-2", "codex-7d", 20, now + DAY, now);
-  expect(calibrateRate(store, plans[0]!, priceOf, now)).toBeCloseTo(30 * OPENAI_POINT / 14.5, 9);
+  expect(calibrateRate(store, plans[0]!, priceOf, now)).toBeCloseTo(30 * OPENAI_POINT / 14.505, 9);
   const window = personUsage(store, now - DAY, now, priceOf, plans);
   const byPrincipal = Object.fromEntries(window.rows.map(row => [row.principal ?? "owner", row]));
-  expect(byPrincipal.owner!.spend).toBeCloseTo(30 * OPENAI_POINT * 12 / 14.5, 9);
-  expect(byPrincipal.owner!.sources.fleet.spend).toBeCloseTo(30 * OPENAI_POINT * 2 / 14.5, 9);
-  expect(byPrincipal.sybil!.spend).toBeCloseTo(30 * OPENAI_POINT * 2.5 / 14.5, 9);
-  expect(byPrincipal.jodie).toMatchObject({ tokens: 500, value: 0, spend: 0, unpricedTokens: 500 });
+  expect(byPrincipal.owner!.spend).toBeCloseTo(30 * OPENAI_POINT * 12 / 14.505, 9);
+  expect(byPrincipal.owner!.sources.fleet.spend).toBeCloseTo(30 * OPENAI_POINT * 2 / 14.505, 9);
+  expect(byPrincipal.sybil!.spend).toBeCloseTo(30 * OPENAI_POINT * 2.5 / 14.505, 9);
+  expect(byPrincipal.jodie).toMatchObject({ tokens: 500, value: 0.005, unpricedTokens: 0 });
+  expect(byPrincipal.jodie!.spend).toBeCloseTo(30 * OPENAI_POINT * 0.005 / 14.505, 9);
   const openai = window.subscriptions.find(plan => plan.planId === "openai")!;
   expect(openai.used).toBeCloseTo(30 * OPENAI_POINT, 9);
   expect(openai.spend).toBeCloseTo(2 * 200 / 30, 9);
@@ -112,8 +116,53 @@ test("the personal week runs Monday midnight to Monday midnight", () => {
   expect(weekStart(monday)).toBe(monday);
 });
 
-test("list prices cover catalog and retired pooled models", () => {
+test("list prices share every pooled custom definition with routing and retain retired models", () => {
   const prices = modelPrices();
-  expect(prices.get("claude-fable-5-1")?.output).toBeGreaterThan(0);
+  for (const [id, config] of Object.entries(customModelConfig.providers)) {
+    const provider = withCustomModels(builtinProviders().find(provider => provider.id === id)!);
+    for (const custom of config.models) {
+      const routed = provider.getModels().find(model => model.id === custom.id)!;
+      expect(prices.get(custom.id)).toEqual(Object.fromEntries(
+        (["input", "output", "cacheRead", "cacheWrite"] as const).map(component => [component, routed.cost[component]]),
+      ));
+    }
+  }
+  expect(prices.get("gpt-6-sol")?.input).toBeGreaterThan(0);
   expect(prices.get("gpt-6-astra")?.input).toBeGreaterThan(0);
 });
+
+test("Sol 6.1 prices every component and calibrates without rewriting historical usage or frozen rates", () => ledger(store => {
+  const start = 20 * DAY, now = start + 2 * HOUR;
+  store.upsertAccount({ id: "codex-1", provider: "openai-codex" });
+  for (const hour of [start, start + HOUR]) {
+    for (const component of ["input", "output", "cacheRead", "cacheWrite"] as const)
+      record(store, "codex-1", "fleet", "sol-run", component, 1_000_000, hour, "gpt-6.1-sol");
+  }
+  store.recordMeter("codex-1", "codex-7d", 10, start + 5 * DAY, now);
+  store.db.prepare("INSERT INTO usage_rate(provider, hour, rate) VALUES (?, ?, ?)").run("openai-codex", start, 0.5);
+  const evidence = store.db.prepare("SELECT * FROM usage_hour ORDER BY hour, component").all();
+  expect(modelPrices().get("gpt-6.1-sol")).toEqual({ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 });
+  expect(calibrateRate(store, plans[0]!, undefined, now)).toBeCloseTo(10 * OPENAI_POINT / 29.4, 9);
+  const window = personUsage(store, start, now, undefined, plans);
+  expect(window.rows[0]).toMatchObject({ tokens: 8_000_000, value: 29.4, unpricedTokens: 0 });
+  expect(window.rows[0]!.spend).toBeCloseTo(14.7 * 0.5 + 10 * OPENAI_POINT / 2, 9);
+  expect(store.db.prepare("SELECT rate FROM usage_rate WHERE provider=? AND hour=?").get("openai-codex", start)).toEqual({ rate: 0.5 });
+  expect(store.db.prepare("SELECT * FROM usage_hour ORDER BY hour, component").all()).toEqual(evidence);
+}));
+
+test("unknown prices remain explicit and cannot bias calibration with a partial account denominator", () => ledger(store => {
+  const now = 20 * DAY, hour = now - HOUR;
+  store.upsertAccount({ id: "partial", provider: "openai-codex" });
+  record(store, "partial", "interactive", "broker:sybil:1", "output", 1_000_000, hour);
+  record(store, "partial", "interactive", "broker:sybil:2", "output", 1000, hour, "unknown-model");
+  store.recordMeter("partial", "codex-7d", 20, now + DAY, now);
+  expect(calibrateRate(store, plans[0]!, priceOf, now)).toBeNull();
+  const window = personUsage(store, hour, now, priceOf, plans);
+  expect(window.rows[0]).toMatchObject({ value: 10, spend: 0, unpricedTokens: 1000 });
+  expect(window.subscriptions[0]!.rate).toBeNull();
+  expect(store.db.prepare("SELECT * FROM usage_rate").all()).toEqual([]);
+  store.upsertAccount({ id: "priced", provider: "openai-codex" });
+  record(store, "priced", "interactive", "owner-session", "output", 2_000_000, hour);
+  store.recordMeter("priced", "codex-7d", 5, now + DAY, now);
+  expect(calibrateRate(store, plans[0]!, priceOf, now)).toBeCloseTo(5 * OPENAI_POINT / 20, 9);
+}));

@@ -6,8 +6,7 @@ import type { OrchestratorConfig } from "./domain.js";
 import { defaultSharedAuthPath } from "./auth/shared-oauth.js";
 import { parsePeerHosts } from "./auth/account-peers.js";
 
-const standard = catalogModel("astra")!;
-const sol = catalogModel("sol")!;
+const standard = catalogModel("sol")!;
 
 function parsePort(value: unknown): number | undefined {
   if (value === undefined) return undefined;
@@ -36,7 +35,7 @@ export function loadConfig(
   const candidate=({provider,model}:ModelCandidate)=>({provider,model,thinking:admissionThinking({provider,model})});
   const profiles = {
     ...(local.profiles ?? {
-      standard: [standard, sol],
+      standard: [standard],
       expert: [standard],
     }),
     ...Object.fromEntries(["astra", "sol", "luna", "opus"].map(id => [id, [catalogModel(id)!]])),
@@ -56,7 +55,6 @@ export function loadConfig(
     peers: parsePeerHosts(local.peers),
     profiles: Object.fromEntries(Object.entries(profiles).map(([profile, candidates]) => [profile, (candidates as ModelCandidate[]).map(candidate)])),
     backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),
-    maxConcurrentSessions: Number(local.maxConcurrentSessions ?? 40),
     defaultAccountConcurrency: Number(local.defaultAccountConcurrency ?? 4),
     meterMaxAgeMs: Number(local.meterMaxAgeMs ?? 90*60_000),
     reconcileIntervalMs: Number(local.reconcileIntervalMs ?? 5_000),

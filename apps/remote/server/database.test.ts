@@ -60,3 +60,25 @@ test("replayed settlement notifications do not mark a viewed thread unread again
   expect(db.query("SELECT count(*) count FROM idle_notifications").get()).toEqual({ count: 2 });
   db.close();
 });
+
+test("an older supervisor database loses Remote's retired naming state and keeps its views", () => {
+  const db = new Database(":memory:");
+  db.exec(`CREATE TABLE thread_views (id TEXT PRIMARY KEY, idle_unread INTEGER NOT NULL DEFAULT 0, message_count INTEGER NOT NULL DEFAULT 0,
+      named_at_message_count INTEGER NOT NULL DEFAULT 0, naming_request TEXT, naming_attempted_count INTEGER NOT NULL DEFAULT 0, naming_error TEXT,
+      color TEXT CHECK(color IN ('red','orange','yellow','green','blue','purple') OR color IS NULL));
+    CREATE TABLE thread_naming_recovery (id TEXT PRIMARY KEY, model TEXT NOT NULL, message_count INTEGER NOT NULL, failures INTEGER NOT NULL, retry_at INTEGER);
+    CREATE TABLE error_feedback (source TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, message TEXT NOT NULL, occurrence TEXT NOT NULL, dismissed_at INTEGER);`);
+  db.query("INSERT INTO thread_views(id,idle_unread,message_count,naming_error,color) VALUES('a',1,40,'Rate limited','blue')").run();
+  db.query("INSERT INTO thread_naming_recovery VALUES('a','luna',40,2,NULL)").run();
+  for (const source of ["naming", "naming:a", "fleet"]) db.query("INSERT INTO error_feedback(source,id,message,occurrence) VALUES(?,?,?,?)").run(source, source, "m", "1");
+
+  ensureSupervisorSchema(db);
+  ensureSupervisorSchema(db); // a migrated database is left as it is
+
+  const columns = (db.query("PRAGMA table_info(thread_views)").all() as { name: string }[]).map(column => column.name);
+  expect(columns).toEqual(["id", "idle_unread", "color"]);
+  expect(db.query("SELECT * FROM thread_views").all()).toEqual([{ id: "a", idle_unread: 1, color: "blue" }]);
+  expect(db.query("SELECT name FROM sqlite_master WHERE name='thread_naming_recovery'").get()).toBeNull();
+  expect(db.query("SELECT source FROM error_feedback").all()).toEqual([{ source: "fleet" }]);
+  db.close();
+});

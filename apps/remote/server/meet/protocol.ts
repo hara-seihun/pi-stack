@@ -1,5 +1,5 @@
 import type { ThreadState } from "pi-orchestrator/api";
-import type { Activity } from "../protocol";
+import type { Activity, Session } from "../protocol";
 
 export type MeetTrackKind = "camera" | "screen" | "pi-camera" | "pi-screen";
 export interface MeetParticipant { id: string; name: string; host: boolean }
@@ -10,7 +10,7 @@ export interface MeetSignal {
 }
 export interface MeetEnvelope { seq: number; from: string; signal: MeetSignal }
 export interface MeetIceServer { urls: string[]; username: string; credential: string }
-export interface MeetThreadState {
+export interface MeetThreadState extends Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents">> {
   id: string;
   name: string;
   state: ThreadState;

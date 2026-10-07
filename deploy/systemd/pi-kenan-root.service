@@ -1,0 +1,34 @@
+[Unit]
+Description=Root Kenan private request sessions
+Requires=pi-kenan-custody.service pi-kenan-access.service pi-kenan-broker.service
+BindsTo=pi-kenan-custody.service
+After=pi-kenan-custody.service pi-kenan-access.service pi-kenan-broker.service
+
+[Service]
+Type=simple
+User=@EXECUTION_USER@
+Group=@EXECUTION_USER@
+EnvironmentFile=@KENAN_ENV_FILE@
+Environment=HOME=@STATE_DIR@/home
+Environment=BUN_INSTALL=@STATE_DIR@/bun
+Environment=BUN_INSTALL_CACHE_DIR=@STATE_DIR@/bun/install/cache
+Environment=PATH=@STATE_DIR@/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PI_KENAN_MEMORY_ROOT_TOKEN_FILE=%d/kenan-memory-root
+Environment=PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE=%d/kenan-root-admin
+LoadCredential=kenan-memory-root:@STATE_DIR@/root-memory-token
+LoadCredential=kenan-root-admin:@STATE_DIR@/root-admin-capability
+LoadCredential=kenan-root-consent:@ROOT_CONSENT_CAPABILITY_FILE@
+Environment=PI_KENAN_ROOT_CONSENT_TOKEN_FILE=%d/kenan-root-consent
+Environment=PI_KENAN_ROOT_ROUTER_URL=@ROOT_ROUTER_URL@
+ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
+ExecStart=+@RUNTIME_LAUNCHER@ root
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+MemorySwapMax=0
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

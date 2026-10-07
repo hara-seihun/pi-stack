@@ -1,4 +1,11 @@
 import { appStorageKey } from "../../app-path";
+import type { ThreadQuestion } from "../../../../server/protocol";
+
+export function prioritizeQuestion(questions: ThreadQuestion[], id: string | undefined): ThreadQuestion[] {
+  if (id === undefined) return questions;
+  const selected = questions.find(question => question.id === id);
+  return selected ? [selected, ...questions.filter(question => question.id !== id)] : questions;
+}
 
 export interface QuestionDraft { selectedSuggestionIds: string[]; text: string }
 export const emptyQuestionDraft = (): QuestionDraft => ({ selectedSuggestionIds: [], text: "" });

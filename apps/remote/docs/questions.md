@@ -23,7 +23,7 @@ Each item has its own optional `suggestions` with no fixed count. Its optional `
 
 ## Answering
 
-Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with the remaining count, suggestion chips, a free-text answer and **Dismiss question**. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Stop thread** remains available in the header while the agent is running.
+Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with the remaining count, suggestion chips, a free-text answer and **Dismiss question**. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Cancel work** remains available in the header while the agent is running.
 
 - Select any number of suggestions, including none.
 - Add text whether or not suggestions are selected.
@@ -38,11 +38,14 @@ Questions survive the agent's turn ending and owner restarts. Answering removes 
 
 ## Transport and custody
 
-The owning thread database stores questions and answer receipts. Remote is a client of that owner, not another question store. The model's original tool call and the eventual human answer remain in native Pi history.
+The owning thread database stores questions and answer receipts. Remote is a client of that owner, not another question store. For ordinary async questions, the model's original tool call and the eventual human answer remain in native Pi history.
+
+Root permission questions in a marked `rootConsent` inbox are owned by the existing `consent:ID:question` ask receipt. Their answers stay in the owner's durable question record and are projected as visible, correlated user receipts in history reads and the Remote transcript, including over a previously captured local context. They are not ordinary Pi work and do not start or steer the subject's agent; RootConsentManager reads the receipt and owns continuation. Dismissal grants nothing. The answer does not unhold unrelated work or restore an archived inbox. Subsequent ordinary inbox conversation and its own async questions still use normal delivery.
 
 - `GET /v1/sessions/:sessionId/questions` returns `{questions}` with pending questions.
 - `POST /v1/sessions/:sessionId/questions/:questionId/answer` accepts `{selectedSuggestionIds, text}` or `{selectedSuggestionIds: [], text: "", dismissed: true}` and returns `{accepted: true, questionId}`.
-- The selected conversation's shared resource stream publishes `{type: "questions", sessionId, questions}`. It uses the existing reconciliation and reconnect protocol.
+- The selected conversation's shared resource stream publishes `{type: "questions", sessionId, state, questions}`. `state` is `loading`, `ready`, or `failed`; failure also carries `error`. Loading and failure retain the last known questions explicitly as stale. A ready snapshot replaces those questions and clears only this resource's error. Questions never mark the whole chat offline or delay finite transcript/readiness synchronization. **Retry questions** reloads this resource, not the chat connection.
+- Known local and peer sessions read questions directly from their owning service. Directory discovery is used only when the owner is not yet known.
 
 A question contains `id`, `threadId`, `question`, `suggestions: [{id, text}]`, optional `recommendedSuggestionId`, and `createdAt`. Suggestions have stable identities so the answer preserves exactly which choices the user selected, alongside their free-form text.
 
@@ -50,8 +53,10 @@ A question contains `id`, `threadId`, `question`, `suggestions: [{id, text}]`, o
 
 Asking records durable, ordered question occurrences atomically with the questions and their ask receipt. `ThreadApi.questionEvents(after, limit)` pages this owner-local feed; accepted questions are suppressed but still advance the cursor. Remote projects it into the existing `/v1/notifications` and stream feed, with `kind: "question"` and `body` containing the prompt, using a separate durable cursor per thread owner. Projection retries do not duplicate notices. Pending questions recovered from before this feed was introduced are seeded once.
 
-Browser and Android use their existing notification permission and delivery channel. Another thread's question shows a clickable foreground toast, or a private system notification while backgrounded; the visible thread is suppressed because its card is already up. Android polls every permitted environment every 30 seconds in the background and consumes the selected environment's stream immediately in the foreground. Tapping opens that person/environment/thread with the question composer visible. Worker questions notify too, unlike worker completion notices. A completion while questions remain pending does not overwrite the question alert with an idle notice.
+Browser and Android use their existing notification permission and delivery channel. Another thread's question shows a clickable foreground toast, or a private system notification while backgrounded; the visible thread is suppressed because its card is already up. Android polls every permitted environment every 30 seconds in the background and consumes the selected environment's stream immediately in the foreground. Tapping opens that person/environment/thread with the question composer visible. Background-agent questions notify too. Ordinary completion notices follow foreground placement. A completion while questions remain pending does not overwrite the question alert with an idle notice.
 
-The native notification payload and channel presentation changed, so Android needs a new APK, not only a web-bundle update. Build and publish through the existing Android publication workflow; no separate question channel or push credentials are required.
+The persistent **Notifications** tab retains attention and question records after a toast or native alert disappears. **Needs you** resolves each question receipt against its original owner's pending questions; answered or dismissed questions move to **History**. An unavailable owner preserves the record with a status error. Opening a record opens/promotes the original agent under Chats without restarting cancelled work. `GET /v1/notifications?history=1&before=N` pages the existing durable ledger independently of notification replay cursors; see [state and presentation](state-machine.md#notifications).
+
+The unified UI uses the same native notification payload and channel, so these UI changes can ship as a shared web-bundle update. No separate question channel or push credentials are required.
 
 The design follows Codex CLI's immediate acknowledgement/new-user-message contract, inspected at upstream commit `e07e58c8429019de78b138d7138deaaf7f3ef22c`. Pi Stack deliberately differs by retaining pending questions beyond a turn, allowing multiple selections together with text, and marking a recommendation explicitly rather than deriving it from option order.

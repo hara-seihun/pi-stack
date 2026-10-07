@@ -1,10 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, useSyncExternalStore } from "react";
 import { API } from "../../../../server/api";
 import { piFetch } from "../../client";
 import { Markdown } from "../../context";
 import { fileKind, type FileKind } from "./file-kind";
+import { FileEditor, MAX_EDIT_BYTES } from "./file-editor";
+import { fileDrafts, fileDraftScope } from "./file-editor-drafts";
 
-const MAX_TEXT_BYTES = 1_048_576;
+const MAX_TEXT_BYTES = MAX_EDIT_BYTES;
+
+export interface FilePreviewHandle {
+  canLeave(): boolean;
+}
 
 type FileDetails = { size: number | null; contentType: string; kind: FileKind };
 
@@ -43,7 +49,40 @@ function MarkdownView({ source }: { source: string }) {
   return <Markdown source={source} sessionId="" className="markdown-body file-preview-markdown" />;
 }
 
-export function FilePreview({ path, onAttach }: FilePreviewProps) {
+export const FilePreview = forwardRef<FilePreviewHandle, FilePreviewProps>(function FilePreview({ path, onAttach }, ref) {
+  const [editor] = useState(() => new FileEditor());
+  const editorState = useSyncExternalStore(editor.subscribe, editor.snapshot, editor.snapshot);
+  const activeEditor = editorState.path === path ? editorState : null;
+  const editing = activeEditor?.phase === "editing" ? activeEditor : null;
+  const dirty = !!editing && editing.draft !== editing.document.content;
+
+  useEffect(() => {
+    const scope = fileDraftScope();
+    const person = window.PiRemotePerson.get();
+    editor.activate(path, fileDrafts.take(scope, path));
+    return () => {
+      if (person === window.PiRemotePerson.get() && window.PiRemotePerson.session()) fileDrafts.keep(scope, editor.snapshot());
+      editor.dispose();
+    };
+  }, [editor, path]);
+
+  useImperativeHandle(ref, () => ({ canLeave() {
+    const state = editor.snapshot();
+    if (state.phase === "editing" && state.busy) {
+      window.alert("Wait for the file operation to finish before leaving.");
+      return false;
+    }
+    if (editor.dirty() && !window.confirm("Discard your unsaved file changes?")) return false;
+    editor.cancel();
+    return true;
+  } }), [editor]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   const [details, setDetails] = useState<FileDetails | null>(null);
   const [source, setSource] = useState("");
   const [truncated, setTruncated] = useState(false);
@@ -86,25 +125,40 @@ export function FilePreview({ path, onAttach }: FilePreviewProps) {
     return () => controller.abort();
   }, [path]);
 
+  const documentSize = useMemo(() => activeEditor?.document ? new TextEncoder().encode(activeEditor.document.content).length : null, [activeEditor?.document]);
+
   if (!path) return <section className="file-preview-empty" aria-label="File preview">Select a file to preview it.</section>;
   const name = fileName(path);
   const kind = details?.kind;
+  const visibleSource = activeEditor?.document?.content ?? source;
+  const editable = (kind === "text" || kind === "markdown") && (details?.size === null || (details?.size ?? Infinity) <= MAX_EDIT_BYTES);
   return <section className="file-preview" aria-label={`Preview ${name}`}>
     <header className="file-preview-header">
-      <div className="file-preview-title"><strong title={name}>{name}</strong><span>{details ? formatSize(details.size) : error ? null : "Loading…"}</span></div>
+      <div className="file-preview-title"><strong title={name}>{name}</strong><span>{details ? formatSize(documentSize ?? details.size) : error ? null : "Loading…"}</span></div>
       <div className="file-preview-actions">
+        {editable && !editing && <button type="button" disabled={activeEditor?.phase === "loading"} onClick={() => void editor.begin()}>{activeEditor?.phase === "loading" ? "Opening editor…" : "Edit"}</button>}
+        {editing && <>
+          <button type="button" disabled={!dirty || !!editing.busy || !!editing.problem?.conflict} onClick={() => void editor.save()}>{editing.busy === "save" ? "Saving…" : "Save"}</button>
+          <button type="button" disabled={!!editing.busy} onClick={() => { if (!dirty || window.confirm("Discard your unsaved file changes?")) editor.cancel(); }}>Cancel</button>
+        </>}
         <a className="file-button" href={downloadPath(path)} download={name}>Download</a>
         <button type="button" onClick={() => void navigator.clipboard.writeText(path).catch(cause => setError(cause instanceof Error ? cause.message : "Could not copy path"))}>Copy path</button>
         {onAttach && <button type="button" onClick={() => onAttach(path)}>Attach</button>}
       </div>
     </header>
     {error && <div className="file-preview-error" role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)} aria-label="Dismiss error">Dismiss</button></div>}
-    {kind === "markdown" && <><div className="file-preview-options"><button type="button" onClick={() => setSourceMode(value => !value)} aria-pressed={sourceMode}>{sourceMode ? "Show rendered" : "Show source"}</button></div>{sourceMode ? <TextView source={source} truncated={truncated} /> : <MarkdownView source={source} />}</>}
-    {kind === "text" && <TextView source={source} truncated={truncated} />}
+    {activeEditor?.problem && <div className="file-preview-error" role="alert"><span>{activeEditor.problem.conflict ? "This file changed on disk. Your draft is kept. Reload to use the latest version; reloading discards your draft. " : ""}{activeEditor.problem.error}</span></div>}
+    {editing ? <section className="file-editor" aria-label="File editor">
+      <div className="file-preview-options"><span role="status">{editing.busy === "reload" ? "Reloading…" : dirty ? "Unsaved changes" : "No changes"}</span><button type="button" disabled={!!editing.busy} onClick={() => { if (!dirty || window.confirm("Reload from disk and discard your unsaved changes?")) void editor.reload(); }}>Reload from disk</button></div>
+      <textarea aria-label={`Edit ${name}`} autoFocus spellCheck={false} autoCapitalize="off" autoCorrect="off" value={editing.draft} disabled={!!editing.busy} onChange={event => editor.change(event.target.value)} />
+    </section> : <>
+      {kind === "markdown" && <><div className="file-preview-options"><button type="button" onClick={() => setSourceMode(value => !value)} aria-pressed={sourceMode}>{sourceMode ? "Show rendered" : "Show source"}</button></div>{sourceMode ? <TextView source={visibleSource} truncated={!activeEditor?.document && truncated} /> : <MarkdownView source={visibleSource} />}</>}
+      {kind === "text" && <TextView source={visibleSource} truncated={!activeEditor?.document && truncated} />}
+    </>}
     {kind === "image" && <div className={`file-preview-image${naturalImage ? " natural" : ""}`}><img src={downloadPath(path)} alt={name} onClick={() => setNaturalImage(value => !value)} title="Tap for natural size" /></div>}
     {kind === "audio" && <audio className="file-preview-audio" controls preload="metadata" src={downloadPath(path)} aria-label={name} />}
     {kind === "video" && <video className="file-preview-video" controls preload="metadata" playsInline src={downloadPath(path)} aria-label={name} />}
     {kind === "pdf" && <iframe className="file-preview-pdf" title={name} src={downloadPath(path, true)} />}
     {kind === "binary" && <p className="file-preview-binary">No preview is available for this file type.</p>}
   </section>;
-}
+});

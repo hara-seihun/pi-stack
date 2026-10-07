@@ -4,17 +4,32 @@ import { CopyButton } from "../../chat-message";
 import type { QueuedMessage } from "../../types";
 import { DELIVERY_LABELS, type QueueAction } from "./delivery";
 import "./queue.css";
+import { assertNever, requireState } from "../../../../shared/explicit-state";
 
 export type { QueueAction };
 
-function deliveryLabel(delivery: string) { return DELIVERY_LABELS[delivery]?.label ?? delivery; }
+function deliveryLabel(delivery: string) { return DELIVERY_LABELS[requireState(delivery, { queue: true, steer: true, hardSteer: true }, "Queue delivery")]!.label; }
 
-export function queueMessageStatus(message: Pick<QueuedMessage, "state" | "delivery">, held: boolean): string {
-  if (message.state === "dispatched") return "Sent to agent";
-  if (held) return "Held until resumed";
-  if (message.delivery === "steer") return "Steering after current tool calls";
-  if (message.delivery === "hardSteer") return "Interrupting current work";
-  return "Queued for after completion";
+export function queueMessageStatus(message: Pick<QueuedMessage, "state" | "delivery" | "acknowledgement">, held: boolean): string {
+  const delivery = requireState(message.delivery, { queue: true, steer: true, hardSteer: true }, "Queue delivery");
+  switch (message.state) {
+    case "dispatched":
+      switch (message.acknowledgement) {
+        case "unconfirmed": return "Acknowledgement unconfirmed — not resent";
+        case "pending": return "Awaiting agent acknowledgement";
+        case undefined: return "Sent to agent";
+      }
+      return assertNever(message.acknowledgement, "Queue acknowledgement");
+    case "queued":
+      if (held) return "Held until resumed";
+      switch (delivery) {
+        case "steer": return "Steering after current tool calls";
+        case "hardSteer": return "Interrupting current work";
+        case "queue": return "Queued for after completion";
+      }
+      return assertNever(delivery, "Queue delivery");
+  }
+  return assertNever(message.state, "Queue state");
 }
 
 export function QueueSheet({ open, messages, held, pending, onClose, onAction }: {

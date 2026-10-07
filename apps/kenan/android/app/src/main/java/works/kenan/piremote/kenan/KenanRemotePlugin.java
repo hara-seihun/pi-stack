@@ -38,6 +38,7 @@ import java.util.concurrent.Executors;
 public final class KenanRemotePlugin extends Plugin {
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean installingUpdate = new AtomicBoolean();
+    private final AtomicBoolean requestingPhoneAccess = new AtomicBoolean();
     private AppUpdates appUpdates;
     private WebBundles webBundles;
 
@@ -87,58 +88,75 @@ public final class KenanRemotePlugin extends Plugin {
         } catch (IllegalArgumentException failure) { call.reject(failure.getMessage(), failure); }
     }
 
+    static boolean granted(PermissionState state) {
+        return switch (state) {
+            case GRANTED -> true;
+            case DENIED, PROMPT, PROMPT_WITH_RATIONALE -> false;
+        };
+    }
+
+    static boolean requiresPhoneSettings(PermissionState state) {
+        return switch (state) {
+            case GRANTED, DENIED -> true;
+            case PROMPT, PROMPT_WITH_RATIONALE -> false;
+        };
+    }
+
     @PluginMethod
     public void writeStatus(PluginCall call) {
-        android.view.accessibility.AccessibilityManager manager =
-            (android.view.accessibility.AccessibilityManager) getContext().getSystemService(android.content.Context.ACCESSIBILITY_SERVICE);
-        boolean accessibility = false;
-        for (android.accessibilityservice.AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(
-            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
-            if (info.getResolveInfo().serviceInfo.packageName.equals(getContext().getPackageName())
-                && info.getResolveInfo().serviceInfo.name.equals(WriteAccessibilityService.class.getName())) accessibility = true;
-        }
         call.resolve(new JSObject()
-            .put("microphone", getPermissionState("microphone") == PermissionState.GRANTED)
-            .put("notification", Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED)
+            .put("microphone", granted(getPermissionState("microphone")))
+            .put("notification", NativeAccess.notifications(getContext()))
             .put("overlay", Settings.canDrawOverlays(getContext()))
-            .put("accessibility", accessibility)
+            .put("accessibility", NativeAccess.accessibility(getContext(), WriteAccessibilityService.class))
             .put("battery", ((android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE))
                 .isIgnoringBatteryOptimizations(getContext().getPackageName()))
-            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true)));
+            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true))
+            .put("overlayEnabled", getContext().getSharedPreferences("write-settings", 0).getBoolean("overlayEnabled", true)));
     }
 
     @PluginMethod
     public void writeSetup(PluginCall call) {
-        String step = call.getString("step", "");
-        switch (step) {
-            case "microphone" -> {
-                if (getPermissionState("microphone") == PermissionState.GRANTED) call.resolve();
+        NativeState.WriteSetup step;
+        try { step = NativeState.require(NativeState.WriteSetup.class, call.getString("step", "")); }
+        catch (IllegalArgumentException invalid) { call.reject(invalid.getMessage(), "invalid_args"); return; }
+        Runnable setup = switch (step) {
+            case MICROPHONE -> () -> {
+                if (granted(getPermissionState("microphone"))) call.resolve();
                 else requestPermissionForAlias("microphone", call, "writeMicrophonePermission");
-            }
-            case "notification" -> {
-                if (Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED) call.resolve();
+            };
+            case NOTIFICATION -> () -> {
+                if (Build.VERSION.SDK_INT < 33 || granted(getPermissionState("notifications"))) call.resolve();
                 else requestPermissionForAlias("notifications", call, "writeMicrophonePermission");
-            }
-            case "overlay" -> {
+            };
+            case OVERLAY -> () -> {
                 getContext().startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                     Uri.parse("package:" + getContext().getPackageName())).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                 call.resolve();
-            }
-            case "accessibility" -> {
+            };
+            case ACCESSIBILITY -> () -> {
                 getContext().startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                 call.resolve();
-            }
-            case "battery" -> {
+            };
+            case BATTERY -> () -> {
                 getContext().startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                 call.resolve();
-            }
-            case "keyboard" -> {
+            };
+            case ENABLED -> () -> {
+                Object enabled = call.getData().opt("enabled");
+                if (!(enabled instanceof Boolean)) { call.reject("Write enabled must be a boolean"); return; }
+                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("overlayEnabled", (Boolean) enabled).apply();
+                WriteAccessibilityService.settingsChanged();
+                call.resolve();
+            };
+            case KEYBOARD -> () -> {
                 boolean required = Boolean.TRUE.equals(call.getBoolean("required", true));
                 getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", required).apply();
+                WriteAccessibilityService.settingsChanged();
                 call.resolve();
-            }
-            default -> call.reject("Unknown Write setup step");
-        }
+            };
+        };
+        setup.run();
     }
 
     @PermissionCallback
@@ -208,51 +226,86 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PluginMethod
     public void phoneSetup(PluginCall call) {
-        String step = call.getString("step", "");
+        NativeState.PhoneSetup parsed;
+        try { parsed = NativeState.require(NativeState.PhoneSetup.class, call.getString("step", "")); }
+        catch (IllegalArgumentException invalid) { call.reject(invalid.getMessage(), "invalid_args"); return; }
+        String step = parsed.wire();
+        if (!requestingPhoneAccess.compareAndSet(false, true)) {
+            call.reject("Return from the current phone access request first", "busy"); return;
+        }
         try {
-            switch (step) {
-                case "contacts", "calendar", "location", "backgroundLocation", "sms", "callLog", "phone", "camera", "microphone", "notifications" -> {
-                    if (step.equals("notifications") && Build.VERSION.SDK_INT < 33
-                        || step.equals("backgroundLocation") && Build.VERSION.SDK_INT < 29) { phoneStatus(call); return; }
+            if (PhoneControlService.capabilities(getContext()).optBoolean(step)) {
+                finishPhoneAccess(call); return;
+            }
+            Runnable setup = switch (parsed) {
+                case CONTACTS, CALENDAR, LOCATION, BACKGROUND_LOCATION, SMS, CALL_LOG, PHONE, CAMERA, MICROPHONE, NOTIFICATIONS -> () -> {
+                    if (step.equals("notifications") && Build.VERSION.SDK_INT < 33) {
+                        openPhoneSettings(call, new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName())); return;
+                    }
+                    if (step.equals("backgroundLocation") && Build.VERSION.SDK_INT < 29) { finishPhoneAccess(call); return; }
                     if (step.equals("backgroundLocation")) {
                         boolean locationGranted = androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_COARSE_LOCATION)
                             == android.content.pm.PackageManager.PERMISSION_GRANTED
                             || androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_FINE_LOCATION)
                             == android.content.pm.PackageManager.PERMISSION_GRANTED;
-                        if (!locationGranted) { call.reject("Approve location before background location", "permission_denied"); return; }
-                        if (Build.VERSION.SDK_INT >= 30 && getPermissionState("backgroundLocation") != PermissionState.GRANTED) {
-                            openPhoneSettings(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                            call.resolve(new JSObject().put("opened", true).put("message", "Choose Permissions → Location → Allow all the time")); return;
+                        if (!locationGranted) { requestingPhoneAccess.set(false); call.reject("Approve location before background location", "permission_denied"); return; }
+                        if (Build.VERSION.SDK_INT >= 30 && !granted(getPermissionState("backgroundLocation"))) {
+                            openPhoneSettings(call, new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName()))); return;
                         }
                     }
-                    if (getPermissionState(step) == PermissionState.GRANTED) phoneStatus(call);
-                    else requestPermissionForAlias(step, call, "phonePermission");
+                    if (requiresPhoneSettings(getPermissionState(step))) {
+                        openPhoneSettings(call, new Intent(step.equals("notifications") ? Settings.ACTION_APP_NOTIFICATION_SETTINGS : Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            step.equals("notifications") ? null : Uri.parse("package:" + getContext().getPackageName()))
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName()));
+                    } else requestPermissionForAlias(step, call, "phonePermission");
                     return;
-                }
-                case "accessibility" -> openPhoneSettings(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                case "notificationAccess" -> openPhoneSettings(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
-                case "battery" -> openPhoneSettings(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                };
+                case ACCESSIBILITY, WRITE_ACCESSIBILITY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .putExtra(Intent.EXTRA_COMPONENT_NAME, new android.content.ComponentName(getContext(),
+                        step.equals("writeAccessibility") ? WriteAccessibilityService.class : PhoneAccessibilityService.class).flattenToString()));
+                case NOTIFICATION_ACCESS -> () -> openPhoneSettings(call, new Intent(Build.VERSION.SDK_INT >= 30 ? Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS : Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneNotificationService.class).flattenToString()));
+                case OVERLAY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                     Uri.parse("package:" + getContext().getPackageName())));
-                case "allFiles" -> {
-                    if (Build.VERSION.SDK_INT < 30) { call.reject("All-files access requires Android 11 or newer; app-owned files remain available", "unsupported"); return; }
-                    openPhoneSettings(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getContext().getPackageName())));
-                }
-                case "usage" -> openPhoneSettings(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                case "writeSettings" -> openPhoneSettings(new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                case "deviceAdmin" -> openPhoneSettings(new Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                case BATTERY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getContext().getPackageName())));
+                case ALL_FILES -> () -> {
+                    if (Build.VERSION.SDK_INT < 30) { requestingPhoneAccess.set(false); call.reject("All-files access requires Android 11 or newer; app-owned files remain available", "unsupported"); return; }
+                    openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getContext().getPackageName())));
+                };
+                case USAGE -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                case WRITE_SETTINGS -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+                case INSTALL_PACKAGES -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getContext().getPackageName())));
+                case DEVICE_ADMIN -> () -> openPhoneSettings(call, new Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
                     .putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, new android.content.ComponentName(getContext(), PhoneAdminReceiver.class))
                     .putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Optional remote screen locking. Factory reset requires separate Device Owner provisioning, not this grant."));
-                case "deviceOwner" -> { call.reject("Device Owner requires separate Android enterprise provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
-                case "secureSettings" -> { call.reject("Secure settings requires an optional shell grant or system provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; }
-                default -> { call.reject("Unknown phone setup step", "invalid_args"); return; }
-            }
-            call.resolve(new JSObject().put("opened", true));
-        } catch (Exception failure) { call.reject("Could not open phone setup: " + failure.getMessage(), "unavailable", failure); }
+                case DEVICE_OWNER -> () -> { requestingPhoneAccess.set(false); call.reject("Device Owner requires separate Android enterprise provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; };
+                case SECURE_SETTINGS -> () -> { requestingPhoneAccess.set(false); call.reject("Secure settings requires an optional shell grant or system provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; };
+            };
+            setup.run();
+        } catch (Exception failure) { requestingPhoneAccess.set(false); call.reject("Could not open phone setup: " + failure.getMessage(), "unavailable", failure); }
     }
 
-    private void openPhoneSettings(Intent intent) { getActivity().startActivity(intent); }
+    private void openPhoneSettings(PluginCall call, Intent intent) {
+        startActivityForResult(call, intent, "phoneSettingsReturned");
+        String instruction = call.getString("instruction", "");
+        if (!instruction.isBlank()) android.widget.Toast.makeText(getContext(),
+            instruction.substring(0, Math.min(instruction.length(), 240)), android.widget.Toast.LENGTH_LONG).show();
+    }
+    @ActivityCallback
+    private void phoneSettingsReturned(PluginCall call, ActivityResult result) {
+        if (call != null) finishPhoneAccess(call);
+        else requestingPhoneAccess.set(false);
+    }
+    private void finishPhoneAccess(PluginCall call) {
+        requestingPhoneAccess.set(false);
+        PhoneControlService.refresh();
+        phoneStatus(call);
+    }
     @PermissionCallback
-    private void phonePermission(PluginCall call) { PhoneControlService.refresh(); phoneStatus(call); }
+    private void phonePermission(PluginCall call) { finishPhoneAccess(call); }
 
     @PluginMethod
     public void checkAppUpdate(PluginCall call) {
@@ -261,7 +314,7 @@ public final class KenanRemotePlugin extends Plugin {
                 AppUpdates.Update update = appUpdates.check(webBundles);
                 call.resolve(checkResult(update));
                 // Fetch a web bundle in the background so applying it, or the next cold start, is immediate.
-                if (update != null && update.kind.equals("web") && webBundles.installed(update.revision) == null) {
+                if (update != null && update.kind == NativeState.UpdateKind.WEB && webBundles.installed(update.revision) == null) {
                     try { appUpdates.stageWeb(webBundles); } catch (Exception ignored) { }
                 }
             } catch (Exception failure) {
@@ -283,8 +336,8 @@ public final class KenanRemotePlugin extends Plugin {
                 .put("builtIn", active == null));
         JSObject result = new JSObject().put("installed", installed);
         result.put("update", update == null ? org.json.JSONObject.NULL : new JSObject()
-            .put("kind", update.kind).put("revision", update.revision).put("versionCode", update.versionCode)
-            .put("ready", update.kind.equals("web") && webBundles.installed(update.revision) != null));
+            .put("kind", update.kind.wire()).put("revision", update.revision).put("versionCode", update.versionCode)
+            .put("ready", update.kind == NativeState.UpdateKind.WEB && webBundles.installed(update.revision) != null));
         return result;
     }
 
@@ -305,26 +358,31 @@ public final class KenanRemotePlugin extends Plugin {
         updateExecutor.execute(() -> {
             try {
                 AppUpdates.Update update = appUpdates.check(webBundles);
-                if (update != null && update.kind.equals("web")) {
-                    WebBundles.Installed bundle = appUpdates.stageWeb(webBundles);
-                    getActivity().runOnUiThread(() -> {
-                        installingUpdate.set(false);
-                        call.resolve(new JSObject().put("status", "reloading").put("revision", bundle.revision));
-                        ((MainActivity) getActivity()).serveWebBundle(webBundles.activate());
-                    });
-                    return;
-                }
-                File apk = appUpdates.downloadCurrent();
-                call.getData().put("updateRevision", apk.getName().replace(".apk", ""));
-                getActivity().runOnUiThread(() -> {
-                    try {
-                        if (Build.VERSION.SDK_INT >= 26 && !getContext().getPackageManager().canRequestPackageInstalls()) {
-                            Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                Uri.parse("package:" + getContext().getPackageName()));
-                            startActivityForResult(call, settings, "appInstallPermission");
-                        } else openAppInstaller(call, apk);
-                    } catch (Exception failure) { failAppInstall(call, failure); }
-                });
+                if (update == null) { installingUpdate.set(false); call.reject("No app update is available"); return; }
+                NativeState.Action install = switch (update.kind) {
+                    case WEB -> () -> {
+                        WebBundles.Installed bundle = appUpdates.stageWeb(webBundles);
+                        getActivity().runOnUiThread(() -> {
+                            installingUpdate.set(false);
+                            call.resolve(new JSObject().put("status", "reloading").put("revision", bundle.revision));
+                            ((MainActivity) getActivity()).serveWebBundle(webBundles.activate());
+                        });
+                    };
+                    case APK -> () -> {
+                        File apk = appUpdates.downloadCurrent();
+                        call.getData().put("updateRevision", apk.getName().replace(".apk", ""));
+                        getActivity().runOnUiThread(() -> {
+                            try {
+                                if (Build.VERSION.SDK_INT >= 26 && !getContext().getPackageManager().canRequestPackageInstalls()) {
+                                    Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                        Uri.parse("package:" + getContext().getPackageName()));
+                                    startActivityForResult(call, settings, "appInstallPermission");
+                                } else openAppInstaller(call, apk);
+                            } catch (Exception failure) { failAppInstall(call, failure); }
+                        });
+                    };
+                };
+                install.run();
             } catch (Exception failure) { failAppInstall(call, failure); }
         });
     }
@@ -364,9 +422,14 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PluginMethod
     public void haptic(PluginCall call) {
-        String kind = call.getString("kind", "select");
+        if (call.getData().has("kind") && !(call.getData().opt("kind") instanceof String)) {
+            call.reject("Haptic kind must be a string", "invalid_args"); return;
+        }
+        NativeState.Haptic kind;
+        try { kind = NativeState.require(NativeState.Haptic.class, call.getString("kind", "select")); }
+        catch (IllegalArgumentException invalid) { call.reject(invalid.getMessage(), "invalid_args"); return; }
         getActivity().runOnUiThread(() -> {
-            boolean played = NativeHaptics.play(getActivity().getWindow().getDecorView(), kind);
+            boolean played = NativeHaptics.play(getActivity().getWindow().getDecorView(), kind.wire());
             call.resolve(new JSObject().put("played", played));
         });
     }
@@ -382,7 +445,7 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PluginMethod
     public void notifications(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= 33 && getPermissionState("notifications") != PermissionState.GRANTED) {
+        if (Build.VERSION.SDK_INT >= 33 && !granted(getPermissionState("notifications"))) {
             getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", false).apply();
             getContext().stopService(new Intent(getContext(), IdleNotificationService.class));
             if (Boolean.TRUE.equals(call.getBoolean("request", false))) {
@@ -395,7 +458,7 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PermissionCallback
     private void notificationPermission(PluginCall call) {
-        boolean granted = Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED;
+        boolean granted = NativeAccess.notifications(getContext());
         boolean enabled = granted && NotificationIdentity.get(getContext()).current() != null;
         getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", enabled).apply();
         if (enabled) startNotifications();
@@ -408,13 +471,55 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void notificationCursor(PluginCall call) {
+        RemoteSession state = NotificationIdentity.get(getContext());
+        synchronized (state) {
+            if (!notificationCaller(call)) return;
+            long after = NotificationDelivery.cursor(getContext(), call.getString("environment"));
+            call.resolve(new JSObject().put("after", after < 0 ? org.json.JSONObject.NULL : after));
+        }
+    }
+
+    @PluginMethod
+    public void notificationLease(PluginCall call) {
+        RemoteSession state = NotificationIdentity.get(getContext());
+        synchronized (state) {
+            if (!notificationCaller(call)) return;
+            String environment = call.getString("environment");
+            String requested = call.getString("state");
+            long after = NotificationDelivery.cursor(getContext(), environment);
+            boolean accepted;
+            if ("healthy".equals(requested)) {
+                accepted = getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
+                    && NativeAccess.notifications(getContext()) && NotificationFeedLease.renew(state.current(), environment, after, android.os.SystemClock.elapsedRealtime());
+                if (!accepted) NotificationFeedLease.release(environment);
+            } else if ("released".equals(requested)) {
+                NotificationFeedLease.release(environment);
+                IdleNotificationService.requestPoll();
+                accepted = false;
+            } else { call.reject("Unknown notification lease state", "invalid_args"); return; }
+            call.resolve(new JSObject().put("accepted", accepted).put("after", after < 0 ? org.json.JSONObject.NULL : after));
+        }
+    }
+
+    private boolean notificationCaller(PluginCall call) {
+        RemoteSession.Identity identity = NotificationIdentity.get(getContext()).current();
+        String environment = call.getString("environment");
+        if (identity == null || !identity.user.equals(call.getString("user")) || !identity.session.equals(call.getString("session"))) {
+            call.reject("Notification session changed", "session_expired"); return false;
+        }
+        if (environment == null || environment.isBlank()) { call.reject("Notification environment is required", "invalid_args"); return false; }
+        return true;
+    }
+
+    @PluginMethod
     public void notificationFeed(PluginCall call) {
         RemoteSession state = NotificationIdentity.get(getContext());
         synchronized (state) {
+            if (!notificationCaller(call)) return;
             RemoteSession.Identity identity = state.current();
-            if (identity == null || !identity.user.equals(call.getString("user", ""))
-                || !getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
-                || !androidx.core.app.NotificationManagerCompat.from(getContext()).areNotificationsEnabled()) {
+            if (!getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)
+                || !NativeAccess.notifications(getContext())) {
                 call.resolve();
                 return;
             }
@@ -423,8 +528,24 @@ public final class KenanRemotePlugin extends Plugin {
                 String name = call.getString("name", "");
                 org.json.JSONObject feed = call.getObject("feed");
                 if (environment.isBlank() || name.isBlank() || feed == null) throw new IllegalArgumentException("Invalid notification feed");
-                NotificationDelivery.receive(getContext(), identity, environment, name, feed, true);
-                call.resolve();
+                boolean replay = Boolean.TRUE.equals(call.getBoolean("replay"));
+                if (replay) {
+                    long cursor = NotificationDelivery.cursor(getContext(), environment);
+                    Object supplied = call.getData().opt("after");
+                    if (supplied != org.json.JSONObject.NULL && (!(supplied instanceof Number)
+                        || ((Number) supplied).doubleValue() != ((Number) supplied).longValue())) {
+                        call.reject("Replay after must be an integer cursor or null", "invalid_args"); return;
+                    }
+                    Long origin = supplied == org.json.JSONObject.NULL ? null : ((Number) supplied).longValue();
+                    if (!NotificationSequence.canReplay(cursor, origin, feed.getLong("cursor"))) {
+                        NotificationFeedLease.release(environment);
+                        call.reject("Replay must begin at or before the native cursor", "notification_gap");
+                        return;
+                    }
+                }
+                NotificationDelivery.receive(getContext(), identity, environment, name, feed, !replay);
+                long after = NotificationDelivery.cursor(getContext(), environment);
+                call.resolve(new JSObject().put("after", after < 0 ? org.json.JSONObject.NULL : after));
             } catch (Exception failure) { call.reject("Could not deliver notification feed: " + failure.getMessage(), failure); }
         }
     }

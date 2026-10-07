@@ -21,7 +21,8 @@ export function recordModelUsage(store:Store,account:string,model:string,usage:U
 export default function usageLogger(pi:ExtensionAPI):void{
   let store:Store|undefined,lastLog=0;const open=()=>store??=Store.open(defaultLedgerPath());
   const guard=(action:()=>void)=>{try{action();}catch(error){if(Date.now()-lastLog>60_000){lastLog=Date.now();console.error(`pi-orchestrator usage: ${String(error)}`);}}};
-  if(environment().PI_ORCHESTRATOR_CORE_USAGE!=="worker")pi.on("message_end",async(event,ctx)=>{
+  const env=environment();
+  if(env.PI_THREAD_USAGE!=="service"&&env.PI_ORCHESTRATOR_CORE_USAGE!=="worker")pi.on("message_end",async(event,ctx)=>{
     const message=event.message as any;
     if(message.role!=="assistant"||!message.usage)return;
     guard(()=>recordModelUsage(open(),message.provider,message.model,message.usage,ctx.sessionManager.getSessionId()));

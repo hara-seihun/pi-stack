@@ -1,4 +1,6 @@
 import type { ContextEntry } from "../../types";
+import { assertNever } from "../../../../shared/explicit-state";
+import { outgoingAgentMessage } from "./agent-message";
 
 export interface WorkSummary {
   toolCalls: number;
@@ -13,19 +15,26 @@ export interface WorkSummary {
 export type TranscriptItem =
   | { kind: "user"; entry: ContextEntry }
   | { kind: "assistant"; entry: ContextEntry }
+  /** A thread_send or thread_spawn call, shown as the message this agent sent. */
+  | { kind: "outgoing"; entry: ContextEntry }
   | {
       kind: "work";
       key: string;
       entries: ContextEntry[];
       running: boolean;
       latest: ContextEntry;
+      live?: ContextEntry;
       summary: WorkSummary;
     };
 
-function visibleKind(entry: ContextEntry): "user" | "assistant" | undefined {
-  if (entry.kind === "user") return "user";
-  if (entry.kind === "assistant") return "assistant";
-  return undefined;
+function visibleKind(entry: ContextEntry): "user" | "assistant" | "outgoing" | undefined {
+  switch (entry.kind) {
+    case "user": return "user";
+    case "assistant": return "assistant";
+    case "toolCall": return outgoingAgentMessage(entry) ? "outgoing" : undefined;
+    case "system": case "tool": case "thinking": case "notice": return undefined;
+  }
+  return assertNever(entry.kind, "Transcript visible kind");
 }
 
 function isRunning(entry: ContextEntry) {
@@ -93,18 +102,29 @@ function workItem(key: string, entries: ContextEntry[]): Extract<TranscriptItem,
  * "Thinking…" step the person can open to subscribe.
  */
 export function buildTranscript(entries: ContextEntry[], liveThinking?: string, thinkingActive?: boolean): TranscriptItem[] {
+  return appendLiveThinking(buildStableTranscript(entries), liveThinking, thinkingActive);
+}
+
+export function appendLiveThinking(items: TranscriptItem[], liveThinking?: string, thinkingActive?: boolean): TranscriptItem[] {
   const text = liveThinking?.trim() ? liveThinking : "";
-  const source = text || thinkingActive
-    ? [...entries, {
+  if (!text && !thinkingActive) return items;
+  const live = {
         key: "live-thinking",
-        signature: `live-thinking:${text.length}:${thinkingActive ? "active" : "idle"}`,
+        signature: `live-thinking:${text}:${thinkingActive ? "active" : "idle"}`,
         kind: "thinking",
         label: text ? "Thinking" : "Thinking…",
         text,
         streaming: true,
         live: true,
-      } satisfies ContextEntry]
-    : entries;
+      } satisfies ContextEntry;
+  const last = items.at(-1);
+  const work = last?.kind === "work"
+    ? { ...last, live, running: true, latest: live, summary: { ...last.summary, thinkingBlocks: last.summary.thinkingBlocks + 1 } }
+    : workItem(last ? `work-after:${last.entry.key}` : "work-after:start", [live]);
+  return [...(last?.kind === "work" ? items.slice(0, -1) : items), work];
+}
+
+export function buildStableTranscript(entries: ContextEntry[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let work: ContextEntry[] = [];
   let workKey = "work-after:start";
@@ -115,7 +135,7 @@ export function buildTranscript(entries: ContextEntry[], liveThinking?: string, 
     work = [];
   };
 
-  for (const entry of source) {
+  for (const entry of entries) {
     const kind = visibleKind(entry);
     if (!kind) {
       work.push(entry);

@@ -27,6 +27,8 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
   const sessions = new Map<string, string>();
   let issued = 0;
   let wrongCloud = false;
+  let healthFailure = true;
+  let writeEnvironmentGate: (() => Promise<void>) | null = null;
   const synced: Array<{ user: string; session: string }> = [];
   const publicIngress = process.env.PI_ROUTER_TEST_CASE === "android-public";
   let accessVersion = 1;
@@ -36,6 +38,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
       if (rejectAccess) { rejectAccess = false; accessVersion++; }
       return { routerUrl: bootstrap, ...(publicIngress ? { accessToken: `cf-token-${accessVersion}` } : {}) };
     },
+    writeEnvironment: async () => { await writeEnvironmentGate?.(); },
     syncSession: async (identity: { user: string; session: string }) => {
       if (Boolean(identity.user) !== Boolean(identity.session)) throw new Error("Native rejects incomplete identity");
       synced.push(identity);
@@ -58,6 +61,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
       expect(request.redirect).toBe("manual");
       if (rejectAccess) return json({ error: "Access token expired" }, 403);
     }
+    if (path === "/v1/network") return json({ network: { name: "Household", loginServer: "https://mesh.test" }, connected: false });
     if (path === "/v1/app-update") return json({ release: { fileName: "current.apk" } });
     if (path === "/v1/environment" && !request.headers.has("x-pi-remote-session")) return json({ persons: [{ user: "sybil", requiresUnlock: true }, { user: "guest", requiresUnlock: false }] });
     if (path === "/v1/auth/session") return json({ error: "Account sign-in is not configured" }, 404);
@@ -71,7 +75,10 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     const user = sessions.get(request.headers.get("x-pi-remote-session") || "");
     if (!user) return json({ locked: true, persons: [] }, 423);
     if (hint !== user) return json({ error: "Conflicting person" }, 403);
-    if (path.endsWith("/health")) return json({ environmentId: path.startsWith("/v1/remotes/cloud/") && !wrongCloud ? "cloud" : "local" });
+    if (path.endsWith("/health")) {
+      if (healthFailure) { healthFailure = false; return json({ error: "Startup health unavailable" }, 503); }
+      return json({ environmentId: path.startsWith("/v1/remotes/cloud/") && !wrongCloud ? "cloud" : "local" });
+    }
     if (path === "/v1/environments") return json({ environments: [
       { id: "local", name: "Home", baseUrl: "", icon: "house" },
       ...(user === "sybil" ? [{ id: "cloud", name: "Cloud", baseUrl: "/v1/remotes/cloud", icon: "cloud" }] : []),
@@ -89,6 +96,13 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     let prompts = 0;
     client.registerUnlockHandler(async () => { prompts++; window.PiRemotePerson.set("sybil"); return "sybil-key"; });
     expect(calls).toHaveLength(0);
+    const network = await fetch("/v1/network");
+    expect(await network.json()).toMatchObject({ connected: false });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.path).toBe("/v1/network");
+    expect(calls[0]!.headers.has("x-pi-remote-session")).toBe(false);
+    expect(prompts).toBe(0);
+    await expect(client.piFetch("/v1/stream", { method: "POST", body: "{}" })).rejects.toThrow("health returned HTTP 503");
     await client.piFetch("/v1/stream", { method: "POST", body: "{}" });
     expect(prompts).toBe(1);
     expect(calls.some(call => call.path === "/v1/auth/session")).toBe(!nativePlatform);
@@ -99,9 +113,35 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     expect(calls[discovery]!.headers.get("x-pi-remote-session")).toBe("token-1");
     wrongCloud = true;
     await expect(window.KenanRemote!.select({ id: "cloud", user: "sybil" })).rejects.toThrow("identity mismatch");
-    expect((await window.KenanRemote!.getState()).id).toBe("local");
+    const localEndpoint = await window.KenanRemote!.getState();
+    expect(localEndpoint.id).toBe("local");
+    if (nativePlatform) {
+      let began!: () => void;
+      let release!: () => void;
+      const writing = new Promise<void>(resolve => { began = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      writeEnvironmentGate = async () => { began(); await gate; };
+      window.dispatchEvent(new Event("pi-auth"));
+      const stale = window.KenanRemote!.getState();
+      await writing;
+      window.dispatchEvent(new Event("pi-auth"));
+      release();
+      await expect(stale).rejects.toThrow("Identity changed during endpoint selection");
+      writeEnvironmentGate = null;
+      expect((await window.KenanRemote!.getState()).id).toBe("local");
+    }
     wrongCloud = false;
     await window.KenanRemote!.select({ id: "cloud", user: "sybil" });
+    const pinnedCalls = calls.length;
+    await expect(native.pinnedFetch(localEndpoint, "sybil", "/v1/sessions/pinned/prompt", { method: "POST", body: "{}" })).rejects.toThrow("Request owner changed");
+    expect(calls).toHaveLength(pinnedCalls);
+    const cloudEndpoint = await window.KenanRemote!.getState();
+    await expect(native.pinnedFetch(cloudEndpoint, "guest", "/v1/sessions/pinned/prompt", { method: "POST", body: "{}" })).rejects.toThrow("Request owner changed");
+    expect(calls).toHaveLength(pinnedCalls);
+    await native.pinnedFetch(cloudEndpoint, "sybil", "/v1/sessions/pinned/prompt", { method: "POST", body: JSON.stringify({ requestId: "retained" }) });
+    expect(calls.at(-1)!.path).toBe("/v1/remotes/cloud/v1/sessions/pinned/prompt");
+    expect(calls.at(-1)!.body).toEqual({ requestId: "retained" });
+    expect(calls.at(-1)!.headers.get("x-pi-remote-session")).toBe("token-1");
     const { beginRequest, inFlight, SLOW_REQUEST_MS } = await import("./src/in-flight");
     const diagnostic = new Promise<(typeof calls)[number]>(resolve => { reportResolve = resolve; });
     beginRequest("POST", "/v1/sessions/123?message=secret", performance.now() - SLOW_REQUEST_MS - 1)();
@@ -124,6 +164,11 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     await fetch("/v1/environment");
     expect(calls.at(-1)!.path).toBe("/v1/remotes/cloud/v1/environment");
     expect(calls.at(-1)!.headers.get("x-pi-remote-session")).toBe("token-1");
+    const networkCallCount = calls.length;
+    await fetch("/v1/network");
+    expect(calls).toHaveLength(networkCallCount + 1);
+    expect(calls.at(-1)!.path).toBe("/v1/network");
+    expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
     await native.fetchPersonChooser();
     expect(calls.at(-1)!.path).toBe("/v1/environment");
     expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);

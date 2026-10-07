@@ -1,18 +1,29 @@
 import { randomUUID } from "node:crypto";
+import { compactionRetryAt } from "./retry.mjs";
 
 export const ATTEMPT = "codex-compaction-attempt";
 export const IDLE_MS = 180_000;
 export const DEADLINE_MS = 600_000;
 
-export function blockedAttempt(branch, modelKey) {
+export function blockedAttempt(branch, modelKey, now = Date.now()) {
+  let latest, failures = 0;
   for (const entry of [...branch].reverse()) {
-    if (entry.type === "compaction") return;
-    if (entry.type === "custom" && entry.customType === ATTEMPT && entry.data?.modelKey === modelKey) {
-      // An unfinished request has no outcome to preserve. The next native
-      // compaction may safely retry it against the unchanged session context.
-      return entry.data.state === "started" ? undefined : entry.data;
-    }
+    if (entry.type === "compaction") break;
+    if (entry.type !== "custom" || entry.customType !== ATTEMPT || entry.data?.modelKey !== modelKey) continue;
+    // An unfinished request has no outcome to preserve. The next native
+    // compaction may safely retry it against the unchanged session context.
+    if (!latest && entry.data.state === "started") return;
+    if (entry.data.state === "started") continue;
+    if (entry.data.state !== "failed" && entry.data.state !== "cancelled") return {
+      kind: "invalid", state: entry.data.state,
+      error: `Unsupported stored compaction attempt state: ${String(entry.data.state)}`,
+    };
+    latest ??= entry;
+    failures++;
   }
+  if (!latest) return;
+  const retryAt = compactionRetryAt(Date.parse(latest.timestamp) || 0, failures);
+  return now < retryAt ? { ...latest.data, kind: "terminal", failures, retryAt } : undefined;
 }
 
 export function operationScope(parent, { idleMs = IDLE_MS, deadlineMs = DEADLINE_MS } = {}) {

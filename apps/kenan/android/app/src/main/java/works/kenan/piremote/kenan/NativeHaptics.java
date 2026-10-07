@@ -14,18 +14,18 @@ final class NativeHaptics {
     }
 
     static int feedbackConstant(String kind, int sdk) {
-        return switch (kind == null ? "select" : kind) {
-            case "press" -> HapticFeedbackConstants.VIRTUAL_KEY;
-            case "release" -> sdk >= 27
+        return switch (NativeState.require(NativeState.Haptic.class, kind == null ? "select" : kind)) {
+            case PRESS -> HapticFeedbackConstants.VIRTUAL_KEY;
+            case RELEASE -> sdk >= 27
                 ? HapticFeedbackConstants.KEYBOARD_RELEASE
                 : HapticFeedbackConstants.VIRTUAL_KEY;
-            case "confirm" -> sdk >= 30
+            case CONFIRM -> sdk >= 30
                 ? HapticFeedbackConstants.CONFIRM
                 : HapticFeedbackConstants.VIRTUAL_KEY;
-            case "reject" -> sdk >= 30
+            case REJECT -> sdk >= 30
                 ? HapticFeedbackConstants.REJECT
                 : HapticFeedbackConstants.LONG_PRESS;
-            default -> HapticFeedbackConstants.CLOCK_TICK;
+            case SELECT -> HapticFeedbackConstants.CLOCK_TICK;
         };
     }
 }

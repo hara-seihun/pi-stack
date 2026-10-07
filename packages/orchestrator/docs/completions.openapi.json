@@ -550,20 +550,192 @@
                       ],
                       "properties": {
                         "state": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "const": "failed"
+                          "type": "string",
+                          "const": "failed"
+                        },
+                        "error": {
+                          "type": "object",
+                          "required": [
+                            "code",
+                            "message"
+                          ],
+                          "properties": {
+                            "code": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "const": "invalid-request"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "unsupported-option"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "not-found"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "request-conflict"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "invalid-state"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "provider"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "authentication"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "cancelled"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "indeterminate"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "missing-provider-evidence"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "transport"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "protocol"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "rate-limited"
+                                }
+                              ]
                             },
-                            {
-                              "type": "string",
-                              "const": "cancelled"
+                            "message": {
+                              "type": "string"
                             },
-                            {
-                              "type": "string",
-                              "const": "indeterminate"
+                            "httpStatus": {
+                              "type": "integer",
+                              "minimum": 100,
+                              "maximum": 599
+                            },
+                            "retryAfterMs": {
+                              "type": "integer",
+                              "minimum": 0
                             }
-                          ]
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "error"
+                      ],
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "const": "cancelled"
+                        },
+                        "error": {
+                          "type": "object",
+                          "required": [
+                            "code",
+                            "message"
+                          ],
+                          "properties": {
+                            "code": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "const": "invalid-request"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "unsupported-option"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "not-found"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "request-conflict"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "invalid-state"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "provider"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "authentication"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "cancelled"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "indeterminate"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "missing-provider-evidence"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "transport"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "protocol"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "rate-limited"
+                                }
+                              ]
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "httpStatus": {
+                              "type": "integer",
+                              "minimum": 100,
+                              "maximum": 599
+                            },
+                            "retryAfterMs": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "error"
+                      ],
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "const": "indeterminate"
                         },
                         "error": {
                           "type": "object",
@@ -810,16 +982,59 @@
                 "minimum": 0
               },
               "state": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "const": "queued"
-                  },
-                  {
-                    "type": "string",
-                    "const": "running"
-                  }
-                ]
+                "type": "string",
+                "const": "queued"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "runId",
+              "model",
+              "createdAt",
+              "updatedAt",
+              "state"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string",
+                "const": "luna"
+              },
+              "metadata": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {}
+                }
+              },
+              "createdAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updatedAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "attemptCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "retryAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "state": {
+                "type": "string",
+                "const": "running"
               }
             },
             "additionalProperties": false
@@ -1002,20 +1217,268 @@
                 "minimum": 0
               },
               "state": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "const": "failed"
+                "type": "string",
+                "const": "failed"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "invalid-request"
+                      },
+                      {
+                        "type": "string",
+                        "const": "unsupported-option"
+                      },
+                      {
+                        "type": "string",
+                        "const": "not-found"
+                      },
+                      {
+                        "type": "string",
+                        "const": "request-conflict"
+                      },
+                      {
+                        "type": "string",
+                        "const": "invalid-state"
+                      },
+                      {
+                        "type": "string",
+                        "const": "provider"
+                      },
+                      {
+                        "type": "string",
+                        "const": "authentication"
+                      },
+                      {
+                        "type": "string",
+                        "const": "cancelled"
+                      },
+                      {
+                        "type": "string",
+                        "const": "indeterminate"
+                      },
+                      {
+                        "type": "string",
+                        "const": "missing-provider-evidence"
+                      },
+                      {
+                        "type": "string",
+                        "const": "transport"
+                      },
+                      {
+                        "type": "string",
+                        "const": "protocol"
+                      },
+                      {
+                        "type": "string",
+                        "const": "rate-limited"
+                      }
+                    ]
                   },
-                  {
-                    "type": "string",
-                    "const": "cancelled"
+                  "message": {
+                    "type": "string"
                   },
-                  {
-                    "type": "string",
-                    "const": "indeterminate"
+                  "httpStatus": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 599
+                  },
+                  "retryAfterMs": {
+                    "type": "integer",
+                    "minimum": 0
                   }
-                ]
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "runId",
+              "model",
+              "createdAt",
+              "updatedAt",
+              "state",
+              "error"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string",
+                "const": "luna"
+              },
+              "metadata": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {}
+                }
+              },
+              "createdAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updatedAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "attemptCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "retryAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "state": {
+                "type": "string",
+                "const": "cancelled"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "invalid-request"
+                      },
+                      {
+                        "type": "string",
+                        "const": "unsupported-option"
+                      },
+                      {
+                        "type": "string",
+                        "const": "not-found"
+                      },
+                      {
+                        "type": "string",
+                        "const": "request-conflict"
+                      },
+                      {
+                        "type": "string",
+                        "const": "invalid-state"
+                      },
+                      {
+                        "type": "string",
+                        "const": "provider"
+                      },
+                      {
+                        "type": "string",
+                        "const": "authentication"
+                      },
+                      {
+                        "type": "string",
+                        "const": "cancelled"
+                      },
+                      {
+                        "type": "string",
+                        "const": "indeterminate"
+                      },
+                      {
+                        "type": "string",
+                        "const": "missing-provider-evidence"
+                      },
+                      {
+                        "type": "string",
+                        "const": "transport"
+                      },
+                      {
+                        "type": "string",
+                        "const": "protocol"
+                      },
+                      {
+                        "type": "string",
+                        "const": "rate-limited"
+                      }
+                    ]
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "httpStatus": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 599
+                  },
+                  "retryAfterMs": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "runId",
+              "model",
+              "createdAt",
+              "updatedAt",
+              "state",
+              "error"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string",
+                "const": "luna"
+              },
+              "metadata": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {}
+                }
+              },
+              "createdAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updatedAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "attemptCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "retryAt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "state": {
+                "type": "string",
+                "const": "indeterminate"
               },
               "error": {
                 "type": "object",

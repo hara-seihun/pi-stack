@@ -21,4 +21,6 @@ The patch tree handles replacements, string splices, object field additions/remo
 
 `resource-cache.ts` owns the bounded access-ordered cache for this protocol and the browser's loaded resources. Its optional weighted entry count lets one publisher resource account for its current and historical snapshots without a second eviction implementation.
 
+`state-validation.ts` validates first-party state discriminants at snapshot and room-observation boundaries. Its finite tables satisfy the owning protocol unions, so a new activity, transcript kind, delivery or other state requires a deliberate handling change. Invalid input produces a named error rather than a healthy default. Missing-kind historical wait metadata may cross the snapshot boundary only as an explicit `status_error` observation. `explicit-state.ts` owns the after-dispatch `assertNever` invariant and finite input validation; dispatch switches have no default clauses.
+
 Shared modules also enter Orchestrator's NodeNext typecheck through the server protocol, so relative imports use `.js` extensions. `deploy/remote` ships the `shared` directory beside `server`; `scripts/deploy-remote.test.mjs` checks direct and transitive shared imports, including missing files on an unchanged redeploy.

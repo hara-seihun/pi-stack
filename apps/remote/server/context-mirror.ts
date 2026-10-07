@@ -7,7 +7,8 @@ import { identifyMessages, modelVisibleMessages } from "./message-context";
 
 type ModelMessage = ReturnType<typeof convertToLlm>[number];
 type ModelTool = { name: string; description: string; parameters: unknown };
-type ModelContext = { systemPrompt: string; tools: ModelTool[]; messages: ModelMessage[] };
+type ModelContext = { systemPrompt: string; tools: ModelTool[]; messages: ModelMessage[];
+  contextUsage?: ReturnType<ExtensionContext["getContextUsage"]>; contextModel?: string };
 
 export default function contextMirror(pi: ExtensionAPI) {
   const environment = sessionEnvironment();
@@ -142,13 +143,15 @@ export default function contextMirror(pi: ExtensionAPI) {
     baseMessages = identifyMessages(convertToLlm(messages), ctx, sessionId, {
       id: environment.PI_REMOTE_SENDER_ID || "user",
       ...(environment.PI_REMOTE_SENDER_NAME ? { name: environment.PI_REMOTE_SENDER_NAME } : {}),
-    }, AGENT_NAME);
+    }, AGENT_NAME, environment.PI_REMOTE_ROOM_ID === sessionId);
     context = {
       systemPrompt: ctx.getSystemPrompt(),
       tools: pi.getAllTools()
         .filter((tool) => active.has(tool.name))
         .map(({ name, description, parameters }) => ({ name, description, parameters })),
       messages: baseMessages,
+      contextUsage: ctx.getContextUsage?.(),
+      contextModel: ctx.model?.id,
     };
     await publishCurrent(replacement);
   };
@@ -190,8 +193,8 @@ export default function contextMirror(pi: ExtensionAPI) {
     baseMessages = identifyMessages(baseMessages, ctx, sessionId, {
       id: environment.PI_REMOTE_SENDER_ID || "user",
       ...(environment.PI_REMOTE_SENDER_NAME ? { name: environment.PI_REMOTE_SENDER_NAME } : {}),
-    }, AGENT_NAME);
-    context = { ...context, messages: baseMessages };
+    }, AGENT_NAME, environment.PI_REMOTE_ROOM_ID === sessionId);
+    context = { ...context, messages: baseMessages, contextUsage: ctx.getContextUsage?.(), contextModel: ctx.model?.id };
     await publishCurrent();
   });
 

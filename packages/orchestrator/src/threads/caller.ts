@@ -32,6 +32,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SendThread, SpawnThread } from "./contracts.js";
+import { assertNever } from "./runtime-events.js";
 
 export const THREAD_TOKEN_HEADER = "x-pi-thread-token";
 export const UPSTREAM_CREDENTIAL_HEADER = "x-pi-remote-upstream";
@@ -125,7 +126,7 @@ function hexAddress(address: string, six: boolean): string | undefined {
 }
 
 /** The uid and, when readable, pid owning the client end of a loopback TCP connection. */
-export function loopbackPeer(socket: PeerSocket, proc = "/proc"): PeerProcess | undefined {
+export function loopbackPeer(socket: PeerSocket, proc = "/proc", identifyProcess = true): PeerProcess | undefined {
   for (const six of [false, true]) {
     const client = hexAddress(socket.address, six), server = hexAddress(socket.localAddress, six);
     if (!client || !server) continue;
@@ -137,7 +138,7 @@ export function loopbackPeer(socket: PeerSocket, proc = "/proc"): PeerProcess | 
       const fields = line.trim().split(/\s+/);
       if (fields[1] !== local || fields[2] !== remote) continue;
       const uid = Number(fields[7]), inode = fields[9];
-      return { uid, ...(inode && inode !== "0" ? { pid: socketOwner(inode, uid, proc) } : {}) };
+      return { uid, ...(identifyProcess && inode && inode !== "0" ? { pid: socketOwner(inode, uid, proc) } : {}) };
     }
   }
   return undefined;
@@ -235,6 +236,7 @@ export function creatorOf(caller: ThreadCaller, parentId?: string, forwarded?: u
     case "person": return { kind: "person", via: caller.via };
     case "process": return { kind: "process", uid: caller.uid, ...(caller.pid ? { pid: caller.pid } : {}), ...(caller.command ? { command: caller.command } : {}) };
   }
+  return assertNever(caller);
 }
 
 function isCreator(value: unknown): value is ThreadCreator {
@@ -264,6 +266,27 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
       return peer(socket);
     },
     async admit(operation, input, caller) {
+      if (operation === "control") {
+        if ((input.action === "dependencyClaim" || input.action === "dependencyRelease") && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Dependency endpoint reservations require an owning runtime or service");
+        if (input.action === "open" || input.action === "placement" || input.action === "view") {
+          if (caller.kind !== "person" && caller.kind !== "service") return refuse("Only a human opening or placing an agent can change foreground placement");
+        }
+        if (input.action === "title" && (caller.kind === "thread" ? input.threadId !== caller.threadId : caller.kind !== "runtime" && caller.kind !== "service"))
+          return refuse("Only a thread's own agent names it; people rename it");
+        if (input.action === "rename" && caller.kind === "thread") return refuse("Agents name their own thread with thread_title; renaming is a person's pin");
+        if (input.action === "dependencies" && caller.kind === "thread" && input.threadId !== caller.threadId)
+          return refuse("Only the dependent agent can resolve or release its outgoing dependencies");
+        if (input.action === "dependencies" && caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service")
+          return refuse("Dependency changes require the dependent agent's capability or owning runtime");
+      }
+      if (operation === "agentWait" || operation === "wakeSchedule") {
+        if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only manage its own waiting and wakes`);
+        if (caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Self waiting and wakes require a thread capability or the Pi runtime");
+      }
+      if (operation === "attention") {
+        if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only request attention for itself`);
+        if (caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Self attention requires a thread capability or the Pi runtime");
+      }
       if (operation === "watch") {
         if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only edit the watch list as itself`);
         if (caller.kind === "process") return refuse("Watch list access requires a thread capability or the Pi runtime");
@@ -278,6 +301,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
           if (caller.kind === "thread" && request.parentId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only create its own children`);
           if (caller.kind === "process") return refuse("Naming a parent requires that thread's capability (PI_THREAD_TOKEN) or the Pi runtime");
         }
+        if (caller.kind === "thread") request.parentId = caller.threadId;
         let createdBy = creatorOf(caller, request.parentId ?? undefined, forwarded);
         if (createdBy.kind === "process" && createdBy.pid && attest) createdBy = { ...createdBy, attestation: await attest(createdBy.pid) };
         return { ok: true, input: { ...request, createdBy } };
@@ -299,7 +323,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
 export function admissionFor(resolver: CallerResolver, source: CallerSource): (operation: string, input: Record<string, any>) => Promise<AdmissionResult> {
   let caller: ThreadCaller | { error: string } | undefined;
   return async (operation, input) => {
-    if (operation !== "spawn" && operation !== "send" && operation !== "watch") return { ok: true, input };
+    if (operation !== "control" && operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention") return { ok: true, input };
     caller ??= resolver.resolve(source);
     if ("error" in caller) return { ok: false, status: 401, message: caller.error };
     return resolver.admit(operation, input, caller);

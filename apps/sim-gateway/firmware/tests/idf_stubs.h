@@ -27,6 +27,10 @@ typedef const char *esp_event_base_t;
 #define WEBSOCKET_EVENT_DISCONNECTED 2
 #define WEBSOCKET_EVENT_ERROR 3
 #define WEBSOCKET_EVENT_DATA 4
+#define WEBSOCKET_EVENT_CLOSED 5
+#define WEBSOCKET_EVENT_BEFORE_CONNECT 6
+#define WEBSOCKET_EVENT_BEGIN 7
+#define WEBSOCKET_EVENT_FINISH 8
 typedef struct {
     int data_len, payload_len, payload_offset;
     const char *data_ptr;

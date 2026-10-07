@@ -1,13 +1,22 @@
 .shell { display: grid; width: 100%; height: 100%; min-height: 0; background: var(--bg); }
 .pane { min-width: 0; min-height: 0; }
 .pane[hidden] { display: none !important; }
+.dependency-close-error { position: fixed; z-index: 90; inset: auto 1rem 5rem; max-width: 40rem; margin: auto; display: grid; gap: .5rem; padding: 1rem; border-radius: var(--radius-2); background: var(--surface-2); box-shadow: 0 4px 20px #0004; }
+.dependency-close-error button { text-align: left; overflow-wrap: anywhere; }
 
 /* Phone: one pane, bottom tab bar under the list, none under a conversation. */
 .layout-phone { grid-template-rows: minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); }
 .layout-phone .pane { grid-row: 1; grid-column: 1; }
 .tabbar { grid-row: 2; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; height: var(--tabbar); padding-bottom: env(safe-area-inset-bottom); background: var(--surface); }
 .tab { position: relative; display: grid; place-items: center; padding: 0; color: var(--muted); background: transparent; }
-.tab[aria-current] { color: var(--accent); }
+.tab[aria-current], .tab-update { color: var(--accent); }
+.tab-update { align-content: center; }
+.tab-update:disabled { opacity: 1; cursor: progress; }
+.tab-update-label { font-size: 10px; line-height: 12px; font-weight: 700; }
+.tab-update[aria-busy="true"] svg { animation: update-pulse 1.2s ease-in-out infinite alternate; }
+@keyframes update-pulse { to { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { .tab-update[aria-busy="true"] svg { animation: none; } }
+.app-update { position: fixed; z-index: 80; top: max(var(--space-2), env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: min(420px, calc(100% - 24px)); padding: var(--space-3); border-radius: var(--radius-2); background: var(--surface-2); color: var(--text); box-shadow: 0 4px 20px #0004; }
 .tab-icon { position: relative; display: grid; place-items: center; width: 48px; height: 36px; border-radius: 18px; }
 .tab[aria-current] .tab-icon { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .tab-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }

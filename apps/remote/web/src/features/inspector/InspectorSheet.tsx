@@ -7,10 +7,13 @@ import { optimisticThreadSettings, SettingsFields } from "../../thread-settings"
 import type { Session, ThreadSettings } from "../../types";
 import { Sheet } from "../../app/Sheet";
 import { StatusPill } from "../status/StatusPill";
+import { StatusIcon } from "../status/StatusIcon";
+import { agentName } from "../../agent-name";
 import { threadStatus } from "../status/thread-status";
-import { WorkersTree } from "../workers/WorkersTree";
 import { WriteSettings } from "./WriteSettings";
 import "./inspector.css";
+import { assertNever } from "../../../../shared/explicit-state";
+import { validateSession, stateArray } from "../../../../shared/state-validation";
 
 export type InspectorTab = "thread" | "settings" | "timeline";
 
@@ -23,7 +26,18 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   return <div className="inspector-row"><dt>{label}</dt><dd>{children}</dd></div>;
 }
 
-export function InspectorSheet({ session, sessions, open, pending, autoCollapse, onAutoCollapseChange, onClose, onOpenThread, onArchive, onRestore, debug }: {
+function WaitReference({ wait, sessions, onOpen }: { wait: NonNullable<Session["waitingOnAgents"]>; sessions: Session[]; onOpen(id: string): void }) {
+  if (!Object.hasOwn(wait, "kind")) return <Row label="Wait error">Wait type missing</Row>;
+  switch (wait.kind) {
+    case "agents": return <Row label="Agent dependencies">{wait.threadIds.map(id => <button className="inspector-link" type="button" key={id} onClick={() => onOpen(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}</Row>;
+    case "job": return <Row label="Job"><code>{wait.jobId}</code></Row>;
+    case "deployment": return <Row label="Publication"><code>{wait.publicationId}</code></Row>;
+    case "message": return <Row label="Message from"><button className="inspector-link" type="button" onClick={() => onOpen(wait.fromThreadId)}>{sessions.find(item => item.id === wait.fromThreadId)?.name ?? wait.fromThreadId}</button></Row>;
+  }
+  return assertNever(wait, "Inspector dependency");
+}
+
+export function InspectorSheet({ session, sessions, open, pending, autoCollapse, onAutoCollapseChange, onClose, onOpenThread, onOpenThreadId, onArchive, onRestore, onBackground, debug }: {
   session: Session;
   sessions: Session[];
   open: boolean;
@@ -32,8 +46,10 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
   onAutoCollapseChange(enabled: boolean): void;
   onClose(): void;
   onOpenThread(session: Session): void;
+  onOpenThreadId(id: string): void;
   onArchive(): void;
   onRestore(): void;
+  onBackground?(): void;
   /** Voice and Meet controls, kept for debugging. */
   debug?: ReactNode;
 }) {
@@ -88,7 +104,11 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
     setChildrenLoading(true);
     setChildrenFailure("");
     api(API.sessionChildren.method, API.sessionChildren.path({ sessionId: session.id }))
-      .then(result => { if (active) setChildren(result.children ?? []); })
+      .then(result => {
+        if (!active) return;
+        stateArray(result.children, "Child directory").forEach(validateSession);
+        setChildren(result.children);
+      })
       .catch(error => { if (active) setChildrenFailure(error?.message || String(error)); })
       .finally(() => { if (active) setChildrenLoading(false); });
     return () => { active = false; };
@@ -130,32 +150,55 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
     }
   };
   const status = threadStatus(session);
+  const name = agentName(session);
   const parent = session.parentId ? sessions.find(item => item.id === session.parentId) ?? null : null;
   const tabs: { id: InspectorTab; label: string }[] = [{ id: "thread", label: "Thread" }, { id: "settings", label: "Settings" }, { id: "timeline", label: "Timeline" }];
   return <Sheet open={open} title={session.name || "Thread"} onClose={onClose} labelledBy="inspector-title" variant="sidebar">
     <div className="inspector-tabs" role="tablist">{tabs.map(item => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
     {tab === "thread" && <div className="inspector-panel">
       <div className="inspector-controls">
-        {session.archivedAt ? <button type="button" disabled={pending} onClick={onRestore}>Restore</button> : <button type="button" disabled={pending} onClick={onArchive}>Close chat</button>}
+        {session.archivedAt ? <button type="button" disabled={pending} onClick={onRestore}>Restore</button> : <button type="button" disabled={pending} onClick={onArchive}>Close agent</button>}
+        {!session.archivedAt && session.foreground && onBackground && <button type="button" disabled={pending} onClick={onBackground}>Move to background</button>}
       </div>
       <dl className="inspector-facts">
         <Row label="Status"><StatusPill status={status} /></Row>
+        {session.state === "running" && <>
+          {status.title && <Row label="Phase evidence">{status.title}</Row>}
+          <Row label="Phase started">{session.activitySince ? formatTime(new Date(session.activitySince).toISOString()) : "Not reported"}</Row>
+          <Row label="Last activity">{session.lastActivityAt ? formatTime(new Date(session.lastActivityAt).toISOString()) : "Not reported"}</Row>
+        </>}
+        {session.waitingOnAgents && <>
+          <Row label="Dependency">{session.waitingOnAgents.reason}</Row>
+          <Row label="Waiting since">{formatTime(new Date(session.waitingOnAgents.since).toISOString())}</Row>
+          <WaitReference wait={session.waitingOnAgents} sessions={sessions} onOpen={onOpenThreadId} />
+        </>}
+        {session.wakeSchedule && <>
+          <Row label="Wake check">{session.wakeSchedule.reason}</Row>
+          <Row label="Check interval">{session.wakeSchedule.cadenceMs / 60000} minutes</Row>
+          <Row label="Next check">{formatTime(new Date(session.wakeSchedule.nextDueAt).toISOString())}{session.wakeSchedule.deferredReason && ` (${session.wakeSchedule.deferredReason})`}</Row>
+          {session.wakeSchedule.lastDueAt !== undefined && <Row label="Last wake due">{formatTime(new Date(session.wakeSchedule.lastDueAt).toISOString())}</Row>}
+          {session.wakeSchedule.lastDeliveredAt && <Row label="Last wake queued">{formatTime(new Date(session.wakeSchedule.lastDeliveredAt).toISOString())}</Row>}
+          {session.wakeSchedule.lastLandedAt && <Row label="Last wake landed">{formatTime(new Date(session.wakeSchedule.lastLandedAt).toISOString())}</Row>}
+        </>}
         <Row label="Model">{session.model}</Row>
         {!session.model.includes("/") && <Row label="Provider">{session.provider}</Row>}
         <Row label="Environment">{session.environment}</Row>
         <Row label="Workspace">{session.workspaceName || "—"}</Row>
         <Row label="Directory"><code>{session.cwd}</code></Row>
-        <Row label="Owner">{session.origin === "fleet" ? "Fleet" : "You"}</Row>
+        <Row label="Placement">{session.foreground ? "Foreground" : "Background"}</Row>
+        {name && <Row label="Agent">{name}</Row>}
+        <Row label="Task">{session.name}</Row>
         <Row label="Created">{formatTime(session.createdAt)}</Row>
         <Row label="Updated">{formatTime(session.updatedAt)}</Row>
         {session.archivedAt && <Row label="Archived">{formatTime(session.archivedAt)}</Row>}
         <Row label="Thread ID"><code className="inspector-id">{session.id}</code></Row>
       </dl>
-      {parent && <section className="inspector-section"><h3>Parent</h3><button type="button" className="inspector-link" onClick={() => onOpenThread(parent)}>{parent.name || parent.id}</button></section>}
+      {parent && <section className="inspector-section"><h3>Launched by</h3><button type="button" className="inspector-link" onClick={() => onOpenThread(parent)}>{agentName(parent) && <strong>{agentName(parent)} </strong>}{parent.name || parent.id}</button></section>}
+      {!!session.dependencies?.length && <section className="inspector-section"><h3>Dependencies</h3>{session.dependencies.map(id => <button type="button" className="inspector-link" key={id} onClick={() => onOpenThreadId(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}<p className="muted">Resolve or release these dependencies before closing either agent.</p></section>}
       <section className="inspector-section">
-        <h3>Workers {childrenLoading && <span className="muted">loading</span>}</h3>
+        <h3>Agents launched {childrenLoading && <span className="muted">loading</span>}</h3>
         <DismissibleError message={childrenFailure} resetKey={attempt} />
-        {children.length ? <WorkersTree sessions={children} selectedId={null} filter="all" onFilter={() => {}} onOpen={onOpenThread} compact /> : !childrenLoading && !childrenFailure && <p className="muted">No workers spawned by this thread.</p>}
+        {children.length ? <ul className="launched-agents">{children.map(child => <li key={child.id}><button type="button" className="inspector-link launched-agent" onClick={() => onOpenThread(child)}><StatusIcon status={threadStatus(child)} /><span className="launched-agent-text">{agentName(child) && <strong>{agentName(child)}</strong>} <span>{child.name}</span> <span className="muted">{child.foreground ? "Foreground" : "Background"}{child.archivedAt ? " · Archived" : ""}</span></span></button></li>)}</ul> : !childrenLoading && !childrenFailure && <p className="muted">No agents launched.</p>}
       </section>
       {debug && <section className="inspector-section"><h3>Debug</h3>{debug}</section>}
     </div>}

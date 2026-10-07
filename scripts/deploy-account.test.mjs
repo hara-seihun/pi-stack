@@ -43,6 +43,9 @@ test("service-environment onboarding reconciles one account without global Git t
       file(path, "#!/bin/sh\necho 'onboarding must not invoke package installers or browsers' >&2\nexit 99\n");
       chmodSync(path, 0o755);
     }
+    const stackPi = join(roots.runtime, "stack-pi.mjs");
+    file(stackPi, "#!/bin/sh\necho 'onboarding must not execute agent sessions' >&2\nexit 99\n");
+    chmodSync(stackPi, 0o755);
     const manifest = json(join(root, "config/packages.json"));
     const expectedPackages = manifest.packages.map(entry => {
       if (!entry.source.startsWith("npm:")) { mkdirSync(deployed(entry.deployed), { recursive: true }); return deployed(entry.deployed); }
@@ -74,7 +77,7 @@ test("service-environment onboarding reconciles one account without global Git t
     assert.equal(json(settings).theme, "personal");
     assert.deepEqual(json(models).providers, { personal: personalProvider, local: { ...sharedProvider, models: [{ id: "extra", icon: "🔬" }, ...sharedProvider.models] } });
     for (const name of ["pi", "agent-browser", "pi-agent-browser-doctor", "pi-model-selection-doctor"]) {
-      assert.equal(readlinkSync(join(home, ".local/bin", name)), join(roots.runtime, "node_modules/.bin", name));
+      assert.equal(readlinkSync(join(home, ".local/bin", name)), name === "pi" ? stackPi : join(roots.runtime, "node_modules/.bin", name));
     }
     for (const tool of json(join(root, "config/tools.json")).tools) for (const command of tool.commands) {
       assert.equal(readlinkSync(join(home, ".local/bin", command.name)), join(roots.tools, tool.id, command.entry));

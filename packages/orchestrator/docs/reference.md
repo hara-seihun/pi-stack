@@ -4,6 +4,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 
 ## Commands
 
+- `names`: Generate Nebulani agent names locally: --count N.
 - `daemon`: Run reconciliation and the local API.
 - `status`: Print accounts, lanes, leases, and active threads.
 - `usage-evidence`: Print a read-only 24-hour quota and token snapshot; optional --ledger FILE.
@@ -12,11 +13,12 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `wave`: Spawn a one-off batch from a declared lane [--count N] [--background].
 - `list`: List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR].
 - `read`: Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR].
-- `send`: Send to THREAD_ID with --prompt TEXT [--delivery steer|hardSteer]; agents steer by default, senderless sends queue by default.
-- `stop`: Stop THREAD_ID; --descendants also stops its descendants.
+- `send`: Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]; steer by default, agents cannot queue.
+- `close`: Cancel and archive THREAD_ID; dependencies protect both endpoints.
+- `cancel`: Cancel THREAD_ID's current work without closing its conversation.
+- `reopen`: Restore THREAD_ID without resuming interrupted work.
+- `dependencies`: Set this agent's dependencies: THREAD_ID PEER_ID...; --clear releases them.
 - `pause / resume`: Set or clear the global launch halt; --ordinary controls only ordinary work.
-- `resume THREAD_ID`: Release a held thread's pending messages.
-- `restore`: Unarchive THREAD_ID; --descendants also restores every thread below it; --resume continues the work its archive interrupted.
 - `boost`: Set a provider pacing multiplier or halt.
 - `account`: Import, refresh, inspect capabilities, remove, list, reserve, or exclusively transfer pooled accounts.
 - `peer`: List configured account-transfer peers.

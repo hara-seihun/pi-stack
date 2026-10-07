@@ -8,6 +8,8 @@ import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 import { threadMode } from "./modes.js";
 import { SPEEDS } from "./speed.js";
+import { threadWaitParameters } from "./wait-contract.js";
+import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
@@ -17,6 +19,7 @@ const watchFields = {
   how: Type.Optional(Type.String({ description: "Known way to check it." })),
   cadenceMs: Type.Optional(Type.Integer({ minimum: 60000, description: "Repeat interval in milliseconds; omitted uses the person's default." })),
   nextDueAt: Type.Optional(Type.Integer({ minimum: 0, description: "Next due time as Unix epoch milliseconds; new items default to now." })),
+  destination: Type.Optional(Type.String({ minLength: 1, description: "Destination whose workspace and chosen context check this item, such as personal or home; omitted on add uses this thread's own destination." })),
 };
 const settings = Type.Object({
   model: Type.Optional(Type.String()),
@@ -42,35 +45,53 @@ export function threadTools(options: PiSessionOptions) {
     if (!url) throw new Error("Thread owner is unavailable: PI_THREAD_API_URL is not configured");
     return createThreadClient(url, fetch, { signal, token: options.env.PI_THREAD_TOKEN });
   }
-  /** Whether an unavailable recipient is archived, and if so whether it sits below this unarchived thread. */
-  async function archivedDescendant(threadId: string, signal?: AbortSignal): Promise<"descendant" | "other" | null> {
-    const find = async (id: string) => {
-      const page = await api(signal).list({ id, limit: 1 });
-      return page.ok ? page.value.threads.find(thread => thread.id === id) : undefined;
-    };
-    const recipient = await find(threadId);
-    if (!recipient?.metadata?.archived) return null;
-    const caller = await find(options.threadId);
-    if (!caller || caller.metadata?.archived) return "other";
-    const seen = new Set([threadId]);
-    for (let parentId: string | null | undefined = recipient.parentId; parentId && !seen.has(parentId); parentId = (await find(parentId))?.parentId) {
-      if (parentId === options.threadId) return "descendant";
-      seen.add(parentId);
-    }
-    return "other";
-  }
   return [
     defineTool({
+      name: "thread_attention", label: "Notify the person",
+      description: `Send an explicit notification from your own thread, including while background or scheduled work is running. Attention only notifies: the human opens an agent to place it in the foreground. Durable receipt acceptance is not proof the person's device displayed it. ${BACKGROUND_ATTENTION_POLICY}`,
+      parameters: Type.Object({
+        summary: Type.String({ minLength: 1, maxLength: 1000, description: "Renia-reduced notification: the important change and what the person needs to do, with deadline/timezone if relevant." }),
+      }),
+      execute: async (id, input, signal) => result(await api(signal).attention({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
+    defineTool({
+      name: "thread_title", label: "Name this thread",
+      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation) and taskDescription; keep a supplied title when it already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. Include taskDescription: one short sentence saying what you are trying to accomplish, so the Orchestrator shows the purpose as well as the title. Update both when the task changes. Your agent name is separate and never changes.",
+      parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 80, description: "The thread's topic title." }), taskDescription: Type.Optional(Type.String({ minLength: 1, maxLength: 240, description: "One sentence describing the task's intended outcome." })) }),
+      execute: async (_id, input, signal) => result(await api(signal).control({ action: "title", threadId: options.threadId, title: input.title, ...(input.taskDescription !== undefined ? { taskDescription: input.taskDescription } : {}) })),
+    }),
+    defineTool({
+      name: "thread_wait", label: "Wait for a named dependency",
+      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Messages and wakes may resume scheduling but do not release dependency protection. Both endpoints remain protected against close until you explicitly resolve/release with clear. Clear removes your wait and outgoing dependencies without creating work.",
+      parameters: threadWaitParameters,
+      execute: async (id, input, signal) => {
+        const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
+        return { ...result(waited), ...(waited.ok && input.action === "set" && waited.value.metadata?.agentWait ? { terminate: true } : {}) };
+      },
+    }),
+    defineTool({
+      name: "thread_wake", label: "Schedule own-thread wakes",
+      description: "Set, list, change or cancel one durable periodic recovery check for your own existing thread. Set replaces reason/cadence and retimes nextDueAt (epoch milliseconds, default now+cadence). Due checks coalesce while busy and pause during Stop/archive. Restart-safe ordinary messages resume the same thread through normal model admission; no watch-list item or polling model is created. List shows next due and last durable delivery/landing. Cancel when resolved. Prefer agent settlement events; wakes are fallback checks.",
+      parameters: Type.Union([
+        Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), cadenceMs: Type.Integer({ minimum: 60000 }), nextDueAt: Type.Optional(Type.Integer({ minimum: 0 })) }),
+        Type.Object({ action: Type.Literal("list") }),
+        Type.Object({ action: Type.Literal("cancel") }),
+      ]),
+      execute: async (id, input, signal) => result(await api(signal).wakeSchedule(input.action === "list"
+        ? { action: "list", threadId: options.threadId }
+        : { ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+    }),
+    defineTool({
       name: "watch_list_add", label: "Add to watch list",
-      description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with Opus 5.5, handles routine follow-ups and asks the person about major decisions. An empty list makes no model calls.",
+      description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with its configured model and acts within the person's current life policy; it asks only for decisions that policy leaves with the person. An empty list makes no model calls.",
       parameters: Type.Object(watchFields),
       execute: async (id, item, signal) => result(await api(signal).watch({ action: "add", item, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
     }),
     defineTool({
       name: "watch_list_update", label: "Update a watch item",
-      description: "Change a watch item's check, reason, method or timing. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
+      description: "Change a watch item's check, reason, method, timing or destination. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
       parameters: Type.Object({ id: Type.String({ minLength: 1 }), patch: Type.Object({
-        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt,
+        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt, destination: watchFields.destination,
         how: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         cadenceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 60000 }), Type.Null()])),
       }) }),
@@ -99,35 +120,27 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_spawn", label: "Start a thread",
-      description: `${DELEGATION_POLICY}\n\nStart a fresh Orchestrator worker with its own context. Workers cannot spawn subagents; coordinate all delegation from this conversation. It returns immediately; completion arrives as a normal message. An ephemeral worker archives after its final assignment settles, but its work and filesystem effects persist. Set ephemeral:false if you expect to continue the conversation after its response. To continue an existing conversation use thread_send instead. ${spawnDefaults(options.env.PI_THREAD_MODE)} Explicit settings override these defaults: Opus may be chosen explicitly, but Astra and Fable cannot be spawned. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
+      description: `${DELEGATION_POLICY}\n\nStart a fresh agent peer with its own context. Every agent may spawn peers within the shared resource limit. parentId records creator provenance only. It returns immediately; assignment replies arrive as ordinary agent messages. Creating a peer is not a dependency: use thread_wait or explicit dependencies when you rely on its result. An ephemeral worker archives after its final assignment settles, but its work and filesystem effects persist. Set ephemeral:false if you expect to continue the conversation after its response. To continue an existing conversation use thread_send instead. ${spawnDefaults(options.env.PI_THREAD_MODE)} Explicit settings may select any available installed model. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
       parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), ephemeral: Type.Optional(Type.Boolean({ default: true, description: "Archive after its last assignment settles. Set false when you plan to send follow-up work." })), settings: Type.Optional(Type.Object({
         ...settings.properties,
-        model: Type.Optional(Type.String({ description: "Defaults to Sol. Opus may be chosen explicitly. Astra and Fable are not allowed, including provider-qualified names." })),
+        model: Type.Optional(Type.String({ description: "Defaults to Sol; any available installed model may be selected." })),
       })) }),
       execute: async (id, input, signal) => result(await api(signal).spawn({ ...input, ephemeral: input.ephemeral ?? true, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
         cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] })),
     }),
     defineTool({
       name: "thread_send", label: "Send to a thread",
-      description: "Send to an existing accessible thread. Agents steer by default and may hard steer to cancel and confirm current local work before running the message. Sending explicitly resumes a held recipient. An archived descendant of this thread is restored first; any other archived recipient needs thread_control restore. It does not stop descendants.",
+      description: "Send to an existing accessible thread. Agents steer by default and may hard steer to cancel and confirm current local work before running the message. A closed recipient needs an explicit thread_control reopen before sending. Reopen never continues discarded work.",
       parameters: Type.Object({ threadId: Type.String(), text: Type.String(), delivery: Type.Optional(Type.Union(agentDelivery.anyOf, { default: "steer", description: "Agents may steer or hard steer." })), replyTo: Type.Optional(Type.String()) }),
       execute: async (id, input, signal) => {
         if (input.threadId === options.threadId && input.delivery === "hardSteer") return result({ ok: false, error: { code: "invalid_request", message: "Hard steer cannot wait for the tool that requested it. Return and continue in this thread instead." } });
         const request = { ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" as const };
-        const sent = await api(signal).send(request);
-        // The owner words this refusal "Restore this archived thread …"; only then is the recipient worth inspecting.
-        if (sent.ok || sent.error.code !== "unavailable" || !/archived/i.test(sent.error.message) || signal?.aborted) return result(sent);
-        const archived = await archivedDescendant(input.threadId, signal).catch(() => null);
-        if (archived === "other") return result({ ok: false, error: { ...sent.error, message: `${sent.error.message}. Use thread_control with action "restore" (descendants:true for its workers too, resume:true to continue work the archive interrupted), then send again.` } });
-        if (archived !== "descendant") return result(sent);
-        const restored = await api(signal).control({ threadId: input.threadId, action: "restore", descendants: false });
-        if (!restored.ok) return result(restored);
         return result(await api(signal).send(request));
       },
     }),
     defineTool({
-      name: "thread_await", label: "Await a child result",
-      description: "Wait up to 25 seconds for the first settlement from direct children. A timeout returns settlement:null, timedOut:true, remaining IDs, after cursors and current child statuses; it does not settle or stop children. Use the statuses to decide whether to intervene, continue other work or call again with the returned after. Settlements include outcome and final text; native result metadata and thinking are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
+      name: "thread_await", label: "Await a peer result",
+      description: "Wait up to 25 seconds for the first completed assignment from accessible peers. A turn settled while the peer owns a wait, dependency or unanswered question is not an assignment result. A timeout returns settlement:null, timedOut:true, remaining IDs, after cursors and current child statuses; it does not settle or stop children. Use the statuses to decide whether to intervene, continue other work or call again with the returned after. Settlements include outcome and final text; native result metadata and thinking are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
       parameters: Type.Object({
         threadIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true }),
         after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))),
@@ -151,8 +164,8 @@ export function threadTools(options: PiSessionOptions) {
               try {
                 const page = await api(statusSignal).list({ id: threadId, limit: 1 });
                 if (!page.ok) return { threadId, error: page.error };
-                const thread = page.value.threads.find(item => item.id === threadId && item.parentId === options.threadId);
-                if (!thread) return { threadId, error: { code: "not_found", message: "Direct child status unavailable" } };
+                const thread = page.value.threads.find(item => item.id === threadId);
+                if (!thread) return { threadId, error: { code: "not_found", message: "Peer status unavailable" } };
                 return { threadId, state: thread.state, held: thread.held, pendingMessages: thread.pendingMessages,
                   ...(thread.metadata?.admissionWait ? { admissionWait: thread.metadata.admissionWait } : {}),
                   ...(thread.metadata?.executionError ? { executionError: thread.metadata.executionError } : {}) };
@@ -179,7 +192,7 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_read", label: "Read thread history",
-      description: "Read persisted native history without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
+      description: "Read persisted thread history, including root-consent answer receipts, without opening or starting the recipient. Text previews omit image bytes and signatures. Continue pages with cursor; read a large entry with its entryId and offset from nextOffset.",
       parameters: Type.Object({ threadId: Type.String(), cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), entryId: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
       execute: async (_id, input, signal) => {
         const value = await api(signal).read(input.entryId ? { threadId: input.threadId, entryId: input.entryId }
@@ -193,18 +206,18 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_control", label: "Control a thread",
-      description: "Stop local execution and hold pending messages, resume held messages, restore archived threads, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Restore unarchives the thread, and with descendants:true every thread below it; resume:true also puts back what the archive took out of play, continuing cancelled turns and releasing held messages, while leaving threads that were already stopped stopped. Omit threadId for this thread. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
+      description: "Close cancels and archives only the selected agent and discards pending input; unresolved peer dependencies protect both endpoints. Reopen unhides without replay or continuation. Cancel interrupts only local work without archiving. Dependencies replaces your own persistent outgoing peer dependencies (empty releases them); messages/wakes never release protection. Omit threadId for self. Settings save future preferences; retryWaiting moves dormant capacity waiting to the selected model without interrupting live work. Pending receipts can be cancelled or promoted.",
       parameters: Type.Union([
-        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("stop"), descendants: Type.Boolean() }),
-        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("resume") }),
-        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("restore"), descendants: Type.Boolean({ description: "Also restore every thread below it, such as workers archived with their conversation." }), resume: Type.Optional(Type.Boolean({ default: false, description: "Continue the work the archive interrupted." })) }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Union([Type.Literal("close"), Type.Literal("reopen"), Type.Literal("cancel")]) }),
+        Type.Object({ action: Type.Literal("dependencies"), threadIds: Type.Array(Type.String({ minLength: 1 }), { maxItems: 100, uniqueItems: true }) }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("settings"), settings }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("retryWaiting") }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("cancelMessage"), messageId: Type.String() }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("promoteMessage"), messageId: Type.String(), delivery }),
       ]),
       execute: async (_id, input, signal) => {
-        const threadId = input.threadId ?? options.threadId;
-        if (threadId === options.threadId && input.action === "stop") return result({ ok: false, error: { code: "invalid_request", message: "Return from this turn to stop your own work; stopping it inside a tool would wait on that same tool." } });
+        const threadId = "threadId" in input ? input.threadId ?? options.threadId : options.threadId;
+        if (threadId === options.threadId && (input.action === "close" || input.action === "cancel")) return result({ ok: false, error: { code: "invalid_request", message: "Return from this turn to stop your own work; stopping it inside a tool would wait on that same tool." } });
         return result(await api(signal).control({ ...input, threadId } as Parameters<ThreadApi["control"]>[0]));
       },
     }),

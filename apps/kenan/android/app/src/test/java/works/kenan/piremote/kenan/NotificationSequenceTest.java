@@ -5,6 +5,16 @@ import java.util.Set;
 import static org.junit.Assert.*;
 
 public final class NotificationSequenceTest {
+    @Test public void replayCannotSkipNativeCursorOrRaceItsInitialBaseline() {
+        assertTrue(NotificationSequence.canReplay(-1, null, 20));
+        assertFalse(NotificationSequence.canReplay(-1, 0L, 20));
+        assertFalse(NotificationSequence.canReplay(10, null, 20));
+        assertTrue(NotificationSequence.canReplay(10, null, 10));
+        assertTrue(NotificationSequence.canReplay(10, 5L, 20));
+        assertFalse(NotificationSequence.canReplay(10, 11L, 20));
+        assertFalse(NotificationSequence.canReplay(10, -1L, 20));
+    }
+
     @Test public void streamAheadOfPollDoesNotSkipMissingCompletionsOrDeliverTwice() {
         NotificationSequence sequence = new NotificationSequence(10, Set.of());
         assertTrue(sequence.accept(15, 15, true));

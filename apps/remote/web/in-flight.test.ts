@@ -25,6 +25,8 @@ test("top-level requests and actions show; descendant media, read receipts and s
   for (const path of ["/v1/sessions/x/items/a", "/v1/sessions/x/images/hash", "/v1/sessions/x/transcript", "/v1/messaging/attachments/file", "/v1/messaging/backends/signal/avatars/person", "/v1/speech/utterances/id/audio", "/v1/files/download"]) {
     expect(requestVisibility("GET", path, 5)).toBe("background");
   }
+  expect(requestVisibility("POST", "/v1/reconcile", 5)).toBe("background");
+  expect(requestVisibility("POST", "/v1/remotes/other/v1/reconcile", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/stream", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/stream/abc", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/remotes/other/v1/messaging/conversations/id/read", 5)).toBe("background");

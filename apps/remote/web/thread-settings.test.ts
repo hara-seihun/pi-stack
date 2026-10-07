@@ -30,6 +30,17 @@ test("running and held threads retain all settings controls", () => {
   expect(fields({ archivedAt: "today" }).filter(node => ["button", "select"].includes(String(node.type))).every(node => node.props.disabled)).toBe(true);
 });
 
+test("future model selection preserves the effective model and explicitly retries dormant waiting work", () => {
+  const waiting: ThreadSettings = { ...settings, effectiveModel: "anthropic-2/claude-opus-5-5", waiting: "provider", canRetryWaiting: true };
+  const selected = optimisticThreadSettings(waiting, { modelProvider: "openai-codex", modelId: "gpt-6-astra" });
+  expect(selected.effectiveModel).toBe(waiting.effectiveModel);
+  const changes: unknown[] = [];
+  const nodes = elements(SettingsFields({ session: {} as Session, settings: selected, saving: "", onUpdate: (field, body) => changes.push({ field, body }) }));
+  const retry = nodes.find(node => node.type === "button" && node.props.children === "Switch waiting work to selected model")!;
+  retry.props.onClick(); expect(changes).toEqual([{ field: "retry", body: { retryWaiting: 1 } }]);
+  expect(elements(SettingsFields({ session: {} as Session, settings: { ...selected, waiting: null, canRetryWaiting: false }, saving: "", onUpdate: () => {} })).some(node => node.props.children === retry.props.children)).toBe(false);
+});
+
 test("optimistic model selection changes its dependent settings before the response", () => {
   const accelerated = { ...settings, speedMode: "ultrafast" };
   const fable = optimisticThreadSettings(accelerated, { modelProvider: "anthropic", modelId: "claude-fable-5-1" });

@@ -18,7 +18,7 @@ Omit the name to read your own usage. These are Unix person names from Pi Remote
 - **Logged API value** is the sum of the response logs' `usage.cost.total`. It is not a provider invoice, a current retail quote, or an extra subscription charge. Missing or all-zero prices are reported as unpriced rather than free.
 - **Subscription equivalent** is a prorated estimate of capacity consumed, priced at `--plan-usd`. It does not count how many subscriptions were purchased.
 
-The estimate uses the Orchestrator's latest 24 hours of token and quota evidence. For each model, it finds shared accounts whose matching-model tokens occupy at least 99.9% of the sampled meter's traffic. Voice-reserved accounts are excluded. Tiny other-model traffic, such as thread naming, is ignored below that threshold. Unknown or materially mixed models make a sample unusable.
+The estimate uses the Orchestrator's latest 24 hours of token and quota evidence. For each model, it finds shared accounts whose matching-model tokens occupy at least 99.9% of the sampled meter's traffic. Voice-reserved accounts are excluded. Tiny other-model traffic is ignored below that threshold. Unknown or materially mixed models make a sample unusable.
 
 Each sample matches quota readings to whole-hour token buckets within five minutes. It must span at least three hours in one uninterrupted reset window, consume at least five percentage points, end below saturation, and have a final reading no more than two hours old. At least two accounts and ten pooled percentage points are required. Accounts are pooled before division, so a flat or noisy individual meter cannot dominate the result.
 
@@ -42,7 +42,7 @@ The command discovers `PI_REMOTE_DATA` and the ledger path from `/var/lib/pi-rem
 
 If an encrypted folder is not visible in the caller's namespace, the command enters the running `pi-remote@USER` mount namespace and executes the scanner as that user through passwordless `sudo`. It sends the self-contained scanner over stdin, so the other person does not need access to the caller's checkout. The configured ledger is also read as the selected person, in her namespace when encrypted. A shared ledger can still be reached through a private per-person symlink. An explicit `--ledger` override is read as the caller. Running as root alone cannot read an owner-only FUSE mount. A locked person gets an explicit unlock-required error. The command never retrieves a key, unlocks anyone, starts services, reads credential files, or writes databases.
 
-Only usage persisted in conversation JSONL is counted. Unsaved naming and compaction calls, voice, fleet jobs, deleted sessions, and responses without recorded usage are not recoverable from these files. The report names that scope rather than claiming to measure every activity by a person. A partially written final line is reported and excluded. Malformed completed lines fail the scan instead of silently losing spend. Logs are streamed one file at a time; no transcript text is printed or persisted.
+Only usage persisted in conversation JSONL is counted. Unsaved compaction calls, voice, fleet jobs, deleted sessions, and responses without recorded usage are not recoverable from these files. The report names that scope rather than claiming to measure every activity by a person. A partially written final line is reported and excluded. Malformed completed lines fail the scan instead of silently losing spend. Logs are streamed one file at a time; no transcript text is printed or persisted.
 
 ## Evidence and operations
 

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
+import { copyDeploymentOwner } from "./deployment-fixture.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helper = join(root, "deploy", "lib");
@@ -62,6 +63,45 @@ test("one host deployment installs its shared dependency tree once", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("concurrent dependency consumers serialize npm ci and share its completed receipt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-concurrent-"));
+  try {
+    writeFileSync(join(directory, "package.json"), "{}\n");
+    writeFileSync(join(directory, "package-lock.json"), "{}\n");
+    const script = `set -euo pipefail
+      source "$1"
+      root=$2
+      npm() {
+        mkdir "$root/installing" || return 71
+        printf 'called\\n' >> "$root/npm-calls"
+        rm -rf "$root/node_modules"
+        mkdir -p "$root/node_modules"
+        sleep 0.15
+        printf '{}\\n' > "$root/node_modules/.package-lock.json"
+        rmdir "$root/installing"
+      }
+      pi_stack_prepare_dependencies "$root"
+      test -n "$PI_STACK_DEPENDENCIES_READY"`;
+    await Promise.all([waitForExit(start(script, [helper, directory])), waitForExit(start(script, [helper, directory]))]);
+    assert.equal(readFileSync(join(directory, "npm-calls"), "utf8"), "called\n");
+    assert.ok(existsSync(join(directory, "node_modules/.pi-stack-dependency-key")));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("dependency install failure propagates even in a conditional and never stamps readiness", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-failed-"));
+  try {
+    writeFileSync(join(directory, "package.json"), "{}\n");
+    writeFileSync(join(directory, "package-lock.json"), "{}\n");
+    const result = spawnSync("bash", ["-c", `set -euo pipefail
+      source "$1"
+      npm() { return 23; }
+      if pi_stack_prepare_dependencies "$2"; then exit 99; else test "$?" = 23; fi
+      test ! -e "$2/node_modules/.pi-stack-dependency-key"`, "failed-dependencies", helper, directory], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("a deleted nested dependency invalidates an otherwise matching receipt", () => {
@@ -244,15 +284,52 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
   try {
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
-    copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));chmodSync(join(deploy, "host"), 0o755);
-    for (const name of ["release-checkout", "meeting-census", "native-prerequisites"]) copyFileSync(join(root, "deploy", name), join(deploy, name));
+    copyDeploymentOwner(root, repository);
+    writeFileSync(join(remoteApp, "data-contract.json"), readFileSync(join(root, "apps/remote/data-contract.json")));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
-    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice"; touch "$release/server/voice/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
+    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; cp "$(cd "$(dirname "$0")/.." && pwd)/apps/remote/data-contract.json" "$release/data-contract.json"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
-    writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
-    writeFileSync(join(deploy,"voice"),"#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$VOICE_TRACE\"\ncase $1 in --check) exit \"${VOICE_CHECK_EXIT:-0}\";; --activate) exit 0;; *) exit 64;; esac\n",{mode:0o755});
+    const runtimeOverlap = `
+if [[ \${REQUIRE_RUNTIME_OVERLAP:-0} == 1 ]]; then
+  if [[ $name == orchestrator ]]; then touch "$ORCHESTRATOR_STAGED"; fi
+  if [[ $name == runtime ]]; then
+    for i in $(seq 1 100); do
+      if [[ -f $ORCHESTRATOR_STAGED ]]; then
+        touch "$RUNTIME_CHECKED"
+        exit "\${RUNTIME_CHECK_EXIT:-0}"
+      fi
+      sleep 0.01
+    done
+    echo 'Prepared runtime proof serialized component staging' >&2
+    exit 91
+  fi
+fi
+`;
+    for (const name of ["runtime", "orchestrator"]) writeFileSync(join(deploy, name), component + runtimeOverlap + '\nif [[ $name == orchestrator ]]; then exit "${ORCHESTRATOR_EXIT:-0}"; fi\n');
+    writeFileSync(join(deploy, "skills"), component.replace('name=$(basename "$0")', 'name=$(basename "$0")\nprintf "%s\\n" "$*" >> "$SKILLS_TRACE"'));
+    writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nif [ \"${REQUIRE_ACTIVATION_OVERLAP:-0}\" = 1 ]; then test -f \"$DAEMON_ACTIVATED\" || exit 92; fi\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
+    for (const service of ["voice", "phone"]) {
+      const key = service.toUpperCase();
+      writeFileSync(join(deploy, service), `#!/bin/sh\nprintf '%s\\n' "$1" >> "$${key}_TRACE"\ncase $1 in --check) exit "\${${key}_CHECK_EXIT:-0}";; --activate) if [ -n "\${DOCTOR_ACTIVATION_STARTED:-}" ]; then touch "$DOCTOR_ACTIVATION_STARTED"; fi; exit 0;; *) exit 64;; esac\n`, { mode: 0o755 });
+    }
     mkdirSync(join(repository,"packages/runtime"),{recursive:true});
-    writeFileSync(join(repository,"packages/runtime/browser-doctor.mjs"), "process.exit(Number(process.env.BROWSER_SMOKE_EXIT ?? 0));\n");
+    const doctorProof = (name, peer) => `
+import { existsSync, writeFileSync } from 'node:fs';
+if (process.env.REQUIRE_DOCTOR_OVERLAP === '1') {
+  writeFileSync(process.env.${name}_DOCTOR_STARTED, 'started');
+  const deadline = Date.now() + 1500;
+  while (!existsSync(process.env.${peer}_DOCTOR_STARTED) || !existsSync(process.env.DOCTOR_ACTIVATION_STARTED)) {
+    if (Date.now() >= deadline) { console.error('Runtime doctors must overlap each other and activation'); process.exit(94); }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+if (process.env.DOCTOR_SETTLEMENT_DIR) {
+  await new Promise(resolve => setTimeout(resolve, 150));
+  writeFileSync(process.env.DOCTOR_SETTLEMENT_DIR + '/${name}.settled', 'settled');
+}
+process.exit(Number(process.env.${name}_SMOKE_EXIT ?? 0));
+`;
+    writeFileSync(join(repository,"packages/runtime/browser-doctor.mjs"), doctorProof("BROWSER", "MODEL"));
     // Activation hands the supervisor the selected release; its health then names that commit.
     writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\ncat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\" > \"$SUPERVISOR_COMMIT\"\n");chmodSync(join(remoteApp,"activate"),0o755);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps","packages"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
@@ -260,7 +337,15 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     const doctorBin = join(destinations.PI_STACK_RUNTIME_DEST, "node_modules/.bin");
     function installModelDoctor() {
       mkdirSync(doctorBin, { recursive: true });
-      writeFileSync(join(doctorBin, "pi-model-selection-doctor"), "process.exit(Number(process.env.MODEL_SMOKE_EXIT ?? 0));\n");
+      writeFileSync(join(doctorBin, "pi-model-selection-doctor"), doctorProof("MODEL", "BROWSER"));
+      const capacityDir = join(destinations.PI_STACK_ORCHESTRATOR_DEST, "dist");
+      mkdirSync(capacityDir, { recursive: true });
+      writeFileSync(join(capacityDir, "agent-capacity.js"), `
+export async function configuredAgentCapacityStatus() {
+  return { ok: true, value: { authority: 'pi-stack-global-agents-v1', limit: 100,
+    initialized: process.env.CAPACITY_UNINITIALIZED !== '1', active: 0, queued: 0 } };
+}
+`);
     }
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
@@ -298,14 +383,28 @@ case $1 in
     printf '%s\\n' 'pi-model-broker.service loaded active running' 'pi-stack-model-broker@alice.service loaded active running' 'pi-remote@alice.service loaded active running' 'pi-orchestrator@alice.service loaded active running' 'pi-orchestrator@running-person.service loaded active running';;
   show)
     [ "\${DISCOVERY_EXIT:-0}" = 0 ] || exit "$DISCOVERY_EXIT"
+    case $2 in pi-stack-phone.service|pi-stack-voice.service) echo loaded; exit 0;; esac
     case $4 in
       pi-orchestrator@alice.service) echo "\${ALICE_UNIT_STATE:-enabled}";;
       pi-orchestrator@guest-person.service) echo "\${GUEST_UNIT_STATE:-${enableGuest ? "enabled-runtime" : "disabled"}}";;
       *) echo static;;
     esac;;
   restart)
-    case $2 in pi-orchestrator@*) exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
-  is-active|reset-failed) exit 0;;
+    case $2 in pi-orchestrator@*)
+      if [ "\${REQUIRE_ACTIVATION_OVERLAP:-0}" = 1 ]; then
+        for i in $(seq 1 100); do
+          if [ -f "$ACTIVATE_TRACE" ]; then
+            sleep 0.05
+            touch "$DAEMON_ACTIVATED"
+            exit "\${DAEMON_RESTART_EXIT:-0}"
+          fi
+          sleep 0.01
+        done
+        echo 'Remote handoff was serialized behind daemon restart' >&2
+        exit 91
+      fi
+      exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
+  is-active|reset-failed|stop) exit 0;;
   *) exit 64;;
 esac
 exit 0
@@ -330,6 +429,9 @@ printf 'Unexpected deployment HTTP request: %s\\n' "$*" >&2
 exit 64
 `, { mode: 0o755 });
     const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,VOICE_TRACE:join(directory,"voice.trace"),SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,HEALTH_TRACE:join(directory,"health.trace"),PI_REMOTE_PERSONS_DIR:personsDir,PI_REMOTE_ROUTER_PORT:"8788",PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
+    env.PHONE_TRACE = join(directory, "phone.trace");
+    env.SKILLS_TRACE = join(directory, "skills.trace");
+    env.DAEMON_ACTIVATED = join(directory, "daemon.activated");
     env.PERSON_READ_TRACE = personReadTrace;
     env.PI_STACK_ALLOW_LIVE_MEETING_RESTART = "0";
     env.MEETING_ROOMS = '{"rooms":[]}';
@@ -342,7 +444,7 @@ exit 64
       for (const destination of Object.values(destinations)) {
         assert.equal(existsSync(destination), false, "person preflight must precede component publication");
       }
-      for (const trace of [systemctlTrace, settingsTrace, activationTrace, env.VOICE_TRACE]) {
+      for (const trace of [systemctlTrace, settingsTrace, activationTrace, env.VOICE_TRACE, env.PHONE_TRACE]) {
         assert.equal(existsSync(trace), false, "person preflight must precede account and service changes");
       }
       chmodSync(config, 0o644);
@@ -362,9 +464,14 @@ exit 64
     assert.equal(existsSync(destinations.PI_STACK_REMOTE_DEST), false, "failed preparation cannot select Remote");
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed preparation cannot activate services");
     rmSync(env.VOICE_TRACE, { force: true });
+    rmSync(env.PHONE_TRACE, { force: true });
     rmSync(personReadTrace);
     installModelDoctor();
-    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env,cwd:directory});assert.equal(first.status,0,first.stderr);
+    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,REQUIRE_ACTIVATION_OVERLAP:"1",REQUIRE_DOCTOR_OVERLAP:"1",BROWSER_DOCTOR_STARTED:join(directory,"browser.started"),MODEL_DOCTOR_STARTED:join(directory,"model.started"),DOCTOR_ACTIVATION_STARTED:join(directory,"doctor.activation.started")},cwd:directory});assert.equal(first.status,0,first.stderr);
+    assert.equal(existsSync(env.DAEMON_ACTIVATED), true, "smoke joins the independent daemon activation job");
+    assert.deepEqual(readFileSync(env.SKILLS_TRACE, "utf8").trim().split("\n").sort(),
+      [user, "--links-only alice", "--links-only guest-person"].sort(),
+      "publish the shared skills once, then only reconcile other accounts' links");
     assert.doesNotMatch(first.stderr, /fatal: not a git repository/, "preflight resolves the source commit independently of caller cwd");
     assert.deepEqual(readFileSync(personReadTrace, "utf8").trim().split("\n"), ["alice", "guest-person"], "preflight reads both unlocked and locked people through their own accounts");
     const firstUnits=readFileSync(systemctlTrace,"utf8");
@@ -381,16 +488,43 @@ exit 64
     assert.match(firstUnits,/^restart pi-remote-router\.service$/m);
     assert.match(firstUnits, /^restart pi-model-broker\.service pi-stack-model-broker@alice\.service$/m);
     assert.equal(readFileSync(env.VOICE_TRACE,"utf8"),"--check\n--activate\n");
+    assert.equal(readFileSync(env.PHONE_TRACE,"utf8"),"--check\n--activate\n");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
     assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
     rmSync(systemctlTrace,{force:true});
-    const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
+    const uninitialized = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, CAPACITY_UNINITIALIZED: "1" }, cwd: directory });
+    assert.equal(uninitialized.status, 75, uninitialized.stderr);
+    assert.match(uninitialized.stderr, /Global agent capacity cutover incomplete/);
+    assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote@alice.service\n", "capacity readiness gates further activation");
+    assert.doesNotMatch(uninitialized.stdout, /phase=(browser-doctor|model-doctor|activation) started/, "capacity readiness gates native doctors");
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m);
+    rmSync(systemctlTrace);
+    const doctorSettlement = join(directory, "doctor-settlement");
+    mkdirSync(doctorSettlement);
+    const stagingFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ORCHESTRATOR_EXIT: "23", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });
+    assert.equal(stagingFailure.status, 23, stagingFailure.stderr);
+    for (const doctor of ["BROWSER", "MODEL"]) assert.equal(existsSync(join(doctorSettlement, `${doctor}.settled`)), false, "doctors require successful publication of the runtime");
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "staging failure cannot activate services");
+    const activationFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, DAEMON_RESTART_EXIT: "1", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });
+    assert.equal(activationFailure.status, 1, activationFailure.stderr);
+    for (const doctor of ["BROWSER", "MODEL"]) assert.ok(existsSync(join(doctorSettlement, `${doctor}.settled`)), "failed activation must join both proof jobs before releasing custody");
+    rmSync(systemctlTrace);
+    const overlapEnv = { ...env, REQUIRE_RUNTIME_OVERLAP: "1", ORCHESTRATOR_STAGED: join(directory, "orchestrator.staged"), RUNTIME_CHECKED: join(directory, "runtime.checked") };
+    const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:overlapEnv});assert.equal(unchanged.status,0,unchanged.stderr);
+    assert.equal(existsSync(overlapEnv.RUNTIME_CHECKED), true, "prepared runtime proof overlaps component staging and is joined");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     const again = readFileSync(systemctlTrace, "utf8");
     assert.deepEqual(restartedDaemons(again), expectedDaemons, "unchanged releases still reconcile every daemon");
     assert.doesNotMatch(again, /restart pi-remote-router/);
 
+    rmSync(systemctlTrace,{force:true});
+    rmSync(overlapEnv.ORCHESTRATOR_STAGED);
+    rmSync(overlapEnv.RUNTIME_CHECKED);
+    const runtimeFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...overlapEnv, RUNTIME_CHECK_EXIT: "23" } });
+    assert.equal(runtimeFailure.status, 1, runtimeFailure.stderr);
+    assert.equal(existsSync(overlapEnv.RUNTIME_CHECKED), true, "failed runtime proof was not skipped");
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed overlapped runtime proof vetoes service activation");
     rmSync(systemctlTrace,{force:true});
     const disabled=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,GUEST_UNIT_STATE:"disabled",ALICE_UNIT_STATE:"disabled"}});
     assert.equal(disabled.status,0,disabled.stderr);
@@ -399,9 +533,11 @@ exit 64
       "disabled running daemons restart, but disabled inactive daemons stay stopped");
 
     rmSync(systemctlTrace,{force:true});
-    const voiceFailure=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,VOICE_CHECK_EXIT:"1"}});
-    assert.notEqual(voiceFailure.status,0);
-    assert.equal(existsSync(systemctlTrace),false,"Voice preflight blocks service activation");
+    for (const service of ["VOICE", "PHONE"]) {
+      const preflightFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, [`${service}_CHECK_EXIT`]: "75" } });
+      assert.equal(preflightFailure.status, 75, preflightFailure.stderr);
+      assert.equal(existsSync(systemctlTrace), false, `${service} preflight blocks service activation`);
+    }
     for (const failure of [{ BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
       const doctorFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ...failure } });
       assert.notEqual(doctorFailure.status, 0);
@@ -418,13 +554,40 @@ exit 64
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
     writeFileSync(join(repository,"release"),"broken\n");assert.equal(spawnSync("git",["-C",repository,"add","release"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","broken"]).status,0);
     for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }, { BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
-      rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});
+      rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});rmSync(env.PHONE_TRACE,{force:true});
       const broken=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,...failure}});assert.notEqual(broken.status,0);
       assert.match(broken.stderr,/returning Pi Remote to/);
       assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST),before);
       assert.equal(readFileSync(env.VOICE_TRACE,"utf8"),"--check\n--activate\n--activate\n");
+      assert.equal(readFileSync(env.PHONE_TRACE,"utf8"),"--check\n--activate\n--activate\n");
       assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\npi-remote@alice.service\n");
       assert.match(readFileSync(systemctlTrace,"utf8"),/reset-failed pi-remote@\*\.service/);
+    }
+    rmSync(join(before, "server/phone/service.ts"));
+    rmSync(systemctlTrace);
+    rmSync(env.PHONE_TRACE);
+    const prePhoneRollback = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, SMOKE_EXIT: "1" } });
+    assert.equal(prePhoneRollback.status, 1, prePhoneRollback.stderr);
+    assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST), before);
+    assert.equal(readFileSync(env.PHONE_TRACE, "utf8"), "--check\n--activate\n");
+    assert.match(readFileSync(systemctlTrace, "utf8"), /^stop pi-stack-phone.service$/m);
+
+    // Unknown or incompatible persistent schemas must retain forward selection,
+    // not reactivate an older supervisor against migrated data.
+    const contractPath = join(before, "data-contract.json");
+    for (const previousContract of [null, { version: 1, schema: "incompatible-fixture-schema" }]) {
+      if (previousContract === null) rmSync(contractPath);
+      else writeFileSync(contractPath, JSON.stringify(previousContract));
+      rmSync(destinations.PI_STACK_REMOTE_DEST);
+      symlinkSync(before, destinations.PI_STACK_REMOTE_DEST);
+      writeFileSync(supervisorCommit, readFileSync(join(before, ".pi-stack-commit")));
+      rmSync(activationTrace, { force: true });
+      const incompatible = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, SMOKE_EXIT: "1" } });
+      assert.equal(incompatible.status, 1, incompatible.stderr);
+      assert.match(incompatible.stderr, /Remote rollback refused/);
+      assert.doesNotMatch(incompatible.stderr, /returning Pi Remote to/);
+      assert.notEqual(readlinkSync(destinations.PI_STACK_REMOTE_DEST), before, "failed candidate remains selected for forward repair");
+      assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote@alice.service\n", "incompatible old release never receives activation");
     }
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });

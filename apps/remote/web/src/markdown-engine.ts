@@ -68,6 +68,14 @@ function build(): MarkdownRenderer {
     // image blocks do.
     const src = tokens[index].attrGet?.("src");
     if (typeof src === "string") {
+      if (env?.sessionMedia === false) {
+        let external = false;
+        try {
+          const url = new URL(src);
+          external = ["https:", "http:"].includes(url.protocol) && url.origin !== window.location.origin && !url.pathname.includes("/v1/sessions/");
+        } catch {}
+        if (!external) return escapeHtml(`![${tokens[index].content}](${src})`);
+      }
       if (src.startsWith("/v1/sessions/")) {
         tokens[index].attrSet("src", resourceUrl(src));
         tokens[index].attrSet("data-download-query", "true");

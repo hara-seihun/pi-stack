@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { openPiSession } from "../src/threads/pi-session.js";
+import { threadTools } from "../src/threads/pi-tools.js";
 import { seedPiSession } from "../src/threads/pi-session-file.js";
 import type { PiCommand, PiEvent, PiSessionOptions } from "../src/threads/contracts.js";
 
@@ -69,9 +70,10 @@ it("retains native history, resources, thread tools and RPC session replacement"
   const context = await request({ type: "get_context" });
   expect((context.data as { systemPrompt: string }).systemPrompt).toContain("fixture context supplied by the project");
   const names = (context.data as { tools: { name: string }[] }).tools.map(tool => tool.name);
-  expect(names).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", "fixture_resource", "thread_await", "thread_spawn", "thread_read", "thread_list", "thread_send", "thread_control"]));
+  const declared = threadTools(options).map(tool => tool.name);
+  expect(names).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", "fixture_resource", ...declared]));
   expect(names.some(name => name.startsWith("core_"))).toBe(false);
-  expect(names.filter(name => name.startsWith("thread_")).sort()).toEqual(["thread_await", "thread_control", "thread_list", "thread_read", "thread_send", "thread_spawn"]);
+  expect(names.filter(name => name.startsWith("thread_")).sort()).toEqual(declared.filter(name => name.startsWith("thread_")).sort());
   expect(await request({ type: "prompt", workId: "handled", message: "/fixture_command" })).toMatchObject({ success: true });
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(readFileSync(options.sessionFile, "utf8")).toContain('"workId":"handled"');

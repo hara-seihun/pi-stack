@@ -1,0 +1,23 @@
+{
+  "collected_at_utc": "2026-10-03T19:03:07.697008+00:00",
+  "endpoint": "ws://127.0.0.1:8797",
+  "max_concurrency": 1,
+  "pace": "realtime",
+  "chunk_ms": 20,
+  "baseline": "selected live CPU service before parent tail/scored-alternative fixes; not candidate runtime",
+  "baseline_source_file_sha256": {
+    "/srv/pi/write-engine/server.py": "45a280ac2693703e89d4a62a2585afbcb2472c8db183b3c3e4da3c08ca13916c",
+    "/srv/pi/write-engine/nemotron.py": "3aa1b523cde5f4ce5fb6b5a935385d623e21907182c0c63b04c55a1e9764e4ab",
+    "/srv/pi/write-engine/cleanup/__init__.py": "62bf5679bee9b682fc532f6a7b268b8b27268504fe997d15879e369a67580c29"
+  },
+  "manifest_sha256": "a798dc3e06647f9e0f89a7e93bd7840df6482431cf04cd703207cf474540d6f1",
+  "result_rows": 34,
+  "desired_expectations": "expectation_pass and meaning_proxy_pass are desired fixture contracts, not labels chosen to match baseline behavior",
+  "limitations": [
+    "client finish includes roundtrip and current CPU contention; not SLA proof",
+    "first request may warm CPU cleanup model",
+    "synthetic audio is not evidence of natural dictation quality",
+    "AMI source orthographic transcripts retain cutoffs without explicit hyphenation; targets and constraints authored",
+    "meaning_proxy is bounded lexical checks, not semantic equivalence"
+  ]
+}

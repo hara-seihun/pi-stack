@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, standaloneRecordPath } from "../../runtime/standalone-agent.mjs";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -15,6 +17,10 @@ assert.ok(["enabled", "disabled"].includes(values.expect));
 const routing = resolve(values.routing);
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi/agent");
 const cwd = process.cwd();
+const executionId = randomUUID();
+const capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `image-probe:${executionId}`, executionId });
+let session;
+try {
 const settingsManager = SettingsManager.inMemory();
 const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
 const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
@@ -22,8 +28,7 @@ const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManage
   additionalExtensionPaths: [routing],
 });
 await resourceLoader.reload();
-const { session } = await createAgentSession({ cwd, agentDir, modelRuntime, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd) });
-try {
+({ session } = await createAgentSession({ cwd, agentDir, modelRuntime, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd) }));
   const errors = [];
   await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
   assert.deepEqual(errors, []);
@@ -42,6 +47,8 @@ try {
   }
   console.log(JSON.stringify(result));
 } finally {
-  await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-  session.dispose();
+  if (session) {
+    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    await abortAndSettleStandaloneSession(session, capacity);
+  } else await settleStandaloneAgent(capacity);
 }

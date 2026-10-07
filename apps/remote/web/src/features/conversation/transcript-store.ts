@@ -17,6 +17,28 @@ export interface TranscriptWindow {
 }
 
 export const emptyTranscript: TranscriptWindow = { generation: "", total: 0, items: [] };
+export const TRANSCRIPT_HEAD_BUDGET = 600;
+export const TRANSCRIPT_HEAD_BYTES = 8 * 1024 * 1024;
+
+export function boundTranscriptHeads(items: readonly TranscriptItemHead[], direction: "older" | "newer"): TranscriptItemHead[] {
+  const source = direction === "older" ? items : [...items].reverse();
+  const held: TranscriptItemHead[] = [];
+  let bytes = 0;
+  for (const head of source) {
+    const size = JSON.stringify(head).length * 2;
+    if (held.length >= TRANSCRIPT_HEAD_BUDGET || held.length && bytes + size > TRANSCRIPT_HEAD_BYTES) break;
+    held.push(head);
+    bytes += size;
+  }
+  return direction === "older" ? held : held.reverse();
+}
+export interface VisibleTranscriptRange { from: number; to: number }
+
+function withoutBody(head: TranscriptItemHead): TranscriptItemHead {
+  if (!head.body) return head;
+  const { body: _body, ...metadata } = head;
+  return metadata;
+}
 
 export interface TranscriptEvent {
   generation: string;
@@ -32,11 +54,23 @@ export function mergeHeads(current: readonly TranscriptItemHead[], incoming: rea
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
-export function applyTranscriptEvent(current: TranscriptWindow | null, event: TranscriptEvent): TranscriptWindow {
-  if (!current || current.generation !== event.generation) return { generation: event.generation, total: event.total, items: [...event.items] };
+export function applyTranscriptEvent(current: TranscriptWindow | null, event: TranscriptEvent, visible: VisibleTranscriptRange | null = null): TranscriptWindow {
+  if (!current || current.generation !== event.generation) return { generation: event.generation, total: event.total, items: boundTranscriptHeads(event.items, "newer") };
   const first = event.items[0]?.seq ?? event.total;
-  const older = current.items.filter(item => item.seq < first && item.seq < event.total);
-  return { generation: event.generation, total: event.total, items: [...older, ...event.items] };
+  const older = current.items.filter(item => item.seq < first && item.seq < event.total).map(withoutBody);
+  const candidate = [...older, ...event.items];
+  const tail = boundTranscriptHeads(candidate, "newer");
+  const readingOlder = hasNewer(current) && first > (current.items.at(-1)?.seq ?? -1) + 1
+    || !!visible && !!tail.length && visible.from < tail[0].seq;
+  if (readingOlder) {
+    const updates = new Map(event.items.map(item => [item.seq, item]));
+    return { generation: event.generation, total: event.total, items: current.items.filter(item => item.seq < event.total).map(item => updates.get(item.seq) ?? withoutBody(item)) };
+  }
+  return { generation: event.generation, total: event.total, items: tail };
+}
+
+export function hasNewer(window: TranscriptWindow | null): boolean {
+  return !!window?.items.length && window.items.at(-1)!.seq < window.total - 1;
 }
 
 /** True while the generation holds items older than the window's first head. */
@@ -78,6 +112,20 @@ export async function fetchTranscriptPage(
 
 export const EARLIER_PAGE_SIZE = 60;
 
+export async function loadLatest(sessionId: string, fetcher: TranscriptFetch = request): Promise<TranscriptWindow> {
+  const result = await fetchTranscriptPage(sessionId, { limit: EARLIER_PAGE_SIZE }, fetcher);
+  const page = result.page;
+  if (!page) throw new Error("The transcript generation kept moving");
+  return { generation: page.generation, total: page.total, items: boundTranscriptHeads(page.items, "newer") };
+}
+
+export async function loadNewer(sessionId: string, window: TranscriptWindow, fetcher: TranscriptFetch = request): Promise<{ window: TranscriptWindow; reset: boolean }> {
+  const before = Math.min(window.total, (window.items.at(-1)?.seq ?? -1) + 1 + EARLIER_PAGE_SIZE);
+  const result = await fetchTranscriptPage(sessionId, { generation: window.generation, before, limit: EARLIER_PAGE_SIZE }, fetcher);
+  if (!result.ok) return { window: await loadLatest(sessionId, fetcher), reset: true };
+  return { window: { generation: result.page.generation, total: result.page.total, items: boundTranscriptHeads(mergeHeads(window.items.map(withoutBody), result.page.items), "newer") }, reset: false };
+}
+
 /**
  * One "Show earlier" step. A 409 means the thread compacted or forked while
  * the person was reading: the newest window of the current generation replaces
@@ -92,7 +140,7 @@ export async function loadEarlier(
   const older = await fetchTranscriptPage(sessionId, { generation: window.generation, before, limit }, fetcher);
   if (older.ok) {
     return {
-      window: { generation: older.page.generation, total: older.page.total, items: mergeHeads(window.items, older.page.items) },
+      window: { generation: older.page.generation, total: older.page.total, items: boundTranscriptHeads(mergeHeads(window.items.map(withoutBody), older.page.items), "older") },
       reset: false,
     };
   }
@@ -101,7 +149,7 @@ export async function loadEarlier(
     .then(result => result.ok ? result.page : result.page);
   if (!replacement) throw new Error("The transcript generation kept moving");
   return {
-    window: { generation: replacement.generation, total: replacement.total, items: mergeHeads([], replacement.items) },
+    window: { generation: replacement.generation, total: replacement.total, items: boundTranscriptHeads(replacement.items, "newer") },
     reset: true,
   };
 }

@@ -1,25 +1,35 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { API } from "../../server/api";
+import { prioritizeQuestion } from "./features/conversation/question-drafts";
+import { assertNever } from "../../shared/explicit-state";
+import { voiceActionLabel, type VoiceState } from "./voice-state";
+import { validateSession, validateStreamSnapshot } from "../../shared/state-validation";
 import { appPath, appStorageKey } from "./app-path";
-import type { GovernorProvider, InlineImageSnapshot, StreamEvent, ThreadQuestion } from "../../server/protocol";
+import type { GovernorProvider, InlineImageSnapshot, StreamEvent, QuestionsResource } from "../../server/protocol";
 import { ClientCache } from "./client-cache";
 import { ClientCacheContext } from "./cached-media";
-import { api, piFetch, registerUnlockHandler } from "./client";
-import { fetchPersonChooser, reportWebReady } from "./native";
+import { api, ApiError, piFetch, ensureUnlocked, registerUnlockHandler } from "./client";
+import { fetchPersonChooser, reportWebReady, bootstrapUrl, pinnedFetch } from "./native";
+import { PromptOutbox, type PromptOutboxEntry, type PromptOutboxScope, type PromptOutboxTransport } from "./prompt-outbox";
+import { PromptSubmissions } from "./prompt-submissions";
+import { PromptOutboxStatus } from "./PromptOutboxStatus";
+import { PromptStorage, type PromptStorageState, type PromptStorageResult } from "./prompt-storage";
 import { useChatDrawing } from "./chat-drawing";
 import type { ReplyTarget } from "./message-reply";
 import { ReplyDrafts } from "./reply-drafts";
 import type { MessagingSnapshot } from "../../server/messaging/protocol";
 import { inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync, type Chat, type ChatId } from "./chats";
+import { agentName } from "./agent-name";
 import { SignInDialog } from "./SignInDialog";
 import { DismissibleError } from "./dismissible-error";
 import { dismissServerError } from "./error-feedback";
-import { deliverIdleNotifications, readIdleCursor, takeNotificationTarget, retainNotificationTarget } from "./notifications";
+import { deliverIdleNotifications, notificationReplayCursor, notificationFeedActivity, takeNotificationTarget, retainNotificationTarget } from "./notifications";
 import { listenForFileDrops } from "./file-drop";
 import { ensureMarkdown } from "./markdown-engine";
 import { createStreamClient, type StreamClient } from "./stream";
-import { workerThreads, working } from "./thread-state";
-import { CloseRunningChatDialog, requestStop, runningDescendants, submitThreadControl, ThreadStopDialog } from "./thread-controls";
+import { useRooms, RoomConversation } from "./rooms";
+import { conversationTab, working } from "./thread-state";
+import { requestStop, submitThreadControl } from "./thread-controls";
 import { LazyChatPicker } from "./chat-picker-lazy";
 import type { ChatPickerHandle } from "./thread-start-menu";
 import type { Attachment, Bootstrap, ContextEntry, Dashboard, QueuedMessage, Session, SlashCommand } from "./types";
@@ -32,6 +42,7 @@ import { MessagingConversations } from "./Messages";
 import { MessagingCallProvider, SignalCallButton } from "./messaging-call";
 import { RequestIndicator } from "./RequestIndicator";
 import { AndroidDownloadPrompt } from "./android-download";
+import { AppUpdateStatus, useAppUpdate } from "./app-update";
 import { NetworkJoinPrompt } from "./network-join";
 import { beginSectionLoad } from "./in-flight";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
@@ -46,7 +57,7 @@ import { ItemBodies, ItemBodiesContext } from "./features/conversation/item-bodi
 import { createLiveText, type LiveTextStore } from "./features/conversation/live-text";
 import { ThreadDirectoryProvider, type ThreadDirectory } from "./features/conversation/thread-chips";
 import { entriesFromHeads, WAITING_ENTRY } from "./features/conversation/transcript-entries";
-import { applyTranscriptEvent, hasEarlier, loadEarlier, mergeHeads, type TranscriptWindow } from "./features/conversation/transcript-store";
+import { applyTranscriptEvent, hasEarlier, hasNewer, loadEarlier, loadNewer, loadLatest, type VisibleTranscriptRange, type TranscriptWindow } from "./features/conversation/transcript-store";
 import type { QueueAction } from "./features/queue/delivery";
 import { threadStatus } from "./features/status/thread-status";
 import { speech } from "./speech";
@@ -58,8 +69,10 @@ import { SpeechBar } from "./SpeechBar";
 const PasteTextDialog = lazy(() => import("./PasteTextDialog").then(module => ({ default: module.PasteTextDialog })));
 const InspectorSheet = lazy(() => import("./features/inspector/InspectorSheet").then(module => ({ default: module.InspectorSheet })));
 const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
-const WorkersTree = lazy(() => import("./features/workers/WorkersTree").then(module => ({ default: module.WorkersTree })));
+const AgentsScreen = lazy(() => import("./features/agents/AgentsScreen").then(module => ({ default: module.AgentsScreen })));
+const NotificationsScreen = lazy(() => import("./features/notifications/NotificationsScreen").then(module => ({ default: module.NotificationsScreen })));
 const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
+const NeedsYouScreen = lazy(() => import("./needs-you").then(module => ({ default: module.NeedsYouScreen })));
 const CalendarScreen = lazy(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
 const MachineTab = lazy(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
 
@@ -79,7 +92,7 @@ interface AppState {
   sessions: Session[];
   /** Threads opened from the picker or a notification before a delta carries them. */
   discovered: Session[];
-  /** Every fleet thread, carried only while the Workers screen shows "All". */
+  /** Background agents discovered for opening or inspecting launch provenance. */
   fleet: Session[];
   archivedTotal: number;
   dashboard: Dashboard | null;
@@ -127,6 +140,7 @@ function UnlockDialog() {
   const [selectedUser, setSelectedUser] = useState("");
   const [key, setKey] = useState("");
   const [message, setMessage] = useState("");
+  const [custody, setCustody] = useState<{ locked: boolean; message: string } | null>(null);
   useEffect(() => {
     registerUnlockHandler(async (nextMessage) => {
       setMessage(nextMessage);
@@ -135,6 +149,7 @@ function UnlockDialog() {
         const response = await fetchPersonChooser();
         if (!response.ok) throw new Error(`Person chooser returned HTTP ${response.status}`);
         const result = await response.json();
+        setCustody(result?.environment?.custody ?? null);
         const nextPeople = result?.environment?.persons || result?.persons || [];
         const savedUser = window.PiRemotePerson?.get() || "";
         const nextUser = nextPeople.some((person: { user: string }) => person.user === savedUser) ? savedUser : nextPeople[0]?.user || "";
@@ -157,7 +172,8 @@ function UnlockDialog() {
   return <dialog ref={dialog} className="unlock-dialog" aria-labelledby="unlock-title" onCancel={event => event.preventDefault()}>
     <form className="unlock-form" onSubmit={submit}>
       <h2 id="unlock-title">Pi Remote</h2>
-      {requiresKey && <p>Your folder key stays on this device.</p>}
+      {requiresKey && <p>{custody ? "Your key proves who you are to Kenan; he retains folder custody." : "Your folder key stays on this device."}</p>}
+      {custody?.locked && <p role="status">Kenan's custody is locked after a restart. {custody.message}</p>}
       {people.length > 0 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={selectedUser} onChange={(event) => { setSelectedUser(event.target.value); setKey(""); window.PiRemotePerson?.set(event.target.value); }}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
       {requiresKey && <div className="unlock-field"><label htmlFor="unlock-key">Folder key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>}
       <DismissibleError className="unlock-error" message={message} />
@@ -167,6 +183,7 @@ function UnlockDialog() {
 }
 
 export default function App() {
+  const update = useAppUpdate();
   const [person, setPerson] = useState(window.PiRemotePerson.get());
   const [lockGeneration, setLockGeneration] = useState(0);
   useEffect(reportWebReady, []);
@@ -177,7 +194,7 @@ export default function App() {
     window.addEventListener("pi-auth", authChanged);
     return () => { window.removeEventListener("pi-person", changed); window.removeEventListener("pi-auth", authChanged); };
   }, []);
-  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><NetworkJoinPrompt /><AndroidDownloadPrompt /><RemoteApp key={`${person}:${lockGeneration}`} /></>;
+  return <><RequestIndicator /><SignInDialog /><UnlockDialog /><NetworkJoinPrompt /><AndroidDownloadPrompt /><RemoteApp key={`${person}:${lockGeneration}`} update={update} /></>;
 }
 
 /**
@@ -190,7 +207,7 @@ const LiveConversation = memo(function LiveConversation({ live, ...props }: { li
   return <ConversationScreen {...props} liveText={text} liveThinking={thinking} thinkingActive={props.session.activity === "thinking" || !!thinking} />;
 });
 
-function RemoteApp() {
+function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const person = useRef(window.PiRemotePerson.get()).current;
   const autoCollapseKey = appStorageKey(`pi-remote-auto-collapse:${person}`);
   const [autoCollapse, setAutoCollapse] = useState(() => localStorage.getItem(autoCollapseKey) !== "false");
@@ -203,6 +220,7 @@ function RemoteApp() {
     }
   }, [autoCollapseKey]);
   const { state, stateRef, patch } = useStableState();
+  const roomDirectory = useRooms(state.bootstrap?.rooms === true);
   const layout = useLayout();
   const route = useRoute();
   const routeChat = routeChatId(route);
@@ -214,6 +232,7 @@ function RemoteApp() {
   const showConversationIdentity = layout === "phone" || listSelection.key !== selectionKey || !listSelection.visible;
   const aiId = routeThreadId(route);
   const messagingActive = routeChat?.startsWith("human:") ?? false;
+  const roomId = state.bootstrap?.rooms && routeChat?.startsWith("room:") ? routeChat.slice(5) : null;
   const humanConversation = state.messaging.conversations.find(item => `human:${item.id}` === routeChat && item.current) ?? null;
   const [chatError, setChatError] = useState("");
   const [closing, setClosing] = useState<PendingCloses>(() => new Set());
@@ -225,17 +244,17 @@ function RemoteApp() {
   const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [stopTarget, setStopTarget] = useState<Session | null>(null);
-  const [closeConfirm, setCloseConfirm] = useState<{ chat: Chat; running: number } | null>(null);
+  const [closeDependencies, setCloseDependencies] = useState<Array<{ threadId: string; dependsOn: string; ownerId?: string }>>([]);
+  const [notificationVersion, setNotificationVersion] = useState(0);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
-  const [pendingQuestions, setPendingQuestions] = useState<{ sessionId: string; questions: ThreadQuestion[] } | null>(null);
+  const [pendingQuestions, setPendingQuestions] = useState<({ sessionId: string } & QuestionsResource) | null>(null);
   const [pasteSessionId, setPasteSessionId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<{ sessionId: string; message: string } | null>(null);
   const [fileDrag, setFileDrag] = useState(false);
   const [pasteName, setPasteName] = useState("pasted-text.txt");
   const [pasteContent, setPasteContent] = useState("");
-  const [workersFilter, setWorkersFilter] = useState<"active" | "all">("active");
-  const [voiceState, setVoiceState] = useState<"idle" | "connecting" | "live" | "error">("idle");
+
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [voiceDetail, setVoiceDetail] = useState("");
   const voice = useRef<VoiceSession | null>(null);
   const stream = useRef<StreamClient | null>(null);
@@ -252,9 +271,7 @@ function RemoteApp() {
   live.current ??= createLiveText();
   const panelPushed = useRef(false);
   const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState === "visible");
-  // Reconnect now. The stream pushes on its own, so this only matters when it
-  // is not carrying anything: after a mutation the server sends the change.
-  const kick = useCallback(() => { if (stream.current?.state() !== "open") stream.current?.reconnect(); }, []);
+  const kick = useCallback(() => stream.current?.reconnect(), []);
   const reconnect = useCallback(() => stream.current?.reconnect(), []);
   const liveText = live.current;
   const selectedSession = useCallback(() => {
@@ -286,7 +303,7 @@ function RemoteApp() {
     }
     voice.current = window.PiRemoteVoice.create({
       sessionId: session.id,
-      onState(next, detail) { setVoiceState(next as typeof voiceState); setVoiceDetail(detail || ""); },
+      onState(next, detail) { setVoiceState(next); setVoiceDetail(detail || ""); },
       onNotice(message) { setVoiceDetail(message); },
     });
     await voice.current.start();
@@ -320,11 +337,9 @@ function RemoteApp() {
   // person was; panels remember whether they pushed so closing a deep-linked
   // panel does not leave the app.
   const openChat = useCallback((chat: ChatId, options: { tab?: Tab; replace?: boolean } = {}) => {
-    const tab = options.tab ?? (route.tab === "workers" && chat.startsWith("ai:") ? "workers" : "chats");
-    if (tab === "workers") navigate({ tab: "workers", thread: chat.slice(3), panel: null }, options);
-    else navigate({ tab: "chats", chat, panel: null }, options);
+    navigate({ tab: "chats", chat, panel: null }, options);
   }, [route.tab]);
-  const openThreadId = useCallback((id: string, tab?: Tab) => openChat(`ai:${id}`, { tab }), [openChat]);
+  const openThreadId = useCallback((id: string, tab?: Tab) => openChat(id.startsWith("room:") ? id as ChatId : `ai:${id}`, { tab }), [openChat]);
   // Opening a thread from inside a panel used to close the panel and navigate
   // in the same tick. `history.back()` settles later, so its popstate landed
   // after the push and returned the person to the thread they came from: a
@@ -352,7 +367,6 @@ function RemoteApp() {
   const selectTab = useCallback((tab: Tab) => {
     if (tab === route.tab) navigate(routeHome(route));
     else if (tab === "chats") navigate({ tab, chat: null, panel: null });
-    else if (tab === "workers") navigate({ tab, thread: null, panel: null });
     else if (tab === "files") navigate({ tab, path: null });
     else navigate({ tab });
   }, [route]);
@@ -362,9 +376,13 @@ function RemoteApp() {
   const selectThread = useCallback(async (id: string, discovered?: Session, signal?: AbortSignal) => {
     const generation = ++selectionGeneration.current;
     const candidate = discovered ?? [...stateRef.current.sessions, ...stateRef.current.discovered].find(item => item.id === id);
-    if (candidate?.archivedAt) await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: id }), {});
+    if (!candidate || candidate.archivedAt || candidate.foreground !== true) {
+      const opened = await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: id }), {});
+      validateSession(opened.session);
+      discovered = opened.session;
+    }
     if (signal?.aborted || generation !== selectionGeneration.current) return;
-    setStopTarget(null);
+    setPendingQuestions({ sessionId: id, state: "loading", questions: [] });
     setPasteSessionId(null);
     liveText.reset();
     const remembered = cache.thread(id);
@@ -389,7 +407,7 @@ function RemoteApp() {
         stream.current?.restore({ type: "transcript", sessionId: id, ...window });
         patch({ transcript: window });
         finishSection(`thread:${id}`);
-        stream.current?.update({ transcriptFrom: window.items[0]?.seq ?? null });
+        stream.current?.update({ transcriptFrom: null });
       }
     });
   }, [cache, kick, liveText, patch, stateRef]);
@@ -397,7 +415,7 @@ function RemoteApp() {
     if (routeChat === stateRef.current.selectedChatId) return;
     if (!routeChat) { liveText.reset(); patch({ selectedChatId: null, transcript: null, images: null }); return; }
     if (routeChat.startsWith("ai:")) void selectThread(routeChat.slice(3)).catch(cause => { finishSection(`thread:${routeChat.slice(3)}`); setChatError(String(cause)); });
-    else { setStopTarget(null); setPasteSessionId(null); liveText.reset(); patch({ selectedChatId: routeChat, transcript: null, images: null, slashCommands: [] }); kick(); }
+    else { setPasteSessionId(null); liveText.reset(); patch({ selectedChatId: routeChat, transcript: null, images: null, slashCommands: [] }); kick(); }
   }, [routeChat, selectThread, patch, kick, liveText, stateRef]);
 
   useEffect(() => {
@@ -446,31 +464,184 @@ function RemoteApp() {
     return () => finishSection(name);
   }, [aiId, routeChat, route.tab, cache, messagingHistory]);
 
-  // One stream carries every section. Session-scoped frames for a thread the
-  // person left are dropped by the client before they reach this handler.
-  const notificationsSubscribed = useRef(false);
+  type OutboxOwner = { store: PromptOutbox; transport: PromptOutboxTransport; scope: PromptOutboxScope; entries: PromptOutboxEntry[] };
+  const outbox = useRef<OutboxOwner | null>(null);
+  const promptStorage = useRef<PromptStorage<OutboxOwner> | null>(null);
+  const storageFailure = useRef<string | null>(null);
+  const [storageState, setStorageState] = useState<PromptStorageState<OutboxOwner>>({ kind: "loading" });
+  const ensureOutbox = useCallback((): Promise<PromptStorageResult<OutboxOwner>> => promptStorage.current?.ensure()
+    ?? Promise.resolve({ ok: false, error: { kind: "unavailable", message: "Prompt storage is initializing. Your draft is retained; try Send again." } }), []);
+  const [outboxEntries, setOutboxEntries] = useState<PromptOutboxEntry[]>([]);
+  const [outboxBusy, setOutboxBusy] = useState<string | null>(null);
+  const ownedPrompts = useRef(new Map<string, string>());
+  const promptSubmissions = useRef(new PromptSubmissions());
+  const drainingPrompts = useRef(false);
+  const refreshOutbox = useCallback(async () => {
+    const owner = outbox.current;
+    if (!owner) return;
+    const entries = await owner.store.list();
+    if (outbox.current !== owner) return;
+    if (entries.ok) setOutboxEntries(entries.value);
+    else promptStorage.current?.fail(entries.error.message);
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const storage = new PromptStorage<OutboxOwner>({
+      open: async currentAttempt => {
+        const [environment, root] = await Promise.all([window.KenanRemote?.getState(), bootstrapUrl()]);
+        if (!environment) return { ok: false, error: { kind: "unavailable", message: "Environment transport is unavailable" } };
+        const scope: PromptOutboxScope = { person, environment: environment.id, bootstrap: new URL(root || "/", location.href).href };
+        const currentScope = () => active && currentAttempt() && window.PiRemotePerson.get() === person
+          && (!stateRef.current.bootstrap || stateRef.current.bootstrap.environmentId === scope.environment) ? scope : null;
+        const store = new PromptOutbox({ scope, database: indexedDB, currentScope });
+        const entries = await store.list();
+        if (!entries.ok) { store.dispose(); return { ok: false, error: { kind: entries.error.kind === "scope_changed" ? "scope_changed" : "unavailable", message: entries.error.message } }; }
+        const transport: PromptOutboxTransport = async (entry, signal) => {
+          const selected = await window.KenanRemote?.getState();
+          if (!selected || !currentScope() || selected.id !== scope.environment) throw new Error("The prompt belongs to another person or environment");
+          signal.throwIfAborted();
+          const response = await pinnedFetch(environment, person, API.sessionPrompt.path({ sessionId: entry.sessionId }), {
+            method: "POST", signal, headers: { "content-type": "application/json" }, body: entry.bodyJson });
+          if (response.status === 423 && window.PiRemotePerson.get() === person) {
+            void ensureUnlocked().catch(error => toast.error(error instanceof Error ? error.message : String(error)));
+          }
+          return { status: response.status, body: await response.json() };
+        };
+        return { ok: true, value: { store, transport, scope, entries: entries.value } };
+      },
+      dispose: owner => owner.store.dispose(),
+      changed: next => {
+        if (!active) return;
+        outbox.current = next.kind === "ready" ? next.owner : null;
+        setStorageState(next);
+        if (next.kind === "failed") storageFailure.current = next.error.message;
+        if (next.kind === "ready") {
+          setOutboxEntries(next.owner.entries);
+          const recoveredError = storageFailure.current;
+          if (recoveredError) setControlError(current => current?.message === recoveredError ? null : current);
+          storageFailure.current = null;
+        }
+      },
+    });
+    promptStorage.current = storage;
+    void storage.ensure();
+    const reset = () => {
+      ownedPrompts.current.clear();
+      setOutboxEntries([]);
+      storage.invalidate();
+      void storage.ensure();
+    };
+    window.addEventListener("pi-auth", reset);
+    window.addEventListener("pi-person", reset);
+    return () => {
+      active = false;
+      window.removeEventListener("pi-auth", reset);
+      window.removeEventListener("pi-person", reset);
+      ownedPrompts.current.clear();
+      storage.close();
+      if (promptStorage.current === storage) { promptStorage.current = null; outbox.current = null; }
+    };
+  }, [person, stateRef]);
+  const submitSavedPrompt = useCallback(async (requestId: string) => {
+    const expectedEnvironment = stateRef.current.bootstrap?.environmentId;
+    const initialized = await ensureOutbox();
+    if (!initialized.ok) { toast.error(initialized.error.message); return; }
+    const owner = initialized.value;
+    if (outbox.current !== owner || expectedEnvironment !== owner.scope.environment) { toast.error("The saved prompt belongs to another environment."); return; }
+    return promptSubmissions.current.run(owner.store, requestId, async () => {
+      setOutboxBusy(requestId);
+      try {
+        const result = await owner.store.submit(requestId, owner.transport);
+        if (outbox.current !== owner) return;
+        if (!result.ok) { ownedPrompts.current.delete(requestId); toast.error(result.error.message); }
+        else if (result.value.outcome.kind !== "pending") {
+          ownedPrompts.current.delete(requestId);
+          if (result.value.outcome.kind === "accepted") {
+            const removed = await owner.store.acknowledge(requestId);
+            if (!removed.ok) toast.error(removed.error.message);
+            kick();
+          }
+        }
+        await refreshOutbox();
+      } finally { setOutboxBusy(current => current === requestId ? null : current); }
+    });
+  }, [kick, refreshOutbox, ensureOutbox, stateRef]);
+  const interruptPrompts = useCallback((sessionId: string, descendants: boolean) => {
+    const ids = new Set([sessionId]);
+    if (descendants) {
+      const rows = [...stateRef.current.sessions, ...stateRef.current.discovered, ...stateRef.current.fleet];
+      for (let changed = true; changed;) {
+        changed = false;
+        for (const row of rows) if (row.parentId && ids.has(row.parentId) && !ids.has(row.id)) { ids.add(row.id); changed = true; }
+      }
+    }
+    const requests = new Set(outboxEntries.filter(entry => ids.has(entry.sessionId)).map(entry => entry.requestId));
+    for (const [id, thread] of ownedPrompts.current) if (ids.has(thread)) requests.add(id);
+    for (const id of requests) { outbox.current?.store.interrupt(id); ownedPrompts.current.delete(id); }
+  }, [outboxEntries, stateRef]);
+  const discardSavedPrompt = useCallback(async (requestId: string) => {
+    ownedPrompts.current.delete(requestId);
+    const initialized = await ensureOutbox();
+    if (!initialized.ok) { toast.error(initialized.error.message); return; }
+    const owner = initialized.value;
+    if (outbox.current !== owner) return;
+    const result = await owner.store.discard(requestId);
+    if (!result.ok) toast.error(result.error.message);
+    await refreshOutbox();
+  }, [refreshOutbox, ensureOutbox]);
+  const healthyPromptFeed = useRef(false);
+  const feedActivity = useCallback((healthy: boolean) => {
+    notificationFeedActivity(healthy);
+    const recovered = healthy && !healthyPromptFeed.current;
+    healthyPromptFeed.current = healthy;
+    if (recovered && promptStorage.current?.state.kind !== "ready") void ensureOutbox();
+    if (!healthy || drainingPrompts.current || document.visibilityState !== "visible") return;
+    drainingPrompts.current = true;
+    void (async () => {
+      try {
+        for (const requestId of [...ownedPrompts.current.keys()]) {
+          if (ownedPrompts.current.has(requestId)) await submitSavedPrompt(requestId);
+        }
+      } finally { drainingPrompts.current = false; }
+    })();
+  }, [submitSavedPrompt, ensureOutbox]);
+
+  const visibleHeads = useRef<{ sessionId: string; range: VisibleTranscriptRange | null } | null>(null);
+  const onVisibleHeads = useCallback((range: VisibleTranscriptRange | null) => { visibleHeads.current = aiId ? { sessionId: aiId, range } : null; }, [aiId]);
   const carrying = useRef(false);
   useEffect(() => {
+    let protocolError = "";
+    let connectionError = "";
     const handle = (event: StreamEvent) => {
       carrying.current = true;
       switch (event.type) {
         case "hello":
         case "bootstrap": {
+          if (outbox.current && outbox.current.scope.environment !== event.bootstrap.environmentId) {
+            ownedPrompts.current.clear();
+            setOutboxEntries([]);
+            promptStorage.current?.invalidate();
+          }
           undoCloses.setScope(`${person}:${event.bootstrap.environmentId}`);
           patch({ bootstrap: event.bootstrap, syncing: false });
+          if (promptStorage.current?.state.kind !== "ready") void ensureOutbox();
           initialLoad.current?.();
           initialLoad.current = null;
           speech.configure(event.bootstrap.speech);
-          if (event.type === "hello" && !notificationsSubscribed.current && event.bootstrap.environmentId) {
-            notificationsSubscribed.current = true;
-            stream.current?.update({ notificationsAfter: readIdleCursor(person, event.bootstrap.environmentId) });
-          }
-          break;
+          return;
         }
         case "state": {
           const current = stateRef.current;
           const sessions = event.sessions;
           const present = new Set(sessions.map(session => session.id));
+          for (const [requestId, threadId] of ownedPrompts.current) {
+            const before = current.sessions.find(row => row.id === threadId);
+            const after = sessions.find(row => row.id === threadId);
+            if (before && (!after || after.held && !before.held)) {
+              outbox.current?.store.interrupt(requestId);
+              ownedPrompts.current.delete(requestId);
+            }
+          }
           for (const previous of current.sessions) if (!present.has(previous.id)) cache.forgetThread(previous.id);
           const update: Partial<AppState> = {
             sessions,
@@ -484,7 +655,7 @@ function RemoteApp() {
           if (closed) { liveText.reset(); Object.assign(update, { selectedChatId: null, transcript: null, images: null }); }
           patch(update);
           if (closed) navigate(routeHome(currentRoute()), { replace: true });
-          break;
+          return;
         }
         case "messaging": {
           messagingHistory.reconcile(event.snapshot);
@@ -494,59 +665,77 @@ function RemoteApp() {
           if (closed) { liveText.reset(); Object.assign(update, { selectedChatId: null, transcript: null, images: null }); }
           patch(update);
           if (closed) navigate(routeHome(currentRoute()), { replace: true });
-          break;
+          return;
         }
-        case "dashboard": patch({ dashboard: event.dashboard }); finishSection("machine"); break;
-        case "workers": patch({ fleet: event.sessions }); break;
+        case "dashboard": patch({ dashboard: event.dashboard }); finishSection("machine"); return;
+        case "workers": patch({ fleet: event.sessions }); return;
         case "transcript": {
           const previous = stateRef.current.transcript;
-          const transcript = applyTranscriptEvent(previous, event);
+          const transcript = applyTranscriptEvent(previous, event, visibleHeads.current?.sessionId === event.sessionId ? visibleHeads.current.range : null);
           patch({ transcript, syncing: false, earlierError: "" });
           finishSection(`thread:${event.sessionId}`);
           if (previous && previous.generation !== transcript.generation) stream.current?.update({ transcriptFrom: null });
           cache.rememberThread(event.sessionId, { transcript });
-          break;
+          return;
         }
         // Live frames do not touch the app's state: the conversation that
         // shows them subscribes to this store on its own.
-        case "live": liveText.apply(event); break;
+        case "live": liveText.apply(event); return;
         case "images":
           cache.rememberThread(event.sessionId, { images: event.snapshot });
           patch({ images: event.snapshot });
-          break;
+          return;
         case "questions":
-          setPendingQuestions({ sessionId: event.sessionId, questions: event.questions });
-          break;
+          setPendingQuestions(previous => event.state === "loading" && !event.questions.length && previous?.sessionId === event.sessionId
+            ? { ...event, questions: previous.questions } : event);
+          return;
         case "notifications": {
           deliverIdleNotifications(event.feed);
+          if (event.feed.notifications.some(item => item.kind === "attention" || item.kind === "question")) setNotificationVersion(value => value + 1);
           stream.current?.remember({ notificationsAfter: event.feed.cursor });
-          break;
+          return;
         }
-        case "error": patch({ offline: event.message }); break;
+        case "error":
+          protocolError = event.message;
+          patch({ offline: connectionError || protocolError });
+          return;
+        case "events": return; // Voice owns occurrence feeds; this client subscribes to snapshots.
+        case "reconcile": case "selection-ready": throw new Error(`Unprocessed stream control frame reached App: ${event.type}`);
       }
+      assertNever(event, "App stream event");
     };
     const opening = currentRoute();
     const client = createStreamClient({
+      suspendWhenHidden: true,
+      beforeReconcile: async () => {
+        const environment = await window.KenanRemote?.getState();
+        if (!environment) throw new Error("Environment transport is unavailable");
+        return { notificationsAfter: await notificationReplayCursor(person, environment.id) };
+      },
+      onActivity: feedActivity,
       subscription: {
         session: routeThreadId(opening),
         viewing: document.visibilityState === "visible" && !!routeThreadId(opening),
         dashboard: opening.tab === "machine",
-        transcriptFrom: cache.thread(routeThreadId(opening) ?? "")?.transcript?.items[0]?.seq ?? null,
+        transcriptFrom: null,
       },
       onEvent: handle,
       onSelectionStatus: ({ sessionId, ready }) => {
-        if (sessionId === selectedAiId(stateRef.current)) patch({ threadSyncing: !ready });
+        if (sessionId !== selectedAiId(stateRef.current)) return;
+        if (ready) protocolError = "";
+        patch({ threadSyncing: !ready, offline: connectionError || protocolError });
       },
       onStatus: (status) => {
-        if (status.state !== "open") carrying.current = false;
+        if (status.state !== "open") { carrying.current = false; notificationFeedActivity(false); }
         if (status.state === "offline") {
           initialLoad.current?.();
           initialLoad.current = null;
           sectionLoad.current?.finish();
           sectionLoad.current = null;
         }
+        connectionError = status.state === "offline" ? status.error || "Offline" : "";
         patch({
-          offline: status.state === "offline" ? status.error || "Offline" : "",
+          offline: connectionError || protocolError,
           syncing: status.state !== "open" || !carrying.current,
         });
       },
@@ -556,11 +745,20 @@ function RemoteApp() {
     const remembered = selectedId ? cache.thread(selectedId)?.transcript : null;
     if (selectedId && remembered) client.restore({ type: "transcript", sessionId: selectedId, ...remembered });
     client.start();
+    let replayQueued = false;
+    const replayRequired = (event: Event) => {
+      const detail = (event as CustomEvent<{ user: string; session: string; environment: string }>).detail;
+      if (!detail || detail.user !== person || detail.session !== window.PiRemotePerson.session() || detail.environment !== stateRef.current.bootstrap?.environmentId || replayQueued) return;
+      replayQueued = true;
+      queueMicrotask(() => { replayQueued = false; if (stream.current === client) client.reconnect(); });
+    };
+    window.addEventListener("pi-notification-replay-required", replayRequired);
     return () => {
+      window.removeEventListener("pi-notification-replay-required", replayRequired);
       client.stop();
       stream.current = null;
     };
-  }, [cache, messagingHistory, liveText, patch, person, stateRef, undoCloses]);
+  }, [cache, messagingHistory, liveText, patch, person, stateRef, undoCloses, feedActivity, ensureOutbox]);
 
   // What the stream carries follows the route: the open thread, whether the
   // person can see it, and the Machine screen only while it is showing.
@@ -573,15 +771,28 @@ function RemoteApp() {
       viewing: visible && !messagingActive && !!aiId,
       thinking: !autoCollapse && visible && !messagingActive && !!aiId,
       dashboard: route.tab === "machine",
-      workers: route.tab === "workers" && workersFilter === "all",
-      transcriptFrom: aiId === held.session ? held.transcriptFrom ?? null : cache.thread(aiId ?? "")?.transcript?.items[0]?.seq ?? null,
+      workers: route.tab === "agents",
+      transcriptFrom: null,
     };
     const same = (held.session ?? null) === next.session && !!held.viewing === next.viewing && !!held.dashboard === next.dashboard && !!held.workers === next.workers && !!held.thinking === next.thinking;
     if (same) return;
     // A list nobody refreshes would show settled fleet threads as they were.
     if (!next.workers && held.workers) patch({ fleet: [] });
     client.update(next);
-  }, [aiId, autoCollapse, messagingActive, route.tab, visible, workersFilter]);
+  }, [aiId, autoCollapse, messagingActive, route.tab, visible]);
+
+  const retryQuestions = useCallback(() => {
+    const id = selectedAiId(stateRef.current);
+    if (!id) return;
+    const generation = selectionGeneration.current;
+    setPendingQuestions(current => ({ sessionId: id, state: "loading", questions: current?.sessionId === id ? current.questions : [] }));
+    void api(API.sessionQuestions.method, API.sessionQuestions.path({ sessionId: id })).then(result => {
+      validateStreamSnapshot(`questions:${id}`, { type: "questions", sessionId: id, state: "ready", questions: result.questions });
+      if (generation === selectionGeneration.current && selectedAiId(stateRef.current) === id) setPendingQuestions({ sessionId: id, state: "ready", questions: result.questions });
+    }).catch(cause => {
+      if (generation === selectionGeneration.current && selectedAiId(stateRef.current) === id) setPendingQuestions(current => ({ sessionId: id, state: "failed", questions: current?.sessionId === id ? current.questions : [], error: cause instanceof Error ? cause.message : String(cause) }));
+    });
+  }, [stateRef]);
 
   const showEarlier = useCallback(() => {
     const id = selectedAiId(stateRef.current);
@@ -593,16 +804,41 @@ function RemoteApp() {
       const latest = stateRef.current.transcript;
       const changedWhilePaging = latest?.generation !== window.generation;
       const updated = !result.reset && latest?.generation === result.window.generation
-        ? { ...latest, items: mergeHeads(result.window.items, latest.items) }
+        ? { ...result.window, total: Math.max(latest.total, result.window.total), items: result.window.items.map(item => latest.items.find(current => current.seq === item.seq) ?? item) }
         : changedWhilePaging ? latest ?? result.window : result.window;
       cache.rememberThread(id, { transcript: updated });
       patch({ transcript: updated, loadingEarlier: false });
-      stream.current?.update({ transcriptFrom: result.reset || changedWhilePaging ? null : updated.items[0]?.seq ?? null });
+      stream.current?.update({ transcriptFrom: null });
     }, (cause: unknown) => {
       if (selectedAiId(stateRef.current) !== id) return;
       patch({ loadingEarlier: false, earlierError: cause instanceof Error ? cause.message : String(cause) });
     });
   }, [cache, patch, stateRef]);
+
+  const showNewer = useCallback(async (jump: boolean) => {
+    const id = selectedAiId(stateRef.current);
+    const held = stateRef.current.transcript;
+    if (!id || !held || stateRef.current.loadingEarlier) return;
+    patch({ loadingEarlier: true, earlierError: "" });
+    try {
+      const page = jump ? await loadLatest(id) : (await loadNewer(id, held)).window;
+      if (selectedAiId(stateRef.current) !== id) return;
+      const current = stateRef.current.transcript;
+      if (current && current.generation !== held.generation && current.generation !== page.generation) return;
+      const updated = current?.generation === page.generation
+        ? { ...page, total: Math.max(current.total, page.total), items: page.items.map(item => current.items.find(head => head.seq === item.seq) ?? item) }
+        : page;
+      visibleHeads.current = null;
+      cache.rememberThread(id, { transcript: updated });
+      patch({ transcript: updated });
+    } catch (cause) {
+      if (selectedAiId(stateRef.current) === id) patch({ earlierError: cause instanceof Error ? cause.message : String(cause) });
+    } finally { if (selectedAiId(stateRef.current) === id) patch({ loadingEarlier: false }); }
+  }, [cache, patch, stateRef]);
+
+  useEffect(() => {
+    messagingHistory.select(messagingActive ? humanConversation?.id ?? null : null);
+  }, [messagingActive, humanConversation?.id, messagingHistory]);
 
   const thinkingOpen = useCallback((open: boolean) => {
     if (!autoCollapse) return;
@@ -615,47 +851,59 @@ function RemoteApp() {
     void ensureMarkdown().catch(console.error);
   }, []);
   const prefetchChat = useCallback((chat: Chat) => { if (chat.kind === "ai") prefetchThread(chat.session.id); }, [prefetchThread]);
-  const prefetchSession = useCallback((session: Session) => prefetchThread(session.id), [prefetchThread]);
 
   const selectChat = useCallback(async (chat: Chat, signal?: AbortSignal) => {
     if (chat.kind === "ai") {
       patch(current => ({ discovered: [...current.sessions, ...current.discovered].some(session => session.id === chat.session.id) ? current.discovered : [...current.discovered, chat.session] }));
       if (chat.session.archivedAt) await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: chat.session.id }), {});
       if (signal?.aborted) return;
-      openChat(chat.id, { tab: chat.session.watchList ? "workers" : "chats" });
+      openChat(chat.id, { tab: conversationTab(chat.session) });
+    } else if (chat.kind === "room") {
+      if (chat.room.current === false) await api("POST", `/v1/rooms/${chat.room.id}/open`, {});
+      if (signal?.aborted) return;
+      openChat(chat.id, { tab: "chats" });
+      await roomDirectory.refresh();
     } else {
       if (!chat.conversation.current) await api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: chat.conversation.backendId, target: chat.conversation.externalId });
       if (signal?.aborted) return;
       openChat(chat.id, { tab: "chats" });
       kick();
     }
-  }, [kick, openChat, patch]);
+  }, [kick, openChat, patch, roomDirectory.refresh]);
   const closeChat = useCallback(async (chat: Chat) => {
     if (undoCloses.isBusy(chat.id)) return;
+    setCloseDependencies([]);
     setClosing(current => withClose(current, chat.id));
-    if (stateRef.current.selectedChatId === chat.id) {
-      liveText.reset();
-      patch({ selectedChatId: null, transcript: null, images: null });
-      navigate(routeHome(route), { replace: true });
-    }
     const result = await undoCloses.close(chat, () => chat.kind === "ai"
-      ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id }))
+      ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id })).catch(cause => {
+          if (cause instanceof ApiError && cause.code === "dependency_conflict") setCloseDependencies(cause.dependencies ?? []);
+          throw cause;
+        })
+      : chat.kind === "room" ? api("POST", `/v1/rooms/${chat.room.id}/close`, {})
       : api(API.messagingClose.method, API.messagingClose.path({ conversationId: chat.conversation.id })));
-    if (result?.ok && chat.kind === "ai") cache.forgetThread(chat.session.id);
+    if (result?.ok) {
+      if (chat.kind === "ai") { interruptPrompts(chat.session.id, false); cache.forgetThread(chat.session.id); }
+      if (stateRef.current.selectedChatId === chat.id) {
+        liveText.reset(); patch({ selectedChatId: null, transcript: null, images: null });
+        navigate(routeHome(route), { replace: true });
+      }
+    }
     if (!result?.ok) {
       setClosing(current => withoutClose(current, chat.id));
       if (result) setChatError(result.error);
     }
+    if (chat.kind === "room") await roomDirectory.refresh();
     kick();
-  }, [cache, kick, liveText, patch, route, stateRef, undoCloses]);
+  }, [cache, kick, liveText, patch, route, stateRef, undoCloses, roomDirectory.refresh, interruptPrompts]);
   const undoClose = useCallback(async () => {
     const chat = undoCloses.snapshot().entries.at(-1)?.chat;
     const result = await undoCloses.undo(item => item.kind === "ai"
-      ? api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: item.session.id }), { descendants: true, resume: true })
+      ? api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: item.session.id }), {})
+      : item.kind === "room" ? api("POST", `/v1/rooms/${item.room.id}/open`, {})
       : api(API.messagingOpen.method, API.messagingOpen.path(), { backendId: item.conversation.backendId, target: item.conversation.externalId }));
     if (result?.ok && chat) setClosing(current => withoutClose(current, chat.id));
-    if (result) kick();
-  }, [kick, undoCloses]);
+    if (result) { if (chat?.kind === "room") await roomDirectory.refresh(); kick(); }
+  }, [kick, undoCloses, roomDirectory.refresh]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!undoCloses.snapshot().entries.length || undoCloses.snapshot().restoring || !shouldUndoClose(event)) return;
@@ -667,26 +915,20 @@ function RemoteApp() {
   }, [undoClose, undoCloses]);
   useEffect(() => {
     const entry = undoState.entries.at(-1);
-    if (!entry || undoState.restoring) return;
-    const description = entry.chat.kind === "ai" ? "Undo restores the chat and its workers and continues their work." : "Restore this chat to your inbox.";
-    const show = undoState.error ? toast.error : toast;
-    const id = show(undoState.error ? `Could not restore ${entry.chat.title}` : `Closed ${entry.chat.title}`, {
-      description: undoState.error || description,
-      action: { label: undoState.error ? "Retry Undo" : "Undo", onClick: () => { void undoClose(); } },
+    if (!entry || undoState.restoring || !undoState.error) return;
+    const id = toast.error(`Could not restore ${entry.chat.title}`, {
+      description: undoState.error,
+      action: { label: "Retry Undo", onClick: () => { void undoClose(); } },
     });
     return () => { toast.dismiss(id); };
   }, [undoState, undoClose]);
+  const dismissChatError = useCallback(() => setChatError(""), []);
   const openInboxChat = useCallback((chat: Chat) => { void selectChat(chat).catch(cause => setChatError(String(cause))); }, [selectChat]);
-  // Closing cancels every running worker below the chat; ask first when there are any.
-  const requestCloseChat = useCallback((chat: Chat) => {
-    const running = chat.kind === "ai" ? runningDescendants(chat.session.id, [...stateRef.current.sessions, ...stateRef.current.discovered]).length : 0;
-    if (running) setCloseConfirm({ chat, running });
-    else void closeChat(chat);
-  }, [closeChat, stateRef]);
+  const requestCloseChat = useCallback((chat: Chat) => { void closeChat(chat); }, [closeChat]);
   const closeInboxChat = requestCloseChat;
   const chatPicker = useRef<ChatPickerHandle>(null);
   const searchArchived = useCallback((query: string) => { chatPicker.current?.open({ kind: "archived", query }); }, []);
-  const openWorker = useCallback((session: Session) => openThreadId(session.id, "workers"), [openThreadId]);
+
 
   const editFrom = useCallback(async (entry: ContextEntry) => {
     const id = selectedAiId(stateRef.current);
@@ -749,43 +991,67 @@ function RemoteApp() {
   };
 
   const controlThread = async (sessionId: string, action: "stop" | "resume", descendants = false) => {
+    if (action === "stop") interruptPrompts(sessionId, descendants);
     setPending(true);
     setControlError(null);
     try {
       await submitThreadControl(action === "stop" ? { threadId: sessionId, action, descendants } : { threadId: sessionId, action });
-      setStopTarget(null);
     } catch (error) {
       setControlError({ sessionId, message: error instanceof Error ? error.message : String(error) });
     } finally { setPending(false); kick(); }
   };
-  const stopThread = (session: Session) => requestStop(session, (id, descendants) => { void controlThread(id, "stop", descendants); }, target => { setControlError(null); setStopTarget(target); });
+  const stopThread = (session: Session) => requestStop(session, (id, descendants) => { void controlThread(id, "stop", descendants); });
 
+  const sending = useRef(false);
   const send = async (delivery: Delivery) => {
     const session = selectedSession();
-    if (!session || pending) return;
+    if (!session || pending || sending.current) return;
     const sessionAttachments = stateRef.current.attachments.filter((file) => file.sessionId === session.id);
     if (sessionAttachments.some((file) => file.uploading)) return;
     const attachments = sessionAttachments.filter((file) => file.path);
-    const text = prompt.trim();
+    const draft = prompt;
+    const text = draft.trim();
     if (!text && !attachments.length) return;
+    sending.current = true;
+    const expectedEnvironment = stateRef.current.bootstrap?.environmentId;
     const selectedReply = replyRef.current;
     const replyVersion = replyDrafts.version(session.id);
     const command = text.startsWith("/") ? state.slashCommands.find((candidate) => candidate.name === text.slice(1).split(/\s/, 1)[0]) : null;
     setControlError(null);
-    setPrompt(""); saveDraft(session.id, ""); setPending(true);
+    setPending(true);
     try {
       const attachmentText = attachments.length ? `The following files were attached to this message:\n${attachments.map((file) => `- ${file.path}`).join("\n")}` : "";
       const bodyText = [text, attachmentText].filter(Boolean).join("\n\n");
       if (command && !attachments.length && !selectedReply) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
-      else await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), text: bodyText, delivery: session.state === "running" ? delivery : "queue", replyTo: selectedReply?.identity.id });
+      else {
+        const initialized = await ensureOutbox();
+        if (!initialized.ok) throw new Error(initialized.error.message);
+        const owner = initialized.value;
+        const environment = await window.KenanRemote?.getState();
+        if (outbox.current !== owner || window.PiRemotePerson.get() !== person || !environment
+          || environment.id !== owner.scope.environment || expectedEnvironment !== owner.scope.environment) {
+          throw new Error("The prompt's person or environment changed. Your draft is retained; send it from the intended chat.");
+        }
+        const entry = await owner.store.enqueue(session.id, { requestId: crypto.randomUUID(), text: bodyText, delivery, ...(selectedReply ? { replyTo: selectedReply.identity.id } : {}) });
+        if (!entry.ok) {
+          if (entry.error.kind === "storage_unavailable" || entry.error.kind === "storage_corrupt") promptStorage.current?.fail(entry.error.message);
+          throw new Error(entry.error.message);
+        }
+        ownedPrompts.current.set(entry.value.requestId, session.id);
+        await refreshOutbox();
+        void submitSavedPrompt(entry.value.requestId);
+      }
+      if (selectedAiId(stateRef.current) === session.id) setPrompt(current => current === draft ? "" : current);
+      if (loadDraft(session.id) === draft) saveDraft(session.id, "");
       if (replyDrafts.accept(session.id, replyVersion) && selectedAiId(stateRef.current) === session.id) {
         replyRef.current = null;
         setReply(null);
       }
       const sentIds = new Set(attachments.map((file) => file.localId));
       patch((current) => ({ attachments: current.attachments.filter((file) => !sentIds.has(file.localId)) }));
-    } catch (error) { if (selectedAiId(stateRef.current) === session.id) setPrompt(text); saveDraft(session.id, text); setControlError({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) }); }
-    finally { setPending(false); kick(); }
+    } catch (error) {
+      setControlError({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) });
+    } finally { sending.current = false; setPending(false); kick(); }
   };
 
   useEffect(() => {
@@ -815,7 +1081,16 @@ function RemoteApp() {
   const dashboard = state.dashboard;
   const threadStarts = useMemo(() => state.bootstrap?.threadStarts ?? [], [state.bootstrap]);
   const home = state.bootstrap?.home ?? "/";
-  const listedRows = useMemo(() => inboxRows(state.sessions, threadStarts, state.messaging), [state.sessions, threadStarts, state.messaging]);
+  const previousRooms = useRef(roomDirectory.rooms);
+  useEffect(() => {
+    const previous = { sessions: [], messaging: stateRef.current.messaging, rooms: previousRooms.current };
+    previousRooms.current = roomDirectory.rooms;
+    if (routeChat?.startsWith("room:") && selectionAfterSync(routeChat, previous, { ...previous, rooms: roomDirectory.rooms }) !== routeChat) {
+      patch({ selectedChatId: null });
+      navigate(routeHome(route), { replace: true });
+    }
+  }, [roomDirectory.rooms, routeChat, route, patch, stateRef]);
+  const listedRows = useMemo(() => inboxRows(state.sessions, threadStarts, state.messaging, roomDirectory.rooms), [state.sessions, threadStarts, state.messaging, roomDirectory.rooms]);
   useEffect(() => { setClosing(current => reconcileCloses(current, listedRows.map(row => row.chat.id))); }, [listedRows]);
   const rows = useMemo(() => hideClosing(listedRows, closing), [listedRows, closing]);
   const knownSessions = useMemo(() => {
@@ -843,13 +1118,11 @@ function RemoteApp() {
   const modelCounts = useMemo(() => new Map((dashboard?.modelCounts ?? []).map((model) => [model.key, model.count])), [dashboard]);
   const images = useMemo(() => state.images ? new Map(state.images.images.map(image => [image.id, image])) : null, [state.images]);
   const humanBackend = state.messaging.backends.find(item => item.id === humanConversation?.backendId);
-  // Watch checks live alongside workers and the conversation roots that spawned them.
-  const workerSessions = useMemo(() => workerThreads(knownSessions), [knownSessions]);
   const showPlace = useMemo(() => new Set(state.sessions.map(session => `${session.environment}/${session.workspaceName}`)).size > 1, [state.sessions]);
   const attentionCount = rows.filter(row => row.section === "attention").length;
   const badges = {
     chats: { count: attentionCount || rows.length, attention: attentionCount > 0 },
-    workers: { count: workerSessions.filter(session => (session.parentId || session.origin === "fleet" || session.watchList) && working(session)).length },
+    notifications: { count: attentionCount, attention: attentionCount > 0 },
     machine: { count: state.ownerErrors.length + (state.offline ? 1 : 0), attention: true },
   };
   // A thread tool call names threads by id. The transcript shows what they are
@@ -865,48 +1138,55 @@ function RemoteApp() {
       void api(API.session.method, API.session.path({ sessionId: id }))
         .then((result: { session?: Session }) => {
           const session = result?.session;
-          if (!session) return;
+          validateSession(session);
           patch(state => [...state.sessions, ...state.discovered].some(item => item.id === session.id)
             ? {} : { discovered: [...state.discovered, session] });
         })
-        .catch(() => {});
+        .catch(error => toast.error(`Could not load thread ${id}: ${error instanceof Error ? error.message : String(error)}`));
     }
   }, [patch, stateRef]);
   const threadDirectory = useMemo<ThreadDirectory>(() => ({
     name: id => knownSessions.find(session => session.id === id)?.name || null,
+    agentName: id => { const session = knownSessions.find(item => item.id === id); return session ? agentName(session) : null; },
     busy: id => { const session = knownSessions.find(item => item.id === id); return session ? working(session) : false; },
     open: id => openThreadId(id),
     discover: discoverThreads,
   }), [knownSessions, openThreadId, discoverThreads]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || !!routeChat;
+  const showDetail = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;
 
-  const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} />,
-    [threadStarts, state.messaging, selectChat, openThreadId, kick]);
+  const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
+    [threadStarts, state.messaging, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
   const debugTools = <div className="inspector-debug">
-    <button type="button" className={voiceState === "idle" ? "" : voiceState} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceState === "live" ? "Hang up voice" : voiceState === "connecting" ? "Connecting voice…" : "Start voice"}</button>
+    <button type="button" className={voiceState === "idle" ? "" : voiceState} disabled={voiceState === "closing"} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceActionLabel(voiceState)}</button>
     {voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}
     <a href={`${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}>Open PiStack Meet</a>
     {voiceDetail && <p className="muted">{voiceDetail}</p>}
   </div>;
 
-  const conversation = selected && !messagingActive
-    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
-        earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
-        attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
-        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? pendingQuestions.questions : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
+  const conversation = roomId
+    ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} showBack={layout === "phone"} showIdentity={showConversationIdentity} onRefresh={roomDirectory.refresh} />
+    : selected && !messagingActive
+    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation outbox={<PromptOutboxStatus entries={outboxEntries.filter(entry => entry.sessionId === selected.id)} busyRequestId={outboxBusy} storage={{ state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
+        onVisibleRange={onVisibleHeads} newerAvailable={hasNewer(state.transcript)} onShowNewer={() => void showNewer(false)} onJumpLatest={() => void showNewer(true)} earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
+        attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} questionsResource={pendingQuestions?.sessionId === aiId ? pendingQuestions : undefined} onRetryQuestions={retryQuestions} showBack={layout === "phone"} showIdentity={showConversationIdentity}
+        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? prioritizeQuestion(pendingQuestions.questions, route.tab === "chats" ? route.questionId : undefined) : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : messagingActive && humanConversation
       ? <div className="conversation-screen"><ConversationHeader title={humanConversation.title} avatar={messagingAvatarUrl(humanConversation.backendId, humanConversation.externalId, humanConversation.avatar)} showIdentity={showConversationIdentity} meta={<span className="conversation-meta">{humanBackend?.label || "Messaging"}{humanBackend && humanBackend.status !== "ready" ? ` · ${humanBackend.status}` : ""}</span>} trailing={<SignalCallButton conversation={humanConversation} available={humanBackend?.plugin === "signal"} enabled={humanBackend?.status === "ready" && humanBackend.capabilities.calls === true} />} onBack={layout === "phone" ? closeDetail : null} onOpenInspector={null} />
         <MessagingConversations selected={humanConversation} snapshot={state.messaging} history={messagingHistory} onRead={kick} /></div>
       : routeChat && state.syncing
         ? <section className="empty-state"><strong>Opening…</strong></section>
-        : <section className="empty-state"><strong>{route.tab === "workers" ? "Choose a worker" : "Choose a chat"}</strong></section>;
+        : <section className="empty-state"><strong>Choose a chat</strong></section>;
 
-  const list = route.tab === "chats" ? <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />
-    : route.tab === "workers" ? <Suspense fallback={<Loading label="Loading workers…" />}><WorkersTree sessions={workerSessions} selectedId={aiId} compactSelected={layout !== "phone"} filter={workersFilter} onFilter={setWorkersFilter} onOpen={openWorker} onPrefetch={prefetchSession} onSelectedVisibleChange={onSelectedVisibleChange} /></Suspense>
-    : null;
+  const list = (() => {
+    switch (route.tab) {
+      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
+      case "agents": case "needs-you": case "notifications": case "calendar": case "machine": case "files": return null;
+    }
+    return assertNever(route, "App list route");
+  })();
 
   function filesScreen(mode: "stack" | "split") {
     const seen = new Set(["/", home]);
@@ -918,25 +1198,33 @@ function RemoteApp() {
     return <Suspense fallback={<Loading label="Loading files…" />}><FilesScreen layout={mode} selectedPath={route.tab === "files" ? route.path : null} shortcuts={shortcuts} onAttach={selectedAiId(stateRef.current) ? path => void attachPath(path) : undefined} onSelect={path => navigate({ tab: "files", path }, { replace: mode === "split" || !path })} /></Suspense>;
   }
 
-  const detail = route.tab === "calendar"
-    ? <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>
-    : route.tab === "machine"
-    ? <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>
-    : route.tab === "files" ? filesScreen(layout === "phone" ? "stack" : "split")
-    : <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
+  const detail = (() => {
+    switch (route.tab) {
+      case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
+      case "notifications": return <Suspense fallback={<Loading label="Loading notifications…" />}><NotificationsScreen version={notificationVersion} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
+      case "needs-you": return <Suspense fallback={<Loading label="Loading Needs you…" />}><NeedsYouScreen version={notificationVersion} /></Suspense>;
+      case "calendar": return <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>;
+      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
+      case "files": return filesScreen(layout === "phone" ? "stack" : "split");
+      case "chats": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
+    }
+    return assertNever(route, "App detail route");
+  })();
 
-  const showTabs = route.tab === "calendar" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
-  return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
-    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
+  const showTabs = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "notifications" || (route.tab === "files" && !route.path) || !showDetail;
+  return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
+    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
+        <AppUpdateStatus update={update} />
         <SpeechBar />
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && !messagingActive && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
-        {closeConfirm && <CloseRunningChatDialog title={closeConfirm.chat.title} running={closeConfirm.running} onConfirm={() => { const { chat } = closeConfirm; setCloseConfirm(null); void closeChat(chat); }} onClose={() => setCloseConfirm(null)} />}
-        {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
+        {closeDependencies.length > 0 && <div className="dependency-close-error" role="alert"><strong>Close is protected by an explicit dependency.</strong>{closeDependencies.map((dependency, index) => <button key={index} type="button" onClick={() => { setCloseDependencies([]); openThreadId(dependency.threadId); }}>Open dependency owner · {knownSessions.find(item => item.id === dependency.threadId)?.name ?? dependency.threadId}</button>)}<button type="button" onClick={() => setCloseDependencies([])}>Dismiss</button></div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} debug={debugTools} /></Suspense>}
+        {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
+          void api(API.sessionPlacement.method, API.sessionPlacement.path({ sessionId: selected.id }), { foreground: false }).then(() => { panelPushed.current = false; navigate({ tab: "chats", chat: null, panel: null }); kick(); }, cause => setControlError({ sessionId: selected.id, message: String(cause) }));
+        }} debug={debugTools} /></Suspense>}
         {selected && !messagingActive && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
         {!messagingActive && pasteSessionId && <Suspense fallback={null}><PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} /></Suspense>}
       </>} />

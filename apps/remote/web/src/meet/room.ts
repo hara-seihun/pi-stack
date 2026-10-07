@@ -1,7 +1,9 @@
 import { piFetch } from "../client";
-import { meetPath, type MeetJoined, type MeetParticipant, type MeetPoll, type MeetSignal, type MeetSnapshot, type MeetTrackKind, type MeetVoiceControl } from "../../../server/meet/protocol";
+import { meetPath, type MeetJoined, type MeetParticipant, type MeetSignal, type MeetSnapshot, type MeetTrackKind, type MeetVoiceControl } from "../../../server/meet/protocol";
 import type { MeetMediaSource } from "./media";
-import { meetJson, type MeetRequest } from "./transport";
+import { parsePoll } from "./poll";
+import { holdLiveMedia } from "../live-media";
+import { meetJson, recoverMeetRequest, type MeetRequest } from "./transport";
 
 type Peer = {
   connection: RTCPeerConnection; participant: MeetParticipant; streams: Record<string, MeetTrackKind>;
@@ -14,8 +16,8 @@ function browserRequest(owner: string): MeetRequest {
     const headers = new Headers(init.headers);
     if (owner) headers.set("x-pi-remote-user", owner);
     const response = owner && owner !== window.PiRemotePerson.get()
-      ? await fetch(path, { ...init, headers }) : await piFetch(path, { ...init, headers });
-    if (response.status === 423) throw new Error("The meeting host must unlock Pi Remote before guests can join");
+      ? await fetch(path, { ...init, headers }) : await piFetch(path, { ...init, headers }, false);
+    if (response.status === 423) return Response.json({ error: "The meeting host must unlock Pi Remote before guests can join" }, { status: 423 });
     return response;
   };
 }
@@ -38,9 +40,11 @@ export class MeetRoom {
   snapshot: MeetSnapshot;
   private cursor = 0;
   private stopped = false;
+  private polling = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly abort = new AbortController();
   readonly request: MeetRequest;
+  private readonly releaseMedia: () => void;
 
   constructor(
     readonly joined: MeetJoined,
@@ -50,7 +54,12 @@ export class MeetRoom {
     readonly onLeave: (id: string) => void,
     readonly onFailure: (message: string) => void,
     request: MeetRequest = browserRequest(owner),
-  ) { this.snapshot = joined.room; this.request = boundedRequest(request); }
+  ) {
+    if (!joined?.room || !joined.participant) throw new Error("Meet returned an invalid joined room");
+    this.snapshot = parsePoll({ ...joined.room, messages: [] }, joined);
+    this.request = boundedRequest(request);
+    this.releaseMedia = holdLiveMedia();
+  }
 
   json<T>(path: string, init: RequestInit = {}): Promise<T> {
     return meetJson<T>(this.request, path, init);
@@ -89,12 +98,14 @@ export class MeetRoom {
 
   private async signal(id: string, signal: MeetSignal) {
     if (this.stopped) return;
-    const response = await this.request(this.path("/signal"), {
-      ...post({ to: id, signal }),
-      signal: this.abort.signal,
-    });
-    if (response.status === 410) return;
-    if (!response.ok) throw new Error((await response.json()).error || "Meet signaling failed");
+    const result = await recoverMeetRequest(this.request, this.path("/signal"), post({ to: id, signal, requestId: crypto.randomUUID() }), this.abort.signal);
+    if (!result.ok) {
+      if (result.error.kind === "stopped") return;
+      throw new Error(result.error.message);
+    }
+    if (result.value.status === 410) return;
+    const acknowledgement = JSON.parse(result.value.text);
+    if (acknowledgement?.ok !== true) throw new Error("Meet returned an invalid signaling acknowledgement");
   }
 
   private fail(cause: unknown) {
@@ -139,6 +150,7 @@ export class MeetRoom {
   }
 
   private async receive(peer: Peer, signal: MeetSignal) {
+    if (this.stopped) return;
     const connection = peer.connection;
     if (signal.streams) peer.streams = signal.streams;
     if (signal.description) {
@@ -161,21 +173,28 @@ export class MeetRoom {
   }
 
   async poll() {
-    if (this.stopped) return;
+    if (this.stopped || this.polling) return;
+    this.polling = true;
     try {
-      const snapshot = await this.json<MeetPoll>(this.path("/poll", { after: String(this.cursor) }), { signal: this.abort.signal });
+      const result = await recoverMeetRequest(this.request, this.path("/poll", { after: String(this.cursor) }), {}, this.abort.signal);
       if (this.stopped) return;
+      if (!result.ok) { this.fail(result.error.message); return; }
+      if (!result.value.ok) { this.fail(`Meet HTTP ${result.value.status}: ${result.value.text}`); return; }
+      const snapshot = parsePoll(JSON.parse(result.value.text), this.joined);
       if (snapshot.voiceRevision < this.snapshot.voiceRevision) {
         snapshot.voiceMuted = this.snapshot.voiceMuted;
         snapshot.voiceRevision = this.snapshot.voiceRevision;
       }
       this.snapshot = snapshot;
       this.onSnapshot(snapshot);
+      if (this.stopped) return;
       for (const [id, peer] of this.peers) if (!snapshot.participants.some((participant) => participant.id === id)) {
         peer.connection.close(); this.peers.delete(id); this.onLeave(id);
       }
       for (const participant of snapshot.participants) if (participant.id !== this.joined.participant.id) this.peer(participant);
       for (const message of snapshot.messages) {
+        if (this.stopped) return;
+        if (message.seq <= this.cursor) continue;
         const peer = this.peers.get(message.from);
         if (peer) {
           peer.queue = peer.queue.then(() => this.receive(peer, message.signal));
@@ -185,6 +204,7 @@ export class MeetRoom {
       }
       if (!this.stopped) this.timer = setTimeout(() => void this.poll(), 750);
     } catch (cause) { this.fail(cause); }
+    finally { this.polling = false; }
   }
 
   close(leave = true) {
@@ -195,6 +215,7 @@ export class MeetRoom {
     const peers = [...this.peers.values()];
     this.peers.clear();
     for (const peer of peers) peer.connection.close();
+    this.releaseMedia();
     if (leave) void this.json(this.path("/leave"), { method: "POST", keepalive: true }).catch((cause) => {
       console.warn("Meet leave request failed; the server's participant lease owns cleanup within 45 seconds", cause);
     });

@@ -1,7 +1,24 @@
 ---
 name: software-engineering
-description: Mandatory software-engineering principles and defaults. Load this skill whenever a task is even tangentially related to software engineering, including code, scripts, configuration, tests, debugging, architecture, APIs, databases, automation, CI/CD, deployment, infrastructure, operations, developer tooling, code review, technical planning, or software documentation.
+description: REQUIRED FIRST for every software-related task. Read SKILL.md before planning, coding, debugging, reviewing, delegating or operating software, including small UI changes, scripts, configuration, tests, APIs, databases, automation, deployment, infrastructure and technical documentation. Applies even tangentially. Invalid states must be unrepresentable. Every path yields a valid state or an explicit typed error. Things are set or unset; behaviour is known or an error. Defaults are wrong.
 ---
+
+# Software engineering — load before doing the work
+
+Read this skill whenever software is involved, before choosing an implementation or delegating it. Small changes, UI indicators, operational fixes and documentation are engineering work too. The advertised description is a routing instruction, not a substitute for loading this file.
+
+## Every path yields a valid state or an error — no defaults
+
+**Invalid states must be unrepresentable. Every path must produce a valid state or an explicit typed error. Anything else is a default, and defaults are wrong. Things are either set or unset. Behaviour is either known or an error.**
+
+This is a general engineering rule, not a rule about presentation or placeholders. It governs configuration, data, control flow, persistence, protocols, lifecycle transitions and user interfaces alike.
+
+- Represent set and unset explicitly. Unset is not permission to invent a value. If absence is valid in the domain, its behaviour must be defined explicitly; if an operation requires the value, unset produces a typed error.
+- Success contains everything required by its contract. Construct valid states directly with discriminated unions and validated values, rather than allowing contradictory flags or partially populated successes and repairing them later.
+- Every branch has known behaviour and returns a valid state or a typed error. Handle closed unions exhaustively. Reject unknown variants and invalid external data at the boundary; do not route them through a catch-all success case.
+- Do not use default values, implicit selections, coercions, fallback implementations or catch-all branches to manufacture behaviour for an unset value or an unknown case. A deliberate initial state is valid only when its values and behaviour are explicitly established, not inferred because something is missing.
+- Intermediate states are subject to the same rule. Loading, waiting and recalculating are valid only when their meaning, owner and transitions are known. Naming an unknown condition does not make it valid.
+- Follow every path through to its consumer. Check absence, invalid input, startup, restart, transitions and failures as well as the successful path. Neither the type system nor a test should bless an outcome that is neither a valid state nor an explicit error.
 
 ## Modern agents are first class engineers and operators
 
@@ -448,7 +465,7 @@ for await (
 
 ### Typing
 
-Strong typing is incredibly useful because it allows you to make certain guarantees about your program that let you reduce the amount of code that you write and the amount of conceptual area you have to keep track of. In almost all systems, you can make typing such that invalid states are unrepresentable.
+Make invalid states unrepresentable in the types, rather than detecting them after constructing them. Every transition returns a valid next state or a typed error; every consumer handles the complete union. Strong typing reduces both runtime checks and the conceptual area of the system.
 
 Here is an example of code written poorly, and code written properly
 
@@ -655,9 +672,9 @@ Comments should almost never exist, in general, reading the code, if it is done 
 
 If you are doing something and there exists a popular lightweight library to do that thing, it is generally good practice to depend on that library instead of writing it yourself, with the exception of if you believe you can write it better. Check in your dependency tree to see if you already have a dependency that does the thing you want to do. It is likely that somewhere in your tree there is a dependency that you can use instead of installing a new one.
 
-### Fallbacks
+### Defaults and fallbacks
 
-Never use fallbacks unless you have a specific reason to use a fallback that is related to a citable incident. In general, a fallback will be written such that System A falls back to System B. The issue with this is that, in most places, this is implemented such that System A will at some point stop working. The fallback will handle it, but no one will be aware that System A ever stopped working. The correct version of this is to fail and fail loudly such that System A is made more robust. 
+Defaults are wrong: they substitute invented behaviour for an unset value or an unknown case. Do not select a provider, value, implementation or outcome merely because the intended one is absent or failed. Return the explicit error. If the domain genuinely has multiple execution routes, define their selection and transitions as known behaviour in the contract; do not disguise an error as successful execution of another route. This is the same valid-state-or-error rule, not an exception to it.
 
 ### Deleting code
 

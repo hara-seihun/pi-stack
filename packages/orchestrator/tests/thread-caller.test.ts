@@ -28,7 +28,7 @@ function owner() {
   const root = temp("thread-caller-");
   const capability = threadCapability(join(root, "state", "thread-capability.key"));
   const sessions: IdleSession[] = [];
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite3"), sessionsDir: root, capability,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite3"), sessionsDir: root, capability,
     openSession: async (options, output) => { const session = new IdleSession(options, output); sessions.push(session); return session; } });
   cleanups.push(async () => { await service.close(); });
   return { root, capability, service, sessions };
@@ -69,6 +69,23 @@ describe("thread capability", () => {
 });
 
 describe("thread API admission", () => {
+  it("accepts idle human and service view controls through the HTTP boundary", async () => {
+    const harness = owner();
+    const spawned = await harness.service.spawn({ requestId: "view", id: "view", cwd: harness.root });
+    expect(spawned.ok).toBe(true);
+    const before = harness.service.get("view")!;
+    for (const caller of [{ kind: "person", via: "router" }, { kind: "service", pid: 10 }] as const) {
+      const response = await as(harness, caller)("control", { threadId: "view", action: "view" });
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ ok: true, value: { updatedAt: before.updatedAt, revision: before.revision,
+        metadata: { autoArchiveViewedAt: expect.any(Number) } } });
+      expect(response.body.value.metadata.autoArchiveViewedAt).toBeGreaterThanOrEqual(before.updatedAt);
+    }
+    const forged = await as(harness, { kind: "service", pid: 10 })("control", { threadId: "view", action: "view", timestamp: 1 });
+    expect(forged.body).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(harness.sessions).toHaveLength(0);
+  });
+
   it("refuses a local process that names a parent and stamps its roots as process-created", async () => {
     const harness = owner();
     expect((await harness.service.spawn({ requestId: "parent", id: "parent", cwd: harness.root })).ok).toBe(true);

@@ -19,8 +19,25 @@ import com.getcapacitor.WebViewListener;
 import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
+    private DefaultNetworkMonitor networkMonitor;
+    private volatile boolean foreground;
+    private final android.os.Handler networkEvents = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable networkChanged = () -> {
+        if (!foreground || bridge == null) return;
+        NotificationFeedLease.clear();
+        IdleNotificationService.requestPoll();
+        bridge.triggerWindowJSEvent("pi-network-changed");
+    };
+
+    private void defaultNetworkChanged() {
+        if (!foreground) return;
+        networkEvents.removeCallbacks(networkChanged);
+        networkEvents.post(networkChanged);
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        NotificationFeedLease.clear();
         ThreadNotifications.pageStarting();
         registerPlugin(KenanRemotePlugin.class);
         // A downloaded web client for this shell replaces the APK's built-in copy.
@@ -29,10 +46,11 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
         android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(bridge.getWebView(), true);
         bridge.addWebViewListener(new WebViewListener() {
-            @Override public void onPageStarted(WebView webView) { ThreadNotifications.pageStarting(); }
+            @Override public void onPageStarted(WebView webView) { NotificationFeedLease.clear(); ThreadNotifications.pageStarting(); IdleNotificationService.requestPoll(); }
         });
         keepSharedClientBelowSystemBars();
         routeSystemBackThroughClient();
+        networkMonitor = new DefaultNetworkMonitor(this, this::defaultNetworkChanged);
     }
 
     /**
@@ -46,8 +64,17 @@ public class MainActivity extends BridgeActivity {
             @Override
             public void handleOnBackPressed() {
                 if (bridge == null) { moveTaskToBack(true); return; }
-                bridge.eval("typeof window.PiRemoteBack === 'function' && window.PiRemoteBack() === true", handled -> {
-                    if (!"true".equals(handled)) moveTaskToBack(true);
+                bridge.eval("typeof window.PiRemoteBack === 'function' ? window.PiRemoteBack() : false", handled -> {
+                    var parsed = NativeState.parse(NativeState.BackResult.class, handled);
+                    if (parsed.isEmpty()) {
+                        android.widget.Toast.makeText(MainActivity.this, "Client returned an invalid Back result", android.widget.Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    Runnable back = switch (parsed.get()) {
+                        case HANDLED -> () -> { }; // The web client already performed the navigation.
+                        case UNHANDLED -> () -> moveTaskToBack(true);
+                    };
+                    back.run();
                 });
             }
         });
@@ -56,6 +83,7 @@ public class MainActivity extends BridgeActivity {
     /** Switches the running WebView to a bundle (or back to the built-in client) and reloads it. */
     void serveWebBundle(WebBundles.Installed bundle) {
         if (bridge == null) return;
+        NotificationFeedLease.clear();
         ThreadNotifications.pageStarting();
         if (bundle != null) bridge.setServerBasePath(bundle.directory.getPath());
         else bridge.setServerAssetPath("public");
@@ -64,14 +92,27 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        foreground = true;
+        NotificationFeedLease.resume();
         ThreadNotifications.resume(this, this);
         if (bridge != null) bridge.triggerWindowJSEvent("pi-app-foreground");
     }
 
     @Override
     public void onPause() {
+        foreground = false;
+        networkEvents.removeCallbacks(networkChanged);
+        NotificationFeedLease.pause();
+        IdleNotificationService.requestPoll();
         ThreadNotifications.pause(this);
         super.onPause();
+    }
+
+    @Override public void onDestroy() {
+        foreground = false;
+        if (networkMonitor != null) networkMonitor.close();
+        networkEvents.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     void notificationToast(JSONObject detail) {

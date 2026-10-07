@@ -49,6 +49,8 @@ export const agentAvatar = () => appPath(AGENT_AVATAR);
 export type ChatMessageProps = {
   kind: string;
   label: string;
+  /** Shown instead of the label when the sender needs more than a name, such as an agent-to-agent route. */
+  heading?: ReactNode;
   /** Picture shown before the label: the sender's, or Kenan's head. */
   avatar?: string;
   text: string;
@@ -69,9 +71,10 @@ export type ChatMessageProps = {
   onEditImage?(image: HTMLImageElement): void;
 } & ({ contentFormat: "literal"; renderMarkdown?: never } | { contentFormat: "markdown"; renderMarkdown(text: string): ReactNode });
 
-function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identity, onReply, onReact, children }: {
+function MessageFrame({ kind, label, heading, avatar, text, timestamp, menu = [], identity, onReply, onReact, children }: {
   kind: string;
   label: string;
+  heading?: ReactNode;
   avatar?: string;
   text: string;
   timestamp?: number;
@@ -93,7 +96,7 @@ function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identit
   return <article className={`message ${kind}`} data-message-id={identity?.id} tabIndex={identity ? 0 : undefined} {...handlers}>
     <header className="message-header">
       {avatar && <CachedImage className="message-avatar" src={avatar} alt="" loading="lazy" decoding="async" />}
-      <span className="message-label">{label.toUpperCase()}</span>
+      {heading ?? <span className="message-label">{label.toUpperCase()}</span>}
       {time && <time className="message-time" dateTime={time.toISOString()}>{time.toLocaleString()}</time>}
     </header>
     {openMenu}
@@ -126,9 +129,9 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
 }
 
 export function ChatMessage(props: ChatMessageProps) {
-  const { kind, label, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions, reply, onReply } = props;
+  const { kind, label, heading, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions, reply, onReply } = props;
   const [reactionsOpen, setReactionsOpen] = useState(false);
-  return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
+  return <MessageFrame kind={kind} label={label} heading={heading} avatar={avatar} text={text} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
     <MessageBody attachments={attachments} delivery={delivery} checking={checking} onCheck={onCheck} onRetry={onRetry} onEditImage={onEditImage}>
       {reply && <ReplyQuote reply={reply} />}
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}

@@ -38,8 +38,7 @@ function header(html: string) {
 
 test("cached idle transcript stays visible while the header updates, then idle returns when ready", () => {
   const updating = render({ syncing: true });
-  expect(header(updating)).toContain('class="conversation-syncing" role="status"');
-  expect(header(updating)).toContain("Updating…");
+  expect(header(updating)).toContain('class="conversation-syncing" role="status" aria-label="Updating"');
   expect(header(updating)).toContain('class="conversation-syncing-spinner" aria-hidden="true"');
   expect(header(updating)).not.toContain("Idle");
   expect(updating).toContain('class="message user"');
@@ -47,9 +46,24 @@ test("cached idle transcript stays visible while the header updates, then idle r
 
   const ready = render({ syncing: false });
   expect(header(ready)).toContain('data-status="idle"');
-  expect(header(ready)).toContain("Idle");
-  expect(header(ready)).not.toContain("Updating…");
+  expect(header(ready)).toContain('aria-label="Idle"');
+  expect(header(ready)).not.toContain("Updating");
   expect(ready).toContain("Cached conversation text");
+});
+
+test("chat header consumes context usage and replaces a count with recalculating or unavailable", () => {
+  const measured = { ...session, contextUsage: { tokens: 12_345, contextWindow: 200_000, percent: 6.1725 } };
+  expect(header(render({ session: measured }))).toContain("~12.3K tok");
+  const recalculating = header(render({ session: { ...measured, contextUsage: { ...measured.contextUsage, tokens: null, percent: null } } }));
+  expect(recalculating).toContain("Context …");
+  expect(recalculating).not.toContain("~12.3K tok");
+  expect(header(render())).toContain("Context —");
+});
+
+test("a running conversation defaults to steer rather than waiting for the turn to finish", () => {
+  const html = render({ session: { ...session, state: "running" }, prompt: "Adjust the work" });
+  expect(html).toContain('aria-label="Change delivery. Current: Steer"');
+  expect(html).not.toContain('aria-label="Change delivery. Current: Queued"');
 });
 
 test("questions replace messaging, expose only the next answer, and preserve dictation and stop", () => {
@@ -66,7 +80,7 @@ test("questions replace messaging, expose only the next answer, and preserve dic
     expect(html).toContain('aria-label="Submit answer"');
     expect(html).toContain('aria-label="Start dictation"');
     expect(html).toContain("Dismiss question");
-    expect(html).toContain("Stop thread");
+    expect(html).toContain("Cancel work");
     expect(html).toContain("Recommended");
     expect(html).not.toContain("Second question");
     expect(html).not.toContain('checked=""');
@@ -74,9 +88,29 @@ test("questions replace messaging, expose only the next answer, and preserve dic
   } finally { Object.assign(globalThis, { window: originalWindow, localStorage: originalStorage }); }
 });
 
+test("question loading leaves the composer layout unchanged instead of flashing a banner", () => {
+  const ready = render({ prompt: "Unsent message", questionsResource: { state: "ready", questions: [] } });
+  const loading = render({ prompt: "Unsent message", questionsResource: { state: "loading", questions: [] } });
+  expect(loading).toBe(ready);
+  expect(loading).toContain('id="prompt"');
+  expect(loading).toContain("Unsent message");
+});
+
+test("question resource failure never marks chat offline and a ready resource clears its own error", () => {
+  const failed = render({ questionsResource: { state: "failed", questions: [], error: "Question owner unavailable" } });
+  expect(failed).toContain("Could not load questions");
+  expect(failed).toContain("Retry questions");
+  expect(failed).toContain('id="prompt"');
+  expect(header(failed)).toContain('data-status="idle"');
+  expect(header(failed)).not.toContain("Offline");
+  const ready = render({ questionsResource: { state: "ready", questions: [] } });
+  expect(ready).not.toContain("Question owner unavailable");
+});
+
 test("offline status and reconnect take precedence even while a refresh is pending", () => {
-  const offline = render({ syncing: true, offline: "Connection lost" });
+  const offline = render({ syncing: true, offline: "Connection lost. Reconnecting…" });
   expect(header(offline)).toContain('data-status="offline"');
+  expect(header(offline)).toContain("Connection lost. Reconnecting…");
   expect(header(offline)).toContain("Reconnect");
   expect(header(offline)).not.toContain("Updating…");
   expect(offline).toContain("Cached conversation text");

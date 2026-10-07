@@ -45,13 +45,14 @@ export const CompletionErrorSchema = Type.Object({
   retryAfterMs: Type.Optional(Type.Integer({ minimum: 0 })),
 }, { additionalProperties: false });
 const completed = { state: Type.Literal("completed"), result: CompletionResultSchema };
-const failed = {
-  state: Type.Union([Type.Literal("failed"), Type.Literal("cancelled"), Type.Literal("indeterminate")]),
-  error: CompletionErrorSchema,
-};
+const failed = { state: Type.Literal("failed"), error: CompletionErrorSchema };
+const cancelled = { state: Type.Literal("cancelled"), error: CompletionErrorSchema };
+const indeterminate = { state: Type.Literal("indeterminate"), error: CompletionErrorSchema };
 export const CompletionExecutionSchema = Type.Union([
   Type.Object(completed, { additionalProperties: false }),
   Type.Object(failed, { additionalProperties: false }),
+  Type.Object(cancelled, { additionalProperties: false }),
+  Type.Object(indeterminate, { additionalProperties: false }),
 ]);
 export const CompletionAttemptSchema = Type.Object({
   attemptId: Type.String(), runId: Type.String(), accountId: Type.String(), provider: Type.String(), model: Type.String(),
@@ -67,9 +68,12 @@ const identity = {
   attemptCount: Type.Optional(Type.Integer({ minimum: 0 })), retryAt: Type.Optional(Type.Integer({ minimum: 0 })),
 };
 export const CompletionRecordSchema = Type.Union([
-  Type.Object({ ...identity, state: Type.Union([Type.Literal("queued"), Type.Literal("running")]) }, { additionalProperties: false }),
+  Type.Object({ ...identity, state: Type.Literal("queued") }, { additionalProperties: false }),
+  Type.Object({ ...identity, state: Type.Literal("running") }, { additionalProperties: false }),
   Type.Object({ ...identity, ...completed }, { additionalProperties: false }),
   Type.Object({ ...identity, ...failed }, { additionalProperties: false }),
+  Type.Object({ ...identity, ...cancelled }, { additionalProperties: false }),
+  Type.Object({ ...identity, ...indeterminate }, { additionalProperties: false }),
 ]);
 export const CompletionErrorResponseSchema = Type.Object({ error: CompletionErrorSchema }, { additionalProperties: false });
 export type CompletionModel = Static<typeof CompletionModelSchema>;
@@ -81,6 +85,17 @@ export type CompletionExecution = Static<typeof CompletionExecutionSchema>;
 export type CompletionRecord = Static<typeof CompletionRecordSchema>;
 export type CompletionFetch = (...args: Parameters<typeof globalThis.fetch>) => ReturnType<typeof globalThis.fetch>;
 export type CompletionOutcome<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: CompletionError };
+
+const completionStatuses = {
+  "invalid-request": 400, "unsupported-option": 422, "not-found": 404,
+  "request-conflict": 409, "invalid-state": 409,
+  provider: 500, authentication: 500, cancelled: 500, indeterminate: 500,
+  "missing-provider-evidence": 500, transport: 500, protocol: 500, "rate-limited": 500,
+} satisfies Record<CompletionError["code"], number>;
+export function completionHttpStatus(code: CompletionError["code"]): number {
+  if (!Object.hasOwn(completionStatuses, code)) throw new Error(`Unknown completion error code: ${String(code)}`);
+  return completionStatuses[code];
+}
 
 export function completionError(code: CompletionError["code"], message: string): CompletionOutcome<never> {
   return { ok: false, error: { code, message } };

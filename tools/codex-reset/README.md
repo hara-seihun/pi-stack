@@ -18,7 +18,9 @@ codex-reset status --json
 
 `redeem` spends **at most one credit per account per invocation**, oldest-expiring credit first, and only on accounts whose weekly meter is at or above `--min-used` (default 100). Unspent allowance is discarded by a reset rather than banked, so redeeming below 100% throws away whatever was left; `--min-used` exists for the deliberate cases, not for routine use.
 
-After a redemption the tool waits for `codex/usage` to report the drop — the endpoint serves the pre-reset percent for up to a minute — then writes the fresh reading into `/var/lib/pi-orchestrator/ledger.sqlite3` and clears the account's cooldown, so the orchestrator admits work against the new allowance without waiting for its next sampler pass.
+After a redemption the tool waits for `codex/usage` to report the drop — the endpoint serves the pre-reset percent for up to a minute — then writes the fresh reading into the selected ledger and clears the account's cooldown only on confirmed weekly recovery. An unconfirmed redemption leaves the cooldown in place.
+
+The fleet daemon can run this policy automatically: its host sets `PI_CODEX_AUTO_RESET=1`. The five-minute sampler redeems only enabled accounts with raw weekly usage at least 100%, using the oldest unexpired credit. The manual command and sampler share a durable credit reservation in `codex-reset-attempt:<accountId>`; a concurrent invocation or stale usage cannot consume another reset. Ambiguous or rejected redemptions remain fenced until the provider reports recovered weekly quota. Automatic retries never send another POST. The [sampler contract](../../packages/orchestrator/README.md) owns activation and recovery.
 
 Redemption also records the remaining banked-reset balance in the ledger. The Codex sampler reads that balance on every pass, so `status` is no longer the only way to see it; Pi Remote's System tab shows it for each account.
 

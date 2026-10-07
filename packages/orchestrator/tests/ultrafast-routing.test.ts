@@ -132,7 +132,7 @@ test("ThreadService resolves the tier-only endpoint before the runner environmen
   const f = fixture();
   const root = dirname(f.env.PI_ORCHESTRATOR_CONFIG), endpoint = "http://127.0.0.1:2462";
   const sessions: PiSessionOptions[] = [];
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
     environment: () => ({ PI_ORCHESTRATOR_CONFIG: f.env.PI_ORCHESTRATOR_CONFIG, PI_CODEX_ULTRAFAST_BROKER_URL: endpoint }),
     openSession: async (options, output) => {
       sessions.push(options);

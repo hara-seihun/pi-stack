@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { actionJournal, journalWarning, type ActionJournal } from "kenan-memory/journal";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -156,7 +157,7 @@ export class CalendarStore {
   private timer?: ReturnType<typeof setInterval>;
   private refreshing?: Promise<void>;
   private controller = new AbortController();
-  constructor(directory: string, private readonly user: string, private readonly feedBase = "") {
+  constructor(directory: string, private readonly user: string, private readonly feedBase = "", private readonly journal: Pick<ActionJournal, "begin" | "finish"> = actionJournal) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = join(directory, "calendar.sqlite3");
     this.db = new Database(path, { create: true }); chmodSync(path, 0o600);
@@ -223,6 +224,15 @@ export class CalendarStore {
       if (!from.ok || !to.ok || Date.parse(to.value) <= Date.parse(from.value) || Date.parse(to.value) - Date.parse(from.value) > 2 * 366 * 86400000) return fail("Use a valid date range of at most two years");
       return Response.json(this.snapshot(from.value, to.value));
     }
+    let warning: string | undefined;
+    const reply = (body: unknown) => Response.json(body, { headers: warning ? { "x-kenan-journal-warning": "Calendar write succeeded; journal outcome pending. Do not repeat the write." } : {} });
+    const mutate = <T>(action: string, event: CalendarEvent, write: () => T): T => {
+      const ticket = this.journal.begin({ action: `calendar.${action}`, actedFor: this.user, recipients: [this.user], summary: `${event.title}; ${event.start} to ${event.end}`, externalId: event.id });
+      let value: T;
+      try { value = write(); } catch (cause) { this.journal.finish(ticket, "failed", "Calendar write failed"); throw cause; }
+      warning = journalWarning(this.journal.finish(ticket, "confirmed", `Event ${event.id}`));
+      return value;
+    };
     const save = (event: CalendarEvent) => this.db.query("INSERT OR REPLACE INTO events VALUES (?,?)").run(event.id, JSON.stringify(event));
     const deleteWithUndo = (before: CalendarEvent, after?: CalendarEvent) => {
       const token = crypto.randomUUID();
@@ -239,12 +249,12 @@ export class CalendarStore {
       const before: CalendarEvent = JSON.parse(undo.before);
       const current = this.db.query("SELECT body FROM events WHERE id=?").get(before.id) as { body: string } | null;
       if ((current?.body ?? null) !== undo.after) return fail("The event changed after deletion; undo would overwrite those changes", 409);
-      this.db.transaction(() => { save(before); this.db.query("DELETE FROM delete_undo WHERE token=?").run(path.slice(6)); })();
-      return Response.json({ ok: true });
+      mutate("restore", before, () => this.db.transaction(() => { save(before); this.db.query("DELETE FROM delete_undo WHERE token=?").run(path.slice(6)); })());
+      return reply({ ok: true });
     }
     if (path === "/events" && req.method === "POST") {
       const parsed = calendarEvent(input); if (!parsed.ok) return fail(parsed.error);
-      save(parsed.value); return Response.json(parsed.value);
+      mutate("create", parsed.value, () => save(parsed.value)); return reply(parsed.value);
     }
     if (path.startsWith("/events/")) {
       const [id, occurrenceId] = decodeURIComponent(path.slice(8)).split("~");
@@ -267,12 +277,12 @@ export class CalendarStore {
         if (parsed?.ok && parsed.value.allDay !== previous.allDay) return fail("Change all-day type on the whole series, not one occurrence");
         const replacement = parsed?.ok ? parsed.value : null;
         const after = { ...previous, updated: new Date().toISOString(), exceptions: { ...previous.exceptions, [original]: replacement } };
-        if (replacement) { save(after); return Response.json({ ...replacement, seriesId: id, occurrenceStart: original }); }
-        return Response.json({ ok: true, scope: "occurrence", undoToken: deleteWithUndo(previous, after) });
+        if (replacement) { mutate("update-occurrence", replacement, () => save(after)); return reply({ ...replacement, seriesId: id, occurrenceStart: original }); }
+        return reply({ ok: true, scope: "occurrence", undoToken: mutate("delete-occurrence", occurrence, () => deleteWithUndo(previous, after)) });
       }
-      if (req.method === "DELETE") return Response.json({ ok: true, scope: "series", undoToken: deleteWithUndo(previous) });
+      if (req.method === "DELETE") return reply({ ok: true, scope: "series", undoToken: mutate("delete", previous, () => deleteWithUndo(previous)) });
       const parsed = calendarEvent(input, previous); if (!parsed.ok) return fail(parsed.error);
-      save(parsed.value); return Response.json(parsed.value);
+      mutate("update", parsed.value, () => save(parsed.value)); return reply(parsed.value);
     }
     if (path === "/settings" && req.method === "PUT") { if (!object(input) || typeof input.zone !== "string" || !validZone(input.zone)) return fail("Invalid time zone"); this.putSetting("zone", input.zone); return Response.json({ zone: input.zone }); }
     if (path === "/feed" && ["GET", "POST"].includes(req.method)) {

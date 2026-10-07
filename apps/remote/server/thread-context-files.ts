@@ -68,6 +68,17 @@ export function listContextFiles(sources: ContextFileSources): ContextFileOffer[
   return offers;
 }
 
+/**
+ * The files a destination's watch-list checks load whole: its configured choice, otherwise every top-level Markdown
+ * file in its context folder (the picker's default without the instruction file, which the workspace already loads).
+ * Destinations without a context folder load none.
+ */
+export function watchContextFiles(configured: readonly string[] | undefined, directory: string | undefined): string[] {
+  if (!directory) return [];
+  if (configured) return [...configured];
+  return listContextFiles({ directory }).map((offer) => offer.name);
+}
+
 /** The requested identifiers, each confirmed to be an offered file. */
 export function selectContextFiles(sources: ContextFileSources | null, requested: unknown): { ok: true; value: string[] } | { ok: false; error: string } {
   if (requested === undefined || requested === null) return { ok: true, value: [] };

@@ -1,4 +1,4 @@
-import type { Thread, ThreadApi } from "pi-orchestrator/api";
+import { liveDependency, type Thread, type ThreadApi } from "pi-orchestrator/api";
 
 export function autoArchiveDelay(value: string | undefined): number {
   const delay = Number(value ?? 0);
@@ -6,16 +6,7 @@ export function autoArchiveDelay(value: string | undefined): number {
   return delay;
 }
 
-/**
- * Archives conversations nobody has touched for `afterMs` along with their
- * workers, and workers whose conversation is already archived or gone. An
- * unread conversation stays, and keeps its ancestors; an unread worker does
- * not, because its reader is the agent above it, which has already finished.
- * A worker whose conversation is archived or gone is archived outright once it
- * stops running, queued messages and all. A thread attached to a live meeting
- * room stays with its ancestors however long the room has been quiet: the
- * meeting can hand it work at any moment and must find it open.
- */
+/** Retention is per agent. Launch provenance never closes another agent. */
 export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, now = Date.now(), stopped = () => false,
   isUnread: (thread: Thread) => boolean = () => false, isLive: (thread: Thread) => boolean = () => false): Promise<number> {
   if (afterMs <= 0) return 0;
@@ -29,30 +20,34 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
     for (const thread of page.value.threads) threads.set(thread.id, thread);
     cursor = page.value.nextCursor;
   } while (cursor);
-  const unread = (thread: Thread) => !thread.parentId && isUnread(thread);
-  const orphaned = (thread: Thread) => { const parent = thread.parentId ? threads.get(thread.parentId) : null; return Boolean(thread.parentId) && (!parent || Boolean(parent.metadata?.archived)); };
+  const unread = isUnread;
+  const expired = (thread: Thread) => {
+    if (thread.updatedAt >= cutoff) return false;
+    const viewedAt = thread.metadata?.autoArchiveViewedAt;
+    const viewed = typeof viewedAt === "number" && Number.isSafeInteger(viewedAt) && viewedAt > 0;
+    return viewed && viewedAt >= thread.updatedAt && viewedAt < cutoff;
+  };
   const blocked = new Set<string>();
   for (const thread of threads.values()) {
     if (thread.metadata?.archived) continue;
-    if (thread.updatedAt < cutoff && thread.state !== "running" && thread.pendingMessages === 0 && !unread(thread) && !isLive(thread)) continue;
-    let id: string | null = thread.id;
-    const visited = new Set<string>();
-    while (id && !visited.has(id)) {
-      visited.add(id); blocked.add(id); id = threads.get(id)?.parentId ?? null;
+    const wait = thread.waitingOnAgents;
+    if (wait) {
+      blocked.add(thread.id);
+      if (wait.kind === "agents") for (const id of wait.threadIds) blocked.add(id);
+      if (wait.kind === "message") blocked.add(wait.fromThreadId);
     }
+    for (const id of thread.dependencies ?? []) if (liveDependency(thread, id, threads.get(id))) { blocked.add(thread.id); blocked.add(id); }
   }
   let archived = 0;
   for (const thread of threads.values()) {
     if (stopped()) break;
     if (thread.metadata?.archived || unread(thread) || isLive(thread)) continue;
-    const orphan = orphaned(thread);
-    if (blocked.has(thread.id) && !orphan) continue;
-    // An orphan only has to stop running. Its queued messages came from the
-    // conversation that is gone, so they are archived with it rather than
-    // keeping it current; the owner still refuses while a model is generating.
-    if (orphan && thread.state === "running") continue;
-    const result = await api.control(orphan ? { threadId: thread.id, action: "update", archived: true } : { threadId: thread.id, action: "archiveInactive", inactiveBefore: cutoff });
-    if (!result.ok) throw new Error(result.error.message);
+    if (blocked.has(thread.id) || !expired(thread) || thread.state !== "idle" || thread.pendingMessages > 0) continue;
+    const result = await api.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: cutoff });
+    if (!result.ok) {
+      if (result.error.code === "dependency_conflict") continue;
+      throw new Error(result.error.message);
+    }
     if (result.value.metadata?.archived) archived++;
   }
   return archived;

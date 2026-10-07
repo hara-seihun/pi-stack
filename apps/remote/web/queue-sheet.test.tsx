@@ -23,6 +23,16 @@ test("queue wording is composed from delivery, dispatch and the thread's held st
   expect(queueMessageStatus(message({ state: "dispatched" }), true)).toBe("Sent to agent");
 });
 
+test("delayed acknowledgements never claim failure or offer replay and late receipts restore sent status", () => {
+  const pending = message({ state: "dispatched", acknowledgement: "pending" });
+  expect(queueMessageStatus(pending, false)).toBe("Awaiting agent acknowledgement");
+  expect(queueMessageStatus({ ...pending, acknowledgement: "unconfirmed" }, false)).toBe("Acknowledgement unconfirmed — not resent");
+  expect(queueMessageStatus({ ...pending, acknowledgement: undefined }, false)).toBe("Sent to agent");
+  const markup = render([pending]);
+  expect(markup).not.toContain("Remove");
+  expect(markup).not.toContain("Hard steer");
+});
+
 test("only queued messages offer actions, and held threads cannot steer", () => {
   const queued = render([message()]);
   expect(queued).toContain("Edit");

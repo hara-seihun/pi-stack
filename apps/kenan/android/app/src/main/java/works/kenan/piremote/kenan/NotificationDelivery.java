@@ -12,7 +12,7 @@ import org.json.JSONObject;
 import java.util.HashSet;
 import java.util.Set;
 
-/** One native cursor and delivery path for polled and streamed settlements. */
+/** One native cursor and delivery path for polled and streamed agent notices. */
 final class NotificationDelivery {
     static final String CHANNEL = "session-idle";
     private static final String CURSOR = "cursor:";
@@ -27,6 +27,8 @@ final class NotificationDelivery {
         long cursor = cursor(prefs, environment);
         return cursor >= 0 ? "?after=" + cursor : "";
     }
+
+    static long cursor(Context context, String environment) { return cursor(preferences(context), environment); }
 
     private static long cursor(SharedPreferences prefs, String environment) {
         if (prefs.contains(CURSOR + environment)) return prefs.getLong(CURSOR + environment, 0);
@@ -78,7 +80,12 @@ final class NotificationDelivery {
                 if (!sequence.accept(seq, next, stream)) continue;
                 String session = event.getString("sessionId");
                 String thread = ThreadNotifications.key(identity.user, environment, session);
-                boolean question = "question".equals(event.optString("kind"));
+                NativeState.NotificationKind kind = NativeState.require(NativeState.NotificationKind.class, event.getString("kind"));
+                boolean question = kind == NativeState.NotificationKind.QUESTION;
+                boolean alertAgain = switch (kind) {
+                    case IDLE -> false;
+                    case QUESTION, ATTENTION -> true;
+                };
                 String title = name + " · " + event.getString("name") + (question ? " · Question" : "");
                 String body = event.optString("body", "Session is idle");
                 Intent open = new Intent(context, MainActivity.class)
@@ -93,7 +100,7 @@ final class NotificationDelivery {
                     .addExtras(ThreadNotifications.extras(thread))
                     .setContentTitle(title).setContentText(body)
                     .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
-                    .setContentIntent(target).setAutoCancel(true).setOnlyAlertOnce(!question)
+                    .setContentIntent(target).setAutoCancel(true).setOnlyAlertOnce(!alertAgain)
                     .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).build();
                 ThreadNotifications.deliver(context, thread, notification, new JSONObject()
                     .put("user", identity.user).put("environment", environment)

@@ -6,9 +6,10 @@ export type {
 
 /** One rendered row of the model context, derived from a transcript item. */
 export interface ContextEntry {
+  agentSender?: { threadId: string; name?: string };
   key: string;
   signature: string;
-  kind: string;
+  kind: import("../../server/protocol").TranscriptItemKind;
   label?: string;
   /** Inline text: user, assistant and notice items carry it with the head. */
   text?: string;
@@ -16,6 +17,8 @@ export interface ContextEntry {
   preview?: string;
   /** Content hash of the item, and the key its body is fetched and cached by. */
   itemId?: string;
+  /** Authoritative head position; live text has no sequence yet. */
+  seq?: number;
   /** Bytes of the complete body. */
   size?: number;
   bodyLoaded?: boolean;

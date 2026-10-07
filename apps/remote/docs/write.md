@@ -4,9 +4,41 @@ The authenticated router proxies WebSockets and HTTP under the selected environm
 
 ## Streaming dictation
 
-`GET /v1/write/stream` upgrades to WebSocket. Exactly one dictation per connection. The first client frame is JSON `{ "type":"start", "dictation":"UUID", "context":"text before cursor" }`; the supervisor loads that person's dictionary from `supervisor.sqlite3` and forwards the engine's `start` with `dictionary` populated. By default, subsequent binary frames contain **PCM16LE, 16 kHz, mono**, arbitrary frame sizes. For bandwidth-limited mobile dictation, set `"audio":"opus"` on `start`: each binary WebSocket frame must contain exactly one raw 20 ms Opus packet encoded at 16 kHz mono (the Android client uses 24 kbps), with no Ogg wrapper, OpusHead or codec-configuration packet. The supervisor forwards the format choice and packets unchanged; the engine decodes them locally. Client JSON `{ "type":"finish" }` requests the final; `{ "type":"cancel" }` discards it. Do not send more audio after finish. The supervisor replies with JSON `{ "type":"partial", "committed":"stable cleaned text", "tail":"unstable raw text" }` repeatedly, then `{ "type":"final", "text":"cleaned final text", "raw":"verbatim text", "edits":[...], "timing":{"flushMs":number} }`, or `{ "type":"error", "message":"..." }`. `committed` is the **whole committed prefix**, not a delta; replace the prior displayed prefix. `tail` is never committed until a later partial/final. The supervisor closes the socket after final/error. A disconnect without final cancels the engine dictation. Open failure must be shown to the person; never silently send an empty transcript.
+`GET /v1/write/stream` upgrades to WebSocket. Exactly one dictation per connection. The first client frame is JSON `{ "type":"start", "dictation":"UUID", "context":"text before cursor" }`; the supervisor loads that person's dictionary from `supervisor.sqlite3` and forwards the engine's `start` with `dictionary` populated. By default, subsequent binary frames contain **PCM16LE, 16 kHz, mono**, arbitrary frame sizes. For bandwidth-limited mobile dictation, set `"audio":"opus"` on `start`: each binary WebSocket frame must contain exactly one raw 20 ms Opus packet encoded at 16 kHz mono (the Android client uses 24 kbps), with no Ogg wrapper, OpusHead or codec-configuration packet. The supervisor forwards the format choice and packets unchanged; the engine decodes them locally. Client JSON `{ "type":"finish" }` requests the final; `{ "type":"cancel" }` discards it. Do not send more audio after finish. The supervisor replies with JSON `{ "type":"partial", "committed":"stable cleaned text", "tail":"unstable raw text" }` repeatedly, then `{ "type":"final", "text":"final edited text", "raw":"recognized text", "edits":[...], "rewrite":{"status":"applied|unchanged|guarded|unavailable", "reason":null, "latencyMs":number}, "timing":{"flushMs":number} }`, or `{ "type":"error", "message":"..." }`. `committed` is the **whole committed prefix**, not a delta; replace the prior displayed prefix. `tail` is never committed until a later partial/final. The supervisor closes the socket after final/error. A disconnect without final cancels the engine dictation. Open failure must be shown to the person; never silently send an empty transcript.
 
-`PI_STACK_WRITE_URL` selects the shared loopback engine endpoint (default `ws://127.0.0.1:8797/`). An ordinary person's supervisor with a configured model broker connects to that person's UID-gated broker listener `/v1/write/stream`, which relays binary and JSON frames to the engine. The administrator supervisor connects directly. The host UID filter limits the engine port to root and the administrator, not ordinary users; router authentication and the person's supervisor remain the entry points for browser/Android. The engine protocol is specified in `/home/kenan/work/pi-stack-write/CONTRACT.md`.
+`PI_STACK_WRITE_URL` selects the shared loopback engine endpoint (default `ws://127.0.0.1:8797/`). An ordinary person's supervisor with a configured model broker connects to that person's UID-gated broker listener `/v1/write/stream`, which relays binary and JSON frames to the engine. The administrator supervisor connects directly. The host UID filter limits the engine port to root and the administrator, not ordinary users; router authentication and the person's supervisor remain the entry points for browser/Android. The [engine owner](../../write/engine/README.md) describes audio custody and finalization.
+
+### Final local rewrite
+
+The source now adds an entirely local, resident CPU Qwen3-4B-Instruct-2507 editor
+after baseline cleanup; partials still use incremental source-constrained cleanup.
+No dictation goes to a cloud/pooled rewrite API. [Rewrite design and limits](../../write/engine/REWRITE.md)
+and [pinned runtime](../../write/rewrite-runtime/README.md) own implementation and installation.
+[Bounded measurements](../../write/engine/rewrite-results/README.md) separate
+fluency improvements from retained failures; this contract does not claim deployment.
+
+`rewrite.status` is `applied` when accepted text differs from the baseline,
+`unchanged` when it does not, `guarded` when a candidate/input fails protection,
+or `unavailable` when local inference cannot run. `reason` is null for accepted
+outcomes and a machine-readable reason otherwise. Guarded/unavailable outcomes
+return the cleaned baseline, not raw ASR. During cold background prefix priming,
+`unavailable` with `reason: "warming"` inserts baseline immediately and shows
+**Local rewrite is warming up; inserted the transcript.** A failed priming task
+reports `warmup_failed`, not readiness. Both browser and Android otherwise show
+**Kept the original wording to avoid changing its meaning.** or
+**Local rewrite unavailable; inserted the transcript.** respectively. A null
+`rewrite` means no rewriter ran; it is not an applied rewrite. Internal meeting
+transcription sends `rewrite: false` at Start and consumes `raw` without an editor.
+When rewrite changes text, `edits` contains a whole-source `kind: "rewrite"` receipt;
+`raw` and recognition `words` remain unchanged. Raw is ASR output, not a guaranteed
+verbatim transcript.
+
+Final rewrite is seconds-scale. `timing.flushMs` includes recognizer drain,
+baseline cleanup and rewrite; `rewrite.latencyMs` reports the rewrite's own
+queue/inference duration. Android's native final wait is 30 seconds after wire
+Finish, not a promised latency. The recognition-only 100 ms target does not cover
+this stage. Seven combined loopback regressions measured 1.15–2.24 seconds;
+these are not installed-phone latency or general accuracy guarantees.
 
 ## Dictionary and correction learning
 

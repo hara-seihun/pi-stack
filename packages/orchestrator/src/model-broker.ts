@@ -14,6 +14,7 @@ import { catalogModel, modelDrainsMeter } from "./catalog.js";
 import { allowsAccountUse, type UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
+import { accountModelExcluded, noEntitledAccountError, recordAccountModelUnsupported } from "./auth/model-entitlement.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
 import { modelSpeedModes } from "./threads/speed.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
@@ -37,6 +38,7 @@ export interface ModelBrokerConfig {
   ledgerPath: string;
   authPath: string;
   listeners: BrokerListener[];
+  grantOwner?: string;
 }
 export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig {
   if (!value || typeof value !== "object") return false;
@@ -44,6 +46,7 @@ export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig
   const strings = (items: unknown): items is string[] => Array.isArray(items) && items.length > 0 && items.every(item => typeof item === "string" && item.length > 0);
   return typeof config.ledgerPath === "string" && config.ledgerPath.startsWith("/")
     && typeof config.authPath === "string" && config.authPath.startsWith("/")
+    && (config.grantOwner === undefined || typeof config.grantOwner === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(config.grantOwner))
     && Array.isArray(config.listeners) && config.listeners.length > 0
     && config.listeners.every(listener => listener && /^[a-z_][a-z0-9_-]*$/.test(listener.principal)
       && Number.isInteger(listener.port) && listener.port > 1023 && listener.port <= 65535
@@ -83,7 +86,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
     const used = allowances.spent(principal);
     return used >= weeklyUsd ? allowanceRefusal(weeklyUsd) : null;
   };
-  const publish = () => store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })));
+  const publish = () => store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })), config.grantOwner);
   const completions = new CompletionService(store, process.cwd());
   const providers = new Map(builtinProviders().filter(provider => provider.id in BROKER_ROUTES).map(provider => [provider.id, provider]));
   const auth = new Map([...providers].map(([id, provider]) => [id, providerOAuth(provider, config.authPath)]));
@@ -205,8 +208,13 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       if (ultrafast) exclude = await codexTierExclusions(store, shared, body.model, "ultrafast", exclude, signal, transport as typeof fetch);
       const affinity = scoped(listener.principal, body.prompt_cache_key ?? req.headers["session-id"] ?? req.headers["session_id"] ?? req.headers["x-claude-code-session-id"]);
       const retained = sticky.get(affinity);
-      const account = eligibleInteractiveAccounts(store, shared, family, exclude).find(account => account.id === retained)
+      const account = eligibleInteractiveAccounts(store, shared, family, exclude, body.model).find(account => account.id === retained)
         ?? chooseInteractiveAccount(store, shared, family, exclude, { includeCooling: true, model: body.model });
+      const granted = store.accounts().filter(candidate => candidate.provider === family && !exclude.has(candidate.id) && shared.has(candidate.id));
+      if (!account && granted.length && granted.every(candidate => accountModelExcluded(store, candidate.id, body.model))) {
+        json(res, 400, noEntitledAccountError(family, body.model));
+        return;
+      }
       if (!account) {
         json(res, 503, ultrafast
           ? "No eligible shared model account advertises Ultrafast for this model. The granted pool is unavailable, out of quota, or not entitled; no slower tier was used."
@@ -273,6 +281,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
             family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
         }
       }
+      if (!response.ok && response.status !== 429) recordAccountModelUnsupported(store, account.id, body.model, await providerResponseFailure(response));
       if (response.status === 429) store.setCooldown(account.id, Math.max(account.cooldownUntil ?? 0, Date.now() + 60_000), { model: body.model });
       // The provider admitted this request past its quota checks; a stream that fails later is not a quota refusal.
       else if (response.ok) store.recordProviderSuccess(account.id, { model: body.model, startedAt, source: "model-broker" });
@@ -295,6 +304,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
         const failure = value.error ?? value.response?.error ?? (value.type === "error" ? value : undefined);
         if (failure) {
           const detail = `${failure.code ?? ""} ${failure.message ?? ""}`;
+          recordAccountModelUnsupported(store, account.id, body.model, detail);
           if (isRejectedTokenError(detail)) streamRejection = detail;
         }
         const usage = value.type === "response.completed" ? value.response?.usage : value.type === "message_start" ? value.message?.usage : value.type === "message_delta" ? value.usage : undefined;
@@ -393,6 +403,10 @@ export async function runModelBroker(path: string): Promise<void> {
     let reloaded: ModelBrokerConfig;
     try { reloaded = loadBrokerConfig(path); }
     catch (error) { console.error(`Model broker kept its current grants: ${error instanceof Error ? error.message : "unreadable grant file"}`); return; }
+    if (reloaded.grantOwner !== config.grantOwner) {
+      console.error(`Model broker grant owner changed in ${path}; restart with the intended owner`);
+      return;
+    }
     if (topology(reloaded.listeners) !== topology(config.listeners)) console.error(`Model broker listeners changed in ${path}; restart the service to serve them`);
     broker.applyGrants(reloaded.listeners);
   });

@@ -14,8 +14,10 @@ import { AccountTransfer, prepareWithDrainWait, transferEndpoint, transferPeer }
 import { fetchAccountFromPeer, resolveFetchPeer, resolvePeerHost } from "./auth/account-peers.js";
 import { isAccountReservation } from "./admission-reservation.js";
 import { isSpeed, SPEEDS } from "./threads/speed.js";
+import { getRandomName } from "./nebulani-names.js";
 
 export const COMMANDS=[
+  ["names","Generate Nebulani agent names locally: --count N"],
   ["daemon","Run reconciliation and the local API"],
   ["status","Print accounts, lanes, leases, and active threads"],
   ["usage-evidence","Print a read-only 24-hour quota and token snapshot; optional --ledger FILE"],
@@ -24,11 +26,12 @@ export const COMMANDS=[
   ["wave","Spawn a one-off batch from a declared lane [--count N] [--background]"],
   ["list","List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR]"],
   ["read","Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR]"],
-  ["send","Send to THREAD_ID with --prompt TEXT [--delivery steer|hardSteer]; agents steer by default, senderless sends queue by default"],
-  ["stop","Stop THREAD_ID; --descendants also stops its descendants"],
+  ["send","Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]; steer by default, agents cannot queue"],
+  ["close","Cancel and archive THREAD_ID; dependencies protect both endpoints"],
+  ["cancel","Cancel THREAD_ID's current work without closing its conversation"],
+  ["reopen","Restore THREAD_ID without resuming interrupted work"],
+  ["dependencies","Set this agent's dependencies: THREAD_ID PEER_ID...; --clear releases them"],
   ["pause / resume","Set or clear the global launch halt; --ordinary controls only ordinary work"],
-  ["resume THREAD_ID","Release a held thread's pending messages"],
-  ["restore","Unarchive THREAD_ID; --descendants also restores every thread below it; --resume continues the work its archive interrupted"],
   ["boost","Set a provider pacing multiplier or halt"],
   ["account","Import, refresh, inspect capabilities, remove, list, reserve, or exclusively transfer pooled accounts"],
   ["peer","List configured account-transfer peers"],
@@ -89,7 +92,7 @@ function threadSettings(named:Map<string,string>):SettingsOverrides|undefined{
   return{...(model?{model}:{}),...(thinkingLevel?{thinkingLevel:thinkingLevel as SettingsOverrides["thinkingLevel"]}:{}),...(speed?{speed:speed as SettingsOverrides["speed"]}:{})};
 }
 async function spawnThreads(input:Omit<SpawnThread,"requestId">,count:number):Promise<void>{
-  if(process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("Orchestrator workers cannot spawn subagents; report remaining work to the parent conversation");
+  if(process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("This execution boundary does not grant agent creation");
   if(process.env.PI_THREAD_ID){
     if(input.parentId&&input.parentId!==process.env.PI_THREAD_ID)throw new Error("Agent spawning must use its own thread as parent");
     input={...input,parentId:process.env.PI_THREAD_ID};
@@ -108,6 +111,13 @@ export async function dispatch(argv:string[]):Promise<void>{
     console.log(USAGE);
     return;
   }
+  if(command==="names"){
+    const count=rest.length===2&&rest[0]==="--count"&&/^[1-9]\d*$/.test(rest[1]!)?Number(rest[1]):NaN;
+    if(!Number.isSafeInteger(count)||count<1||count>1000){
+      console.error("usage: pi-orchestrator names --count N (1..1000)");process.exitCode=1;return;
+    }
+    output({names:Array.from({length:count},()=>getRandomName())});return;
+  }
   if(command==="daemon"){const store=Store.open(ledgerPath());try{await new Daemon(store,loadConfig()).start();}finally{store.close();}return;}
   if(command==="usage-evidence"){
     if(rest.length!==0&&(rest.length!==2||rest[0]!=="--ledger")){
@@ -122,16 +132,18 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(rest.length>1||(rest.length===1&&rest[0]!=="--ordinary"))throw new Error(`${command} accepts only --ordinary`);
     output(await request("/v1/control","POST",{key:rest[0]==="--ordinary"?"ordinary-launches":"launches",value:command==="pause"?"paused":"enabled"}));return;
   }
-  if(command==="restore"){
+  if(command==="close"||command==="stop"||command==="reopen"||command==="restore"||command==="cancel"){
     const {named,positional}=flags(rest),threadId=positional[0];
-    if(!threadId||positional.length!==1||[...named.keys()].some(key=>key!=="descendants"&&key!=="resume"))throw new Error("restore accepts one thread id, --descendants and --resume");
-    threadOutput(await threadClient().control({threadId,action:"restore",descendants:switchEnabled(named,"descendants"),resume:switchEnabled(named,"resume")}));return;
+    if(!threadId||positional.length!==1||named.size)throw new Error(`${command} accepts exactly one thread id`);
+    const action=command==="stop"?"close":command==="restore"?"reopen":command;
+    threadOutput(await threadClient().control({threadId,action}));return;
   }
-  if(command==="stop"||command==="resume"){
-    const {named,positional}=flags(rest),threadId=positional[0];
-    if(!threadId)throw new Error(`${command} requires a thread id`);
-    if(positional.length!==1||[...named.keys()].some(key=>command!=="stop"||key!=="descendants"))throw new Error(`${command} accepts one thread id${command==="stop"?" and --descendants":""}`);
-    threadOutput(await threadClient().control(command==="stop"?{threadId,action:"stop",descendants:switchEnabled(named,"descendants")}:{threadId,action:"resume"}));return;
+  if(command==="dependencies"){
+    const clear=rest.at(-1)==="--clear",ids=clear?rest.slice(0,-1):rest;
+    const [threadId,...threadIds]=ids;
+    if(!threadId||ids.some(id=>!id.trim()||id.startsWith("--"))||clear&&threadIds.length||!clear&&!threadIds.length)
+      throw new Error("dependencies requires THREAD_ID PEER_ID... or THREAD_ID --clear");
+    threadOutput(await threadClient().control({threadId,action:"dependencies",threadIds}));return;
   }
   if(command==="schedule"){
     const [action,...tail]=rest;
@@ -184,7 +196,7 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(command==="run"){
       const message=named.get("prompt")??positional.join(" ");
       if(!message.trim())throw new Error("run requires --prompt");
-      await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission,ephemeral:named.has("ephemeral")?switchEnabled(named,"ephemeral"):!!process.env.PI_THREAD_ID,...(named.has("mode")?{metadata:{mode:named.get("mode")}}:{})},count);
+      await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission,ephemeral:named.has("ephemeral")?switchEnabled(named,"ephemeral"):!!process.env.PI_THREAD_ID,...(named.has("mode")?{metadata:{mode:named.get("mode"),liveDispatcher:named.get("mode")==="live"}}:{})},count);
     }else{
       if(process.env.PI_THREAD_ID||process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("Agents cannot launch unparented waves; use thread_spawn from the parent conversation");
       const id=named.get("lane")??positional[0];if(!id)throw new Error("wave requires a lane");

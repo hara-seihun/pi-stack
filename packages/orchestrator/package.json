@@ -6,7 +6,8 @@
   "license": "MIT",
   "repository": "github:hara-seihun/pi-stack",
   "bin": {
-    "pi-orchestrator": "dist/cli.js"
+    "pi-orchestrator": "dist/cli.js",
+    "pi-agent-capacity": "dist/agent-capacity-cli.js"
   },
   "files": [
     "dist",
@@ -18,6 +19,12 @@
       "bun": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./message-format": {
+      "types": "./src/threads/message-format.ts",
+      "browser": "./src/threads/message-format.ts",
+      "bun": "./src/threads/message-format.ts",
+      "default": "./dist/threads/message-format.js"
+    },
     "./history": {
       "types": "./src/threads/history.d.mts",
       "default": "./src/threads/history.mjs"
@@ -26,6 +33,16 @@
       "types": "./src/image-service.ts",
       "bun": "./src/image-service.ts",
       "default": "./dist/image-service.js"
+    },
+    "./agent-capacity": {
+      "types": "./src/agent-capacity.ts",
+      "bun": "./src/agent-capacity.ts",
+      "default": "./dist/agent-capacity.js"
+    },
+    "./standalone-agent": {
+      "types": "./src/standalone-agent.ts",
+      "bun": "./src/standalone-agent.ts",
+      "default": "./dist/standalone-agent.js"
     },
     "./boost": {
       "types": "./src/boost.ts",
@@ -41,17 +58,18 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/check.mjs build",
     "docs": "npm run build && node scripts/generate-docs.mjs && node scripts/generate-completion-openapi.mjs",
-    "pretest": "node ../runtime/patch-shared-rpc.mjs ../../node_modules",
-    "test": "vitest run --maxWorkers=1",
-    "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/orchestrator.tsbuildinfo"
+    "test": "node scripts/check.mjs test",
+    "typecheck": "node scripts/check.mjs typecheck"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-coding-agent": "0.87.1",
     "@pi-plugins/claude-oauth": "0.3.7",
     "eventsource-parser": "3.1.1",
+    "kenan-memory": "0.1.0",
+    "openai": "6.40.0",
     "typebox": "1.3.16",
     "ws": "^8.22.0"
   },

@@ -30,7 +30,7 @@ describe("authorized thread directory", () => {
     if (!page.ok) throw new Error(page.error.message);
     expect(page.value.threads.map(thread => thread.id)).toEqual(["a", "b", "c"]);
     const next = await directory.list({ limit: 3, cursor: page.value.nextCursor });
-    expect(next).toEqual({ ok: true, value: { threads: [{ id: "d" }] } });
+    expect(next).toEqual({ ok: true, value: { threads: [{ id: "d", ownerId: "fleet" }] } });
     const mismatched = await directory.list({ parentId: "different", cursor: page.value.nextCursor });
     expect(mismatched.ok).toBe(false);
   });

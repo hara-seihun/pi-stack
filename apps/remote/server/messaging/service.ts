@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { actionJournal, journalWarning, type ActionTicket, type ActionJournal } from "kenan-memory/journal";
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,8 +22,14 @@ const ID = /^[a-zA-Z0-9_-]{1,100}$/;
 const CALL_STATE_ORDER: Record<MessagingCallState, number> = {
   ringing_incoming: 0, ringing_outgoing: 0, connecting: 1, connected: 2, reconnecting: 3, ended: 4,
 };
-const advancesCall = (current: MessagingCallState, next: MessagingCallState) =>
-  (current === "reconnecting" && next === "connected") || CALL_STATE_ORDER[next] >= CALL_STATE_ORDER[current];
+const advancesCall = (current: MessagingCallState, next: MessagingCallState) => {
+  if (!Object.hasOwn(CALL_STATE_ORDER, current) || !Object.hasOwn(CALL_STATE_ORDER, next)) throw new MessagingFailure("Unsupported messaging call state", 502, "protocol");
+  return (current === "reconnecting" && next === "connected") || CALL_STATE_ORDER[next] >= CALL_STATE_ORDER[current];
+};
+function requireCallVariant(call: Pick<BackendCall, "direction" | "state">): void {
+  if (!Object.hasOwn(CALL_STATE_ORDER, call.state) || call.direction !== "incoming" && call.direction !== "outgoing")
+    throw new MessagingFailure("Unsupported messaging call state or direction", 502, "protocol");
+}
 const failureText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
 /** Backend picture files carry no extension, so the type comes from their first bytes. Only browser-safe raster types are served. */
@@ -178,7 +185,7 @@ export class MessagingService {
   private closed = false;
   private started: Promise<void> | null = null;
   private closeTask: Promise<void> | null = null;
-  constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY) {
+  constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY, private readonly journal: Pick<ActionJournal, "begin" | "finish"> = actionJournal) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     this.linkPreview = createLinkPreviewResolver(join(root, "preview-images"));
     this.db = new Database(join(root, "messages.sqlite3"));
@@ -300,6 +307,7 @@ export class MessagingService {
     return link;
   }
   private setLink(backend: Backend, link: MessagingLink): void {
+    if (link.status !== "waiting" && link.status !== "linked" && link.status !== "failed" && link.status !== "cancelled") throw new MessagingFailure("Unsupported messaging link status", 502, "protocol");
     if (this.closed) return;
     backend.info.link = link;
     this.changed();
@@ -348,6 +356,7 @@ export class MessagingService {
     this.onChange();
   }
   private setStatus(backend: Backend, status: MessagingBackendInfo["status"], detail: string): void {
+    if (status !== "ready" && status !== "unconfigured" && status !== "connecting" && status !== "error") throw new MessagingFailure("Unsupported messaging backend status", 502, "protocol");
     if (this.closed || (backend.info.status === status && backend.info.detail === detail)) return;
     backend.info.status = status;
     backend.info.detail = detail;
@@ -451,6 +460,7 @@ export class MessagingService {
   }
 
   private newServiceCall(backend: Backend, support: MessagingCallSupport, conversation: ConversationRow, call: Pick<BackendCall, "peer" | "direction" | "state">, externalId: string | null): ServiceCall {
+    requireCallVariant(call);
     const name = this.db.query(`SELECT s.name FROM messaging_sender_aliases a JOIN messaging_senders s
       ON s.backend_id=a.backend_id AND s.id=a.sender_id WHERE a.backend_id=? AND a.alias=?`)
       .get(backend.config.id, call.peer) as { name: string | null } | null;
@@ -468,6 +478,7 @@ export class MessagingService {
   }
 
   private applyBackendCall(call: ServiceCall, update: BackendCall): void {
+    requireCallVariant(update);
     if (call.externalId && call.externalId !== update.externalId) return;
     call.externalId = update.externalId;
     if (!advancesCall(call.value.state, update.state)) return;
@@ -485,6 +496,7 @@ export class MessagingService {
   }
 
   private receiveCall(backend: Backend, update: BackendCall): void {
+    requireCallVariant(update);
     if (!backend.plugin?.calls || !update.externalId || !update.peer) return;
     const active = this.activeCall;
     if (active) {
@@ -524,6 +536,7 @@ export class MessagingService {
     if (conversation.kind !== "direct") throw new MessagingFailure("Signal calls are available only in direct conversations", 409, "calls_direct_only");
     const backend = this.readyCallBackend(backendId);
     if (this.activeCall) throw new MessagingFailure("Another call is already in progress", 409, "call_in_progress");
+    const ticket = this.journal.begin({ action: `${backendId}.call`, recipients: [conversation.title, conversation.external_id], summary: "Initiated an outgoing call; not proof of a connected call", externalId: requestId });
     this.clearEndedCall();
     this.setCurrent(conversation.id, true);
     const call = this.newServiceCall(backend, backend.plugin.calls, conversation, {
@@ -535,6 +548,8 @@ export class MessagingService {
       let result;
       try { result = await call.support.start(conversation.external_id); }
       catch (cause) { result = { ok: false as const, error: { code: "call_failed", message: failureText(cause) } }; }
+      const warning = journalWarning(this.journal.finish(ticket, result.ok ? "confirmed" : "unconfirmed", result.ok ? `Backend accepted call ${result.value.externalId}; not proof it connected` : result.error.message));
+      if (warning) call.value.error = warning;
       if (this.activeCall !== call) return;
       if (!result.ok) {
         this.finishCall(call, result.error.code, result.error.message);
@@ -757,12 +772,18 @@ export class MessagingService {
     const backend = this.backends.get(conversation.backend_id);
     if (!backend?.plugin?.react) return { ok: false, error: { code: "reactions_unsupported", message: "This messaging backend does not support reactions" } };
     if (backend.info.status !== "ready") return { ok: false, error: { code: "backend_unavailable", message: backend.info.detail } };
+    let ticket: ActionTicket | null;
+    try { ticket = this.journal.begin({ action: `${conversation.backend_id}.reaction`, recipients: [conversation.title, conversation.external_id], summary: `${remove ? "Removed" : "Sent"} reaction ${emoji}`, externalId: messageId }); }
+    catch (cause) { return { ok: false, error: { code: "journal_unavailable", message: `Not dispatched: ${failureText(cause)}` } }; }
     let result;
     try { result = await backend.plugin.react({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { author: row.sender, timestamp: row.timestamp }, emoji, remove); }
-    catch (cause) { return { ok: false, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } }; }
+    catch (cause) { result = { ok: false as const, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } }; }
+    const warning = journalWarning(this.journal.finish(ticket, result.ok ? "confirmed" : result.error.code === "unknown" ? "unconfirmed" : "failed", result.ok ? `Reaction accepted at ${result.value.timestamp}` : result.error.message));
+    if (warning) { this.db.query("UPDATE messages SET error=? WHERE id=?").run(warning, messageId); this.changed(); }
     if (!result.ok) return result;
     await this.receiveReaction(conversation.backend_id, { conversation: { id: conversation.external_id, title: conversation.title, kind: conversation.kind }, target: { author: row.direction === "outgoing" ? result.value.sender : row.sender, timestamp: row.timestamp }, account: result.value.sender, sender: result.value.sender, emoji, remove, timestamp: result.value.timestamp });
-    return { ok: true, value: this.reactions(row) };
+    const receipt = { ok: true as const, value: this.reactions(row), ...(warning ? { journalWarning: warning } : {}) };
+    return receipt;
   }
   private messageSender(row: MessageRow, backendId: string): string {
     if (row.direction === "outgoing" && row.sender === "You") {
@@ -797,7 +818,7 @@ export class MessagingService {
     const account = prepared ? prepared.account : row.direction === "outgoing" && row.sender === "You"
       ? (this.db.query(`SELECT sender_id FROM messaging_accounts WHERE backend_id=(SELECT backend_id FROM conversations WHERE id=?)`).get(row.conversation_id) as { sender_id: string } | null)?.sender_id ?? null : null;
     const reply = this.reply(row);
-    return { id: row.id, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), ...(sender?.avatar ? { senderAvatar: sender.avatar } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
+    return { id: row.id, seq: row.seq, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), ...(sender?.avatar ? { senderAvatar: sender.avatar } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
       ...((row.status === "received" || row.status === "sent") && row.external_id ? {
         identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account ?? row.sender, ...(sender?.name ? { name: sender.name } : {}), ...(row.direction === "outgoing" ? { own: true } : {}) } },
       } : {}),
@@ -965,6 +986,14 @@ export class MessagingService {
     return { message, settled: task };
   }
   private async dispatch(plugin: MessagingPlugin, conversation: ConversationRow, input: MessagingSend, attachments: AttachmentRow[], reply?: BackendReply): Promise<MessagingMessage> {
+    let ticket: ActionTicket | null;
+    try {
+      ticket = this.journal.begin({ action: `${conversation.backend_id}.message`, recipients: [conversation.title, conversation.external_id], summary: `${input.text} (${attachments.length} attachments)`, externalId: input.requestId });
+    } catch (cause) {
+      this.db.query("UPDATE messages SET status='failed',error=? WHERE id=?").run(`Not dispatched: action journal unavailable: ${failureText(cause)}`, input.requestId);
+      this.changed();
+      return this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
+    }
     try {
       const result = await plugin.send({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { requestId: input.requestId, text: input.text, attachments: attachments.map(item => ({ path: item.path, name: item.name, mimeType: item.mime_type, size: item.size })), ...(reply ? { reply } : {}) });
       if (result.ok) {
@@ -996,10 +1025,16 @@ export class MessagingService {
     } catch (cause) {
       this.db.query("UPDATE messages SET status='unknown',error=? WHERE id=?").run(`Backend did not confirm the send: ${failureText(cause)}`, input.requestId);
     }
+    const row = this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow;
+    const outcomes = { sent: "confirmed", failed: "failed", unknown: "unconfirmed" } as const;
+    if (row.status !== "sent" && row.status !== "failed" && row.status !== "unknown") throw new MessagingFailure("Unsupported outgoing send settlement state", 502, "protocol");
+    const warning = journalWarning(this.journal.finish(ticket, outcomes[row.status], row.external_id ?? row.error ?? row.status));
+    if (warning) this.db.query("UPDATE messages SET error=? WHERE id=?").run(warning, input.requestId);
     this.changed();
     return this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
   }
   private async receive(backendId: string, value: BackendMessage): Promise<void> {
+    if (value.direction !== "incoming" && value.direction !== "outgoing") throw new MessagingFailure("Unsupported messaging message direction", 502, "protocol");
     const conversation = this.upsertConversation(backendId, value.conversation);
     if (!value.id || !Number.isFinite(value.timestamp)) throw new Error("Backend returned an invalid message identity");
     if (value.reply && (!value.reply.author || !Number.isSafeInteger(value.reply.timestamp) || value.reply.timestamp <= 0 || typeof value.reply.text !== "string")) throw new Error("Backend returned an invalid reply");

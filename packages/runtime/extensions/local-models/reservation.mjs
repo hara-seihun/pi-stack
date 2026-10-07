@@ -12,16 +12,14 @@
 // the registered provider go out under Pi's own client and are not leased: a session-lifetime shared
 // lease would deny maintenance for as long as the session lived. While the engine is paused those
 // requests fail, which is the true state of the engine. A short, bounded consumer may choose to hold
-// its lease across its own request instead; Pi Remote's thread naming does.
+// its lease across its own request instead.
 //
 // Shared holders keep a maintenance holder out while an engine is genuinely coming up, and an
 // exclusive holder keeps every consumer out, so neither side has a check-then-start window. The
 // kernel owns the state: it is the same lock a shell takes with `exec 9>PATH; flock 9`, and it is
 // released when the last holder's descriptor closes, including when the holder dies.
 //
-// This file is the contract for both implementations of the consumer half. The other one is Pi
-// Remote's `apps/remote/server/engine-reservation.ts`, which runs under Bun in a separate deployed
-// tree; keep the manifest field names, defaults and lock semantics identical in the two.
+// This file is the only implementation of the consumer half.
 import { spawn } from "node:child_process";
 
 /** A consumer that finds the engine reserved reports it rather than waiting, unless the manifest says otherwise. */

@@ -54,21 +54,21 @@ public class AppUpdatesTest {
     @Test public void webBundlesForThisShellAreAppliedInsteadOfApks() throws Exception {
         int next = BuildConfig.VERSION_CODE + 1;
         AppUpdates.Update update = decide(release(next, BuildConfig.SHELL_ID), web(next, BuildConfig.SHELL_ID), BuildConfig.VERSION_CODE);
-        assertEquals("web", update.kind);
+        assertEquals(NativeState.UpdateKind.WEB, update.kind);
         assertEquals(next, update.versionCode);
         // Already running that web client: nothing to offer even though the APK is newer.
         assertNull(decide(release(next, BuildConfig.SHELL_ID), web(next, BuildConfig.SHELL_ID), next));
         // A web bundle alone, without an APK publication, still updates the client.
-        assertEquals("web", decide(null, web(next, BuildConfig.SHELL_ID), BuildConfig.VERSION_CODE).kind);
+        assertEquals(NativeState.UpdateKind.WEB, decide(null, web(next, BuildConfig.SHELL_ID), BuildConfig.VERSION_CODE).kind);
     }
 
     @Test public void nativeChangesRequireTheApk() throws Exception {
         int next = BuildConfig.VERSION_CODE + 1;
-        assertEquals("apk", decide(release(next, OTHER_SHELL), web(next, OTHER_SHELL), BuildConfig.VERSION_CODE).kind);
+        assertEquals(NativeState.UpdateKind.APK, decide(release(next, OTHER_SHELL), web(next, OTHER_SHELL), BuildConfig.VERSION_CODE).kind);
         // Older publications without shell identity are treated as native changes.
-        assertEquals("apk", decide(release(next, null), null, BuildConfig.VERSION_CODE).kind);
+        assertEquals(NativeState.UpdateKind.APK, decide(release(next, null), null, BuildConfig.VERSION_CODE).kind);
         // A newer APK whose web bundle failed to publish is still offered.
-        assertEquals("apk", decide(release(next, BuildConfig.SHELL_ID), null, BuildConfig.VERSION_CODE).kind);
+        assertEquals(NativeState.UpdateKind.APK, decide(release(next, BuildConfig.SHELL_ID), null, BuildConfig.VERSION_CODE).kind);
         assertNull(decide(release(BuildConfig.VERSION_CODE, OTHER_SHELL), web(BuildConfig.VERSION_CODE, OTHER_SHELL), BuildConfig.VERSION_CODE));
         assertNull(decide(release(BuildConfig.VERSION_CODE - 1, null), null, BuildConfig.VERSION_CODE));
     }

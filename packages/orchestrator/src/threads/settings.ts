@@ -7,10 +7,7 @@ import { isThinkingLevel, type Result, type SettingsOverrides, type Thread, type
 export function resolveSpawnSettings(input: SettingsOverrides | undefined, parent: Thread | null, requestedMode?: unknown): Result<ThreadSettings> {
   const mode = threadMode(parent ? parent.metadata?.mode : requestedMode);
   if (!parent) return mode ? resolveModeSettings(input, mode.conversation.settings) : resolveThreadSettings(input);
-  const resolved = mode ? resolveModeSettings(input, mode.worker.settings) : resolveThreadSettings(input, { model: "sol", thinkingLevel: "high", speed: "standard" });
-  if (!resolved.ok) return resolved;
-  const forbidden = childModelError(resolved.value.model);
-  return forbidden ? { ok: false, error: forbidden } : resolved;
+  return mode ? resolveModeSettings(input, mode.worker.settings) : resolveThreadSettings(input, { model: "sol", thinkingLevel: "high", speed: "standard" });
 }
 
 /** A mode's declared settings are the defaults; a model override keeps the mode's thinking and speed unless those are overridden too. */
@@ -19,14 +16,21 @@ function resolveModeSettings(input: SettingsOverrides = {}, declared: Required<S
   return resolveThreadSettings({ ...input, model: input.model ?? declared.model, thinkingLevel: input.thinkingLevel ?? declared.thinkingLevel, speed: input.speed ?? declared.speed });
 }
 
-export function childModelError(model: string): { code: "invalid_request"; message: string } | undefined {
-  const physical = model.split("/").at(-1)!;
-  if (/(^|[-_.])(astra|fable)([-_.]|$)/i.test(physical)) return { code: "invalid_request", message: "Subagents cannot use Astra or Fable. Choose Sol, Opus or Luna." };
-  return undefined;
+const settingFields = ["model", "thinkingLevel", "speed"];
+
+export function validateThreadSettings(input: unknown): Result<ThreadSettings> {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || Object.keys(input).some(key => !settingFields.includes(key))
+    || !("model" in input) || typeof input.model !== "string" || !input.model.trim()
+    || !("thinkingLevel" in input) || !isThinkingLevel(input.thinkingLevel)
+    || !("speed" in input) || !isSpeed(input.speed)) {
+    return { ok: false, error: { code: "invalid_request", message: "Complete thread settings require model, thinkingLevel and speed" } };
+  }
+  return resolveThreadSettings({ model: input.model, thinkingLevel: input.thinkingLevel, speed: input.speed });
 }
 
 export function resolveThreadSettings(input: SettingsOverrides = {}, current?: ThreadSettings): Result<ThreadSettings> {
-  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key => !["model", "thinkingLevel", "speed"].includes(key))) return { ok: false, error: { code: "invalid_request", message: "Expected model, thinkingLevel and speed overrides" } };
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key => !settingFields.includes(key))) return { ok: false, error: { code: "invalid_request", message: "Expected model, thinkingLevel and speed overrides" } };
   const requested = input.model ?? current?.model ?? "astra";
   if (typeof requested !== "string") return { ok: false, error: { code: "invalid_request", message: "Model must be a catalog name or provider/model" } };
   const separator = requested.indexOf("/");

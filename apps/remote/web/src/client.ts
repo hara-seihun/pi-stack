@@ -107,6 +107,10 @@ export async function piFetch(input: RequestInfo | URL, init?: RequestInit, retr
   return wait(send());
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly code?: string, readonly dependencies?: Array<{ threadId: string; dependsOn: string; ownerId?: string }>) { super(message); }
+}
+
 export async function api(method: string, path: string, body?: unknown, timeout = 20_000): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("Request timed out")), timeout);
@@ -119,7 +123,7 @@ export async function api(method: string, path: string, body?: unknown, timeout 
       cache: "no-store",
     });
     const result = await responseJson(response);
-    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (!response.ok) throw new ApiError(result.error || `HTTP ${response.status}`, result.code, result.dependencies);
     return result;
   } finally {
     clearTimeout(timer);

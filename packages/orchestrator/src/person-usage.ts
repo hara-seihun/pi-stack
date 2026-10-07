@@ -1,5 +1,5 @@
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import customModelConfig from "./models.json" with { type: "json" };
+import { modelsWithCustomDefinitions } from "./models.js";
 import { catalogMeter, ORCHESTRATOR_CATALOG, type PlanDefinition } from "./catalog.js";
 import type { UsageComponent } from "./domain.js";
 import type { Store } from "./store.js";
@@ -24,9 +24,10 @@ import type { Store } from "./store.js";
  * providers are rated separately.
  *
  * Rates are frozen per provider-hour in `usage_rate` the first time an hour
- * is priced, so a person's spend for a past hour never changes afterwards and
- * her total since any fixed moment only grows. Hours priced before any
- * calibration existed take the first calibration available.
+ * is priced, so later meter readings do not reprice past hours. Model-price
+ * registry corrections can change their list-price value, but never rewrite
+ * usage evidence or frozen rates. Hours priced before any calibration existed
+ * take the first calibration available.
  */
 export interface PersonUsageRow {
   /** Broker principal (a Unix user name), or null for the ledger's owner. */
@@ -87,10 +88,8 @@ let prices: Map<string, Price> | undefined;
 export function modelPrices(): Map<string, Price> {
   if (prices) return prices;
   const map = new Map<string, Price>();
-  const models = [
-    ...builtinProviders().filter(provider => POOLED_PROVIDERS.has(provider.id)).flatMap(provider => [...provider.getModels()]),
-    ...customModelConfig.providers.anthropic.models,
-  ] as Array<{ id: string; cost?: Partial<Price> }>;
+  const models = builtinProviders().filter(provider => POOLED_PROVIDERS.has(provider.id))
+    .flatMap(modelsWithCustomDefinitions);
   for (const model of models) {
     const cost = model.cost;
     if (!cost || COMPONENTS.every(component => !cost[component])) continue;
@@ -110,8 +109,9 @@ const valueOf = (priceOf: PriceOf, model: string, component: UsageComponent, tok
  * The provider's current rate from its accounts' latest weekly readings:
  * consumed-quota dollars over the list-price value those accounts served
  * since each one's window began. An account whose meter moved without any
- * usage in this ledger (traffic from elsewhere) is left out. Null without a
- * fresh reading on an account this ledger used.
+ * usage in this ledger (traffic from elsewhere), or with unknown model prices,
+ * is left out: its weekly meter cannot be attributed to a partial denominator.
+ * Null without a fresh reading on an account this ledger can fully price.
  */
 export function calibrateRate(store: Store, plan: PlanDefinition, priceOf: PriceOf = defaultPrice, now = Date.now()): number | null {
   const meter = catalogMeter(plan.quotaMeter);
@@ -133,8 +133,9 @@ export function calibrateRate(store: Store, plan: PlanDefinition, priceOf: Price
     // Weekly meters round small consumption to zero after a reset. A zero
     // reading cannot calibrate the tokens already served in that window.
     if (window.usedPercent <= 0) continue;
-    const served = rows.filter(row => row.account_id === window.id && row.hour >= window.since)
-      .reduce((sum, row) => sum + valueOf(priceOf, row.model, row.component, row.tokens), 0);
+    const usage = rows.filter(row => row.account_id === window.id && row.hour >= window.since);
+    if (usage.some(row => row.tokens > 0 && !priceOf(row.model))) continue;
+    const served = usage.reduce((sum, row) => sum + valueOf(priceOf, row.model, row.component, row.tokens), 0);
     if (served <= 0) continue;
     cost += window.usedPercent * pointUsd;
     value += served;

@@ -145,6 +145,22 @@ test("malformed checkpoints and missing payload markers abort rather than leakin
   assert.equal(checkpointContext(buildSessionContext(f.sm.getBranch()).messages, f.sm.getBranch(), model).ok, false);
 });
 
+test("unknown stored attempt state blocks context and automatic compaction without provider requests", async t => {
+  t.mock.method(console, "error", () => {});
+  const f = fixture();
+  f.sm.appendCustomEntry(ATTEMPT, { state: "future", modelKey: modelKey(model) });
+  codexCompaction(f.pi);
+  let calls = 0;
+  f.ctx.modelRegistry.complete = async () => { calls++; throw new Error("Unexpected provider request"); };
+  const context = f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx);
+  assert.match(context.error, /Unsupported stored compaction attempt state/);
+  assert.match(context.error, /no automatic retry was inferred/);
+  const result = await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
+  assert.match(result.error, /Unsupported stored compaction attempt state/);
+  assert.equal(calls, 0);
+  assert.equal(f.sm.getBranch().at(-1).data.state, "future");
+});
+
 test("an interrupted checkpoint permits context and one automatic retry, then fences a terminal failure", async t => {
   t.mock.method(console, "error", () => {});
   const f = fixture();
@@ -183,7 +199,7 @@ test("failed native compaction retains context and fences automatic retries acro
   f.ctx.model = { ...model, provider: "openai-codex-9" };
   for (let i = 0; i < 32; i++) {
     const retry = await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
-    assert.match(retry.error, /Automatic resubmission is blocked/);
+    assert.match(retry.error, /Automatic compaction retries after/);
   }
   assert.equal(calls, 1);
   const rejected = f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx);
@@ -191,6 +207,11 @@ test("failed native compaction retains context and fences automatic retries acro
   assert.equal(f.aborted, false);
   await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch(), reason: "manual" }, f.ctx);
   assert.equal(calls, 2);
+  const later = Date.now() + 2 * 60 * 60_000;
+  t.mock.method(Date, "now", () => later);
+  assert.equal(f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx).error, undefined, "an expired fence no longer rejects chat");
+  await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
+  assert.equal(calls, 3, "automatic compaction retries once its fence expires");
   assert.equal(f.handlers.has("turn_end"), false);
   assert.equal(f.handlers.has("agent_settled"), false);
 });

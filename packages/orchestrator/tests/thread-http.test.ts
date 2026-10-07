@@ -34,7 +34,7 @@ it("recovers refused connection and lost acceptance across owner restart without
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const options = { databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
     openSession: async () => { throw new Error("No model execution is needed for transport acceptance"); } };
-  let service = new ThreadService(options);
+  let service = new ThreadService({ ...options, capacity: { mode: "unmanaged" } });
   cleanups.push(async () => { expect(await service.close()).toMatchObject({ ok: true }); });
   expect((await service.spawn({ requestId: "create", id: "recipient", cwd: root })).ok).toBe(true);
   const bodies: string[] = [];
@@ -53,7 +53,7 @@ it("recovers refused connection and lost acceptance across owner restart without
       restart = (async () => {
         expect((await service.control({ threadId: "recipient", action: "stop", descendants: false })).ok).toBe(true);
         await service.detach();
-        service = new ThreadService(options);
+        service = new ThreadService({ ...options, capacity: { mode: "unmanaged" } });
       })();
       res.destroy();
       return;
@@ -77,10 +77,11 @@ it("recovers refused connection and lost acceptance across owner restart without
   expect(result).toMatchObject({ ok: true, value: { id: send.requestId, text: "GO", delivery: "steer" } });
   expect(refusals).toBe(1);
   expect(bodies).toEqual([JSON.stringify(send), JSON.stringify(send)]);
-  expect(service.pending("recipient")).toHaveLength(1);
-  expect(service.get("recipient")).toMatchObject({ state: "idle", held: true });
+  expect(service.pending("recipient")).toHaveLength(0);
+  expect(service.get("recipient")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
   expect(await api.send({ ...send, text: "different instruction" })).toMatchObject({ ok: false, error: { code: "conflict" } });
-  expect(service.pending("recipient")).toHaveLength(1);
+  expect(service.pending("recipient")).toHaveLength(0);
+  expect(service.get("recipient")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
 });
 
 it("waits through a suspended controller, then returns its durable acceptance", async () => {
@@ -88,7 +89,7 @@ it("waits through a suspended controller, then returns its durable acceptance", 
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const options = { databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
     openSession: async () => { throw new Error("No model execution"); } };
-  let owner = new ThreadService(options);
+  let owner = new ThreadService({ ...options, capacity: { mode: "unmanaged" } });
   cleanups.push(async () => { expect(await owner.close()).toMatchObject({ ok: true }); });
   await owner.spawn({ requestId: "create", id: "recipient", cwd: root });
   owner.suspend();
@@ -97,7 +98,7 @@ it("waits through a suspended controller, then returns its durable acceptance", 
     if (fetcher.mock.calls.length === 1) {
       expect(await response!.clone().json()).toMatchObject({ ok: false, error: { retryable: true } });
       await owner.detach();
-      owner = new ThreadService(options);
+      owner = new ThreadService({ ...options, capacity: { mode: "unmanaged" } });
     }
     return response!;
   });
@@ -109,10 +110,10 @@ it("waits through a suspended controller, then returns its durable acceptance", 
 it("deduplicates overlapping spawn retries after asynchronous parent discovery", async () => {
   const root = mkdtempSync(join(tmpdir(), "thread-spawn-retry-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
+  const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
     openSession: async () => { throw new Error("No model execution"); } });
   cleanups.push(async () => { expect(await owner.close()).toMatchObject({ ok: true }); });
-  const parentOwner = new ThreadService({ databasePath: join(root, "parent.sqlite3"), sessionsDir: join(root, "parent"),
+  const parentOwner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "parent.sqlite3"), sessionsDir: join(root, "parent"),
     openSession: async () => { throw new Error("No model execution"); } });
   cleanups.push(async () => { expect(await parentOwner.close()).toMatchObject({ ok: true }); });
   expect(await parentOwner.spawn({ requestId: "create-parent", id: "parent", cwd: root })).toMatchObject({ ok: true });

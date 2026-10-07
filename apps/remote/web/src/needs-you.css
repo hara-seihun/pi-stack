@@ -1,0 +1,30 @@
+.needs-you-screen { height: 100%; overflow-y: auto; padding: 24px; color: var(--text); }
+.needs-you-screen > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.needs-you-screen h1 { margin: 0 0 8px; font-size: 26px; }
+.needs-you-screen h2 { margin: 8px 0 16px; font-size: 19px; overflow-wrap: anywhere; }
+.needs-you-screen h3 { font-size: 15px; margin-bottom: 8px; }
+.needs-you-screen p { line-height: 1.5; overflow-wrap: anywhere; }
+.needs-you-screen header p, .needs-you-muted { color: var(--muted); font-size: 13px; }
+.needs-you-screen button, .needs-you-open { display: inline-block; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface); color: var(--text); font: inherit; font-size: 14px; text-decoration: none; cursor: pointer; min-height: 44px; }
+.needs-you-screen button:disabled { opacity: .5; cursor: wait; }
+.needs-you-items { list-style: none; margin: 20px 0; padding: 0; display: grid; gap: 14px; }
+.needs-you-items > li { padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.needs-you-kind, .needs-you-status { font-size: 12px; color: var(--muted); }
+.needs-you-status { margin-left: 10px; }
+.needs-you-screen dl { margin: 12px 0 18px; display: grid; gap: 12px; }
+.needs-you-screen dl > div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; }
+.needs-you-screen dt { color: var(--muted); font-size: 13px; }
+.needs-you-screen dd { margin: 0; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.needs-you-coverage, .needs-you-policy { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 24px; }
+.needs-you-coverage ul { list-style: none; padding: 0; }
+.needs-you-coverage li { margin-bottom: 18px; }
+.needs-you-coverage li p { margin: 5px 0; font-size: 13px; }
+.needs-you-policy summary { min-height: 44px; cursor: pointer; font-weight: 600; }
+.needs-you-error { color: var(--danger, #db655c); }
+.needs-you-empty { border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+@media (max-width: 600px) {
+  .needs-you-screen { padding: 18px 14px; }
+  .needs-you-screen > header { flex-wrap: wrap; }
+  .needs-you-screen dl > div { grid-template-columns: 1fr; gap: 4px; }
+  .needs-you-items > li { padding: 16px; }
+}

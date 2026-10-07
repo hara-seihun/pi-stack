@@ -25,11 +25,12 @@ export async function runProviderOperation(
   store: Store,
   auth: SharedOAuthAuth,
   signal: AbortSignal,
+  environment: NodeJS.ProcessEnv,
   onRoute?: (model: Model<any>) => Promise<void>,
 ): Promise<OperationResult> {
   const family = store.account(request.model.provider)!.provider;
   const excluded = new Set<string>();
-  const runId = process.env.PI_ORCHESTRATOR_RUN_ID;
+  const runId = environment.PI_ORCHESTRATOR_RUN_ID;
   const parentLease = runId ? `run:${runId}` : `interactive:${request.sessionId}`;
   let account = request.model.provider;
   let last: OperationResult = { ok: false, error: "No account available for provider operation" };
@@ -70,7 +71,7 @@ export async function runProviderOperation(
       }
       if (!isRateLimitError(last.error)) return last;
       store.setCooldown(account, Date.now() + rateLimitCooldownMs(last.error), { model: model.id });
-      if (process.env.PI_ORCHESTRATOR_ASSIGNED === "1") return last;
+      if (environment.PI_ORCHESTRATOR_ASSIGNED === "1") return last;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return { ok: false, error: repairDetail ? `${repairDetail}; after shared OAuth repair: ${detail}` : detail };
@@ -86,7 +87,7 @@ export async function runProviderOperation(
   return signal.aborted ? { ok: false, error: "Provider operation aborted" } : last;
 }
 
-export function installProviderOperations(pi: ExtensionAPI, store: Store, shared: Map<string, SharedOAuthAuth>): void {
+export function installProviderOperations(pi: ExtensionAPI, store: Store, shared: Map<string, SharedOAuthAuth>, environment: NodeJS.ProcessEnv): void {
   const shutdown = new AbortController();
   const pending = new Set<Promise<void>>();
   const unsubscribe = pi.events.on(PROVIDER_OPERATION_EVENT, (raw: unknown) => {
@@ -97,7 +98,7 @@ export function installProviderOperations(pi: ExtensionAPI, store: Store, shared
       const signal = AbortSignal.any([request.signal, shutdown.signal]);
       const family = store.account(request.model.provider)?.provider;
       const auth = family ? shared.get(family) : undefined;
-      return auth ? runProviderOperation(request, store, auth, signal, async model => {
+      return auth ? runProviderOperation(request, store, auth, signal, environment, async model => {
         const thinking = pi.getThinkingLevel();
         if (!await pi.setModel(model)) throw new Error(`Cannot select provider operation account ${model.provider}`);
         pi.setThinkingLevel(thinking);

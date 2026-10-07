@@ -21,6 +21,9 @@ reconcile_cli_links() {
     pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$home/.local/bin"
     pi_stack_as_root ln -sfn "$dest/dist/cli.js" "$link"
     pi_stack_as_root chown -h "$owner:$group" "$link"
+    link=$home/.local/bin/pi-agent-capacity
+    pi_stack_as_root ln -sfn "$dest/dist/agent-capacity-cli.js" "$link"
+    pi_stack_as_root chown -h "$owner:$group" "$link"
   done < <(pi_stack_users)
 }
 
@@ -50,6 +53,21 @@ NODE
 }
 normalize_model_defaults
 
+reconcile_model_availability() {
+  local fleet path group
+  fleet=$(pi_stack_fleet_user)
+  [[ -n $fleet ]] || return 0
+  if [[ -n ${PI_STACK_ORCHESTRATOR_DEST:-} && -z ${PI_STACK_MODEL_AVAILABILITY_PATH:-} ]]; then return 0; fi
+  path=${PI_STACK_MODEL_AVAILABILITY_PATH:-/var/lib/pi-stack/model-availability/policy.json}
+  group=$(id -gn "$fleet")
+  pi_stack_as_root install -d -m 755 -o "$fleet" -g "$group" "$(dirname "$path")"
+  if [[ -e $path ]]; then
+    pi_stack_as_root chown "$fleet:$group" "$path"
+    pi_stack_as_root chmod 644 "$path"
+  fi
+}
+reconcile_model_availability
+
 # The fleet user's operator config names the lane manifest. A release whose
 # daemon cannot parse the live manifest must not be selected.
 validate_manifest() {
@@ -76,7 +94,7 @@ NODE
 # Loading the CLI takes about two seconds; it overlaps the manifest and link work.
 check_cli() { "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'; }
 
-if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js ]]; then
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js && -x $dest/dist/agent-capacity-cli.js ]]; then
   check_cli &
   cli_pid=$!
   validate_manifest
@@ -101,7 +119,7 @@ node "$root/scripts/build-workspace.mjs" orchestrator
 mkdir -p "$stage/release"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src \
   packages/orchestrator/package.json "$stage/release/"
-chmod 755 "$stage/release/dist/cli.js"
+chmod 755 "$stage/release/dist/cli.js" "$stage/release/dist/agent-capacity-cli.js"
 ln -s "$dependencies" "$stage/release/node_modules"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
 validate_manifest
