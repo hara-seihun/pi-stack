@@ -55,18 +55,38 @@ test("only explicit valid timestamp deadlines are parsed; no relative or date-on
   const followup = entries.find(entry => entry.entity.title.startsWith("Follow up"))!.entity;
   expect(followup.kind === "commitment" && followup.due).toBeNull();
   for (const phrase of ["due: 2026-02-30T10:00:00Z", "due: 2026-02-03", "due: 2026-02-03T10:00:00Z and due: 2026-02-04T10:00:00Z"]) {
-    const entity = parse(`- [ ] Do the action ${phrase}`).entries[0]!.entity;
+    const entity = parse(`## Needs Operator\n## Agent work\n- [ ] Do the action ${phrase}`).entries[0]!.entity;
     expect(entity.kind === "commitment" && entity.due).toBeNull();
   }
 });
 
 test("stable source IDs, UTF-8 evidence, strict CLI options, and empty source are defined", () => {
   expect(parse().entries.map(entry => entry.id)).toEqual(parse().entries.map(entry => entry.id));
-  expect(parse("# Completed\n- [x] Finished\n").entries).toEqual([]);
+  expect(parse("## Needs Operator\n## Completed\n- [x] Finished\n").entries).toEqual([]);
   expect(markdownImportEntries(new Uint8Array([0xff]), options, observedAt)).toMatchObject({ ok: false, error: "invalid-source" });
   expect(importArguments(["--source", "relative.md", "--needs-heading", "Needs Operator"])).toMatchObject({ ok: false, error: "invalid-options" });
   expect(importArguments(["--source", options.source, "--needs-heading", options.needsHeading, "--person", "claimed"])).toMatchObject({ ok: false, error: "invalid-options" });
   expect(importArguments(["--source", options.source, "--needs-heading", options.needsHeading])).toEqual({ ok: true, value: options });
+});
+
+test("wrong nominated heading returns an explicit error without sealing the source", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "life-import-heading-test-"));
+  const source = join(directory, "tasks.md");
+  const operations: string[] = [];
+  const client: LifeClient = {
+    async request<T = LifeValue>(request: LifeRequest): Promise<LifeResult<T>> {
+      operations.push(request.operation);
+      if (request.operation !== "import-receipt") throw new Error("A wrong-heading import must never be submitted");
+      return { ok: false, error: "not-found", message: "No import receipt" };
+    },
+  };
+  try {
+    const bytes = Buffer.from(fixture);
+    await writeFile(source, bytes);
+    expect(await importMarkdown({ source, needsHeading: "Needs Another Operator" }, client, observedAt)).toMatchObject({ ok: false, error: "missing-needs-heading" });
+    expect(operations).toEqual(["import-receipt"]);
+    expect(await readFile(source)).toEqual(bytes);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("one-time receipt short-circuits reruns even after source edits/deletion, and never writes source bytes", async () => {

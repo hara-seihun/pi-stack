@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { LifeClient, LifeDue, LifeEntityInput, LifeImportReceipt, LifeProvenance, LifeResult } from "../packages/kenan-memory/src/life-contract.js";
 
-type ImportError = "invalid-options" | "source-unavailable" | "invalid-source" | "too-many-items";
+type ImportError = "invalid-options" | "source-unavailable" | "invalid-source" | "missing-needs-heading" | "too-many-items";
 type Result<T> = { ok: true; value: T } | { ok: false; error: ImportError; message: string };
 type ImportEntry = { id: string; entity: LifeEntityInput };
 type SourceItem = { needsPerson: boolean; title: string; original: string; start: number; end: number };
@@ -35,6 +35,7 @@ export function markdownImportEntries(bytes: Uint8Array, options: ImportOptions,
   const lines = raw.map((line, index) => line.replace(/\r?\n$/, "").replace(index === 0 ? /^\uFEFF/ : /$^/, ""));
   const items: SourceItem[] = [];
   let needsPerson = false;
+  let foundNeedsHeading = false;
   let fence: { character: string; length: number } | null = null;
   const bullet = /^(\s*)(?:[-+*]|\d+[.)])\s+(.*)$/;
   const checkbox = /^\[([ xX])\](?:\s+(.*)|\s*)$/;
@@ -50,6 +51,7 @@ export function markdownImportEntries(bytes: Uint8Array, options: ImportOptions,
     const section = heading.exec(line);
     if (section) {
       if (section[1]!.length <= 2) needsPerson = section[1]!.length === 2 && section[2] === options.needsHeading;
+      if (needsPerson && section[1]!.length === 2) foundNeedsHeading = true;
       continue;
     }
     if (!line.trim() || /^\s*(?:([-*_])\s*){3,}$/.test(line)) continue;
@@ -80,6 +82,7 @@ export function markdownImportEntries(bytes: Uint8Array, options: ImportOptions,
     if (title.length > 100_000 || original.length > 90_000) return { ok: false, error: "invalid-source", message: `Source item at line ${start + 1} exceeds the life evidence limit` };
     items.push({ needsPerson, title, original, start: start + 1, end: index + 1 });
   }
+  if (!foundNeedsHeading) return { ok: false, error: "missing-needs-heading", message: "The nominated level-2 needs heading is absent; nothing was imported" };
   const entries: ImportEntry[] = [];
   for (const item of items) {
     const anchor = item.start === item.end ? `#L${item.start}` : `#L${item.start}-L${item.end}`;
