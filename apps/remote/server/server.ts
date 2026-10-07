@@ -71,7 +71,7 @@ import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
 import { createThreadViewRecorder } from "./thread-viewing";
 import { VoiceClient } from "./voice/client";
-import { MeetServer } from "./meet/server";
+import { MeetGateway } from "./meet/gateway";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
 import { observeExecutionActivity } from "pi-orchestrator/api";
@@ -1812,10 +1812,12 @@ const unsubscribeThreads = threads.subscribe(change => {
 }
 await inlineImages.start();
 
-const meet = new MeetServer((id) => {
-  const row = sessionRow.get(id) as any;
-  return Boolean(row && !row.archived_at);
-}, undefined, db, (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
+const meetingRuntime = await MeetGateway.connect(db, {
+  sessionExists: (id) => {
+    const row = sessionRow.get(id) as any;
+    return Boolean(row && !row.archived_at);
+  },
+  threadActivity: (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
   const runtime = liveProjections.get(row.id);
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
@@ -1823,7 +1825,10 @@ const meet = new MeetServer((id) => {
     ...projectThreadActivity(row.state, runtime, row.executionActivity, row.metadata, Boolean(row.held)),
     waitingOnAgents: row.waitingOnAgents,
     tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
-}));
+  }),
+});
+if (!meetingRuntime.ok) throw new Error(`Meeting runtime unavailable: ${meetingRuntime.error}`);
+const meet = meetingRuntime.value;
 
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
@@ -1870,7 +1875,7 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
-    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
+    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT, meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } });
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
@@ -2510,7 +2515,7 @@ const server = Bun.serve<SocketData>({
           if (row.archived_at) return { ok: false, error: { code: "conflict", message: "Thread is archived" } };
           if (forkingSessions.has(id)) return { ok: false, error: { code: "conflict", message: "Wait for the conversation edit to finish" } };
           const roomImages = input.includeMeetingImages === true && row.meeting_id
-            ? meet.captureDelegation(row.meeting_id) : { images: [], note: "" };
+            ? await meet.captureDelegation(row.meeting_id) : { images: [], note: "" };
           let text = input.text.trim() + (roomImages.note ? `\n\n${roomImages.note}` : "");
           if (input.replyTo !== undefined) {
             const target = parseMessageReference(input.replyTo);

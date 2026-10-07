@@ -205,10 +205,9 @@ pi_stack_supervisor_health() {
   port=$(pi_stack_as_root jq -er '.port | select(type == "number" and . > 0 and . < 65536)' "$(pi_stack_persons_dir)/$user.json") || return
   pi_stack_as_root curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/health"
 }
-# Live Meet rooms held by each person's supervisor, as "user:count" words; empty when none.
-# A restart of Pi Remote ends every one of them.
+# --all reports rooms; --restart-blockers excludes independently owned meeting runtimes.
 pi_stack_live_meeting_rooms() {
-  bash "$(dirname "${BASH_SOURCE[0]}")/meeting-census"
+  bash "$(dirname "${BASH_SOURCE[0]}")/meeting-census" "$@"
 }
 # Every unix account that runs Pi here: each Pi Remote person plus the fleet user.
 pi_stack_users() {

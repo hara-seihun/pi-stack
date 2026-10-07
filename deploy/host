@@ -30,13 +30,18 @@ if (( services )) && [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
   "$root/deploy/voice" --check
   "$root/deploy/phone" --check
 fi
-# Activation restarts Pi Remote, which ends every live Meet room: the meeting bot stays
-# in the call with no voice, canvas or agent (a release at 06:40Z on 2026-09-29 cut a
-# live Meet test mid-brief). Defer instead; the publication owner probes this exit 75
-# without consuming deployment attempts. A census that cannot answer is not an empty
-# host, so it defers too. PI_STACK_ALLOW_LIVE_MEETING_RESTART=1 overrides.
+# Independent meeting runtimes keep rooms and media across supervisor activation.
+# The initial upgrade still protects rooms owned by an earlier in-process supervisor.
+# A candidate without the lifetime contract cannot remove it under a live meeting.
+meeting_mode=--all
+if [[ -f $root/apps/remote/meeting-runtime.json ]]; then
+  jq -e '.protocol == "meet-runtime-v1" and .lifetime == "person-service"' "$root/apps/remote/meeting-runtime.json" >/dev/null || {
+    echo 'invalid meeting runtime contract' >&2; exit 64;
+  }
+  meeting_mode=--restart-blockers
+fi
 if (( services )) && [[ ${PI_STACK_ALLOW_LIVE_MEETING_RESTART:-0} != 1 ]]; then
-  if ! live_rooms=$(pi_stack_live_meeting_rooms); then
+  if ! live_rooms=$(pi_stack_live_meeting_rooms "$meeting_mode"); then
     echo "meeting census unavailable on this host: see the census error above" >&2
     exit 75
   fi

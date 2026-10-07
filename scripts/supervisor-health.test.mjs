@@ -20,7 +20,7 @@ const invoke = (path = "/v1/health", { method = "GET", owns = true, draining = f
 test("supervisor readiness needs no messaging, thread routing or socket caller discovery", async () => {
   const response = invoke();
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true, version: "test-version", environmentId: "test-environment", releaseCommit: "tested-commit" });
+  assert.deepEqual(await response.json(), { ok: true, version: "test-version", environmentId: "test-environment", releaseCommit: "tested-commit", meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } });
   assert.equal(invoke("/v1/threads"), null);
   assert.equal(invoke("/v1/health", { method: "POST" }), null);
 });

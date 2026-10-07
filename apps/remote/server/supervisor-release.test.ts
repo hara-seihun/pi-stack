@@ -74,6 +74,25 @@ test("handoff accepts the real Pi shutdown context while refusing new work", asy
   }
 });
 
+test("ongoing room traffic stays available while a supervisor drains, without admitting new meeting roots", async () => {
+  let finish!: (value: Result<void>) => void;
+  const detached = new Promise<Result<void>>(resolve => { finish = resolve; });
+  const release = new SupervisorRelease({ suspend() {}, detach: () => detached, closeImages: async () => {}, stopServer() {}, closeDatabase() {}, exit() {} });
+  const pending = release.release(75);
+  const room = "00000000-0000-0000-0000-000000000001";
+  for (const [method, path] of [
+    ["GET", `/v1/meet/${room}/poll`], ["POST", `/v1/meet/${room}/signal`],
+    ["POST", `/v1/meet/${room}/transcript/turn`], ["POST", `/v1/meet/${room}/voice`],
+    ["GET", "/v1/sessions/root/meeting"], ["POST", "/v1/sessions/root/meeting/browser"],
+    ["GET", "/v1/meet/external/transcript"], ["POST", `/v1/meet/external/${room}/stop`],
+  ]) expect(release.accepts(method!, path!)).toBe(true);
+  for (const [method, path] of [["POST", "/v1/meet"], ["POST", "/v1/meet/external"], ["POST", "/v1/threads"], ["POST", "/v1/sessions/root/prompt"]]) {
+    expect(release.accepts(method!, path!)).toBe(false);
+  }
+  finish(ok);
+  expect(await pending).toEqual(ok);
+});
+
 test.each(["detach", "images"])("failed %s keeps ingestion alive and permits an explicit handoff retry", async failure => {
   let failed = true;
   const events: string[] = [];

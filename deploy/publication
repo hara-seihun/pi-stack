@@ -1049,11 +1049,21 @@ export function requeueBusyHost(request, target, logPath, waitKind = "host-lock"
 }
 
 /** Live meetings on a target, as census words; empty when none. Throws when the census cannot answer. */
-export function censusTarget(target) {
+export function censusTarget(target, protocol = null) {
   const script = readFileSync(join(dirname(self), "meeting-census"), "utf8");
+  const mode = protocol === "meet-runtime-v1" ? "--restart-blockers" : "--all";
   return target.sshHost
-    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s"], { input: script, timeoutSeconds: 45 })
-    : runCapture("bash", ["-s"], { input: script, timeoutSeconds: 45 });
+    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s", "--", mode], { input: script, timeoutSeconds: 45 })
+    : runCapture("bash", ["-s", "--", mode], { input: script, timeoutSeconds: 45 });
+}
+
+function meetingRuntimeProtocol(sha) {
+  const path = "apps/remote/meeting-runtime.json";
+  const present = runCapture("git", ["-C", checkout, "ls-tree", "--name-only", sha, "--", path]);
+  if (!present) return null;
+  const manifest = JSON.parse(runCapture("git", ["-C", checkout, "show", `${sha}:${path}`]));
+  if (manifest.protocol !== "meet-runtime-v1" || manifest.lifetime !== "person-service") throw new Error("Unsupported meeting runtime lifetime contract");
+  return manifest.protocol;
 }
 
 /** Before the first host deploys, a live meeting on any target holds the whole release. */
@@ -1062,7 +1072,7 @@ export function liveMeetingTarget(request) {
   if (targets.some(target => request.hosts?.[target.id]?.status === "passed")) return null;
   for (const target of targets) {
     let rooms;
-    try { rooms = censusTarget(target); } catch (error) { rooms = `census unavailable: ${error.message}`; }
+    try { rooms = censusTarget(target, request.meetingRuntimeProtocol); } catch (error) { rooms = `census unavailable: ${error.message}`; }
     if (rooms) return { target, rooms };
   }
   return null;
@@ -1072,7 +1082,7 @@ export function refreshMeetingWait(request) {
   const target = targets.find(target => target.id === request.waiting.host);
   if (!target) throw new Error(`Unknown meeting-wait host: ${request.waiting.host}`);
   if (meetingOverride(request.requestId)) return true;
-  const rooms = censusTarget(target);
+  const rooms = censusTarget(target, request.meetingRuntimeProtocol);
   request.waiting.probe = { at: new Date().toISOString(), rooms };
   delete request.waiting.probeFailingSince;
   if (rooms) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
@@ -1740,6 +1750,8 @@ export function processRequest(request) {
     }
 
     checkOwnerSource(checkout, request.integrationSha);
+    request.meetingRuntimeProtocol = meetingRuntimeProtocol(request.integrationSha);
+    writeRequest(request);
     prepareAndroidArtifact(request, logPath);
     request.step = "inspect-thread-execution-contract";
     writeRequest(request);
@@ -1819,8 +1831,8 @@ export function processRequest(request) {
       }
       if (!result.ok) throw new Error(result.stderr.trim() || `main integration exited ${result.status}`);
 
-      // Any live Kenan meeting on either host holds the release before anything restarts;
-      // each host's deploy/host still checks its own rooms right before activation.
+      // Only rooms without an independent meeting owner hold the release.
+      // Each host repeats admission before activation, including the initial upgrade.
       const busy = liveMeetingTarget(request);
       if (busy) {
         appendLog(logPath, `[${new Date().toISOString()}] live meetings on ${busy.target.id}: ${busy.rooms}\n`);

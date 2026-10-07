@@ -20,7 +20,12 @@ export class SupervisorRelease {
 
   accepts(method: string, pathname: string): boolean {
     return !this.releasing || API.patchSessionContext.match(method, pathname) !== null
-      || API.replaceSessionContext.match(method, pathname) !== null;
+      || API.replaceSessionContext.match(method, pathname) !== null
+      || /^\/v1\/meet\/[0-9a-f-]{36}(?:\/|$)/i.test(pathname)
+      || (method === "GET" && pathname === "/v1/meet/external/transcript")
+      || (method === "POST" && /^\/v1\/meet\/external\/[0-9a-f-]{36}\/stop$/i.test(pathname))
+      || [API.sessionMeeting, API.sessionMeetingVoice, API.sessionMeetingShare, API.sessionMeetingStop, API.sessionMeetingFrame]
+        .some(route => route.match(method, pathname) !== null);
   }
 
   release(code: number): Promise<Result<void>> {

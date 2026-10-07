@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Read-only restart admission, shared by deployment and its durable wait owner.
+# Read-only meeting census and restart admission.
 set -euo pipefail
+mode=${1:---all}
+case "$mode" in --all|--restart-blockers) ;; *) echo 'usage: meeting-census [--all|--restart-blockers]' >&2; exit 64 ;; esac
 become=()
 [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]] || become=(sudo -n)
 dir=${PI_REMOTE_PERSONS_DIR:-/var/lib/pi-remote/persons}
 [[ -d $dir ]] || exit 0
 live=()
+all_preserved=1
+preserved_count=0
 for file in "$dir"/*.json; do
   [[ -f $file ]] || continue
   user=$("${become[@]}" jq -er '.user | select(type == "string")' "$file")
@@ -26,14 +30,28 @@ for file in "$dir"/*.json; do
     done
     continue
   fi
-  (( count == 0 )) || live+=("$user:$count")
+  preserved=0
+  if [[ $mode == --restart-blockers ]]; then
+    health=$("${become[@]}" curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/health") || {
+      echo "cannot inspect meeting runtime for $user" >&2; exit 1;
+    }
+    jq -e 'type == "object" and .ok == true' <<< "$health" >/dev/null || {
+      echo "invalid supervisor health for $user" >&2; exit 1;
+    }
+    if jq -e '.meetingRuntime.protocol == "meet-runtime-v1" and .meetingRuntime.lifetime == "person-service"' <<< "$health" >/dev/null; then
+      preserved=1
+      preserved_count=$((preserved_count + 1))
+    fi
+    (( preserved )) || all_preserved=0
+  fi
+  if (( count > 0 && !preserved )); then live+=("$user:$count"); fi
 done
 # Meetings a host service owns outside Pi Remote (a Recall bot waiting in a lobby, a
 # scheduler about to join) have no room here yet, but a restart still cuts them. The
 # host file's optional meetingCensus command prints one live meeting per line; a
 # failing census is unknown state, never an empty host.
 host_file=${PI_STACK_HOST_FILE:-/etc/pi-stack/host.json}
-if [[ -f $host_file ]]; then
+if [[ -f $host_file && ( $mode == --all || $all_preserved == 0 || $preserved_count == 0 ) ]]; then
   commands=$(jq -r '.meetingCensus // [] | if type == "array" and all(type == "string") then .[] else error("meetingCensus must be a list of strings") end' "$host_file")
   census=()
   [[ -z $commands ]] || mapfile -t census <<< "$commands"
