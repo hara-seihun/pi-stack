@@ -29,7 +29,7 @@ requests cannot promote it. Opening from a notification or launched-agent link
 selects the same identity, not a copied conversation.
 
 `lastUserMessageAt` records accepted explicit input without an agent sender.
-Automatic notices, agent messages, tool activity, naming and settlements do not
+Automatic notices, agent messages, tool activity, titles and settlements do not
 change it. Imports retain original timestamps. Creation time orders threads with
 no person input.
 
@@ -138,8 +138,16 @@ promoting the recipient. Merely inspecting an agent is not a human view.
 - `cancel`: end the selected agent's current work without archiving it or leaving
   a persistent stopped state.
 - `placement`: explicit human-controlled foreground/background change.
-- `rename`: pin a nonblank conversation title against automatic naming. This does
-  not rename the agent's Nebulani identity.
+- `rename`: a person's nonblank conversation title, recorded with
+  `metadata.titleSource: "manual"`. It pins the title: the thread's agent cannot
+  retitle it until a person renames it again. Agents cannot call `rename`. This
+  does not rename the agent's Nebulani identity.
+- `title`: the thread's own agent titles its conversation through the
+  `thread_title` tool, self only, recorded with `metadata.titleSource: "agent"`.
+  The agent names its thread when it starts and again whenever it judges the topic
+  has changed enough. Nothing else titles a thread automatically. While a person's
+  rename pins the title, `title` returns a conflict and changes nothing. Older
+  `titleSource: "auto"` titles count as agent titles and are not pinned.
 - `settings`: future model/thinking/speed preferences; `effectiveSettings` names
   already accepted current/queued work.
 - `retryWaiting`: apply selected settings to dormant provider/admission waiting

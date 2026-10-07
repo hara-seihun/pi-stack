@@ -8,11 +8,6 @@ export function ensureSupervisorSchema(db: Database): void {
 CREATE TABLE IF NOT EXISTS thread_views (
   id TEXT PRIMARY KEY,
   idle_unread INTEGER NOT NULL DEFAULT 0,
-  message_count INTEGER NOT NULL DEFAULT 0,
-  named_at_message_count INTEGER NOT NULL DEFAULT 0,
-  naming_request TEXT,
-  naming_attempted_count INTEGER NOT NULL DEFAULT 0,
-  naming_error TEXT,
   color TEXT CHECK(color IN ('red','orange','yellow','green','blue','purple') OR color IS NULL)
 );
 CREATE TABLE IF NOT EXISTS error_feedback (
@@ -104,9 +99,8 @@ CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   const viewColumns = new Set((db.query("PRAGMA table_info(thread_views)").all() as Array<{ name: string }>).map(column => column.name));
   if (viewColumns.has("display_order")) db.exec("ALTER TABLE thread_views DROP COLUMN display_order");
   db.query("DELETE FROM metadata WHERE key='current_chat_order'").run();
-  for (const [name, type] of [["naming_request", "TEXT"], ["naming_attempted_count", "INTEGER NOT NULL DEFAULT 0"], ["naming_error", "TEXT"], ["message_count", "INTEGER NOT NULL DEFAULT 0"], ["color", "TEXT CHECK(color IN ('red','orange','yellow','green','blue','purple') OR color IS NULL)"]]) {
-    if (!viewColumns.has(name)) db.exec(`ALTER TABLE thread_views ADD COLUMN ${name} ${type}`);
-  }
+  if (!viewColumns.has("color")) db.exec("ALTER TABLE thread_views ADD COLUMN color TEXT CHECK(color IN ('red','orange','yellow','green','blue','purple') OR color IS NULL)");
+  retireThreadNaming(db, viewColumns);
   const annotationColumns = new Set((db.query("PRAGMA table_info(message_annotations)").all() as Array<{ name: string }>).map(column => column.name));
   for (const [name, type] of [["session_id", "TEXT"], ["created_at", "TEXT"]]) {
     if (!annotationColumns.has(name)) db.exec(`ALTER TABLE message_annotations ADD COLUMN ${name} ${type}`);
@@ -120,9 +114,22 @@ CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   retireEventJournal(db);
 }
 
+/** Remote used to title threads itself with a background model. A thread's own agent now titles it
+ * with `thread_title` and a person's rename pins it, so the naming counters, receipts, recovery
+ * budget and their owner-error rows go. Each step checks what exists, so any older database
+ * converges and a migrated one is untouched. */
+const RETIRED_NAMING_COLUMNS = ["message_count", "named_at_message_count", "naming_request", "naming_attempted_count", "naming_error"] as const;
+function retireThreadNaming(db: Database, viewColumns: ReadonlySet<string>): void {
+  db.transaction(() => {
+    for (const column of RETIRED_NAMING_COLUMNS) if (viewColumns.has(column)) db.exec(`ALTER TABLE thread_views DROP COLUMN ${column}`);
+    db.exec("DROP TABLE IF EXISTS thread_naming_recovery");
+    for (const table of ["error_feedback", "error_diagnostics"]) db.exec(`DELETE FROM ${table} WHERE source='naming' OR source LIKE 'naming:%'`);
+  })();
+}
+
 /** The `events` table was a general journal: presentation, voice projection and
  * two durable joins in one place, growing without bound. Its durable facts move
- * to `message_facts`, `thread_views.message_count` and `message_annotations`;
+ * to `message_facts` and `message_annotations`;
  * the live projection owns what is left.
  *
  * A supervisor has to answer its health check within seconds of starting, so
@@ -145,12 +152,6 @@ function retireEventJournal(db: Database): void {
       WHERE type IN ('thinking','metrics') AND json_extract(payload,'$.finalizesMessage') IS NOT NULL
       GROUP BY session_id, finalized`);
     db.exec("DELETE FROM message_facts WHERE thinking IS NULL AND metrics IS NULL");
-    db.exec(`CREATE TEMP TABLE counted AS
-      SELECT session_id, COUNT(*) AS total FROM events WHERE type IN ('user','assistant') GROUP BY session_id`);
-    db.exec("CREATE INDEX temp.counted_session ON counted(session_id)");
-    db.exec(`UPDATE thread_views SET message_count=MAX(message_count,
-      (SELECT total FROM counted WHERE counted.session_id=thread_views.id))
-      WHERE id IN (SELECT session_id FROM counted)`);
     db.exec(`CREATE TEMP TABLE work_origin AS
       SELECT json_extract(payload,'$.workId') AS work_id, session_id, MIN(time) AS time FROM events
       WHERE type='user' AND json_extract(payload,'$.workId') IS NOT NULL GROUP BY work_id`);
@@ -159,7 +160,6 @@ function retireEventJournal(db: Database): void {
       session_id=(SELECT session_id FROM work_origin WHERE work_origin.work_id=message_annotations.work_id),
       created_at=(SELECT time FROM work_origin WHERE work_origin.work_id=message_annotations.work_id)
       WHERE session_id IS NULL AND work_id IN (SELECT work_id FROM work_origin)`);
-    db.exec("DROP TABLE temp.counted");
     db.exec("DROP TABLE temp.work_origin");
     db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('events_retired',?)").run(new Date().toISOString());
   })();

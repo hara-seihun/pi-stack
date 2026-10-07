@@ -79,8 +79,8 @@ test("catalog merge replaces engine providers and keeps the rest", () => {
   assert.equal(merged.providers.halo.name, "Halo");
 });
 
-test("a naming-only engine is not started, registered or retained in the catalog", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "local-models-naming-"));
+test("an unpublished engine is not started, registered or retained in the catalog", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "local-models-unpublished-"));
   try {
     const port = await freePort();
     await writeFile(join(dir, "models.json"), JSON.stringify({ providers: { halo: { baseUrl: "http://stale" }, keep: { models: [] } } }));

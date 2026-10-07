@@ -81,7 +81,7 @@ esac
         PI_AGENT_DIR: join(home, ".pi", "agent"), PI_REMOTE_PRIVATE_DIR: join(home, "private"),
         PI_REMOTE_ORCHESTRATOR_DB: join(home, "ledger.sqlite3"), PI_REMOTE_WATCH_ENABLED: "0",
         PI_REMOTE_WORKSPACES: JSON.stringify([{ id: "home", name: "Fixture home", path: home }]),
-        PI_REMOTE_DESTINATIONS: "home", PI_REMOTE_THREAD_NAMING_MODEL: "luna",
+        PI_REMOTE_DESTINATIONS: "home",
       } : {}),
     };
   }

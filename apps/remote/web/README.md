@@ -58,7 +58,7 @@ API fetches reject redirects so custom session headers cannot follow a router re
 
 Server-owned errors carry an occurrence ID. The client posts it to `POST /v1/errors/:errorId/dismiss` and hides the message after the server acknowledges it. While saving, the button is disabled. A failed save keeps the original error visible with a retryable dismissal error. Server synchronization removes dismissed errors from every client, including inbox and thread summaries. Browser reloads and supervisor restarts retain dismissal.
 
-The supervisor's `error_feedback` table owns acknowledgements. Repeated reports of the same unresolved error keep their ID; recovery, changed messages and new naming attempts create a new occurrence. A stale dismissal cannot acknowledge a newer occurrence or an error from another thread. Dismissal does not change execution state, retry policy, native history or work outcomes.
+The supervisor's `error_feedback` table owns acknowledgements. Repeated reports of the same unresolved error keep their ID; recovery and changed messages create a new occurrence. A stale dismissal cannot acknowledge a newer occurrence or an error from another thread. Dismissal does not change execution state, retry policy, native history or work outcomes.
 
 Client-only errors, such as upload and connection failures, still dismiss locally. Keep failure state and retry actions in the caller. Changed messages, changed reset keys, or clearing the message reset local dismissal. The dismiss button has a 44px touch target and a visible keyboard focus outline.
 
