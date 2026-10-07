@@ -68,6 +68,21 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { "content-type": "text/html" });
+  if (req.url === "/sensitive") {
+    res.end(`<title>Sensitive input probe</title><iframe title="Sensitive input frame" src="http://localhost:${server.address().port}/sensitive-frame"></iframe>`);
+    return;
+  }
+  if (req.url === "/sensitive-frame") {
+    res.end(`<title>Sensitive frame</title>
+      <label>Card number<input id="cardnumber" autocomplete="cc-number" value="4242 4242 4242 4242"></label>
+      <label>Expiration<input id="exp-date" autocomplete="cc-exp" value="12/39"></label>
+      <label>Security code<input id="cvc" autocomplete="cc-csc" value="937"></label>
+      <label>Password<input id="secret-password" type="password" value="fixture-password-82"></label>
+      <label>One-time code<input id="otp" autocomplete="one-time-code" value="681295"></label>
+      <label>Cardholder<input id="cardholder" autocomplete="cc-name" value="Public Test Name"></label>
+      <div id="shadow"></div><script>document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML = '<label>Shadow card<input autocomplete="cc-number" value="4000 0000 0000 0077"></label>';</script>`);
+    return;
+  }
   if (req.url === "/frame") {
     res.end('<title>Frame probe</title><label>Frame input<input id="frame-input"></label>');
     return;
@@ -113,7 +128,7 @@ try {
     },
   });
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, frameEval: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

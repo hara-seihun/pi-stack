@@ -6,7 +6,15 @@ It resolves physical paths before registering the tool. Changing `/srv/pi/runtim
 
 The supported hosts run one Pi session per process. An SDK application needing simultaneous sessions on different dependency generations must give them separate processes because executable resolution uses the process environment.
 
-The native tool, commands, session state, cleanup and browser configuration remain upstream-owned. This entrypoint does not wrap tool calls or alter their schemas. Browser profiles and credentials stay in their existing locations outside the release.
+The native tool, commands, session state, cleanup and browser configuration remain upstream-owned. This entrypoint does not wrap tool calls or alter their schemas. The matched executable owns sensitive-form output protection; the release installer adds its policy to the native tool description and installed README/command/contract docs. Browser profiles and credentials stay in their existing locations outside the release.
+
+## Sensitive form outputs
+
+Native snapshot/value/text/HTML observations redact card numbers, expiry/month/year, CVC/CVV/security code, passwords and one-time codes, including cross-origin iframes and shadow roots. Markers carry their classification (`[redacted: cc-number]`, `[redacted: password]`, etc.). Cardholder names (`cc-name`) stay readable. Observation does not clear or change live form values.
+
+Evaluation and screenshot/PDF on tabs with detected sensitive controls or known sensitive state return `SENSITIVE_OUTPUT_UNSUPPORTED` before execution or artifact creation. Ordinary evaluation and captures on non-sensitive tabs remain supported. Continuous recording/tracing/profiling/HAR/streaming are refused because a one-time inspection cannot protect future fills. Saved native-wrapper `outputPath` results inherit the protected response. This is a DOM form-output boundary, not a general scanner for caller arguments, arbitrary page-owned data or downloads. Secret entry belongs to the private credential-fill transport, not plaintext tool arguments.
+
+The doctor additionally gates release on a populated disposable cross-origin sensitive fixture: snapshot and getters, cardholder-name preservation, saved wrapper output, encoded-value eval refusal, and screenshot/PDF refusal without residual files. Its synthetic card values are test numbers, never live credentials.
 
 The native tool documentation lives under `/srv/pi/runtime/node_modules/pi-agent-browser-native`. The stack owns the normal `pi-agent-browser-doctor` command. Upstream's doctor only recognizes its own package paths and recommends an npm installation when it sees this entrypoint. That advice would recreate mutable package state, so the stack's doctor checks actual Pi registration and the native tool instead.
 

@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 // Keep the isolated-script contract, but batch the recurring linear checks. Each
 // wrapper call otherwise repeats session-policy and page probes before its CLI.
 export async function probeBrowser(tool, { url, title, visibleTextCheck, frameValue, screenshotPath, downloadPath, downloadContent, record = () => {} }) {
-  const execute = async (phase, input) => {
+  const sensitiveValues = ["4242 4242 4242 4242", "4242424242424242", "4000 0000 0000 0077", "4000000000000077", "12/39", "937", "fixture-password-82", "681295"];
+  const assertRedacted = (answer) => {
+    const serialized = JSON.stringify(answer);
+    for (const value of sensitiveValues) assert.ok(!serialized.includes(value), "sensitive fixture value escaped the native boundary");
+  };
+  const execute = async (phase, input, expectedCategory = "success") => {
     const started = performance.now();
     const answer = await tool.execute(randomUUID(), { timeoutMs: 20000, ...input }, AbortSignal.timeout(25000));
+    if (phase.startsWith("sensitive-")) assertRedacted(answer);
     record({ phase, elapsedMs: Math.round(performance.now() - started), result: answer });
-    assert.equal(answer.details.resultCategory, "success", JSON.stringify(answer));
+    assert.equal(answer.details.resultCategory, expectedCategory, JSON.stringify(answer));
     return answer.details;
   };
   const script = await execute("isolated-script", { script: `
@@ -86,6 +92,41 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
       ["get", "url"], ...frameSteps("iframe[title='Secure payment input frame']"),
     ]);
     checkFrame(attached.data.slice(1), "remote existing frame");
+
+    const sensitiveResultPath = `${screenshotPath}.sensitive.json`;
+    const sensitive = await batch("sensitive-inputs", ownerArgs, [
+      ["frame", "main"], ["open", new URL("/sensitive", url).href],
+      ["frame", "iframe[title='Sensitive input frame']"], ["snapshot", "-i"],
+      ["get", "value", "#cardnumber"], ["get", "value", "#exp-date"],
+      ["get", "value", "#cvc"], ["get", "value", "#secret-password"],
+      ["get", "value", "#otp"], ["get", "value", "#cardholder"],
+      ["get", "text", "body"], ["get", "html", "body"],
+    ]);
+    assertRedacted(sensitive);
+    for (const [index, kind] of [[4, "cc-number"], [5, "cc-exp"], [6, "cc-csc"], [7, "password"], [8, "one-time-code"]]) {
+      assert.equal(sensitive.data[index].result.value, `[redacted: ${kind}]`, `sensitive ${kind} getter must return its classification`);
+    }
+    assert.equal(sensitive.data[9].result.value, "Public Test Name", "cc-name must stay readable");
+    const saved = await execute("sensitive-saved-result", {
+      args: [...ownerArgs, "snapshot", "-i"], outputPath: sensitiveResultPath,
+    });
+    assertRedacted(saved);
+    assertRedacted(readFileSync(sensitiveResultPath, "utf8"));
+    const unsafeImage = `${screenshotPath}.sensitive.png`;
+    const unsafePdf = `${screenshotPath}.sensitive.pdf`;
+    const guarded = await execute("sensitive-unsafe-operations", {
+      args: [...ownerArgs, "batch"], stdin: JSON.stringify([
+        ["eval", "btoa(document.querySelector('#cardnumber').value)"],
+        ["screenshot", unsafeImage], ["pdf", unsafePdf],
+      ]),
+    }, "failure");
+    assert.equal(guarded.data.length, 3, "each sensitive unsafe operation must have a typed refusal");
+    for (const row of guarded.data) {
+      assert.equal(row.success, false, "unsafe operations must be refused before execution");
+      assert.match(row.error, /^SENSITIVE_OUTPUT_UNSUPPORTED/);
+    }
+    assert.equal(existsSync(unsafeImage), false, "refused screenshots must not leave unprotected artifacts");
+    assert.equal(existsSync(unsafePdf), false, "refused PDFs must not leave unprotected artifacts");
   } finally {
     try {
       if (attachAttempted) await execute("attached-cleanup", { args: [...attachedArgs(), "close"] });
