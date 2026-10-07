@@ -5,6 +5,7 @@ import { createStreamClient } from "./stream";
 import type { StreamEvent } from "../../server/protocol";
 import { assertNever, requireState } from "../../shared/explicit-state";
 import { VOICE_STATES, type VoiceState } from "./voice-state";
+import { holdLiveMedia } from "./live-media";
 
   const MAX_CONTEXT_BYTES = 500;
 
@@ -145,6 +146,7 @@ import { VOICE_STATES, type VoiceState } from "./voice-state";
       const generation = ++this.generation;
       this.setState("connecting", "Connecting…");
       try {
+        this.releaseMedia = holdLiveMedia();
         if (!this.input && !navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable");
         const configResponse = await this.request(API.voice.path(), { cache: "no-store" });
         const config = await configResponse.json();
@@ -267,6 +269,7 @@ import { VOICE_STATES, type VoiceState } from "./voice-state";
       this.stopStream(this.microphone); this.microphone = null;
       if (this.speaker) { this.speaker.muted = true; this.speaker.pause(); this.speaker.srcObject = null; }
       this.onPlayback("stopped");
+      this.releaseMedia?.(); this.releaseMedia = null;
     }
 
     stop(clearState = true) {

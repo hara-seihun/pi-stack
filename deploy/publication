@@ -1057,11 +1057,21 @@ export function requeueBusyHost(request, target, logPath, waitKind = "host-lock"
 }
 
 /** Live meetings on a target, as census words; empty when none. Throws when the census cannot answer. */
-export function censusTarget(target) {
+export function censusTarget(target, protocol = null) {
   const script = readFileSync(join(dirname(self), "meeting-census"), "utf8");
+  const mode = protocol === "meet-runtime-v1" ? "--restart-blockers" : "--all";
   return target.sshHost
-    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s"], { input: script, timeoutSeconds: 45 })
-    : runCapture("bash", ["-s"], { input: script, timeoutSeconds: 45 });
+    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s", "--", mode], { input: script, timeoutSeconds: 45 })
+    : runCapture("bash", ["-s", "--", mode], { input: script, timeoutSeconds: 45 });
+}
+
+function meetingRuntimeProtocol(sha) {
+  const path = "apps/remote/meeting-runtime.json";
+  const present = runCapture("git", ["-C", checkout, "ls-tree", "--name-only", sha, "--", path]);
+  if (!present) return null;
+  const manifest = JSON.parse(runCapture("git", ["-C", checkout, "show", `${sha}:${path}`]));
+  if (manifest.protocol !== "meet-runtime-v1" || manifest.lifetime !== "person-service") throw new Error("Unsupported meeting runtime lifetime contract");
+  return manifest.protocol;
 }
 
 /** Before the first host deploys, a live meeting on any target holds the whole release. */
@@ -1070,7 +1080,7 @@ export function liveMeetingTarget(request) {
   if (targets.some(target => request.hosts?.[target.id]?.status === "passed")) return null;
   for (const target of targets) {
     let rooms;
-    try { rooms = censusTarget(target); } catch (error) { rooms = `census unavailable: ${error.message}`; }
+    try { rooms = censusTarget(target, request.meetingRuntimeProtocol); } catch (error) { rooms = `census unavailable: ${error.message}`; }
     if (rooms) return { target, rooms };
   }
   return null;
@@ -1080,7 +1090,7 @@ export function refreshMeetingWait(request) {
   const target = targets.find(target => target.id === request.waiting.host);
   if (!target) throw new Error(`Unknown meeting-wait host: ${request.waiting.host}`);
   if (meetingOverride(request.requestId)) return true;
-  const rooms = censusTarget(target);
+  const rooms = censusTarget(target, request.meetingRuntimeProtocol);
   request.waiting.probe = { at: new Date().toISOString(), rooms };
   delete request.waiting.probeFailingSince;
   if (rooms) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
@@ -1773,7 +1783,7 @@ function deliverHost(request, target, logPath, previous) {
     atomicWrite(ancestryPath, `${JSON.stringify(ancestry, null, 2)}\n`);
     if (!ancestry.ok) throw new Error(`${target.id} integration omits selected or checkout source; repair the source ancestry`);
     if (!meetingOverride(request.requestId)) {
-      const rooms = censusTarget(target);
+      const rooms = censusTarget(target, request.meetingRuntimeProtocol);
       if (rooms) return hostWait(request, target, "live-meeting", logPath, `${target.id} has live meetings; other hosts roll forward while this host waits.`, previous);
     }
     const native = nativeSourceProbe(request, target, true);
@@ -1849,6 +1859,8 @@ export function processRequest(request) {
     }
 
     if (!request.integratedAt) checkOwnerSource(checkout, request.integrationSha);
+    request.meetingRuntimeProtocol = meetingRuntimeProtocol(request.integrationSha);
+    writeRequest(request);
     prepareAndroidArtifact(request, logPath);
     request.step = "inspect-thread-execution-contract";
     writeRequest(request);
@@ -2267,7 +2279,7 @@ export function refreshHostWaits(request) {
       let available;
       switch (host.waiting.kind) {
         case "live-meeting": {
-          const rooms = meetingOverride(request.requestId) ? "" : censusTarget(target);
+          const rooms = meetingOverride(request.requestId) ? "" : censusTarget(target, request.meetingRuntimeProtocol);
           host.waiting.probe = { at: new Date().toISOString(), rooms };
           available = !rooms;
           break;
