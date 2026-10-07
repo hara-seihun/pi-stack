@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -33,7 +33,7 @@ export function directAgentProcessProof(procRoot, retained, gatedRootPid) {
   return { oldProcesses, retainedProcesses, scannedProcesses: processes.size };
 }
 
-if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {
+if (process.argv[1] && existsSync(process.argv[1]) && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {
   try {
     const [receipt, rootPid] = process.argv.slice(2);
     if (!receipt || !receipt.startsWith("/") || !/^\d+$/.test(rootPid ?? "")) throw new Error("usage: direct-agent-processes.mjs RETAINED_CUSTODY_RECEIPT GATED_ROOT_PID_OR_ZERO");
