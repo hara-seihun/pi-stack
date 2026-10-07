@@ -37,15 +37,14 @@ function delivery(entry: ContextEntry): OutgoingDelivery {
 export function outgoingAgentMessage(entry: ContextEntry): OutgoingAgentMessage | null {
   if (entry.kind !== "toolCall") return null;
   const args = entry.toolCall?.arguments ?? {};
-  switch (toolName(entry.toolCall?.name)) {
-    case "thread_send":
-      return typeof args.threadId === "string" && args.threadId && typeof args.text === "string"
-        ? { tool: "send", recipientId: args.threadId, text: args.text, delivery: delivery(entry) } : null;
-    case "thread_spawn":
-      return typeof args.message === "string"
-        ? { tool: "spawn", title: typeof args.title === "string" && args.title ? args.title : null, text: args.message, delivery: delivery(entry) } : null;
-    default: return null;
-  }
+  const tool = toolName(entry.toolCall?.name);
+  if (tool === "thread_send")
+    return typeof args.threadId === "string" && args.threadId && typeof args.text === "string"
+      ? { tool: "send", recipientId: args.threadId, text: args.text, delivery: delivery(entry) } : null;
+  if (tool === "thread_spawn")
+    return typeof args.message === "string"
+      ? { tool: "spawn", title: typeof args.title === "string" && args.title ? args.title : null, text: args.message, delivery: delivery(entry) } : null;
+  return null;
 }
 
 /** The thread a successful spawn created, read from its complete result. */
