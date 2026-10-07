@@ -202,6 +202,8 @@ it("a later final turn discharges the original assignment reply exactly once wit
   const replies = f.service.pending("requester").filter(message => message.senderId === "assigned");
   expect(replies).toHaveLength(1); expect(replies[0]?.senderName).toBe(assigned.agentName);
   expect(f.service.latestSettlement("assigned")?.assignmentPending).toBeUndefined();
+  expect(f.service.get("assigned")?.metadata?.archived).toBe(true);
+  value(await f.service.control({ threadId: "assigned", action: "open" }));
   value(await f.service.send({ requestId: "unrelated", threadId: "assigned", text: "Independent task" }));
   await until(() => !!f.sessions.get("assigned")?.active);
   f.sessions.get("assigned")!.settle("independent result");

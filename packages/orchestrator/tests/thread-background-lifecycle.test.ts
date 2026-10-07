@@ -56,8 +56,8 @@ afterEach(async () => {
 it("archives completed background threads without consuming their transcript or unread result", async () => {
   const f = fixture();
   await f.service.start();
-  const parent = (await f.service.spawn({ id: "parent", requestId: "parent", cwd: f.root, metadata: { foreground: true } })).ok;
-  expect(parent).toBe(true);
+  const parent = await f.service.spawn({ id: "parent", requestId: "parent", cwd: f.root });
+  if (!parent.ok) throw new Error(parent.error.message);
   const child = await f.service.spawn({ id: "background", requestId: "background", parentId: "parent", cwd: f.root, message: "finish" });
   if (!child.ok) throw new Error(child.error.message);
   await until(() => !!f.sessions.get("background")?.active);
@@ -72,9 +72,17 @@ it("archives completed background threads without consuming their transcript or 
 
 it("leaves foreground and persistent watch threads in the live directory", async () => {
   const f = fixture(); await f.service.start();
-  for (const [id, metadata] of [["foreground", { foreground: true }], ["watch", { watchList: true }] ] as const) {
-    const result = await f.service.spawn({ id, requestId: id, cwd: f.root, message: "finish", metadata });
+  for (const id of ["foreground", "watch"]) {
+    const result = await f.service.spawn({ id, requestId: id, cwd: f.root, message: "finish" });
     if (!result.ok) throw new Error(result.error.message);
+    if (id === "foreground") {
+      const placed = await f.service.control({ threadId: id, action: "placement", foreground: true });
+      if (!placed.ok) throw new Error(placed.error.message);
+    } else {
+      const db = new DatabaseSync(join(f.root, "threads.sqlite"));
+      db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.watchList',json('true')) WHERE id=?").run(id);
+      db.close();
+    }
     await until(() => !!f.sessions.get(id)?.active);
     f.sessions.get(id)!.settle(id);
     await until(() => f.service.get(id)?.state === "idle");
@@ -84,14 +92,16 @@ it("leaves foreground and persistent watch threads in the live directory", async
 
 it("backfills previously completed background work on restart", async () => {
   const first = fixture(); await first.service.start();
-  const thread = await first.service.spawn({ id: "old-background", requestId: "old", cwd: first.root, message: "finish", metadata: { foreground: true } });
+  const parent = await first.service.spawn({ id: "parent", requestId: "parent", cwd: first.root });
+  if (!parent.ok) throw new Error(parent.error.message);
+  const thread = await first.service.spawn({ id: "old-background", requestId: "old", parentId: "parent", cwd: first.root, message: "finish" });
   if (!thread.ok) throw new Error(thread.error.message);
   await until(() => !!first.sessions.get("old-background")?.active);
   first.sessions.get("old-background")!.settle("Persisted result");
   await until(() => first.service.get("old-background")?.state === "idle");
 
   const db = new DatabaseSync(join(first.root, "threads.sqlite"));
-  db.prepare("UPDATE thread SET metadata=json_remove(metadata,'$.foreground','$.archived','$.archivedAt') WHERE id=?").run("old-background");
+  db.prepare("UPDATE thread SET metadata=json_remove(metadata,'$.archived','$.archivedAt','$.runnerReference') WHERE id=?").run("old-background");
   db.close();
   await first.service.close();
   const next = fixture(first.root); await next.service.start();

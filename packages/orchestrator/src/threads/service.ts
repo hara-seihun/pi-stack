@@ -661,6 +661,11 @@ export class ThreadService implements ThreadApi {
       .all() as Array<{ id: string }>;
     for (const row of rows) void this.archiveSettledBackground(row.id);
   }
+  private archiveBackgroundAfterCurrentOperation(id: string): void {
+    const current = this.operations.get(id);
+    if (!current) { void this.archiveSettledBackground(id); return; }
+    void current.finally(() => this.archiveBackgroundAfterCurrentOperation(id)).catch(() => {});
+  }
   /** At the end of a turn, dependencies whose result has been delivered and is no longer awaited are released. */
   private async pruneSettledDependencies(id: string): Promise<void> {
     const thread = this.get(id);
@@ -2013,7 +2018,7 @@ export class ThreadService implements ThreadApi {
     const settled = this.sql("SELECT settlement_seq,ended_at FROM thread_execution WHERE id=?").get(execution.id) as Json;
     for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, ...(assignmentPending ? { assignmentPending: true } : {}), time: settled.ended_at, finalMessage, ...(error ? { error } : {}) } });
     if (runtime) await this.park(id, runtime);
-    if (!assignmentPending && !this.localDependencyProtection(id)) await this.archiveSettledBackground(id);
+    if (!assignmentPending && !this.localDependencyProtection(id)) this.archiveBackgroundAfterCurrentOperation(id);
   }
   private async park(id: string, runtime: Runtime): Promise<void> {
     if (this.suspended || this.halts.has(id) || !runtime.session || runtime.busy || runtime.commandRunning || runtime.executionId || this.execution(id) || this.runtimes.get(id) !== runtime) return;
