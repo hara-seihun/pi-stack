@@ -1,28 +1,29 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
-  SignalWireMediaSession, encodeMuLawSample, decodeMuLawSample,
-  MAX_SIGNALWIRE_MESSAGE_BYTES, MAX_MULAW_PACKET_BYTES, MAX_VOICE_PACKET_BYTES,
-  type SignalWireMediaResult, type SignalWireMediaMessage,
-} from "./signalwire-media";
+  CompatibilityMediaSession, encodeMuLawSample, decodeMuLawSample,
+  MAX_COMPATIBILITY_MESSAGE_BYTES, MAX_MULAW_PACKET_BYTES, MAX_VOICE_PACKET_BYTES,
+  type CompatibilityMediaResult, type CompatibilityMediaMessage,
+} from "./compatibility-media";
 
+const accountSid = "b08dacad-2f6c-4de1-93d6-cc732e0c69c5";
 const callSid = "76ac3c36-56da-4a3e-a0d6-b5f8df6da9ad";
 const streamSid = "7d56cc11-536d-4a45-b4fb-ed3d55be843b";
 const connected = { event: "connected", protocol: "Call", version: "0.2.0" };
 const start = {
   event: "start", sequenceNumber: "1",
-  start: { callSid, streamSid, accountSid: "b08dacad-2f6c-4de1-93d6-cc732e0c69c5", tracks: ["inbound"],
+  start: { callSid, streamSid, accountSid, tracks: ["inbound"],
     mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 } },
 };
-function value<T>(result: SignalWireMediaResult<T>): T {
+function value<T>(result: CompatibilityMediaResult<T>): T {
   if (!result.ok) assert.fail(result.error);
   return result.value;
 }
-function error<T>(result: SignalWireMediaResult<T>, expected: string) {
+function error<T>(result: CompatibilityMediaResult<T>, expected: string) {
   assert.deepEqual(result, { ok: false, error: expected });
 }
 function active(expectedCallSid: string | null = callSid) {
-  const session = new SignalWireMediaSession(expectedCallSid);
+  const session = new CompatibilityMediaSession("signalwire", expectedCallSid, accountSid);
   assert.deepEqual(value(session.receive(JSON.stringify(connected))), { event: "connected" });
   assert.deepEqual(value(session.receive(JSON.stringify(start))), { event: "start", callSid, streamSid });
   return session;
@@ -40,7 +41,7 @@ function pcm(samples: number[]) {
 function samples(bytes: Buffer) {
   return Array.from({ length: bytes.length / 2 }, (_, i) => bytes.readInt16LE(i * 2));
 }
-function outputBytes(messages: SignalWireMediaMessage[]) {
+function outputBytes(messages: CompatibilityMediaMessage[]) {
   for (const message of messages) {
     assert.equal(message.event, "media"); assert.equal(message.streamSid, streamSid);
     assert.equal(Buffer.from(message.media.payload, "base64").length, 160);
@@ -86,12 +87,12 @@ test("documented messages bind one stream; identity-less media/stop remain socke
 });
 
 test("ordered handshake is mandatory and invalid or duplicate starts are terminal", () => {
-  error(new SignalWireMediaSession(callSid).receive(JSON.stringify(start)), "invalid-state");
+  error(new CompatibilityMediaSession("signalwire", callSid, accountSid).receive(JSON.stringify(start)), "invalid-state");
   error(active().receive(JSON.stringify(start)), "invalid-state");
-  const session = new SignalWireMediaSession(callSid);
+  const session = new CompatibilityMediaSession("signalwire", callSid, accountSid);
   error(session.receive(JSON.stringify({ ...connected, version: "unknown" })), "unsupported-protocol");
   error(session.receive(JSON.stringify(connected)), "session-closed");
-  const repeated = new SignalWireMediaSession(callSid);
+  const repeated = new CompatibilityMediaSession("signalwire", callSid, accountSid);
   value(repeated.receive(JSON.stringify(connected)));
   error(repeated.receive(JSON.stringify(connected)), "invalid-state");
 });
@@ -99,6 +100,7 @@ test("ordered handshake is mandatory and invalid or duplicate starts are termina
 test("codec, track, identity and initial sequence are validated before audio starts", () => {
   const invalid: readonly (readonly [unknown, string])[] = [
     [{ ...start, start: { ...start.start, callSid: "other-call" } }, "identity-mismatch"],
+    [{ ...start, start: { ...start.start, accountSid: "other-account" } }, "identity-mismatch"],
     [{ ...start, streamSid: "other-stream" }, "identity-mismatch"],
     [{ ...start, start: { ...start.start, streamSid: "" } }, "invalid-message"],
     [{ ...start, start: { ...start.start, tracks: ["inbound", "outbound"] } }, "unsupported-codec"],
@@ -109,7 +111,7 @@ test("codec, track, identity and initial sequence are validated before audio sta
     [{ ...start, sequenceNumber: "2" }, "invalid-sequence"],
   ] as const;
   for (const [message, expected] of invalid) {
-    const session = new SignalWireMediaSession(callSid);
+    const session = new CompatibilityMediaSession("signalwire", callSid, accountSid);
     value(session.receive(JSON.stringify(connected)));
     error(session.receive(JSON.stringify(message)), expected);
     error(session.receive(JSON.stringify(start)), "session-closed");
@@ -118,7 +120,7 @@ test("codec, track, identity and initial sequence are validated before audio sta
 
 test("malformed external JSON, binary, oversized and unknown packets return errors without throws", () => {
   for (const [raw, expected] of [["{", "invalid-json"], ["null", "invalid-message"], ["[]", "invalid-message"],
-    [Buffer.alloc(160), "invalid-message"], [{}, "invalid-message"], ["x".repeat(MAX_SIGNALWIRE_MESSAGE_BYTES + 1), "message-too-large"],
+    [Buffer.alloc(160), "invalid-message"], [{}, "invalid-message"], ["x".repeat(MAX_COMPATIBILITY_MESSAGE_BYTES + 1), "message-too-large"],
     [JSON.stringify({ event: "unknown", sequenceNumber: "2" }), "unsupported-event"]] as const) {
     const session = active();
     error(session.receive(raw), expected);
@@ -142,7 +144,9 @@ test("payload requires nonempty bounded canonical base64, never Node's permissiv
 test("active session rejects other stream/call identities, including nested stop identity", () => {
   const packet = JSON.parse(media(Buffer.alloc(160), 1, 0));
   for (const message of [{ ...packet, streamSid: "other-stream" }, { ...packet, callSid: "other-call" },
-    { event: "stop", sequenceNumber: "2", stop: { callSid: "other-call" } }]) {
+    { event: "stop", sequenceNumber: "2", stop: { callSid: "other-call" } },
+    { event: "stop", sequenceNumber: "2", stop: { accountSid: "other-account" } },
+    { event: "stop", sequenceNumber: "2", stop: { streamSid: "other-stream" } }]) {
     error(active().receive(JSON.stringify(message)), "identity-mismatch");
   }
 });
@@ -167,6 +171,135 @@ test("DTMF and unsequenced mark acknowledgements preserve audio session ordering
   assert.equal(value(session.receive(media(Buffer.alloc(160), 1, 0, 3))).event, "media");
 });
 
+const twilioAccountSid = "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const twilioCallSid = "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const twilioStreamSid = "MZXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const twilioConnected = { event: "connected", protocol: "Call", version: "1.0.0" };
+const twilioStart = {
+  event: "start", sequenceNumber: "1",
+  start: {
+    accountSid: twilioAccountSid, streamSid: twilioStreamSid, callSid: twilioCallSid,
+    tracks: ["inbound"], mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 },
+    customParameters: { FirstName: "Jane", LastName: "Doe", RemoteParty: "Bob" },
+  },
+  streamSid: twilioStreamSid,
+};
+function twilioActive(expectedCallSid: string | null = twilioCallSid) {
+  const session = new CompatibilityMediaSession("twilio", expectedCallSid, twilioAccountSid);
+  assert.deepEqual(value(session.receive(JSON.stringify(twilioConnected))), { event: "connected" });
+  assert.deepEqual(value(session.receive(JSON.stringify(twilioStart))), { event: "start", callSid: twilioCallSid, streamSid: twilioStreamSid });
+  return session;
+}
+function twilioMedia(bytes: Buffer, chunk: number, timestamp: number, sequence = chunk + 1) {
+  return { ...JSON.parse(media(bytes, chunk, timestamp, sequence)), streamSid: twilioStreamSid };
+}
+const twilioStop = {
+  event: "stop", sequenceNumber: "2", streamSid: twilioStreamSid,
+  stop: { accountSid: twilioAccountSid, callSid: twilioCallSid },
+};
+
+// Twilio WebSocket Messages documentation, with complete rather than abbreviated audio payloads.
+test("documented Twilio start/media/DTMF/mark/stop sequence uses the shared duplex codec", () => {
+  const session = twilioActive(null);
+  const wire = Buffer.from(tone(8000, 1000, 0.02).map(encodeMuLawSample));
+  const incoming = value(session.receive(JSON.stringify(twilioMedia(wire, 1, 5))));
+  const reference = active();
+  assert.deepEqual(incoming, value(reference.receive(media(wire, 1, 5))));
+  if (incoming.event !== "media") assert.fail();
+  assert.equal(incoming.pcm.length, 1);
+  assert.equal(incoming.pcm[0].length, 640);
+  const outgoing = value(session.outgoing(incoming.pcm[0]));
+  assert.deepEqual(outgoing, value(reference.outgoing(incoming.pcm[0])).map(packet => ({ ...packet, streamSid: twilioStreamSid })));
+  assert.deepEqual(value(session.clear()), { event: "clear", streamSid: twilioStreamSid });
+  assert.deepEqual(value(session.receive(JSON.stringify({
+    event: "dtmf", streamSid: twilioStreamSid, sequenceNumber: "3", dtmf: { track: "inbound_track", digit: "1" },
+  }))), { event: "dtmf", digit: "1", duration: null });
+  assert.deepEqual(value(session.receive(JSON.stringify({
+    event: "mark", streamSid: twilioStreamSid, sequenceNumber: "4", mark: { name: "my label" },
+  }))), { event: "mark", name: "my label" });
+  assert.deepEqual(value(session.receive(JSON.stringify({ ...twilioStop, sequenceNumber: "5" }))), { event: "stop" });
+  error(session.receive(JSON.stringify(twilioStart)), "session-closed");
+  error(session.outgoing(Buffer.alloc(640)), "session-closed");
+  error(session.clear(), "session-closed");
+});
+
+test("the explicit dialect rejects the other protocol and unsupported Call versions", () => {
+  for (const [kind, wrong] of [["signalwire", twilioConnected], ["twilio", connected]] as const) {
+    const session = new CompatibilityMediaSession(kind, null, accountSid);
+    error(session.receive(JSON.stringify(wrong)), "unsupported-protocol");
+    error(session.receive(JSON.stringify(connected)), "session-closed");
+  }
+  for (const packet of [{ ...twilioConnected, version: "1.0.1" }, { ...twilioConnected, protocol: "Other" }]) {
+    error(new CompatibilityMediaSession("twilio", twilioCallSid, twilioAccountSid).receive(JSON.stringify(packet)), "unsupported-protocol");
+  }
+});
+
+test("Twilio binds account, optional expected call and envelope stream before opening audio", () => {
+  for (const [packet, expected] of [
+    [{ ...twilioStart, start: { ...twilioStart.start, accountSid: "other-account" } }, "identity-mismatch"],
+    [{ ...twilioStart, start: { ...twilioStart.start, accountSid: "" } }, "invalid-message"],
+    [{ ...twilioStart, start: { ...twilioStart.start, callSid: "other-call" } }, "identity-mismatch"],
+    [{ ...twilioStart, streamSid: "other-stream" }, "identity-mismatch"],
+    [{ ...twilioStart, streamSid: undefined }, "invalid-message"],
+    [{ ...twilioStart, sequenceNumber: "2" }, "invalid-sequence"],
+    [{ ...twilioStart, start: { ...twilioStart.start, tracks: ["outbound"] } }, "unsupported-codec"],
+    [{ ...twilioStart, start: { ...twilioStart.start, mediaFormat: { ...twilioStart.start.mediaFormat, sampleRate: 16000 } } }, "unsupported-codec"],
+  ] as const) {
+    const session = new CompatibilityMediaSession("twilio", twilioCallSid, twilioAccountSid);
+    value(session.receive(JSON.stringify(twilioConnected)));
+    error(session.receive(JSON.stringify(packet)), expected);
+    error(session.receive(JSON.stringify(twilioStart)), "session-closed");
+  }
+  const session = new CompatibilityMediaSession("twilio", null, twilioAccountSid);
+  value(session.receive(JSON.stringify(twilioConnected)));
+  error(session.receive(JSON.stringify({ ...twilioStart, start: { ...twilioStart.start, accountSid: "other-account" } })), "identity-mismatch");
+});
+
+test("Twilio requires stream envelopes and complete nested stop identity", () => {
+  const packets = [
+    twilioMedia(Buffer.alloc(160, 255), 1, 0), twilioStop,
+    { event: "dtmf", sequenceNumber: "2", streamSid: twilioStreamSid, dtmf: { track: "inbound_track", digit: "#" } },
+    { event: "mark", sequenceNumber: "2", streamSid: twilioStreamSid, mark: { name: "my label" } },
+  ];
+  for (const packet of packets) {
+    error(twilioActive().receive(JSON.stringify({ ...packet, streamSid: undefined })), "invalid-message");
+    error(twilioActive().receive(JSON.stringify({ ...packet, streamSid: "other-stream" })), "identity-mismatch");
+  }
+  for (const [packet, expected] of [
+    [{ ...twilioStop, stop: undefined }, "invalid-message"],
+    [{ ...twilioStop, stop: {} }, "invalid-message"],
+    [{ ...twilioStop, stop: { accountSid: twilioAccountSid } }, "invalid-message"],
+    [{ ...twilioStop, stop: { callSid: twilioCallSid } }, "invalid-message"],
+    [{ ...twilioStop, stop: { ...twilioStop.stop, accountSid: "other-account" } }, "identity-mismatch"],
+    [{ ...twilioStop, stop: { ...twilioStop.stop, callSid: "other-call" } }, "identity-mismatch"],
+    [{ ...twilioStop, stop: { ...twilioStop.stop, streamSid: "other-stream" } }, "identity-mismatch"],
+  ] as const) error(twilioActive().receive(JSON.stringify(packet)), expected);
+});
+
+test("DTMF shapes cannot cross dialects and invalid digits/tracks/durations close the session", () => {
+  const twilioDtmf = { track: "inbound_track", digit: "1" };
+  const signalwireDtmf = { digit: "#", duration: 200 };
+  for (const dtmf of [signalwireDtmf, { digit: "1" }, { ...twilioDtmf, track: "inbound" },
+    { ...twilioDtmf, duration: 0 }, { ...twilioDtmf, duration: null },
+    { ...twilioDtmf, digit: "" }, { ...twilioDtmf, digit: "12" }, { ...twilioDtmf, digit: 1 }]) {
+    const session = twilioActive();
+    error(session.receive(JSON.stringify({ event: "dtmf", sequenceNumber: "2", streamSid: twilioStreamSid, dtmf })), "invalid-message");
+    error(session.receive(JSON.stringify(twilioStop)), "session-closed");
+  }
+  for (const dtmf of [twilioDtmf, { ...signalwireDtmf, track: "inbound_track" }, { digit: "#" },
+    { ...signalwireDtmf, duration: "200" }, { ...signalwireDtmf, duration: -1 }, { ...signalwireDtmf, duration: 0.5 }]) {
+    error(active().receive(JSON.stringify({ event: "dtmf", sequenceNumber: "2", dtmf })), "invalid-message");
+  }
+});
+
+test("Twilio marks participate in monotonic ordering; SignalWire-only unsequenced marks are rejected", () => {
+  const mark = { event: "mark", streamSid: twilioStreamSid, mark: { name: "my label" } };
+  error(twilioActive().receive(JSON.stringify(mark)), "invalid-sequence");
+  const session = twilioActive();
+  value(session.receive(JSON.stringify({ ...mark, sequenceNumber: "2" })));
+  error(session.receive(JSON.stringify(twilioMedia(Buffer.alloc(160, 255), 1, 0, 2))), "invalid-sequence");
+});
+
 function incomingChunks(bytes: Buffer, lengths: number[]) {
   const session = active(); const frames: Buffer[] = [];
   let offset = 0, chunk = 1;
@@ -179,7 +312,7 @@ function incomingChunks(bytes: Buffer, lengths: number[]) {
   return Buffer.concat(frames);
 }
 function outgoingChunks(bytes: Buffer, lengths: number[]) {
-  const session = active(); const frames: SignalWireMediaMessage[] = [];
+  const session = active(); const frames: CompatibilityMediaMessage[] = [];
   let offset = 0, chunk = 0;
   while (offset < bytes.length) {
     const length = Math.min(lengths[chunk++ % lengths.length], bytes.length - offset);
@@ -235,7 +368,7 @@ test("outgoing packets are bounded and malformed PCM does not consume converter 
   for (const input of [Buffer.alloc(0), Buffer.alloc(3), Buffer.alloc(MAX_VOICE_PACKET_BYTES + 2)]) error(session.outgoing(input), "invalid-pcm");
   assert.equal(value(session.outgoing(Buffer.alloc(MAX_VOICE_PACKET_BYTES))).length, 10);
   assert.ok(outputBytes(value(session.outgoing(Buffer.alloc(640)))).every(x => x === 255));
-  error(new SignalWireMediaSession(callSid).outgoing(Buffer.alloc(640)), "invalid-state");
+  error(new CompatibilityMediaSession("signalwire", callSid, accountSid).outgoing(Buffer.alloc(640)), "invalid-state");
 });
 
 test("clear drops buffered speech and output filter tail without resetting inbound history", () => {

@@ -6,8 +6,9 @@ import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import { callBrief, instructions, type CallBrief } from "./policy";
 import { signedWebhook } from "./vonage";
 import { providerSelection, loadProvider, mediaInstructions, dial, type PhoneProvider, type ProviderKind } from "./provider";
-import { signedSignalWireWebhook, signalWireTerminal, signalWireEnded, signalWireUnavailable } from "./signalwire";
-import { SignalWireMediaSession } from "./signalwire-media";
+import { signedCompatibilityWebhook, signedTwilioUpgrade, compatibilityTerminal, compatibilityEnded, compatibilityUnavailable, type CompatibilityKind } from "./compatibility";
+import { CompatibilityMediaSession } from "./compatibility-media";
+const isCompatibility = (kind: ProviderKind | null): kind is CompatibilityKind => kind === "signalwire" || kind === "twilio";
 import { SimGateways } from "./gateway";
 
 const config = JSON.parse(readFileSync(process.env.PI_STACK_PHONE_CONFIG ?? "/etc/pi-stack/phone.json", "utf8"));
@@ -49,7 +50,7 @@ let launching: Promise<Browser> | undefined;
 let stopping = false;
 type SocketData = { call?: Call; gatewayId?: string; side: "browser" | "provider" | "gateway" };
 type Socket = import("bun").ServerWebSocket<SocketData>;
-type Call = { id: string; providerKind: ProviderKind | null; dialState: "none" | "dispatching" | "accepted" | "uncertain" | "rejected"; stream?: SignalWireMediaSession; streamTimer?: ReturnType<typeof setTimeout>; providerReserved?: boolean; browserReady?: boolean; openingSent?: boolean; gatewayId?: string; telephoneConnected?: boolean; brief: CallBrief; token: string; providerToken: string; page?: Page; media?: Socket; provider?: Socket; voiceId?: string; providerId?: string; offerPending?: boolean; timer: ReturnType<typeof setTimeout>; ready: Promise<void>; resolveReady: () => void; rejectReady: (e: Error) => void; audio: Promise<void>; resolveAudio: () => void; audioOutputBytes: number; usageSeconds: number; finishing?: Promise<void> };
+type Call = { id: string; providerKind: ProviderKind | null; dialState: "none" | "dispatching" | "accepted" | "uncertain" | "rejected"; stream?: CompatibilityMediaSession; streamTimer?: ReturnType<typeof setTimeout>; providerReserved?: boolean; browserReady?: boolean; openingSent?: boolean; gatewayId?: string; telephoneConnected?: boolean; brief: CallBrief; token: string; providerToken: string; page?: Page; media?: Socket; provider?: Socket; voiceId?: string; providerId?: string; offerPending?: boolean; timer: ReturnType<typeof setTimeout>; ready: Promise<void>; resolveReady: () => void; rejectReady: (e: Error) => void; audio: Promise<void>; resolveAudio: () => void; audioOutputBytes: number; usageSeconds: number; finishing?: Promise<void> };
 const gateways = new SimGateways((config.simGateways ?? []).map((g: { id: string; name: string; tokenFile: string }) => ({ id: g.id, name: g.name, token: deviceToken(g.tokenFile) })), {
   state(id, state, reason) {
     const c = active.get(id); if (!c || c.finishing) return;
@@ -91,8 +92,9 @@ function connected(call: Call) {
 type CleanupRow = { id: string; provider_id: string | null; voice_id: string | null; provider_kind: ProviderKind | null; dial_state: string };
 function cleanupRow(call: Call): CleanupRow { return { id: call.id, provider_id: call.providerId ?? null, voice_id: call.voiceId ?? null, provider_kind: call.providerKind, dial_state: call.dialState }; }
 function bindProviderId(id: string, kind: ProviderKind, providerId: string): boolean {
-  const row = db.query("SELECT * FROM calls WHERE id=?").get(id) as CleanupRow & { ended_at: number | null } | null;
+  const row = db.query("SELECT * FROM calls WHERE id=?").get(id) as CleanupRow & { ended_at: number | null; cleanup: number } | null;
   if (!row || row.provider_kind !== kind || (row.provider_id && row.provider_id !== providerId) || (!row.provider_id && !["dispatching", "uncertain"].includes(row.dial_state))) return false;
+  if (row.provider_id === providerId && row.dial_state === "accepted" && row.cleanup === 1) return true;
   db.query("UPDATE calls SET provider_id=?,dial_state='accepted',cleanup=0 WHERE id=?").run(providerId, id);
   const c = active.get(id);
   if (c) { c.providerId = providerId; c.dialState = "accepted"; }
@@ -162,7 +164,7 @@ async function start(call: Call, shouldDial = true) {
       if (!provider || provider.kind !== call.providerKind) { await finish(call, "failed", "PSTN provider is not configured"); return; }
       call.dialState = "dispatching";
       db.query("UPDATE calls SET dial_state='dispatching',cleanup=0 WHERE id=?").run(call.id);
-      const result = await dial(provider, call.brief.to, publicBase, call.providerToken, call.id, call.brief.maxSeconds ?? 300);
+      const result = await dial(provider, call.brief.to, publicBase, call.providerToken, call.id);
       if (!result.ok) {
         if (!call.providerId) { call.dialState = result.uncertain ? "uncertain" : "rejected"; db.query("UPDATE calls SET dial_state=? WHERE id=?").run(call.dialState, call.id); }
         await finish(call, "failed", result.error); return;
@@ -182,9 +184,11 @@ const socketOptions = {
       const c = ws.data.call!;
       if (c.finishing) { ws.close(); return; }
       c.provider = ws;
-      if (c.providerKind === "signalwire") {
-        c.stream = new SignalWireMediaSession(c.providerId ?? null);
-        c.streamTimer = setTimeout(() => void finish(c, "failed", "SignalWire stream startup timed out"), 5000);
+      if (isCompatibility(c.providerKind)) {
+        const p = providerFor(c.providerKind);
+        if (!p.ok || p.value.kind === "vonage") { void finish(c, "failed", "Compatibility provider is unavailable"); return; }
+        c.stream = new CompatibilityMediaSession(c.providerKind, c.providerId ?? null, p.value.client.settings.accountSid);
+        c.streamTimer = setTimeout(() => void finish(c, "failed", "Compatibility stream startup timed out"), 5000);
       } else connected(c);
     }
   },
@@ -195,29 +199,29 @@ const socketOptions = {
       try { const m = JSON.parse(message); const c = [...active.values()].find(c => same(m.token, c.token)); if (m.type !== "authenticate" || !c || c.media || c.finishing) { ws.close(1008); return; } ws.data.call = c; c.media = ws; return; } catch { ws.close(1008); return; }
     }
     const c = ws.data.call; if (!c || c.finishing) return;
-    if (ws.data.side === "provider" && c.providerKind === "signalwire") {
+    if (ws.data.side === "provider" && isCompatibility(c.providerKind)) {
       const result = c.stream!.receive(message);
-      if (!result.ok) { void finish(c, "failed", `SignalWire stream: ${result.error}`); return; }
+      if (!result.ok) { void finish(c, "failed", `Compatibility stream: ${result.error}`); return; }
       const event = result.value;
       if (event.event === "start") {
-        if (!bindProviderId(c.id, "signalwire", event.callSid)) { void finish(c, "failed", "SignalWire stream call identity mismatch"); return; }
+        if (!bindProviderId(c.id, c.providerKind, event.callSid)) { void finish(c, "failed", "Compatibility stream call identity mismatch"); return; }
         clearTimeout(c.streamTimer); connected(c);
       } else if (event.event === "media") {
         for (const packet of event.pcm) if (c.media) {
-          try { if (c.media.getBufferedAmount() >= 6400 || c.media.send(packet) === 0) { void finish(c, "failed", "SignalWire input backpressure"); return; } }
-          catch { void finish(c, "failed", "SignalWire input dispatch failed"); return; }
+          try { if (c.media.getBufferedAmount() >= 6400 || c.media.send(packet) === 0) { void finish(c, "failed", "Compatibility input backpressure"); return; } }
+          catch { void finish(c, "failed", "Compatibility input dispatch failed"); return; }
         }
-      } else if (event.event === "stop") void finish(c, "completed", "SignalWire stream stopped");
+      } else if (event.event === "stop") void finish(c, "completed", "Compatibility stream stopped");
       return;
     }
     if (typeof message !== "string") { if (ws.data.side === "browser") { c.audioOutputBytes += message.length; let speechSamples = 0; for (let i = 0; i + 1 < message.length; i += 2) if (Math.abs(message.readInt16LE(i)) > 300) speechSamples++; if (speechSamples > 20) c.resolveAudio(); } if (message.length > 6400 || message.length % 2) { void finish(c, "failed", "Invalid telephone audio packet"); return; } if (ws.data.side === "browser" && c.gatewayId) { gateways.audio(c.gatewayId, c.id, message); return; }
-    if (ws.data.side === "browser" && c.providerKind === "signalwire") {
+    if (ws.data.side === "browser" && isCompatibility(c.providerKind)) {
       if (!c.telephoneConnected || !c.provider || !c.stream) return;
       const result = c.stream.outgoing(message);
-      if (!result.ok) { void finish(c, "failed", `SignalWire output: ${result.error}`); return; }
+      if (!result.ok) { void finish(c, "failed", `Compatibility output: ${result.error}`); return; }
       for (const packet of result.value) {
-        try { if (c.provider.getBufferedAmount() >= 6400 || c.provider.send(JSON.stringify(packet)) === 0) { void finish(c, "failed", "SignalWire output backpressure"); return; } }
-        catch { void finish(c, "failed", "SignalWire output dispatch failed"); return; }
+        try { if (c.provider.getBufferedAmount() >= 6400 || c.provider.send(JSON.stringify(packet)) === 0) { void finish(c, "failed", "Compatibility output backpressure"); return; } }
+        catch { void finish(c, "failed", "Compatibility output dispatch failed"); return; }
       }
       return;
     }
@@ -323,26 +327,35 @@ const publicListener = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: publ
     if (server.upgrade(req, { data: { side: "gateway", gatewayId } })) return;
     return error("Gateway WebSocket required");
   }
-  const route = /^\/(vonage|signalwire)\/(media|answer|events)(?:\/([^/]+))?$/.exec(url.pathname);
-  if (!route || (route[3] && route[2] !== "events")) return error("Unknown public phone operation", 404);
+  const route = /^\/(vonage|signalwire|twilio)\/(media|answer|events)(?:\/([^/]+))?(?:\/([^/]+))?$/.exec(url.pathname);
+  if (!route) return error("Unknown public phone operation", 404);
   const kind = route[1] as ProviderKind;
   if (route[2] === "media") {
-    const c = [...active.values()].find(c => c.providerKind === kind && same(req.headers.get("authorization"), `Bearer ${c.providerToken}`));
+    let c: Call | undefined;
+    if (kind === "twilio") {
+      c = route[3] ? active.get(route[3]) : undefined;
+      const p = providerFor(kind);
+      if (!c || c.providerKind !== kind || !same(route[4] ?? null, c.providerToken) || !p.ok || p.value.kind === "vonage" || !signedTwilioUpgrade(req.headers.get("x-twilio-signature"), p.value.client.settings.signingKey, `${publicBase}${url.pathname}${url.search}`)) return error("Signed owned Twilio audio connection required", 403);
+    } else {
+      if (route[3] || route[4]) return error("Unknown public phone operation", 404);
+      c = [...active.values()].find(c => c.providerKind === kind && same(req.headers.get("authorization"), `Bearer ${c.providerToken}`));
+    }
     if (!c || c.providerReserved || c.finishing || stopping) return error("Unauthorized audio connection", 403);
     c.providerReserved = true;
     if (server.upgrade(req, { data: { side: "provider", call: c } })) return;
     c.providerReserved = false; return error("WebSocket required");
   }
+  if (route[4] || (route[3] && route[2] !== "events")) return error("Unknown public phone operation", 404);
   const p = providerFor(kind);
   if (!p.ok) return error("Signed provider webhook required", 403);
   const rawBody = await req.text();
   let body: Record<string, any>;
-  if (p.value.kind === "signalwire") {
-    const params = new URLSearchParams(rawBody);
-    if (!(req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/x-www-form-urlencoded") || !signedSignalWireWebhook(req.headers.get("x-signalwire-signature"), p.value.client.credentials.SIGNALWIRE_SIGNING_KEY, `${publicBase}${url.pathname}${url.search}`, params)) return error("Signed SignalWire webhook required", 403);
+  if (p.value.kind !== "vonage") {
+    const params = new URLSearchParams(rawBody), settings = p.value.client.settings;
+    if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/x-www-form-urlencoded" || !signedCompatibilityWebhook(req.headers.get(settings.signatureHeader), settings.signingKey, `${publicBase}${url.pathname}${url.search}`, params)) return error("Signed Compatibility webhook required", 403);
     if ([...new Set(params.keys())].some(k => params.getAll(k).length !== 1)) return error("Repeated callback fields", 400);
     body = Object.fromEntries(params);
-    if (body.AccountSid !== p.value.client.credentials.SIGNALWIRE_PROJECT_ID) return error("Provider account identity mismatch", 403);
+    if (body.AccountSid !== settings.accountSid) return error("Provider account identity mismatch", 403);
     if (typeof body.CallSid !== "string" || !body.CallSid || body.CallSid.length > 200) return error("Call identity required");
   } else {
     if (!signedWebhook(req.headers.get("authorization"), p.value.client.credentials.VONAGE_SIGNATURE_SECRET, Date.now(), rawBody)) return error("Signed Vonage webhook required", 403);
@@ -351,8 +364,8 @@ const publicListener = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: publ
     if (typeof body.uuid !== "string" || !body.uuid || body.uuid.length > 200) return error("Call identity required");
   }
   if (req.method !== "POST") return error("POST webhook required", 405);
-  const sid = kind === "signalwire" ? body.CallSid : body.uuid;
-  const status = kind === "signalwire" ? body.CallStatus : body.status;
+  const sid = isCompatibility(kind) ? body.CallSid : body.uuid;
+  const status = isCompatibility(kind) ? body.CallStatus : body.status;
   if (route[2] === "events") {
     const stored = route[3] ? null : db.query("SELECT id FROM calls WHERE provider_kind=? AND provider_id=?").get(kind, sid) as { id: string } | null;
     const id = route[3] ?? stored?.id;
@@ -360,26 +373,26 @@ const publicListener = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: publ
     if (!bindProviderId(id, kind, sid)) return error("Call identity mismatch", 403);
     const c = active.get(id);
     log(id, "provider-status", { provider: kind, status, uuid: sid });
-    const terminal = kind === "signalwire" ? signalWireTerminal.has(status) : ["completed", "busy", "cancelled", "unanswered", "rejected", "failed", "timeout"].includes(status);
+    const terminal = isCompatibility(kind) ? compatibilityTerminal.has(status) : ["completed", "busy", "cancelled", "unanswered", "rejected", "failed", "timeout"].includes(status);
     if (c && terminal) void finish(c, status === "completed" ? "completed" : "failed", status);
     return json({ accepted: true });
   }
   const xml = (text: string) => new Response(text, { headers: { "content-type": "application/xml" } });
-  const unavailable = () => kind === "signalwire" ? xml(signalWireUnavailable) : json([{ action: "talk", text: "Kenan is unavailable. Please call again later." }]);
+  const unavailable = () => isCompatibility(kind) ? xml(compatibilityUnavailable) : json([{ action: "talk", text: "Kenan is unavailable. Please call again later." }]);
   if (provider?.kind !== kind || config.callingEnabled !== true || stopping) return unavailable();
-  const to = String(kind === "signalwire" ? body.To : body.to).replace(/^\+/, "");
+  const to = String(isCompatibility(kind) ? body.To : body.to).replace(/^\+/, "");
   if (to !== provider.callerId.replace(/^\+/, "")) return unavailable();
   const previous = db.query("SELECT id FROM calls WHERE provider_kind=? AND provider_id=?").get(kind, sid) as { id: string } | null;
   if (previous) {
     const c = active.get(previous.id);
-    return kind === "signalwire" ? xml(c && !c.finishing ? telephoneInstructions(c) as string : signalWireEnded) : json(c && !c.finishing ? telephoneInstructions(c) : []);
+    return isCompatibility(kind) ? xml(c && !c.finishing ? telephoneInstructions(c) as string : compatibilityEnded) : json(c && !c.finishing ? telephoneInstructions(c) : []);
   }
   if (active.size >= 2) return unavailable();
-  const from = `+${String(kind === "signalwire" ? body.From : body.from).replace(/^\+/, "")}`;
+  const from = `+${String(isCompatibility(kind) ? body.From : body.from).replace(/^\+/, "")}`;
   if (!/^\+[1-9]\d{7,14}$/.test(from)) return unavailable();
   const c = create({ to: from, purpose: "Receive a call for Hara's AI assistant Kenan and take a message.", shareableFacts: ["You are Kenan, Hara's AI assistant.", "You can take a message for Hara but cannot share her private information or confirm private details."], opening: "Hello, I'm Kenan, Hara's AI assistant. How can I help?", maxSeconds: 300 }, sid, randomUUID(), undefined, kind);
   void start(c);
-  return kind === "signalwire" ? xml(telephoneInstructions(c) as string) : json(telephoneInstructions(c));
+  return isCompatibility(kind) ? xml(telephoneInstructions(c) as string) : json(telephoneInstructions(c));
 } });
 const gatewayWatchdog = setInterval(() => gateways.expire(), 1000);
 const heartbeat = setInterval(() => { for (const c of active.values()) if (c.voiceId && !c.finishing) void voice(`/sessions/${encodeURIComponent(c.voiceId)}`, "PATCH", { owner, threadId: `phone:${c.id}`, seconds: c.usageSeconds, finalized: false }).then(r => { if (!r.ok) void finish(c, "failed", r.error); }); }, 20_000);
