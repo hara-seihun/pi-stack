@@ -11,6 +11,7 @@ export {
   type PlanMetric,
 } from "./catalog.js";
 export { DELEGATION_POLICY } from "./delegation-policy.js";
+export { getRandomName } from "./nebulani-names.js";
 export { loadConfig, orchestratorUrl } from "./config.js";
 export { modelBrokerUrl } from "./model-broker-contract.js";
 export type { OrchestratorConfig } from "./domain.js";

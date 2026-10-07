@@ -152,6 +152,19 @@ Vitest's [test setup](tests/setup.ts) gives each test file a temporary home and 
 
 Run `npm test --workspace=pi-orchestrator -- tests/catalog-config.test.ts tests/routing-runtime.test.ts` to check model selection and routing. The source-owned [check graph](scripts/check.mjs) first builds Kenan memory, then checks all Orchestrator source, tests and Vitest configuration, then prepares the shared RPC runtime, and only then admits the selected Vitest suite. A focused file filter narrows runtime execution, never the type contract. These prerequisites live in the `test` command itself, not `pretest`: `npm --ignore-scripts test` cannot skip them. A failed prerequisite produces blocked runtime outcomes rather than a transpile-only success. Publication imports the same graph and shares one prerequisite chain across its seven bounded suites; it does not invoke seven nested npm lifecycles. Provider assertions use `nativeProviders`, which includes the custom definitions, rather than the upstream catalog alone. Fresh-session fixtures load the same `models.json` definitions deployed to each account before selecting a model; pin and model-switch cases resolve current choices through `catalogModel` instead of constructing versioned IDs. Explicit historical model IDs in resume fixtures remain intentional.
 
+## Nebulani agent names
+
+`pi-orchestrator names --count 10` generates names locally without model calls,
+creating agents or changing existing names. `getRandomName` is also exported from
+`pi-orchestrator/api`. Names are labels, not reserved identities; UUIDs remain the
+identity authority. Automatic assignment and UI display are not enabled by this command.
+
+[`src/nebulani-names.ts`](src/nebulani-names.ts) is imported unchanged from Hara's
+Lemma Dev generator (`src/nebulani-names.ts`, source commit
+`a106f9555dd2fc6eb76aa5967a0fcb4f5596df43`). Given names combine three or four
+semantic primes; family names combine three with plural `-n`. It retains Lemma
+Dev's junction checks, repeated-onset repair, romanization and sampling weights.
+
 ## Operations
 
 ```bash
