@@ -26,7 +26,7 @@ const unwrap = <T>(value: Result<T>): T => { if (!value.ok) throw new Error(valu
 const boundary = () => new Promise<void>(resolve => setImmediate(resolve));
 async function until(check: () => boolean) { const deadline = performance.now() + 3000; while (performance.now() < deadline) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); } throw new Error("Native lifecycle did not reach boundary"); }
 
-it.each(["refused", "accepted", "clear", "ordinary"] as const)("real retained legacy-tool %s ends only through the correct native boundary and settles once", async mode => {
+it.each(["refused", "accepted", "clear", "ordinary"] as const)("real retained legacy-tool %s settles once without waking its closed requester", async mode => {
   const root = mkdtempSync(join(tmpdir(), "wait-legacy-native-"));
   let modelCalls = 0;
   const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"),
@@ -63,7 +63,8 @@ it.each(["refused", "accepted", "clear", "ordinary"] as const)("real retained le
     const settlement = owner.latestSettlement("self")!;
     expect(settlement).toMatchObject({ outcome: "complete" });
     expect(modelCalls).toBe(mode === "accepted" || mode === "ordinary" ? 1 : 2);
-    expect(owner.pending("parent")).toHaveLength(mode === "accepted" ? 0 : 1);
+    expect(owner.pending("parent")).toHaveLength(0);
+    expect(owner.get("parent")?.metadata?.archived).toBe(true);
     if (mode === "accepted") {
       expect(owner.get("self")?.waitingOnAgents).toMatchObject({ kind: "agents", threadIds: ["dependency"] });
       expect(owner.get("self")?.metadata?.archived).not.toBe(true);
@@ -74,7 +75,7 @@ it.each(["refused", "accepted", "clear", "ordinary"] as const)("real retained le
     }
     if (mode === "refused") expect(readFileSync(self.sessionFile, "utf8")).toContain("no waiting status was recorded");
     owner.reconcile(); await boundary();
-    expect(owner.latestSettlement("self")).toEqual(settlement); expect(owner.pending("parent")).toHaveLength(mode === "accepted" ? 0 : 1);
+    expect(owner.latestSettlement("self")).toEqual(settlement); expect(owner.pending("parent")).toHaveLength(0);
   } finally {
     native.prepare = undefined; await owner.detach(); vi.restoreAllMocks(); rmSync(root, { recursive: true, force: true });
   }
@@ -137,7 +138,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
     const created = unwrap(await owner.spawn({ requestId: "self", id: "self", cwd: root, settings: { model: "anthropic/claude-sonnet-4-5", thinkingLevel: "off" } }));
     unwrap(await client.wakeSchedule({ action: "set", threadId: "self", requestId: "timer", reason: "Recovery check", cadenceMs: 60000, nextDueAt: now + 60000 }));
     unwrap(await owner.start()); unwrap(await owner.send({ requestId: "first-turn", threadId: "self", text: "Wait for the durable job" }));
-    await until(() => owner.get("self")?.state === "idle" && !!owner.get("self")?.waitingOnAgents).catch(error => { throw new Error(`${error.message}: ${JSON.stringify(owner.get("self"))}; calls=${modelCalls}`); });
+    await until(() => owner.get("self")?.state === "waiting" && !!owner.get("self")?.waitingOnAgents).catch(error => { throw new Error(`${error.message}: ${JSON.stringify(owner.get("self"))}; calls=${modelCalls}`); });
     const waiting = await observe("waiting"); expect(waiting.sessionFile).toBe(created.sessionFile); expect(rendered.waiting).toContain("Waiting for job"); expect(modelCalls).toBe(1);
     owner.reconcile(); unwrap(await watch.tick(now)); await boundary(); expect(modelCalls).toBe(1); expect(unwrap(await watch.watch({ threadId: "self", action: "list" }))).toEqual({ items: [] });
     // Native history and the wake survive replacing the scheduler/controller connection.
@@ -149,9 +150,9 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
     expect(rendered.woke).toContain("Idle"); expect(readFileSync(created.sessionFile, "utf8")).toContain("Wake received in original conversation");
     owner.reconcile(); await boundary(); expect(modelCalls).toBe(2);
     unwrap(await owner.control({ action: "stop", threadId: "self", descendants: false })); now += 120000; owner.reconcile(); await boundary();
-    expect((await observe("stopped")).wakeSchedule?.deferredReason).toBe("stopped"); expect(modelCalls).toBe(2); expect(rendered.stopped).toContain("Stopped");
+    const stopped = await observe("stopped"); expect(stopped.wakeSchedule).toBeUndefined(); expect(stopped.metadata?.archived).toBe(true); expect(modelCalls).toBe(2); expect(rendered.stopped).toContain("Archived");
     unwrap(await owner.control({ action: "update", threadId: "self", archived: true })); owner.reconcile(); await boundary();
-    expect((await observe("archived")).wakeSchedule?.deferredReason).toBe("archived"); expect(rendered.archived).toContain("Archived"); expect(modelCalls).toBe(2);
+    expect((await observe("archived")).wakeSchedule).toBeUndefined(); expect(rendered.archived).toContain("Archived"); expect(modelCalls).toBe(2);
     const denied = createThreadClient(`${origin}/v1/threads`, fetch, { token: foreign.issue("self"), timeoutMs: 3000 }); expect((await denied.wakeSchedule({ action: "list", threadId: "self" })).ok).toBe(false);
     unwrap(await client.wakeSchedule({ action: "cancel", threadId: "self", requestId: "cancel" })); expect((await observe("cancelled")).wakeSchedule).toBeUndefined();
     unwrap(await owner.control({ action: "restore", threadId: "self", descendants: false, resume: true })); owner.reconcile(); await boundary(); expect(modelCalls).toBe(2);

@@ -127,7 +127,7 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
   (( ! write )) || write_started=1
   phase publication 50 env PI_STACK_HOST_PHASE=publication "$0" "$@"
   if (( services )); then
-    phase capacity-ready 10 pi_stack_run_as "${fleet:-${users[0]}}" node "$control/deploy/capacity-ready.mjs" "${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}/dist/agent-capacity.js"
+    phase capacity-ready 10 bash -c 'source "$1/deploy/lib"; shift; pi_stack_run_as "$@"' -- "$control" "${fleet:-${users[0]}}" node "$control/deploy/capacity-ready.mjs" "${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}/dist/agent-capacity.js"
     (
       phase browser-doctor 120 "$control/deploy/runtime-doctors" browser "$root" "${fleet:-${users[0]}}" "$control" &
       browser_doctor_pid=$!
