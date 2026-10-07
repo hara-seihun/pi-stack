@@ -10,6 +10,8 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { modelDrainsMeter } from "./catalog.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
+import { accountModelExcluded, noEntitledAccountError, recordAccountModelUnsupported } from "./auth/model-entitlement.js";
+import { allowsAccountUse } from "./domain.js";
 import { assertNever, requireRuntimeEvent, type RuntimeEvent } from "./threads/runtime-events.js";
 
 /** Account spending urgency is separate from the global agent execution limit. */
@@ -43,6 +45,10 @@ export class Fleet {
           { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user", excluded);
       if (!selected.assignment) {
         const now=Date.now();
+        // Every account that could serve this provider refuses the model itself: a capacity wait would wait forever.
+        const usable=this.store.accounts().filter(account=>account.provider===candidate.provider&&allowsAccountUse(account,"fleet")&&!excluded.has(account.id));
+        if(usable.length&&usable.every(account=>accountModelExcluded(this.store,account.id,candidate.model,now)))
+          return {ok:false,error:{code:"invalid_request",message:noEntitledAccountError(candidate.provider,candidate.model)}};
         const opportunities=this.store.accounts().filter(account=>account.provider===candidate.provider&&!excluded.has(account.id)).map(account=>{
           const exhausted=this.store.latestMeters(account.id).filter(meter=>meter.used_percent>=100&&modelDrainsMeter(candidate.provider,candidate.model,meter.meter_id));
           return Math.max(account.cooldownUntil??0,...exhausted.map(meter=>meter.reset_at>now?meter.reset_at:now+60_000));
@@ -126,11 +132,13 @@ export class Fleet {
     const lease = this.leases.get(threadId), message = event.message as Record<string, any> | undefined;
     if (!lease || message?.role !== "assistant") return;
     const failure = String(message.errorMessage ?? "");
+    const model = typeof message.model === "string" ? message.model : undefined;
+    // Entitlement refusal is account/model evidence for future admission; it neither cools the account nor blames the task.
+    if (message.stopReason === "error" && model) recordAccountModelUnsupported(this.store, lease.accountId, model, failure);
     // A burst throttle must not bench the account for half an hour, and a monthly
     // spend ceiling must not be retried after thirty minutes (September 24, 2026:
     // one throttle cooled the only healthy Anthropic account while three workers
     // kept being admitted onto one at its monthly limit, and all three failed).
-    const model = typeof message.model === "string" ? message.model : undefined;
     if (message.stopReason === "error" && isRateLimitError(failure)) this.store.transaction(()=>this.store.setCooldown(lease.accountId,
       Math.max(this.store.account(lease.accountId)?.cooldownUntil??0,Date.now()+rateLimitCooldownMs(failure)),{model}));
     else if (message.stopReason === "error" && isCredentialError(failure)) this.store.setCooldown(lease.accountId, Date.now() + 30 * 60_000, { model });

@@ -21,6 +21,7 @@ import { installBrokerRouting } from "./broker-routing.js";
 import { codexTierExclusions, requireCodexTier } from "../auth/codex-capabilities.js";
 import { withCodexTierGuard } from "../auth/codex-tier-provider.js";
 import { requestedSpeedError } from "../threads/speed.js";
+import { accountModelExcluded, accountModelUnsupported, noEntitledAccountError, recordAccountModelUnsupported } from "../auth/model-entitlement.js";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
@@ -67,10 +68,12 @@ export async function resolveSessionModel(models:readonly Model<any>[],provider:
     const assigned=env.PI_ORCHESTRATOR_ASSIGNED==="1"&&env.PI_ORCHESTRATOR_RUN_ID?store.run(env.PI_ORCHESTRATOR_RUN_ID):undefined;
     const pinned=env.PI_ORCHESTRATOR_ASSIGNED==="1"?(env.PI_ORCHESTRATOR_ACCOUNT_ID??assigned?.accountId):provider!==family.id?provider:undefined;
     const account=pinned?store.account(pinned):chooseInteractiveAccount(store,shared,family.id,exclude,{includeCooling:true,model:modelId,live:env.PI_THREAD_MODE==="live"});
-    if(account&&!exclude.has(account.id)&&account.provider===family.id&&available.has(account.id)&&shared.has(account.id)){
+    if(account&&!exclude.has(account.id)&&account.provider===family.id&&available.has(account.id)&&shared.has(account.id)&&!accountModelExcluded(store,account.id,modelId)){
       const model=candidates.find(model=>model.provider===account.id)!;
       return {ok:true,model};
     }
+    const usable=store.accounts().filter(account=>account.provider===family.id&&available.has(account.id)&&!exclude.has(account.id)&&allowsAccountUse(account,"interactive")&&shared.has(account.id));
+    if(usable.length&&usable.every(account=>accountModelExcluded(store,account.id,modelId)))return {ok:false,error:noEntitledAccountError(family.id,modelId)};
     // Cooling accounts are admitted above, so reaching here means the pool has
     // nothing this session could use at all. Name the wait anyway when an
     // assigned run is pinned to an account that is cooling.
@@ -145,13 +148,13 @@ export default function routing(pi:ExtensionAPI):void{
     if(!hasPin)return true;
     if(!pinned||ctx.model?.id!==pinned.model||familyOf(ctx.model.provider)!==pinned.provider)return false;
     const account=store.account(ctx.model.provider);
-    return !!account&&!!shared.get(pinned.provider)?.has(account.id)&&!!(assigned||allowsAccountUse(account,"interactive"));
+    return !!account&&!!shared.get(pinned.provider)?.has(account.id)&&!!(assigned||allowsAccountUse(account,"interactive")&&!accountModelExcluded(store,account.id,pinned.model));
   };
   const enforcePin=async(ctx:ExtensionContext)=>{
     if(matchesPin(ctx))return;
     if(!pinned){void ctx.abort();throw new Error(`Unknown subagent model pin ${requestedPin}`);}
     const current=store.account(ctx.model?.provider??"");
-    const accountId=environment.PI_ORCHESTRATOR_ACCOUNT_ID??assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")&&shared.get(pinned.provider)?.has(current.id)?current.id:(await choose(pinned.provider,pinned.model,undefined,true))?.id);
+    const accountId=environment.PI_ORCHESTRATOR_ACCOUNT_ID??assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")&&shared.get(pinned.provider)?.has(current.id)&&!accountModelExcluded(store,current.id,pinned.model)?current.id:(await choose(pinned.provider,pinned.model,undefined,true))?.id);
     const model=accountId?resolve(accountId,pinned.provider,pinned.model):undefined;
     if(!model||!await select(ctx,model,assigned?.thinking as ThinkingLevel??(pi.getThinkingLevel()==="off"?pinned.thinking as ThinkingLevel:pi.getThinkingLevel()))){
       void ctx.abort();throw new Error(`Pinned model ${pinned.provider}/${pinned.model} has no available account`);
@@ -208,16 +211,24 @@ export default function routing(pi:ExtensionAPI):void{
     const error=requestedSpeedError(ctx.model,environment.PI_THREAD_SPEED??"standard");
     if(error)throw new Error(error);
   };
+  /** Every usable account of the family refuses this model: report it, never wait on it as capacity. */
+  const entitlementExhausted=(family:string,modelId:string)=>{
+    const usable=store.accounts().filter(account=>account.provider===family&&allowsAccountUse(account,"interactive")&&shared.get(family)?.has(account.id));
+    return usable.length>0&&usable.every(account=>accountModelExcluded(store,account.id,modelId));
+  };
   const bindCurrent=async(ctx:ExtensionContext)=>{
     requireSpeed(ctx);
     if(!ctx.model||!POOLED_FAMILIES.has(familyOf(ctx.model.provider)))return;
     const explicit=ctx.model?.provider&&/-\d+$/.test(ctx.model.provider)?store.account(ctx.model.provider):undefined;
     const retain=explicit&&allowsAccountUse(explicit,"interactive")
       &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id)
+      &&!accountModelExcluded(store,explicit.id,ctx.model.id)
       &&!interactiveQuotaExhausted(store,explicit.id,explicit.provider,ctx.model.id);
     const tierAllowed=retain&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(explicit.provider),explicit.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
     if(!retain||!tierAllowed){
       const bound=await bind(ctx);
+      const family=familyOf(ctx.model.provider);
+      if(!bound&&entitlementExhausted(family,ctx.model.id))throw new Error(noEntitledAccountError(family,ctx.model.id));
       if(!bound)throw new Error(`No eligible pooled account for ${ctx.model.provider}/${ctx.model.id}${environment.PI_THREAD_SPEED==="ultrafast"?" advertising ultrafast":""}`);
     }
   };
@@ -238,7 +249,7 @@ export default function routing(pi:ExtensionAPI):void{
         if(saved&&ctx.model?.provider===selected.provider&&ctx.model.id===selected.modelId&&getSupportedThinkingLevels(saved).includes(pi.getThinkingLevel())){
           thinking=pi.getThinkingLevel();
         }
-        if(!(saved&&account&&allowsAccountUse(account,"interactive")&&await select(ctx,saved,thinking))){
+        if(!(saved&&account&&allowsAccountUse(account,"interactive")&&!accountModelExcluded(store,account.id,selected.modelId)&&await select(ctx,saved,thinking))){
           if(!POOLED_FAMILIES.has(family))await bindCurrent(ctx);
           else if(!await bind(ctx,undefined,{family,modelId:selected.modelId,thinking}))throw new Error(`Saved model ${family}/${selected.modelId} has no eligible pooled account`);
         }
@@ -252,11 +263,12 @@ export default function routing(pi:ExtensionAPI):void{
     requireSpeed(ctx);
     const current=store.account(ctx.model?.provider??"");
     const tierAllowed=current&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(current.provider),current.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
-    if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&(!allowsAccountUse(current,"interactive")||interactiveQuotaExhausted(store,current.id,current.provider,ctx.model!.id))||!tierAllowed)){
+    if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&(!allowsAccountUse(current,"interactive")||interactiveQuotaExhausted(store,current.id,current.provider,ctx.model!.id)||accountModelExcluded(store,current.id,ctx.model!.id))||!tierAllowed)){
       if(fleetAssigned)throw new Error(tierAllowed?`Account ${current.id} shared OAuth credential requires recovery before this assigned run can continue`:`Assigned account ${current.id} no longer advertises Astra ultrafast; refusing to downgrade`);
       const moved=await bind(ctx,new Set([current.id]),undefined,true);
       if(!moved){
         if(interactiveQuotaExhausted(store,current.id,current.provider,ctx.model!.id))return;
+        if(entitlementExhausted(current.provider,ctx.model!.id))throw new Error(noEntitledAccountError(current.provider,ctx.model!.id));
         throw new Error(`Account ${current.id} is unavailable for interactive agents; no shared account is available`);
       }
       reconcileLease(ctx);
@@ -331,6 +343,19 @@ export default function routing(pi:ExtensionAPI):void{
         if(result.outcome!=="repaired")ctx.ui.notify(result.detail,"warning");
         if(result.outcome==="repaired"){unresolved={failure:result.detail,account:failing,prompt:credentialRepairPrompt};return;}
       }
+    }
+    // An account that refuses the model itself is excluded for that model and the session moves to an entitled
+    // sibling on the same model. It is never a capacity wait, a cooldown, or a reason to switch models.
+    const refusedModel=last.model??ctx.model.id;
+    if(accountModelUnsupported(failure)&&recordAccountModelUnsupported(store,failing,refusedModel,failure)){
+      if(fleetAssigned)return;
+      const moved=await bind(ctx,new Set([failing]),undefined,true);
+      if(moved&&!closed){unresolved={failure,account:moved,prompt:failoverPrompt};return;}
+      if(closed)return;
+      const family=familyOf(failing);
+      pi.appendEntry("model-unsupported",{model:`${family}/${refusedModel}`,account:failing,failure});
+      ctx.ui.notify(noEntitledAccountError(family,refusedModel),"error");
+      return;
     }
     const credentialUnavailable=!!shared.get(familyOf(failing))?.rejection(failing);
     if(!credentialUnavailable&&!isRateLimitError(failure))return;
