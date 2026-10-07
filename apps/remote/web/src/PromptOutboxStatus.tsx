@@ -1,12 +1,14 @@
 import { useState } from "react";
 import type { PromptOutboxEntry } from "./prompt-outbox";
+import type { PromptStorageState } from "./prompt-storage";
 import "./prompt-outbox-status.css";
 
-export function PromptOutboxStatus({ entries, busyRequestId, onRetry, onDiscard }: {
+export function PromptOutboxStatus({ entries, busyRequestId, onRetry, onDiscard, storage }: {
   entries: readonly PromptOutboxEntry[];
   busyRequestId: string | null;
   onRetry: (requestId: string) => void;
   onDiscard: (requestId: string) => void;
+  storage?: { state: PromptStorageState<unknown>; retry: () => void };
 }) {
   const [copyError, setCopyError] = useState<{ requestId: string; message: string } | null>(null);
   const copyText = async (requestId: string, text: string) => {
@@ -15,8 +17,15 @@ export function PromptOutboxStatus({ entries, busyRequestId, onRetry, onDiscard 
   };
   const visible = entries.filter(entry => entry.outcome.kind !== "accepted"
     && !(entry.outcome.kind === "pending" && entry.outcome.reason === "saved" && entry.requestId === busyRequestId));
-  if (!visible.length) return null;
+  const initialization = storage?.state;
+  if (!visible.length && (!initialization || initialization.kind === "ready" || initialization.kind === "closed")) return null;
   return <div className="prompt-outbox-status" aria-label="Saved prompt submissions">
+    {initialization?.kind === "loading" && <div className="prompt-outbox-status-item" role="status">Opening saved prompt storage… Your draft stays here until it is saved.</div>}
+    {initialization?.kind === "failed" && <div className="prompt-outbox-status-item" role="alert">
+      <strong>Could not open saved prompts</strong><div>{initialization.error.message}</div>
+      <div>Your draft is retained. Retry storage or press Send to try again.</div>
+      <button type="button" onClick={storage!.retry}>Retry storage</button>
+    </div>}
     {visible.map(entry => {
       const body = JSON.parse(entry.bodyJson) as { text: string; delivery: string };
       const busy = entry.requestId === busyRequestId;

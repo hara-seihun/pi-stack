@@ -12,6 +12,7 @@ import { fetchPersonChooser, reportWebReady, bootstrapUrl, pinnedFetch } from ".
 import { PromptOutbox, type PromptOutboxEntry, type PromptOutboxScope, type PromptOutboxTransport } from "./prompt-outbox";
 import { PromptSubmissions } from "./prompt-submissions";
 import { PromptOutboxStatus } from "./PromptOutboxStatus";
+import { PromptStorage, type PromptStorageState, type PromptStorageResult } from "./prompt-storage";
 import { useChatDrawing } from "./chat-drawing";
 import type { ReplyTarget } from "./message-reply";
 import { ReplyDrafts } from "./reply-drafts";
@@ -87,7 +88,7 @@ interface AppState {
   sessions: Session[];
   /** Threads opened from the picker or a notification before a delta carries them. */
   discovered: Session[];
-  /** Every fleet thread, carried only while the Workers screen shows "All". */
+  /** Background agents discovered for opening or inspecting launch provenance. */
   fleet: Session[];
   archivedTotal: number;
   dashboard: Dashboard | null;
@@ -460,7 +461,13 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     return () => finishSection(name);
   }, [aiId, routeChat, route.tab, cache, messagingHistory]);
 
-  const outbox = useRef<{ store: PromptOutbox; transport: PromptOutboxTransport } | null>(null);
+  type OutboxOwner = { store: PromptOutbox; transport: PromptOutboxTransport; scope: PromptOutboxScope; entries: PromptOutboxEntry[] };
+  const outbox = useRef<OutboxOwner | null>(null);
+  const promptStorage = useRef<PromptStorage<OutboxOwner> | null>(null);
+  const storageFailure = useRef<string | null>(null);
+  const [storageState, setStorageState] = useState<PromptStorageState<OutboxOwner>>({ kind: "loading" });
+  const ensureOutbox = useCallback((): Promise<PromptStorageResult<OutboxOwner>> => promptStorage.current?.ensure()
+    ?? Promise.resolve({ ok: false, error: { kind: "unavailable", message: "Prompt storage is initializing. Your draft is retained; try Send again." } }), []);
   const [outboxEntries, setOutboxEntries] = useState<PromptOutboxEntry[]>([]);
   const [outboxBusy, setOutboxBusy] = useState<string | null>(null);
   const ownedPrompts = useRef(new Map<string, string>());
@@ -472,36 +479,72 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     const entries = await owner.store.list();
     if (outbox.current !== owner) return;
     if (entries.ok) setOutboxEntries(entries.value);
-    else toast.error(entries.error.message);
+    else promptStorage.current?.fail(entries.error.message);
   }, []);
   useEffect(() => {
     let active = true;
-    void (async () => {
-      const [environment, root] = await Promise.all([window.KenanRemote?.getState(), bootstrapUrl()]);
-      if (!active) return;
-      if (!environment) throw new Error("Environment transport is unavailable");
-      const scope: PromptOutboxScope = { person, environment: environment.id, bootstrap: new URL(root || "/", location.href).href };
-      const store = new PromptOutbox({ scope, database: indexedDB,
-        currentScope: () => active && window.PiRemotePerson.get() === person ? scope : null });
-      const transport: PromptOutboxTransport = async (entry, signal) => {
-        const current = await window.KenanRemote?.getState();
-        if (!current || !active || current.id !== scope.environment || window.PiRemotePerson.get() !== person) throw new Error("The prompt belongs to another person or environment");
-        signal.throwIfAborted();
-        const response = await pinnedFetch(environment, person, API.sessionPrompt.path({ sessionId: entry.sessionId }), {
-          method: "POST", signal, headers: { "content-type": "application/json" }, body: entry.bodyJson });
-        if (response.status === 423 && window.PiRemotePerson.get() === person) {
-          void ensureUnlocked().catch(error => toast.error(error instanceof Error ? error.message : String(error)));
+    const storage = new PromptStorage<OutboxOwner>({
+      open: async currentAttempt => {
+        const [environment, root] = await Promise.all([window.KenanRemote?.getState(), bootstrapUrl()]);
+        if (!environment) return { ok: false, error: { kind: "unavailable", message: "Environment transport is unavailable" } };
+        const scope: PromptOutboxScope = { person, environment: environment.id, bootstrap: new URL(root || "/", location.href).href };
+        const currentScope = () => active && currentAttempt() && window.PiRemotePerson.get() === person
+          && (!stateRef.current.bootstrap || stateRef.current.bootstrap.environmentId === scope.environment) ? scope : null;
+        const store = new PromptOutbox({ scope, database: indexedDB, currentScope });
+        const entries = await store.list();
+        if (!entries.ok) { store.dispose(); return { ok: false, error: { kind: entries.error.kind === "scope_changed" ? "scope_changed" : "unavailable", message: entries.error.message } }; }
+        const transport: PromptOutboxTransport = async (entry, signal) => {
+          const selected = await window.KenanRemote?.getState();
+          if (!selected || !currentScope() || selected.id !== scope.environment) throw new Error("The prompt belongs to another person or environment");
+          signal.throwIfAborted();
+          const response = await pinnedFetch(environment, person, API.sessionPrompt.path({ sessionId: entry.sessionId }), {
+            method: "POST", signal, headers: { "content-type": "application/json" }, body: entry.bodyJson });
+          if (response.status === 423 && window.PiRemotePerson.get() === person) {
+            void ensureUnlocked().catch(error => toast.error(error instanceof Error ? error.message : String(error)));
+          }
+          return { status: response.status, body: await response.json() };
+        };
+        return { ok: true, value: { store, transport, scope, entries: entries.value } };
+      },
+      dispose: owner => owner.store.dispose(),
+      changed: next => {
+        if (!active) return;
+        outbox.current = next.kind === "ready" ? next.owner : null;
+        setStorageState(next);
+        if (next.kind === "failed") storageFailure.current = next.error.message;
+        if (next.kind === "ready") {
+          setOutboxEntries(next.owner.entries);
+          const recoveredError = storageFailure.current;
+          if (recoveredError) setControlError(current => current?.message === recoveredError ? null : current);
+          storageFailure.current = null;
         }
-        return { status: response.status, body: await response.json() };
-      };
-      outbox.current = { store, transport };
-      await refreshOutbox();
-    })().catch(error => { if (active) toast.error(`Could not open saved prompts: ${String(error)}`); });
-    return () => { active = false; ownedPrompts.current.clear(); outbox.current?.store.dispose(); outbox.current = null; };
-  }, [person, refreshOutbox]);
-  const submitSavedPrompt = useCallback((requestId: string) => {
-    const owner = outbox.current;
-    if (!owner) return Promise.resolve();
+      },
+    });
+    promptStorage.current = storage;
+    void storage.ensure();
+    const reset = () => {
+      ownedPrompts.current.clear();
+      setOutboxEntries([]);
+      storage.invalidate();
+      void storage.ensure();
+    };
+    window.addEventListener("pi-auth", reset);
+    window.addEventListener("pi-person", reset);
+    return () => {
+      active = false;
+      window.removeEventListener("pi-auth", reset);
+      window.removeEventListener("pi-person", reset);
+      ownedPrompts.current.clear();
+      storage.close();
+      if (promptStorage.current === storage) { promptStorage.current = null; outbox.current = null; }
+    };
+  }, [person, stateRef]);
+  const submitSavedPrompt = useCallback(async (requestId: string) => {
+    const expectedEnvironment = stateRef.current.bootstrap?.environmentId;
+    const initialized = await ensureOutbox();
+    if (!initialized.ok) { toast.error(initialized.error.message); return; }
+    const owner = initialized.value;
+    if (outbox.current !== owner || expectedEnvironment !== owner.scope.environment) { toast.error("The saved prompt belongs to another environment."); return; }
     return promptSubmissions.current.run(owner.store, requestId, async () => {
       setOutboxBusy(requestId);
       try {
@@ -519,7 +562,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         await refreshOutbox();
       } finally { setOutboxBusy(current => current === requestId ? null : current); }
     });
-  }, [kick, refreshOutbox]);
+  }, [kick, refreshOutbox, ensureOutbox, stateRef]);
   const interruptPrompts = useCallback((sessionId: string, descendants: boolean) => {
     const ids = new Set([sessionId]);
     if (descendants) {
@@ -535,14 +578,20 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [outboxEntries, stateRef]);
   const discardSavedPrompt = useCallback(async (requestId: string) => {
     ownedPrompts.current.delete(requestId);
-    const owner = outbox.current;
-    if (!owner) return;
+    const initialized = await ensureOutbox();
+    if (!initialized.ok) { toast.error(initialized.error.message); return; }
+    const owner = initialized.value;
+    if (outbox.current !== owner) return;
     const result = await owner.store.discard(requestId);
     if (!result.ok) toast.error(result.error.message);
     await refreshOutbox();
-  }, [refreshOutbox]);
+  }, [refreshOutbox, ensureOutbox]);
+  const healthyPromptFeed = useRef(false);
   const feedActivity = useCallback((healthy: boolean) => {
     notificationFeedActivity(healthy);
+    const recovered = healthy && !healthyPromptFeed.current;
+    healthyPromptFeed.current = healthy;
+    if (recovered && promptStorage.current?.state.kind !== "ready") void ensureOutbox();
     if (!healthy || drainingPrompts.current || document.visibilityState !== "visible") return;
     drainingPrompts.current = true;
     void (async () => {
@@ -552,7 +601,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         }
       } finally { drainingPrompts.current = false; }
     })();
-  }, [submitSavedPrompt]);
+  }, [submitSavedPrompt, ensureOutbox]);
 
   const visibleHeads = useRef<{ sessionId: string; range: VisibleTranscriptRange | null } | null>(null);
   const onVisibleHeads = useCallback((range: VisibleTranscriptRange | null) => { visibleHeads.current = aiId ? { sessionId: aiId, range } : null; }, [aiId]);
@@ -565,8 +614,14 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       switch (event.type) {
         case "hello":
         case "bootstrap": {
+          if (outbox.current && outbox.current.scope.environment !== event.bootstrap.environmentId) {
+            ownedPrompts.current.clear();
+            setOutboxEntries([]);
+            promptStorage.current?.invalidate();
+          }
           undoCloses.setScope(`${person}:${event.bootstrap.environmentId}`);
           patch({ bootstrap: event.bootstrap, syncing: false });
+          if (promptStorage.current?.state.kind !== "ready") void ensureOutbox();
           initialLoad.current?.();
           initialLoad.current = null;
           speech.configure(event.bootstrap.speech);
@@ -700,7 +755,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       client.stop();
       stream.current = null;
     };
-  }, [cache, messagingHistory, liveText, patch, person, stateRef, undoCloses, feedActivity]);
+  }, [cache, messagingHistory, liveText, patch, person, stateRef, undoCloses, feedActivity, ensureOutbox]);
 
   // What the stream carries follows the route: the open thread, whether the
   // person can see it, and the Machine screen only while it is showing.
@@ -943,36 +998,47 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   };
   const stopThread = (session: Session) => requestStop(session, (id, descendants) => { void controlThread(id, "stop", descendants); });
 
+  const sending = useRef(false);
   const send = async (delivery: Delivery) => {
     const session = selectedSession();
-    if (!session || pending) return;
+    if (!session || pending || sending.current) return;
     const sessionAttachments = stateRef.current.attachments.filter((file) => file.sessionId === session.id);
     if (sessionAttachments.some((file) => file.uploading)) return;
     const attachments = sessionAttachments.filter((file) => file.path);
-    const text = prompt.trim();
+    const draft = prompt;
+    const text = draft.trim();
     if (!text && !attachments.length) return;
+    sending.current = true;
+    const expectedEnvironment = stateRef.current.bootstrap?.environmentId;
     const selectedReply = replyRef.current;
     const replyVersion = replyDrafts.version(session.id);
     const command = text.startsWith("/") ? state.slashCommands.find((candidate) => candidate.name === text.slice(1).split(/\s/, 1)[0]) : null;
     setControlError(null);
     setPending(true);
-    let saved = false;
     try {
       const attachmentText = attachments.length ? `The following files were attached to this message:\n${attachments.map((file) => `- ${file.path}`).join("\n")}` : "";
       const bodyText = [text, attachmentText].filter(Boolean).join("\n\n");
       if (command && !attachments.length && !selectedReply) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
       else {
-        const owner = outbox.current;
-        if (!owner) throw new Error("Saved prompt storage is not ready. Your draft is retained.");
+        const initialized = await ensureOutbox();
+        if (!initialized.ok) throw new Error(initialized.error.message);
+        const owner = initialized.value;
+        const environment = await window.KenanRemote?.getState();
+        if (outbox.current !== owner || window.PiRemotePerson.get() !== person || !environment
+          || environment.id !== owner.scope.environment || expectedEnvironment !== owner.scope.environment) {
+          throw new Error("The prompt's person or environment changed. Your draft is retained; send it from the intended chat.");
+        }
         const entry = await owner.store.enqueue(session.id, { requestId: crypto.randomUUID(), text: bodyText, delivery, ...(selectedReply ? { replyTo: selectedReply.identity.id } : {}) });
-        if (!entry.ok) throw new Error(entry.error.message);
-        saved = true;
+        if (!entry.ok) {
+          if (entry.error.kind === "storage_unavailable" || entry.error.kind === "storage_corrupt") promptStorage.current?.fail(entry.error.message);
+          throw new Error(entry.error.message);
+        }
         ownedPrompts.current.set(entry.value.requestId, session.id);
         await refreshOutbox();
         void submitSavedPrompt(entry.value.requestId);
       }
-      if (selectedAiId(stateRef.current) === session.id) setPrompt("");
-      saveDraft(session.id, "");
+      if (selectedAiId(stateRef.current) === session.id) setPrompt(current => current === draft ? "" : current);
+      if (loadDraft(session.id) === draft) saveDraft(session.id, "");
       if (replyDrafts.accept(session.id, replyVersion) && selectedAiId(stateRef.current) === session.id) {
         replyRef.current = null;
         setReply(null);
@@ -980,9 +1046,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       const sentIds = new Set(attachments.map((file) => file.localId));
       patch((current) => ({ attachments: current.attachments.filter((file) => !sentIds.has(file.localId)) }));
     } catch (error) {
-      if (!saved) { if (selectedAiId(stateRef.current) === session.id) setPrompt(text); saveDraft(session.id, text); }
       setControlError({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) });
-    } finally { setPending(false); kick(); }
+    } finally { sending.current = false; setPending(false); kick(); }
   };
 
   useEffect(() => {
@@ -1098,7 +1163,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const conversation = roomId
     ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} showBack={layout === "phone"} showIdentity={showConversationIdentity} onRefresh={roomDirectory.refresh} />
     : selected && !messagingActive
-    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation outbox={<PromptOutboxStatus entries={outboxEntries.filter(entry => entry.sessionId === selected.id)} busyRequestId={outboxBusy} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
+    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation outbox={<PromptOutboxStatus entries={outboxEntries.filter(entry => entry.sessionId === selected.id)} busyRequestId={outboxBusy} storage={{ state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         onVisibleRange={onVisibleHeads} newerAvailable={hasNewer(state.transcript)} onShowNewer={() => void showNewer(false)} onJumpLatest={() => void showNewer(true)} earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} questionsResource={pendingQuestions?.sessionId === aiId ? pendingQuestions : undefined} onRetryQuestions={retryQuestions} showBack={layout === "phone"} showIdentity={showConversationIdentity}
         onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? pendingQuestions.questions : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
