@@ -68,7 +68,7 @@ for (const host of ["gmktec", "converge"]) test(`${host} meeting waits survive b
   const request = { version: 3, requestId, sourceSha: "a".repeat(40), sourceRef: "refs/heads/retained",
     integrationSha: "b".repeat(40), status: "queued", step: "waiting-for-live-meetings", attempt: policy.maxAttempts,
     nextAttemptAt: new Date(0).toISOString(), waiting: { kind: "live-meeting", host, at: new Date(0).toISOString(), log: join(f.state, "wait.log") },
-    checks: { status: "passed" }, hosts: { other: { status: "passed" } },
+    checks: { status: "passed" }, hosts: { [host === "gmktec" ? "converge" : "gmktec"]: { status: "passed" } },
     reservations: { [host]: { state: "released", integrationSha: "b".repeat(40) } },
     maintenance: { hosts: { [host]: { state: "restored", plan: { intake: "paused" } } } }, failures: [] };
   assert.equal(progressBudgetExhausted(request), false);
@@ -79,9 +79,12 @@ for (const host of ["gmktec", "converge"]) test(`${host} meeting waits survive b
   let waited = read();
   assert.equal(waited.status, "queued");
   assert.equal(waited.attempt, policy.maxAttempts);
-  assert.equal(waited.waiting.probe.rooms, "alice:1");
+  assert.equal(waited.waiting.kind, "hosts", "legacy waits migrate into independent host delivery");
+  assert.equal(waited.hosts[host].waiting.probe.rooms, "alice:1");
+  assert.equal(waited.hosts[host].ready, false);
   assert.ok(Date.parse(waited.nextAttemptAt) > Date.now());
-  for (const field of ["checks", "hosts", "sourceRef", "integrationSha", "reservations", "maintenance"]) assert.deepEqual(waited[field], request[field]);
+  for (const field of ["checks", "sourceRef", "integrationSha", "reservations", "maintenance"]) assert.deepEqual(waited[field], request[field]);
+  for (const [id, receipt] of Object.entries(request.hosts)) assert.deepEqual(waited.hosts[id], receipt);
   assert.equal(existsSync(f.env.GIT_LOG), false, "waiting must not prepare or deploy");
   assert.equal(existsSync(join(f.state, "repairs", requestId, "receipt.json")), false);
   waited.nextAttemptAt = new Date(0).toISOString();
@@ -97,8 +100,8 @@ for (const host of ["gmktec", "converge"]) test(`${host} meeting waits survive b
   assert.equal(failed.attempt, request.attempt, "closure resumes, not spends another attempt");
   assert.equal(failed.failure.message, "checkout preparation exited 42");
   assert.match(readFileSync(failed.failure.log, "utf8"), /fixture stops resumed checkout/);
-  assert.equal(failed.meetingWait.probe.rooms, "");
-  assert.ok(failed.meetingWait.resumedAt);
+  assert.equal(failed.hosts[host].waiting.probe.rooms, "");
+  assert.ok(failed.hostWait.resumedAt);
 });
 
 test("a preserving publication resumes its durable wait while the meeting is still live", t => {
@@ -114,8 +117,8 @@ test("a preserving publication resumes its durable wait while the meeting is sti
   assert.equal(result.status, 0, result.stderr);
   const request = JSON.parse(readFileSync(join(f.state, file), "utf8"));
   assert.equal(request.attempt, 1);
-  assert.equal(request.meetingWait.probe.rooms, "");
-  assert.ok(request.meetingWait.resumedAt);
+  assert.equal(request.hosts.converge.waiting.probe.rooms, "");
+  assert.ok(request.hostWait.resumedAt);
   assert.equal(request.status, "failed", "the subsequent fixture checkout fails, not live-meeting admission");
   assert.equal(request.failure.message, "checkout preparation exited 42");
 });
@@ -190,14 +193,16 @@ test("publication retains a native-source wait and resumes without consuming an 
   const waiting = read();
   assert.equal(waiting.status, "queued");
   assert.equal(waiting.attempt, policy.maxAttempts);
-  assert.match(waiting.waiting.probe.selected, /native source prerequisite/);
+  assert.equal(waiting.waiting.kind, "hosts");
+  assert.match(waiting.hosts.gmktec.waiting.probe.selected, /native source prerequisite/);
   waiting.nextAttemptAt = new Date(0).toISOString();
   f.put(file, JSON.stringify(waiting));
   assert.equal(drain(required).status, 0);
   const resumed = read();
   assert.equal(resumed.status, "failed", "the fixture's subsequent checkout fails, not the prerequisite");
   assert.equal(resumed.attempt, request.attempt);
-  assert.equal(resumed.nativeWait.probe.selected, "ready");
+  assert.equal(resumed.hosts.gmktec.waiting.probe.selected, "ready");
+  assert.ok(resumed.hostWait.resumedAt);
 });
 
 test("ordinary lock and gate waits retain both progress limits", () => {
@@ -227,21 +232,23 @@ test("a failing meeting probe keeps waiting without deploying, then fails once t
   const id = "PUB-0123456789abcdef01234567";
   const file = join(f.state, "requests", `${id}.json`);
   f.put(`requests/${id}.json`, JSON.stringify({ requestId: id, sourceSha: "a".repeat(40), status: "queued", attempt: 1,
-    nextAttemptAt: new Date(0).toISOString(), waiting: { kind: "live-meeting", host: "converge", log: join(f.state, "wait.log") }, failures: [] }));
+    nextAttemptAt: new Date(0).toISOString(), waiting: { kind: "live-meeting", host: "converge", log: join(f.state, "wait.log") },
+    hosts: { gmktec: { status: "passed" } }, failures: [] }));
   const drain = () => f.run(process.execPath, [join(root, "deploy/publication"), "drain"], { PROBE_FAIL: "1" });
   assert.equal(drain().status, 0);
   let request = JSON.parse(readFileSync(file, "utf8"));
   assert.equal(request.status, "queued");
-  assert.match(request.waiting.probe.error, /failed/);
-  assert.ok(request.waiting.probeFailingSince);
+  assert.match(request.hosts.converge.waiting.probe.error, /failed/);
+  assert.ok(request.hosts.converge.waiting.probeFailingSince);
+  assert.equal(request.hosts.converge.ready, false);
   assert.ok(Date.parse(request.nextAttemptAt) > Date.now());
   assert.equal(existsSync(f.env.GIT_LOG), false, "an unknown census must not deploy");
   request.nextAttemptAt = new Date(0).toISOString();
-  request.waiting.probeFailingSince = new Date(Date.now() - policy.meetingProbeFailureLimitMs - 1000).toISOString();
+  request.hosts.converge.waiting.probeFailingSince = new Date(Date.now() - policy.meetingProbeFailureLimitMs - 1000).toISOString();
   writeFileSync(file, JSON.stringify(request));
   assert.equal(drain().status, 0);
   request = JSON.parse(readFileSync(file, "utf8"));
   assert.equal(request.status, "failed");
-  assert.match(request.failure.message, /Meeting wait probe failed/);
-  assert.equal(existsSync(f.env.GIT_LOG), false);
+  assert.equal(request.hosts.converge.status, "failed");
+  assert.match(request.hosts.converge.failure.message, /readiness probe failed/);
 });
