@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+(( $# == 0 )) || { echo 'usage: tools/agent-workspace/deploy' >&2; exit 64; }
+dest=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
+commit=$(git -C "$root" rev-parse HEAD)
+[[ -L $dest && -f $dest/.pi-stack-commit ]] || {
+  echo 'component deployment requires an existing managed tools release' >&2; exit 66;
+}
+baseline=$(<"$dest/.pi-stack-commit")
+git -C "$root" merge-base --is-ancestor "$baseline" "$commit" || {
+  echo "candidate must descend from selected tools source $baseline" >&2; exit 65;
+}
+git -C "$root" diff --quiet "$baseline" "$commit" -- tools ':!tools/agent-workspace' config/tools.json || {
+  echo 'component deployment refuses changes to other tools or their manifest; use the full release owner' >&2; exit 65;
+}
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-workspace-tools.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+rsync -a "$(readlink -f "$dest")/" "$stage/"
+rm -rf "$stage/agent-workspace"
+rsync -a --chmod=D755,F644 --exclude=deploy "$root/tools/agent-workspace/" "$stage/agent-workspace/"
+chmod 755 "$stage/agent-workspace/workspace.mjs"
+node "$stage/agent-workspace/main" --help >/dev/null
+printf '%s\n' "$commit" > "$stage/.pi-stack-commit"
+node - "$stage/agent-workspace/.component-release.json" "$baseline" "$commit" <<'NODE'
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2], JSON.stringify({component: 'agent-workspace', baseline: process.argv[3],
+  sourceCommit: process.argv[4], deployedAt: Date.now(), scope: 'tools-only; other tool bodies and dependency links retained'}, null, 2) + '\n');
+NODE
+pi_stack_publish_release "$root" "$stage" "$dest" tools
+cmp "$root/tools/agent-workspace/workspace.mjs" "$dest/agent-workspace/workspace.mjs"
+node "$dest/agent-workspace/main" --help >/dev/null
+printf 'deployed agent-workspace %s over tools %s; no services or workspace records changed\n' "$commit" "$baseline"

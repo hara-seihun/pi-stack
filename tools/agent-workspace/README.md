@@ -41,7 +41,28 @@ A released or expired checkout is reclaimable only when it is clean and every lo
 
 Give related repositories the same `--group` value when one agent task spans them. A heartbeat on any member renews the whole group. Release removes the group only when every member is recoverable, so a clean frontend checkout cannot disappear while its backend peer still contains unique work.
 
-Re-registering an existing non-released path inspects its current Git layout and refreshes `checkoutType`: an owner may have replaced a clean linked worktree with an independent shared clone, or the reverse. Registration preserves the existing row identity, owner, source custody and lease; it does not bless new commits as published. Cache and group declarations still follow their normal rules. Pending creations remain pending and require their explicit resume or finalization transition.
+Re-registering an existing non-released path inspects its current Git layout and refreshes `checkoutType`: an owner may have replaced a clean linked worktree with an independent shared clone, or the reverse. Registration preserves the existing row identity, owner, source custody and lease; it does not bless new commits as published. Explicit `--owner`, `--source-commit`, `--mode`, `--kind` and `--root` must match the existing record, otherwise registration fails with `registration-metadata-mismatch` before changing its cache or group policy. Omitting them preserves the record; it does not assert a new owner or baseline. Cache and group declarations still follow their normal rules. Pending creations remain pending and require their explicit resume or finalization transition.
+
+## Authorized writer reassignment
+
+When the previous author has ended and both author and borrower have authorized reuse, reassign the existing writer explicitly. This is a responsibility handoff, not a new allocation or an authorization-granting mechanism:
+
+```sh
+agent-workspace reassign --id EXISTING_ID --path /absolute/existing/checkout \
+  --from-owner PREVIOUS_OWNER --from-source-commit PREVIOUS_BASELINE --from-state active \
+  --owner BORROWER --source-commit CURRENT_FULL_HEAD \
+  --authorization 'receipt/reference: previous author ended; author and borrower approved reuse' --json
+```
+
+All flags above are required. Use `unset` only for an actually null previous source. Source IDs are full lowercase Git object IDs. `--id` and `--path` must name the same row; expected owner, source and state must match under the checkout/group fences and an immediate registry transaction. Known retained states `active`, `referenced`, `blocked` and `repair-required` permit handoff; creating, released, reclaiming and unknown states do not. The existing Git root, checkout type, origin and attached writer HEAD must agree with the record and requested new baseline. Dirty files and ignored evidence may remain: reassignment never alters files, refs, remotes, caches or Git configuration. A competing handoff or stale replay fails rather than reapplying it.
+
+Success is `{ ok: true, record, transfer }`. Refusal is `{ ok: false, error: { code, detail } }` with exit 2, or exit 75 for a busy resource fence. Parse failures use `invalid-request`; unexpected registry failures use `reassignment-failed`. The durable `workspace_reassignment` journal records each old/new owner and baseline, authorization reference, path, sequence and timestamp. The command changes only the selected row's owner and update timestamp, plus that journal. It preserves ID, creation time/request, original source custody, state/detail, lease expiry, group peers, cache policy and every capacity reservation. It neither renews nor releases a lease, drains disposal, changes admission headroom, nor checks consent from the authorization text; the caller must already have that consent.
+
+`record.sourceCommit` and status's `sourceCommit` report the current working baseline from the journal. `durableSourceCommit` remains the original source commit used by release to prove recoverability. The raw `workspace.source_commit` also stays immutable, so an older in-flight client cannot mistake the borrower's unpublished HEAD for durable deletion ancestry. A new baseline is not publication: every new commit still needs remote coverage before deletion.
+
+### Tool-only deployment
+
+From clean committed Pi Stack source, `tools/agent-workspace/deploy` publishes this component on an already managed host without runtime/service activation or workspace-record mutation. It uses the normal shared deployment lock and publication reservation fence. The candidate must descend from the selected tools commit and leave every other tool and `config/tools.json` unchanged; otherwise use the full release owner. It stages the selected tools tree, replaces only agent-workspace, retains dependency links and other tool bodies, and atomically selects a commit-addressed tools release. `agent-workspace/.component-release.json` records the baseline and source SHA. Normal full Pi Stack releases continue to own the complete tools tree. Push the committed source through its owning repository so the next full release retains the repair.
 
 ## Forecasted local-source allocations
 
