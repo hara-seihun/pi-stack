@@ -135,15 +135,17 @@ describe("thread controls", () => {
     }
   });
 
-  test("an idle parent with working children stays idle and available for messages", () => {
-    const parent = session("parent", { hasChildren: true, idleUnread: true, activity: "idle" });
+  test("an idle parent with working children displays their activity but stays available for messages", () => {
+    const parent = session("parent", { hasChildren: true, idleUnread: true, activity: "waiting_on_workers" });
     const child = session("child", { parentId: parent.id, state: "running", activity: "thinking" });
     expect(working(parent)).toBe(false);
     expect(working(child)).toBe(true);
-    expect(threadStatus(parent)).toMatchObject({ key: "idle", label: "Idle", busy: false });
+    expect(threadStatus(parent)).toMatchObject({ key: "waiting_on_workers", busy: true, attention: true });
     expect(threadStatus(child)).toMatchObject({ key: "thinking", busy: true });
     expect(composerAction(parent, "")).toBe("send");
     expect(composerAction(parent, "Continue")).toBe("send");
+    expect(composerAction({ ...parent, activity: "idle" }, "")).toBe("send");
+    expect(composerAction({ ...parent, held: true }, "")).toBe("send");
     expect(working({ ...child, state: "idle", held: true })).toBe(false);
   });
 

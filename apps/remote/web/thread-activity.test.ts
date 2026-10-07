@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "../server/protocol";
-import { activityTiming, threadStatus, roomThreadStatus } from "./src/features/status/thread-status";
+import { activityTiming, attentionRank, threadStatus, roomThreadStatus } from "./src/features/status/thread-status";
 import { StatusPill } from "./src/features/status/StatusPill";
+import { ACTIVITIES, validateStreamSnapshot } from "../shared/state-validation";
 
 const running = (patch: Partial<Session> = {}) => ({
   state: "running" as const, held: false, activity: "status_error" as Session["activity"], activeTools: [], idleUnread: false, archivedAt: null, ...patch,
@@ -37,6 +38,37 @@ test("durable waiting names its dependency without pretending it is silent model
   expect(threadStatus(running({ state: "idle", activity: "awaiting", held: true })).key).toBe("stopped");
   expect(threadStatus(running({ state: "idle", activity: "awaiting", archivedAt: "2026-10-05" })).key).toBe("archived");
   expect(threadStatus(running({ activity: "waiting_for_capacity" })).key).toBe("waiting_for_capacity");
+});
+
+test("worker activity is display-only, keeps unread attention and never shows parent execution clocks", () => {
+  const parent = running({ state: "idle", activity: "waiting_on_workers", activitySince: 1000, lastActivityAt: 1000 });
+  const status = threadStatus(parent);
+  expect(status).toMatchObject({ key: "waiting_on_workers", busy: true, attention: false });
+  expect(attentionRank(status)).toBe(11);
+  expect(activityTiming(status, 80000)).toEqual({});
+  expect(activityTiming({ ...status, since: 1000, lastActivityAt: 1000 }, 80000)).toEqual({});
+  expect(renderToStaticMarkup(createElement(StatusPill, { status, compact: true }))).toContain("Waiting on workers");
+  expect(attentionRank(threadStatus({ ...parent, idleUnread: true }))).toBe(2);
+  expect(threadStatus({ ...parent, held: true }).key).toBe("stopped");
+  expect(threadStatus({ ...parent, archivedAt: "2026-10-05" }).key).toBe("archived");
+  expect(threadStatus({ ...parent, executionError: "Runner exited" })).toMatchObject({ key: "error", busy: false });
+  expect(threadStatus({ ...parent, state: "running" })).toMatchObject({ key: "reporting_error", busy: true });
+});
+
+test("every activity crosses state and workers streams and both lifecycle dispatches", () => {
+  const waitingOnAgents: Session["waitingOnAgents"] = { kind: "job", jobId: "job", reason: "Result", since: 1000 };
+  for (const activity of Object.keys(ACTIVITIES) as Session["activity"][]) {
+    for (const state of ["idle", "running"] as const) {
+      const observation = running({ state, activity, activeTools: ["bash"], waitingOnAgents });
+      for (const resource of ["state", "workers"]) validateStreamSnapshot(resource, {
+        type: resource, sessions: [{ ...observation, id: "parent", origin: "person", queuedMessages: [] }],
+      });
+      const status = threadStatus(observation);
+      expect(Number.isFinite(attentionRank(status))).toBe(true);
+      if (state === "running" && ["idle", "awaiting", "waiting_on_workers"].includes(activity)) expect(status.key).toBe("reporting_error");
+      if (state === "idle" && !["idle", "awaiting", "waiting_on_workers", "status_error"].includes(activity)) expect(status.key).toBe("reporting_error");
+    }
+  }
 });
 
 test("room statuses use the room owner's evidence, including status retrieval failures", () => {
