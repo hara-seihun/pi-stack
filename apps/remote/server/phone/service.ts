@@ -5,7 +5,12 @@ import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import { callBrief, instructions, type CallBrief } from "./policy";
-import { Vonage, signedWebhook } from "./vonage";
+import { signedWebhook } from "./vonage";
+import { retellTerminal } from "./retell";
+import { providerSelection, loadProvider, mediaInstructions, dial, type PhoneProvider, type ProviderKind } from "./provider";
+import { signedCompatibilityWebhook, signedTwilioUpgrade, compatibilityTerminal, compatibilityEnded, compatibilityUnavailable, type CompatibilityKind } from "./compatibility";
+import { CompatibilityMediaSession } from "./compatibility-media";
+const isCompatibility = (kind: ProviderKind | null): kind is CompatibilityKind => kind === "signalwire" || kind === "twilio";
 import { SimGateways } from "./gateway";
 
 const config = JSON.parse(readFileSync(process.env.PI_STACK_PHONE_CONFIG ?? "/etc/pi-stack/phone.json", "utf8"));
@@ -13,9 +18,20 @@ const state = process.env.PI_STACK_PHONE_STATE;
 if (!state) throw new Error("PI_STACK_PHONE_STATE must select the person's encrypted phone state");
 mkdirSync(state, { recursive: true, mode: 0o700 });
 const adminToken = readFileSync(config.adminTokenFile, "utf8").trim();
-const provider = config.vonageCredentialFile ? new Vonage(config.vonageCredentialFile) : null;
-const publicBase = String(config.publicBaseUrl).replace(/\/$/, "");
-if (provider && !publicBase.startsWith("https://")) throw new Error("Vonage requires a public HTTPS/WSS callback endpoint");
+const selection = providerSelection(config);
+if (!selection.ok) throw new Error(selection.error);
+const providers = new Map<ProviderKind, PhoneProvider>();
+function providerFor(kind: ProviderKind) {
+  const existing = providers.get(kind);
+  if (existing) return { ok: true as const, value: existing };
+  const result = loadProvider(kind, config);
+  if (result.ok) providers.set(kind, result.value);
+  return result;
+}
+const selected = selection.value === null ? null : providerFor(selection.value);
+if (selected && !selected.ok) throw new Error(selected.error);
+const provider = selected?.ok ? selected.value : null;
+const publicBase = config.publicBaseUrl?.replace(/\/$/, "") ?? "";
 const localPort = Number(config.localPort ?? 8802);
 const publicPort = Number(config.publicPort ?? 8803);
 const voiceBase = config.voiceUrl ?? "http://127.0.0.1:8796";
@@ -23,6 +39,9 @@ const owner = config.owner ?? "kenan";
 const db = new Database(join(state, "calls.sqlite3"));
 db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,provider_id TEXT,voice_id TEXT,status TEXT NOT NULL,brief TEXT NOT NULL,started_at INTEGER NOT NULL,ended_at INTEGER,error TEXT,cleanup INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id TEXT NOT NULL,at INTEGER NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL);`);
 if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === "gateway_id")) db.exec("ALTER TABLE calls ADD COLUMN gateway_id TEXT");
+if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === "provider_kind")) db.exec("ALTER TABLE calls ADD COLUMN provider_kind TEXT; UPDATE calls SET provider_kind='vonage' WHERE provider_id IS NOT NULL AND gateway_id IS NULL");
+if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === "dial_state")) db.exec("ALTER TABLE calls ADD COLUMN dial_state TEXT NOT NULL DEFAULT 'none'");
+if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === "provider_snapshot")) db.exec("ALTER TABLE calls ADD COLUMN provider_snapshot TEXT");
 const json = (v: unknown, status = 200) => Response.json(v, { status });
 const error = (message: string, status = 400) => json({ error: message }, status);
 const releaseFile = new URL("../../.pi-stack-commit", import.meta.url);
@@ -34,7 +53,7 @@ let launching: Promise<Browser> | undefined;
 let stopping = false;
 type SocketData = { call?: Call; gatewayId?: string; side: "browser" | "provider" | "gateway" };
 type Socket = import("bun").ServerWebSocket<SocketData>;
-type Call = { id: string; gatewayId?: string; telephoneConnected?: boolean; brief: CallBrief; token: string; providerToken: string; page?: Page; media?: Socket; provider?: Socket; voiceId?: string; providerId?: string; offerPending?: boolean; timer: ReturnType<typeof setTimeout>; ready: Promise<void>; resolveReady: () => void; rejectReady: (e: Error) => void; audio: Promise<void>; resolveAudio: () => void; audioOutputBytes: number; usageSeconds: number; finishing?: Promise<void> };
+type Call = { id: string; providerKind: ProviderKind | null; dialState: "none" | "dispatching" | "accepted" | "uncertain" | "rejected"; stream?: CompatibilityMediaSession; streamTimer?: ReturnType<typeof setTimeout>; providerReserved?: boolean; browserReady?: boolean; openingSent?: boolean; gatewayId?: string; telephoneConnected?: boolean; brief: CallBrief; token: string; providerToken: string; page?: Page; media?: Socket; provider?: Socket; voiceId?: string; providerId?: string; offerPending?: boolean; timer: ReturnType<typeof setTimeout>; ready: Promise<void>; resolveReady: () => void; rejectReady: (e: Error) => void; audio: Promise<void>; resolveAudio: () => void; audioOutputBytes: number; usageSeconds: number; finishing?: Promise<void> };
 const gateways = new SimGateways((config.simGateways ?? []).map((g: { id: string; name: string; tokenFile: string }) => ({ id: g.id, name: g.name, token: deviceToken(g.tokenFile) })), {
   state(id, state, reason) {
     const c = active.get(id); if (!c || c.finishing) return;
@@ -64,13 +83,36 @@ function deviceToken(file: string): string {
 }
 function same(a: string | null, b: string) { const x = Buffer.from(a ?? ""), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); }
 function log(id: string, type: string, payload: unknown) { db.query("INSERT INTO events(call_id,at,type,payload) VALUES(?,?,?,?)").run(id, Date.now(), type, JSON.stringify(payload)); }
-function ncco(call: Call) { return [{ action: "connect", endpoint: [{ type: "websocket", uri: `${publicBase.replace(/^https:/, "wss:")}/vonage/media`, "content-type": "audio/l16;rate=16000", authorization: { type: "custom", value: `Bearer ${call.providerToken}` }, headers: { callId: call.id } }] }]; }
+function telephoneInstructions(call: Call) { if (!provider) throw new Error("No selected PSTN provider"); return mediaInstructions(provider, publicBase, call.providerToken, call.id); }
+function connected(call: Call) {
+  if (call.finishing) return;
+  call.telephoneConnected = true;
+  db.query("UPDATE calls SET status='connected' WHERE id=?").run(call.id);
+  if (!call.browserReady || call.openingSent || !call.media) return;
+  call.openingSent = true;
+  try { if (call.media.send(JSON.stringify({ type: "context", text: "The telephone connection is now live. Deliver the approved opening and listen." })) === 0) void finish(call, "failed", "Opening dispatch dropped"); }
+  catch { void finish(call, "failed", "Opening dispatch failed"); }
+}
+type CleanupRow = { id: string; provider_id: string | null; voice_id: string | null; provider_kind: ProviderKind | null; dial_state: string };
+function cleanupRow(call: Call): CleanupRow { return { id: call.id, provider_id: call.providerId ?? null, voice_id: call.voiceId ?? null, provider_kind: call.providerKind, dial_state: call.dialState }; }
+function bindProviderId(id: string, kind: ProviderKind, providerId: string): boolean {
+  const row = db.query("SELECT * FROM calls WHERE id=?").get(id) as CleanupRow & { ended_at: number | null; cleanup: number } | null;
+  if (!row || row.provider_kind !== kind || (row.provider_id && row.provider_id !== providerId) || (!row.provider_id && !["dispatching", "uncertain"].includes(row.dial_state))) return false;
+  if (row.provider_id === providerId && row.dial_state === "accepted" && row.cleanup === 1) return true;
+  db.query("UPDATE calls SET provider_id=?,dial_state='accepted',cleanup=0 WHERE id=?").run(providerId, id);
+  const c = active.get(id);
+  if (c) { c.providerId = providerId; c.dialState = "accepted"; }
+  if (row.ended_at !== null) void cleanup({ ...row, provider_id: providerId, dial_state: "accepted" });
+  return true;
+}
 async function voice(path: string, method: string, body: unknown) {
   try { const response = await fetch(`${voiceBase}${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(35_000) }); const value = await response.json(); return response.ok ? { ok: true as const, value } : { ok: false as const, error: String(value.error ?? "Voice request failed") }; }
   catch { return { ok: false as const, error: "Voice service unavailable" }; }
 }
-async function cleanup(row: { id: string; provider_id: string | null; voice_id: string | null }) {
-  const results = await Promise.all([row.provider_id && provider ? provider.hangup(row.provider_id) : { ok: true }, row.voice_id ? voice(`/sessions/${encodeURIComponent(row.voice_id)}`, "DELETE", { owner, threadId: `phone:${row.id}` }) : { ok: true }]);
+async function cleanup(row: CleanupRow) {
+  const p = row.provider_kind ? providerFor(row.provider_kind) : null;
+  const telephone = row.provider_id ? (p?.ok ? p.value.client.hangup(row.provider_id) : { ok: false, error: p && !p.ok ? p.error : "Stored PSTN provider is missing" }) : row.provider_kind && ["dispatching", "uncertain"].includes(row.dial_state) ? { ok: false, error: row.provider_kind === "retell" ? "Retell dial outcome unknown; provider duration cap applies, never redialing" : "Dial outcome unknown; awaiting a signed provider callback, never redialing" } : { ok: true };
+  const results = await Promise.all([telephone, row.voice_id ? voice(`/sessions/${encodeURIComponent(row.voice_id)}`, "DELETE", { owner, threadId: `phone:${row.id}` }) : { ok: true }]);
   const failures = results.filter(r => !r.ok).map(r => "error" in r ? r.error : "cleanup failed");
   if (!failures.length) db.query("UPDATE calls SET cleanup=1 WHERE id=?").run(row.id);
   else { db.query("UPDATE calls SET error=?,cleanup=0 WHERE id=?").run(failures.join("; "), row.id); console.error(`Phone call ${row.id}: cleanup pending`); }
@@ -79,6 +121,8 @@ async function finish(call: Call, status: string, reason?: string) {
   if (call.finishing) return call.finishing;
   call.finishing = Promise.resolve().then(async () => {
     clearTimeout(call.timer);
+    clearTimeout(call.streamTimer);
+    call.stream?.close();
     if (call.gatewayId) gateways.end(call.gatewayId, call.id);
     db.query("UPDATE calls SET status=?,ended_at=?,error=? WHERE id=?").run(status, Date.now(), reason ?? null, call.id);
     call.rejectReady(new Error(reason ?? "Call ended"));
@@ -86,23 +130,70 @@ async function finish(call: Call, status: string, reason?: string) {
     for (const socket of [call.media, call.provider]) try { socket?.close(); } catch { log(call.id, "cleanup-notice", { error: "Audio socket was already closed" }); }
     await call.page?.close().catch(() => {});
     if (call.voiceId) { const usage = await voice(`/sessions/${encodeURIComponent(call.voiceId)}`, "PATCH", { owner, threadId: `phone:${call.id}`, seconds: call.usageSeconds, finalized: false }); if (!usage.ok) log(call.id, "usage-error", { error: usage.error }); }
-    await cleanup({ id: call.id, provider_id: call.providerId ?? null, voice_id: call.voiceId ?? null });
+    await cleanup(cleanupRow(call));
     active.delete(call.id);
   });
   return call.finishing;
 }
-function create(brief: CallBrief, providerId?: string, id = randomUUID(), gatewayId?: string): Call {
+function create(brief: CallBrief, providerId?: string, id = randomUUID(), gatewayId?: string, providerKind: ProviderKind | null = null): Call {
   let resolveReady!: () => void, rejectReady!: (e: Error) => void;
   const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   void ready.catch(() => {});
   let resolveAudio!: () => void;
   const audio = new Promise<void>(resolve => { resolveAudio = resolve; });
-  const call: Call = { id, gatewayId, brief, audio, resolveAudio, audioOutputBytes: 0, usageSeconds: 0, token: randomBytes(32).toString("base64url"), providerToken: randomBytes(32).toString("base64url"), providerId, ready, resolveReady, rejectReady, timer: setTimeout(() => void finish(call, "completed", "Maximum call duration reached"), (brief.maxSeconds ?? 300) * 1000) };
-  db.query("INSERT INTO calls(id,provider_id,status,brief,started_at,gateway_id) VALUES(?,?,?,?,?,?)").run(id, providerId ?? null, "preparing", JSON.stringify(brief), Date.now(), gatewayId ?? null); active.set(id, call);
+  const call: Call = { id, providerKind, dialState: providerId ? "accepted" : "none", gatewayId, brief, audio, resolveAudio, audioOutputBytes: 0, usageSeconds: 0, token: randomBytes(32).toString("base64url"), providerToken: randomBytes(32).toString("base64url"), providerId, ready, resolveReady, rejectReady, timer: setTimeout(() => void finish(call, "completed", "Maximum call duration reached"), (brief.maxSeconds ?? 300) * 1000) };
+  db.query("INSERT INTO calls(id,provider_id,status,brief,started_at,gateway_id,provider_kind,dial_state) VALUES(?,?,?,?,?,?,?,?)").run(id, providerId ?? null, "preparing", JSON.stringify(brief), Date.now(), gatewayId ?? null, providerKind, call.dialState); active.set(id, call);
   return call;
 }
-async function start(call: Call, dial = true) {
+async function startRetell(call: Call) {
+  if (provider?.kind !== "retell" || call.providerKind !== "retell") throw new Error("Retell start requires the selected Retell provider");
+  const ticket = actionJournal.begin({ action: "telephone.dial", actedFor: owner, recipients: [call.brief.to], summary: call.brief.purpose, externalId: call.id });
+  call.dialState = "dispatching";
+  db.query("UPDATE calls SET status='dialing',dial_state='dispatching',cleanup=0 WHERE id=?").run(call.id);
+  const result = await provider.client.dial(call.brief, call.id);
+  const warning = journalWarning(actionJournal.finish(ticket, result.ok ? "confirmed" : "unconfirmed", result.ok ? `Retell accepted call ${result.value.uuid}; not proof of delivery` : result.error));
+  if (warning) log(call.id, "journal-outcome-pending", { error: warning });
+  if (!result.ok) {
+    call.dialState = result.uncertain ? "uncertain" : "rejected";
+    db.query("UPDATE calls SET dial_state=? WHERE id=?").run(call.dialState, call.id);
+    await finish(call, "failed", result.error); return;
+  }
+  if (!bindProviderId(call.id, "retell", result.value.uuid)) {
+    await provider.client.hangup(result.value.uuid);
+    await finish(call, "failed", "Retell call identity changed during dial"); return;
+  }
+  if (call.finishing) await cleanup(cleanupRow(call));
+  else await syncRetell(call.id, result.value.uuid);
+}
+const retellSyncing = new Set<string>();
+async function syncRetell(id: string, providerId: string) {
+  if (retellSyncing.has(id)) return { ok: false as const, error: "Retell synchronization is already running" };
+  const p = providerFor("retell");
+  if (!p.ok) return p;
+  if (p.value.kind !== "retell") throw new Error("Retell provider identity mismatch");
+  retellSyncing.add(id);
   try {
+    const result = await p.value.client.get(providerId);
+    if (!result.ok) return result;
+    const snapshot = JSON.stringify(result.value);
+    const previous = db.query("SELECT provider_snapshot,ended_at,status FROM calls WHERE id=? AND provider_kind='retell' AND provider_id=?").get(id, providerId) as { provider_snapshot: string | null; ended_at: number | null; status: string } | null;
+    if (!previous) return { ok: false as const, error: "Stored Retell call identity mismatch" };
+    if (snapshot !== previous.provider_snapshot) {
+      db.query("UPDATE calls SET provider_snapshot=? WHERE id=?").run(snapshot, id);
+      log(id, "retell-call", result.value);
+    }
+    const c = active.get(id);
+    if (retellTerminal(result.value.status)) {
+      if (c && !c.finishing) await finish(c, result.value.status, result.value.status === "failed" ? result.value.disconnection_reason : undefined);
+    } else if (previous.ended_at === null && c && !c.finishing) {
+      db.query("UPDATE calls SET status=? WHERE id=?").run(result.value.status === "in-progress" ? "connected" : result.value.status, id);
+    }
+    return result;
+  } finally { retellSyncing.delete(id); }
+}
+async function start(call: Call, shouldDial = true) {
+  try {
+    if (call.providerKind === "retell") { await startRetell(call); return; }
     if (!browser) {
       launching ??= chromium.launch({ executablePath: config.chromium ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", "--disable-dev-shm-usage"] }).then(b => { browser = b; b.on("disconnected", () => { browser = undefined; for (const c of active.values()) void finish(c, "failed", "Audio transport disconnected"); }); return b; }).finally(() => { launching = undefined; });
       await launching;
@@ -114,9 +205,9 @@ async function start(call: Call, dial = true) {
     await call.page.goto(`http://127.0.0.1:${localPort}/media#${call.token}`);
     await Promise.race([call.ready, new Promise<never>((_, reject) => { const t = setTimeout(() => reject(new Error("Voice startup timed out")), 35_000); t.unref(); })]);
     if (call.finishing) return;
-    if (dial && !call.providerId) {
+    if (shouldDial && !call.providerId) {
       db.query("UPDATE calls SET status='dialing' WHERE id=?").run(call.id);
-      if (!call.gatewayId && !provider) { await finish(call, "failed", "Vonage is not configured"); return; }
+      if (!call.gatewayId && (!provider || provider.kind !== call.providerKind)) { await finish(call, "failed", "PSTN provider is not configured"); return; }
       const ticket = actionJournal.begin({ action: "telephone.dial", actedFor: owner, recipients: [call.brief.to], summary: call.brief.purpose, externalId: call.id });
       const record = (ok: boolean, detail: string) => {
         const warning = journalWarning(actionJournal.finish(ticket, ok ? "confirmed" : "unconfirmed", detail));
@@ -128,19 +219,41 @@ async function start(call: Call, dial = true) {
         if (!result.ok) await finish(call, "failed", result.error);
         return;
       }
-      const result = await provider!.dial(call.brief.to, ncco(call), `${publicBase}/vonage/events/${call.id}`);
+      call.dialState = "dispatching";
+      db.query("UPDATE calls SET dial_state='dispatching',cleanup=0 WHERE id=?").run(call.id);
+      const result = await dial(provider!, call.brief.to, publicBase, call.providerToken, call.id);
       record(result.ok, result.ok ? `Provider accepted call ${result.value.uuid}; not proof of a connected call` : result.error);
-      if (!result.ok) { await finish(call, "failed", result.error); return; }
-      call.providerId = result.value.uuid;
-      db.query("UPDATE calls SET provider_id=?,cleanup=0 WHERE id=?").run(call.providerId, call.id);
-      if (call.finishing) await cleanup({ id: call.id, provider_id: call.providerId, voice_id: call.voiceId ?? null });
+      if (!result.ok) {
+        if (!call.providerId) { call.dialState = result.uncertain ? "uncertain" : "rejected"; db.query("UPDATE calls SET dial_state=? WHERE id=?").run(call.dialState, call.id); }
+        await finish(call, "failed", result.error); return;
+      }
+      if (!bindProviderId(call.id, provider!.kind, result.value.uuid)) { await provider!.client.hangup(result.value.uuid); await finish(call, "failed", "Provider call identity changed during dial"); return; }
+      call.providerId = result.value.uuid; call.dialState = "accepted";
+      if (call.finishing) await cleanup(cleanupRow(call));
     }
   } catch (e) { await finish(call, "failed", e instanceof Error ? e.message.slice(0, 300) : "Audio startup failed"); }
 }
 const socketOptions = {
   maxPayloadLength: 256 * 1024,
   idleTimeout: 60,
-  open(ws: Socket) { if (ws.data.side === "gateway") { gateways.connected(ws.data.gatewayId!, ws); return; } if (ws.data.side === "provider") { const c = ws.data.call!; c.provider = ws; db.query("UPDATE calls SET status='connected' WHERE id=?").run(c.id); c.media?.send(JSON.stringify({ type: "context", text: "The telephone connection is now live. Deliver the approved opening and listen." })); return; } if (ws.data.side === "browser") return; ws.data.side satisfies never; ws.close(1008); },
+  open(ws: Socket) {
+    if (ws.data.side === "gateway") { gateways.connected(ws.data.gatewayId!, ws); return; }
+    if (ws.data.side === "provider") {
+      const c = ws.data.call!;
+      if (c.finishing) { ws.close(); return; }
+      c.provider = ws;
+      if (isCompatibility(c.providerKind)) {
+        const p = providerFor(c.providerKind);
+        if (!p.ok || (p.value.kind !== "signalwire" && p.value.kind !== "twilio")) { void finish(c, "failed", "Compatibility provider is unavailable"); return; }
+        c.stream = new CompatibilityMediaSession(c.providerKind, c.providerId ?? null, p.value.client.settings.accountSid);
+        c.streamTimer = setTimeout(() => void finish(c, "failed", "Compatibility stream startup timed out"), 5000);
+      } else connected(c);
+      return;
+    }
+    if (ws.data.side === "browser") return;
+    ws.data.side satisfies never;
+    ws.close(1008);
+  },
   message(ws: Socket, message: string | Buffer) {
     if (ws.data.side === "gateway") { gateways.receive(ws.data.gatewayId!, ws, message); return; }
     if (ws.data.side !== "browser" && ws.data.side !== "provider") { ws.data.side satisfies never; ws.close(1008); return; }
@@ -149,7 +262,33 @@ const socketOptions = {
       try { const m = JSON.parse(message); const c = [...active.values()].find(c => same(m.token, c.token)); if (m.type !== "authenticate" || !c || c.media || c.finishing) { ws.close(1008); return; } ws.data.call = c; c.media = ws; return; } catch { ws.close(1008); return; }
     }
     const c = ws.data.call; if (!c || c.finishing) return;
-    if (typeof message !== "string") { if (ws.data.side === "browser") { c.audioOutputBytes += message.length; let speechSamples = 0; for (let i = 0; i + 1 < message.length; i += 2) if (Math.abs(message.readInt16LE(i)) > 300) speechSamples++; if (speechSamples > 20) c.resolveAudio(); } if (message.length > 6400 || message.length % 2) { void finish(c, "failed", "Invalid telephone audio packet"); return; } if (ws.data.side === "browser" && c.gatewayId) { gateways.audio(c.gatewayId, c.id, message); return; } const target = ws.data.side === "provider" ? c.media : c.provider; if (target) {
+    if (ws.data.side === "provider" && isCompatibility(c.providerKind)) {
+      const result = c.stream!.receive(message);
+      if (!result.ok) { void finish(c, "failed", `Compatibility stream: ${result.error}`); return; }
+      const event = result.value;
+      if (event.event === "start") {
+        if (!bindProviderId(c.id, c.providerKind, event.callSid)) { void finish(c, "failed", "Compatibility stream call identity mismatch"); return; }
+        clearTimeout(c.streamTimer); connected(c);
+      } else if (event.event === "media") {
+        for (const packet of event.pcm) if (c.media) {
+          try { if (c.media.getBufferedAmount() >= 6400 || c.media.send(packet) === 0) { void finish(c, "failed", "Compatibility input backpressure"); return; } }
+          catch { void finish(c, "failed", "Compatibility input dispatch failed"); return; }
+        }
+      } else if (event.event === "stop") void finish(c, "completed", "Compatibility stream stopped");
+      return;
+    }
+    if (typeof message !== "string") { if (ws.data.side === "browser") { c.audioOutputBytes += message.length; let speechSamples = 0; for (let i = 0; i + 1 < message.length; i += 2) if (Math.abs(message.readInt16LE(i)) > 300) speechSamples++; if (speechSamples > 20) c.resolveAudio(); } if (message.length > 6400 || message.length % 2) { void finish(c, "failed", "Invalid telephone audio packet"); return; } if (ws.data.side === "browser" && c.gatewayId) { gateways.audio(c.gatewayId, c.id, message); return; }
+    if (ws.data.side === "browser" && isCompatibility(c.providerKind)) {
+      if (!c.telephoneConnected || !c.provider || !c.stream) return;
+      const result = c.stream.outgoing(message);
+      if (!result.ok) { void finish(c, "failed", `Compatibility output: ${result.error}`); return; }
+      for (const packet of result.value) {
+        try { if (c.provider.getBufferedAmount() >= 6400 || c.provider.send(JSON.stringify(packet)) === 0) { void finish(c, "failed", "Compatibility output backpressure"); return; } }
+        catch { void finish(c, "failed", "Compatibility output dispatch failed"); return; }
+      }
+      return;
+    }
+    const target = ws.data.side === "provider" ? c.media : c.provider; if (target) {
       try {
         if (target.getBufferedAmount() >= 64_000 || target.send(message) === 0) void finish(c, "failed", "Audio transport backpressure");
       } catch { void finish(c, "failed", "Audio transport dispatch failed"); }
@@ -161,7 +300,7 @@ const socketOptions = {
         else log(c.id, "unsupported-provider-event", { event: String(m.event).slice(0, 200) });
         return;
       }
-      if (m.type === "ready") { c.resolveReady(); if (c.provider) c.media?.send(JSON.stringify({ type: "context", text: "The telephone connection is now live. Deliver the approved opening and listen." })); return; }
+      if (m.type === "ready") { c.browserReady = true; c.resolveReady(); if (c.telephoneConnected) connected(c); return; }
       if (m.type === "error") { void finish(c, "failed", String(m.error).slice(0, 300)); return; }
       if (m.type === "live-event") {
         const e = m.event;
@@ -179,6 +318,8 @@ const socketOptions = {
   },
   close(ws: Socket) { if (ws.data.side === "gateway") { gateways.disconnected(ws.data.gatewayId!, ws); return; } if (ws.data.side !== "browser" && ws.data.side !== "provider") { ws.data.side satisfies never; throw new Error("Unsupported telephone WebSocket side"); } const c = ws.data.call; if (c && !c.finishing) void finish(c, "completed", `${ws.data.side} disconnected`); },
 };
+db.query("UPDATE calls SET status='interrupted',ended_at=?,error='Service restarted; call not replayed' WHERE ended_at IS NULL").run(Date.now());
+for (const row of db.query("SELECT id,provider_id,provider_kind,dial_state,voice_id FROM calls WHERE cleanup=0 AND ended_at IS NOT NULL").all() as CleanupRow[]) await cleanup(row);
 const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, maxRequestBodySize: 256 * 1024, websocket: socketOptions, async fetch(req, server) {
   const url = new URL(req.url);
   if (url.pathname === "/media" && req.method === "GET") return new Response(html, { headers: { "content-type": "text/html", "cache-control": "no-store", "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src blob:; connect-src 'self' ws://127.0.0.1:*; media-src blob:" } });
@@ -195,11 +336,11 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
     c.offerPending = false;
     if (!result.ok) return error(result.error, 502);
     c.voiceId = result.value.session.id; db.query("UPDATE calls SET voice_id=?,cleanup=0 WHERE id=?").run(c.voiceId!, c.id);
-    if (c.finishing) { await cleanup({ id: c.id, provider_id: c.providerId ?? null, voice_id: c.voiceId ?? null }); return error("Call ended", 410); }
+    if (c.finishing) { await cleanup(cleanupRow(c)); return error("Call ended", 410); }
     return json(result.value);
   }
   if (!same(bearer, `Bearer ${adminToken}`)) return error("Owner authorization required", 403);
-  if (url.pathname === "/status") return json({ enabled: true, callingEnabled: config.callingEnabled === true, releaseCommit, storedCallerId: provider?.credentials.VONAGE_FROM_NUMBER ?? null, model: "gpt-live-1", activeCalls: active.size, simGateways: gateways.snapshots() });
+  if (url.pathname === "/status") return json({ enabled: true, callingEnabled: config.callingEnabled === true, releaseCommit, pstnProvider: provider?.kind ?? null, storedCallerId: provider?.callerId ?? null, model: provider?.kind === "retell" ? "retell-llm" : "gpt-live-1", activeCalls: active.size, simGateways: gateways.snapshots() });
   if (url.pathname === "/preflight" && req.method === "POST") {
     if (stopping || active.size) return error("Phone service is busy", 409);
     const c = create({ to: "+15555550100", purpose: "Check the telephone audio connection without calling anyone.", shareableFacts: [], opening: "This is an audio connection test.", maxSeconds: 60 });
@@ -231,25 +372,31 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
     catch (cause) { gateways.end(body.gatewayId, id); throw cause; }
     void start(c); return json({ id, status: "preparing", transport: "sim", gatewayId: body.gatewayId }, 202);
   }
-  if (url.pathname === "/calls" && req.method === "GET") return json(db.query("SELECT id,provider_id,gateway_id,status,started_at,ended_at,error FROM calls ORDER BY started_at DESC LIMIT 50").all());
+  if (url.pathname === "/calls" && req.method === "GET") return json(db.query("SELECT id,provider_id,provider_kind,dial_state,gateway_id,status,started_at,ended_at,error FROM calls ORDER BY started_at DESC LIMIT 50").all());
   if (url.pathname === "/calls" && req.method === "POST") {
     if (!provider || config.callingEnabled !== true) return error("Confirm provider credit and number ownership, then enable calling in host configuration", 409);
     if (stopping || active.size >= 2) return error("Phone service is busy", 409);
     let body; try { body = await req.json(); } catch { return error("JSON required"); }
     const result = callBrief(body); if (!result.ok) return error(result.error);
+    if (provider.kind === "retell" && ((result.value.maxSeconds ?? 300) < 60 || (result.value.maxSeconds ?? 300) > 600)) return error("Retell call duration must be 60–600 seconds");
     if (stopping || active.size >= 2) return error("Phone service is busy", 409);
-    const c = create(result.value); void start(c); return json({ id: c.id, status: "preparing" }, 202);
+    const c = create(result.value, undefined, randomUUID(), undefined, provider.kind); void start(c); return json({ id: c.id, status: "preparing" }, 202);
   }
   const match = /^\/calls\/([^/]+)(\/context)?$/.exec(url.pathname);
   if (match) {
     const c = active.get(match[1]!);
     if (req.method === "DELETE") { if (!c) return error("Active call not found", 404); await finish(c, "completed", "Ended by owner"); return json({ ended: true, telephoneHangupPending: Boolean(c.gatewayId && gateways.snapshots().some(g => g.callId === c.id)) }); }
-    if (req.method === "POST" && match[2]) { if (!c?.media) return error("Active call not found", 404); let b; try { b = await req.json(); } catch { return error("JSON required"); } if (!b || typeof b !== "object" || Object.keys(b).length !== 1 || typeof b.shareableFact !== "string" || b.shareableFact.length > 2000) return error("One bounded explicitly shareable fact is required"); log(c.id, "approved-context", { shareableFact: b.shareableFact }); c.media.send(JSON.stringify({ type: "context", text: `Hara approved this additional shareable fact: ${b.shareableFact}` })); return json({ accepted: true }); }
-    if (req.method === "GET") { const row = db.query("SELECT * FROM calls WHERE id=?").get(match[1]!); return row ? json({ call: row, events: db.query("SELECT at,type,payload FROM events WHERE call_id=? ORDER BY id").all(match[1]!) }) : error("Call not found", 404); }
+    if (req.method === "POST" && match[2]) { if (c?.providerKind === "retell") return error("Retell live context updates are not supported; all facts must be in the approved brief before dialing", 409); if (!c?.media) return error("Active call not found", 404); let b; try { b = await req.json(); } catch { return error("JSON required"); } if (!b || typeof b !== "object" || Object.keys(b).length !== 1 || typeof b.shareableFact !== "string" || b.shareableFact.length > 2000) return error("One bounded explicitly shareable fact is required"); log(c.id, "approved-context", { shareableFact: b.shareableFact }); c.media.send(JSON.stringify({ type: "context", text: `Hara approved this additional shareable fact: ${b.shareableFact}` })); return json({ accepted: true }); }
+    if (req.method === "GET") {
+      const stored = db.query("SELECT * FROM calls WHERE id=?").get(match[1]!) as CleanupRow | null;
+      if (!stored) return error("Call not found", 404);
+      const synced = stored.provider_kind === "retell" && stored.provider_id ? await syncRetell(stored.id, stored.provider_id) : null;
+      return json({ call: db.query("SELECT * FROM calls WHERE id=?").get(stored.id), events: db.query("SELECT at,type,payload FROM events WHERE call_id=? ORDER BY id").all(stored.id), ...(synced && !synced.ok ? { providerSyncError: synced.error } : {}) });
+    }
   }
   return error("Unknown phone operation", 404);
 } });
-Bun.serve<SocketData>({ hostname: "127.0.0.1", port: publicPort, maxRequestBodySize: 64 * 1024, websocket: socketOptions, async fetch(req, server) {
+const publicListener = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: publicPort, maxRequestBodySize: 64 * 1024, websocket: socketOptions, async fetch(req, server) {
   const url = new URL(req.url);
   if (url.pathname === "/gateway/connect") {
     const gatewayId = gateways.authenticate(req.headers.get("authorization"));
@@ -257,37 +404,79 @@ Bun.serve<SocketData>({ hostname: "127.0.0.1", port: publicPort, maxRequestBodyS
     if (server.upgrade(req, { data: { side: "gateway", gatewayId } })) return;
     return error("Gateway WebSocket required");
   }
-  if (!provider) return error("Vonage is not configured", 404);
-  if (url.pathname === "/vonage/media") { const c = [...active.values()].find(c => same(req.headers.get("authorization"), `Bearer ${c.providerToken}`)); if (!c || c.provider || c.finishing) return error("Unauthorized audio connection", 403); if (server.upgrade(req, { data: { side: "provider", call: c } })) return; return error("WebSocket required"); }
-  if (req.method !== "POST") return error("POST webhook required", 405);
+  const route = /^\/(vonage|signalwire|twilio)\/(media|answer|events)(?:\/([^/]+))?(?:\/([^/]+))?$/.exec(url.pathname);
+  if (!route) return error("Unknown public phone operation", 404);
+  const kind = route[1] as ProviderKind;
+  if (route[2] === "media") {
+    let c: Call | undefined;
+    if (kind === "twilio") {
+      c = route[3] ? active.get(route[3]) : undefined;
+      const p = providerFor(kind);
+      if (!c || c.providerKind !== kind || !same(route[4] ?? null, c.providerToken) || !p.ok || (p.value.kind !== "signalwire" && p.value.kind !== "twilio") || !signedTwilioUpgrade(req.headers.get("x-twilio-signature"), p.value.client.settings.signingKey, `${publicBase}${url.pathname}${url.search}`)) return error("Signed owned Twilio audio connection required", 403);
+    } else {
+      if (route[3] || route[4]) return error("Unknown public phone operation", 404);
+      c = [...active.values()].find(c => c.providerKind === kind && same(req.headers.get("authorization"), `Bearer ${c.providerToken}`));
+    }
+    if (!c || c.providerReserved || c.finishing || stopping) return error("Unauthorized audio connection", 403);
+    c.providerReserved = true;
+    if (server.upgrade(req, { data: { side: "provider", call: c } })) return;
+    c.providerReserved = false; return error("WebSocket required");
+  }
+  if (route[4] || (route[3] && route[2] !== "events")) return error("Unknown public phone operation", 404);
+  const p = providerFor(kind);
+  if (!p.ok || p.value.kind === "retell") return error("Signed provider webhook required", 403);
   const rawBody = await req.text();
-  if (!signedWebhook(req.headers.get("authorization"), provider.credentials.VONAGE_SIGNATURE_SECRET, Date.now(), rawBody)) return error("Signed Vonage webhook required", 403);
-  const eventMatch = /^\/vonage\/events\/([^/]+)$/.exec(url.pathname);
-  let body: Record<string, any>; try { body = JSON.parse(rawBody); } catch { return error("JSON required"); }
-  if (!body || typeof body !== "object" || Array.isArray(body)) return error("Webhook object required");
-  if (eventMatch || url.pathname === "/vonage/events") {
-    const stored = eventMatch ? null : db.query("SELECT id FROM calls WHERE provider_id=?").get(String(body.uuid ?? "")) as { id: string } | null;
-    const id = eventMatch?.[1] ?? stored?.id;
+  let body: Record<string, any>;
+  if (p.value.kind !== "vonage") {
+    const params = new URLSearchParams(rawBody), settings = p.value.client.settings;
+    if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/x-www-form-urlencoded" || !signedCompatibilityWebhook(req.headers.get(settings.signatureHeader), settings.signingKey, `${publicBase}${url.pathname}${url.search}`, params)) return error("Signed Compatibility webhook required", 403);
+    if ([...new Set(params.keys())].some(k => params.getAll(k).length !== 1)) return error("Repeated callback fields", 400);
+    body = Object.fromEntries(params);
+    if (body.AccountSid !== settings.accountSid) return error("Provider account identity mismatch", 403);
+    if (typeof body.CallSid !== "string" || !body.CallSid || body.CallSid.length > 200) return error("Call identity required");
+  } else {
+    if (!signedWebhook(req.headers.get("authorization"), p.value.client.credentials.VONAGE_SIGNATURE_SECRET, Date.now(), rawBody)) return error("Signed Vonage webhook required", 403);
+    try { body = JSON.parse(rawBody); } catch { return error("JSON required"); }
+    if (!body || typeof body !== "object" || Array.isArray(body)) return error("Webhook object required");
+    if (typeof body.uuid !== "string" || !body.uuid || body.uuid.length > 200) return error("Call identity required");
+  }
+  if (req.method !== "POST") return error("POST webhook required", 405);
+  const sid = isCompatibility(kind) ? body.CallSid : body.uuid;
+  const status = isCompatibility(kind) ? body.CallStatus : body.status;
+  if (route[2] === "events") {
+    const stored = route[3] ? null : db.query("SELECT id FROM calls WHERE provider_kind=? AND provider_id=?").get(kind, sid) as { id: string } | null;
+    const id = route[3] ?? stored?.id;
     if (!id) return json({ accepted: true });
+    if (!bindProviderId(id, kind, sid)) return error("Call identity mismatch", 403);
     const c = active.get(id);
-    if (c?.providerId && body.uuid !== c.providerId) return error("Call identity mismatch", 403);
-    log(id, "provider-status", { status: body.status, uuid: body.uuid });
-    if (c && ["completed", "busy", "cancelled", "unanswered", "rejected", "failed", "timeout"].includes(body.status)) void finish(c, body.status === "completed" ? "completed" : "failed", body.status);
+    log(id, "provider-status", { provider: kind, status, uuid: sid });
+    const terminal = isCompatibility(kind) ? compatibilityTerminal.has(status) : ["completed", "busy", "cancelled", "unanswered", "rejected", "failed", "timeout"].includes(status);
+    if (c && terminal) void finish(c, status === "completed" ? "completed" : "failed", status);
     return json({ accepted: true });
   }
-  if (url.pathname === "/vonage/answer") {
-    if (config.callingEnabled !== true || stopping || active.size >= 2 || !body.uuid || String(body.to).replace(/^\+/, "") !== provider.credentials.VONAGE_FROM_NUMBER.replace(/^\+/, "")) return json([{ action: "talk", text: "Kenan is unavailable. Please call again later." }]);
-    const previous = db.query("SELECT id FROM calls WHERE provider_id=?").get(body.uuid) as { id: string } | null;
-    if (previous) { const c = active.get(previous.id); return c ? json(ncco(c)) : json([]); }
-    const c = create({ to: `+${String(body.from).replace(/^\+/, "")}`, purpose: "Receive a call for Hara's AI assistant Kenan and take a message.", shareableFacts: ["You are Kenan, Hara's AI assistant.", "You can take a message for Hara but cannot share her private information or confirm private details."], opening: "Hello, I'm Kenan, Hara's AI assistant. How can I help?", maxSeconds: 300 }, body.uuid);
-    void start(c); return json(ncco(c));
+  const xml = (text: string) => new Response(text, { headers: { "content-type": "application/xml" } });
+  const unavailable = () => isCompatibility(kind) ? xml(compatibilityUnavailable) : json([{ action: "talk", text: "Kenan is unavailable. Please call again later." }]);
+  if (provider?.kind !== kind || config.callingEnabled !== true || stopping) return unavailable();
+  const to = String(isCompatibility(kind) ? body.To : body.to).replace(/^\+/, "");
+  if (to !== provider.callerId.replace(/^\+/, "")) return unavailable();
+  const previous = db.query("SELECT id FROM calls WHERE provider_kind=? AND provider_id=?").get(kind, sid) as { id: string } | null;
+  if (previous) {
+    const c = active.get(previous.id);
+    return isCompatibility(kind) ? xml(c && !c.finishing ? telephoneInstructions(c) as string : compatibilityEnded) : json(c && !c.finishing ? telephoneInstructions(c) : []);
   }
-  return error("Unknown public phone operation", 404);
+  if (active.size >= 2) return unavailable();
+  const from = `+${String(isCompatibility(kind) ? body.From : body.from).replace(/^\+/, "")}`;
+  if (!/^\+[1-9]\d{7,14}$/.test(from)) return unavailable();
+  const c = create({ to: from, purpose: "Receive a call for Hara's AI assistant Kenan and take a message.", shareableFacts: ["You are Kenan, Hara's AI assistant.", "You can take a message for Hara but cannot share her private information or confirm private details."], opening: "Hello, I'm Kenan, Hara's AI assistant. How can I help?", maxSeconds: 300 }, sid, randomUUID(), undefined, kind);
+  void start(c);
+  return isCompatibility(kind) ? xml(telephoneInstructions(c) as string) : json(telephoneInstructions(c));
 } });
 const gatewayWatchdog = setInterval(() => gateways.expire(), 1000);
 const heartbeat = setInterval(() => { for (const c of active.values()) if (c.voiceId && !c.finishing) void voice(`/sessions/${encodeURIComponent(c.voiceId)}`, "PATCH", { owner, threadId: `phone:${c.id}`, seconds: c.usageSeconds, finalized: false }).then(r => { if (!r.ok) void finish(c, "failed", r.error); }); }, 20_000);
-const recover = setInterval(() => { for (const row of db.query("SELECT id,provider_id,voice_id FROM calls WHERE cleanup=0 AND ended_at IS NOT NULL").all() as any[]) if (!active.has(row.id)) void cleanup(row); }, 60_000);
-db.query("UPDATE calls SET status='interrupted',ended_at=?,error='Service restarted; call not replayed' WHERE ended_at IS NULL").run(Date.now());
-for (const row of db.query("SELECT id,provider_id,voice_id FROM calls WHERE cleanup=0 AND ended_at IS NOT NULL").all() as any[]) await cleanup(row);
-for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => { if (stopping) return; stopping = true; clearInterval(heartbeat); clearInterval(gatewayWatchdog); clearInterval(recover); void Promise.all([...active.values()].map(c => finish(c, "interrupted", "Phone service stopping"))).then(async () => { await browser?.close(); local.stop(); process.exit(0); }); });
+const retellPoll = setInterval(() => {
+  const rows = db.query("SELECT id,provider_id FROM calls WHERE provider_kind='retell' AND provider_id IS NOT NULL AND (ended_at IS NULL OR (ended_at>? AND (provider_snapshot IS NULL OR json_extract(provider_snapshot,'$.call_analysis') IS NULL)))").all(Date.now() - 300_000) as { id: string; provider_id: string }[];
+  for (const row of rows) if (!retellSyncing.has(row.id)) void syncRetell(row.id, row.provider_id).then(result => { if (!result.ok) log(row.id, "retell-sync-error", { error: result.error }); });
+}, 3000);
+const recover = setInterval(() => { for (const row of db.query("SELECT id,provider_id,provider_kind,dial_state,voice_id FROM calls WHERE cleanup=0 AND ended_at IS NOT NULL").all() as CleanupRow[]) if (!active.has(row.id)) void cleanup(row); }, 60_000);
+for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => { if (stopping) return; stopping = true; clearInterval(heartbeat); clearInterval(gatewayWatchdog); clearInterval(recover); clearInterval(retellPoll); void Promise.all([...active.values()].map(c => finish(c, "interrupted", "Phone service stopping"))).then(async () => { await browser?.close(); local.stop(); publicListener.stop(); process.exit(0); }); });
 console.log(`Pi Stack Phone ready on loopback ${localPort}/${publicPort}`);

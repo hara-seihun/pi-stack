@@ -50,7 +50,7 @@ async function fixture() {
   writeFileSync(join(root, 'admin-token'), adminToken, { mode: 0o600 });
   writeFileSync(join(root, 'device-token'), deviceToken, { mode: 0o600 });
   writeFileSync(join(root, 'config.json'), JSON.stringify({
-    adminTokenFile: join(root, 'admin-token'), localPort, publicPort,
+    pstnProvider: null, adminTokenFile: join(root, 'admin-token'), localPort, publicPort,
     voiceUrl: `http://127.0.0.1:${fakeVoice.port}`, owner: 'synthetic-test-owner',
     chromium: join(root, 'never-launch-a-real-browser'),
     simGateways: [{ id: 'desk', name: 'Synthetic desk SIM', tokenFile: join(root, 'device-token') }],
