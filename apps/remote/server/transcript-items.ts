@@ -11,6 +11,7 @@
 // Item order and pairing follow what the client used to compute in the browser
 // from the whole document, so a rendered transcript keeps its shape.
 
+import type { Database } from "bun:sqlite";
 import { agentMessagePresentation, agentSenderLabel } from "pi-orchestrator/message-format";
 import { ResourceCache } from "../shared/resource-cache";
 import { AGENT_NAME } from "./agent-identity";
@@ -32,7 +33,7 @@ export const PARTIAL_OUTPUT_LIMIT = 4_000;
 export const INLINE_BODY_LIMIT = 8_000;
 /** How many trailing items the newest window carries. Older items remain page-able. */
 export const WINDOW_ITEMS = 60;
-/** Derived lists kept in memory, newest use last. The byte budget counts bodies and heads. */
+/** Materialized sessions retained on disk; the byte budget bounds cached metadata. */
 export const CACHED_SESSIONS = 32;
 export const CACHED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 
@@ -156,12 +157,23 @@ export type ResolveAgentName = (threadId: string) => string | undefined;
 
 export function deriveTranscriptItems(context: any, resolveAgentName?: ResolveAgentName): DerivedItem[] {
   const items: DerivedItem[] = [];
+  visitTranscriptItems(context, item => items.push(item), resolveAgentName);
+  return items;
+}
+
+function visitTranscriptItems(context: any, accept: (item: DerivedItem) => void, resolveAgentName?: ResolveAgentName): void {
+  const items: DerivedItem[] = [];
+  let seq = 0;
+  const flush = () => {
+    for (const item of items) accept(item);
+    items.length = 0;
+  };
   const add = (key: string, head: PartialHead, body: TranscriptItemBody) => {
     const encoded = JSON.stringify(body);
     items.push({
       key,
       body: encoded,
-      head: { ...head, seq: items.length, id: sha256(encoded), size: Buffer.byteLength(encoded) } as TranscriptItemHead,
+      head: { ...head, seq: seq++, id: sha256(encoded), size: Buffer.byteLength(encoded) } as TranscriptItemHead,
     });
   };
   const lazy = (kind: "system" | "tool" | "thinking", key: string, label: string, text: string, timestamp?: number) =>
@@ -189,11 +201,13 @@ export function deriveTranscriptItems(context: any, resolveAgentName?: ResolveAg
     }
   };
 
-  if (!context) return items;
+  if (!context) return;
   lazy("system", "system", "System", String(context.systemPrompt || ""));
+  flush();
   for (const tool of (context.tools || []) as any[]) {
     const name = String(tool?.name || "tool");
     lazy("tool", `tool:${name}`, `Tool · ${name}`, `${String(tool?.description || "")}\n\n${fenced(formatJson(tool?.parameters))}`.trim());
+    flush();
   }
 
   const messages: any[] = Array.isArray(context.messages) ? context.messages : [];
@@ -244,6 +258,7 @@ export function deriveTranscriptItems(context: any, resolveAgentName?: ResolveAg
       }
       attachResponseMetrics(message, itemsBefore);
       attachIdentity(message, itemsBefore);
+      flush();
       continue;
     }
     if (role === "toolResult" && paired.has(message)) continue;
@@ -271,8 +286,8 @@ export function deriveTranscriptItems(context: any, resolveAgentName?: ResolveAg
     else if (role === "bashExecution") lazy("tool", `bashExecution:${identity}`, "Shell execution", fenced(formatJson(message)), stamp);
     else inline("notice", `unsupported:message:${role}:${identity}`, `Unsupported message role · ${role}`, fenced(formatJson(message)), stamp);
     attachIdentity(message, itemsBefore);
+    flush();
   }
-  return items;
 }
 
 /** The last item's head with its body inline when small: it is the step the
@@ -296,75 +311,134 @@ export function transcriptPage(items: DerivedItem[], before: number, limit: numb
 
 export interface TranscriptGeneration {
   sessionId: string;
-  /** Hash of the display document these items came from. */
-  sourceHash: string;
+  /** Source revision supplied by the owner; null marks an invalidated projection. */
+  sourceHash: string | null;
   generation: string;
-  items: DerivedItem[];
-  bodies: Map<string, string>;
+  total: number;
 }
 
 export interface TranscriptUpdate {
   current: TranscriptGeneration;
 }
 
-/**
- * Keep up to 32 sessions and 64 MiB of derived bodies and heads, least recently
- * used first. A larger context is derived on demand; a small identity fingerprint
- * preserves its generation across captures without retaining its bodies.
- */
+/** Heads and complete bodies live beside the captured context in the person's
+ * supervisor database. Only generation metadata is retained in JS. An oversized
+ * session therefore has exactly the same read and refresh paths as a small one. */
 export class TranscriptItems {
   private readonly cache: ResourceCache<TranscriptGeneration>;
-  private readonly oversized: ResourceCache<{ count: number; identityHash: string; generation: string }>;
+  private access: number;
 
   constructor(
-    maxEntries = CACHED_SESSIONS,
-    private readonly maxBytes = CACHED_TRANSCRIPT_BYTES,
+    private readonly db: Database,
+    private readonly maxEntries = CACHED_SESSIONS,
+    maxBytes = CACHED_TRANSCRIPT_BYTES,
     private readonly mintGeneration: () => string = () => crypto.randomUUID(),
   ) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw new Error("Invalid transcript cache limits");
+    }
     this.cache = new ResourceCache({ entries: maxEntries, bytes: maxBytes });
-    this.oversized = new ResourceCache({ entries: maxEntries, bytes: maxEntries * 512 });
+    db.exec(`CREATE TABLE IF NOT EXISTS transcript_generations (
+      session_id TEXT PRIMARY KEY, source_hash TEXT, generation TEXT NOT NULL,
+      total INTEGER NOT NULL, used_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS transcript_items (
+      session_id TEXT NOT NULL, seq INTEGER NOT NULL, item_key TEXT NOT NULL,
+      item_id TEXT NOT NULL, head TEXT NOT NULL, body TEXT NOT NULL,
+      PRIMARY KEY(session_id, seq)
+    );
+    CREATE INDEX IF NOT EXISTS transcript_item_bodies ON transcript_items(session_id, item_id);`);
+    this.access = (db.query("SELECT COALESCE(MAX(used_at),0) AS access FROM transcript_generations").get() as { access: number }).access;
   }
 
+  get byteSize() { return this.cache.byteSize; }
+
   derive(sessionId: string, sourceHash: string, load: () => unknown, resolveAgentName?: ResolveAgentName): TranscriptUpdate {
-    const previous = this.cache.get(sessionId);
+    const previous = this.get(sessionId);
     if (previous?.sourceHash === sourceHash) return { current: previous };
-    const previousLarge = this.oversized.get(sessionId);
-    const items = deriveTranscriptItems(load(), resolveAgentName);
-    const extended = previous
-      ? previous.items.length <= items.length && previous.items.every((item, index) => item.key === items[index].key)
-      : Boolean(previousLarge && previousLarge.count <= items.length
-        && previousLarge.identityHash === this.identityHash(items, previousLarge.count));
-    const bytes = Buffer.byteLength(sessionId) + Buffer.byteLength(sourceHash)
-      + items.reduce((total, item) => total + Buffer.byteLength(item.key) + 64
-        + item.head.size + Buffer.byteLength(JSON.stringify(item.head)), 0);
-    const generation = extended ? (previous?.generation ?? previousLarge!.generation) : this.mintGeneration();
-    const current: TranscriptGeneration = {
-      sessionId,
-      sourceHash,
-      generation,
-      items,
-      bodies: new Map(items.map((item) => [item.head.id, item.body])),
-    };
-    this.forget(sessionId);
-    if (bytes <= this.maxBytes) this.cache.set(sessionId, current, bytes);
-    else {
-      const identityHash = this.identityHash(items, items.length);
-      this.oversized.set(sessionId, { count: items.length, identityHash, generation },
-        Buffer.byteLength(sessionId) + identityHash.length + generation.length + 16);
-    }
+    const context = load();
+    const current = this.db.transaction(() => {
+      const oldKey = this.db.query("SELECT item_key FROM transcript_items WHERE session_id=? AND seq=?");
+      const write = this.db.query(`INSERT INTO transcript_items(session_id,seq,item_key,item_id,head,body)
+        VALUES(?,?,?,?,?,?) ON CONFLICT(session_id,seq) DO UPDATE SET
+        item_key=excluded.item_key,item_id=excluded.item_id,head=excluded.head,body=excluded.body`);
+      let total = 0;
+      let extended = previous !== null;
+      visitTranscriptItems(context, item => {
+        if (previous && item.head.seq < previous.total && extended) {
+          const old = oldKey.get(sessionId, item.head.seq) as { item_key: string } | null;
+          extended = old?.item_key === item.key;
+        }
+        write.run(sessionId, item.head.seq, item.key, item.head.id, JSON.stringify(item.head), item.body);
+        total++;
+      }, resolveAgentName);
+      extended = extended && total >= previous!.total;
+      const generation = extended ? previous!.generation : this.mintGeneration();
+      this.db.query("DELETE FROM transcript_items WHERE session_id=? AND seq>=?").run(sessionId, total);
+      this.db.query(`INSERT INTO transcript_generations(session_id,source_hash,generation,total,used_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(session_id) DO UPDATE SET source_hash=excluded.source_hash,generation=excluded.generation,
+        total=excluded.total,used_at=excluded.used_at`).run(sessionId, sourceHash, generation, total, ++this.access);
+      const evicted = this.db.query("SELECT session_id FROM transcript_generations ORDER BY used_at DESC LIMIT -1 OFFSET ?")
+        .all(this.maxEntries) as Array<{ session_id: string }>;
+      for (const row of evicted) this.removeRows(row.session_id);
+      return { sessionId, sourceHash, generation, total };
+    })();
+    this.cache.delete(sessionId);
+    this.cache.set(sessionId, current, JSON.stringify(current).length * 2);
     return { current };
   }
 
   get(sessionId: string): TranscriptGeneration | null {
-    return this.cache.get(sessionId) ?? null;
+    const cached = this.cache.get(sessionId);
+    const row = cached ? null : this.db.query(`SELECT source_hash AS sourceHash,generation,total
+      FROM transcript_generations WHERE session_id=?`).get(sessionId) as Omit<TranscriptGeneration, "sessionId"> | null;
+    const current = cached ?? (row ? { sessionId, ...row } : null);
+    if (current) {
+      this.db.query("UPDATE transcript_generations SET used_at=? WHERE session_id=?").run(++this.access, sessionId);
+      if (!cached) this.cache.set(sessionId, current, JSON.stringify(current).length * 2);
+    }
+    return current;
   }
 
-  forget(sessionId: string) {
+  body(sessionId: string, itemId: string): string | undefined {
+    if (!this.get(sessionId)) return undefined;
+    const row = this.db.query("SELECT body FROM transcript_items WHERE session_id=? AND item_id=? LIMIT 1")
+      .get(sessionId, itemId) as { body: string } | null;
+    return row?.body;
+  }
+
+  page(sessionId: string, before: number, limit: number): TranscriptItemHead[] {
+    if (!this.get(sessionId)) return [];
+    const rows = this.db.query(`SELECT head FROM transcript_items WHERE session_id=? AND seq<?
+      ORDER BY seq DESC LIMIT ?`).all(sessionId, before, Math.max(1, limit)) as Array<{ head: string }>;
+    return rows.reverse().map(row => JSON.parse(row.head));
+  }
+
+  window(sessionId: string, limit = WINDOW_ITEMS): TranscriptItemHead[] {
+    const current = this.get(sessionId);
+    if (!current) return [];
+    const heads = this.page(sessionId, current.total, limit);
+    const last = heads.at(-1);
+    if (last && last.size <= INLINE_BODY_LIMIT) {
+      const body = this.body(sessionId, last.id);
+      if (body === undefined) throw new Error("Materialized transcript body missing");
+      heads[heads.length - 1] = { ...last, body: JSON.parse(body) } as TranscriptItemHead;
+    }
+    return heads;
+  }
+
+  invalidate(sessionId: string): void {
+    this.db.query("UPDATE transcript_generations SET source_hash=NULL WHERE session_id=?").run(sessionId);
     this.cache.delete(sessionId);
-    this.oversized.delete(sessionId);
   }
 
-  private identityHash(items: DerivedItem[], count: number): string {
-    return sha256(JSON.stringify(items.slice(0, count).map((item) => item.key)));
+  forget(sessionId: string): void {
+    this.db.transaction(() => this.removeRows(sessionId))();
+  }
+
+  private removeRows(sessionId: string): void {
+    this.db.query("DELETE FROM transcript_items WHERE session_id=?").run(sessionId);
+    this.db.query("DELETE FROM transcript_generations WHERE session_id=?").run(sessionId);
+    this.cache.delete(sessionId);
   }
 }
