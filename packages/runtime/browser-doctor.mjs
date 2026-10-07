@@ -25,7 +25,7 @@ entrypoint with the host's pi-stack-release command, not pi install npm.`);
 const runtime = realpathSync(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime");
 const host = realpathSync(values["worker-release"] ?? runtime);
 const sdk = realpathSync(join(host, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
-const { createAgentSession, DefaultResourceLoader, SessionManager } = await import(pathToFileURL(sdk).href);
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager } = await import(pathToFileURL(sdk).href);
 const selected = createRequire(join(runtime, "package.json"));
 const browserPackage = selected.resolve("agent-browser/package.json");
 const bin = realpathSync(join(dirname(dirname(browserPackage)), ".bin"));
@@ -97,8 +97,11 @@ try {
   const agentDir = join(homedir(), ".pi/agent");
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
+  const modelRuntime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json") });
+  const probeModel = modelRuntime.getModel("anthropic", "claude-opus-4-5");
+  assert.ok(probeModel, "the SDK must retain the declared no-request doctor model");
   const opened = await createAgentSession({
-    cwd: directory, agentDir, resourceLoader, tools: ["agent_browser"],
+    cwd: directory, agentDir, resourceLoader, tools: ["agent_browser"], modelRuntime, model: probeModel, thinkingLevel: "off",
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
   });
   session = opened.session;
