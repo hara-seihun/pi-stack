@@ -565,11 +565,12 @@ let statePushTimer: ReturnType<typeof setTimeout> | null = null;
 let stateSyncPhase: "initializing" | "ready" = "initializing";
 let stateSyncPending = false;
 function signalSync() {
+  if (shuttingDown) return;
   if (stateSyncPhase === "initializing") { stateSyncPending = true; return; }
-  if (statePushTimer || shuttingDown) return;
+  if (statePushTimer) return;
   statePushTimer = setTimeout(() => {
     statePushTimer = null;
-    refreshState();
+    if (!shuttingDown) refreshState();
   }, STATE_COALESCE_MS);
 }
 
@@ -638,6 +639,7 @@ const LIVE_SYNC_INTERVAL_MS = 33;
 let liveSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let liveSyncPending = false;
 function signalLiveSync() {
+  if (shuttingDown) return;
   if (liveSyncTimer) {
     liveSyncPending = true;
     return;
@@ -645,7 +647,7 @@ function signalLiveSync() {
   pushLive();
   liveSyncTimer = setTimeout(() => {
     liveSyncTimer = null;
-    if (liveSyncPending) {
+    if (liveSyncPending && !shuttingDown) {
       liveSyncPending = false;
       signalLiveSync();
     }
@@ -2771,6 +2773,7 @@ console.log(`Pi Remote listening on http://${server.hostname}:${server.port}`);
 // slow enough to matter to an activation handshake and to a request in flight,
 // and urgent to nobody, so it happens a slice at a time between requests.
 const journalRemoval = setInterval(() => {
+  if (shuttingDown) return;
   try { if (removeEventJournal(db) === "removed") clearInterval(journalRemoval); }
   catch (cause) {
     clearInterval(journalRemoval);
@@ -2828,6 +2831,13 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  if (statePushTimer) clearTimeout(statePushTimer);
+  statePushTimer = null;
+  stateSyncPending = false;
+  if (liveSyncTimer) clearTimeout(liveSyncTimer);
+  liveSyncTimer = null;
+  liveSyncPending = false;
+  clearInterval(journalRemoval);
   unwatchFile(modelAvailability.path);
   watchList.stop();
   stopAutoArchive();
