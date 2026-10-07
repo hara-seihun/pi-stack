@@ -3,7 +3,8 @@ import type { ThreadCreator } from "./caller.js";
 import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
+export interface ThreadDependency { threadId: string; dependsOn: string; ownerId?: string }
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "dependency_conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; dependencies?: ThreadDependency[]; retryable?: boolean; retryAt?: number; requestId?: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
@@ -12,7 +13,7 @@ import type { Speed } from "./speed.js";
 export type { Speed } from "./speed.js";
 /** `live` is never requested directly; it comes from a thread mode (see modes.ts). */
 export type Admission = "force" | "background" | "live";
-export const THREAD_STATES = ["idle", "running"] as const;
+export const THREAD_STATES = ["idle", "running", "waiting"] as const;
 export type ThreadState = typeof THREAD_STATES[number];
 export const isThreadState = (state: unknown): state is ThreadState => THREAD_STATES.some(value => value === state);
 export type WorkOutcome = "complete" | "failed" | "cancelled";
@@ -25,8 +26,13 @@ export interface ThreadSettings {
 export type SettingsOverrides = Partial<ThreadSettings>;
 export interface Thread {
   id: string;
+  ownerId?: string;
   parentId: string | null;
-  role?: "conversation" | "worker";
+  role?: "agent" | "conversation" | "worker";
+  /** Immutable generated identity; historical threads may not have one. */
+  agentName?: string;
+  /** Persistent outgoing peer dependencies, independent of scheduling waits. */
+  dependencies?: string[];
   title: string;
   cwd: string;
   sessionFile: string;
@@ -86,6 +92,7 @@ export interface ThreadMessage {
   id: string;
   threadId: string;
   senderId: string | null;
+  senderName?: string;
   text: string;
   images?: unknown[];
   delivery: Delivery;
@@ -143,6 +150,8 @@ export interface ThreadSettlement {
   threadId: string;
   workId: string;
   outcome: WorkOutcome;
+  /** Native turn settled, but its assignment still owns waits, dependencies or questions. */
+  assignmentPending?: boolean;
   time: number;
   finalMessage: Record<string, unknown> | null;
   error?: string;
@@ -184,10 +193,15 @@ export interface ThreadInspection {
   live?: Record<string, unknown>;
 }
 export type ThreadControl =
-  /** `reason: "archive"` records the work this stop interrupts so a restore can resume it. */
+  | { threadId: string; action: "close" | "reopen" | "open" | "cancel" }
+  | { threadId: string; action: "placement"; foreground: boolean }
+  | { threadId: string; action: "dependencies"; threadIds: string[] }
+  /** Owner-to-owner durable endpoint reservation, never a model operation. */
+  | { threadId: string; action: "dependencyClaim"; dependentId: string; active: boolean }
+  /** Retained callers' stop/restore act on the selected agent only; no recursive control or replay. */
   | { threadId: string; action: "stop"; descendants: boolean; reason?: "archive" }
   | { threadId: string; action: "resume" }
-  /** Unarchive a thread, or its whole subtree; `resume` continues the turns and held work its archive interrupted. */
+  /** Retained restore input: descendants/resume do not confer authority or replay work. */
   | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
   /** Record an idle human view using the owner's clock, without changing execution activity or emitting changed. */
   | { threadId: string; action: "view" }

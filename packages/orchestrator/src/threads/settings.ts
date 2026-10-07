@@ -7,22 +7,13 @@ import { isThinkingLevel, type Result, type SettingsOverrides, type Thread, type
 export function resolveSpawnSettings(input: SettingsOverrides | undefined, parent: Thread | null, requestedMode?: unknown): Result<ThreadSettings> {
   const mode = threadMode(parent ? parent.metadata?.mode : requestedMode);
   if (!parent) return mode ? resolveModeSettings(input, mode.conversation.settings) : resolveThreadSettings(input);
-  const resolved = mode ? resolveModeSettings(input, mode.worker.settings) : resolveThreadSettings(input, { model: "sol", thinkingLevel: "high", speed: "standard" });
-  if (!resolved.ok) return resolved;
-  const forbidden = childModelError(resolved.value.model);
-  return forbidden ? { ok: false, error: forbidden } : resolved;
+  return mode ? resolveModeSettings(input, mode.worker.settings) : resolveThreadSettings(input, { model: "sol", thinkingLevel: "high", speed: "standard" });
 }
 
 /** A mode's declared settings are the defaults; a model override keeps the mode's thinking and speed unless those are overridden too. */
 function resolveModeSettings(input: SettingsOverrides = {}, declared: Required<SettingsOverrides>): Result<ThreadSettings> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return resolveThreadSettings(input);
   return resolveThreadSettings({ ...input, model: input.model ?? declared.model, thinkingLevel: input.thinkingLevel ?? declared.thinkingLevel, speed: input.speed ?? declared.speed });
-}
-
-export function childModelError(model: string): { code: "invalid_request"; message: string } | undefined {
-  const physical = model.split("/").at(-1)!;
-  if (/(^|[-_.])(astra|fable)([-_.]|$)/i.test(physical)) return { code: "invalid_request", message: "Subagents cannot use Astra or Fable. Choose Sol, Opus or Luna." };
-  return undefined;
 }
 
 const settingFields = ["model", "thinkingLevel", "speed"];

@@ -1,0 +1,162 @@
+import { afterEach, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { PiCommand, PiEvent, PiSession, PiSessionOptions, Result, ThreadApi } from "../src/threads/contracts.js";
+import { ThreadService } from "../src/threads/service.js";
+import { ThreadDirectory } from "../src/threads/directory.js";
+import { threadTools } from "../src/threads/pi-tools.js";
+import { modeConversation } from "../src/threads/pi-mode.js";
+
+function value<T>(result: Result<T>): T {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  return result.value;
+}
+async function until(check: () => boolean) {
+  for (let i = 0; i < 100; i++) { if (check()) return; await new Promise<void>(resolve => setImmediate(resolve)); }
+  throw new Error("Expected lifecycle transition did not arrive");
+}
+class Native implements PiSession {
+  active = false;
+  accepted = new Set<string>();
+  completed = new Set<string>();
+  lastAssistantMessage?: Record<string, unknown>;
+  constructor(readonly options: PiSessionOptions, private output: (event: PiEvent) => void) { writeFileSync(options.sessionFile, ""); }
+  async command(command: PiCommand) {
+    if (command.type === "prompt" || command.type === "steer") {
+      this.accepted.add(String(command.workId)); this.active = true;
+      this.output({ type: "agent_start" });
+      this.output({ type: "message_start", message: { role: "user", content: [{ type: "text", text: command.message }] } });
+    }
+    if (command.type === "abort") this.active = false;
+    this.output({ type: "response", id: command.id, command: command.type, success: true,
+      data: command.type === "get_state" ? { isStreaming: this.active, pendingMessageCount: 0, acceptedWorkIds: [...this.accepted], completedWorkIds: [...this.completed], sessionFile: this.options.sessionFile, lastAssistantMessage: this.lastAssistantMessage } : {} });
+  }
+  settle(text: string) {
+    for (const id of this.accepted) this.completed.add(id);
+    this.active = false;
+    this.lastAssistantMessage = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp: Date.now() };
+    this.output({ type: "message_end", message: this.lastAssistantMessage }); this.output({ type: "agent_settled" });
+  }
+  async close() {}
+}
+const roots: string[] = [], services: ThreadService[] = [];
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), "unified-agent-")); roots.push(root);
+  const sessions = new Map<string, Native>();
+  const options = { databasePath: join(root, "threads.sqlite"), sessionsDir: root,
+    openSession: async (input: PiSessionOptions, output: (event: PiEvent) => void) => { const session = new Native(input, output); sessions.set(input.threadId, session); return session; } };
+  const service = new ThreadService(options); services.push(service);
+  return { service, root, sessions, options };
+}
+afterEach(async () => {
+  for (const service of services.splice(0).reverse()) {
+    for (const thread of service.snapshot()) await service.control({ threadId: thread.id, action: "cancel" });
+    await service.close();
+  }
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+it("any peer can launch peers, with immutable identity and placement independent of ancestry/model", async () => {
+  const f = fixture();
+  const person = value(await f.service.spawn({ requestId: "person", id: "person", cwd: f.root, createdBy: { kind: "person", via: "router" } }));
+  const first = value(await f.service.spawn({ requestId: "first", id: "first", parentId: person.id, cwd: f.root, title: "Topic", settings: { model: "astra" } }));
+  const second = value(await f.service.spawn({ requestId: "second", parentId: first.id, cwd: f.root, settings: { model: "fable" } }));
+  expect([person.role, first.role, second.role]).toEqual(["agent", "agent", "agent"]);
+  expect(person.metadata?.foreground).toBe(true); expect(first.metadata?.foreground).toBe(false);
+  expect(first.agentName).toBeTruthy(); expect(second.agentName).toBeTruthy();
+  value(await f.service.control({ action: "rename", threadId: first.id, title: "Another topic" }));
+  expect(f.service.get(first.id)?.agentName).toBe(first.agentName);
+  expect(f.service.update(first.id, { metadata: { agentName: "Forged" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  value(await f.service.attention({ threadId: first.id, requestId: "notice", summary: "Appointment moved", foreground: true }));
+  expect(f.service.get(first.id)?.metadata?.foreground).toBe(false);
+  value(await f.service.control({ action: "open", threadId: first.id }));
+  expect(f.service.get(first.id)?.metadata?.foreground).toBe(true);
+  value(await f.service.control({ action: "placement", threadId: first.id, foreground: false }));
+  expect(f.service.get(first.id)?.metadata?.foreground).toBe(false);
+  expect(threadTools({ threadId: second.id, cwd: f.root, sessionFile: second.sessionFile, args: [], env: { PI_THREAD_CAN_SPAWN: "1" }, threads: f.service }).some(tool => tool.name === "thread_spawn")).toBe(true);
+});
+
+it("close and historical recursive controls cancel only the selected agent; reopen never replays", async () => {
+  const f = fixture(); value(await f.service.start());
+  value(await f.service.spawn({ requestId: "a", id: "a", cwd: f.root, message: "work" }));
+  value(await f.service.spawn({ requestId: "b", id: "b", parentId: "a", cwd: f.root, message: "independent work" }));
+  await until(() => !!f.sessions.get("a")?.active && !!f.sessions.get("b")?.active);
+  value(await f.service.send({ requestId: "queued", threadId: "a", text: "discard this", delivery: "queue" }));
+  value(await f.service.control({ action: "stop", threadId: "a", descendants: true, reason: "archive" }));
+  expect(f.service.get("a")).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
+  expect(f.sessions.get("b")?.active).toBe(true); expect(f.service.get("b")?.metadata?.archived).not.toBe(true);
+  value(await f.service.control({ action: "restore", threadId: "a", descendants: true, resume: true }));
+  expect(f.service.get("a")).toMatchObject({ state: "idle", held: false, pendingMessages: 0 });
+  f.sessions.get("b")!.settle("done after requester closed");
+  await until(() => f.service.get("b")?.state === "idle");
+  expect(f.service.pending("a").some(message => message.text.includes("Continue the interrupted"))).toBe(false);
+});
+
+it("explicit peer dependencies survive input/wakes, protect both owners, reject cycles and release explicitly", async () => {
+  const a = fixture(), b = fixture();
+  const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "a", reason: "Need peer", fromThreadId: "b" }));
+  expect(a.service.get("a")).toMatchObject({ state: "waiting", dependencies: ["b"] });
+  expect(b.service.get("b")?.metadata?.peerDependents).toEqual(["a"]);
+  for (const id of ["a", "b"]) expect(await directory.control({ action: "close", threadId: id })).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
+  value(await a.service.send({ requestId: "human", threadId: "a", text: "Discuss this" }));
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined(); expect(a.service.get("a")?.dependencies).toEqual(["b"]);
+  expect(await b.service.control({ action: "dependencies", threadId: "b", threadIds: ["a"] })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  value(await a.service.agentWait({ action: "clear", threadId: "a", requestId: "release" }));
+  expect(a.service.get("a")?.dependencies).toEqual([]); expect(b.service.get("b")?.metadata?.peerDependents).toEqual([]);
+  value(await directory.control({ action: "close", threadId: "b" }));
+});
+
+it("endpoint reservations fence a concurrent cross-owner close after its graph snapshot", async () => {
+  const a = fixture(), b = fixture();
+  const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  const list = directory.list.bind(directory);
+  let release!: () => void, snapshotRead!: () => void;
+  const read = new Promise<void>(resolve => { snapshotRead = resolve; });
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  let intercept = true;
+  directory.list = async input => {
+    const result = await list(input);
+    if (intercept && !input?.id) { intercept = false; snapshotRead(); await barrier; }
+    return result;
+  };
+  const closing = b.service.control({ action: "close", threadId: "b" });
+  await read;
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  release();
+  expect(await closing).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
+  expect(b.service.get("b")?.metadata?.archived).not.toBe(true);
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: [] }));
+});
+
+it("turn settlement while waiting or questioning is not an assignment result or ephemeral completion", async () => {
+  const f = fixture(); value(await f.service.start());
+  value(await f.service.spawn({ requestId: "requester", id: "requester", cwd: f.root }));
+  value(await f.service.spawn({ requestId: "assigned", id: "assigned", parentId: "requester", cwd: f.root, message: "work", ephemeral: true }));
+  await until(() => !!f.sessions.get("assigned")?.active);
+  value(await f.service.agentWait({ action: "set", kind: "job", threadId: "assigned", requestId: "job", reason: "Job result", jobId: "job-id" }));
+  f.sessions.get("assigned")!.settle("waiting, not finished");
+  await until(() => f.service.get("assigned")?.state === "waiting");
+  expect(f.service.latestSettlement("assigned")?.assignmentPending).toBe(true);
+  expect(value(await f.service.await({ parentId: "requester", threadIds: ["assigned"], timeoutMs: 0 })).settlement).toBeNull();
+  expect(f.service.pending("requester")).toEqual([]); expect(f.service.get("assigned")?.metadata?.archived).not.toBe(true);
+  value(await f.service.agentWait({ action: "clear", threadId: "assigned", requestId: "clear" }));
+  value(await f.service.send({ threadId: "assigned", requestId: "continue", text: "finish" }));
+  await until(() => !!f.sessions.get("assigned")?.active);
+  value(await f.service.ask({ threadId: "assigned", requestId: "question", questions: [{ question: "Choose?" }] }));
+  f.sessions.get("assigned")!.settle("question pending");
+  await until(() => !!f.service.latestSettlement("assigned")?.assignmentPending);
+  expect(f.service.get("assigned")?.metadata?.archived).not.toBe(true); expect(f.service.pending("requester")).toEqual([]);
+});
+
+it("dispatcher tool boundaries are explicit and independent of peer spawning", () => {
+  expect(modeConversation({ PI_THREAD_MODE: "live", PI_THREAD_CAN_SPAWN: "1", PI_THREAD_LIVE_DISPATCHER: "0" })).toBeUndefined();
+  expect(modeConversation({ PI_THREAD_MODE: "live", PI_THREAD_CAN_SPAWN: "1", PI_THREAD_LIVE_DISPATCHER: "1" })?.bashTimeoutSeconds).toBe(10);
+});

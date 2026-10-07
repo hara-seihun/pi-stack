@@ -20,7 +20,7 @@ const choices = Type.Union([
 export const threadWaitParameters = Type.Unsafe<Static<typeof choices>>({
   ...Type.Object({
     action: Type.Union([Type.Literal("set"), Type.Literal("clear")]),
-    kind: Type.Optional(Type.Union(WAIT_KINDS.map(kind => Type.Literal(kind)), { description: "Required for set. agents needs nonempty direct-child threadIds; job needs jobId; deployment needs publicationId; message needs accessible collaborator fromThreadId. Omit for clear." })),
+    kind: Type.Optional(Type.Union(WAIT_KINDS.map(kind => Type.Literal(kind)), { description: "Required for set. agents needs nonempty accessible peer threadIds; job needs jobId; deployment needs publicationId; message needs accessible collaborator fromThreadId. Omit for clear." })),
     reason: Type.Optional(reason), threadIds: Type.Optional(threadIds), after,
     jobId: Type.Optional(jobId), publicationId: Type.Optional(publicationId), fromThreadId: Type.Optional(fromThreadId),
   }, { additionalProperties: false }),
@@ -34,7 +34,7 @@ export function parseRunnerWaitDependency(input: unknown): Result<WaitDependency
   }
   const parsed = validateWaitDependency(input);
   if (!parsed.ok && input && typeof input === "object" && !("kind" in input)) return {
-    ok: false, error: { code: "invalid_request", message: "This runner must name a typed dependency: agents with nonempty direct child threadIds, job with jobId, deployment with publicationId, or message with fromThreadId. If work is finished, end the turn normally; no waiting status was recorded. Retained runner tools refresh after accepted work settles, not during active work." },
+    ok: false, error: { code: "invalid_request", message: "This runner must name a typed dependency: agents with nonempty accessible peer threadIds, job with jobId, deployment with publicationId, or message with fromThreadId. If work is finished, end the turn normally; no waiting status was recorded. Retained runner tools refresh after accepted work settles, not during active work." },
   };
   return parsed;
 }
