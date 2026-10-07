@@ -664,7 +664,8 @@ export class ThreadService implements ThreadApi {
   private archiveBackgroundAfterCurrentOperation(id: string): void {
     const current = this.operations.get(id);
     if (!current) { void this.archiveSettledBackground(id); return; }
-    void current.finally(() => this.archiveBackgroundAfterCurrentOperation(id)).catch(() => {});
+    const completed = () => this.archiveBackgroundAfterCurrentOperation(id);
+    void current.then(completed, completed);
   }
   /** At the end of a turn, dependencies whose result has been delivered and is no longer awaited are released. */
   private async pruneSettledDependencies(id: string): Promise<void> {
@@ -880,6 +881,7 @@ export class ThreadService implements ThreadApi {
       if (input.metadata && ("foreground" in input.metadata || "attentionSummary" in input.metadata)) return bad("invalid_request", "Use attention instead of setting attention metadata");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (input.metadata && "autoArchiveViewedAt" in input.metadata) return bad("invalid_request", "Use view control instead of setting auto-archive metadata");
+      if (input.metadata && "taskDescription" in input.metadata && (typeof input.metadata.taskDescription !== "string" || !input.metadata.taskDescription.trim() || input.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
       if (parent?.metadata?.sandbox) return bad("invalid_request", "Sandbox threads cannot create workers");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
@@ -1138,6 +1140,7 @@ export class ThreadService implements ThreadApi {
     if (patch.title !== undefined && options.titleSource === "agent" && thread.metadata?.titleSource === "manual") return bad("conflict", "The person named this thread; their title stays until they rename it again");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
     for (const key of ["agentWait", "peerDependencies", "peerDependents", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "foreground", "attentionSummary", "context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    if (patch.metadata && "taskDescription" in patch.metadata && (typeof patch.metadata.taskDescription !== "string" || !patch.metadata.taskDescription.trim() || patch.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
     const admission = patch.metadata && "mode" in patch.metadata ? threadMode(patch.metadata.mode)!.admission : thread.admission;
@@ -1287,7 +1290,8 @@ export class ThreadService implements ThreadApi {
     }
     if (input.action === "rename" || input.action === "title") {
       if (typeof input.title !== "string" || !input.title.trim()) return bad("invalid_request", "A thread title must be nonempty");
-      return this.update(input.threadId, { title: input.title }, input.action === "title" ? { titleSource: "agent" } : {});
+      if (input.action === "title" && input.taskDescription !== undefined && (typeof input.taskDescription !== "string" || !input.taskDescription.trim() || input.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
+      return this.update(input.threadId, { title: input.title, ...(input.action === "title" && input.taskDescription !== undefined ? { metadata: { taskDescription: input.taskDescription.trim() } } : {}) }, input.action === "title" ? { titleSource: "agent" } : {});
     }
     if (input.action === "update") {
       if (input.archived === true) { const closed = await this.control({ threadId: input.threadId, action: "close" }); if (!closed.ok) return closed; }

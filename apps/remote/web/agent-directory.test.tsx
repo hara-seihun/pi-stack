@@ -54,3 +54,18 @@ test("resource failure keeps a visibly stale usable directory, never a successfu
   expect(html).toContain("Waiting for job");
   expect(html).not.toContain("No background agents.");
 });
+
+test("task purpose and owned activity are readable without agent identity or opening a transcript", () => {
+  const agents = [session("unnamed-task", { name: "Publish new release", agentName: undefined,
+    taskDescription: "Install the Orchestrator changes on both machines.", state: "waiting", activity: "awaiting",
+    waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Waiting for the Converge release to finish", since: 1 } }),
+    session("named-task", { name: "Fix account routing", agentName: "Renian", state: "running", activity: "waiting_on_tool", activeTools: ["functions.read"] })];
+  const html = renderToStaticMarkup(<AgentsDirectory directory={{ state: "ready", sessions: agents }} onRefresh={() => {}} onOpen={() => {}} />);
+  expect(html).toContain("Install the Orchestrator changes on both machines.");
+  expect(html).toContain("Waiting for the Converge release to finish");
+  expect(html).toContain("Running read");
+  expect(html).not.toContain("Unnamed agent");
+  expect(html.indexOf("Fix account routing")).toBeLessThan(html.indexOf("Renian"));
+  expect(groupAgents(agents, "Converge", "all").flatMap(group => group.agents.map(agent => agent.id))).toEqual(["unnamed-task"]);
+  expect(groupAgents(agents, "both machines", "all").flatMap(group => group.agents.map(agent => agent.id))).toEqual(["unnamed-task"]);
+});

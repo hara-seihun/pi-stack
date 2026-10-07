@@ -561,8 +561,12 @@ it("the thread's own agent names it with thread_title; a person's rename pins it
   const tools = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service });
   expect(tools.find(item => item.name === "thread_control")!.parameters.anyOf.some((variant: { properties: { action: { const?: string } } }) => variant.properties.action.const === "rename")).toBe(false);
   const title = tools.find(item => item.name === "thread_title")!;
-  const first = await title.execute("title-1", { title: "  First topic  " }, undefined, undefined, undefined as never);
-  expect(first.details).toMatchObject({ ok: true, value: { id: thread.id, title: "First topic", metadata: { titleSource: "agent" } } });
+  const first = await title.execute("title-1", { title: "  First topic  ", taskDescription: "  Publish the task-first Orchestrator on both hosts.  " }, undefined, undefined, undefined as never);
+  expect(first.details).toMatchObject({ ok: true, value: { id: thread.id, title: "First topic", metadata: { titleSource: "agent", taskDescription: "Publish the task-first Orchestrator on both hosts." } } });
+  for (const taskDescription of ["", " ", "x".repeat(241)]) {
+    expect(await service.control({ threadId: thread.id, action: "title", title: "Invalid description", taskDescription })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  }
+  expect(service.get(thread.id)?.title).toBe("First topic");
   await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "First topic"));
   expect((await title.execute("title-2", { title: "Changed topic" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: true, value: { title: "Changed topic" } });
   value(await service.control({ threadId: thread.id, action: "rename", title: "My chosen title" }));
@@ -578,6 +582,7 @@ it("the thread's own agent names it with thread_title; a person's rename pins it
   value(await restored.start());
   expect(await restored.control({ threadId: thread.id, action: "title", title: "After restart" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(value(await restored.control({ threadId: thread.id, action: "rename", title: "Next chosen title" })).title).toBe("Next chosen title");
+  expect(restored.get(thread.id)?.metadata?.taskDescription).toBe("Publish the task-first Orchestrator on both hosts.");
 });
 
 it("a person accepting the agent's title through update pins it", async () => {

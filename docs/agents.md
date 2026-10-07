@@ -24,8 +24,11 @@ Placement does not change tools, permissions, admission, or execution identity.
 The first-class **Agents** tab lists the complete live background directory,
 including quiet agents outside the recent inbox projection. Collapsible groups
 use each agent's immediate launcher; scheduled/system agents and agents with no
-launcher have their own groups. Names, task titles and current status remain
-separate. All, Active, Waiting and Idle filters and search narrow the directory.
+launcher have their own groups. Task titles and optional agent-authored purpose sentences lead each row; visible
+current activity and dependency reasons explain what is happening now. Names and
+short IDs remain separate, secondary identity. All, Active, Waiting and Idle filters and search narrow the directory.
+Completed background tasks leave the directory immediately without requiring a
+human view; their results, transcripts and notification history remain preserved.
 Opening a row promotes that original agent into Chats. These are presentation
 groups, not worker classes, rooms, dependencies or cascading control scopes.
 Notifications remains its own navigation destination.

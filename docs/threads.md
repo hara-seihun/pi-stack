@@ -29,6 +29,14 @@ human open promotes the selected agent. Agent reads, subscriptions and attention
 requests cannot promote it. Opening from a notification or launched-agent link
 selects the same identity, not a copied conversation.
 
+Completed background tasks archive as soon as their final assignment settles,
+regardless of unread results or attention notices. Startup also reconciles already
+completed background tasks. Transcripts, results, assignment receipts and notification
+history remain accessible; opening a notification restores and promotes the original
+thread. Foreground Chats keep their unread behavior. Pending input/questions, typed
+waits, wake schedules, live dependency protection and persistent watch threads remain
+open because their work is not complete.
+
 `lastUserMessageAt` records accepted explicit input without an agent sender.
 Automatic notices, agent messages, tool activity, titles and settlements do not
 change it. Imports retain original timestamps. Creation time orders threads with
@@ -78,7 +86,7 @@ it, the edge is **inert**: it protects nothing, does not make either endpoint
 `waiting`, does not keep A's assignment pending, and closing either endpoint
 releases it on both owners (`dependencyRelease`/`dependencyClaim` owner-to-owner
 controls). At the end of each of A's turns, inert outgoing edges are released; a
-settled ephemeral B archives once its last dependent releases it. Creator
+settled background B archives once its last dependent releases it. Creator
 provenance alone protects neither endpoint. Dependency liveness and close must be
 enforced at the owner (`threads/dependency-liveness.ts`), not just in a client's
 confirmation dialog. Hara's October 7 ruling: idle dependencies must not block
@@ -150,7 +158,11 @@ promoting the recipient. Merely inspecting an agent is not a human view.
   The agent names its thread when it starts and again whenever it judges the topic
   has changed enough. Nothing else titles a thread automatically. While a person's
   rename pins the title, `title` returns a conflict and changes nothing. Older
-  `titleSource: "auto"` titles count as agent titles and are not pinned.
+  `titleSource: "auto"` titles count as agent titles and are not pinned. The optional
+  `taskDescription` is a nonempty sentence of at most 240 characters describing the
+  task's intended outcome. It is stored with the title and projected into the
+  Orchestrator; omitted descriptions stay unset or retain an already supplied one.
+  No model is called to infer a description from private transcript content.
 - `settings`: future model/thinking/speed preferences; `effectiveSettings` names
   already accepted current/queued work.
 - `retryWaiting`: apply selected settings to dormant provider/admission waiting
