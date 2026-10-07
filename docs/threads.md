@@ -1,5 +1,7 @@
 # Persistent agents and threads
 
+[First global-capacity cutover](agent-capacity-cutover.md) owns the durable all-owner admission barrier, custody census and initialization before model doctors. [Standalone ingress](standalone-agent-capacity.md) owns direct SDK/CLI capacity custody.
+
 [The kena model](agents.md) owns the product contract. One agent has one stable
 thread ID, native Pi conversation, workspace, complete model settings and storage
 owner. Foreground/background is placement, not a class of agent. Orchestrator,
