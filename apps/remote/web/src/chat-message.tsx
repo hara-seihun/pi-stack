@@ -54,6 +54,8 @@ export type ChatMessageProps = {
   /** Picture shown before the label: the sender's, or Kenan's head. */
   avatar?: string;
   text: string;
+  /** Resolves native text before copying when the visible words are only a preview. */
+  resolveCopyText?(): Promise<string>;
   timestamp?: number;
   responseMetrics?: ResponseMetrics;
   previewMessageId?: string;
@@ -71,12 +73,13 @@ export type ChatMessageProps = {
   onEditImage?(image: HTMLImageElement): void;
 } & ({ contentFormat: "literal"; renderMarkdown?: never } | { contentFormat: "markdown"; renderMarkdown(text: string): ReactNode });
 
-function MessageFrame({ kind, label, heading, avatar, text, timestamp, menu = [], identity, onReply, onReact, children }: {
+function MessageFrame({ kind, label, heading, avatar, text, resolveCopyText, timestamp, menu = [], identity, onReply, onReact, children }: {
   kind: string;
   label: string;
   heading?: ReactNode;
   avatar?: string;
   text: string;
+  resolveCopyText?(): Promise<string>;
   timestamp?: number;
   menu?: MessageMenuItem[];
   identity?: MessageIdentity;
@@ -86,10 +89,23 @@ function MessageFrame({ kind, label, heading, avatar, text, timestamp, menu = []
 }) {
   const time = timestamp === undefined ? undefined : new Date(timestamp);
   const reader = useSpeech().catalog !== null;
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const copy = async () => {
+    try {
+      const copied = await copyText(resolveCopyText ? await resolveCopyText() : text);
+      setCopyError(copied ? null : "Copy failed.");
+    } catch (cause) { setCopyError(cause instanceof Error ? cause.message : "The full message could not be copied."); }
+  };
   const { menu: openMenu, handlers } = useMessageMenu([
-    { label: "Copy", onSelect: () => copyText(text) },
-    ...(reader && text.trim() ? [{ label: "Speak", onSelect: () => speech.speak(text, speechTitle(text)) }] : []),
-    ...(identity && onReply ? [{ label: "Reply", onSelect: () => onReply(replyTarget(identity, text)) }] : []),
+    { label: "Copy", onSelect: copy },
+    ...(reader && text.trim() ? [{ label: "Speak", onSelect: async () => {
+      try { const full = resolveCopyText ? await resolveCopyText() : text; speech.speak(full, speechTitle(full)); setCopyError(null); }
+      catch (cause) { setCopyError(cause instanceof Error ? cause.message : "The full message could not be loaded."); }
+    } }] : []),
+    ...(identity && onReply ? [{ label: "Reply", onSelect: async () => {
+      try { onReply(replyTarget(identity, resolveCopyText ? await resolveCopyText() : text)); setCopyError(null); }
+      catch (cause) { setCopyError(cause instanceof Error ? cause.message : "The full message could not be loaded."); }
+    } }] : []),
     ...(onReact ? [{ label: "React", onSelect: onReact }] : []),
     ...menu,
   ]);
@@ -101,6 +117,7 @@ function MessageFrame({ kind, label, heading, avatar, text, timestamp, menu = []
     </header>
     {openMenu}
     {children}
+    {copyError && <p className="message-status failed" role="status">{copyError}</p>}
   </article>;
 }
 
@@ -129,9 +146,9 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
 }
 
 export function ChatMessage(props: ChatMessageProps) {
-  const { kind, label, heading, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions, reply, onReply } = props;
+  const { kind, label, heading, avatar, text, resolveCopyText, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions, reply, onReply } = props;
   const [reactionsOpen, setReactionsOpen] = useState(false);
-  return <MessageFrame kind={kind} label={label} heading={heading} avatar={avatar} text={text} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
+  return <MessageFrame kind={kind} label={label} heading={heading} avatar={avatar} text={text} resolveCopyText={resolveCopyText} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
     <MessageBody attachments={attachments} delivery={delivery} checking={checking} onCheck={onCheck} onRetry={onRetry} onEditImage={onEditImage}>
       {reply && <ReplyQuote reply={reply} />}
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}

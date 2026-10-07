@@ -7,6 +7,7 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { validateThreadObservation } from "../shared/state-validation";
 import type { Room, RoomActivity, RoomMember, RoomSnapshot } from "../shared/rooms";
+import { readRoomHistoryOptions, readRoomPaging } from "../shared/rooms";
 
 export const ROOM_CUSTODIAN = "pi-rooms";
 interface StoredRoom extends Room {
@@ -197,16 +198,18 @@ export class Rooms {
     this.notifyChanges();
     return status;
   }
-  private async refresh(room: StoredRoom, actor: string): Promise<Response> {
+  private async refresh(room: StoredRoom, actor: string, query = "", signal?: AbortSignal): Promise<Response> {
+    const historyPage = query !== "";
     if (this.closed) return fail("Rooms stopped", 503);
     if (room.owner !== ROOM_CUSTODIAN) {
       this.statusFailure(room.id, "Room status requires custody migration into the unprivileged room runtime");
       return fail("This room needs custody migration into the unprivileged room runtime", 503);
     }
     try {
-      const response = await this.transport(room.owner, actor, `/v1/room-owner/${room.id}`, "GET", undefined, AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(10_000)]));
+      const response = await this.transport(room.owner, actor, `/v1/room-owner/${room.id}${query}`, "GET", undefined, AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(10_000), ...(signal ? [signal] : [])]));
       if (this.closed) return fail("Rooms stopped", 503);
       if (!response.ok) {
+        if (historyPage) return response;
         const detail = `Room owner status retrieval failed: HTTP ${response.status}`;
         await response.body?.cancel();
         this.statusFailure(room.id, detail);
@@ -214,13 +217,20 @@ export class Rooms {
       }
       const snapshot = await response.json() as RoomSnapshot;
       if (this.closed) return fail("Rooms stopped", 503);
-      this.reconcile(room, snapshot);
-      this.snapshotRevisions.set(room.id, revision(snapshot));
-      this.notifyChanges();
+      if (!readRoomPaging(snapshot.paging)) {
+        if (!historyPage) this.statusFailure(room.id, "Room owner returned an invalid history page");
+        return fail("Room owner returned an invalid history page", 503);
+      }
+      validateThreadObservation(snapshot);
+      if (!historyPage) {
+        this.reconcile(room, snapshot);
+        this.snapshotRevisions.set(room.id, revision(snapshot));
+        this.notifyChanges();
+      }
       return Response.json({ ...snapshot, room: this.visible(this.get(room.id)!, actor) });
     } catch {
       if (this.closed) return fail("Rooms stopped", 503);
-      this.statusFailure(room.id, "Room owner status retrieval failed");
+      if (!historyPage) this.statusFailure(room.id, "Room owner status retrieval failed");
       return fail("Room owner status retrieval failed", 503);
     }
   }
@@ -249,7 +259,9 @@ export class Rooms {
     if (req.method !== "GET") this.notifyChanges();
     const url = new URL(req.url);
     if (req.method !== "GET" || !response.ok || url.searchParams.get("sync") !== "1" || url.pathname.endsWith("/changes")) return response;
-    const resource = url.pathname;
+    const page = new URLSearchParams();
+    for (const name of ["before", "limit", "revision"]) if (url.searchParams.has(name)) page.set(name, url.searchParams.get(name)!);
+    const resource = `${url.pathname}${page.size ? `?${page}` : ""}`;
     const key = `${actor}:${resource}`;
     try {
       const value = await response.json();
@@ -329,7 +341,13 @@ export class Rooms {
         return Response.json({ room: this.visible(room, actor) });
       }
       if (room.owner !== ROOM_CUSTODIAN) return fail("This room needs custody migration into the unprivileged room runtime", 503);
-      if (!action && req.method === "GET") return this.refresh(room, actor);
+      if (!action && req.method === "GET") {
+        const parsed = readRoomHistoryOptions(url.searchParams);
+        if (!parsed.ok) return fail(parsed.error);
+        const page = new URLSearchParams();
+        for (const [name, value] of Object.entries(parsed.value)) page.set(name, String(value));
+        return this.refresh(room, actor, page.size ? `?${page}` : "", req.signal);
+      }
       if (action === "members" && req.method === "POST") {
         const members = this.roster([...room.members.map(member => member.user), ...(Array.isArray(body?.members) ? body.members : [null])], actor);
         if (!members) return fail("Known host members required");

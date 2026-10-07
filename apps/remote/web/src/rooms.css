@@ -10,6 +10,8 @@
 .room-details p { margin: var(--space-2) 0; }
 .room-add-members { padding: var(--space-2) 0; }
 .room-discretion { color: var(--muted); font-size: var(--text-xs); line-height: 1.5; }
-.room-context summary, .room-work > summary { min-height: var(--touch); padding: var(--space-2) 0; color: var(--muted); cursor: pointer; font-size: var(--text-sm); font-weight: 600; }
-.room-context pre { margin: var(--space-2) 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--text-xs)/1.5 var(--font-mono); }
+.room-work > summary { min-height: var(--touch); padding: var(--space-2) 0; color: var(--muted); cursor: pointer; font-size: var(--text-sm); font-weight: 600; }
+.room-context code { overflow-wrap: anywhere; font: var(--text-xs)/1.5 var(--font-mono); }
+.room-history-paging { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) 0; color: var(--muted); font-size: var(--text-xs); }
+.room-history-paging [role="status"] { flex-basis: 100%; }
 .room-retry { padding: var(--space-2); color: var(--muted); font-size: var(--text-xs); }

@@ -1,4 +1,4 @@
-import { validateThreadAwait } from "./contracts.js";
+import { validateInspectOptions, validateThreadAwait } from "./contracts.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
@@ -73,8 +73,10 @@ export class ThreadDirectory implements ThreadApi {
     return owner.value.api.control(input);
   }
   async inspect(threadId: string, options?: InspectOptions): Promise<Result<ThreadInspection>> {
+    const valid = validateInspectOptions(options);
+    if (!valid.ok) return valid;
     const owner = await this.owner(threadId);
-    return owner.ok ? owner.value.api.inspect(threadId, options) : owner;
+    return owner.ok ? owner.value.api.inspect(threadId, valid.value) : owner;
   }
   async command(threadId: string, command: PiCommand): Promise<Result<unknown>> {
     const owner = await this.owner(threadId);

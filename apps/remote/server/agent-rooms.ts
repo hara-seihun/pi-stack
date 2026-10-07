@@ -32,7 +32,9 @@ export async function handleAgentRooms(req: Request, peer: { uid: number } | und
     // Agent-created rooms are private to this person. Inviting others stays with the human room UI.
     if (path === "/v1/rooms") body = { ...(body as object), members: [] };
   }
-  const response = await rooms.handle(new Request(`http://router${path}`, { method: req.method,
+  const historyQuery = new URLSearchParams();
+  for (const name of ["before", "limit", "revision"]) for (const value of url.searchParams.getAll(name)) historyQuery.append(name, value);
+  const response = await rooms.handle(new Request(`http://router${path}${historyQuery.size ? `?${historyQuery}` : ""}`, { method: req.method, signal: req.signal,
     ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) }), actor, "agent");
   return Response.json({ ...await response.json(), person: actor }, { status: response.status });
 }

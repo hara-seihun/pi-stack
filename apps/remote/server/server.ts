@@ -53,10 +53,14 @@ import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
-import { displayAssistantMessage, displayContextDocument, type ContextImage } from "./context-display";
+import { displayAssistantMessage } from "./context-display";
+import { openIndexedContext } from "./indexed-context";
+import { CapturedTranscriptSource } from "./captured-transcript-source";
+import { ThreadTranscriptSource } from "./thread-transcript-source";
+import { contextResponse } from "./context-response";
 import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
-import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
+import { ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { questionAnswerContext } from "./question-answer-context";
 import { QuestionFeed } from "./question-feed";
@@ -66,9 +70,8 @@ import { oneKenanEnabled } from "kenan-memory/config";
 import { lifeClient } from "kenan-memory/life-client";
 import type { LifePolicyView, LifeSnapshot } from "kenan-memory/life-contract";
 import { projectNeedsYou, readNeedsYouQuestions } from "./needs-you";
-import { handleRoomOwner } from "./rooms-owner";
+import { handleRoomOwner, RoomHistoryError } from "./rooms-owner";
 import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
-import { readThreadHistory } from "pi-orchestrator/history";
 import { dismissError, observeError, observeFailure } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
@@ -108,7 +111,7 @@ import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
 import { ResourceCache } from "../shared/resource-cache";
-import { TranscriptItems } from "./transcript-items";
+import { SourceTranscripts, type SourceResult } from "./source-transcripts";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
@@ -285,7 +288,15 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
-const transcripts = new TranscriptItems(db);
+const capturedTranscripts = new CapturedTranscriptSource(db, id => threads.questionAnswerSource(id),
+  (id, entryId) => threads.questionAnswerSourceMessage(id, entryId));
+const transcriptSource = new ThreadTranscriptSource(db, capturedTranscripts, (id, options) => directory.inspect(id, options),
+  id => liveProjections.get(id)?.toolProgress, identity => piReactions.list(identity));
+const transcripts = new SourceTranscripts(db, transcriptSource.read, transcriptSource.project,
+  (sessionId, hash) => API.sessionImage.path({ sessionId, hash }), id => {
+    const thread = liveThread(id);
+    return thread?.agentName ?? (typeof thread?.metadata?.agentName === "string" ? thread.metadata.agentName : undefined);
+  });
 const piReactions = new PiReactions(db, MESSAGE_OWNER);
 const slackReactions = new SlackReactions(process.env.PI_REMOTE_SLACK_REACTIONS);
 const orchestrator = new OrchestratorClient({
@@ -446,7 +457,7 @@ async function refreshThreadInspection(id: string, fresh = false) {
   const pending = inspectingThreads.get(id);
   if (pending) return pending;
   const local = threads.get(id);
-  if (local && !peerInspections.has(id) && storedContext(id)) return;
+  if (local && !peerInspections.has(id) && hasCapturedContext(id)) return;
   const known = peerInspections.get(id);
   const listed = peerThreads.get(id);
   if (!fresh && !local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
@@ -455,12 +466,9 @@ async function refreshThreadInspection(id: string, fresh = false) {
   return operation;
 }
 async function inspectThread(id: string, local: boolean) {
-  const held = peerInspections.get(id);
-  const result = await directory.inspect(id, held?.context ? { contextRevision: held.thread.revision } : undefined);
+  const result = await directory.inspect(id, { context: "omit" });
   if (!result.ok) throw new Error(result.error.message);
-  // An owner that finds this revision already held omits the context instead of rereading the thread's whole history.
-  const inspection = !result.value.context && held?.context && result.value.thread.revision === held.thread.revision ? { ...result.value, context: held.context } : result.value;
-  if (inspection.context === held?.context && held && inspectedContexts.has(held)) inspectedContexts.set(inspection, inspectedContexts.get(held)!);
+  const inspection = result.value;
   const changed = !local && (peerThreads.get(id)?.revision !== inspection.thread.revision
     || JSON.stringify(peerInspections.get(id)?.pending) !== JSON.stringify(inspection.pending));
   if (!local) peerThreads.set(id, inspection.thread);
@@ -661,81 +669,53 @@ function signalLiveSync() {
 type StoredContext = { capturedAt: number; document: string; hash: string };
 const contextCacheLimits = { entries: 32, bytes: 64 * 1024 * 1024 };
 const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheLimits);
-const displayContexts = new ResourceCache<{ sourceHash: string; document: string; hash: string; images: Map<string, ContextImage> }>(contextCacheLimits);
-const inspectedContexts = new WeakMap<ThreadInspection, StoredContext | null>();
-/** Projections too large for `displayContexts`, kept only while a client has that thread open; reprojecting one costs seconds. */
-const openDisplayContexts = new Map<string, NonNullable<ReturnType<typeof displayContexts.get>>>();
 
 /** The newest user and assistant messages of this thread, from the context the
  * agent actually holds. Voice reads the conversation from the captured context,
  * which is where the conversation is. */
 function recentContextMessages(sessionId: string, limit: number): Array<{ role: "user" | "assistant"; text: string }> {
-  const stored = storedContext(sessionId);
-  if (!stored) return [];
-  let messages: any[];
-  try { messages = JSON.parse(stored.document).messages ?? []; } catch { return []; }
+  const opened = openIndexedContext(db, sessionId);
+  if (!opened.ok) throw new Error(`${opened.error.code}: ${opened.error.detail}`);
+  if (!opened.value) return [];
+  const context = opened.value;
   const found: Array<{ role: "user" | "assistant"; text: string }> = [];
-  for (const message of messages) {
-    const role = message?.role;
-    if (role !== "user" && role !== "assistant") continue;
-    const text = contentText(message.content).trim();
-    if (text) found.push({ role, text });
+  for (let index = context.messages.length - 1; index >= 0 && found.length < limit; index--) {
+    const descriptor = context.messages[index];
+    if (descriptor.role !== "user" && descriptor.role !== "assistant") continue;
+    const read = context.readMessage(descriptor.index);
+    if (!read.ok) throw new Error(`${read.error.code}: ${read.error.detail}`);
+    const text = contentText(read.value.content).trim();
+    if (text) found.push({ role: descriptor.role, text });
   }
-  return found.slice(-limit);
+  return found.reverse();
 }
 
-/** Finished response measurements of this session, keyed by the message each
- * one belongs to, exactly as the streamed thinking is joined. */
-function responseMetricsByMessage(sessionId: string): Map<string, ResponseMetrics> {
-  const result = new Map<string, ResponseMetrics>();
-  const rows = db.query("SELECT finalizes_message,metrics FROM message_facts WHERE session_id=? AND metrics IS NOT NULL")
-    .all(sessionId) as Array<{ finalizes_message: string; metrics: string }>;
-  for (const row of rows) {
-    try {
-      const metrics = JSON.parse(row.metrics);
-      if (isResponseMetrics(metrics)) result.set(row.finalizes_message, metrics);
-    } catch {}
-  }
-  return result;
+function hasCapturedContext(sessionId: string): boolean {
+  return Boolean(db.query("SELECT 1 FROM session_contexts WHERE session_id=?").get(sessionId));
 }
 
-function streamedThinkingByMessage(sessionId: string): Map<string, string> {
-  const result = new Map<string, string>();
-  const rows = db.query("SELECT finalizes_message,thinking FROM message_facts WHERE session_id=? AND thinking IS NOT NULL")
-    .all(sessionId) as Array<{ finalizes_message: string; thinking: string }>;
-  for (const row of rows) if (row.thinking) result.set(row.finalizes_message, row.thinking);
-  return result;
+function boundedContextUsage(sessionId: string, model: string) {
+  const row = db.query("SELECT captured_at,document FROM captured_context_usage WHERE session_id=?").get(sessionId) as { captured_at: number; document: string } | null;
+  return capturedContextUsage(row ? { document: row.document } : null, model);
 }
 
-function displayContext(sessionId: string, sourceHash: string, sourceDocument: string) {
-  const cached = displayContexts.get(sessionId) ?? openDisplayContexts.get(sessionId);
-  if (cached?.sourceHash === sourceHash) return cached;
-  const progress = liveProjections.get(sessionId)?.toolProgress;
-  if (progress?.size) {
-    for (const message of JSON.parse(sourceDocument).messages ?? []) {
-      if (message?.role === "toolResult") progress.delete(message.toolCallId);
-    }
-  }
-  const images = new Map<string, ContextImage>();
-  const document = displayContextDocument(piReactions.project(sessionId, sourceDocument), streamedThinkingByMessage(sessionId), (image) => {
-    const hash = sha256(`${image.mimeType}\0${image.data}`);
-    images.set(hash, image);
-    return API.sessionImage.path({ sessionId, hash });
-  }, liveProjections.get(sessionId)?.toolProgress.values(), responseMetricsByMessage(sessionId));
-  const projected = { sourceHash, document, hash: sha256(document), images };
-  openDisplayContexts.delete(sessionId);
-  releaseOpenDisplayContexts();
-  if (!displayContexts.set(sessionId, projected, document.length * 2 + [...images.values()].reduce((bytes, image) => bytes + image.data.length * 2, 0))
-    && sessionSubscribers(sessionId).length) openDisplayContexts.set(sessionId, projected);
-  return projected;
+function sourceValue<T>(result: SourceResult<T>): T {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  return result.value;
 }
 
-function cacheStoredContext(sessionId: string, stored: { capturedAt: number; document: string; hash: string } | null) {
+function cacheStoredContext(sessionId: string, stored: { capturedAt: number; document: string; hash: string } | null, captured?: any) {
   if (stored && threads.get(sessionId)) peerInspections.delete(sessionId);
   const known = storedContextCache.get(sessionId) ?? null;
+  const context = stored ? captured ?? JSON.parse(stored.document) : null;
+  if (stored) {
+    db.query("DELETE FROM captured_context_unavailable WHERE session_id=?").run(sessionId);
+    db.query("INSERT OR REPLACE INTO captured_context_usage VALUES(?,?,?)")
+      .run(sessionId, stored.capturedAt, JSON.stringify({ contextUsage: context.contextUsage, contextModel: context.contextModel }));
+  } else db.query("DELETE FROM captured_context_usage WHERE session_id=?").run(sessionId);
   const progress = liveProjections.get(sessionId)?.toolProgress;
   if (progress?.size && stored && known?.hash !== stored.hash) {
-    for (const message of JSON.parse(stored.document).messages ?? []) {
+    for (const message of context.messages ?? []) {
       if (message?.role === "toolResult") progress.delete(message.toolCallId);
     }
   }
@@ -743,15 +723,7 @@ function cacheStoredContext(sessionId: string, stored: { capturedAt: number; doc
   if (known?.hash !== stored?.hash) signalTranscript(sessionId);
 }
 
-/** The display projection of this session is stale; rebuild and push it. */
-function releaseOpenDisplayContexts() {
-  for (const id of openDisplayContexts.keys()) if (!sessionSubscribers(id).length) openDisplayContexts.delete(id);
-}
-
 function invalidateDisplayContext(sessionId: string) {
-  displayContexts.delete(sessionId);
-  openDisplayContexts.delete(sessionId);
-  transcripts.invalidate(sessionId);
   signalTranscript(sessionId);
 }
 
@@ -760,14 +732,6 @@ function storedContext(sessionId: string): { capturedAt: number; document: strin
 }
 
 function baseStoredContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
-  const peer = peerInspections.get(sessionId);
-  if (peer) {
-    if (inspectedContexts.has(peer)) return inspectedContexts.get(peer)!;
-    const document = peer.context ? JSON.stringify(peer.context) : null;
-    const stored = document === null ? null : { capturedAt: peer.thread.updatedAt, document, hash: sha256(document) };
-    inspectedContexts.set(peer, stored);
-    return stored;
-  }
   const cached = storedContextCache.get(sessionId);
   if (cached !== undefined) return cached;
   const stored = readContext(db, sessionId);
@@ -779,6 +743,8 @@ function clearStoredContext(sessionId: string) {
   db.transaction(() => {
     db.query("DELETE FROM session_context_patches WHERE session_id=?").run(sessionId);
     db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
+    db.query("INSERT OR REPLACE INTO captured_context_unavailable VALUES(?,?)")
+      .run(sessionId, "The current model context is unavailable because compaction did not acknowledge its replacement");
   })();
   cacheStoredContext(sessionId, null);
   transcripts.forget(sessionId);
@@ -811,7 +777,7 @@ function storeContextCapture(id: string, body: any) {
     changed = true;
   })();
   if (changed) {
-    cacheStoredContext(id, { capturedAt: time, document, hash });
+    cacheStoredContext(id, { capturedAt: time, document, hash }, context);
     if (compactionReplacement && runtime) runtime.compactionContextHash = hash;
     signalSync();
   }
@@ -1124,7 +1090,7 @@ function publicSession(row: any,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
-    ...(queued ? { contextUsage: capturedContextUsage(baseStoredContext(row.id), (row.effectiveSettings ?? row.settings).model) } : {}),
+    ...(queued ? { contextUsage: boundedContextUsage(row.id, (row.effectiveSettings ?? row.settings).model) } : {}),
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
     ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held)),
@@ -1192,7 +1158,7 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected), contextUsage: capturedContextUsage(baseStoredContext(selected), session.model) } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected), contextUsage: boundedContextUsage(selected, session.model) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
@@ -1268,37 +1234,33 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
   return [...streams.values()].filter(stream => stream.subscription.session === sessionId);
 }
 
-/** Project a captured context once; the reconciler owns each client's differences. */
-function refreshTranscript(sessionId: string) {
-  const stored = storedContext(sessionId);
-  if (!stored) transcripts.forget(sessionId);
-  const update = stored ? transcripts.derive(sessionId, `${SUPERVISOR_EPOCH}:${stored.hash}`, () => {
-    const display = displayContext(sessionId, stored.hash, stored.document);
-    return JSON.parse(display.document);
-  }, id => {
-    const thread = liveThread(id);
-    return thread?.agentName ?? (typeof thread?.metadata?.agentName === "string" ? thread.metadata.agentName : undefined);
-  }) : null;
-  for (const stream of sessionSubscribers(sessionId)) sendTranscript(stream, update);
-  return update;
+async function refreshTranscript(sessionId: string): Promise<void> {
+  await Promise.all(sessionSubscribers(sessionId).map(stream => sendTranscript(stream)));
 }
 
 function signalTranscript(sessionId: string): void {
   if (shuttingDown || transcriptTimers.has(sessionId) || !sessionSubscribers(sessionId).length) return;
   transcriptTimers.set(sessionId, setTimeout(() => {
     transcriptTimers.delete(sessionId);
-    refreshTranscript(sessionId);
+    void refreshTranscript(sessionId).catch(cause => {
+      for (const stream of sessionSubscribers(sessionId)) stream.send({ type: "error", message: `Could not read transcript: ${cause instanceof Error ? cause.message : String(cause)}` });
+    });
   }, TRANSCRIPT_COALESCE_MS));
 }
 
-function sendTranscript(stream: ClientStream, update: ReturnType<typeof refreshTranscript>): void {
+async function sendTranscript(stream: ClientStream): Promise<void> {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
-  const current = update?.current;
+  const revision = stream.revision;
+  const loaded = await transcripts.page(sessionId, undefined, 60);
+  if (!loaded.ok && loaded.error.code === "captured_context_unavailable" && !stream.closed && stream.revision === revision)
+    stream.publish({ type: "transcript", sessionId, generation: `unavailable:${sessionId}`, total: 0, items: [] });
+  let page = sourceValue(loaded);
   const from = stream.subscription.transcriptFrom;
-  const limit = from == null ? 60 : Math.min(600, Math.max(60, (current?.total ?? 0) - from));
-  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.total ?? 0,
-    items: current ? transcripts.window(sessionId, limit) : [] });
+  const limit = from == null ? 60 : Math.min(600, Math.max(60, page.total - from));
+  if (limit > 60) page = sourceValue(await transcripts.page(sessionId, undefined, limit));
+  if (!stream.closed && stream.revision === revision && stream.subscription.session === sessionId)
+    stream.publish({ type: "transcript", ...page });
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
@@ -1308,16 +1270,12 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
   const revision = stream.revision;
   const sessionId = stream.subscription.session ?? null;
   const changedSession = (before.session ?? null) !== sessionId;
-  if (changedSession) releaseOpenDisplayContexts();
+
   if (sessionId && stream.subscription.viewing) await markSessionViewed(sessionId,
     changedSession || !before.viewing || before.selectionId !== stream.subscription.selectionId);
   const pending: Promise<void>[] = [];
   if (sessionId) {
-    const captured = storedContext(sessionId);
-    if (mode === "push") {
-      if (captured) sendTranscript(stream, refreshTranscript(sessionId));
-      sendLive(stream);
-    }
+    if (mode === "push") sendLive(stream);
     sendImages(stream);
     if (mode === "finite") pending.push(sendQuestions(stream));
     else void sendQuestions(stream);
@@ -1325,8 +1283,8 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     const fresh = changedSession || before.selectionId !== stream.subscription.selectionId;
     pending.push(stream.synchronizeSelection(
       () => sessionRow.get(sessionId) ? refreshThreadInspection(sessionId, fresh) : Promise.resolve(),
-      () => {
-        sendTranscript(stream, refreshTranscript(sessionId));
+      async () => {
+        await sendTranscript(stream);
         sendLive(stream);
         projectState();
         sendState(stream);
@@ -1350,7 +1308,6 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
 function closeStream(stream: ClientStream): void {
   streams.delete(stream.id);
   stream.close();
-  releaseOpenDisplayContexts();
 }
 
 function contentText(content: unknown): string {
@@ -1902,22 +1859,29 @@ const server = Bun.serve<SocketData>({
         },
         update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
         send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
-        history: async id => {
-          const thread = threads.get(id)!;
-          const messages = readThreadHistory(thread.sessionFile).map(entry => entry.type === "message"
-            ? { ...entry.message, identity: { id: `pi/${id}/${entry.id}` } }
-            : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
-          if (!storedContext(id)) await refreshThreadInspection(id);
-          const context = storedContext(id);
+        history: async (id, options) => {
+          const inspect = async (before: number | undefined, limit: number, revision?: string) => {
+            const result = await directory.inspect(id, { contextRecords: { includeEntries: true,
+              ...(before === undefined ? {} : { before }), limit, ...(revision === undefined ? {} : { revision }) } });
+            if (!result.ok) throw new RoomHistoryError(result.error.code === "conflict" ? 409 : result.error.code === "oversized" ? 413 : 503, result.error.message);
+            if (!result.value.contextRecords) throw new RoomHistoryError(503, "The room owner did not return native records");
+            return result.value.contextRecords;
+          };
+          const initial = options.before === undefined ? await inspect(undefined, 1, options.revision) : null;
+          const page = await inspect(options.before ?? initial!.total, options.limit ?? 32, options.revision ?? initial?.source.revision);
+          const messages = page.records.map(record => ({ ...record.message, identity: { ...record.message.identity, id: `pi/${id}/${record.entryId}` } }));
           const questions = unwrap(await directory.questions(id));
           const current = threads.get(id)!;
           const settlement = threads.latestSettlement(id);
           const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
           const failure = current.state !== "running" && settlement?.outcome === "failed"
             ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
-          return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
-            execution: projectThreadActivity(current.state, liveProjections.get(id), current.executionActivity, current.metadata, Boolean(current.held)),
-            context: context ? JSON.parse(context.document) : null, questions };
+          const end = Math.min(options.before ?? page.total, page.total);
+          const start = page.records[0]?.index ?? end;
+          return { messages, paging: { revision: page.source.revision, total: page.total, start, end,
+            hasOlder: start > 0, nextBefore: start > 0 ? start : null }, ...(failure ? { error: failure } : {}),
+            live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+            execution: projectThreadActivity(current.state, liveProjections.get(id), current.executionActivity, current.metadata, Boolean(current.held)), questions };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "cancel" })); },
         answer: async (id, questionId, sender, body) => {
@@ -2063,8 +2027,9 @@ const server = Bun.serve<SocketData>({
     }
     const imageRequest = API.sessionImage.match(req.method, url.pathname);
     if (imageRequest) {
-      const stored = storedContext(imageRequest.sessionId);
-      const image = stored && displayContext(imageRequest.sessionId, stored.hash, stored.document).images.get(imageRequest.hash);
+      const found = await transcripts.image(imageRequest.sessionId, imageRequest.hash);
+      if (!found.ok) return error(found.error.message, found.error.code === "stale_source" ? 409 : 422);
+      const image = found.value;
       if (!image || !/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(image.mimeType)) return error("Context image not found", 404);
       const headers = new Headers({ ...API_CORS_HEADERS, "content-type": image.mimeType, "cache-control": "private, max-age=31536000, immutable", etag: `"${imageRequest.hash}"` });
       if (url.searchParams.get("download") === "1") {
@@ -2083,33 +2048,28 @@ const server = Bun.serve<SocketData>({
     if (transcriptRequest) {
       const id = transcriptRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      if (!storedContext(id)) await refreshThreadInspection(id);
-      const update = refreshTranscript(id);
-      if (!update) return json({ sessionId: id, generation: "", total: 0, items: [] });
-      const total = update.current.total;
-      const generation = url.searchParams.get("generation") ?? "";
-      if (generation && generation !== update.current.generation) {
-        // The client's window is gone; answer with the one that replaced it.
-        return json({ error: "The transcript generation has been replaced", sessionId: id,
-          generation: update.current.generation, total, items: transcripts.window(id) }, 409);
+      const beforeText = url.searchParams.get("before");
+      const before = beforeText === null ? undefined : Number(beforeText);
+      const limitText = url.searchParams.get("limit");
+      const limit = limitText === null ? 60 : Number(limitText);
+      if (before !== undefined && (!Number.isSafeInteger(before) || before < 0) || !Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+        return error("Invalid transcript page", 400);
+      const page = await transcripts.page(id, before, limit, url.searchParams.get("generation") ?? undefined);
+      if (page.ok) return json(page.value);
+      if (page.error.code === "stale_source") {
+        const current = await transcripts.page(id, undefined, 60);
+        return current.ok ? json({ error: page.error.message, ...current.value }, 409) : error(current.error.message, 422);
       }
-      const requestedBefore = Number(url.searchParams.get("before") ?? total);
-      const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : total;
-      const requestedLimit = Number(url.searchParams.get("limit") ?? 60);
-      const limit = Math.min(200, Math.max(1, Number.isSafeInteger(requestedLimit) ? requestedLimit : 60));
-      return json({ sessionId: id, generation: update.current.generation, total,
-        items: transcripts.page(id, before, limit) });
+      return error(page.error.message, page.error.code === "invalid_request" ? 400 : 422);
     }
     const itemRequest = API.sessionItem.match(req.method, url.pathname);
     if (itemRequest) {
       const id = itemRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      if (!transcripts.get(id)) {
-        if (!storedContext(id)) await refreshThreadInspection(id);
-        refreshTranscript(id);
-      }
-      const body = transcripts.body(id, itemRequest.itemId);
-      if (!body) return error("Transcript item not found", 404);
+      const found = await transcripts.body(id, itemRequest.itemId);
+      if (!found.ok) return error(found.error.message, found.error.code === "stale_source" ? 409 : 422);
+      const body = found.value;
+      if (body === undefined) return error("Transcript item not found", 404);
       const headers: Record<string, string> = {
         ...API_CORS_HEADERS,
         "content-type": "application/json",
@@ -2493,7 +2453,7 @@ const server = Bun.serve<SocketData>({
       .map(route => ({ route, match: route.match(req.method, url.pathname) })).find(item => item.match);
     if (queueAction?.match) {
       const { sessionId, workId } = queueAction.match;
-      const before = unwrap(await directory.inspect(sessionId));
+      const before = unwrap(await directory.inspect(sessionId, { context: "omit" }));
       const message = before.pending.find(item => item.id === workId);
       if (!message) return error("Pending message not found", 404);
       const result = await directory.control(queueAction.route === API.queueItem
@@ -2583,19 +2543,13 @@ const server = Bun.serve<SocketData>({
     if (action === "admission" && req.method === "PUT") return error("Admission belongs to Orchestrator", 405);
 
     if (action === "context" && req.method === "GET") {
-      await refreshThreadInspection(id);
-      const stored = storedContext(id);
-      const hash = stored?.hash ?? "empty";
-      const etag = `\"${hash}\"`;
-      if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { ...API_CORS_HEADERS, etag, "cache-control": "no-cache" } });
-      const response = json({
-        capturedAt: stored?.capturedAt ?? 0,
-        context: stored ? JSON.parse(stored.document) : null,
-        hash: stored?.hash ?? "",
-        session: publicSession(sessionRow.get(id)),
-      });
-      response.headers.set("etag", etag);
-      return response;
+      return contextResponse(db, id, publicSession(sessionRow.get(id)), req, async (after, limit, revision) => {
+        const inspected = await directory.inspect(id, { contextRecords: { ...(after === undefined ? {} : { after }), limit,
+          ...(revision === undefined ? {} : { revision }) } });
+        if (!inspected.ok) return inspected;
+        return inspected.value.contextRecords ? { ok: true, value: inspected.value.contextRecords }
+          : { ok: false, error: { code: "invalid_source", message: "The thread owner did not return native records" } };
+      }, API_CORS_HEADERS);
     }
     if (action === "context" && req.method === "PATCH") {
       try {

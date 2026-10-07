@@ -37,45 +37,41 @@ export function displayAssistantMessage(message: JsonObject): JsonObject {
   ] };
 }
 
-/** Builds the smaller transcript-only document shared by the browser and Android clients. */
+/** The page and full-download paths use the same per-record projection. */
+export function displayContextMessage(value: unknown, thinking?: string, imageReference?: ImageReference, metrics?: ResponseMetrics): unknown {
+  const source = object(value);
+  if (!source) return value;
+  const original = source.role === "assistant" ? restoreStreamedThinking(displayAssistantMessage(source), thinking) : source;
+  const message = { ...projectMessageReply(original) };
+  if (message.role === "assistant") {
+    for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"]) delete message[key];
+    if (metrics) message.responseMetrics = metrics;
+    if (Array.isArray(message.content)) message.content = message.content.filter(value => {
+      const block = object(value);
+      return block?.type !== "thinking" || String(block.thinking ?? "").trim().length > 0;
+    }).map(value => {
+      const originalBlock = object(value);
+      if (!originalBlock) return value;
+      const block = { ...originalBlock };
+      if (block.type === "thinking") delete block.thinkingSignature;
+      if (block.type === "text") delete block.textSignature;
+      return block;
+    });
+  } else if (message.role === "toolResult") delete message.details;
+  if (imageReference && Array.isArray(message.content)) message.content = message.content.map(value => {
+    const block = object(value);
+    if (block?.type !== "image" || typeof block.data !== "string" || typeof block.mimeType !== "string") return value;
+    return { type: "image", mimeType: block.mimeType, src: imageReference({ data: block.data, mimeType: block.mimeType }) };
+  });
+  return message;
+}
+
 export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map(), imageReference?: ImageReference, tools: Iterable<ToolProgress> = [], responseMetrics: ReadonlyMap<string, ResponseMetrics> = new Map()): string {
   const context = JSON.parse(document) as JsonObject;
-  const messages = withToolProgress(Array.isArray(context.messages) ? context.messages : [], tools);
-  const projected = messages.map((value) => {
+  const messages = withToolProgress(Array.isArray(context.messages) ? context.messages : [], tools).map(value => {
     const source = object(value);
-    if (!source) return value;
-    const finalization = source.role === "assistant" ? messageFinalizationKey(source) : "";
-    const original = source.role === "assistant"
-      ? restoreStreamedThinking(displayAssistantMessage(source), streamedThinking.get(finalization))
-      : source;
-    const message = { ...projectMessageReply(original) };
-    if (message.role === "assistant") {
-      for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"])
-        delete message[key];
-      // The supervisor's own measurement of this response, not part of the
-      // model context: the transcript reads it off the message it belongs to.
-      const metrics = responseMetrics.get(finalization);
-      if (metrics) message.responseMetrics = metrics;
-      if (Array.isArray(message.content)) message.content = message.content.filter((value) => {
-        const block = object(value);
-        return block?.type !== "thinking" || String(block.thinking ?? "").trim().length > 0;
-      }).map((value) => {
-        const originalBlock = object(value);
-        if (!originalBlock) return value;
-        const block = { ...originalBlock };
-        if (block.type === "thinking") delete block.thinkingSignature;
-        if (block.type === "text") delete block.textSignature;
-        return block;
-      });
-    } else if (message.role === "toolResult") {
-      delete message.details;
-    }
-    if (imageReference && Array.isArray(message.content)) message.content = message.content.map((value) => {
-      const block = object(value);
-      if (block?.type !== "image" || typeof block.data !== "string" || typeof block.mimeType !== "string") return value;
-      return { type: "image", mimeType: block.mimeType, src: imageReference({ data: block.data, mimeType: block.mimeType }) };
-    });
-    return message;
+    const finalization = source?.role === "assistant" ? messageFinalizationKey(source) : "";
+    return displayContextMessage(value, streamedThinking.get(finalization), imageReference, responseMetrics.get(finalization));
   });
-  return JSON.stringify({ ...context, messages: projected });
+  return JSON.stringify({ ...context, messages });
 }

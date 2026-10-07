@@ -1,16 +1,20 @@
 import { readFileSync } from "node:fs";
 import { actionJournal, journalWarning, type ActionJournal, type ActionTicket } from "kenan-memory/journal";
-import { roomMetadata } from "../shared/rooms";
+import { roomMetadata, readRoomHistoryOptions, readRoomPaging } from "../shared/rooms";
 import type { RoomSnapshot } from "../shared/rooms";
 
 export const ROOM_HELP = `usage: pi-room OPERATION [ARGS] [--request-id UUID]
 
   list                           Rooms your person belongs to (including closed rooms)
-  read ROOM_ID [--last N] [--work] Conversation; last 20 messages by default, 0 means all
+  read ROOM_ID [--last N] [--work] One history page; newest 20 chat messages in that page
+    [--before INDEX --revision REVISION] [--limit 1..32]
   send ROOM_ID TEXT|-             Post as your person's Kenan; '-' reads stdin
   create TITLE                   Create a room containing only your person
 
---work includes transparent thinking, tools and context when reading.
+Reads start with the latest <=32 native records, not the whole history. --last 0 shows
+all chat messages in that page. The returned paging.nextBefore and paging.revision
+select the older page via --before/--revision; --limit sets native records per page.
+--work includes transparent thinking, tools and notices from the selected page.
 Sends/creates generate a requestId unless supplied. Keep the returned requestId:
 a lost acknowledgement may have executed; inspect first and reuse that ID, never a new one.
 Acceptance means the room queued the message, not that Kenan's room turn completed.
@@ -24,10 +28,16 @@ type Invocation = { operation: "list" | "read" | "send" | "create"; path: string
 export function parseRoomArgs(argv: string[], stdin = () => readFileSync(0, "utf8")): { ok: true; value: Invocation | null } | { ok: false; error: string } {
   if (!argv.length || argv.includes("--help") || argv[0] === "help") return { ok: true, value: null };
   const positional: string[] = []; let requestId: string | undefined; let last = 20; let work = false;
+  const historyQuery = new URLSearchParams();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--") { positional.push(...argv.slice(i + 1)); break; }
     if (arg === "--work") { work = true; continue; }
+    if (["--before", "--limit", "--revision"].includes(arg)) {
+      const value = argv[++i];
+      if (value === undefined) return { ok: false, error: `${arg} requires a value` };
+      historyQuery.append(arg.slice(2), value); continue;
+    }
     if (arg === "--last") {
       const value = argv[++i];
       if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) return { ok: false, error: "--last requires a nonnegative integer" };
@@ -37,14 +47,17 @@ export function parseRoomArgs(argv: string[], stdin = () => readFileSync(0, "utf
     if (arg.startsWith("--")) return { ok: false, error: `Unknown option ${arg}` };
     positional.push(arg);
   }
+  const parsedHistory = readRoomHistoryOptions(historyQuery);
+  if (!parsedHistory.ok) return parsedHistory;
   const [operation, id, text] = positional;
+  if (historyQuery.size && operation !== "read") return { ok: false, error: "History paging options apply only to read" };
   if (operation === "list" && positional.length === 1) return { ok: true, value: { operation, path: "/v1/agent-rooms", last, work } };
   if (operation === "create" && positional.length === 2 && id?.trim()) {
     requestId ??= crypto.randomUUID();
     return { ok: true, value: { operation, path: "/v1/agent-rooms", body: { requestId, title: id }, requestId, last, work } };
   }
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, error: "read/send require a room UUID; run pi-room list" };
-  if (operation === "read" && positional.length === 2) return { ok: true, value: { operation, path: `/v1/agent-rooms/${id}`, last, work } };
+  if (operation === "read" && positional.length === 2) return { ok: true, value: { operation, path: `/v1/agent-rooms/${id}${historyQuery.size ? `?${historyQuery}` : ""}`, last, work } };
   if (operation === "send" && positional.length === 3 && text) {
     requestId ??= crypto.randomUUID();
     return { ok: true, value: { operation, path: `/v1/agent-rooms/${id}/prompt`, body: { requestId, text: text === "-" ? stdin() : text }, requestId, last, work } };
@@ -87,8 +100,10 @@ export async function runRoomCli(argv: string[], io = { out: (value: unknown) =>
       value.replayed ? "Previously accepted room input acknowledged; no new input" : `Room owner HTTP ${response.status}; acceptance is not a completed room turn`));
     if (!response.ok) { io.out({ ...value, ...(invocation.requestId ? { requestId: invocation.requestId } : {}), ...(warning ? { journalWarning: warning } : {}) }); return 1; }
     if (invocation.operation === "read") {
-      const { work, thinking, context, messages, ...snapshot } = value as RoomSnapshot;
-      io.out({ ...snapshot, messages: invocation.last ? messages.slice(-invocation.last) : messages, ...(invocation.work ? { work, thinking, context } : {}) });
+      const { work, thinking, messages, ...snapshot } = value as RoomSnapshot;
+      if (!readRoomPaging(snapshot.paging)) { io.error("Room router did not report a valid history page"); return 1; }
+      const shown = invocation.last ? messages.slice(-invocation.last) : messages;
+      io.out({ ...snapshot, historyScope: "page", pageMessages: messages.length, shownMessages: shown.length, messages: shown, ...(invocation.work ? { work, thinking } : {}) });
     } else if (invocation.operation === "list") io.out({ rooms: value.rooms });
     else io.out({ ...value, requestId: invocation.requestId, ...(warning ? { journalWarning: warning } : {}) });
     return 0;

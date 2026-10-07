@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
-import { jsonHttp } from "./json-http";
+import { jsonHttp, streamedJson } from "./json-http";
 
 const url = "http://localhost/v1/messaging/conversations/one/messages";
 const body = { messages: Array.from({ length: 80 }, (_, i) => ({ id: i, text: "A conversation message ".repeat(10) })) };
@@ -28,4 +28,21 @@ test("previews have a bounded max-age; streams and pre-encoded responses remain 
   expect(await jsonHttp(new Request(url), stream)).toBe(stream);
   const encoded = new Response("compressed", { headers: { "content-type": "application/json", "content-encoding": "gzip" } });
   expect(await jsonHttp(new Request(url), encoded)).toBe(encoded);
+});
+
+test("owned JSON streams never buffer at the HTTP boundary and gzip is incremental", async () => {
+  const create = () => {
+    const response = streamedJson(new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(body))); controller.close(); },
+    }), { headers: { "content-type": "application/json", etag: '"source-revision"', "cache-control": "no-cache" } }));
+    response.arrayBuffer = () => { throw new Error("HTTP boundary materialized a streamed context"); };
+    return response;
+  };
+  const identity = create();
+  expect(await jsonHttp(new Request(url), identity)).toBe(identity);
+  expect(await identity.json()).toEqual(body);
+  const encoded = await jsonHttp(new Request(url, { headers: { "accept-encoding": "gzip" } }), create());
+  expect(encoded!.headers.get("content-encoding")).toBe("gzip");
+  expect(encoded!.headers.get("etag")).toBe('"source-revision"');
+  expect(JSON.parse(gunzipSync(Buffer.from(await encoded!.arrayBuffer())).toString())).toEqual(body);
 });

@@ -4,7 +4,7 @@ import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
 export interface ThreadDependency { threadId: string; dependsOn: string; ownerId?: string }
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "dependency_conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; dependencies?: ThreadDependency[]; retryable?: boolean; retryAt?: number; requestId?: string };
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "dependency_conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; dependencies?: ThreadDependency[]; retryable?: boolean; retryAt?: number; requestId?: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
@@ -185,11 +185,72 @@ export function validateThreadAwait(input: AwaitThreads): Result<void> {
   }
   return { ok: true, value: undefined };
 }
-export interface InspectOptions { contextRevision?: number }
+export const CONTEXT_WINDOW_MAX_BYTES = 8 * 1024 * 1024;
+export interface InspectOptions {
+  contextRevision?: number;
+  context?: "omit" | "full";
+  contextWindow?: { before?: number; limit: number; generation?: string; toolCallIds?: string[] };
+  contextRecords?: { after?: number; before?: number; limit: number; revision?: string; includeEntries?: boolean };
+}
+export interface ThreadContextWindow {
+  source: {
+    kind: "native-jsonl";
+    context: "native-history";
+    path: string;
+    revision: string;
+    generation: string;
+    size: number;
+    leafId: string | null;
+  };
+  total: number;
+  records: Array<{ seq: number; count: number; entryId: string; message: Record<string, any>; results: Record<string, any>[] }>;
+  knownToolCallIds: string[];
+}
+export interface ThreadContextRecords {
+  source: ThreadContextWindow["source"];
+  total: number;
+  records: Array<{ index: number; entryId: string; message: Record<string, any> }>;
+}
+export function validateInspectOptions(input: unknown): Result<InspectOptions> {
+  const invalid = (message: string): Result<never> => ({ ok: false, error: { code: "invalid_request", message } });
+  if (input === undefined) return { ok: true, value: {} };
+  if (!input || typeof input !== "object" || Array.isArray(input)) return invalid("Inspection options must be an object");
+  const options = input as InspectOptions;
+  if (Object.keys(options).some(key => !["context", "contextRevision", "contextWindow", "contextRecords"].includes(key))) return invalid("Unknown inspection option");
+  if ([options.context, options.contextWindow, options.contextRecords].filter(value => value !== undefined).length > 1) return invalid("Context, contextWindow and contextRecords are mutually exclusive");
+  if (options.context !== undefined && options.context !== "omit" && options.context !== "full") return invalid("Inspection context must be omit or full when specified");
+  if (options.contextRevision !== undefined && options.context !== "full") return invalid("Context revision requires explicit context full");
+  if (options.contextRevision !== undefined && (!Number.isSafeInteger(options.contextRevision) || options.contextRevision < 0)) return invalid("Context revision must be a nonnegative safe integer");
+  if (options.contextWindow !== undefined) {
+    const window = options.contextWindow;
+    if (!window || typeof window !== "object" || Array.isArray(window)
+      || Object.keys(window).some(key => !["before", "limit", "generation", "toolCallIds"].includes(key))
+      || !Number.isInteger(window.limit) || window.limit < 1 || window.limit > 1000
+      || window.before !== undefined && (!Number.isSafeInteger(window.before) || window.before < 0)
+      || window.generation !== undefined && (typeof window.generation !== "string" || !window.generation.trim())
+      || window.toolCallIds !== undefined && (!Array.isArray(window.toolCallIds) || window.toolCallIds.length > 64
+        || window.toolCallIds.some(id => typeof id !== "string" || !id.trim() || id.length > 4096)
+        || new Set(window.toolCallIds).size !== window.toolCallIds.length)) return invalid("Context window requires limit 1..1000, optional nonnegative safe before, optional nonempty generation, and optional 0..64 unique tool call IDs (1..4096 characters)");
+  }
+  if (options.contextRecords !== undefined) {
+    const records = options.contextRecords;
+    if (!records || typeof records !== "object" || Array.isArray(records)
+      || Object.keys(records).some(key => !["after", "before", "limit", "revision", "includeEntries"].includes(key))
+      || !Number.isInteger(records.limit) || records.limit < 1 || records.limit > 32
+      || records.after !== undefined && (!Number.isSafeInteger(records.after) || records.after < -1)
+      || records.before !== undefined && (!Number.isSafeInteger(records.before) || records.before < 0)
+      || records.after !== undefined && records.before !== undefined
+      || records.includeEntries !== undefined && typeof records.includeEntries !== "boolean"
+      || records.revision !== undefined && (typeof records.revision !== "string" || !records.revision.trim())) return invalid("Context records require limit 1..32, optional exclusive safe after >= -1 or before >= 0, and an optional nonempty revision");
+  }
+  return { ok: true, value: options };
+}
 export interface ThreadInspection {
   thread: Thread;
   pending: ThreadMessage[];
   context?: Record<string, unknown>;
+  contextWindow?: ThreadContextWindow;
+  contextRecords?: ThreadContextRecords;
   live?: Record<string, unknown>;
 }
 export type ThreadControl =

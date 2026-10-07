@@ -412,7 +412,7 @@ interface TranscriptItemBase {
   body?: TranscriptItemBody;
 }
 
-/** Text that is always inline: the person's and the agent's visible words. */
+/** Visible words; large messages carry a marked preview with an exact lazy body. */
 export interface InlineTextItem extends TranscriptItemBase {
   agentSender?: { threadId: string; name?: string };
   identity?: import("./message-protocol.js").MessageIdentity;
@@ -421,6 +421,8 @@ export interface InlineTextItem extends TranscriptItemBase {
   kind: "user" | "assistant" | "notice";
   label?: string;
   text: string;
+  /** Present only when text is a bounded preview of the complete item body. */
+  textTruncated?: true;
 }
 
 /** Text shown only on expansion: system prompt, tool schemas, thinking. */
@@ -448,8 +450,8 @@ export interface ToolCallItem extends TranscriptItemBase {
   /** What names the step: strings cut at 120 characters, arrays at five entries, and
    * fields that are bodies rather than names (a written file's `content`, an edit's
    * `edits` replaced by `editCount`, other tools' delegated `message`) left out.
-   * `thread_send` and `thread_spawn` keep their full `message`: it is rendered as an
-   * agent-to-agent message bubble. `argumentsTruncated` says the body has more. */
+   * `thread_send` and `thread_spawn` retain a bounded words preview for their
+   * message bubble. `argumentsTruncated` says the exact body has more. */
   arguments: unknown;
   argumentsTruncated: boolean;
   /** Trailing output of a still-running tool, at most 4,000 characters. */

@@ -23,20 +23,41 @@ test.skipIf(process.getuid?.() === 0)("real local socket binds rooms to the Unix
   } finally { server.stop(true); }
 });
 
+test("agent room reads preserve paging and fences without forwarding identity hints", async () => {
+  const id = crypto.randomUUID();
+  const response = await handleAgentRooms(new Request(`http://fixture/v1/agent-rooms/${id}?before=42&limit=12&revision=r1&user=forged`),
+    { uid: 1001 }, new Map([[1001, "alice"]]), { handle: async (request, actor) => {
+      expect(actor).toBe("alice");
+      expect(new URL(request.url).pathname).toBe(`/v1/rooms/${id}`);
+      expect(new URL(request.url).search).toBe("?before=42&limit=12&revision=r1");
+      return Response.json({ error: "revision changed" }, { status: 409 });
+    } });
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: "revision changed", person: "alice" });
+});
+
 test("UID person mapping refuses ambiguous users and never admits root", () => {
   expect([...roomPersonUids(["root", "missing", "alice"], name => ({ root: 0, alice: 1001 } as Record<string, number>)[name])]).toEqual([[1001, "alice"]]);
   expect(() => roomPersonUids(["alice", "bob"], () => 1001)).toThrow("distinct Unix identities");
 });
 
-test("CLI limits reads without hiding shared work when requested", async () => {
+test("CLI reports the page window, displayed subset and transparent page work", async () => {
   const values: any[] = [];
   const io = { out: (value: unknown) => values.push(value), error: (text: string) => { throw new Error(text); }, help: () => {} };
   const id = crypto.randomUUID();
-  const request: RoomFetch = async () => Response.json({ messages: [{ text: "first" }, { text: "last" }], work: [{ text: "tools" }], thinking: "thinking", context: { text: "prompt" }, state: "idle" });
+  const paging = { revision: "room-r1", total: 102, start: 100, end: 102, hasOlder: true, nextBefore: 100 };
+  const urls: string[] = [];
+  const request: RoomFetch = async url => {
+    urls.push(String(url));
+    return Response.json({ messages: [{ text: "first" }, { text: "last" }], work: [{ text: "tools" }], thinking: "thinking", paging, state: "idle" });
+  };
   expect(await runRoomCli(["read", id, "--last", "1"], io, request, {})).toBe(0);
-  expect(values.pop()).toEqual({ state: "idle", messages: [{ text: "last" }] });
+  expect(values.pop()).toEqual({ state: "idle", paging, historyScope: "page", shownMessages: 1, pageMessages: 2, messages: [{ text: "last" }] });
   expect(await runRoomCli(["read", id, "--last", "0", "--work"], io, request, {})).toBe(0);
-  expect(values.pop()).toMatchObject({ messages: [{ text: "first" }, { text: "last" }], work: [{ text: "tools" }], thinking: "thinking", context: { text: "prompt" } });
+  expect(values.pop()).toMatchObject({ messages: [{ text: "first" }, { text: "last" }], paging, historyScope: "page", shownMessages: 2, work: [{ text: "tools" }], thinking: "thinking" });
+  expect(await runRoomCli(["read", id, "--before", "100", "--revision", "room-r1", "--limit", "2"], io, request, {})).toBe(0);
+  expect(urls.at(-1)).toContain("?before=100&revision=room-r1&limit=2");
+  for (const argv of [["read", id, "--limit", "33"], ["read", id, "--before", "-1"], ["read", id, "--revision", ""], ["list", "--before", "1"]]) expect(parseRoomArgs(argv).ok).toBe(false);
 });
 
 test("CLI retains the actual generated send identity on a lost acknowledgement and never retries", async () => {

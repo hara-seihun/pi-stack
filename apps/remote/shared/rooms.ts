@@ -19,7 +19,38 @@ export interface Room extends RoomActivity {
 export interface RoomSender extends RoomMember { agent?: true }
 export interface RoomMessage { id: string; sender: RoomSender; text: string; time: number }
 export interface RoomWork { id: string; kind: string; text: string; name?: string }
-export interface RoomSnapshot extends RoomActivity { room: Room; state: Session["state"]; messages: RoomMessage[]; live: string; notificationId: string | null; questions?: import("pi-orchestrator/api").ThreadQuestion[]; work?: RoomWork[]; thinking?: string; context?: unknown }
+export const ROOM_HISTORY_LIMIT = 32;
+export interface RoomHistoryOptions { before?: number; limit?: number; revision?: string }
+export interface RoomPaging { revision: string; total: number; start: number; end: number; hasOlder: boolean; nextBefore: number | null }
+export interface RoomSnapshot extends RoomActivity { room: Room; state: Session["state"]; messages: RoomMessage[]; paging: RoomPaging; live: string; notificationId: string | null; questions?: import("pi-orchestrator/api").ThreadQuestion[]; work?: RoomWork[]; thinking?: string }
+
+export function readRoomPaging(value: unknown): RoomPaging | null {
+  if (!value || typeof value !== "object") return null;
+  const page = value as RoomPaging;
+  if (typeof page.revision !== "string" || !page.revision || ![page.total, page.start, page.end].every(Number.isSafeInteger)
+    || page.start < 0 || page.start > page.end || page.end > page.total || page.end - page.start > ROOM_HISTORY_LIMIT
+    || (page.end > 0 && page.start === page.end)
+    || page.hasOlder !== (page.start > 0) || page.nextBefore !== (page.start > 0 ? page.start : null)) return null;
+  return page;
+}
+
+export function readRoomHistoryOptions(query: URLSearchParams): { ok: true; value: RoomHistoryOptions } | { ok: false; error: string } {
+  const value: RoomHistoryOptions = {};
+  for (const key of ["before", "limit"] as const) {
+    if (!query.has(key)) continue;
+    const raw = query.get(key)!;
+    if (query.getAll(key).length !== 1 || !/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) return { ok: false, error: `Invalid room history ${key}` };
+    const number = Number(raw);
+    if (key === "limit" && (number < 1 || number > ROOM_HISTORY_LIMIT)) return { ok: false, error: `Room history limit must be 1..${ROOM_HISTORY_LIMIT}` };
+    value[key] = number;
+  }
+  if (query.has("revision")) {
+    const revision = query.get("revision")!;
+    if (!revision || revision.length > 512 || query.getAll("revision").length !== 1) return { ok: false, error: "Invalid room history revision" };
+    value.revision = revision;
+  }
+  return { ok: true, value };
+}
 
 export function roomMembers(value: unknown): RoomMember[] | null {
   if (!Array.isArray(value) || !value.length || value.length > 64) return null;

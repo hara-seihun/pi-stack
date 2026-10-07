@@ -2,17 +2,20 @@ import type { Thread } from "pi-orchestrator/api";
 import { roomFeed } from "./room-feed";
 import { projectThreadActivity } from "./live-projection";
 import { validateThreadObservation } from "../shared/state-validation";
-import type { Room, RoomActivity, RoomSnapshot } from "../shared/rooms";
-import { roomInput, roomMembers, roomMetadata, readRoomInput } from "../shared/rooms";
+import type { Room, RoomActivity, RoomSnapshot, RoomHistoryOptions, RoomPaging } from "../shared/rooms";
+import { roomInput, roomMembers, roomMetadata, readRoomInput, readRoomPaging, readRoomHistoryOptions } from "../shared/rooms";
 
 interface OwnedRoomThread { id: string; title: string; state: Thread["state"]; held?: boolean; metadata?: Record<string, unknown>; executionActivity?: Thread["executionActivity"] }
-interface RoomHistory { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown; error?: string; execution?: RoomActivity }
+export interface RoomHistory { messages: unknown[]; paging: RoomPaging; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; error?: string; execution?: RoomActivity }
+export class RoomHistoryError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
 interface RoomOwner {
   get(id: string): OwnedRoomThread | null;
   create(id: string, title: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   update(id: string, members: NonNullable<ReturnType<typeof roomMembers>>): Promise<void>;
   send(id: string, requestId: string, text: string): Promise<void>;
-  history(id: string): Promise<RoomHistory>;
+  history(id: string, options: RoomHistoryOptions): Promise<RoomHistory>;
   stop?(id: string): Promise<void>;
   answer?(id: string, questionId: string, sender: NonNullable<ReturnType<typeof roomMembers>>[number], body: any): Promise<void>;
   notify(id: string, receiptId: string, title: string, body: string, time: number): void;
@@ -22,6 +25,7 @@ const uuid = (value: unknown): value is string => typeof value === "string" && /
 const fail = (error: string, status = 400) => Response.json({ error }, { status });
 
 export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory): RoomSnapshot {
+  if (!readRoomPaging(source.paging) || source.messages.length !== source.paging.end - source.paging.start) throw new RoomHistoryError(503, "Room owner returned an invalid history page");
   const metadata = roomMetadata(thread.metadata?.room)!;
   const execution = source.execution ?? projectThreadActivity(thread.state, undefined, thread.executionActivity, thread.metadata, Boolean(thread.held));
   const error = source.error ?? execution.executionError;
@@ -46,20 +50,7 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory)
   for (const [index, value] of source.messages.entries()) {
     if (!value || typeof value !== "object") continue;
     const message = value as Record<string, any>;
-    const entryId = typeof message.identity?.id === "string" ? message.identity.id : `entry:${index}`;
-    const record = message.role === "notice" ? message.content : null;
-    if (record?.customType === "thread_input" && typeof record.data?.message === "string") {
-      const input = readRoomInput(record.data.message);
-      if (input) {
-        let materialized = false;
-        for (const following of source.messages.slice(index + 1) as Record<string, any>[]) {
-          if (following?.content?.customType === "thread_input") break;
-          if (following?.role === "user") { materialized = true; break; }
-        }
-        if (!materialized) messages.push({ id: entryId, sender: input.sender, text: input.text, time: Date.parse(record.timestamp) || 0 });
-        continue;
-      }
-    }
+    const entryId = typeof message.identity?.id === "string" ? message.identity.id : `entry:${source.paging.start + index}`;
     if (message.role === "assistant" && Array.isArray(message.content)) for (const [blockIndex, block] of message.content.entries()) {
       if (block?.type === "thinking") work.push({ id: `${entryId}:${blockIndex}`, kind: "thinking", text: String(block.thinking ?? "") });
       if (block?.type === "toolCall") work.push({ id: `${entryId}:${blockIndex}`, kind: "toolCall", name: block.name, text: JSON.stringify(block.arguments, null, 2) ?? "" });
@@ -75,11 +66,10 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory)
     const input = message.role === "user" ? readRoomInput(text) : null;
     if (message.role === "user" && !input) { work.push({ id: entryId, kind: "notice", text }); continue; }
     const time = Number(message.timestamp) || 0;
-    const id = typeof message.identity?.id === "string" ? message.identity.id : `${message.role}:${time}:${messages.length}`;
-    messages.push({ id, time, sender: input?.sender ?? { user: "assistant", displayName: "Kenan" }, text: input?.text ?? text });
+    messages.push({ id: entryId, time, sender: input?.sender ?? { user: "assistant", displayName: "Kenan" }, text: input?.text ?? text });
   }
-  return { room, state: thread.state, ...activity, messages, live: source.live, questions: source.questions ?? [], work, thinking: source.thinking ?? "", context: source.context ?? null,
-    notificationId: thread.state === "idle" ? messages.filter(message => message.sender.user === "assistant").at(-1)?.id ?? null : null };
+  return { room, state: thread.state, ...activity, messages, paging: source.paging, live: source.live, questions: source.questions ?? [], work, thinking: source.thinking ?? "",
+    notificationId: thread.state === "idle" && source.paging.end === source.paging.total ? messages.filter(message => message.sender.user === "assistant").at(-1)?.id ?? null : null };
 }
 
 /** Invoked only after the supervisor verifies the router's person caller. */
@@ -122,13 +112,19 @@ export async function handleRoomOwner(req: Request, owner: RoomOwner): Promise<R
     });
   }
   if (!action && req.method === "GET") {
-    const history = await owner.history(id);
+    const parsed = readRoomHistoryOptions(url.searchParams);
+    if (!parsed.ok) return fail(parsed.error);
+    let inspected: { ok: true; history: RoomHistory } | { ok: false; cause: unknown };
+    try { inspected = { ok: true, history: await owner.history(id, parsed.value) }; }
+    catch (cause) { inspected = { ok: false, cause }; }
     const current = owner.get(id);
     const audience = roomMetadata(current?.metadata?.room);
     if (!current || audience?.id !== id) return fail("Room not found", 404);
     if (!audience.members.some(member => member.user === actor)) return fail("Room membership required", 403);
     if (req.signal.aborted) return fail("Room request ended", 423);
-    return Response.json(publicRoomSnapshot(current, history));
+    if (!inspected.ok) return inspected.cause instanceof RoomHistoryError ? fail(inspected.cause.message, inspected.cause.status) : fail("Room history retrieval failed", 503);
+    try { return Response.json(publicRoomSnapshot(current, inspected.history)); }
+    catch (cause) { return cause instanceof RoomHistoryError ? fail(cause.message, cause.status) : fail("Room history projection failed", 503); }
   }
   if (action === "members" && req.method === "POST") {
     const members = roomMembers(body?.members);

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./client";
+import { api, piFetch } from "./client";
 import { watchRoomRevision, RoomResource, RoomResourceError } from "./room-sync";
 import type { Room, RoomMember, RoomSnapshot } from "../../shared/rooms";
+import { ROOM_HISTORY_LIMIT, readRoomPaging } from "../../shared/rooms";
 import { ChatMessage, agentAvatar } from "./chat-message";
 import { Composer } from "./Composer";
 import { ConversationView } from "./ConversationView";
@@ -117,6 +118,9 @@ function RoomQuestion({ question, roomId, onAnswered }: { question: NonNullable<
 
 export function RoomConversation({ id, people, onBack, onRefresh, showBack = true, showIdentity = true }: { id: string; people: RoomMember[]; onBack(): void; onRefresh(): Promise<void>; showBack?: boolean; showIdentity?: boolean }) {
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
+  const [historyPage, setHistoryPage] = useState<RoomSnapshot | null>(null);
+  const [paging, setPaging] = useState(false);
+  const pageRequest = useRef<AbortController | null>(null);
   const resource = useMemo(() => new RoomResource<RoomSnapshot>(`/v1/rooms/${encodeURIComponent(id)}`), [id]);
   const draftKey = appStorageKey(`pi-remote-room-draft:${window.PiRemotePerson.get()}:${id}`);
   const [saved] = useState(() => {
@@ -148,6 +152,7 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
     }
     if (value === null) { if (!signal?.aborted) setError(""); return; }
     validateThreadObservation(value);
+    if (!readRoomPaging(value.paging)) throw new Error("Room returned an invalid history page");
     if (signal?.aborted) return;
     setSnapshot(value); setError("");
     const marker = value.room.readThrough;
@@ -158,8 +163,36 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
     }
   }, [id, resource]);
   useEffect(() => {
+    setSnapshot(null); setHistoryPage(null); setPaging(false);
+    return () => { pageRequest.current?.abort(); pageRequest.current = null; };
+  }, [id]);
+  useEffect(() => {
     return watchRoomRevision(value => value.rooms[id], load, setError);
   }, [load]);
+  const page = historyPage ?? snapshot;
+  const historyChanged = historyPage !== null && snapshot !== null && historyPage.paging.revision !== snapshot.paging.revision;
+  const older = async () => {
+    if (!page || paging || historyChanged || page.paging.nextBefore === null) return;
+    const controller = new AbortController();
+    pageRequest.current = controller;
+    setPaging(true); setError("");
+    try {
+      const query = new URLSearchParams({ before: String(page.paging.nextBefore), limit: String(ROOM_HISTORY_LIMIT), revision: page.paging.revision });
+      const response = await piFetch(`/v1/rooms/${id}?${query}`, { signal: controller.signal, cache: "no-store" });
+      if (!response.ok) throw new Error(`History page returned HTTP ${response.status}`);
+      const value: RoomSnapshot = await response.json();
+      if (controller.signal.aborted) return;
+      validateThreadObservation(value);
+      if (!readRoomPaging(value.paging) || value.paging.revision !== page.paging.revision || value.paging.end !== page.paging.start) throw new Error("Room returned a mismatched history page");
+      setHistoryPage(value);
+    } catch (cause) { if (!controller.signal.aborted) setError(`Could not load older history: ${String(cause)}. Return to the latest page to restart paging.`); }
+    finally { if (pageRequest.current === controller) { pageRequest.current = null; setPaging(false); } }
+  };
+  const latest = () => {
+    pageRequest.current?.abort(); pageRequest.current = null;
+    setPaging(false); setHistoryPage(null); setError("");
+    void load().catch(cause => setError(String(cause)));
+  };
   const changeText = (value: string) => {
     if (pending || receipt) return;
     setText(value);
@@ -208,23 +241,33 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
         <button type="submit" className="header-action" disabled={running || pending || !members.length}>Add to conversation</button>
       </form>}
       <p className="room-discretion">Everyone here can see this conversation, including Kenan's thinking and work. Private work goes to root Kenan; only his chosen reply comes back.</p>
-      {snapshot?.context != null && <details className="room-context"><summary>Context</summary><pre>{JSON.stringify(snapshot.context, null, 2)}</pre></details>}
+      {page && <section className="room-context" aria-label="Page-scoped context">
+        <strong>Page-scoped history</strong>
+        <p>This view contains native records {page.paging.start + (page.paging.end > page.paging.start ? 1 : 0)}–{page.paging.end} of {page.paging.total}, including this page's thinking, tools and notices. It is not a full context capture. Use Older page to inspect earlier records.</p>
+        <p>Source revision: <code>{page.paging.revision}</code></p>
+      </section>}
     </section>}
     <ConversationView active label={`Chat with ${snapshot?.room.title ?? "Kenan"}`} editImages={false}
       drawing={{ isOpen: false, open() {}, editImage() {}, editors: [] }}
       transcript={<div className="transcript conversation-transcript">
-        {snapshot?.messages.map(message => message.sender.user === "assistant"
+        {page && <nav className="room-history-paging" aria-label="History pages">
+          <span>Records {page.paging.start + (page.paging.end > page.paging.start ? 1 : 0)}–{page.paging.end} of {page.paging.total}</span>
+          <button type="button" className="header-chip" disabled={paging || historyChanged || !page.paging.hasOlder} onClick={() => void older()}>{paging ? "Loading…" : "Older page"}</button>
+          <button type="button" className="header-chip" onClick={latest}>Latest page</button>
+          {historyChanged && <span role="status">History changed. Return to the latest page before continuing.</span>}
+        </nav>}
+        {page?.messages.map(message => message.sender.user === "assistant"
           ? <ChatMessage key={message.id} kind="assistant" label={message.sender.displayName} avatar={agentAvatar()} timestamp={message.time}
               text={message.text} contentFormat="markdown" renderMarkdown={source => <Markdown source={source} sessionId={id} assistant sessionMedia={false} />} />
           : <ChatMessage key={message.id} kind="user" label={message.sender.displayName} timestamp={message.time} text={message.text} contentFormat="literal" />)}
-        {(snapshot?.work?.length || snapshot?.thinking) ? <details className="room-work work-card"><summary>Thinking and work</summary>
-          <div className="work-steps">{snapshot.work?.map(item => <details className="conversation-step" key={item.id}>
+        {(page?.work?.length || !historyPage && snapshot?.thinking) ? <details className="room-work work-card"><summary>Thinking and work · this page</summary>
+          <div className="work-steps">{page?.work?.map(item => <details className="conversation-step" key={item.id}>
             <summary><span className="step-summary">{item.kind}{item.name ? ` · ${item.name}` : ""}</span></summary>
             <div className="step-detail"><pre>{item.text}</pre></div>
           </details>)}
-          {snapshot.thinking && <details className="conversation-step thinking-step" open><summary><span className="step-summary">Thinking now</span></summary><div className="step-detail"><pre>{snapshot.thinking}</pre></div></details>}</div>
+          {!historyPage && snapshot?.thinking && <details className="conversation-step thinking-step" open><summary><span className="step-summary">Thinking now</span></summary><div className="step-detail"><pre>{snapshot.thinking}</pre></div></details>}</div>
         </details> : null}
-        {snapshot?.live && <div className="live-answer"><ChatMessage kind="assistant" label="Kenan" avatar={agentAvatar()} text={snapshot.live} contentFormat="markdown" renderMarkdown={source => <Markdown source={source} sessionId={id} streaming assistant sessionMedia={false} />} /></div>}
+        {!historyPage && snapshot?.live && <div className="live-answer"><ChatMessage kind="assistant" label="Kenan" avatar={agentAvatar()} text={snapshot.live} contentFormat="markdown" renderMarkdown={source => <Markdown source={source} sessionId={id} streaming assistant sessionMedia={false} />} /></div>}
       </div>}>
       <DismissibleError className="conversation-error" message={snapshot?.error || (snapshot?.held ? "Kenan is stopped in this room." : "") || error} resetKey={id} dismissLabel="Dismiss conversation error" />
       {question ? <section className="questions-composer" aria-label="Questions to answer">

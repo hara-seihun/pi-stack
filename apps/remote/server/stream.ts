@@ -99,15 +99,15 @@ export class ClientStream {
     if (frame && this.send({ type: "reconcile", ...frame })) this.held.set(resource, frame.revision);
   }
 
-  async synchronizeSelection(refresh: () => Promise<void>, publish: () => void): Promise<void> {
+  async synchronizeSelection(refresh: () => Promise<void>, publish: () => void | Promise<void>): Promise<void> {
     const { session, selectionId } = this.subscription;
     if (!session) return;
     const current = () => !this.closed && this.subscription.session === session && this.subscription.selectionId === selectionId;
     try {
       await refresh();
       if (!current()) return;
-      publish();
-      if (!selectionId) return;
+      await publish();
+      if (!current() || !selectionId) return;
       const resources = ["state", `transcript:${session}`, `live:${session}`];
       if (resources.some(resource => !this.held.has(resource))) return;
       this.send({ type: "selection-ready", sessionId: session, selectionId,

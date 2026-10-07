@@ -8,9 +8,10 @@ import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
-import { AgentRoute, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
+import { AgentRoute, copyOutgoingMessage, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
+import { completeMessageEntry, loadMessageEntry } from "./message-body";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
 import { appendLiveThinking, buildStableTranscript, type TranscriptItem } from "./transcript-model";
 import { VirtualTranscript } from "./VirtualTranscript";
@@ -99,15 +100,32 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
   onEdit(entry: ContextEntry): void;
   onReply(target: ReplyTarget): void;
 }) {
-  const presented = presentAgentMessage(entry);
+  const [expanded, setExpanded] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const body = useItemBody(entry.itemId, expanded, entry.size);
+  const loaded = body.body ? completeMessageEntry(entry, body.body) : null;
+  const presented = presentAgentMessage(loaded?.ok ? loaded.value : entry);
   const text = presented.text || "";
   const sender = presented.agentSender;
+  const partial = entry.textTruncated && !loaded?.ok;
+  const copy = async () => {
+    const full = await loadMessageEntry(entry, body.load);
+    if (!full.ok) throw new Error(full.error.message);
+    return presentAgentMessage(full.value).text ?? "";
+  };
+  const edit = async () => {
+    setActionError(null);
+    const full = await loadMessageEntry(entry, body.load);
+    if (!full.ok) { setActionError(full.error.message); return; }
+    onEdit(full.value);
+  };
   return <div data-transcript-seq={entry.seq}><ChatMessage
     kind={entry.kind}
     label={entry.kind === "assistant" ? AGENT_NAME : presented.label || entry.kind}
     heading={sender ? <AgentRoute direction="incoming" from={{ kind: "peer", threadId: sender.threadId, name: presented.label ?? null }} to={{ kind: "self", threadId: sessionId }} /> : undefined}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
     text={text}
+    resolveCopyText={copy}
     timestamp={entry.messageTimestamp || undefined}
     identity={entry.identity}
     reactions={entry.reactions}
@@ -116,15 +134,27 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
     responseMetrics={entry.kind === "assistant" ? entry.responseMetrics : undefined}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
-    menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
-  /></div>;
+    menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: edit }] : []}
+  />
+    {partial && <div className="step-copy">
+      <button type="button" className="message-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
+        {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load full message"}
+      </button>
+      <CopyButton text={copy} label="Copy full message" />
+    </div>}
+    {(body.error || loaded && !loaded.ok || actionError) && <p className="step-loading step-failed" role="status">{actionError || body.error || loaded && !loaded.ok && loaded.error.message}</p>}
+  </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
 const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId }: { entry: ContextEntry; sessionId: string }) {
-  const message = outgoingAgentMessage(entry);
-  const spawn = message?.tool === "spawn" && message.delivery.state === "delivered";
-  const body = useItemBody(entry.itemId, spawn, entry.size);
+  const preview = outgoingAgentMessage(entry);
+  const [expanded, setExpanded] = useState(false);
+  const body = useItemBody(entry.itemId, expanded, entry.size);
+  const complete = body.body?.kind === "toolCall" ? outgoingAgentMessage(entry, body.body) : null;
+  const message = complete ?? preview;
   if (!message) return null;
+  const partial = entry.argumentsTruncated && !complete;
+  const copy = () => copyOutgoingMessage(entry, body.load);
   const created = message.tool === "spawn" ? spawnedThread(body.body) : null;
   const to = message.tool === "send" ? { kind: "peer" as const, threadId: message.recipientId, name: null }
     : created ? { kind: "peer" as const, threadId: created.id, name: created.name } : { kind: "new" as const, title: message.title };
@@ -136,11 +166,21 @@ const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId }: { entry:
     heading={<AgentRoute direction="outgoing" from={{ kind: "self", threadId: sessionId }} to={to} />}
     avatar={agentAvatar()}
     text={message.text}
+    resolveCopyText={copy}
     timestamp={Number(entry.time) || undefined}
     delivery={status}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} assistant />}
-  /></div>;
+  />
+    {(partial || message.tool === "spawn" && message.delivery.state === "delivered" && !created) && <div className="step-copy">
+      <button type="button" className="message-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
+        {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load full message"}
+      </button>
+      <CopyButton text={copy} label="Copy full message" />
+    </div>}
+    {body.error && <p className="step-loading step-failed" role="status">{body.error}</p>}
+    {expanded && body.body && !complete && <p className="step-loading step-failed" role="status">The full outgoing message is invalid.</p>}
+  </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId);
 
 function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {
@@ -252,6 +292,11 @@ const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = fals
           ? <Markdown source={detail} sessionId={sessionId} streaming={entry.streaming} className="markdown-body step-thinking-body" />
           : <pre>{detail}</pre>}
       <div className="step-copy"><CopyButton text={async () => {
+        if (entry.textTruncated) {
+          const full = await loadMessageEntry(entry, body.load);
+          if (!full.ok) throw new Error(full.error.message);
+          return full.value.text ?? "";
+        }
         const complete = await body.load();
         return complete && complete.kind !== "toolCall" ? complete.text : detail;
       }} label={`Copy ${stepLabel(entry).toLowerCase()}`} /></div>
