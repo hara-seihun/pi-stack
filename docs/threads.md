@@ -202,6 +202,15 @@ Machine model availability applies to new creation, while accepted existing
 settings and historical attribution survive policy changes. Actual provider
 exhaustion, reservations and readiness remain independent admission constraints.
 
+A positively failed pre-native open releases its original capacity identity;
+startup rejection cannot strand that lease behind a separate failed settlement.
+Direct cwd admission rejection carries typed absence proof. Retained runner
+absence or confirmed idle cancellation releases startup custody before settling
+failure. Lost acknowledgements retain custody. Restart recovery may release a
+persisted cwd failure only with `nativeNotReady`, the exact failed/unlanded work
+and settlement, matching work-capacity source, and no current native reference,
+runtime or execution. Result notices do not become reply assignments.
+
 Provider capacity refusals preserve execution/work identity, retire inactive
 native resources, and retry through durable admission without emitting a false
 completion. Transient compaction/transport recovery has recorded retry times and

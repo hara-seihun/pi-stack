@@ -26,6 +26,7 @@ import usageLogger from "../extension/usage-logger.js";
 import { observeProviderRequests } from "../extension/provider-request-activity.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
+import { RunnerStartupError } from "./runner-startup.js";
 import { memoryExtension } from "kenan-memory/tools";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
@@ -68,8 +69,13 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     }
     emitOutput(event);
   };
-  const admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
-  options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
+  const admission = (() => {
+    try {
+      const admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
+      options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
+      return admission;
+    } catch (error) { throw new RunnerStartupError(error instanceof Error ? error.message : String(error)); }
+  })();
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_ID: options.threadId,
     PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
     PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1",

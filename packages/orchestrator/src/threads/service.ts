@@ -416,7 +416,20 @@ export class ThreadService implements ThreadApi {
   private async releaseUnenteredCapacity(id: string, executionId: string): Promise<void> {
     if (this.capacityLedger) this.capacityReleaseEvidence(id, await this.capacityLedger.releaseUnentered(id, executionId));
   }
+  private async releaseFailedStartupCapacity(id: string): Promise<void> {
+    if (!this.capacityLedger || this.execution(id) || this.runtimes.has(id) || this.opening.has(id) || this.get(id)?.metadata?.runnerReference) return;
+    const failure = this.get(id)?.metadata?.startupFailure as Json | undefined;
+    if (failure?.nativeNotReady !== true || typeof failure.workId !== "string" || !/^(?:Error: )*Pi cwd admission rejected thread\.cwd:/.test(String(failure.error))) return;
+    const work = this.sql(`SELECT w.id FROM thread_work w JOIN thread_execution e ON e.id=w.execution_id
+      WHERE w.thread_id=? AND w.id=? AND w.status='done' AND w.outcome='failed' AND w.inserted_at IS NULL AND w.landed_at IS NULL
+      AND e.thread_id=w.thread_id AND e.work_id=w.id AND e.ended_at IS NOT NULL AND e.outcome='failed' AND e.error=?`).get(id, failure.workId, failure.error);
+    if (!work) return;
+    for (const row of this.capacityLedger.current(id)) {
+      if (row.kind === "work" && row.source_id === failure.workId) await this.releaseCapacity(id, row.logical_execution_id);
+    }
+  }
   private async recoverUnassignedCapacity(id: string): Promise<boolean> {
+    await this.releaseFailedStartupCapacity(id);
     if (this.capacityLedger && !this.execution(id) && this.get(id)?.metadata?.runnerReference && !this.capacityLedger.current(id).length)
       this.capacityLedger.retain(id, `native-census:${id}`, `native-census:${id}`, "command");
     const rows = this.capacityLedger?.current(id).filter(row => row.entered_native && row.state !== "releasing") ?? [];
@@ -1260,6 +1273,7 @@ export class ThreadService implements ThreadApi {
       try {
         // A rejected startup is not a failed cancellation: inspect the retained runner directly.
         await this.opening.get(id)?.catch(() => undefined);
+        await this.releaseFailedStartupCapacity(id);
         const hadReference = !!this.get(id)?.metadata?.runnerReference;
         const runtime = this.runtimes.get(id) ?? await this.attach(id);
         if (!runtime && !hadReference && this.capacityLedger?.current(id).some(row => row.entered_native && row.state !== "releasing")) throw new Error("Native startup custody has no positive absence or settlement proof; global custody retained");
@@ -1801,15 +1815,22 @@ export class ThreadService implements ThreadApi {
   private async rejectStartup(id: string, error: string): Promise<void> {
     // Startup acknowledgements can be lost. Confirm absence or cancellation before settling.
     this.sql("UPDATE thread SET held=1 WHERE id=?").run(id);
+    await this.releaseFailedStartupCapacity(id);
     const hadReference = !!this.get(id)?.metadata?.runnerReference;
     const runtime = this.runtimes.get(id) ?? await this.attach(id);
     if (!runtime && !hadReference && this.capacityLedger?.current(id).some(row => row.entered_native && row.state !== "releasing")) throw new Error("Native startup custody has no positive absence or settlement proof; global custody retained");
-    if (runtime) await this.rpc(runtime, { type: "abort" });
+    if (runtime) {
+      await this.rpc(runtime, { type: "abort" });
+      const state = await this.rpc(runtime, { type: "get_state" });
+      if (this.busy(state)) throw new Error("Native startup cancellation has not positively settled; global custody retained");
+      this.adoptLanded(id, state);
+    }
+    await this.releaseCapacity(id);
     this.transaction(() => {
       if (this.execution(id)) return;
       const work = this.sql("SELECT id,settings FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
       if (!work) return;
-      const executionId = randomUUID();
+      const executionId = this.capacityLedger?.candidate(id, work.id) ?? randomUUID();
       this.sql("INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, id, work.id, work.settings, Date.now());
       this.sql("UPDATE thread_work SET status='dispatched',execution_id=? WHERE id=?").run(executionId, work.id);
     });

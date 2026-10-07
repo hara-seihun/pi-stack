@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { AgentCapacityAuthority, createAgentCapacityServer } from "../src/agent-capacity-authority.js";
 import { configuredAgentCapacity, type AgentCapacity } from "../src/agent-capacity.js";
 import { ThreadService } from "../src/threads/service.js";
+import { RunnerStartupError } from "../src/threads/runner-startup.js";
 import type { PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
 
 const unwrap = <T>(result: Result<T>): T => { if (!result.ok) throw new Error(result.error.message); return result.value; };
@@ -47,7 +48,7 @@ class Native implements PiSession {
 }
 function fixture(capacity: AgentCapacity | { mode: "unmanaged" } | undefined, root?: string, sessions = new Map<string, Native>()) {
   root ??= mkdtempSync(join(tmpdir(), "thread-capacity-")); if (!roots.includes(root)) roots.push(root);
-  const options = { capacity, databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
+  const options: ConstructorParameters<typeof ThreadService>[0] = { capacity, databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
     openSession: async (input: PiSessionOptions, output: (event: PiEvent) => void) => {
       let native = sessions.get(input.threadId); if (native) native.bind(output); else { native = new Native(input, output); sessions.set(input.threadId, native); }
       output({ type: "runner_attached", control: join(root!, "control.sock"), socketPath: join(root!, input.threadId) });
@@ -161,6 +162,119 @@ it("uncertain native startup and failed cancellation never free capacity or crea
   expect(await f.service.control({ threadId: "uncertain", action: "cancel" })).toMatchObject({ ok: false, error: { code: "cancellation_failed" } });
   expect(shared.entries()).toEqual([custody]);
   expect(f.sessions.size).toBe(0);
+});
+
+it.each([false, true])("failed pre-native startup releases its original identity and never replies to a result notice, reference=%s", async reference => {
+  const shared = authority(), f = fixture(client(shared, "host-a/alice"));
+  (f.options as any).retireIdleSession = () => true;
+  unwrap(f.service.importThread({ id: "parent", title: "Parent", cwd: f.root, sessionFile: join(f.root, "parent.jsonl"), held: true,
+    settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
+  unwrap(f.service.importThread({ id: "worker", parentId: "parent", title: "Worker", cwd: f.root, sessionFile: join(f.root, "worker.jsonl"),
+    settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
+  unwrap(f.service.importMessage({ id: "assignment", threadId: "worker", senderId: "parent", text: "work", source: "explicit" }));
+  unwrap(await f.service.start()); await until(() => f.sessions.get("worker")?.busy === true);
+  f.sessions.get("worker")!.settle(); await until(() => f.service.latestSettlement("worker")?.outcome === "complete" && shared.status().active === 0 && !(f.service as any).runtimes.has("worker"));
+  const originalReply = f.service.pending("parent");
+  const error = "Pi cwd admission rejected thread.cwd: cwd_unavailable: Session cwd cannot be opened";
+  const open = vi.fn(async (input: PiSessionOptions, output: (event: PiEvent) => void): Promise<PiSession> => {
+    if (reference) output({ type: "runner_attached", control: join(f.root, "control.sock"), socketPath: join(f.root, input.threadId) });
+    throw new RunnerStartupError(error);
+  });
+  f.options.openSession = open; f.options.attachSession = async () => null;
+  unwrap(await f.service.send({ requestId: "thread-result:later:worker", threadId: "worker", senderId: "parent", source: "notification", text: "Result received" }));
+  await until(() => f.service.latestSettlement("worker")?.workId === "thread-result:later:worker" && shared.status().active === 0);
+  const db = (f.service as any).db;
+  const row = db.prepare("SELECT * FROM thread_capacity WHERE source_id='thread-result:later:worker'").get();
+  expect(row.state).toBe("released");
+  expect(f.service.latestSettlement("worker")).toMatchObject({ outcome: "failed", executionId: row.logical_execution_id });
+  expect(f.service.pending("parent")).toEqual(originalReply);
+  expect(open).toHaveBeenCalledTimes(1);
+  await f.service.detach(); owners.splice(owners.indexOf(f.service), 1);
+  const next = fixture(client(shared, "host-a/alice"), f.root);
+  next.options.openSession = open; unwrap(await next.service.start());
+  unwrap(await next.service.control({ threadId: "worker", action: "close" }));
+  next.service.reconcile();
+  expect(next.service.get("worker")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
+  expect(next.service.pending("parent")).toEqual(originalReply);
+  expect(open).toHaveBeenCalledTimes(1);
+});
+
+it("a failed open cannot release retained native custody on an abort acknowledgement without idle proof", async () => {
+  const shared = authority(), f = fixture(client(shared, "host-a/alice"));
+  let native!: Native;
+  f.options.openSession = async (input, output) => {
+    output({ type: "runner_attached", control: join(f.root, "control.sock"), socketPath: join(f.root, input.threadId) });
+    throw new RunnerStartupError("Pi cwd admission rejected thread.cwd: cwd_unavailable");
+  };
+  f.options.attachSession = async (_reference, output) => {
+    native = new Native({ threadId: "worker", cwd: f.root, sessionFile: join(f.root, "worker.jsonl"), args: [], env: {} }, output);
+    native.busy = true;
+    const command = native.command.bind(native);
+    native.command = async value => {
+      if (value.type === "abort") output({ type: "response", id: value.id, command: "abort", success: true, data: {} });
+      else await command(value);
+    };
+    return native;
+  };
+  unwrap(await f.service.spawn({ id: "worker", requestId: "assignment", cwd: f.root, message: "work" }));
+  unwrap(await f.service.start());
+  await until(() => String(f.service.get("worker")?.metadata?.executionError).includes("has not positively settled"));
+  expect(shared.status().active).toBe(1);
+  expect(f.service.latestSettlement("worker")).toBeNull();
+  expect(f.service.pending("worker")).toMatchObject([{ id: "assignment", state: "queued" }]);
+  expect(await f.service.control({ threadId: "worker", action: "close" })).toMatchObject({ ok: false, error: { code: "cancellation_failed" } });
+  expect(shared.status().active).toBe(1);
+  native.busy = false;
+});
+
+function failedStartupFixture(releaseState = { available: true }) {
+  const shared = authority(), f = fixture(client(shared, "host-a/alice", releaseState));
+  const error = "Error: Pi cwd admission rejected thread.cwd: cwd_unavailable: Session cwd cannot be opened";
+  unwrap(f.service.importThread({ id: "worker", title: "Worker", cwd: f.root, sessionFile: join(f.root, "worker.jsonl"), held: true,
+    settings: { model: "sol", thinkingLevel: "high", speed: "standard" }, metadata: { startupFailure: { workId: "result", nativeNotReady: true, error }, executionError: "Native startup custody has no positive absence or settlement proof; global custody retained" } }));
+  unwrap(f.service.importMessage({ id: "result", threadId: "worker", source: "notification", text: "prior result", state: "done", outcome: "failed", executionId: "synthetic-failure" }));
+  const db = (f.service as any).db;
+  db.prepare("UPDATE thread_execution SET error=? WHERE id='synthetic-failure'").run(error);
+  db.exec("UPDATE thread SET state='running' WHERE id='worker'");
+  const custody = unwrap(shared.acquire("host-a/alice", { agentId: "worker", executionId: "original-startup" }));
+  db.prepare("INSERT INTO thread_capacity(execution_id,logical_execution_id,thread_id,source_id,kind,state,lease_id,entered_native) VALUES('original-startup','original-startup','worker','result','work','held',?,1)").run(custody.leaseId);
+  return { ...f, shared, db, custody };
+}
+
+it.each([true, false])("recovers persisted failed/unlanded cwd proof across restart without replay, release available=%s", async available => {
+  const releaseState = { available }, f = failedStartupFixture(releaseState);
+  await f.service.detach(); owners.splice(owners.indexOf(f.service), 1);
+  const next = fixture(client(f.shared, "host-a/alice", releaseState), f.root);
+  const open = vi.fn(async (): Promise<PiSession> => { throw new Error("Must not replay failed work"); }); next.options.openSession = open;
+  unwrap(await next.service.start());
+  await until(() => next.service.get("worker")?.state === "idle");
+  expect(f.shared.status().active).toBe(available ? 0 : 1);
+  expect(next.service.latestSettlement("worker")).toMatchObject({ outcome: "failed", workId: "result", executionId: "synthetic-failure" });
+  unwrap(await next.service.control({ threadId: "worker", action: "close" }));
+  expect(next.service.get("worker")).toMatchObject({ held: false, state: "idle", metadata: { archived: true } });
+  releaseState.available = true; next.service.reconcile(); await until(() => f.shared.status().active === 0);
+  expect((next.service as any).db.prepare("SELECT state FROM thread_capacity WHERE execution_id='original-startup'").get().state).toBe("released");
+  expect(open).not.toHaveBeenCalled();
+});
+
+it.each(["untyped", "inserted", "landed", "different-error", "different-source", "command", "live", "uncertain-reference"])("retains persisted custody without exact failed pre-native proof: %s", async missing => {
+  const f = failedStartupFixture();
+  if (missing === "untyped") f.db.exec("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure.nativeNotReady',json('false'))");
+  if (missing === "inserted") f.db.exec("UPDATE thread_work SET inserted_at=1 WHERE id='result'");
+  if (missing === "landed") f.db.exec("UPDATE thread_work SET landed_at=1 WHERE id='result'");
+  if (missing === "different-error") f.db.exec("UPDATE thread_execution SET error='Native open acknowledgement lost' WHERE id='synthetic-failure'");
+  if (missing === "different-source") f.db.exec("UPDATE thread_capacity SET source_id='unknown' WHERE execution_id='original-startup'");
+  if (missing === "command") f.db.exec("UPDATE thread_capacity SET kind='command' WHERE execution_id='original-startup'");
+  if (missing === "live") unwrap(f.service.importMessage({ id: "live-work", threadId: "worker", text: "live", state: "dispatched", executionId: "live-execution" }));
+  if (missing === "uncertain-reference") {
+    f.db.exec("UPDATE thread SET metadata=json_set(metadata,'$.runnerReference',json('{\"control\":\"control.sock\",\"socketPath\":\"worker.sock\"}'))");
+    f.options.attachSession = async () => { throw new Error("Runner status unconfirmed"); };
+  }
+  const before = f.shared.entries();
+  expect(await f.service.control({ threadId: "worker", action: "close" })).toMatchObject({ ok: false, error: { code: "cancellation_failed" } });
+  expect(f.shared.entries()).toEqual(before);
+  expect(f.service.get("worker")).toMatchObject({ state: "running", held: true });
+  expect(f.service.get("worker")?.metadata?.archived).not.toBe(true);
 });
 
 it("legacy synthetic native-census custody releases only after positive native idle proof", async () => {
