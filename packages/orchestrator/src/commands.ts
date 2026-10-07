@@ -196,7 +196,7 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(command==="run"){
       const message=named.get("prompt")??positional.join(" ");
       if(!message.trim())throw new Error("run requires --prompt");
-      await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission,ephemeral:named.has("ephemeral")?switchEnabled(named,"ephemeral"):!!process.env.PI_THREAD_ID,...(named.has("mode")?{metadata:{mode:named.get("mode")}}:{})},count);
+      await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission,ephemeral:named.has("ephemeral")?switchEnabled(named,"ephemeral"):!!process.env.PI_THREAD_ID,...(named.has("mode")?{metadata:{mode:named.get("mode"),liveDispatcher:named.get("mode")==="live"}}:{})},count);
     }else{
       if(process.env.PI_THREAD_ID||process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("Agents cannot launch unparented waves; use thread_spawn from the parent conversation");
       const id=named.get("lane")??positional[0];if(!id)throw new Error("wave requires a lane");

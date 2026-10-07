@@ -24,8 +24,8 @@ export async function ensureExternalMeetingThread(sessionId: string, meetingId: 
   }
   const thread = owner.get(sessionId);
   if (!thread) return;
-  if (thread.metadata?.mode !== MEETING_MODE) {
-    const moded = await owner.control({ threadId: sessionId, action: "update", metadata: { mode: MEETING_MODE } });
+  if (thread.metadata?.mode !== MEETING_MODE || thread.metadata?.liveDispatcher !== true) {
+    const moded = await owner.control({ threadId: sessionId, action: "update", metadata: { mode: MEETING_MODE, liveDispatcher: true } });
     if (!moded.ok) throw new Error(`The external meeting's thread could not become live: ${moded.error.message}`);
   }
   const speed = conversationModeSpeed(MEETING_MODE, thread.settings);

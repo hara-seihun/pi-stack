@@ -55,7 +55,7 @@ for (const [model, speed, promoted] of [
     await ensureExternalMeetingThread("thread", "room", "Meeting", owner);
     expect(controls).toEqual([
       { threadId: "thread", action: "update", archived: false },
-      { threadId: "thread", action: "update", metadata: { mode: "live" } },
+      { threadId: "thread", action: "update", metadata: { mode: "live", liveDispatcher: true } },
       ...(promoted ? [{ threadId: "thread", action: "settings", settings: { speed: "priority" } } as const] : []),
     ]);
     expect(thread.settings).toEqual({ model, thinkingLevel: "high", speed: promoted ? "priority" : speed });
