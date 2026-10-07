@@ -10,8 +10,9 @@ Remote, schedules, tools and the CLI use the same ThreadService operations.
 ## Identity, custody and placement
 
 New threads receive an immutable Nebulani `agentName`, separate from the mutable
-conversation title and UUID. Historical unnamed threads retain their identity;
-a name is not an authorization credential. `parentId` records the agent that
+conversation title and UUID. Startup backfills historical threads without a name
+once and stores it with the thread, so imports, projections and restarts preserve
+the same identity. A name is not an authorization credential. `parentId` records the agent that
 launched this one. It supplies the direct launched-agent list and result
 provenance, not recursive cancellation or a leaf-worker restriction. The runtime
 projects one role, `agent`.

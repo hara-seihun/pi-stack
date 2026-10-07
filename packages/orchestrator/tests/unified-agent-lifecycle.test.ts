@@ -8,6 +8,7 @@ import { ThreadDirectory } from "../src/threads/directory.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 import { modeConversation } from "../src/threads/pi-mode.js";
 import { callerResolver } from "../src/threads/caller.js";
+import { openSqlite } from "../src/sqlite.js";
 
 function value<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -250,7 +251,7 @@ it("historical holds and resume inputs reopen without replaying their discarded 
   value(await f.service.control({ action: "resume", threadId: "resumed" }));
   for (const id of ["opened", "resumed"]) {
     expect(f.service.get(id)).toMatchObject({ title: "Historical title", state: "idle", held: false, pendingMessages: 0 });
-    expect(f.service.get(id)?.agentName).toBeUndefined();
+    expect(f.service.get(id)?.agentName).toBeTruthy();
   }
   expect(f.sessions.size).toBe(0);
 });
@@ -265,7 +266,30 @@ it("projects historical placement from original owner custody without renaming o
   expect(root.metadata?.foreground).toBe(true);
   for (const thread of [child, watch, worker]) expect(thread.metadata?.foreground).toBe(false);
   expect(root.title).toBe("Existing topic"); expect(worker.title).toBe("Existing fleet");
-  for (const thread of [root, child, watch, worker]) expect(thread.agentName).toBeUndefined();
+  for (const thread of [root, child, watch, worker]) expect(thread.agentName).toBeTruthy();
+});
+
+it("imports keep names and startup migration durably names historical threads", async () => {
+  const f = fixture();
+  const imported = value(f.service.importThread({ id: "imported", title: "Imported", cwd: f.root, sessionFile: join(f.root, "imported.jsonl"),
+    settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" }, metadata: { agentName: "Preserved Nebulani" } }));
+  expect(imported.agentName).toBe("Preserved Nebulani");
+  const legacy = value(f.service.importThread({ id: "legacy", title: "Legacy", cwd: f.root, sessionFile: join(f.root, "legacy.jsonl"),
+    settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" } }));
+  expect(legacy.agentName).toBeTruthy();
+  const db = openSqlite(f.options.databasePath);
+  db.prepare("UPDATE thread SET metadata=json_remove(metadata,'$.agentName') WHERE id=?").run("legacy");
+  db.close();
+  services.splice(services.indexOf(f.service), 1);
+  await f.service.close();
+  const reopened = new ThreadService(f.options); services.push(reopened);
+  const migratedName = reopened.get("legacy")?.agentName;
+  expect(migratedName).toBeTruthy();
+  expect(reopened.get("imported")?.agentName).toBe("Preserved Nebulani");
+  services.splice(services.indexOf(reopened), 1);
+  await reopened.close();
+  const restarted = new ThreadService(f.options); services.push(restarted);
+  expect(restarted.get("legacy")?.agentName).toBe(migratedName);
 });
 
 it("caller identity protects human placement and another agent's dependency ownership", async () => {
