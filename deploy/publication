@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { policy, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
+import { rollForwardHosts } from "./publication-hosts.mjs";
 import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
 
 const config = loadPublicationConfig();
@@ -229,7 +230,7 @@ function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -555,6 +556,10 @@ function noticeBody(request) {
     request.resolvedBy ? `Resolved by: ${request.resolvedBy}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
+    request.hosts ? `Hosts: ${targets.map(target => {
+      const host = request.hosts[target.id];
+      return `${target.id} ${host?.status ?? "pending"}${host?.status === "waiting" ? ` (${host.waiting.kind})` : ""}`;
+    }).join("; ")}` : undefined,
     request.repairOf ? `Repairs: ${request.repairOf} via ${request.repairId}` : undefined,
     repair ? `Repair: ${repair.status}; receipt: ${repair.path}` : undefined,
     repair?.successor ? `Successor: ${repair.successor.requestId}` : undefined,
@@ -639,7 +644,10 @@ function deliverReport(request, key, presentation = request) {
 
 function noticeKey(request) {
   const state = request.status === "failed" ? `failed:${request.failure.at}`
-    : request.status === "queued" && request.waiting ? `waiting:${request.blockedSince}` : request.status;
+    : request.status === "queued" && request.waiting ? `waiting:${JSON.stringify(targets.map(target => {
+      const host = request.hosts?.[target.id];
+      return [target.id, host?.status ?? "pending", host?.integrationSha ?? null, host?.waiting?.kind ?? null, host?.failure?.message ?? null];
+    }))}` : request.status;
   const existing = request.report?.key;
   return existing === state || existing?.startsWith(`${state}:`) ? existing : state;
 }
@@ -897,7 +905,7 @@ function prepareAndroidArtifact(request, logPath) {
   writeRequest(request);
 }
 
-function publishAndroidArtifact(request, logPath) {
+function publishAndroidArtifact(request, logPath, selectedTargets = targets) {
   if (!request.android) return;
   const { directory, manifest } = request.android;
   // Ship the checked installer with the artifact: neither host needs to select the
@@ -906,7 +914,7 @@ function publishAndroidArtifact(request, logPath) {
   const build = runLogged(request, "prepare-android-installer", "bun", [join(checkout, "deploy/android-update"), "bundle", installer], 30, logPath);
   if (!build.ok) throw new Error(`Android installer build exited ${build.status}`);
   const installerHash = sha256(installer);
-  for (const target of targets) {
+  for (const target of selectedTargets) {
     const remoteDirectory = target.sshHost && join(target.androidTransferRoot, request.requestId);
     const tool = target.sshHost ? join(remoteDirectory, "android-update.js") : installer;
     if (target.sshHost) {
@@ -928,7 +936,7 @@ function publishAndroidArtifact(request, logPath) {
       if (!cleanup.ok) throw new Error(`${target.id} Android transfer cleanup exited ${cleanup.status}`);
     }
   }
-  request.android.status = "published";
+  request.android.status = targets.every(target => request.android.hosts[target.id]) ? "published" : "partial";
   writeRequest(request);
 }
 
@@ -1090,10 +1098,8 @@ export function refreshMeetingWait(request) {
   return !rooms;
 }
 
-export function refreshNativeSourceWait(request) {
-  const target = targets.find(target => target.id === request.waiting.host);
-  if (!target) throw new Error(`Unknown native-source-wait host: ${request.waiting.host}`);
-  const script = readFileSync(join(dirname(self), "native-prerequisites"), "utf8");
+function nativeSourceProbe(request, target, ensureSource = false) {
+  const script = (ensureSource ? 'set -euo pipefail\ngit -C "$2" fetch --quiet --no-tags origin "$3"\n' : "") + readFileSync(join(dirname(self), "native-prerequisites"), "utf8");
   const args = [target.hostConfig, target.releaseRepository, request.integrationSha];
   const command = target.sshHost ? "ssh" : "bash";
   const commandArgs = target.sshHost
@@ -1101,6 +1107,13 @@ export function refreshNativeSourceWait(request) {
     : ["-s", "--", ...args];
   const result = commandResult(command, commandArgs, { input: script, timeoutSeconds: 45 });
   if (!result.ok && result.status !== 75) throw new Error(result.stderr.trim() || `native prerequisite probe exited ${result.status}`);
+  return result;
+}
+
+export function refreshNativeSourceWait(request) {
+  const target = targets.find(target => target.id === request.waiting.host);
+  if (!target) throw new Error(`Unknown native-source-wait host: ${request.waiting.host}`);
+  const result = nativeSourceProbe(request, target);
   request.waiting.probe = { at: new Date().toISOString(), selected: result.status === 75 ? result.stderr.trim() : "ready" };
   delete request.waiting.probeFailingSince;
   if (result.status === 75) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
@@ -1709,9 +1722,104 @@ export function recoverOutstandingCustody(request, status = request.status) {
   }
 }
 
+function hostWait(request, target, kind, logPath, reason, previous) {
+  const at = previous?.status === "waiting" && previous.waiting.kind === kind ? previous.waiting.at : new Date().toISOString();
+  return { status: "waiting", waiting: { kind, host: target.id, at, log: logPath, reason }, nextAttemptAt: new Date(Date.now() + policy.blockedRetryMs).toISOString() };
+}
+
+const currentAndroidProofScript = String.raw`
+set -euo pipefail
+selected=$1
+root=/var/lib/pi-remote/app-updates/current
+app=$(< "$root/manifest.json")
+web=$(< "$root/web-manifest.json")
+served=$(curl -fsS --max-time 5 http://127.0.0.1:8788/v1/app-update)
+jq -e --arg selected "$selected" --argjson app "$app" --argjson web "$web" \
+  '.release == $app and .web == $web and .release.revision == $selected and .web.revision == $selected' <<<"$served" >/dev/null
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+for artifact in "$app" "$web"; do
+  name=$(jq -er '.fileName | select(test("^[a-zA-Z0-9._-]+$"))' <<<"$artifact")
+  hash=$(jq -er '.sha256 | select(test("^[0-9a-f]{64}$"))' <<<"$artifact")
+  size=$(jq -er '.size | select(type == "number" and . > 0)' <<<"$artifact")
+  curl -fsS --max-time 15 "http://127.0.0.1:8788/v1/app-update/$name" -o "$work/$name"
+  [[ $(stat -c %s "$work/$name") == "$size" ]]
+  [[ $(sha256sum "$work/$name" | cut -d ' ' -f 1) == "$hash" ]]
+done
+jq --arg at "$(date -u +%FT%TZ)" '.release + {web:.web,verifiedAt:$at}' <<<"$served"
+`;
+
+function currentAndroidProof(target, selected) {
+  return JSON.parse(runHostScript(currentAndroidProofScript, target.sshHost, [selected], 45));
+}
+
+function deliverHost(request, target, logPath, previous) {
+  checkCancellation(request);
+  if (previous?.status === "waiting" && previous.ready === false) return previous;
+  if (previous?.status === "waiting" && ["host-lock", "thread-contract"].includes(previous.waiting.kind) && Date.now() - Date.parse(previous.waiting.at) > policy.blockedLimitMs) throw new Error(`${target.id} ${previous.waiting.kind} wait budget exhausted`);
+  const result = reserveTarget(request, target, logPath);
+  if (!result.ok) {
+    if (result.status === 75) {
+      request.reservations[target.id].state = "released";
+      writeRequest(request);
+      return hostWait(request, target, "host-lock", logPath, `${target.id} deployment lock is busy; other hosts continue.`, previous);
+    }
+    throw new Error(`${target.id} reservation exited ${result.status}`);
+  }
+  try {
+    const census = runtimeCensus(target.sshHost);
+    retainSelectedSource(census, target.sshHost);
+    if (census.selectedCommit && commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.integrationSha, census.selectedCommit]).ok) {
+      if (census.selectedCommit !== request.integrationSha && !allRequests().some(candidate => candidate.integrationSha === census.selectedCommit && candidate.checks?.status === "passed")) throw new Error(`${target.id} selected descendant has no passing publication checks`);
+      if (census.selectedCommit === request.integrationSha) publishAndroidArtifact(request, logPath, [target]);
+      const proof = verifyTarget(target, census.selectedCommit);
+      const android = currentAndroidProof(target, census.selectedCommit);
+      const path = join(proofRoot, request.requestId, `${target.id}.json`);
+      atomicWrite(path, `${JSON.stringify({ ...proof, requestedIntegrationSha: request.integrationSha, android }, null, 2)}\n`);
+      return { status: "passed", integrationSha: census.selectedCommit, proof: path, sha256: sha256(path), android, superseded: census.selectedCommit !== request.integrationSha };
+    }
+    const ancestry = inspectReleaseAncestry(census, request.integrationSha, target.sshHost);
+    const ancestryPath = join(proofRoot, request.requestId, `${target.id}-release-ancestry.json`);
+    atomicWrite(ancestryPath, `${JSON.stringify(ancestry, null, 2)}\n`);
+    if (!ancestry.ok) throw new Error(`${target.id} integration omits selected or checkout source; repair the source ancestry`);
+    if (!meetingOverride(request.requestId)) {
+      const rooms = censusTarget(target, request.meetingRuntimeProtocol);
+      if (rooms) return hostWait(request, target, "live-meeting", logPath, `${target.id} has live meetings; other hosts roll forward while this host waits.`, previous);
+    }
+    const native = nativeSourceProbe(request, target, true);
+    if (!native.ok) return hostWait(request, target, "native-source", logPath, `${target.id} needs a newer native source; other hosts continue.`, previous);
+    const bootstrap = !!request.contract && !selectedHasContract(census.selectedCommit, request);
+    if (!request.contract && census.selectedCommit && hasExecutionContract(census.selectedCommit)) throw new Error(`${target.id} release would remove its thread execution contract`);
+    if (bootstrap) {
+      validateBootstrapTarget(request);
+      ensureMaintenance(request, target.id, target.sshHost);
+      const active = runtimeCensus(target.sshHost);
+      if (active.runtimes.length || active.fleet.activeRuns.length) return hostWait(request, target, "thread-contract", logPath, `${target.id} pre-contract workers must settle; other hosts continue.`, previous);
+      const seal = sealHost(request, target.id, target.sshHost);
+      if (seal.state !== "sealed") return hostWait(request, target, "thread-contract", logPath, `${target.id} pre-contract intake is not sealed; other hosts continue.`, previous);
+      request.bootstrap.hosts[target.id].state = "deploying";
+      writeRequest(request);
+    }
+    publishAndroidArtifact(request, logPath, [target]);
+    const deployed = deployTarget(request, target, logPath);
+    if (deployed.kind === "host-lock-busy") return hostWait(request, target, deployed.liveMeeting ? "live-meeting" : deployed.nativePrerequisite ? "native-source" : "host-lock", logPath, `${target.id} is not ready to activate; other hosts continue.`, previous);
+    if (!deployed.ok) throw new Error(`${target.id} release wrapper exited ${deployed.status}`);
+    const proof = verifyTarget(target, request.integrationSha);
+    const android = currentAndroidProof(target, request.integrationSha);
+    const path = join(proofRoot, request.requestId, `${target.id}.json`);
+    atomicWrite(path, `${JSON.stringify({ ...proof, android }, null, 2)}\n`);
+    releaseCustody(request, target.id);
+    return { status: "passed", integrationSha: request.integrationSha, proof: path, sha256: sha256(path), android };
+  } finally {
+    restoreCustody(request, target.id, target.sshHost);
+    restoreMaintenance(request, target.id, target.sshHost);
+    restoreReservation(request, target);
+  }
+}
+
 export function processRequest(request) {
-  if (["live-meeting", "native-source"].includes(request.waiting?.kind)) {
-    request[request.waiting.kind === "live-meeting" ? "meetingWait" : "nativeWait"] = { ...request.waiting, resumedAt: new Date().toISOString() };
+  if (["live-meeting", "native-source", "hosts"].includes(request.waiting?.kind)) {
+    request[request.waiting.kind === "live-meeting" ? "meetingWait" : request.waiting.kind === "native-source" ? "nativeWait" : "hostWait"] = { ...request.waiting, resumedAt: new Date().toISOString() };
     delete request.waiting;
     delete request.nextAttemptAt;
   } else request.attempt = (request.attempt ?? 0) + 1;
@@ -1738,18 +1846,19 @@ export function processRequest(request) {
 
     const remoteMain = runCapture("git", ["-C", checkout, "rev-parse", "refs/remotes/origin/main^{commit}"]);
     const reusableIntegration = request.integrationSha && request.checks?.status === "passed"
-      && (remoteMain === request.integrationSha || remoteMain === request.baseSha)
+      && (request.integratedAt || remoteMain === request.integrationSha || remoteMain === request.baseSha)
       && commandResult("git", ["-C", checkout, "cat-file", "-e", `${request.integrationSha}^{commit}`]).ok;
     if (!reusableIntegration) {
       delete request.integrationSha;
       delete request.baseSha;
       delete request.checks;
       delete request.hosts;
+      delete request.integratedAt;
       result = createIntegration(request, logPath);
       if (!result.ok) throw new Error(result.stderr.trim() || `${request.step} exited ${result.status}`);
     }
 
-    checkOwnerSource(checkout, request.integrationSha);
+    if (!request.integratedAt) checkOwnerSource(checkout, request.integrationSha);
     request.meetingRuntimeProtocol = meetingRuntimeProtocol(request.integrationSha);
     writeRequest(request);
     prepareAndroidArtifact(request, logPath);
@@ -1759,120 +1868,40 @@ export function processRequest(request) {
     if (!request.contract && activatedContract()) throw new Error("Refusing to remove the activated thread execution contract");
     writeRequest(request);
     const requestProofRoot = join(proofRoot, request.requestId);
-    request.step = "reserve-publication-hosts";
-    writeRequest(request);
-    for (const target of targets) {
-      result = reserveTarget(request, target, logPath);
-      if (!result.ok) throw new Error(`${target.id} publication reservation exited ${result.status}`);
-    }
-    const deploymentsPassed = targets.every(target => request.hosts?.[target.id]?.status === "passed");
-    if (!deploymentsPassed) {
-      request.step = "inspect-release-ancestry";
-      writeRequest(request);
-      const censuses = targets.map(target => runtimeCensus(target.sshHost));
-      const ancestry = targets.map((target, index) => inspectReleaseAncestry(censuses[index], request.integrationSha, target.sshHost));
-      const ancestryProofPath = join(requestProofRoot, "release-ancestry.json");
-      atomicWrite(ancestryProofPath, `${JSON.stringify({ checkedAt: new Date().toISOString(), hosts: ancestry }, null, 2)}\n`);
-      request.releaseAncestry = { proof: ancestryProofPath, sha256: sha256(ancestryProofPath) };
-      writeRequest(request);
-      const missing = ancestry.flatMap(host => host.baselines.filter(baseline => !baseline.included)
-        .map(baseline => `${host.host} ${baseline.kind} ${baseline.commit}`));
-      if (missing.length) throw new Error(`Integration ${request.integrationSha} omits host source: ${missing.join(", ")}; merge the retained commits into the repair source before publication`);
-      request.step = "inspect-thread-execution-contract";
-      writeRequest(request);
-      if (!request.contract && censuses.some(host => host.selectedCommit && hasExecutionContract(host.selectedCommit))) {
-        throw new Error("Refusing to replace a host's thread execution contract with a target that lacks it");
-      }
-      const bootstrap = targets.map((target, index) => !!request.contract && !selectedHasContract(censuses[index].selectedCommit, request));
-      for (const [index, census] of censuses.entries()) census.contract = bootstrap[index] ? "pre-contract" : request.contract;
-      if (request.contract) validateBootstrapTarget(request);
-      checkCancellation(request);
-      for (const [index, target] of targets.entries()) {
-        if (!bootstrap[index]) continue;
-        censuses[index].fleet = ensureMaintenance(request, target.id, target.sshHost);
-        Object.assign(censuses[index], runtimeCensus(target.sshHost));
-      }
-      const gateProofPath = join(requestProofRoot, "thread-execution-gate.json");
-      atomicWrite(gateProofPath, `${JSON.stringify({ checkedAt: new Date().toISOString(), contract: request.contract, hosts: censuses }, null, 2)}\n`);
-      request.contractGate = { proof: gateProofPath, sha256: sha256(gateProofPath) };
-      if (censuses.some((census, index) => bootstrap[index] && (census.runtimes.length > 0 || census.fleet.activeRuns.length > 0))) {
-        updateBlocked(request, censuses, logPath);
-        return;
-      }
-
-      request.step = bootstrap.some(Boolean) ? "seal-pre-contract-intake" : "live-handoff";
-      writeRequest(request);
-      const sealed = [];
-      for (const [index, target] of targets.entries()) {
-        if (!bootstrap[index]) continue;
-        const outcome = sealHost(request, target.id, target.sshHost);
-        if (outcome.state !== "sealed") {
-          for (const previous of sealed) restoreCustody(request, previous.id, previous.sshHost);
-          updateBlocked(request, [...censuses, outcome], logPath);
-          return;
-        }
-        sealed.push(target);
-      }
-      if (request.waiting && request.waiting.kind !== "host-lock") {
-        request.gateWait = { ...request.waiting, blockedSince: request.blockedSince, resumedAt: new Date().toISOString() };
-        delete request.waiting;
-        delete request.blockedSince;
-        delete request.nextAttemptAt;
-      }
-      if (bootstrap.some(Boolean)) {
-        request.contractGate.sealedAt = new Date().toISOString();
-        writeRequest(request);
-      }
-
+    if (!request.integratedAt) {
       result = publishIntegration(request, logPath);
       if (result.kind === "main-moved") {
         requeueMovedIntegration(request, result.remoteMain, logPath);
         return;
       }
       if (!result.ok) throw new Error(result.stderr.trim() || `main integration exited ${result.status}`);
-
-      // Only rooms without an independent meeting owner hold the release.
-      // Each host repeats admission before activation, including the initial upgrade.
-      const busy = liveMeetingTarget(request);
-      if (busy) {
-        appendLog(logPath, `[${new Date().toISOString()}] live meetings on ${busy.target.id}: ${busy.rooms}\n`);
-        requeueBusyHost(request, busy.target, logPath, "live-meeting");
-        return;
-      }
-      publishAndroidArtifact(request, logPath);
-      for (const target of targets) {
-        if (request.hosts?.[target.id]?.status === "passed") continue;
-        if (request.bootstrap?.hosts?.[target.id]?.state === "sealed") {
-          request.bootstrap.hosts[target.id].state = "deploying";
-          writeRequest(request);
-        }
-        result = deployTarget(request, target, logPath);
-        if (result.kind === "host-lock-busy") {
-          requeueBusyHost(request, target, logPath, result.liveMeeting ? "live-meeting" : result.nativePrerequisite ? "native-source" : "host-lock");
-          return;
-        }
-        if (!result.ok) throw new Error(`${target.id} release wrapper exited ${result.status}`);
-        const proof = verifyTarget(target, request.integrationSha);
-        const proofPath = join(requestProofRoot, `${target.id}.json`);
-        atomicWrite(proofPath, `${JSON.stringify(proof, null, 2)}\n`);
-        request.hosts ??= {};
-        request.hosts[target.id] = { status: "passed", proof: proofPath, sha256: sha256(proofPath) };
-        if (request.waiting?.kind === "host-lock" && request.waiting.host === target.id) {
-          delete request.waiting;
-          delete request.blockedSince;
-          delete request.nextAttemptAt;
-        }
-        writeRequest(request);
-        releaseCustody(request, target.id);
-      }
-    } else {
-      publishAndroidArtifact(request, logPath);
-      for (const target of targets) {
-        verifyTarget(target, request.integrationSha);
-        releaseCustody(request, target.id);
-      }
     }
-    const finalProofs = Object.fromEntries(targets.map(target => [target.id, verifyTarget(target, request.integrationSha)]));
+    request.step = "roll-forward-hosts";
+    writeRequest(request);
+    const outcome = rollForwardHosts(request, targets, {
+      deliver: (target, previous) => deliverHost(request, target, logPath, previous),
+      save: writeRequest,
+    });
+    checkCancellation(request);
+    if (outcome.status === "failed") throw new Error(outcome.hosts.map(id => `${id}: ${request.hosts[id].failure.message}`).join("; "));
+    if (outcome.status === "waiting") {
+      request.status = "queued";
+      request.step = "waiting-for-hosts";
+      request.waiting = { kind: "hosts", at: new Date().toISOString(), log: logPath, hosts: outcome.hosts,
+        reason: `${outcome.hosts.join(", ")} waiting; ready hosts retain their successful releases and are free to roll forward.` };
+      request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
+      writeRequest(request);
+      deliverNotice(request);
+      return;
+    }
+    const finalProofs = Object.fromEntries(targets.map(target => {
+      const receipt = request.hosts[target.id];
+      if (sha256(receipt.proof) !== receipt.sha256) throw new Error(`${target.id} host proof was modified`);
+      const proof = JSON.parse(readFileSync(receipt.proof, "utf8"));
+      const android = receipt.android ?? request.android?.hosts?.[target.id];
+      if (request.android && !android) throw new Error(`${target.id} lacks durable matching app/web proof`);
+      return [target.id, { ...proof, ...(android ? { android } : {}) }];
+    }));
     const finalProofPath = join(requestProofRoot, "final-hosts.json");
     atomicWrite(finalProofPath, `${JSON.stringify(finalProofs, null, 2)}\n`);
     request.finalProof = { path: finalProofPath, sha256: sha256(finalProofPath) };
@@ -1883,7 +1912,10 @@ export function processRequest(request) {
     request.status = "running";
     request.step = "adopt-publication-owner";
     writeRequest(request);
-    adoptPublicationOwner(checkout, request.integrationSha);
+    const ownerPresent = commandResult("git", ["-C", checkout, "show-ref", "--verify", "--quiet", ownerSourceRef]);
+    if (![0, 1].includes(ownerPresent.status)) throw new Error("Cannot inspect retained publication owner source");
+    const retainedOwner = ownerPresent.ok ? checked("git", ["-C", checkout, "rev-parse", `${ownerSourceRef}^{commit}`]) : null;
+    if (retainedOwner === null || commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", retainedOwner, request.integrationSha]).ok) adoptPublicationOwner(checkout, request.integrationSha);
     for (const target of targets) restoreReservation(request, target);
 
     request.status = "published";
@@ -2125,7 +2157,9 @@ function repairRun(requestId) {
     checkCancellation(request);
     try {
       const workspace = JSON.parse(checked("agent-workspace", ["create", "--root", config.repairWorkspaceRoot,
-        "--name", `publication-repair-${requestId}`, "--repo", checkout, "--owner", repair.id, "--mode", "writer", "--json"], { timeoutSeconds: 45 }));
+        "--name", `publication-repair-${requestId}`, "--repo", checkout, "--ref", request.sourceSha,
+        "--owner", repair.id, "--mode", "writer", "--intent", "source-only", "--headroom-gib", "2",
+        "--growth-mib", "512", "--creation-timeout-seconds", "40", "--json"], { timeoutSeconds: 45 }));
       repair.workspace = workspace.path;
       writeRepair(repair);
       if (!commandResult("git", ["cat-file", "-e", `${request.sourceSha}^{commit}`], { cwd: repair.workspace }).ok) {
@@ -2229,6 +2263,59 @@ function completeRepair(requestId) {
   process.stdout.write(`${JSON.stringify(repair)}\n`);
 }
 
+export function refreshHostWaits(request) {
+  request.hosts ??= {};
+  if (["live-meeting", "native-source", "host-lock"].includes(request.waiting?.kind)) {
+    const id = request.waiting.host;
+    if (!request.hosts[id] || request.hosts[id].status !== "passed") request.hosts[id] = { status: "waiting", waiting: request.waiting, nextAttemptAt: request.nextAttemptAt };
+    request.waiting = { kind: "hosts", hosts: [id], reason: `${id} waiting; other hosts roll forward independently.`, log: request.waiting.log };
+  }
+  let ready = false;
+  for (const target of targets) {
+    const host = request.hosts[target.id];
+    if (!host) { ready = true; continue; }
+    if (host.status === "passed") continue;
+    if (host.status === "failed") { ready = true; continue; }
+    if (host.status !== "waiting") throw new Error(`Unknown delivery state for ${target.id}: ${host.status}`);
+    try {
+      let available;
+      switch (host.waiting.kind) {
+        case "live-meeting": {
+          const rooms = meetingOverride(request.requestId) ? "" : censusTarget(target, request.meetingRuntimeProtocol);
+          host.waiting.probe = { at: new Date().toISOString(), rooms };
+          available = !rooms;
+          break;
+        }
+        case "native-source": {
+          const result = nativeSourceProbe(request, target);
+          host.waiting.probe = { at: new Date().toISOString(), selected: result.ok ? "ready" : result.stderr.trim() };
+          available = result.ok;
+          break;
+        }
+        case "host-lock":
+        case "thread-contract": available = true; break;
+        default: throw new Error(`Unknown wait kind for ${target.id}: ${host.waiting.kind}`);
+      }
+      delete host.waiting.probeFailingSince;
+      host.ready = available;
+      if (available) ready = true;
+      else host.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
+    } catch (error) {
+      host.ready = false;
+      const since = host.waiting.probeFailingSince ?? new Date().toISOString();
+      host.waiting.probeFailingSince = since;
+      host.waiting.probe = { at: new Date().toISOString(), error: error.message };
+      if (Date.now() - Date.parse(since) > policy.meetingProbeFailureLimitMs) {
+        request.hosts[target.id] = { status: "failed", failure: { at: new Date().toISOString(), message: `${target.id} readiness probe failed: ${error.message}` } };
+        ready = true;
+      }
+    }
+  }
+  if (!ready) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
+  writeRequest(request);
+  return ready;
+}
+
 function drain() {
   ensureState();
   // Re-read after each request. A submission while this service is active needs no timer turn.
@@ -2257,7 +2344,7 @@ function drain() {
         restorationBlocked = true;
       } finally { activeRequest = undefined; activeLog = undefined; }
     }
-    if (restorationBlocked) return;
+    // Recovery remains scoped by host reservations; an unavailable host cannot stop its peers.
     const cancelled = allRequests().find(candidate => !["failed", "published"].includes(candidate.status) && existsSync(cancellationPath(candidate.requestId)));
     if (cancelled) { processRequest(cancelled); continue; }
     const request = allRequests().find(candidate => runnable(candidate) || candidate.status === "running");
@@ -2266,24 +2353,7 @@ function drain() {
       failStalled(request.requestId, "Publication worker interrupted; retained host custody has been recovered. Repair required before retry.");
       continue;
     }
-    if (["live-meeting", "native-source"].includes(request.waiting?.kind)) {
-      try {
-        if (!(request.waiting.kind === "live-meeting" ? refreshMeetingWait(request) : refreshNativeSourceWait(request))) continue;
-      } catch (error) {
-        // A census that cannot answer means unknown meetings, not an idle host: keep waiting,
-        // and fail only when the census itself has stayed broken past its own budget.
-        const since = request.waiting.probeFailingSince ?? new Date().toISOString();
-        if (Date.now() - Date.parse(since) > policy.meetingProbeFailureLimitMs) {
-          updateFailure(request, `Meeting wait probe failed: ${error.message}`, request.waiting.log);
-          continue;
-        }
-        request.waiting.probeFailingSince = since;
-        request.waiting.probe = { at: new Date().toISOString(), error: error.message };
-        request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
-        writeRequest(request);
-        continue;
-      }
-    }
+    if (["live-meeting", "native-source", "host-lock", "hosts"].includes(request.waiting?.kind) && !refreshHostWaits(request)) continue;
     if (progressBudgetExhausted(request)) {
       updateFailure(request, "Publication progress budget exhausted", request.waiting?.log ?? join(logRoot, request.requestId, `attempt-${request.attempt}.log`), true,
         request.waiting?.reason ?? "Publication progress budget exhausted");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,59 +9,6 @@ import { publicationConfig } from "./publication-fixture.mjs";
 
 // Each pass performs dozens of durable writes and subprocesses alongside other check jobs.
 const fixtureTimeoutMs = 15_000;
-
-test("divergent host ancestry stops before main, intake or either deployment changes", t => {
-  const root = mkdtempSync(join(tmpdir(), "publication-ancestry-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const path of ["requests", "bin", "repository/.git"]) mkdirSync(join(root, path), { recursive: true });
-  const source = "a".repeat(40), base = "b".repeat(40), integration = "c".repeat(40), divergent = "d".repeat(40);
-  const requestId = "PUB-0123456789abcdef01234567";
-  const receipt = join(root, "requests", `${requestId}.json`);
-  writeFileSync(receipt, JSON.stringify({ requestId, sourceSha: source, sourceRef: `refs/heads/pi-stack-publications/${requestId}`,
-    baseSha: base, integrationSha: integration, checks: { status: "passed" },
-    status: "queued", step: "queued", attempt: 0, queuedAt: "2026-09-13", failures: [] }));
-  writeFileSync(join(root, "bin/git"), `#!/bin/sh
-printf '%s\\n' "$*" >> "$TRACE/git"
-case "$*" in
-  *push*) echo 'unexpected push' >&2; exit 99;;
-  *'remote get-url origin'*) echo https://github.com/hara-seihun/pi-stack.git;;
-  *'rev-parse refs/remotes/origin/main'*) echo ${base};;
-  *':deploy/android-update'*) exit 1;;
-  *grep*) exit 1;;
-  *'merge-base --is-ancestor ${divergent}'*) exit 1;;
-esac
-`, { mode: 0o700 });
-  for (const [command, host, selected] of [["bash", "gmktec", base], ["ssh", "converge-kenan", divergent]]) {
-    writeFileSync(join(root, "bin", command), `#!/bin/sh
-printf '%s\\n' "$*" >> "$TRACE/${command}"
-cat >> "$TRACE/host-scripts"
-printf '%s\\n' '{"host":"${host}","selectedCommit":"${selected}","checkoutCommit":"${selected}","runtimes":[]}'
-`, { mode: 0o700 });
-  }
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../deploy/publication", import.meta.url)), "drain"], {
-    encoding: "utf8", timeout: fixtureTimeoutMs,
-    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, TRACE: root,
-      PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(root), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  const failed = JSON.parse(readFileSync(receipt, "utf8"));
-  assert.equal(failed.status, "failed");
-  assert.equal(failed.failure.step, "inspect-release-ancestry");
-  assert.match(readFileSync(join(root, "inbox/pi-stack-publication-issues.md"), "utf8"), new RegExp(`converge-kenan live ${divergent}`));
-  assert.match(failed.failure.message, new RegExp(`converge-kenan live ${divergent}`));
-  assert.equal(failed.integrationSha, integration);
-  assert.equal(failed.checks.status, "passed");
-  assert.equal(failed.hosts, undefined);
-  assert.equal(failed.maintenance, undefined);
-  assert.equal(failed.bootstrap, undefined);
-  assert.equal(failed.integratedAt, undefined);
-  const proof = JSON.parse(readFileSync(failed.releaseAncestry.proof, "utf8"));
-  assert.deepEqual(proof.hosts.map(host => host.ok), [true, false]);
-  assert.doesNotMatch(readFileSync(join(root, "git"), "utf8"), /push/);
-  assert.doesNotMatch(readFileSync(join(root, "host-scripts"), "utf8"), /systemctl (start|stop|restart|kill)|fleet_cli pause/);
-  assert.deepEqual(Object.values(failed.reservations).map(host => host.state), ["released", "released"]);
-  assert.doesNotMatch(readFileSync(join(root, "ssh"), "utf8"), /pi-stack-release /);
-});
 
 test("main movement returns before deployment and the next worker pass reruns checks", t => {
   const root = mkdtempSync(join(tmpdir(), "publication-main-moved-"));
@@ -80,6 +27,8 @@ printf '%s\\n' "$*" >> "$TRACE/git"
 case "$*" in
   *push*) echo 'unexpected push' >&2; exit 99;;
   *'remote get-url origin'*) echo https://github.com/hara-seihun/pi-stack.git;;
+  *'fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main'*)
+    if [ -e "$TRACE/fetched" ]; then echo ${moved} > "$TRACE/main"; else touch "$TRACE/fetched"; fi;;
   *'rev-parse refs/remotes/origin/main'*) cat "$TRACE/main";;
   *'rev-parse refs/pi-stack-publication/'*) echo ${source};;
   *'rev-parse HEAD'*) echo ${integration};;
@@ -90,8 +39,8 @@ esac
   const hostStub = `#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE/hosts"
 cat >> "$TRACE/host-scripts"
-echo ${moved} > "$TRACE/main"
-printf '%s\\n' '{"selectedCommit":"${base}","checkoutCommit":"${base}","runtimes":[]}'
+echo 'host command before source integration' >&2
+exit 99
 `;
   writeFileSync(join(root, "bin/bash"), hostStub, { mode: 0o700 });
   writeFileSync(join(root, "bin/ssh"), hostStub, { mode: 0o700 });
@@ -106,13 +55,13 @@ printf '%s\\n' '{"selectedCommit":"${base}","checkoutCommit":"${base}","runtimes
     return JSON.parse(readFileSync(receipt, "utf8"));
   }
   const queued = processOne(request);
-  assert.equal(queued.status, "queued");
+  assert.equal(queued.status, "queued", JSON.stringify(queued.failure));
   assert.equal(queued.checks, undefined);
   assert.equal(queued.mainMovements[0].integrationSha, integration);
   assert.deepEqual(queued.failures, []);
-  assert.deepEqual(Object.values(queued.reservations).map(host => host.state), ["released", "released"]);
+  assert.equal(queued.reservations, undefined);
   assert.doesNotMatch(readFileSync(join(root, "git"), "utf8"), /push/);
-  assert.doesNotMatch(readFileSync(join(root, "hosts"), "utf8"), /machine\/pi-stack-release /);
+  assert.equal(existsSync(join(root, "hosts")), false);
   rmSync(join(root, "bin/bash"));
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "fresh integration checks reached" >&2\nexit 1\n', { mode: 0o700 });
   const checked = processOne(queued);
