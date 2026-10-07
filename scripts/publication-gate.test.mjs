@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,7 @@ import { publicationConfig } from "./publication-fixture.mjs";
 // Each pass performs dozens of durable writes and subprocesses alongside other check jobs.
 const fixtureTimeoutMs = 15_000;
 
-test("divergent host ancestry stops before main, intake or either deployment changes", t => {
+test("divergent host ancestry stops only that host and retains its peer's matched release proof", t => {
   const root = mkdtempSync(join(tmpdir(), "publication-ancestry-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const path of ["requests", "bin", "repository/.git"]) mkdirSync(join(root, path), { recursive: true });
@@ -20,22 +20,34 @@ test("divergent host ancestry stops before main, intake or either deployment cha
   writeFileSync(receipt, JSON.stringify({ requestId, sourceSha: source, sourceRef: `refs/heads/pi-stack-publications/${requestId}`,
     baseSha: base, integrationSha: integration, checks: { status: "passed" },
     status: "queued", step: "queued", attempt: 0, queuedAt: "2026-09-13", failures: [] }));
+  writeFileSync(join(root, "main"), base);
   writeFileSync(join(root, "bin/git"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE/git"
 case "$*" in
-  *push*) echo 'unexpected push' >&2; exit 99;;
+  *push*) echo ${integration} > "$TRACE/main";;
   *'remote get-url origin'*) echo https://github.com/hara-seihun/pi-stack.git;;
-  *'rev-parse refs/remotes/origin/main'*) echo ${base};;
+  *'rev-parse refs/remotes/origin/main'*) cat "$TRACE/main";;
   *':deploy/android-update'*) exit 1;;
   *grep*) exit 1;;
-  *'merge-base --is-ancestor ${divergent}'*) exit 1;;
+  *'merge-base --is-ancestor ${divergent}'*|*'merge-base --is-ancestor ${integration} ${divergent}'*) exit 1;;
 esac
 `, { mode: 0o700 });
-  for (const [command, host, selected] of [["bash", "gmktec", base], ["ssh", "converge-kenan", divergent]]) {
-    writeFileSync(join(root, "bin", command), `#!/bin/sh
-printf '%s\\n' "$*" >> "$TRACE/${command}"
-cat >> "$TRACE/host-scripts"
-printf '%s\\n' '{"host":"${host}","selectedCommit":"${selected}","checkoutCommit":"${selected}","runtimes":[]}'
+  for (const [command, host, selected] of [["bash", "gmktec", integration], ["ssh", "converge", divergent]]) {
+    writeFileSync(join(root, "bin", command), `#!${process.execPath}
+import { appendFileSync, readFileSync } from "node:fs";
+const script = readFileSync(0, "utf8");
+appendFileSync(process.env.TRACE + "/${command}", process.argv.slice(2).join(" ") + "\\n");
+appendFileSync(process.env.TRACE + "/host-scripts", script);
+let proof;
+if (script.includes("operation=$1") && script.includes("pi_stack_acquire_host_lock")) process.exit(0);
+else if (script.includes("checkoutCommit:") && script.includes("runtimes:$runtimes"))
+  proof = { host: "${host}", selectedCommit: "${selected}", checkoutCommit: "${selected}", runtimes: [], fleet: { activeRuns: [] } };
+else if (script.includes("supervisors:$people") && script.includes("voiceCommit:"))
+  proof = { host: "${host}", integrationSha: "${selected}", remoteCommit: "${selected}", orchestratorCommit: "${selected}", voiceCommit: "${selected}" };
+else if (script.includes("root=/var/lib/pi-remote/app-updates/current"))
+  proof = { revision: "${selected}", web: { revision: "${selected}" } };
+else throw new Error("Unexpected host operation: " + process.argv.slice(2).join(" "));
+console.log(JSON.stringify(proof));
 `, { mode: 0o700 });
   }
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../deploy/publication", import.meta.url)), "drain"], {
@@ -46,18 +58,21 @@ printf '%s\\n' '{"host":"${host}","selectedCommit":"${selected}","checkoutCommit
   assert.equal(result.status, 0, result.stderr);
   const failed = JSON.parse(readFileSync(receipt, "utf8"));
   assert.equal(failed.status, "failed");
-  assert.equal(failed.failure.step, "inspect-release-ancestry");
-  assert.match(readFileSync(join(root, "inbox/pi-stack-publication-issues.md"), "utf8"), new RegExp(`converge-kenan live ${divergent}`));
-  assert.match(failed.failure.message, new RegExp(`converge-kenan live ${divergent}`));
+  assert.match(readFileSync(join(root, "inbox/pi-stack-publication-issues.md"), "utf8"), /converge.*integration omits selected or checkout source/);
+  assert.match(failed.failure.message, /converge.*integration omits selected or checkout source/);
   assert.equal(failed.integrationSha, integration);
   assert.equal(failed.checks.status, "passed");
-  assert.equal(failed.hosts, undefined);
+  assert.equal(failed.hosts.gmktec.status, "passed");
+  assert.equal(failed.hosts.gmktec.integrationSha, integration);
+  assert.equal(failed.hosts.gmktec.android.web.revision, integration);
+  assert.equal(failed.hosts.converge.status, "failed");
   assert.equal(failed.maintenance, undefined);
   assert.equal(failed.bootstrap, undefined);
-  assert.equal(failed.integratedAt, undefined);
-  const proof = JSON.parse(readFileSync(failed.releaseAncestry.proof, "utf8"));
-  assert.deepEqual(proof.hosts.map(host => host.ok), [true, false]);
-  assert.doesNotMatch(readFileSync(join(root, "git"), "utf8"), /push/);
+  assert.ok(failed.integratedAt);
+  const proof = JSON.parse(readFileSync(join(root, "proofs", requestId, "converge-release-ancestry.json"), "utf8"));
+  assert.equal(proof.ok, false);
+  assert.ok(proof.baselines.every(baseline => baseline.commit === divergent && !baseline.included));
+  assert.match(readFileSync(join(root, "git"), "utf8"), /push/);
   assert.doesNotMatch(readFileSync(join(root, "host-scripts"), "utf8"), /systemctl (start|stop|restart|kill)|fleet_cli pause/);
   assert.deepEqual(Object.values(failed.reservations).map(host => host.state), ["released", "released"]);
   assert.doesNotMatch(readFileSync(join(root, "ssh"), "utf8"), /pi-stack-release /);
@@ -80,6 +95,12 @@ printf '%s\\n' "$*" >> "$TRACE/git"
 case "$*" in
   *push*) echo 'unexpected push' >&2; exit 99;;
   *'remote get-url origin'*) echo https://github.com/hara-seihun/pi-stack.git;;
+  *'fetch --quiet --no-tags origin +refs/heads/main:'*)
+    count=0
+    if [ -e "$TRACE/fetch-count" ]; then count=$(cat "$TRACE/fetch-count"); fi
+    count=$((count + 1))
+    echo "$count" > "$TRACE/fetch-count"
+    if [ "$count" -eq 2 ]; then echo ${moved} > "$TRACE/main"; fi;;
   *'rev-parse refs/remotes/origin/main'*) cat "$TRACE/main";;
   *'rev-parse refs/pi-stack-publication/'*) echo ${source};;
   *'rev-parse HEAD'*) echo ${integration};;
@@ -89,9 +110,8 @@ esac
 `, { mode: 0o700 });
   const hostStub = `#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE/hosts"
-cat >> "$TRACE/host-scripts"
-echo ${moved} > "$TRACE/main"
-printf '%s\\n' '{"selectedCommit":"${base}","checkoutCommit":"${base}","runtimes":[]}'
+echo 'unexpected host operation before integration' >&2
+exit 99
 `;
   writeFileSync(join(root, "bin/bash"), hostStub, { mode: 0o700 });
   writeFileSync(join(root, "bin/ssh"), hostStub, { mode: 0o700 });
@@ -110,9 +130,9 @@ printf '%s\\n' '{"selectedCommit":"${base}","checkoutCommit":"${base}","runtimes
   assert.equal(queued.checks, undefined);
   assert.equal(queued.mainMovements[0].integrationSha, integration);
   assert.deepEqual(queued.failures, []);
-  assert.deepEqual(Object.values(queued.reservations).map(host => host.state), ["released", "released"]);
+  assert.equal(queued.reservations, undefined);
   assert.doesNotMatch(readFileSync(join(root, "git"), "utf8"), /push/);
-  assert.doesNotMatch(readFileSync(join(root, "hosts"), "utf8"), /machine\/pi-stack-release /);
+  assert.equal(existsSync(join(root, "hosts")), false, "main movement must requeue before any host operation");
   rmSync(join(root, "bin/bash"));
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "fresh integration checks reached" >&2\nexit 1\n', { mode: 0o700 });
   const checked = processOne(queued);

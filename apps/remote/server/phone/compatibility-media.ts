@@ -207,8 +207,8 @@ export class CompatibilityMediaSession {
         if (sequence !== null) session.sequence = sequence;
         return success({ event: "mark", name: mark.name });
       }
-      default: return this.reject("unsupported-event");
     }
+    return this.reject("unsupported-event");
   }
 
   outgoing(pcm: Buffer): CompatibilityMediaResult<CompatibilityMediaMessage[]> {
