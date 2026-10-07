@@ -305,6 +305,7 @@ const threads = new ThreadService({
   capacity: configuredAgentCapacity(),
   admitNewThread: settings => modelAvailability.admit(settings.model),
   attachSession: runner.attachSession,
+  recoverSession: runner.recoverSession,
   databasePath: join(DATA, "threads.sqlite3"),
   sessionsDir: join(DATA, "threads"),
   openSession: (options, output, exit) => runner.openSession({ ...options,

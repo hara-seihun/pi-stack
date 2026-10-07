@@ -50,6 +50,7 @@ export interface ThreadServiceOptions {
   sessionsDir: string;
   openSession: OpenPiSession;
   attachSession?: AttachPiSession;
+  recoverSession?: (threadId: string, output: (event: PiEvent) => void, exit: (code: number | null) => void) => Promise<PiSession | null>;
   workersOnly?: boolean;
   capacity?: import("../agent-capacity.js").AgentCapacity | { mode: "unmanaged" };
   admitNewThread?: (settings: ThreadSettings) => Result<void>;
@@ -436,8 +437,15 @@ export class ThreadService implements ThreadApi {
       if (row.kind === "work" && row.source_id === failure.workId) await this.releaseCapacity(id, row.logical_execution_id);
     }
   }
+  private async recoverMissingStartupCapacity(id: string): Promise<void> {
+    if (!this.capacityLedger || !this.options.recoverSession || this.execution(id) || this.runtimes.has(id) || this.opening.has(id) || this.get(id)?.metadata?.runnerReference) return;
+    if (!this.capacityLedger.current(id).some(row => row.entered_native && row.state !== "releasing")) return;
+    const runtime = await this.attach(id, true);
+    if (!runtime) await this.releaseCapacity(id);
+  }
   private async recoverUnassignedCapacity(id: string): Promise<boolean> {
     await this.releaseFailedStartupCapacity(id);
+    await this.recoverMissingStartupCapacity(id);
     if (this.capacityLedger && !this.execution(id) && this.get(id)?.metadata?.runnerReference && !this.capacityLedger.current(id).length)
       this.capacityLedger.retain(id, `native-census:${id}`, `native-census:${id}`, "command");
     const rows = this.capacityLedger?.current(id).filter(row => row.entered_native && row.state !== "releasing") ?? [];
@@ -1391,6 +1399,7 @@ export class ThreadService implements ThreadApi {
         // A rejected startup is not a failed cancellation: inspect the retained runner directly.
         await this.opening.get(id)?.catch(() => undefined);
         await this.releaseFailedStartupCapacity(id);
+        await this.recoverMissingStartupCapacity(id);
         const hadReference = !!this.get(id)?.metadata?.runnerReference;
         const runtime = this.runtimes.get(id) ?? await this.attach(id);
         if (!runtime && !hadReference && this.capacityLedger?.current(id).some(row => row.entered_native && row.state !== "releasing")) throw new Error("Native startup custody has no positive absence or settlement proof; global custody retained");
@@ -1566,7 +1575,9 @@ export class ThreadService implements ThreadApi {
     runtime.waiters.clear(); this.runtimes.delete(id);
     if (!runtime.executionId && !this.execution(id)) {
       this.projections.delete(id);
-      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
+      // A startup exit can race an unacknowledged open. Its reference owns the serial absence fence.
+      if (runtime.session && !this.capacityLedger?.current(id).some(row => row.entered_native && row.state !== "releasing"))
+        this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
       this.changed(id);
     }
     if (runtime.executionId) {
@@ -1576,14 +1587,17 @@ export class ThreadService implements ThreadApi {
       this.wake(id);
     }
   }
-  private async attach(id: string): Promise<Runtime | undefined> {
+  private async attach(id: string, recoverMissing = false): Promise<Runtime | undefined> {
     const thread = this.get(id)!;
     if (thread.metadata?.runnerReference) this.phase(id, "recovering", "Reattaching retained runtime socket");
     if (thread.metadata?.runnerReference && !this.options.attachSession) throw new Error("Native runner attachment is not configured");
     const runtime: Runtime = { epoch: randomUUID(), executionId: this.execution(id)?.id, busy: true, commandNumber: 0, waiters: new Map() };
     this.runtimes.set(id, runtime);
     try {
-      const session = await this.options.attachSession?.(thread.metadata?.runnerReference as Parameters<AttachPiSession>[0], event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
+      const output = (event: PiEvent) => this.output(id, runtime, event), exit = (code: number | null) => this.exited(id, runtime, code);
+      const session = recoverMissing
+        ? await this.options.recoverSession!(id, output, exit)
+        : await this.options.attachSession?.(thread.metadata?.runnerReference as Parameters<AttachPiSession>[0], output, exit);
       if (session) { runtime.session = session; return runtime; }
       if (!this.closed && !this.suspended) this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
       this.runtimes.delete(id); return undefined;
@@ -1933,6 +1947,7 @@ export class ThreadService implements ThreadApi {
     // Startup acknowledgements can be lost. Confirm absence or cancellation before settling.
     this.sql("UPDATE thread SET held=1 WHERE id=?").run(id);
     await this.releaseFailedStartupCapacity(id);
+    await this.recoverMissingStartupCapacity(id);
     const hadReference = !!this.get(id)?.metadata?.runnerReference;
     const runtime = this.runtimes.get(id) ?? await this.attach(id);
     if (!runtime && !hadReference && this.capacityLedger?.current(id).some(row => row.entered_native && row.state !== "releasing")) throw new Error("Native startup custody has no positive absence or settlement proof; global custody retained");

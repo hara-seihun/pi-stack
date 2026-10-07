@@ -1,5 +1,6 @@
-import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -37,6 +38,96 @@ async function listen(path: string, receive: (value: any, socket: Socket) => voi
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
   cleanups.push(async () => { for (const socket of clients) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); });
 }
+
+function recoveryReference(dataDir: string, threadId: string, generation = "a".repeat(16)) {
+  const threadHash = createHash("sha256").update(threadId).digest("hex").slice(0, 16);
+  return { control: join(dataDir, "thread-runners", `${generation}.sock`), socketPath: join(dataDir, "thread-sockets", `${generation}.${threadHash}.sock`) };
+}
+
+it("recovers a lost reference without reopening or closing active native work", async () => {
+  const { opener, dataDir } = fixture(), threadId = "active-thread", reference = recoveryReference(dataDir, threadId);
+  const requests: unknown[] = [], events: PiEvent[] = [];
+  await listen(reference.control, (value, socket) => {
+    requests.push(value);
+    socket.end(`${JSON.stringify({ ok: true, threadIds: [threadId], activeSessions: 1 })}\n`);
+  });
+  await listen(reference.socketPath, (_value, socket) => socket.write('{"type":"attached"}\n'));
+  const session = await opener.recoverSession(threadId, event => events.push(event), () => {});
+  expect(session).not.toBeNull();
+  expect(requests).toEqual([{ type: "status" }]);
+  expect(events).toEqual([{ type: "runner_attached", ...reference }]);
+});
+
+it("serially fences a queued open despite status omitting the thread", async () => {
+  const { opener, dataDir } = fixture(), reference = recoveryReference(dataDir, "queued-thread"), requests: unknown[] = [];
+  let acknowledge!: () => void;
+  let fenced!: () => void;
+  const reachedFence = new Promise<void>(resolve => { fenced = resolve; });
+  await listen(reference.control, (value, socket) => {
+    requests.push(value);
+    if (value.type === "status") socket.end('{"ok":true,"threadIds":[]}\n');
+    if (value.type === "close") { acknowledge = () => socket.end('{"ok":true}\n'); fenced(); }
+  });
+  let settled = false;
+  const recovering = opener.recoverSession("queued-thread", () => {}, () => {}).then(value => { settled = true; return value; });
+  await reachedFence;
+  expect(settled).toBe(false);
+  acknowledge();
+  expect(await recovering).toBeNull();
+  expect(requests).toEqual([{ type: "status" }, { type: "close", socketPath: reference.socketPath }]);
+});
+
+it("retains uncertainty when a missing-reference absence fence is refused", async () => {
+  const { opener, dataDir } = fixture(), reference = recoveryReference(dataDir, "unknown-thread");
+  await listen(reference.control, (value, socket) => socket.end(value.type === "close" ? '{"error":"Native work still active"}\n' : '{"ok":true,"threadIds":[]}\n'));
+  await expect(opener.recoverSession("unknown-thread", () => {}, () => {})).rejects.toThrow("Native work still active");
+});
+
+it("does not close known native ownership whose session socket is not yet listening", async () => {
+  const { opener, dataDir } = fixture(), threadId = "initializing", reference = recoveryReference(dataDir, threadId), requests: unknown[] = [];
+  await listen(reference.control, (value, socket) => { requests.push(value); socket.end(`${JSON.stringify({ ok: true, threadIds: [threadId] })}\n`); });
+  await expect(opener.recoverSession(threadId, () => {}, () => {})).rejects.toMatchObject({ code: "ownership-uncertain" });
+  expect(requests).toEqual([{ type: "status" }]);
+});
+
+it("detects competing native generations before replacing any session client", async () => {
+  const { opener, dataDir } = fixture(), threadId = "conflicted", attached = vi.fn();
+  for (const generation of ["a".repeat(16), "b".repeat(16)]) {
+    const reference = recoveryReference(dataDir, threadId, generation);
+    await listen(reference.control, (_value, socket) => socket.end(`${JSON.stringify({ ok: true, threadIds: [threadId] })}\n`));
+    await listen(reference.socketPath, attached);
+  }
+  await expect(opener.recoverSession(threadId, () => {}, () => {})).rejects.toMatchObject({ code: "ownership-conflict" });
+  expect(attached).not.toHaveBeenCalled();
+});
+
+it("distinguishes a process-lifetime lock from an unlocked artifact when control is absent", async () => {
+  const { opener, dataDir } = fixture(), reference = recoveryReference(dataDir, "locked-thread");
+  mkdirSync(dirname(reference.control), { recursive: true });
+  writeFileSync(`${reference.control}.lock`, "");
+  expect(await opener.recoverSession("locked-thread", () => {}, () => {})).toBeNull();
+  const owner = execFile("flock", ["--no-fork", `${reference.control}.lock`, "node", "-e", "process.stdout.write('locked');process.stdin.resume()"]);
+  const exited = new Promise<void>(resolve => owner.once("exit", () => resolve()));
+  cleanups.push(async () => { owner.kill(); await exited; });
+  await new Promise<void>((resolve, reject) => { owner.once("error", reject); owner.stdout!.once("data", () => resolve()); });
+  await expect(opener.recoverSession("locked-thread", () => {}, () => {})).rejects.toMatchObject({ code: "ownership-uncertain" });
+});
+
+it("returns positive absence for an empty boundary and rejects unidentifiable generations", async () => {
+  const { opener, dataDir } = fixture();
+  expect(await opener.recoverSession("absent", () => {}, () => {})).toBeNull();
+  mkdirSync(join(dataDir, "thread-runners"));
+  writeFileSync(join(dataDir, "thread-runners", "unknown.sock.lock"), "");
+  await expect(opener.recoverSession("absent", () => {}, () => {})).rejects.toMatchObject({ code: "ownership-uncertain" });
+});
+
+it("records native attachment before a replayed immediate exit", async () => {
+  const { opener, reference } = fixture(), observed: string[] = [];
+  await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
+  await listen(reference.socketPath, (_value, socket) => socket.write('{"type":"attached"}\n{"type":"exit","code":0}\n'));
+  expect(await opener.attachSession(reference, event => observed.push(event.type), () => observed.push("exit"))).not.toBeNull();
+  expect(observed).toEqual(["runner_attached", "exit"]);
+});
 
 it("returns absent without a reference or a listening control socket and never launches", async () => {
   const { opener, reference } = fixture();

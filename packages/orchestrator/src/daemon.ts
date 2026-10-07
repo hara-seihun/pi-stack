@@ -86,6 +86,7 @@ export class Daemon {
       capacity:executionOptions?.capacity??configuredAgentCapacity(),
       admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
       attachSession:this.opener.attachSession,
+      recoverSession:this.opener.recoverSession,
       retireIdleSession:thread=>typeof thread.metadata?.laneId==="string"&&thread.metadata.mode!=="live"&&this.store.lane(thread.metadata.laneId)?.maxActive!==undefined,
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
@@ -307,6 +308,7 @@ export class Daemon {
         capacity:this.executionOptions?.capacity??configuredAgentCapacity(),
         admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
         attachSession:this.opener.attachSession,
+        recoverSession:this.opener.recoverSession,
         openSession:(options,output,exit)=>this.opener.openSession({...options,args:[...options.args,"--orchestrator-context",JSON.stringify(context)]},output,exit),
         environment:thread=>({...this.threadEnvironment(thread),PI_THREAD_API_URL:`http://127.0.0.1:${this.port}/v1/applications/${id}/threads`}),
         admit:(...args)=>this.fleet.admit(...args)});

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -38,7 +38,7 @@ function runnerRequest(path: string, value: unknown, timeout = 5000): Promise<an
     socket.on("close", () => { clearTimeout(timer); reject(new Error("Thread runner control closed")); });
   });
 }
-function connect(path: string, output: (event: PiEvent) => void, exit: (code: number) => void): Promise<Connection> {
+function connect(path: string, output: (event: PiEvent) => void, exit: (code: number) => void, onAttached: () => void): Promise<Connection> {
   return new Promise((resolve, reject) => {
     let socket: Socket;
     let connected = false, attached = false, detached = false, ended = false;
@@ -69,6 +69,7 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
       function acceptFrame(value: RunnerFrame): void {
         switch (value.type) {
           case "attached":
+            if (!attached) onAttached();
             attached = true; connected = true; clearTimeout(timer);
             for (const line of unsent.splice(0)) current.write(line);
             resolve(connection); return;
@@ -219,7 +220,27 @@ export function runnerSocketDirectory(dataDir: string, uid = process.getuid!()):
   return Buffer.byteLength(longest) <= 107 ? absolute : `/run/user/${uid}/pi/${hash(absolute)}`;
 }
 
-export function createSharedPiSessionOpener({ dataDir, durable = false }: { dataDir: string; durable?: boolean }): { openSession: OpenPiSession; attachSession: AttachPiSession; detach(): void } {
+export class RunnerRecoveryError extends Error {
+  constructor(readonly code: "ownership-uncertain" | "ownership-conflict", message: string) { super(message); this.name = "RunnerRecoveryError"; }
+}
+
+function controlOwnerAbsent(control: string): boolean {
+  let lock: ReturnType<typeof statSync>;
+  try { lock = statSync(`${control}.lock`); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
+  const dev = BigInt(lock.dev);
+  const major = ((dev >> 8n) & 0xfffn) | ((dev >> 32n) & 0xfffff000n);
+  const minor = (dev & 0xffn) | ((dev >> 12n) & 0xffffff00n);
+  // An unlocked file is not ownership; flock keeps the lock for the native process lifetime.
+  return !readFileSync("/proc/locks", "utf8").split("\n").some(line => {
+    const fields = line.trim().split(/\s+/);
+    const identity = fields[5]?.split(":");
+    return fields[1] === "FLOCK" && identity?.length === 3 &&
+      BigInt(`0x${identity[0]}`) === major && BigInt(`0x${identity[1]}`) === minor && BigInt(identity[2]!) === BigInt(lock.ino);
+  });
+}
+
+export function createSharedPiSessionOpener({ dataDir, durable = false }: { dataDir: string; durable?: boolean }): { openSession: OpenPiSession; attachSession: AttachPiSession; recoverSession(threadId: string, output: (event: PiEvent) => void, exit: (code: number | null) => void): Promise<PiSession | null>; detach(): void } {
   const socketDir = runnerSocketDirectory(dataDir);
   const connections = new Set<Connection>();
   const controls = new Map<string, boolean>();
@@ -231,11 +252,11 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
   }
   async function attach({ control, socketPath }: PiRunnerReference, output: (event: PiEvent) => void, exit: (code: number) => void, residency = true): Promise<PiSession> {
     let connection: Connection | undefined;
-    connection = await connect(socketPath, output, code => { if (connection) connections.delete(connection); exit(code); });
+    let exited = false;
+    connection = await connect(socketPath, output, code => { exited = true; if (connection) connections.delete(connection); exit(code); }, () => output({ type: "runner_attached", control, socketPath }));
     const attached = connection;
-    connections.add(attached); controls.set(control, residency);
-    try { output({ type: "runner_attached", control, socketPath }); }
-    catch (error) { attached.detach(); connections.delete(attached); throw error; }
+    if (!exited) connections.add(attached);
+    controls.set(control, residency);
     return {
       command: async command => { attached.send(command); },
       setActive: async active => { if (residency) await runnerRequest(control, { type: "activity", socketPath, active }); },
@@ -250,16 +271,81 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     const recorded = validate(reference);
     let status: any;
     try { status = await runnerRequest(recorded.control, { type: "status" }); }
-    catch (error) { if (socketAbsent(error)) return null; throw error; }
+    catch (error) {
+      if (!socketAbsent(error)) throw error;
+      if (!controlOwnerAbsent(recorded.control)) throw new RunnerRecoveryError("ownership-uncertain", `Native runner still owns unreachable control: ${recorded.control}`);
+      return null;
+    }
     if (status?.ok !== true) throw new Error("Thread runner did not acknowledge status");
     try { return await attach(recorded, output, exit, typeof status.activeSessions === "number"); }
     catch (error) {
       if (!socketAbsent(error)) throw error;
+      if (status.threadIds?.some((id: string) => recorded.socketPath.endsWith(`.${hash(id)}.sock`))) throw new RunnerRecoveryError("ownership-uncertain", `Native ownership remains without a session socket: ${recorded.socketPath}`);
       // Fence an earlier open whose acknowledgement was lost. Native close shares its serial queue.
       try { await runnerRequest(recorded.control, { type: "close", socketPath: recorded.socketPath }, 35_000); }
-      catch (closing) { if (!socketAbsent(closing)) throw closing; }
+      catch (closing) {
+        if (!socketAbsent(closing)) throw closing;
+        if (!controlOwnerAbsent(recorded.control)) throw new RunnerRecoveryError("ownership-uncertain", `Native absence fence lost its owner: ${recorded.control}`);
+      }
       return null;
     }
+  };
+  function generations(threadId: string): string[] {
+    const found = new Set<string>();
+    function entries(directory: string): string[] {
+      try { return readdirSync(directory); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    }
+    for (const name of entries(join(socketDir, "thread-runners"))) {
+      const match = /^([a-f0-9]{16})\.sock(?:\.lock)?$/.exec(name);
+      if (!match) throw new RunnerRecoveryError("ownership-uncertain", `Unrecognized native runner generation: ${name}`);
+      found.add(match[1]!);
+    }
+    const suffix = `.${hash(threadId)}.sock`;
+    for (const name of entries(join(socketDir, "thread-sockets"))) {
+      if (!name.endsWith(suffix) && !name.endsWith(`${suffix}.events`)) continue;
+      const generation = name.slice(0, 16);
+      if (!/^[a-f0-9]{16}$/.test(generation) || !name.startsWith(`${generation}${suffix}`)) throw new RunnerRecoveryError("ownership-uncertain", `Unrecognized native session generation: ${name}`);
+      found.add(generation);
+    }
+    for (const control of starts.keys()) if (dirname(control) === join(socketDir, "thread-runners")) found.add(control.slice(control.lastIndexOf("/") + 1, -5));
+    return [...found].sort();
+  }
+  const recoverSession = async (threadId: string, output: (event: PiEvent) => void, exit: (code: number | null) => void): Promise<PiSession | null> => {
+    const discovered = generations(threadId);
+    const candidates: { reference: PiRunnerReference; residency: boolean }[] = [];
+    for (const generation of discovered) {
+      const reference = { control: join(socketDir, "thread-runners", `${generation}.sock`), socketPath: join(socketDir, "thread-sockets", `${generation}.${hash(threadId)}.sock`) };
+      const starting = starts.get(reference.control);
+      if (starting) await starting;
+      let status: any;
+      try { status = await runnerRequest(reference.control, { type: "status" }); }
+      catch (error) {
+        if (!socketAbsent(error)) throw error;
+        if (!controlOwnerAbsent(reference.control) || existsSync(reference.socketPath)) throw new RunnerRecoveryError("ownership-uncertain", `Cannot establish native absence: ${reference.control}`);
+        continue;
+      }
+      if (status?.ok !== true || !Array.isArray(status.threadIds)) throw new RunnerRecoveryError("ownership-uncertain", `Native runner did not report thread ownership: ${reference.control}`);
+      if (existsSync(reference.socketPath)) {
+        candidates.push({ reference, residency: typeof status.activeSessions === "number" });
+        continue;
+      }
+      if (status.threadIds.includes(threadId)) throw new RunnerRecoveryError("ownership-uncertain", `Native thread owns a missing session socket: ${threadId}`);
+      // Status is not serialized with open. Close fences an open still waiting in the native queue.
+      try {
+        const closed = await runnerRequest(reference.control, { type: "close", socketPath: reference.socketPath }, 35_000);
+        if (closed?.ok !== true) throw new RunnerRecoveryError("ownership-uncertain", `Native runner did not acknowledge absence fence: ${reference.control}`);
+      } catch (error) {
+        if (!socketAbsent(error)) throw error;
+        if (!controlOwnerAbsent(reference.control)) throw new RunnerRecoveryError("ownership-uncertain", `Native absence fence lost its owner: ${reference.control}`);
+      }
+      if (existsSync(reference.socketPath)) throw new RunnerRecoveryError("ownership-uncertain", `Native session remains after absence fence: ${threadId}`);
+    }
+    if (candidates.length > 1) throw new RunnerRecoveryError("ownership-conflict", `Multiple native generations own thread ${threadId}`);
+    if (generations(threadId).some(generation => !discovered.includes(generation))) throw new RunnerRecoveryError("ownership-uncertain", `Native generations changed during recovery: ${threadId}`);
+    const candidate = candidates[0];
+    if (!candidate) return null;
+    return attach(candidate.reference, output, exit, candidate.residency);
   };
   const openSession: OpenPiSession = async (options, output, exit) => {
     let retained = options.env.PI_THREAD_RUNNER_REFERENCE ? validate(JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE)) : undefined;
@@ -300,7 +386,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     const status = retained ? await runnerRequest(control, { type: "status" }) : undefined;
     return attach(reference, output, exit, !status || typeof status.activeSessions === "number");
   };
-  return { openSession, attachSession, detach() {
+  return { openSession, attachSession, recoverSession, detach() {
     for (const connection of connections) connection.detach(); connections.clear();
     for (const [control, residency] of controls) if (residency) void runnerRequest(control, { type: "drain" }).catch(error => { if (!socketAbsent(error) && (error as NodeJS.ErrnoException).code !== "EPIPE") console.error("Runner generation drain failed:", error); });
     controls.clear();
