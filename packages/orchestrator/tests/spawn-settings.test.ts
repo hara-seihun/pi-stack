@@ -18,7 +18,7 @@ function value<T>(result: Result<T>): T {
 
 function parent(model: string): Thread {
   return {
-    id: "parent", parentId: null, role: "conversation", title: "Parent", cwd: "/work",
+    id: "parent", parentId: null, role: "agent", title: "Parent", cwd: "/work",
     sessionFile: "/work/parent.jsonl", settings: { model, thinkingLevel: "high", speed: "standard" },
     admission: "force", state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 0,
   };
@@ -75,11 +75,8 @@ describe("child spawn settings", () => {
   it.each([
     "astra", "Astra", "ASTRA", "gpt-6-astra", "openai-codex/gpt-6-astra", "openai-codex-8/gpt-6-astra", "alternate/gpt-6-astra",
     "fable", "Fable", "FABLE", "claude-fable-5-1", "anthropic/claude-fable-5-1", "anthropic-8/claude-fable-5-1", "alternate/claude-fable-5-1",
-  ])("rejects forbidden child identity %s", model => {
-    expect(resolveSpawnSettings({ model }, parent("openai-codex/gpt-6-astra"))).toMatchObject({
-      ok: false,
-      error: { code: "invalid_request", message: expect.stringContaining("Astra or Fable") },
-    });
+  ])("accepts the same model identity for a peer as a human-created agent: %s", model => {
+    expect(resolveSpawnSettings({ model }, parent("openai-codex/gpt-6-astra"))).toMatchObject({ ok: true });
   });
 
   it.each([
@@ -120,7 +117,7 @@ describe("Astra ultrafast settings", () => {
       expect(service.get(thread.id)?.settings).toEqual(thread.settings);
     }
     expect(value(await service.control({ action: "settings", threadId: thread.id, settings: { model: "sol" } })).settings.speed).toBe("standard");
-    expect(await service.spawn({ requestId: "child", cwd: root, parentId: thread.id, settings: { model: "astra", speed: "ultrafast" } })).toMatchObject({ ok: false });
+    expect(await service.spawn({ requestId: "child", cwd: root, parentId: thread.id, settings: { model: "astra", speed: "ultrafast" } })).toMatchObject({ ok: true, value: { settings: { speed: "ultrafast" } } });
   });
 });
 
@@ -131,18 +128,18 @@ describe("ThreadService child spawn policy", () => {
     const child = value(await service.spawn({ requestId: "child", cwd: root, parentId: conversation.id }));
     expect(child.settings.model).toBe("openai-codex/gpt-6.1-sol");
     expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "opus" } })).toMatchObject({ ok: true });
-    expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "fable" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "fable" } })).toMatchObject({ ok: true });
     expect(value(await service.spawn({ requestId: "direct", cwd: root, settings: { model: "opus" }, metadata: { source: "direct" } })).settings.model).toMatch(/^anthropic\//);
     expect(await service.control({ action: "settings", threadId: conversation.id, settings: { model: "fable" } })).toMatchObject({ ok: true });
   });
 
-  it("rejects forbidden settings before forwarding to a worker owner", async () => {
+  it("rejects nonexistent installed model settings before forwarding to a peer owner", async () => {
     const { root, service } = fixture();
     const rootThread = value(await service.spawn({ requestId: "root", cwd: root }));
     const forward = vi.fn(async (_input: SpawnThread) => ({ ok: true as const, value: rootThread }));
     service.setDirectory(service, () => ({ spawn: forward } as unknown as ThreadApi));
 
-    const result = await service.spawn({ requestId: "child", parentId: rootThread.id, cwd: root, settings: { model: "alternate/gpt-6-astra" } });
+    const result = await service.spawn({ requestId: "child", parentId: rootThread.id, cwd: root, settings: { model: "openai-codex/missing-model" } });
 
     expect(result).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(forward).not.toHaveBeenCalled();
