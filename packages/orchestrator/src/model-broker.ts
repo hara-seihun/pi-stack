@@ -14,6 +14,7 @@ import { catalogModel, modelDrainsMeter } from "./catalog.js";
 import { allowsAccountUse, type UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
+import { accountModelExcluded, noEntitledAccountError, recordAccountModelUnsupported } from "./auth/model-entitlement.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
 import { modelSpeedModes } from "./threads/speed.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
@@ -207,8 +208,13 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       if (ultrafast) exclude = await codexTierExclusions(store, shared, body.model, "ultrafast", exclude, signal, transport as typeof fetch);
       const affinity = scoped(listener.principal, body.prompt_cache_key ?? req.headers["session-id"] ?? req.headers["session_id"] ?? req.headers["x-claude-code-session-id"]);
       const retained = sticky.get(affinity);
-      const account = eligibleInteractiveAccounts(store, shared, family, exclude).find(account => account.id === retained)
+      const account = eligibleInteractiveAccounts(store, shared, family, exclude, body.model).find(account => account.id === retained)
         ?? chooseInteractiveAccount(store, shared, family, exclude, { includeCooling: true, model: body.model });
+      const granted = store.accounts().filter(candidate => candidate.provider === family && !exclude.has(candidate.id) && shared.has(candidate.id));
+      if (!account && granted.length && granted.every(candidate => accountModelExcluded(store, candidate.id, body.model))) {
+        json(res, 400, noEntitledAccountError(family, body.model));
+        return;
+      }
       if (!account) {
         json(res, 503, ultrafast
           ? "No eligible shared model account advertises Ultrafast for this model. The granted pool is unavailable, out of quota, or not entitled; no slower tier was used."
@@ -275,6 +281,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
             family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
         }
       }
+      if (!response.ok && response.status !== 429) recordAccountModelUnsupported(store, account.id, body.model, await providerResponseFailure(response));
       if (response.status === 429) store.setCooldown(account.id, Math.max(account.cooldownUntil ?? 0, Date.now() + 60_000), { model: body.model });
       // The provider admitted this request past its quota checks; a stream that fails later is not a quota refusal.
       else if (response.ok) store.recordProviderSuccess(account.id, { model: body.model, startedAt, source: "model-broker" });
@@ -297,6 +304,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
         const failure = value.error ?? value.response?.error ?? (value.type === "error" ? value : undefined);
         if (failure) {
           const detail = `${failure.code ?? ""} ${failure.message ?? ""}`;
+          recordAccountModelUnsupported(store, account.id, body.model, detail);
           if (isRejectedTokenError(detail)) streamRejection = detail;
         }
         const usage = value.type === "response.completed" ? value.response?.usage : value.type === "message_start" ? value.message?.usage : value.type === "message_delta" ? value.usage : undefined;

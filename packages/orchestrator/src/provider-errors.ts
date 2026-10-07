@@ -192,6 +192,8 @@ export function isPermanentError(message: string): boolean {
  * trip every task's circuit breaker. */
 const MODEL_CONFIGURATION_PATTERNS = [
   /unknown model|no such model|model not found|cannot alias/i,
+  // Account-scoped Codex entitlement refusal; see auth/model-entitlement.ts.
+  /model is not supported when using Codex with a ChatGPT account/i,
   /model.{0,200}(does not exist|retired|unavailable|testing period)/is,
   /\b404\b.{0,500}\bmodel\b|\bmodel\b.{0,500}\b404\b/is,
 ];
