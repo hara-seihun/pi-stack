@@ -1,10 +1,10 @@
 # Telephone calls
 
-`pi-call` connects a host-owned Vonage, SignalWire or Twilio number, or an explicitly provisioned physical SIM audio gateway to Pi Stack Voice's `gpt-live-1` through a headless Chromium WebRTC bridge. This is separate from `pi-phone` (Android device control). The host installs an optional `pi-stack-phone.service`; hosts without it acquire no telephone account or public endpoint. `deploy/phone` validates the selected provider configuration before activation and refuses publication during a live call. If host activation or its checks reject a release, `deploy/host` reactivates telephone and Voice services against the restored Remote source; a configured service absent from that source is stopped.
+`pi-call` uses either Retell's managed telephone voice, or connects a host-owned Vonage, SignalWire or Twilio number or physical SIM audio gateway to Pi Stack Voice's `gpt-live-1` through a headless Chromium WebRTC bridge. This is separate from `pi-phone` (Android device control). The host installs an optional `pi-stack-phone.service`; hosts without it acquire no telephone account or public endpoint. `deploy/phone` validates the selected provider configuration before activation and refuses publication during a live call. If host activation or its checks reject a release, `deploy/host` reactivates telephone and Voice services against the restored Remote source; a configured service absent from that source is stopped.
 
 ## External context boundary
 
-A call receives only a purpose, approved opening, contact name and explicitly shareable facts. It never imports a thread, memory, private files, credentials, tools, meeting prompt, or agent output. Caller requests cannot invoke a privileged agent. Missing facts become questions for Hara, retained in the private call transcript. An authorized local operator can add one explicitly shareable fact using `pi-call context`. These are deliberately different surfaces: operator reasoning stays private; the brief is content approved for the person answering. Do not put internal reasoning in a brief field.
+A call receives only a purpose, approved opening, contact name and explicitly shareable facts. It never imports a thread, memory, private files, credentials, tools, meeting prompt, or agent output. Caller requests cannot invoke a privileged agent. Missing facts become questions for Hara, retained in the private call transcript. For the GPT Live transports an authorized local operator can add one explicitly shareable fact using `pi-call context`. Retell rejects live context updates explicitly; all approved facts must be supplied before dialing. These are deliberately different surfaces: operator reasoning stays private; the brief is content approved for the person answering. Do not put internal reasoning in a brief field.
 
 Kenan introduces himself as an AI assistant. Default incoming calls disclose only that he is Hara's assistant and can take a message; caller ID does not unlock additional context. Spending, account changes and binding commitments are outside call authority. Voice is not given credentials even when talking to Hara.
 
@@ -28,11 +28,11 @@ Example brief:
 {"to":"+15555550123","contactName":"Alex","purpose":"Confirm the appointment time.","shareableFacts":["Hara is available Tuesday afternoon."],"opening":"Hi, I'm Kenan, Hara's AI assistant. I'm calling to confirm the appointment time.","maxSeconds":300}
 ```
 
-The CLI reads `/etc/pi-stack/phone.json` (`PI_STACK_PHONE_CONFIG` overrides it), then the owner-only admin token file. Ordinary accounts do not inherit this token or the phone credentials. `start` returns accepted/preparing, not successful delivery. `show` gives the provider status, error and GPT Live transcript fragments. An unanswered call, API rejection, audio failure, and a completed conversation are distinct outcomes. No uncertain dial is automatically replayed.
+The CLI reads `/etc/pi-stack/phone.json` (`PI_STACK_PHONE_CONFIG` overrides it), then the owner-only admin token file. Ordinary accounts do not inherit this token or the phone credentials. `start` returns accepted/preparing, not successful delivery. `show` gives the provider status, error and transcript; Retell refreshes its provider snapshot and retains transcript, outcome analysis, duration, disconnection reason and itemized cost in the encrypted record. An unanswered call, API rejection, audio failure, and a completed conversation are distinct outcomes. No uncertain dial is automatically replayed.
 
 ## Host operations
 
-Configuration fields: `owner`, explicit `pstnProvider` (`"vonage"`, `"signalwire"`, `"twilio"`, or `null` for SIM-only), optional `simGateways` (see below), `callingEnabled` (false until provider credit and number ownership are confirmed), `publicBaseUrl`, the selected provider's `vonageCredentialFile`, `signalwireCredentialFile` or `twilioCredentialFile`, `adminTokenFile`, optional `localPort` (8802), `publicPort` (8803), `voiceUrl` (existing loopback Voice), and `chromium` (installed browser executable). Unset/unknown selection fails startup, rather than choosing a provider or silently falling back to another line. Existing Vonage installations must add `"pstnProvider":"vonage"` before activating this release. Vonage credential JSON fields remain `VONAGE_APPLICATION_ID`, `VONAGE_PRIVATE_KEY`, `VONAGE_SIGNATURE_SECRET`, `VONAGE_FROM_NUMBER`.
+Configuration fields: `owner`, explicit `pstnProvider` (`"vonage"`, `"signalwire"`, `"twilio"`, `"retell"`, or `null` for SIM-only), optional `simGateways` (see below), `callingEnabled` (false until provider credit and number ownership are confirmed), `publicBaseUrl`, the selected provider's `vonageCredentialFile`, `signalwireCredentialFile`, `twilioCredentialFile` or `retellCredentialFile`, `adminTokenFile`, optional `localPort` (8802), `publicPort` (8803), `voiceUrl` (existing loopback Voice), and `chromium` (installed browser executable). Unset/unknown selection fails startup, rather than choosing a provider or silently falling back to another line. Existing Vonage installations must add `"pstnProvider":"vonage"` before activating this release. Vonage credential JSON fields remain `VONAGE_APPLICATION_ID`, `VONAGE_PRIVATE_KEY`, `VONAGE_SIGNATURE_SECRET`, `VONAGE_FROM_NUMBER`.
 
 SignalWire credential JSON contains exactly these fields, stored in a host-only private file:
 
@@ -80,6 +80,22 @@ npm run typecheck --workspace=pi-remote
 sudo systemctl status pi-stack-phone
 sudo journalctl -u pi-stack-phone -n 30 --no-pager
 ```
+
+## Retell managed voice
+
+Select `"pstnProvider":"retell"` and an absolute `retellCredentialFile`. Its regular owner-only file must have mode0600:
+
+```json
+{"RETELL_API_KEY":"your-api-key","RETELL_AGENT_ID":"agent_your_agent","RETELL_AGENT_VERSION":0,"RETELL_FROM_NUMBER":"+15555550100"}
+```
+
+Provision and publish one dedicated Retell LLM agent. Its general prompt must be exactly `{{approved_call_prompt}}`, with `{{approved_opening}}` as its begin message; use agent-first speech and only an end-call tool. Disable contact-memory reads and writes, knowledge bases and external tools. Pin the published agent version in the credential file. This avoids importing provider-side contact memories or a mutable draft's unrelated context. Agent setup, owned number and credential custody belong to the host, not source publication.
+
+`start` dispatches once to `POST https://api.retellai.com/v2/create-phone-call` with the pinned agent, approved dynamic prompt/opening and per-call duration. Retell's documented LLM override does not support `general_prompt`, so the saved prompt uses the approved dynamic variable instead. Retell handles LLM, TTS and telephony; no Chromium, GPT Live session or public webhook is allocated for these calls. The administrative API remains owner-authenticated on loopback. `preflight` is still the separate GPT Live/WebRTC audio check, not a Retell or PSTN test.
+
+Retell durations are explicitly60–600seconds, five minutes when omitted. Both the local service and Retell enforce the bound. `end`, duration expiry and restart cleanup use `POST /v2/stop-call/CALL_ID`; `GET /v2/get-call/CALL_ID` synchronizes active calls every3seconds and refreshes `show`. Ended calls continue synchronizing for up to five minutes until analysis is available, including after restart. Provider snapshots and `retell-call` events are stored only in the encrypted call database. Retell `combined_cost` and product costs are cents, not dollars. Provider data-storage/retention policy must permit transcript retrieval; the host chooses its retention policy explicitly.
+
+An accepted API request is not handset delivery. `registered`, `ongoing`, `not_connected`, `ended` and `error` map to queued, connected, unanswered, completed and failed outcomes. An uncertain create response is retained without redial; the provider-side duration cap still ends any accepted call. Retell has no public callback surface in this implementation, and live-context injection returns409 rather than pretending to update the voice. Incoming Retell number routing is separate provider configuration and is not given outgoing briefs.
 
 ## Physical SIM audio gateway
 
