@@ -40,19 +40,16 @@ test("durable waiting names its dependency without pretending it is silent model
   expect(threadStatus(running({ activity: "waiting_for_capacity" })).key).toBe("waiting_for_capacity");
 });
 
-test("worker activity is display-only, keeps unread attention and never shows parent execution clocks", () => {
-  const parent = running({ state: "idle", activity: "waiting_on_workers", activitySince: 1000, lastActivityAt: 1000 });
+test("idle launchers keep idle icons and no execution clocks", () => {
+  const parent = running({ state: "idle", activity: "idle", hasChildren: true, activitySince: 1000, lastActivityAt: 1000 });
   const status = threadStatus(parent);
-  expect(status).toMatchObject({ key: "waiting_on_workers", busy: true, attention: false });
-  expect(attentionRank(status)).toBe(11);
+  expect(status).toMatchObject({ key: "idle", busy: false, attention: false });
+  expect(attentionRank(status)).toBe(21);
   expect(activityTiming(status, 80000)).toEqual({});
-  expect(activityTiming({ ...status, since: 1000, lastActivityAt: 1000 }, 80000)).toEqual({});
-  expect(renderToStaticMarkup(createElement(StatusPill, { status }))).toContain("Agents working");
+  expect(renderToStaticMarkup(createElement(StatusPill, { status }))).not.toContain("Agents working");
   expect(attentionRank(threadStatus({ ...parent, idleUnread: true }))).toBe(2);
   expect(threadStatus({ ...parent, held: true }).key).toBe("idle");
   expect(threadStatus({ ...parent, archivedAt: "2026-10-05" }).key).toBe("archived");
-  expect(threadStatus({ ...parent, executionError: "Runner exited" })).toMatchObject({ key: "error", busy: false });
-  expect(threadStatus({ ...parent, state: "running" })).toMatchObject({ key: "reporting_error", busy: true });
 });
 
 test("every activity crosses state and workers streams and both lifecycle dispatches", () => {
@@ -65,8 +62,8 @@ test("every activity crosses state and workers streams and both lifecycle dispat
       });
       const status = threadStatus(observation);
       expect(Number.isFinite(attentionRank(status))).toBe(true);
-      if (state === "running" && ["idle", "awaiting", "waiting_on_workers"].includes(activity)) expect(status.key).toBe("reporting_error");
-      if (state === "idle" && !["idle", "awaiting", "waiting_on_workers", "status_error"].includes(activity)) expect(status.key).toBe("reporting_error");
+      if (state === "running" && ["idle", "awaiting"].includes(activity)) expect(status.key).toBe("reporting_error");
+      if (state === "idle" && !["idle", "awaiting", "status_error"].includes(activity)) expect(status.key).toBe("reporting_error");
     }
   }
 });

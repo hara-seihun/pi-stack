@@ -3,7 +3,7 @@ import type { MessagingBackendInfo, MessagingCallState, MessagingLink, Messaging
 import { assertNever, requireState } from "./explicit-state.js";
 
 export const ACTIVITIES = {
-  idle: true, awaiting: true, waiting_on_workers: true, status_error: true,
+  idle: true, awaiting: true, status_error: true,
   queued: true, admitting: true, starting: true, preparing: true, finishing: true, cancelling: true, recovering: true,
   thinking: true, responding: true, preparing_tool: true, waiting_for_model: true, waiting_on_agents: true,
   waiting_on_tool: true, compacting: true, retrying: true, waiting_for_capacity: true, waiting_to_retry: true,

@@ -12,7 +12,7 @@ The local service runs inside the person's existing Unix account and mount names
 
 ## Execution state is an observation
 
-Remote publishes the shared `ThreadState` unchanged as `idle`, `running` or `waiting`. An explicit dependency can keep an agent waiting without a native execution. `held` is cancellation-in-progress or historical state, not a persistent Stopped UI state. Live Pi events can add thinking, tool, compaction or retry display details while the thread is running, and `activeTools` names every tool running right now. These details do not control execution or add lifecycle states. An idle launcher can display **Agents working** while an agent it launched runs or owns a valid explicit dependency wait. The aggregate activity is `waiting_on_workers`, derived across the local and fleet owners, without changing the parent's idle execution state or synthesizing durable dependency metadata. Explicit waits and cancellation/archive take precedence.
+Remote publishes the shared `ThreadState` unchanged as `idle`, `running` or `waiting`. An explicit dependency can keep an agent waiting without a native execution. `held` is cancellation-in-progress or historical state, not a persistent Stopped UI state. Live Pi events can add thinking, tool, compaction or retry display details while the thread is running, and `activeTools` names every tool running right now. These details do not control execution or add lifecycle states. An inactive or stopped agent with no explicit dependency is idle, even while agents it launched are running or waiting. Launch provenance never contributes activity, a busy icon or a dependency. Each agent reports its own execution and explicit dependencies.
 
 The client's status line is composed from those facts and never from a status field of its own:
 
@@ -20,8 +20,7 @@ The client's status line is composed from those facts and never from a status fi
 | --- | --- |
 | `Thinking`, `Running bash`, `Running bash and web_search`, `Running 3 tools`, `Compacting context`, `Retrying`, `Working` | `state: running` plus the live activity and `activeTools` |
 | `Waiting on agents` | Explicit `kind: agents` dependency, or observed live `thread_await`; never child activity alone |
-| `Agents working` | Display-only launch activity; it creates no durable dependency |
-| `Idle`, with an unread dot until the person opens it | `state: idle` with no active children or explicit dependency, plus `idleUnread` |
+| `Idle`, with an unread dot until the person opens it | `state: idle` with no explicit dependency, plus `idleUnread` |
 | `Cancelling` | Runtime cancellation requested but not yet confirmed |
 | `Archived` | `archivedAt` |
 
