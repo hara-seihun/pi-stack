@@ -2,8 +2,7 @@ import { build } from "esbuild";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, it } from "vitest";
@@ -11,6 +10,7 @@ import type { PiEvent, PiSession } from "../src/threads/contracts.js";
 import type { createSharedPiSessionOpener } from "../src/threads/runner-transport.js";
 import { scopedBashOperations } from "../src/threads/pi-bash-resources.js";
 import { runnerSlices } from "../src/threads/runner-resources.js";
+import { RunnerBudgetFixture } from "./fixtures/runner-budget.js";
 
 const manager = spawnSync("systemctl", ["--user", "show-environment"], { stdio: "ignore" }).status === 0;
 const ctl = (...args: string[]) => execFileSync("systemctl", ["--user", ...args], { encoding: "utf8", timeout: 5000 });
@@ -29,10 +29,10 @@ async function status(control: string): Promise<any> {
 
 it.skipIf(!manager)("twenty native sessions retain accepted work and progress after an isolated tool OOM under the 8GiB boundary", async () => {
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-  const cache = join(repo, "node_modules/.cache"); mkdirSync(cache, { recursive: true });
-  const compiled = mkdtempSync(join(cache, "runner-budget-")), root = mkdtempSync(join(tmpdir(), "runner-budget-"));
+  const fixture = new RunnerBudgetFixture(repo, "runner-budget-");
+  const { compiled, root } = fixture;
   const sessions: PiSession[] = [], events: PiEvent[][] = [];
-  let opener: ReturnType<typeof createSharedPiSessionOpener> | undefined, id: string | undefined;
+  let opener: ReturnType<typeof createSharedPiSessionOpener> | undefined;
   const gate = join(root, "release"), entered = join(root, "entered");
   try {
     writeFileSync(join(compiled, "package.json"), '{"type":"module"}');
@@ -51,13 +51,13 @@ it.skipIf(!manager)("twenty native sessions retain accepted work and progress af
     for (let i = 0; i < 20; i++) {
       events[i] = [];
       const session = await opener.openSession({ threadId: `thread-${i}`, cwd: root, sessionFile: join(root, `${i}.jsonl`), args: ["--extension", extension],
-        env: { HOME: root, PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: "http://127.0.0.1:1/v1/threads" } }, event => events[i].push(event), () => {});
+        env: { HOME: root, PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: "http://127.0.0.1:1/v1/threads" } }, event => { fixture.track(event); events[i].push(event); }, () => {});
       sessions.push(session);
       await session.command({ type: "prompt", id: `input-${i}`, workId: `work-${i}`, message: "/hold" });
     }
     await until(() => existsSync(entered) && readFileSync(entered, "utf8").trim().split("\n").length === 20);
     const control = String(events[0].find(event => event.type === "runner_attached")!.control);
-    id = createHash("sha256").update(control).digest("hex").slice(0, 16);
+    const id = createHash("sha256").update(control).digest("hex").slice(0, 16);
     const before = await status(control), slices = runnerSlices(id);
     expect(before).toMatchObject({ sessions: 20, activeSessions: 20 });
     expect(ctl("show", slices.boundary, "--property=MemoryMax", "--value").trim()).toBe("8589934592");
@@ -79,13 +79,6 @@ it.skipIf(!manager)("twenty native sessions retain accepted work and progress af
     expect(new Set(readFileSync(entered, "utf8").trim().split("\n")).size).toBe(20);
     expect((await status(control)).pid).toBe(before.pid);
   } finally {
-    writeFileSync(gate, "release");
-    for (const session of sessions) await session.close().catch(() => {});
-    opener?.detach();
-    if (id) {
-      try { ctl("kill", "--signal=SIGKILL", `pi-thread-runner-${id}.service`); } catch {}
-      for (const slice of [runnerSlices(id).tools, runnerSlices(id).boundary]) { ctl("stop", slice); ctl("revert", slice); }
-    }
-    rmSync(root, { recursive: true, force: true }); rmSync(compiled, { recursive: true, force: true });
+    fixture.cleanup(() => opener?.detach());
   }
 }, 20000);

@@ -88,6 +88,14 @@ test("questions replace messaging, expose only the next answer, and preserve dic
   } finally { Object.assign(globalThis, { window: originalWindow, localStorage: originalStorage }); }
 });
 
+test("question loading leaves the composer layout unchanged instead of flashing a banner", () => {
+  const ready = render({ prompt: "Unsent message", questionsResource: { state: "ready", questions: [] } });
+  const loading = render({ prompt: "Unsent message", questionsResource: { state: "loading", questions: [] } });
+  expect(loading).toBe(ready);
+  expect(loading).toContain('id="prompt"');
+  expect(loading).toContain("Unsent message");
+});
+
 test("question resource failure never marks chat offline and a ready resource clears its own error", () => {
   const failed = render({ questionsResource: { state: "failed", questions: [], error: "Question owner unavailable" } });
   expect(failed).toContain("Could not load questions");
