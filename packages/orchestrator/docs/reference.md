@@ -4,6 +4,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 
 ## Commands
 
+- `names`: Generate Nebulani agent names locally: --count N.
 - `daemon`: Run reconciliation and the local API.
 - `status`: Print accounts, lanes, leases, and active threads.
 - `usage-evidence`: Print a read-only 24-hour quota and token snapshot; optional --ledger FILE.

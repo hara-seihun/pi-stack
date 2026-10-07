@@ -15,6 +15,24 @@ function transport(responses:unknown[]=[]){
   return calls;
 }
 
+it("generates names locally without creating agents or contacting a service",async()=>{
+  const calls=transport();
+  await dispatch(["names","--count","10"]);
+  const result=JSON.parse(vi.mocked(console.log).mock.calls[0]![0]);
+  expect(result.names).toHaveLength(10);
+  for(const name of result.names)expect(name).toMatch(/^[A-Z][a-z]+ [A-Z][a-z]+n$/);
+  expect(calls).toHaveLength(0);
+});
+
+it.each([[],["--count","0"],["--count","-1"],["--count","1.5"],["--count","1001"],["--count","2","extra"],["--other","2"]])("rejects invalid name generation arguments %j",async(...args)=>{
+  const calls=transport();
+  vi.spyOn(console,"error").mockImplementation(()=>{});
+  await dispatch(["names",...args]);
+  expect(process.exitCode).toBe(1);
+  expect(console.log).not.toHaveBeenCalled();
+  expect(calls).toHaveLength(0);
+});
+
 it("preserves an agent caller as parent and uses its authorized directory",async()=>{
   vi.stubEnv("PI_THREAD_ID","caller");
   vi.stubEnv("PI_THREAD_API_URL","http://127.0.0.1:18790/v1/threads");
