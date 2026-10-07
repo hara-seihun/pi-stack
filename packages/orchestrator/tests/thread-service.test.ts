@@ -965,6 +965,32 @@ it("keeps provider-exhausted accepted work unsettled across restart and resumes 
   expect(admit.mock.calls.at(-1)?.[3]).toBe(executionId);
 });
 
+it("re-admits accepted work at once when one Codex account's plan refuses the model, instead of failing the thread",async()=>{
+  const directory=mkdtempSync(join(tmpdir(),"thread-model-refusal-"));roots.push(directory);
+  const sessions:FakePiSession[]=[];
+  const refusal="Codex error: The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.";
+  const admit=vi.fn(async(..._args:unknown[])=>({ok:true as const,value:{release(){},env:{PI_ORCHESTRATOR_ACCOUNT_ID:`openai-codex-${admit.mock.calls.length}`}}}));
+  const openSession:OpenPiSession=async(options,output)=>{
+    const session=new FakePiSession(options,output);
+    if(sessions.length){session.acceptedWorkIds.add("accepted");session.completedWorkIds.add("accepted");session.lastAssistantMessage={role:"assistant",stopReason:"error",errorMessage:refusal};}
+    sessions.push(session);return session;
+  };
+  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit,capacity:{mode:"unmanaged"}});services.push(service);
+  value(service.importThread({id:"sol",parentId:"parent",title:"sol",cwd:directory,sessionFile:join(directory,"sol.jsonl"),settings:{model:"openai-codex/gpt-6.1-sol",thinkingLevel:"high",speed:"standard"}}));
+  value(service.importMessage({id:"accepted",threadId:"sol",text:"finish the real work"}));
+  await service.start();await waitFor(()=>sessions[0]?.isStreaming===true);
+  sessions[0]!.settleMessage({role:"assistant",stopReason:"error",errorMessage:refusal});
+  // The refusing account is already excluded, so the zero-length provider wait re-admits immediately.
+  await waitFor(()=>sessions[0]!.closed&&sessions[1]?.isStreaming===true);
+  expect(service.get("sol")?.metadata?.providerRetry).toMatchObject({attempts:1});
+  expect(service.latestSettlement("sol")).toBeNull();
+  expect(sessions[1]!.commands.find(command=>command.type==="prompt")).toMatchObject({workId:"accepted",resume:true,resumeProviderWait:true});
+  expect(admit).toHaveBeenCalledTimes(2);
+  expect(admit.mock.calls[1]?.[2]).toBe(false);
+  sessions[1]!.settle("artifact delivered");await waitFor(()=>service.latestSettlement("sol")!==null);
+  expect(service.latestSettlement("sol")).toMatchObject({workId:"accepted",outcome:"complete"});
+});
+
 it.each([
   ["stop", undefined, "complete"],
   ["aborted", undefined, "cancelled"],
