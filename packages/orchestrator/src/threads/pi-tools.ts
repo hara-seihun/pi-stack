@@ -83,7 +83,7 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "watch_list_add", label: "Add to watch list",
-      description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with Opus 5.5, handles routine follow-ups and asks the person about major decisions. An empty list makes no model calls.",
+      description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with its configured model and acts within the person's current life policy; it asks only for decisions that policy leaves with the person. An empty list makes no model calls.",
       parameters: Type.Object(watchFields),
       execute: async (id, item, signal) => result(await api(signal).watch({ action: "add", item, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
     }),
