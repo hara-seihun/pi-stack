@@ -2,6 +2,8 @@
 
 `pi-kenan` is a separate nonadministrator execution account. Ordinary person supervisors, Unix identities and visible traces remain unchanged. Enable only through the [additive cutover owner](../../docs/one-kenan-deployment.md), never ordinary publication.
 
+Every privileged request holds the mandatory shared global agent slot through native settlement. [Standalone execution capacity](../../docs/standalone-agent-capacity.md) owns the direct SDK/CLI inventory, records, configuration and rollout obligations.
+
 ## Admission and outgoing replies
 
 `POST /v1/ask` accepts only `{request:string}` and the minted person's `x-kenan-memory-session` capability. The memory service authenticates person/thread and, for rooms, the current full roster. Each new consultation starts one fresh native session with host-owned model, prompt and exact toolset; retrieval never starts another. Requests cannot select those resources or claim identity. `root_reply` chooses the sole outgoing text; exact disclosure accounting must acknowledge before `{reply}` returns. Native histories live outside every ordinary ThreadDirectory. [Separate admin admission](src/visibility.ts) protects list/transcript debugging.

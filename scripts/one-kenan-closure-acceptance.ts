@@ -43,7 +43,7 @@ for (const [provider, model] of [["openai-codex", "gpt-6.1-sol"], ["anthropic", 
   const config = { version: 1, provider, model, thinkingLevel: "low", cwd, agentDir, sessionsDir: directory, promptFile: join(release, "kenan-root/instructions.md"), brokerUrl: "http://127.0.0.1:19888/" };
   const session = await createFixedSession({ id: randomUUID(), person: "alice", recipients: ["alice"], prompt: "Fixed fixture root prompt", request: "No provider call", config, directory,
     env: { HOME: directory, PI_STACK_HOST_CONFIG: host, PI_THREAD_ID: "fixture-root", PI_KENAN_MEMORY_PERSON: "alice", PI_KENAN_MEMORY_ROLE: "root", PI_KENAN_MEMORY_TOKEN: "fixture-no-network-token", PI_MODEL_BROKER_URL: config.brokerUrl, PI_ORCHESTRATOR_LEDGER: join(directory, "ledger.sqlite3") } });
-  session.dispose();
+  await session.dispose();
   check(true, `${provider}/${model} actual SDK initializes fixed resources and exact tools from immutable production artifacts`);
 }
 writeFileSync(join(root, "proof.json"), JSON.stringify({ root, checks }, null, 2));

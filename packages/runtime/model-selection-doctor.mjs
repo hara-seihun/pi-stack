@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { requireStandaloneAgent, settleStandaloneAgent, standaloneRecordPath } from "./standalone-agent.mjs";
 import { execFile } from "node:child_process";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -9,6 +11,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export async function modelSelectionDoctor(runtimeEntry = process.env.PI_TEST_RUNTIME_ENTRY ?? import.meta.resolve("@earendil-works/pi-coding-agent")) {
   const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import(runtimeEntry);
+  const executionId = randomUUID();
+  const capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `model-doctor:${executionId}`, executionId });
+  const sessions = new Set();
   const dir = await mkdtemp(join(tmpdir(), "pi-model-selection-"));
   let requests = 0;
   const server = createServer(async (req, res) => {
@@ -41,7 +46,9 @@ export async function modelSelectionDoctor(runtimeEntry = process.env.PI_TEST_RU
     const settingsManager = SettingsManager.inMemory(settings);
     const resourceLoader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager, noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true, extensionFactories: factories });
     await resourceLoader.reload();
-    return createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, settingsManager, resourceLoader, sessionManager: manager, model, tools: [] });
+    const opened = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, settingsManager, resourceLoader, sessionManager: manager, model, tools: [] });
+    sessions.add(opened.session);
+    return opened;
   }
   try {
     await writeFile(join(dir, "auth.json"), "{}");
@@ -126,6 +133,12 @@ export async function modelSelectionDoctor(runtimeEntry = process.env.PI_TEST_RU
     assert.equal(requests, 1, "only the explicit successful selection may dispatch");
     return { sdk: true, bundledCli: true, requestedDefaultRetained: true, explicitOnlyCatalog: true, automaticExclusion: true, savedSelectionRetained: true, extensionProvidersBeforeSelection: true, admissionFailuresVetoInference: true, explicitProviderRequests: requests };
   } finally {
+    for (const session of sessions) {
+      await session.abort();
+      assert.ok(session.isIdle && !session.isStreaming && !session.isCompacting && !session.isRetrying, "Doctor session did not settle; global custody retained");
+      session.dispose();
+    }
+    await settleStandaloneAgent(capacity);
     await new Promise(resolve => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }

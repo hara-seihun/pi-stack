@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, nextStandaloneExecutionId } from "pi-orchestrator/standalone-agent";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
 import { join, isAbsolute } from "node:path";
@@ -22,7 +23,7 @@ export interface RootConfig {
   people?: { person: string; displayName: string }[];
 }
 export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest }
-export interface RootSession { prompt(text: string): Promise<void>; reply(): string | undefined; subjects?(): string[]; dispose(): void }
+export interface RootSession { prompt(text: string): Promise<void>; reply(): string | undefined; subjects?(): string[]; dispose(): void | Promise<void> }
 export type RootSessionFactory = (spec: RootSessionSpec) => Promise<RootSession>;
 export type RootExecution = { reply: string; subjects: string[] };
 export type RootExecutor = (admission: RootAdmission, request: string) => Promise<MemoryResult<RootExecution>>;
@@ -86,7 +87,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
       report({ component: "root-executor", stage, outcome: "failed", reason: error instanceof RootInitializationError ? error.reason : infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
       return { ok: false, error: "unavailable", message: "Root Kenan could not complete this request" };
     } finally {
-      try { session?.dispose(); }
+      try { await session?.dispose(); }
       catch (error) { report({ component: "root-executor", stage: "dispose", outcome: "failed", reason: infrastructureReason(error), durationMs: Math.round(performance.now() - started) }); }
     }
   };
@@ -100,6 +101,11 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
   const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
   const scope = globals[scopeKey] ??= new AsyncLocalStorage<NodeJS.ProcessEnv>();
   return scope.run(spec.env, async () => {
+    const recordPath = join(spec.directory, "capacity.json");
+    const capacity = await requireStandaloneAgent({ recordPath,
+      agentId: `root:${spec.id}`, executionId: nextStandaloneExecutionId(recordPath), env: spec.env });
+    let native: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
+    try {
     const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 }, compaction: { enabled: true } });
     const routing = new URL("./extension/routing.ts", import.meta.resolve("pi-orchestrator/api")).pathname;
     const services = await createAgentSessionServices({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,
@@ -126,13 +132,20 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
     const { session } = await createAgentSessionFromServices({ services,
       sessionManager: SessionManager.create(spec.config.cwd, spec.directory), model,
       thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, consentTool, notificationTool, replyTool] });
+    native = session;
     const resources = services.resourceLoader;
     const names = session.agent.state.tools.map(tool => tool.name);
     if (resources.getSystemPrompt() !== spec.prompt || resources.getAgentsFiles().agentsFiles.length || resources.getSkills().skills.length || resources.getAppendSystemPrompt().length) {
-      session.dispose(); throw new RootInitializationError("prompt-invariant");
+      throw new RootInitializationError("prompt-invariant");
     }
-    if (names.length !== ROOT_TOOLS.length || names.some(name => !ROOT_TOOLS.includes(name))) { session.dispose(); throw new RootInitializationError("toolset-invariant"); }
+    if (names.length !== ROOT_TOOLS.length || names.some(name => !ROOT_TOOLS.includes(name))) { throw new RootInitializationError("toolset-invariant"); }
     return { prompt: async text => scope.run(spec.env, () => session.prompt(text)),
-      reply: () => chosen?.reply, subjects: () => chosen?.subjects ?? [], dispose: () => session.dispose() };
+      reply: () => chosen?.reply, subjects: () => chosen?.subjects ?? [],
+      dispose: () => scope.run(spec.env, () => abortAndSettleStandaloneSession(session, capacity)) };
+    } catch (error) {
+      if (native) await abortAndSettleStandaloneSession(native, capacity);
+      else await settleStandaloneAgent(capacity);
+      throw error;
+    }
   });
 }

@@ -2111,8 +2111,10 @@ function repairRun(requestId) {
     const fd = openSync(repair.log, "a", 0o600);
     let result;
     try {
-      result = commandResult(config.piCommand,
-        ["--print", "--mode", "json", "--model", "openai-codex/gpt-6.1-sol", "--thinking", "high",
+      result = commandResult(process.execPath,
+        [join(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime", "stack-agent.mjs"),
+          "--record", join(dirname(repair.path), "capacity.json"), "--agent", `publication-repair:${repair.id}`, "--execution", repair.id,
+          "--", config.piCommand, "--print", "--mode", "json", "--model", "openai-codex/gpt-6.1-sol", "--thinking", "high",
           "--session", repair.session, `@${repair.prompt}`],
         { cwd: repair.workspace && existsSync(repair.workspace) ? repair.workspace : dirname(repair.path),
           timeoutSeconds: policy.repairMs / 1000, stdio: ["ignore", fd, fd] });
