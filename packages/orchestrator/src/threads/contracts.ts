@@ -208,7 +208,10 @@ export type ThreadControl =
   /** Record an idle human view using the owner's clock, without changing execution activity or emitting changed. */
   | { threadId: string; action: "view" }
   | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
+  /** A person's title, pinned against the agent's own naming until they rename again. */
   | { threadId: string; action: "rename"; title: string }
+  /** The thread's own agent naming its thread; refused while a person's rename pins the title. */
+  | { threadId: string; action: "title"; title: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   /** Retry dormant waiting work on the saved model, without interrupting live native work. */
   | { threadId: string; action: "retryWaiting" }

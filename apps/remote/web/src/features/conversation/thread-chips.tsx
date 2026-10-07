@@ -1,6 +1,6 @@
 // A thread tool call is about other threads, and a person reading the
 // transcript wants to go to them. The call's arguments already name them by
-// id; the client knows what the naming agent called each one, so the step
+// id; the client knows each one's current title, so the step
 // shows those names as buttons that open the thread.
 
 import { createContext, useContext, useEffect, type ReactNode } from "react";

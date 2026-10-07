@@ -11,19 +11,19 @@ test("dismissal survives reconnects and supervisor restarts without hiding anoth
   let db = new Database(join(dir, "supervisor.sqlite3"));
   try {
     ensureSupervisorSchema(db);
-    const first = observeError(db, "naming:one", "Rate limited", "1")!;
-    const other = observeError(db, "naming:two", "Rate limited", "1")!;
+    const first = observeError(db, "image:one", "Rate limited", "1")!;
+    const other = observeError(db, "image:two", "Rate limited", "1")!;
     expect(dismissError(db, first.id)).toBe(true);
     expect(dismissError(db, first.id)).toBe(false);
     db.close();
     db = new Database(join(dir, "supervisor.sqlite3"));
     ensureSupervisorSchema(db);
-    expect(observeError(db, "naming:one", "Rate limited", "1")).toBeNull();
-    expect(observeError(db, "naming:two", "Rate limited", "1")).toEqual(other);
-    const renewed = observeError(db, "naming:one", "Rate limited", "2")!;
+    expect(observeError(db, "image:one", "Rate limited", "1")).toBeNull();
+    expect(observeError(db, "image:two", "Rate limited", "1")).toEqual(other);
+    const renewed = observeError(db, "image:one", "Rate limited", "2")!;
     expect(renewed.id).not.toBe(first.id);
     expect(dismissError(db, first.id)).toBe(false);
-    expect(observeError(db, "naming:one", "Rate limited", "2")).toEqual(renewed);
+    expect(observeError(db, "image:one", "Rate limited", "2")).toEqual(renewed);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -31,14 +31,14 @@ test("automatic recovery removes stale attention while preserving its diagnostic
   const db = new Database(":memory:");
   try {
     ensureSupervisorSchema(db);
-    observeError(db, "naming:one", "Thread naming model returned an invalid title", "1");
-    expect(observeFailure(db, "naming:one", {
-      recovery: "automatic", message: "invalid title", impact: "Thread name unchanged.",
+    observeError(db, "image:one", "Image provider returned an invalid image", "1");
+    expect(observeFailure(db, "image:one", {
+      recovery: "automatic", message: "invalid image", impact: "Image not generated.",
     }, "2", 100)).toBeNull();
     expect(db.query("SELECT * FROM error_feedback").all()).toEqual([]);
     expect(db.query("SELECT message,occurrence,resolved_at FROM error_diagnostics").get())
-      .toEqual({ message: "invalid title", occurrence: "2", resolved_at: null });
-    observeFailure(db, "naming:one", null, "", 200);
+      .toEqual({ message: "invalid image", occurrence: "2", resolved_at: null });
+    observeFailure(db, "image:one", null, "", 200);
     expect(db.query("SELECT resolved_at FROM error_diagnostics").get()).toEqual({ resolved_at: 200 });
   } finally { db.close(); }
 });
@@ -66,12 +66,12 @@ test("required intervention is immediate and contains consequence and action, no
   const db = new Database(":memory:");
   try {
     ensureSupervisorSchema(db);
-    const visible = observeFailure(db, "naming:one", {
-      recovery: "required", message: "No explicitly permitted same-person completion owner",
-      impact: "Automatic thread naming is unavailable.", action: "Rename the thread yourself or ask Kenan to repair naming.",
+    const visible = observeFailure(db, "image:one", {
+      recovery: "required", message: "No image account is configured",
+      impact: "Inline images are unavailable.", action: "Ask Kenan to connect an image account.",
     }, "1", 100)!;
-    expect(visible.message).toBe("Automatic thread naming is unavailable. Rename the thread yourself or ask Kenan to repair naming.");
-    expect(db.query("SELECT message FROM error_diagnostics").get()).toEqual({ message: "No explicitly permitted same-person completion owner" });
+    expect(visible.message).toBe("Inline images are unavailable. Ask Kenan to connect an image account.");
+    expect(db.query("SELECT message FROM error_diagnostics").get()).toEqual({ message: "No image account is configured" });
   } finally { db.close(); }
 });
 

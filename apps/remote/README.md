@@ -80,11 +80,7 @@ Each Pi runtime also loads `server/thread-context.ts`. On a new thread's first r
 
 The globally loaded `server/context-mirror.ts` also registers [`server/session-history.ts`](server/session-history.ts) before checking Remote ownership. Remote and fleet sessions receive generated JSON metadata with their current JSONL path and the existing [`read-thread` command contract](../../tools/read-condensed-session/README.md). This system metadata omits the changing branch leaf, keeping the prompt prefix stable as the conversation advances. The extension reads `read-thread --contract` once per instance; the reader generates that JSON and its own `--help` from the same source. The metadata uses the reader's exported `pi-stored-jsonl-history` marker and contains no separate behavioral policy. `read-thread self` and explicit JSONL paths need no thread database. Titles and IDs use the owner thread database, selected by `PI_THREAD_DATABASE` and then `PI_REMOTE_DATA/threads.sqlite3`. Default reads follow the newest stored parent chain, including history before compaction; `--leaf ID` selects a specific branch, `--all --raw` exposes all complete stored records, and `--search` returns bounded excerpts with original line numbers. The reader needs no VCC cache and leaves stored JSONL unchanged. The display projection does not infer compaction from synthetic user text.
 
-The supervisor names a thread after its first user message and updates the name every 20 user or assistant messages, applying the model's first output line to the owning thread record with `metadata.titleSource: "auto"`. An explicit rename pins the title with `metadata.titleSource: "manual"`; naming skips that thread even if its title is numeric or it has passed another interval. Pinning clears pending naming receipts, maintenance retries and naming errors. Local and completion outputs already in flight are discarded, including failures, and cannot replace the pinned title. `PI_REMOTE_THREAD_NAMING_MODEL` is required and selects one of two routes. `openai-codex/gpt-6-luna:low` (or a numbered pool alias such as `openai-codex-12/gpt-6-luna:low`) sends the latest 12 messages through the Orchestrator completion facility. `local/ENGINE/MODEL`, for example `local/bonsai-halo/bonsai-2-27b`, asks an engine from the person's `~/.pi/agent/local-models.json` directly ([`server/local-naming.ts`](server/local-naming.ts)): the supervisor probes `<baseUrl>/models`, starts the manifest's transient user unit when the engine is down, and posts one non-streaming chat completion with `reasoning_effort: none` (an optional `:LEVEL` suffix maps the same way as the runtime's local-models extension). Because a local engine prefills slowly, the prompt is a one-line instruction plus the opening user message cut to 600 characters and the two latest messages cut to 300 each, with a 16-token reply cap. No account, completion ledger or receipt is involved; local failures use the same durable recovery budget as completion-backed attempts.
-
-A completion-backed naming request is a durable receipt in `thread_views.naming_request`, so it is built only from a conversation the supervisor can actually read. The context mirror can lag behind `message_count` after a restart or an import; while it is empty the thread carries no receipt, no error and stays due, and the next message or reconcile tick asks again. Each receipt's request ID carries a digest of its prompt (`remote-name:THREAD:COUNT:DIGEST[:RETRY]`), so a filled-in mirror or retry of a spent receipt cannot collide with a previous request. Transport failures keep their receipt for polling; terminal provider failures, cancelled completions, conflicting IDs and invalid generated titles get a fresh attempt. The 15-second reconcile tick resumes them after 30 seconds and then 120 seconds, without needing another conversation message. `thread_naming_recovery` persists the two-retry budget and deadlines across supervisor restarts; a new message or changed naming-model selection starts a new recovery episode. Naming keeps the existing title while recovering. Recoverable failures remain in `naming_error` and `error_diagnostics`, not the attention feed, and startup removes stale per-thread visible occurrences while preserving their diagnostic evidence. Missing completion ownership, unsupported configuration or exhausted recovery parks the attempt and produces one compact **Thread names** warning, shared across affected threads and stable when their count changes. Successful naming, manual pinning and archiving resolve that thread's recovery; the warning disappears when none remain paused.
-
-Naming is background work on a shared accelerator, so it honours the engine's maintenance reservation. When the manifest entry declares one, the supervisor holds its shared lock across the probe, any start and the completion itself ([`server/engine-reservation.ts`](server/engine-reservation.ts), the consumer half of the protocol the [local-models extension](../../packages/runtime/extensions/local-models/README.md#maintenance-reservation) owns). A benchmark holding that lock exclusively therefore stops the engine and keeps it stopped: naming does not start the unit, does not wait for the lease, leaves the thread due and no error on it, and the 15-second naming reconcile tick tries again once the lease ends. A supervisor that cannot evaluate the lock at all defers in the same way rather than starting the engine anyway.
+A thread's own agent names it. It calls `thread_title` when the thread starts and again whenever it judges the topic has moved on; the title lands on the owning thread record with `metadata.titleSource: "agent"`. A person's rename through Remote pins the title with `metadata.titleSource: "manual"`, and the owner then refuses `thread_title` until the person renames again. Remote runs no naming model, schedule or recovery of its own: it shows whatever title the thread record carries, and a new thread keeps its creation number until its agent names it.
 
 Model menus, thread labels and plan cards use the catalog exported by `pi-orchestrator/api`. The thread picker shows Sol as ☀️, Luna as 🌙, Astra as ⭐, Fable as 🪶, Opus as 🎨 and the local Bonsai as 🌳. Every offered model has an icon: catalog models carry theirs in the orchestrator catalog, and a `models.json` entry the catalog does not name must supply its own `icon` (an emoji or a client asset name). `loadThreadModelCatalog` refuses a configured model without one, naming the file and entry, rather than offering it under a placeholder; the local-models manifest enforces the same at parse time. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Astra threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
@@ -156,7 +152,6 @@ Android's [notification service](../kenan/android/app/src/main/java/works/kenan/
 
 - [Bun](https://bun.sh/), `jq`, and `gocryptfs` for encrypted folders
 - Node.js, Python 3 (for inode-preserving Files edits) and util-linux `flock` on the supervisor's `PATH`, and the pinned Pi SDK in the deployed dependency tree
-- `PI_REMOTE_THREAD_NAMING_MODEL` set to an explicit OpenAI Pi model selection or a `local/ENGINE/MODEL` engine from `~/.pi/agent/local-models.json`
 - `apps/remote` installed as Pi's final configured package
 - the root npm workspaces installed and Pi Orchestrator built
 - Android SDK 36 and Java 21 to build Kenan
@@ -174,8 +169,8 @@ Vite binds to loopback on port 5175 and proxies `/v1` to the local router on por
 Every machine runs one front door, `pi-remote-router.service`, and one supervisor per person, `pi-remote@<user>.service`. A person is a unix account with a registry file under `/var/lib/pi-remote/persons/<user>.json`:
 
 ```bash
-sudo pi-remote person add alex --display-name Alex --thread-naming-model openai-codex/gpt-6-luna:low
-sudo pi-remote person add sam --display-name Sam --thread-naming-model openai-codex/gpt-6-luna:low --no-encrypt --folder work --environment local --environment-name Local
+sudo pi-remote person add alex --display-name Alex
+sudo pi-remote person add sam --display-name Sam --no-encrypt --folder work --environment local --environment-name Local
 pi-remote person list
 sudo pi-remote person remove alex                              # forgets her; deletes nothing
 ```
@@ -205,7 +200,6 @@ jq '.environment.PI_REMOTE_DESTINATIONS = "personal,home,raw"' \
     "PI_REMOTE_PRIVATE_DIR": "/home/alex/private",
     "PI_REMOTE_DATA": "/home/alex/private/.pi-remote",
     "PI_REMOTE_PORT": 18790,
-    "PI_REMOTE_THREAD_NAMING_MODEL": "openai-codex/gpt-6-luna:low",
     "PI_REMOTE_ORCHESTRATOR_DB": "/home/alex/.local/share/pi-orchestrator/ledger.sqlite3",
     "PI_REMOTE_WORKSPACES": [{ "id": "home", "name": "Alex", "path": "/home/alex" }],
     "PI_REMOTE_DESTINATIONS": "home"
@@ -285,7 +279,7 @@ cd /absolute/path/to/pi-stack
 npm ci --ignore-scripts
 npm run build
 npm run build --workspace=pi-remote
-sudo PI_REMOTE_PERSONS_DIR=/var/lib/pi-remote/persons bun apps/remote/server/person-cli.ts person add "$USER" --display-name Me --thread-naming-model openai-codex/gpt-6-luna:low --no-encrypt
+sudo PI_REMOTE_PERSONS_DIR=/var/lib/pi-remote/persons bun apps/remote/server/person-cli.ts person add "$USER" --display-name Me --no-encrypt
 sudo systemctl start pi-remote-router
 ```
 
