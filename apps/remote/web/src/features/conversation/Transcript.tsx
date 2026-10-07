@@ -192,8 +192,8 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
     </summary>
     <div className="step-detail">
       <span className="step-detail-label">Arguments</span>
-      <pre>{json(args)}</pre>
-      {(previewOutput || completeOutput.length > 0) && <><span className="step-detail-label">Result</span><div className="step-result">
+      <pre className="step-arguments" tabIndex={0} aria-label="Tool arguments">{json(args)}</pre>
+      {(previewOutput || completeOutput.length > 0) && <><span className="step-detail-label">Result</span><div className="step-result" tabIndex={0} role="region" aria-label="Tool result">
         {previewOutput && <pre>{previewOutput}</pre>}
         {completeOutput.map((part, index) => part.kind === "image"
           ? <AttachmentImage key={index} src={imageUrl(part.image)} alt={`Tool result image, ${String(part.image.mimeType || "application/octet-stream")}`} downloadQuery />
