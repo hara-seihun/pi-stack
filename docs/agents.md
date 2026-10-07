@@ -21,6 +21,15 @@ a tool or a background subscription never promotes it. Orchestrator lanes,
 schedules and agent launches create background agents through the same API.
 Placement does not change tools, permissions, admission, or execution identity.
 
+The first-class **Agents** tab lists the complete live background directory,
+including quiet agents outside the recent inbox projection. Collapsible groups
+use each agent's immediate launcher; scheduled/system agents and agents with no
+launcher have their own groups. Names, task titles and current status remain
+separate. All, Active, Waiting and Idle filters and search narrow the directory.
+Opening a row promotes that original agent into Chats. These are presentation
+groups, not worker classes, rooms, dependencies or cascading control scopes.
+Notifications remains its own navigation destination.
+
 The sidebar lists agents this agent launched. The retained `parentId` records
 that provenance only: no implicit stop tree, worker class, leaf restriction or
 resource exemption. There are no organizational rooms or worker groups. Existing
