@@ -465,6 +465,38 @@ describe("controller resource handoff", () => {
     value(await successor.service.detach());
   });
 
+  it("transfers idle native custody without waiting for shutdown context on the draining listener", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-handoff-native-idle-")); roots.push(directory);
+    const databasePath = join(directory, "threads.sqlite");
+    const disposal = vi.fn(async () => { throw new Error("Thread runner control timed out: shutdown context needs the next listener"); });
+    const references = new Map<string, { control: string; socketPath: string }>();
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath, sessionsDir: directory,
+      openSession: async (options, output) => {
+        const reference = { control: join(directory, "runner.sock"), socketPath: join(directory, `${options.threadId}.sock`) };
+        references.set(options.threadId, reference);
+        output({ type: "runner_attached", ...reference });
+        const native = new FakePiSession(options, output); native.close = disposal; return native;
+      } });
+    services.push(service);
+    for (let i = 0; i < 7; i++) {
+      const id = `idle-${i}`;
+      value(service.importThread({ id, title: id, cwd: directory, sessionFile: join(directory, `${id}.jsonl`),
+        settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
+      value(await service.command(id, { type: "get_context" }));
+    }
+    value(await service.detach());
+    expect(disposal).not.toHaveBeenCalled();
+    const successor = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath, sessionsDir: directory,
+      openSession: async () => { throw new Error("Custody inspection must not open another native session"); } });
+    services.push(successor);
+    for (const [id, reference] of references) {
+      expect(successor.get(id)?.metadata?.runnerReference).toEqual(reference);
+      expect(successor.pending(id)).toEqual([]);
+      expect(successor.latestSettlement(id)).toBeNull();
+    }
+    value(await successor.detach());
+  });
+
   it.each(["close", "detach"] as const)("keeps failed idle disposal owned so %s can retry it", async operation => {
     const directory = mkdtempSync(join(tmpdir(), "thread-handoff-disposal-")); roots.push(directory);
     let refuses = true, native!: FakePiSession;

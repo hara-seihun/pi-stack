@@ -2125,7 +2125,10 @@ export class ThreadService implements ThreadApi {
   async detach(): Promise<Result<void>> {
     this.suspend();
     await Promise.allSettled([...this.operations.values(), ...this.halts.values(), ...this.opening.values(), ...this.dependencyOperations.values()]);
-    for (const [id, runtime] of this.runtimes) if (runtime.session && !runtime.busy && !runtime.executionId && !this.execution(id)) {
+    // Native sessions outlive controllers, including idle ones. The successor
+    // retires them with its context listener already serving; shutdown hooks
+    // must not hold this listener's own handoff hostage.
+    for (const [id, runtime] of this.runtimes) if (runtime.session && !this.get(id)?.metadata?.runnerReference && !runtime.busy && !runtime.executionId && !this.execution(id)) {
       try {
         await runtime.session.close();
         this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
