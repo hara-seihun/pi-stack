@@ -50,7 +50,9 @@ export async function runtimeCall<T>(socket: string, path: string, body?: unknow
   try {
     const response = await fetch(`http://meet-runtime${path}`, { unix: socket, method: body === undefined ? "GET" : "POST",
       ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs) });
-    const reply: unknown = await response.json();
+    let reply: unknown;
+    try { reply = await response.json(); }
+    catch (cause) { return { ok: false, kind: "protocol", error: `Meet runtime ${path} returned invalid JSON: ${String(cause)}` }; }
     if (!reply || typeof reply !== "object" || !("ok" in reply)) return { ok: false, kind: "protocol", error: `Meet runtime ${path} returned an invalid result (${response.status})` };
     const result = reply as MeetResult<T>;
     if (result.ok === true && "value" in result && response.ok) return result;
@@ -90,6 +92,11 @@ export async function connectRuntime(data = meetData(), revision = runtimeRevisi
     if (parsed.value.phase === "serving") {
       const release = await runtimeCall<RuntimeRelease>(socket, "/runtime/release", { instance: parsed.value.instance });
       if (!release.ok) return release;
+      const decision = release.value;
+      if (!decision || typeof decision !== "object" || (decision.released !== true && decision.released !== false)
+        || (decision.released === false && !["live-rooms", "requests-in-flight", "instance-changed", "releasing"].includes(decision.reason))) {
+        return { ok: false, error: "Meet runtime returned an invalid idle-release decision; its meetings were not touched" };
+      }
       if (!release.value.released && ["live-rooms", "requests-in-flight"].includes(release.value.reason)) return runtimeStatus(socket);
       if (!release.value.released && release.value.reason === "instance-changed") return connectRuntime(data, revision);
     }

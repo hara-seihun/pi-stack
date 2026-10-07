@@ -37,7 +37,11 @@ async function runMeetRuntime(): Promise<MeetResult<void>> {
     })();
     const context = new AsyncLocalStorage<RuntimeContext>();
     const meet = new MeetServer(id => context.getStore()?.sessions.includes(id) === true, undefined, db,
-      (meetingId, sessionId) => context.getStore()?.activity.find(item => item.meetingId === meetingId && item.sessionId === sessionId)?.threads ?? [],
+      (meetingId, sessionId) => {
+        const observed = context.getStore()?.activity.find(item => item.meetingId === meetingId && item.sessionId === sessionId);
+        if (!observed) throw new Error("Meeting activity was not supplied by its supervisor");
+        return observed.threads;
+      },
       undefined, event => {
         if (event.kind === "created") db.query("INSERT INTO meet_live_rooms(id,session_id,instance) VALUES(?,?,?)").run(event.id, event.sessionId, instance);
         else db.query("DELETE FROM meet_live_rooms WHERE id=? AND instance=?").run(event.id, instance);
@@ -107,8 +111,8 @@ async function runMeetRuntime(): Promise<MeetResult<void>> {
               if (existing && existing.sessionId !== body.sessionId) return failure("Meeting belongs to another thread", 409);
               return success(context.run(body.context, () => meet.openExternal(body.id, body.sessionId, body.apiUrl, body.platformTranscript)));
             }
-            default: return failure("Unknown Meet runtime operation", 404);
           }
+          return failure("Unknown Meet runtime operation", 404);
         } catch (cause) { return failure(`Meet runtime operation failed: ${String(cause)}`, 500); }
         finally { inFlight--; }
       },
@@ -116,7 +120,7 @@ async function runMeetRuntime(): Promise<MeetResult<void>> {
     chmodSync(socket, 0o600);
     for (const signal of ["SIGUSR2", "SIGHUP"] as const) process.on(signal, () => {});
     for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => {
-      if (meet.liveRooms().length || inFlight) { console.error(`Meet runtime retained live rooms after ${signal}; stop the person service to close its cgroup`); return; }
+      // Release activation never signals this owner. TERM/INT are explicit service shutdown.
       if (phase === "serving") { phase = "releasing"; scheduleStop(); }
     });
     return { ok: true, value: undefined };

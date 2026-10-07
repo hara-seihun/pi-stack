@@ -94,7 +94,7 @@ test("person-owned worker retains live room, signals and transcript through actu
     const arrivingId = crypto.randomUUID();
     const input: RuntimeRequest = { url: "http://person.example/v1/meet", method: "POST", headers: [["content-type", "application/json"]],
       body: Buffer.from(JSON.stringify({ sessionId: "thread", requestId: arrivingId, name: "Arriving" })).toString("base64"), agentMeetingId: null,
-      context: { sessions: ["thread"], activity: [] } };
+      context: { sessions: ["thread"], activity: [{ meetingId: arrivingId, sessionId: "thread", threads: [] }] } };
     streamFinish = () => { writer.enqueue(new TextEncoder().encode(JSON.stringify(input).slice('{"url":'.length))); writer.close(); streamFinish = null; };
     const arriving = fetch("http://meet-runtime/runtime/request", { unix: socket, method: "POST", body: stream });
     await until(() => status(socket), value => value.requestsInFlight === 1);
@@ -117,6 +117,13 @@ test("person-owned worker retains live room, signals and transcript through actu
     const db = new Database(join(data, "supervisor.sqlite3"));
     expect(db.query("SELECT id FROM meet_live_rooms").all()).toHaveLength(0);
     expect((db.query("SELECT ended_at FROM meet_records WHERE id=?").get(id) as any).ended_at).toBeNumber();
+    const stoppedId = crypto.randomUUID();
+    const stopped = await supervisor({ mode: "create", id: stoppedId });
+    process.kill(stopped.workerPid, "SIGTERM");
+    await until(async () => { try { process.kill(stopped.workerPid, 0); return false; } catch { return true; } }, exited => exited);
+    expect((db.query("SELECT ended_at FROM meet_records WHERE id=?").get(stoppedId) as any).ended_at).toBeNumber();
+    expect(db.query("SELECT id FROM meet_live_rooms").all()).toHaveLength(0);
+    expect(db.query("SELECT pid FROM meet_runtime_owner").all()).toHaveLength(0);
     db.close();
   } finally {
     streamFinish?.();
