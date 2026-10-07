@@ -2,14 +2,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentCapacityAuthority } from "../src/agent-capacity-authority.js";
-import type { AgentCapacity } from "../src/agent-capacity.js";
+import { AgentCapacityAuthority, createAgentCapacityServer } from "../src/agent-capacity-authority.js";
+import { configuredAgentCapacity, type AgentCapacity } from "../src/agent-capacity.js";
 import { ThreadService } from "../src/threads/service.js";
 import type { PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
 
 const unwrap = <T>(result: Result<T>): T => { if (!result.ok) throw new Error(result.error.message); return result.value; };
 async function until(check: () => boolean) { for (let i = 0; i < 300; i++) { if (check()) return; await new Promise<void>(resolve => setImmediate(resolve)); } throw new Error("Expected capacity transition did not arrive"); }
-const roots: string[] = [], owners: ThreadService[] = [], authorities: AgentCapacityAuthority[] = [];
+const roots: string[] = [], owners: ThreadService[] = [], authorities: AgentCapacityAuthority[] = [], servers: ReturnType<typeof createAgentCapacityServer>[] = [];
 function client(authority: AgentCapacityAuthority, owner: string, releaseState = { available: true }): AgentCapacity {
   return {
     async acquire(execution) { const result = authority.acquire(owner, execution); return result.ok ? { ok: true, value: { ...result.value, release: () => this.release(result.value) } } : result; },
@@ -65,6 +65,7 @@ afterEach(async () => {
     for (const thread of owner.snapshot()) { const runtime = (owner as any).runtimes.get(thread.id); if (runtime?.session instanceof Native) runtime.session.abortFails = false; await owner.control({ threadId: thread.id, action: "cancel" }); }
     await owner.detach();
   }
+  for (const server of servers.splice(0)) await new Promise<void>(resolve => server.close(() => resolve()));
   for (const value of authorities.splice(0)) value.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   vi.unstubAllEnvs();
@@ -133,6 +134,20 @@ it("unset managed authority configuration queues every launch class instead of o
   unwrap(await f.service.start()); await until(() => f.service.snapshot().every(thread => !!thread.metadata?.admissionWait));
   expect(f.sessions.size).toBe(0);
   expect(f.service.snapshot().every(thread => thread.pendingMessages === 1 && String((thread.metadata!.admissionWait as any).message).includes("Global agent capacity"))).toBe(true);
+});
+
+it("an already queued owner recovers missing authority configuration without restarting native or losing its candidate", async () => {
+  const shared = authority(), server = createAgentCapacityServer(shared, [{ id: "host-a/alice", token: "capacity-fixture" }]); servers.push(server);
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const root = mkdtempSync(join(tmpdir(), "capacity-config-recovery-")), token = join(root, "token"); roots.push(root);
+  const configured = configuredAgentCapacity({ PI_AGENT_CAPACITY_URL: `http://127.0.0.1:${(server.address() as { port: number }).port}`, PI_AGENT_CAPACITY_OWNER: "host-a/alice", PI_AGENT_CAPACITY_TOKEN_FILE: token });
+  const f = fixture(configured, root); unwrap(await f.service.spawn({ id: "queued", requestId: "work", cwd: root, message: "work" })); unwrap(await f.service.start());
+  await until(() => !!f.service.get("queued")?.metadata?.admissionWait);
+  const candidate = (f.service as any).db.prepare("SELECT execution_id FROM thread_capacity WHERE thread_id='queued'").get().execution_id;
+  expect(f.sessions.size).toBe(0); expect(shared.status().active).toBe(0);
+  writeFileSync(token, "capacity-fixture"); (f.service as any).db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.admissionWait')"); f.service.reconcile();
+  await until(() => f.sessions.get("queued")?.busy === true);
+  expect(shared.entries()[0]!.executionId).toBe(candidate);
 });
 
 it("uncertain native startup and failed cancellation never free capacity or create a retry identity", async () => {

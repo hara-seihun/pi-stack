@@ -124,8 +124,15 @@ export async function configuredAgentCapacityStatus(env: NodeJS.ProcessEnv = pro
 
 /** Missing configuration queues work. There is deliberately no local authority or fail-open path. */
 export function configuredAgentCapacity(env: NodeJS.ProcessEnv = process.env): AgentCapacity {
-  const configured = configuredAgentCapacitySettings(env);
-  if (configured.ok) return configured.value.capacity;
-  const error = configured.error;
-  return { acquire: async () => ({ ok: false, error }), release: async () => ({ ok: false, error }), inspect: async () => ({ ok: false, error }), withdraw: async () => ({ ok: false, error }) };
+  let configured: ReturnType<typeof configuredAgentCapacitySettings> | undefined;
+  const current = () => {
+    if (!configured?.ok) configured = configuredAgentCapacitySettings(env);
+    return configured;
+  };
+  return {
+    async acquire(execution) { const value = current(); return value.ok ? value.value.capacity.acquire(execution) : value; },
+    async release(custody) { const value = current(); return value.ok ? value.value.capacity.release(custody) : value; },
+    async inspect(execution) { const value = current(); return value.ok ? value.value.capacity.inspect(execution) : value; },
+    async withdraw(execution) { const value = current(); return value.ok ? value.value.capacity.withdraw(execution) : value; },
+  };
 }
