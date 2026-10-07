@@ -23,7 +23,7 @@ if [[ $state != active && $state != activating ]]; then
   printf '[Unit]\nDescription=Pi Stack first global-capacity cutover %s\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nTimeoutStartSec=30min\nExecStart=/usr/local/bin/node %s/candidate.mjs %s %s\nExecStopPost=/usr/local/bin/node %s/receipt.mjs %s %s\nStandardOutput=append:%s/job.log\nStandardError=append:%s/job.log\n' "$2" "$job" "$1" "$2" "$job" "$job" "$2" "$job" "$job" > "$temporary"
   sudo -n install -m 644 "$temporary" "/etc/systemd/system/$unit"
   sudo -n systemctl daemon-reload
-  sudo -n systemctl reset-failed "$unit"
+  if [[ $state == failed ]]; then sudo -n systemctl reset-failed "$unit"; fi
   sudo -n systemctl start --no-block "$unit"
 fi
 printf '{"unit":"%s","candidateCommit":"%s","log":"%s/job.log","receipts":"%s"}\n' "$unit" "$2" "$job" "$job"
