@@ -27,6 +27,8 @@ One-shot records live at `~/.local/state/pi-stack-agent-executions/<UUID>/capaci
 
 A per-record exclusive lock prevents duplicate native execution under one lease. `held` or uncertain state is not replayed. A native cancellation must successfully await `abort()` and observe `isIdle` with no streaming, compaction or retry before release. Sending a signal is not settlement: the CLI wrapper waits for child close and proves its process group absent. Failed cancellation or surviving descendants retain custody. The recorded PID is the custodial wrapper, not an exhaustive list of descendants: **a dead wrapper PID alone never authorizes release**.
 
+Root capacity denial is a typed pre-execution result. Its request remains durably queued with an explicit global-capacity reason and retry time, and the root reconciler resumes the same audience-checked admission when capacity is available. The encrypted store retains request text, not the credential. Local root concurrency waits are queued too. The request becomes executing only after global admission; an interrupted executing request is never replayed.
+
 `settled` is a durable positive proof; recovery may replay release without executing another agent. The authority tombstones released execution IDs. A later distinct attempt uses a new durable execution ID, not the released ID. Unacknowledged acquisition preserves its identity for a safe idempotent retry. Initial all-owner census must include these records as well as ThreadService records before opening fresh admission; release rollout owns that cutover.
 
 ## First-cutover direct ingress proof

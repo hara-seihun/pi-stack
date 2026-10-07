@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { rootService } from "../src/service";
 import { createRootExecutor, type RootSessionSpec, type RootConfig } from "../src/root-runtime";
 import type { RootAdmission } from "kenan-memory/contract";
+import { StandaloneAdmissionError } from "pi-orchestrator/standalone-agent";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -37,6 +38,14 @@ test("fresh root factory uses only host prompt/model/tools and authenticated adm
   await executor(second, "Another request");
   expect(seen[0].directory).not.toBe(seen[1].directory);
 });
+test("global capacity denial is a typed pre-execution queue result, not a failed model turn", async () => {
+  const { config, admission } = fixture(); let executions = 0;
+  const retryAt = Date.now() + 5000;
+  const executor = createRootExecutor(config, { prompt: "HOST POLICY", factory: async () => { throw new StandaloneAdmissionError({ code: "unavailable", message: "Global limit 100/100", retryAt }); } });
+  expect(await executor(admission, "Queued request", () => { executions++; })).toEqual({ ok: false, error: "capacity-unavailable", message: "Waiting for the shared global 100-agent capacity", retryAt });
+  expect(executions).toBe(0);
+});
+
 test("only chosen reply leaves root, and only after durable disclosure acknowledgement", async () => {
   const { config, admission } = fixture();
   const calls: string[] = [];

@@ -63,6 +63,25 @@ test("request lookup, chosen delivery retries and generic terminal notices reche
   } finally { await f.close(); }
 });
 
+test("queued admission recovery belongs only to root service, preserves identity, and refuses changed audience or retired tokens", async () => {
+  const f = await fixture();
+  try {
+    const person = f.store.session("alice", "original-thread"), root = f.store.admitRoot("alice", "original-thread", ["alice"], ["bob"]);
+    const input = { rootSessionId: root.rootSessionId };
+    expect((await f.post("/v1/root/resume-request", input, person.token)).status).toBe(403);
+    expect((await f.post("/v1/root/resume-request", input, root.memoryToken)).status).toBe(403);
+    expect((await f.post("/v1/root/resume-request", { ...input, person: "bob" })).status).toBe(400);
+    expect((await f.post("/v1/root/resume-request", input)).body).toEqual({ ok: true, value: root });
+    expect(f.store.db.query("SELECT count(*) AS count FROM root_runs").get()).toEqual({ count: 1 });
+    f.store.finalizeRootReply({ rootSessionId: root.rootSessionId, reply: "Chosen", subjects: [] });
+    expect((await f.post("/v1/root/resume-request", input)).status).toBe(403);
+    const room = f.store.admitRoot("pi-rooms", "room-thread", ["alice", "bob"], [], "fixture-room");
+    expect((await f.post("/v1/root/resume-request", { rootSessionId: room.rootSessionId })).status).toBe(200);
+    f.audience({ roomId: "fixture-room", people: ["alice", "bob", "carol"] });
+    expect((await f.post("/v1/root/resume-request", { rootSessionId: room.rootSessionId })).status).toBe(403);
+  } finally { await f.close(); }
+});
+
 test("root notification accounting is registered, private-aware, atomic and idempotent with exact chosen text", async () => {
   const f = await fixture();
   try {

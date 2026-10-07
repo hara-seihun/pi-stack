@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, nextStandaloneExecutionId } from "pi-orchestrator/standalone-agent";
+import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, nextStandaloneExecutionId, StandaloneAdmissionError } from "pi-orchestrator/standalone-agent";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
 import { join, isAbsolute } from "node:path";
@@ -22,11 +22,12 @@ export interface RootConfig {
   brokerUrl: string;
   people?: { person: string; displayName: string }[];
 }
-export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest }
+export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest; onExecution?: () => void }
 export interface RootSession { prompt(text: string): Promise<void>; reply(): string | undefined; subjects?(): string[]; dispose(): void | Promise<void> }
 export type RootSessionFactory = (spec: RootSessionSpec) => Promise<RootSession>;
 export type RootExecution = { reply: string; subjects: string[] };
-export type RootExecutor = (admission: RootAdmission, request: string) => Promise<MemoryResult<RootExecution>>;
+export type RootExecutionResult = MemoryResult<RootExecution> | { ok: false; error: "capacity-unavailable"; message: string; retryAt: number };
+export type RootExecutor = (admission: RootAdmission, request: string, onExecution?: () => void) => Promise<RootExecutionResult>;
 export const ROOT_TOOLS = ["read", "write", "edit", "bash", "memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "root_request_consent", "root_notify", "root_reply"];
 
 export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/pi-stack/kenan-root.json"): RootConfig {
@@ -44,7 +45,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
   const hostPrompt = options.prompt ?? readFileSync(config.promptFile, "utf8");
   const factory = options.factory ?? createFixedSession;
   const baseEnv = { ...process.env, ...options.env };
-  return async (admission, request) => {
+  return async (admission, request, onExecution) => {
     if (!/^[0-9a-f-]{36}$/.test(admission.rootSessionId)) return { ok: false, error: "invalid-request", message: "Invalid admitted root session" };
     const directory = join(config.sessionsDir, admission.rootSessionId);
     let session: RootSession | undefined;
@@ -69,8 +70,9 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
         rootSessionId: admission.rootSessionId, recipients: admission.recipients, roomId: admission.roomId, createdAt: new Date().toISOString() })+'\n', { mode: 0o600 });
       stage = "create-session";
       session = await factory({ id: admission.rootSessionId, person: admission.person, recipients: [...admission.recipients], prompt,
-        request, config, directory, env, requestConsent: options.consent ? input => options.consent!(admission, request, input) : undefined,
+        request, config, directory, env, onExecution, requestConsent: options.consent ? input => options.consent!(admission, request, input) : undefined,
         notify: options.notify ? (toolCallId, input) => options.notify!(admission, toolCallId, input) : undefined });
+      onExecution?.();
       stage = "model-turn";
       await session.prompt(`A person asked Kenan the following. Consider it on its merits and answer only what you choose to disclose.\n\n${JSON.stringify({ request })}`);
       const reply = session.reply();
@@ -84,6 +86,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
       report({ component: "root-executor", stage, outcome: "ok", durationMs: Math.round(performance.now() - started) });
       return { ok: true, value: { reply, subjects } };
     } catch (error) {
+      if (error instanceof StandaloneAdmissionError) return { ok: false, error: "capacity-unavailable", message: "Waiting for the shared global 100-agent capacity", retryAt: error.admissionError.retryAt ?? Date.now() + 5_000 };
       report({ component: "root-executor", stage, outcome: "failed", reason: error instanceof RootInitializationError ? error.reason : infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
       return { ok: false, error: "unavailable", message: "Root Kenan could not complete this request" };
     } finally {
@@ -106,6 +109,7 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
       agentId: `root:${spec.id}`, executionId: nextStandaloneExecutionId(recordPath), env: spec.env });
     let native: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
     try {
+    spec.onExecution?.();
     const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 }, compaction: { enabled: true } });
     const routing = new URL("./extension/routing.ts", import.meta.resolve("pi-orchestrator/api")).pathname;
     const services = await createAgentSessionServices({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,

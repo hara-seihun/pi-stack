@@ -3,7 +3,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { configuredAgentCapacitySettings, type AgentCapacity, type CapacityCustody, type CapacityLease } from "./agent-capacity.js";
-import type { Result } from "./threads/contracts.js";
+import type { Result, ThreadError } from "./threads/contracts.js";
 
 type Identity = { version: 1; ownerId: string; agentId: string; executionId: string; pid: number; processStart: string };
 export type StandaloneCapacityRecord = Identity & (
@@ -125,9 +125,12 @@ export function nextStandaloneExecutionId(recordPath: string): string {
   return record.state === "acquiring" ? record.executionId : randomUUID();
 }
 
+export class StandaloneAdmissionError extends Error {
+  constructor(readonly admissionError: ThreadError) { super(admissionError.message); }
+}
 export async function requireStandaloneAgent(options: StandaloneAgentOptions): Promise<StandaloneAgent> {
   const result = await beginStandaloneAgent(options);
-  if (!result.ok) throw new Error(result.error.message);
+  if (!result.ok) throw new StandaloneAdmissionError(result.error);
   return result.value;
 }
 export async function settleStandaloneAgent(agent: StandaloneAgent): Promise<void> {

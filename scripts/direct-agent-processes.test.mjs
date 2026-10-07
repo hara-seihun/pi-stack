@@ -36,6 +36,14 @@ test("only the independently verified root PID is excluded; an old SDK root stil
   const proof = directAgentProcessProof(f.root, { version: 1, processes: [] }, 201);
   assert.deepEqual(proof.oldProcesses, [{ pid: 202, processStart: "101" }]);
 });
+test("source searches and file copies are not SDK agents; inline native SDK evaluation is", t => {
+  const f = fixture(t);
+  f.process(401, 1, "100", ["rg", "createAgentSession", "/srv/pi/runtime/browser-doctor.mjs"]);
+  f.process(402, 1, "101", ["cp", "/srv/pi/runtime/stack-pi.mjs", "/target"]);
+  f.process(403, 1, "102", ["node", "--input-type=module", "-e", "const session = await createAgentSession({})"]);
+  assert.deepEqual(directAgentProcessProof(f.root, { version: 1, processes: [] }, 0).oldProcesses, [{ pid: 403, processStart: "102" }]);
+});
+
 test("unset retention and missing process evidence are errors rather than complete empty coverage", t => {
   const f = fixture(t);
   assert.throws(() => directAgentProcessProof(f.root, undefined, 0), /receipt is required/);

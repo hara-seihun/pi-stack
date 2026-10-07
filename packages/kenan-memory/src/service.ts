@@ -49,7 +49,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
     try {
       if (!options.enabled()) return send(503, { ok: false, error: "disabled", message: "One Kenan is disabled on this host" });
       if (request.method === "GET" && request.url === "/v1/health") return send(200, { ok: true, service: "kenan-memory", releaseCommit: options.releaseCommit ?? null });
-      if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/log-notification", "/v1/root/log-request-status"].includes(request.url ?? ""))
+      if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/resume-request", "/v1/root/log-notification", "/v1/root/log-request-status"].includes(request.url ?? ""))
         return send(404, { ok: false, error: "invalid-request", message: "Unknown memory route" });
       const caller = principal(request);
       if (!caller) return denied("Memory access requires a verified local identity");
@@ -70,6 +70,17 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
             if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0")) return denied("Request is unavailable to this audience");
           }
           return send(200, { ok: true, value: { authorized: true } });
+        }
+        if (request.url === "/v1/root/resume-request") {
+          if (!fields(input, ["rootSessionId"]) || typeof input.rootSessionId !== "string" || !input.rootSessionId) return invalid("Invalid queued root admission");
+          const admitted = store.rootAdmission(input.rootSessionId);
+          const session = admitted && store.resolveSession(admitted.memoryToken);
+          if (!admitted || !session || session.role !== "root" || session.threadId !== admitted.rootSessionId || session.person !== admitted.person) return denied("The original admitted execution is unavailable");
+          const current = await options.roomAudience?.(admitted.person, admitted.threadId);
+          if (admitted.roomId || current || admitted.person === "pi-rooms") {
+            if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0")) return denied("The original room audience changed");
+          }
+          return send(200, { ok: true, value: admitted });
         }
         if (request.url === "/v1/root/log-request-status") {
           if (!fields(input, ["rootSessionId", "requestId", "status"]) || typeof input.rootSessionId !== "string" || typeof input.requestId !== "string" || !new RegExp(KENAN_REQUEST_ID_PATTERN).test(input.requestId) || !["failed", "interrupted"].includes(input.status)) return invalid("Invalid root request status");

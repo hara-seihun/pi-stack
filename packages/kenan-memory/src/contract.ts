@@ -102,7 +102,9 @@ export type KenanRequestStatus = "pending" | "failed" | "interrupted";
 export interface RootLogRequestStatus { rootSessionId: string; requestId: string; status: "failed" | "interrupted" }
 const requestNoticeStates = { failed: "failed", interrupted: "was interrupted" } satisfies Record<RootLogRequestStatus["status"], string>;
 export const kenanRequestNotice = (requestId: string, status: RootLogRequestStatus["status"]) => `Kenan's request ${requestId} ${stateValue(requestNoticeStates, status)} before completion. Actions may already have occurred; do not repeat the original request. Its status can be retrieved with ask_kenan({requestId:\"${requestId}\"}).`;
-export type KenanRequestResponse = { reply: string } | { requestId: string; status: KenanRequestStatus };
+export const KENAN_REQUEST_QUEUE_REASONS = ["global-agent-capacity", "root-concurrency", "admission-unavailable"] as const;
+export type KenanRequestQueuedReason = typeof KENAN_REQUEST_QUEUE_REASONS[number];
+export type KenanRequestResponse = { reply: string } | { requestId: string; status: "pending"; reason?: KenanRequestQueuedReason } | { requestId: string; status: "failed" | "interrupted" };
 export interface RootFinalizeReply { rootSessionId: string; reply: string; subjects: PersonId[]; recipients?: PersonId[] }
 export type RoomAudienceResolver = (person: PersonId, threadId: string) => { roomId: string; people: PersonId[] } | undefined | Promise<{ roomId: string; people: PersonId[] } | undefined>;
 export const KENAN_ROOT_DEFAULT_PORT = 18821;

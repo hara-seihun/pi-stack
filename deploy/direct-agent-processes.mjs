@@ -12,7 +12,10 @@ export function directAgentProcessProof(procRoot, retained, gatedRootPid) {
       const stat = readFileSync(join(procRoot, id, "stat"), "utf8").split(") ").at(-1).split(" ");
       if (!/^\d+$/.test(stat[1] ?? "") || !/^\d+$/.test(stat[19] ?? "")) throw new Error("Invalid process identity");
       const args = readFileSync(join(procRoot, id, "cmdline"), "utf8").split("\0").filter(Boolean);
-      processes.set(Number(id), { pid: Number(id), parent: Number(stat[1]), processStart: stat[19], direct: args.some(arg => standalone.test(arg) || rootSession.test(arg) || /createAgentSession|createFixedSession/.test(arg)) });
+      const interpreter = /(?:^|\/)(?:node|nodejs|bun)$/.test(args[0] ?? "");
+      const evaluate = args.findIndex(arg => arg === "-e" || arg === "--eval");
+      const inlineSdk = interpreter && evaluate >= 0 && /createAgentSession|createFixedSession/.test(args[evaluate + 1] ?? "");
+      processes.set(Number(id), { pid: Number(id), parent: Number(stat[1]), processStart: stat[19], direct: interpreter && (inlineSdk || args.slice(1).some(arg => standalone.test(arg) || rootSession.test(arg))) });
     } catch (error) { if (error.code !== "ENOENT" && error.code !== "ESRCH") throw new Error(`Process census unavailable for PID ${id}: ${error.code}`); }
   }
   const oldProcesses = [], retainedProcesses = [];
