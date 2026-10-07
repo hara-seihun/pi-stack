@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statfsSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -739,6 +739,153 @@ test("bounded reconciliation stops a stalled read without declaring unchecked pa
   } finally { f.close(); }
 });
 
+test("source capacity separates real headroom and known footprint from unknown full work", () => {
+  const GiB = 1024 ** 3;
+  const plan = { constructionBytes: 640 * 1024 ** 2, growthBytes: 256 * 1024 ** 2, headroomBytes: 20 * GiB };
+  assert.equal(workspaceTesting.capacityRequirement(plan, []) < 24.74 * GiB, true);
+  assert.equal(workspaceTesting.capacityRequirement(plan, [4 * GiB]) > 24.74 * GiB, true);
+  assert.equal(workspaceTesting.capacityRequirement({ constructionBytes: 30 * GiB, growthBytes: 0, headroomBytes: 0 }, []) > 24.74 * GiB, true);
+  assert.throws(() => workspaceTesting.capacityRequirement({ ...plan, growthBytes: undefined }, []), /invalid capacity ledger/);
+  assert.throws(() => workspaceTesting.capacityRequirement(plan, [-1]), /invalid capacity ledger/);
+});
+
+test("budgeted source creation shares existing objects and records immutable whole-tree pricing", () => {
+  const f = fixture();
+  try {
+    writeFileSync(path.join(f.source, "excluded.bin"), Buffer.alloc(3 * 1024 ** 2));
+    git(f.source, "add", "excluded.bin");
+    git(f.source, "commit", "-m", "large excluded source");
+    git(f.source, "push", "origin", "main");
+    const selectedSource = git(f.source, "rev-parse", "HEAD");
+    writeFileSync(path.join(f.source, "unique-source.txt"), "unpublished source work\n");
+    git(f.source, "add", "unique-source.txt");
+    git(f.source, "commit", "-m", "unpublished source work");
+    const sourceHead = git(f.source, "rev-parse", "HEAD");
+    const args = ["create", "--root", f.workspaces, "--name", "priced", "--repo", f.source, "--ref", selectedSource,
+      "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--sparse-pattern", "*.txt", "--json"];
+    const created = JSON.parse(run(args, f.env));
+    assert.equal(created.capacity.intent, "source-only");
+    assert.equal(created.capacity.estimate, "whole-tree-upper-bound");
+    assert.equal(created.capacity.sourceCommit, created.sourceCommit);
+    assert.equal(created.capacity.constructionBytes > 6 * 1024 ** 2, true);
+    assert.equal(created.capacity.growthBytes, 8 * 1024 ** 2);
+    assert.equal(existsSync(path.join(created.path, "excluded.bin")), false);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
+    assert.equal(existsSync(path.join(created.path, ".git", "objects", "info", "alternates")), true);
+    assert.equal(existsSync(path.join(f.root, "state", "mirrors")), false);
+    assert.equal(git(created.path, "for-each-ref", "--format=%(refname)", "refs/remotes"), "");
+    assert.equal(git(created.path, "rev-list", "--all", "--not", selectedSource), "");
+    assert.equal(git(f.source, "rev-parse", "HEAD"), sourceHead);
+    assert.deepEqual(JSON.parse(run(args, f.env)).capacity, created.capacity);
+    assert.throws(() => run(args.map(arg => arg === "8" ? "9" : arg), f.env), /different creation request/);
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const device = String(statSync(f.workspaces).dev);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });
+    db.prepare("UPDATE workspace SET lease_expires_at=0 WHERE id=?").run(created.id);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });
+    db.prepare("UPDATE workspace SET state='creating', lease_expires_at=0 WHERE id=?").run(created.id);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [created.capacity.growthBytes + created.capacity.constructionBytes], unpricedDormant: 0 });
+    db.prepare("DELETE FROM workspace_capacity WHERE workspace_id=?").run(created.id);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], unpricedDormant: 1 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device, created.path), { priced: [], unpricedDormant: 0 });
+    // An old dormant reservation is priced again under the filesystem fence before resuming.
+    const resumed = JSON.parse(run(args, f.env));
+    assert.equal(resumed.id, created.id);
+    assert.equal(resumed.capacity.sourceCommit, created.sourceCommit);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });
+    db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(created.id);
+    rmSync(created.path, { recursive: true });
+    run(["cancel-creation", "--id", created.id], f.env);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], unpricedDormant: 0 });
+    db.close();
+  } finally { f.close(); }
+});
+
+test("budgeted shared-source creation resumes an interrupted initialization with the same reservation", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "partial-shared", "--repo", f.source,
+      "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "config")));
+    const pending = JSON.parse(run(["status", "--json"], f.env)).records[0];
+    assert.equal(pending.state, "creating");
+    const resumed = JSON.parse(run(args, f.env));
+    assert.equal(resumed.id, pending.id);
+    assert.equal(resumed.state, "active");
+    assert.equal(resumed.sourceCommit, pending.sourceCommit);
+    assert.equal(git(resumed.path, "for-each-ref", "--format=%(refname)", "refs/remotes"), "");
+    assert.equal(readFileSync(path.join(resumed.path, "file.txt"), "utf8"), "source\n");
+  } finally { f.close(); }
+});
+
+test("budgeted admission rejects unknown source imports, filters and unspecified budgets before reservation", () => {
+  const f = fixture();
+  try {
+    const base = ["create", "--root", f.workspaces, "--name", "unknown", "--repo", f.source, "--json"];
+    const budget = ["--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", "2048"];
+    for (const args of [[...base, "--intent", "source-only"], [...base, "--headroom-gib", "1"],
+      [...base, ...budget, "--min-free-gib", "0"], [...base, ...budget, "--strategy", "worktree"],
+      [...base, ...budget.map(arg => arg === "1" ? "0" : arg)]]) assert.throws(() => run(args, f.env));
+    assert.throws(() => run([...base.map(arg => arg === f.source ? `file://${f.remote}` : arg), ...budget], f.env), /estimate unknown/);
+    git(f.source, "config", "filter.fake.smudge", "cat");
+    assert.throws(() => run([...base, ...budget], f.env), /estimate unknown.*filters/);
+    git(f.source, "config", "--unset", "filter.fake.smudge");
+    writeFileSync(path.join(f.source, ".gitattributes"), "*.txt working-tree-encoding=UTF-16\n");
+    git(f.source, "add", ".gitattributes");
+    git(f.source, "commit", "-m", "unknown encoding transform");
+    assert.throws(() => run([...base, ...budget], f.env), /estimate unknown.*attribute/);
+    assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)).records, []);
+    assert.equal(existsSync(path.join(f.workspaces, "unknown")), false);
+  } finally { f.close(); }
+});
+
+test("an active legacy creator refuses unknown capacity while a dormant one must reprice before resume", async () => {
+  const f = fixture();
+  let child;
+  try {
+    const base = ["create", "--root", f.workspaces, "--repo", f.source, "--min-free-gib", "0", "--json"];
+    const created = JSON.parse(run([...base, "--name", "legacy"], f.env));
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(created.id);
+    db.prepare("DELETE FROM workspace_capacity WHERE workspace_id=?").run(created.id);
+    const device = String(statSync(f.workspaces).dev);
+    const lock = path.join(f.root, "state", "locks", createHash("sha256").update(`checkout:${created.path}`).digest("hex"));
+    child = spawn("flock", ["--exclusive", lock, process.execPath, "-e", "process.stdout.write('ready');process.stdin.resume()"], { stdio: ["pipe", "pipe", "pipe"] });
+    await new Promise((resolve, reject) => { child.stdout.once("data", resolve); child.once("error", reject); });
+    assert.throws(() => workspaceTesting.capacityReservations(db, device), /estimate unknown.*active legacy/);
+    assert.throws(() => run([...base, "--name", "other"], f.env), /estimate unknown.*active legacy/);
+    const closed = new Promise(resolve => child.once("close", resolve));
+    child.stdin.end();
+    await closed;
+    child = undefined;
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], unpricedDormant: 1 });
+    assert.equal(JSON.parse(run([...base, "--name", "other"], f.env)).capacity.admission.unpricedDormant, 1);
+    assert.throws(() => run([...base.map(arg => arg === "0" ? "1000000" : arg), "--name", "legacy"], f.env), /GiB is required/);
+    assert.equal(db.prepare("SELECT count(*) AS count FROM workspace_capacity WHERE workspace_id=?").get(created.id).count, 0);
+    assert.equal(JSON.parse(run([...base, "--name", "legacy"], f.env)).state, "active");
+    assert.equal(db.prepare("SELECT count(*) AS count FROM workspace_capacity WHERE workspace_id=?").get(created.id).count, 1);
+    db.close();
+  } finally { child?.kill(); f.close(); }
+});
+
+test("concurrent budgeted admissions across roots cannot spend the same filesystem capacity twice", async () => {
+  const f = fixture();
+  try {
+    const stats = statfsSync(f.root);
+    const growthMiB = Math.floor(stats.bavail * stats.bsize / 1024 ** 2 * 0.6);
+    const commands = ["first", "second"].map(name => ["create", "--root", path.join(f.root, name), "--name", "priced",
+      "--repo", f.source, "--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", String(growthMiB), "--json"]);
+    const results = await Promise.allSettled(commands.map(args => runAsync(args, f.env)));
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter(result => result.status === "rejected").length, 1);
+    const failure = results.find(result => result.status === "rejected");
+    assert.match(failure.reason.message, /GiB is required/);
+    const winner = JSON.parse(results.find(result => result.status === "fulfilled").value);
+    run(["release", "--id", winner.id], f.env);
+    assert.equal(JSON.parse(run(commands[results[0].status === "rejected" ? 0 : 1], f.env)).state, "active");
+  } finally { f.close(); }
+});
+
 test("capacity follows available storage unless a caller imposes a count limit", () => {
   const f = fixture();
   try {
@@ -750,7 +897,7 @@ test("capacity follows available storage unless a caller imposes a count limit",
     assert.equal(record.path, path.join(f.workspaces, "admitted"));
     assert.throws(() => run([...args, "--name", "blocked", "--max-count", "41"], f.env),
       /limit is 41/);
-    assert.throws(() => run([...args, "--name", "disk-blocked", "--min-free-gib", "1000000000"], f.env),
+    assert.throws(() => run([...args, "--name", "disk-blocked", "--min-free-gib", "1000000"], f.env),
       /GiB is required/);
   } finally {
     f.close();
@@ -854,7 +1001,9 @@ test("released records whose trees are gone leave the registry after a month", (
     insert.run("gone-new", path.join(root, "gone-new"), root, now, now, "released");
     insert.run("present-old", root, root, old, old, "released");
     insert.run("active-old", path.join(root, "active-old"), root, old, old, "active");
+    database.prepare("INSERT INTO workspace_capacity VALUES('gone-old','device','{}')").run();
     assert.equal(workspaceTesting.pruneReleased(database, now), 1);
+    assert.equal(database.prepare("SELECT count(*) AS count FROM workspace_capacity").get().count, 0);
     assert.deepEqual(database.prepare("SELECT id FROM workspace ORDER BY id").all().map((row) => row.id), ["active-old", "gone-new", "present-old"]);
     database.close();
   } finally {
