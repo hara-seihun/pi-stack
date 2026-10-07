@@ -34,7 +34,7 @@ orchestrator_release=$(readlink -f "$orchestrator")
 }
 
 node "$root/scripts/build-workspace.mjs" remote
-npm run build --workspace=kenan-root
+node "$root/scripts/build-workspace.mjs" kenan-root
 mkdir -p "$stage/release/node_modules"
 node "$root/deploy/remote-resources.mjs" "$root" "$stage/release"
 ln -s "$orchestrator_release" "$stage/release/node_modules/pi-orchestrator"
