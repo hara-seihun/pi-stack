@@ -209,7 +209,14 @@ function registrySchemaVersion(database) {
   return version;
 }
 
+function hasCapacityLedger(database) {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_capacity'").get() !== undefined;
+}
+
 function initializeRegistry(database) {
+  database.exec(`CREATE TABLE IF NOT EXISTS workspace_capacity (
+    workspace_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, plan_json TEXT NOT NULL
+  ); CREATE INDEX IF NOT EXISTS workspace_capacity_device ON workspace_capacity(device_id)`);
   if (database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
     database.exec("PRAGMA journal_mode = WAL");
   }
@@ -264,7 +271,7 @@ function openRegistry(statePath = DEFAULT_STATE) {
   registryPaths.set(database, statePath);
   try {
     database.exec("PRAGMA busy_timeout = 5000");
-    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION || !hasPendingIndex(database) ||
+    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION || !hasPendingIndex(database) || !hasCapacityLedger(database) ||
       database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
       withResourceLock(statePath, "registry-schema", () => initializeRegistry(database));
     }
@@ -1526,7 +1533,93 @@ function adoptCommand(database, args, statePath) {
   print(results, bool(args, "json"));
 }
 
-function assertCapacity(root, args, database, reservedPath) {
+function capacityIntent(args) {
+  const intent = one(args, "intent");
+  if (intent === undefined) {
+    if (one(args, "headroom-gib") !== undefined || one(args, "growth-mib") !== undefined) fail("--headroom-gib and --growth-mib require explicit --intent source-only or budgeted");
+    return null;
+  }
+  if (!["source-only", "budgeted"].includes(intent)) fail("--intent must be source-only or budgeted");
+  if (one(args, "min-free-gib") !== undefined) fail("budgeted intent uses --headroom-gib, not --min-free-gib");
+  required(args, "headroom-gib");
+  required(args, "growth-mib");
+  const headroomBytes = Math.ceil(numberFlag(args, "headroom-gib") * 1024 ** 3);
+  const growthBytes = Math.ceil(numberFlag(args, "growth-mib") * 1024 ** 2);
+  if (!Number.isSafeInteger(headroomBytes) || headroomBytes <= 0 || !Number.isSafeInteger(growthBytes)) fail("capacity budgets require positive headroom and nonnegative growth within the supported byte range");
+  return { intent, headroomBytes, growthBytes };
+}
+
+function sourceCapacityPlan(repository, sourceCommit, intent, blockSize) {
+  if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
+  const filters = command("git", ["-C", repository, "config", "--get-regexp", "^filter\\..*\\.(smudge|process)$"]);
+  if (filters.status !== 1) fail("source capacity estimate unknown: configured checkout filters need an independently budgeted installer");
+  const entries = git(repository, ["ls-tree", "-rlz", sourceCommit]).split("\0").filter(Boolean);
+  let constructionBytes = 16 * 1024 ** 2;
+  for (const entry of entries) {
+    const match = entry.match(/^(\d+) (blob|commit) [0-9a-f]+\s+(\d+|-)\t(.+)$/su);
+    if (match === null) fail("source capacity estimate unknown: malformed Git tree entry");
+    const [, mode, type, size, name] = match;
+    if (type === "commit" && mode !== "160000") fail("source capacity estimate unknown: unsupported tree entry");
+    if (name.endsWith(".gitattributes") && /(?:working-tree-encoding|filter)=/u.test(git(repository, ["show", `${sourceCommit}:${name}`]))) {
+      fail("source capacity estimate unknown: checkout attribute transformation");
+    }
+    // Whole-tree upper bound includes sparse exclusions, CRLF expansion, index and directories.
+    constructionBytes += (size === "-" ? 0 : 2 * Math.ceil(Number(size) / blockSize) * blockSize) + 4 * blockSize + Buffer.byteLength(name) * 2;
+  }
+  if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
+  return { ...intent, estimate: "whole-tree-upper-bound", constructionBytes, sourceCommit };
+}
+
+function capacityRequirement(plan, reservations) {
+  for (const value of [plan.constructionBytes, plan.growthBytes, plan.headroomBytes, ...reservations]) {
+    if (!Number.isSafeInteger(value) || value < 0) fail("invalid capacity ledger byte budget");
+  }
+  const requiredBytes = plan.constructionBytes + plan.growthBytes + plan.headroomBytes + reservations.reduce((sum, bytes) => sum + bytes, 0);
+  if (!Number.isSafeInteger(requiredBytes)) fail("capacity ledger total exceeds supported byte range");
+  return requiredBytes;
+}
+
+function creationFenceBusy(database, workspacePath) {
+  const statePath = registryPaths.get(database) ?? database.prepare("PRAGMA database_list").all().find(row => row.name === "main")?.file;
+  if (!statePath) fail("capacity estimate unknown: creation fence registry path unavailable");
+  const directory = path.join(path.dirname(statePath), "locks");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const file = path.join(directory, createHash("sha256").update(`checkout:${path.resolve(workspacePath)}`).digest("hex"));
+  const descriptor = openSync(file, "a", 0o600);
+  try {
+    const result = spawnSync("flock", ["--exclusive", "--nonblock", "3"], { stdio: ["ignore", "pipe", "pipe", descriptor], timeout: 1000 });
+    if (result.status === 0) return false;
+    if (result.status === 1) return true;
+    fail("capacity estimate unknown: cannot inspect pending creation fence");
+  } finally { closeSync(descriptor); }
+}
+
+function capacityReservations(database, device, reservedPath) {
+  if (database === undefined) return { priced: [], unpricedDormant: 0 };
+  const unknown = database.prepare(`SELECT w.path, w.root FROM workspace w LEFT JOIN workspace_capacity c ON c.workspace_id=w.id
+    WHERE w.state='creating' AND c.workspace_id IS NULL AND w.path!=?`).all(reservedPath ?? "");
+  let unpricedDormant = 0;
+  for (const row of unknown) {
+    let ancestor = row.root;
+    while (!existsSync(ancestor) && ancestor !== path.dirname(ancestor)) ancestor = path.dirname(ancestor);
+    if (String(statSync(ancestor).dev) !== device) continue;
+    if (creationFenceBusy(database, row.path)) fail(`capacity estimate unknown: active legacy creation at ${row.path}; await its owning creator`);
+    unpricedDormant += 1;
+  }
+  const priced = database.prepare(`SELECT c.plan_json, w.state FROM workspace_capacity c JOIN workspace w ON w.id=c.workspace_id
+    WHERE c.device_id=? AND w.path!=? AND w.state!='released'`)
+    .all(device, reservedPath ?? "").map(row => {
+      const plan = JSON.parse(row.plan_json);
+      if (!["source-only", "budgeted", "unestimated"].includes(plan.intent) ||
+        plan.estimate !== (plan.intent === "unestimated" ? "unknown" : "whole-tree-upper-bound")) fail("invalid capacity ledger intent or estimate");
+      capacityRequirement(plan, []);
+      return plan.intent === "unestimated" ? plan.constructionBytes
+        : plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
+    });
+  return { priced, unpricedDormant };
+}
+
+function assertCapacity(root, args, database, reservedPath, plan) {
   mkdirSync(root, { recursive: true });
   const maxCount = numberFlag(args, "max-count", DEFAULT_MAX_COUNT);
   if (maxCount > 0) {
@@ -1537,12 +1630,16 @@ function assertCapacity(root, args, database, reservedPath) {
     if (count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
   }
   const stats = statfsSync(root);
-  const freeGiB = stats.bavail * stats.bsize / 1024 ** 3;
-  const minFreeGiB = numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB);
-  if (freeGiB < minFreeGiB) fail(`${freeGiB.toFixed(2)} GiB is free; ${minFreeGiB.toFixed(2)} GiB is required`);
+  const freeBytes = stats.bavail * stats.bsize;
+  const device = String(statSync(root).dev);
+  const reservations = capacityReservations(database, device, reservedPath);
+  const minimum = Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3);
+  const requirement = capacityRequirement(plan ?? { constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced);
+  if (freeBytes < requirement) fail(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`);
   const freeInodes = stats.files > 0 ? 100 * stats.ffree / stats.files : 100;
   const minFreeInodes = numberFlag(args, "min-free-inodes-percent", DEFAULT_MIN_FREE_INODES_PERCENT);
   if (freeInodes < minFreeInodes) fail(`${freeInodes.toFixed(2)}% of inodes are free; ${minFreeInodes.toFixed(2)}% is required`);
+  return { freeBytes, requiredBytes: requirement, unpricedDormant: reservations.unpricedDormant };
 }
 
 function safeName(value) {
@@ -1716,13 +1813,50 @@ function cloneSourceTag(statePath, mirror, sourceCommit) {
   });
 }
 
+function prepareSharedSourceClone(destination, repository, sourceCommit, input) {
+  const objectSource = git(repository, ["rev-parse", "--path-format=absolute", "--git-path", "objects"]);
+  if (!existsSync(path.join(destination, ".git"))) {
+    if (existsSync(destination) && readdirSync(destination).length !== 0) fail("pending shared-source directory has non-Git files");
+    run("git", ["init", "-b", input.branch, destination]);
+  }
+  const rawDirectory = git(destination, ["rev-parse", "--absolute-git-dir"]);
+  if (rawDirectory !== path.join(destination, ".git")) fail("pending shared source is not an independent clone");
+  const alternates = path.join(rawDirectory, "objects", "info", "alternates");
+  if (existsSync(alternates) && readFileSync(alternates, "utf8") !== `${objectSource}\n`) fail("pending shared source object store differs");
+  const head = command("git", ["-C", destination, "rev-parse", "--verify", "HEAD"]);
+  if (head.status !== 0 && (existsSync(path.join(rawDirectory, "index")) || readdirSync(destination).some(name => name !== ".git"))) {
+    fail("pending shared source lacks HEAD but contains materialized work; preserve it for repair");
+  }
+  const readOrigin = command("git", ["-C", destination, "config", "--local", "--get", "remote.origin.url"]);
+  if (![0, 1].includes(readOrigin.status)) fail("cannot inspect pending shared source origin");
+  const origin = readOrigin.status === 1 ? null : readOrigin.stdout;
+  if (head.status !== 0 && git(destination, ["for-each-ref", "--format=%(refname)"]).split("\n").filter(Boolean)
+    .some(name => name !== `refs/tags/pi-workspace-source-${sourceCommit}`)) fail("pending shared source lacks HEAD but has other source refs; preserve it for repair");
+  if (origin !== null && origin !== repository) {
+    if (head.status !== 0) fail("pending shared source origin differs");
+    return;
+  }
+  if (!existsSync(alternates)) writeFileSync(alternates, `${objectSource}\n`);
+  if (origin === null) git(destination, ["remote", "add", "origin", repository]);
+  ensureOriginFetch(destination);
+  for (const [name, value] of Object.entries({ ...REFERENCE_CLONE_CONFIG, "core.hooksPath": "/dev/null", "submodule.recurse": "false" })) {
+    git(destination, ["config", "--local", name, value]);
+  }
+  const custodyRef = `refs/tags/pi-workspace-source-${sourceCommit}`;
+  const custody = command("git", ["-C", destination, "rev-parse", "--verify", custodyRef]);
+  if (custody.status === 0 && custody.stdout !== sourceCommit) fail("pending shared source custody tag differs");
+  if (custody.status !== 0) git(destination, ["update-ref", custodyRef, sourceCommit, ""]);
+  if (head.status !== 0) git(destination, ["update-ref", "--no-deref", "HEAD", sourceCommit]);
+}
+
 function createCommand(database, args, statePath) {
   const destination = path.join(path.resolve(required(args, "root")), safeName(required(args, "name")));
   return withWorkspaceLock(database, destination, () => createWorkspace(database, args, statePath), one(args, "group"));
 }
 
 function createWorkspace(database, args, statePath) {
-  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "creation-timeout-seconds", "sparse-pattern", "json"]);
+  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "creation-timeout-seconds", "sparse-pattern", "intent", "headroom-gib", "growth-mib", "json"]);
+  const intent = capacityIntent(args);
   const checkoutTimeout = creationTimeout(args);
   const root = path.resolve(required(args, "root"));
   const name = safeName(required(args, "name"));
@@ -1733,6 +1867,7 @@ function createWorkspace(database, args, statePath) {
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   const strategy = one(args, "strategy", "clone");
   if (!["clone", "worktree"].includes(strategy)) fail("--strategy must be clone or worktree");
+  if (intent !== null && strategy !== "clone") fail("budgeted intent requires a shared-object clone; worktree capacity is unestimated");
   const sparsePatterns = many(args, "sparse-pattern");
   if (sparsePatterns.some(pattern => !pattern.trim() || pattern === "true" || /[\r\n\0]/u.test(pattern))) {
     fail("--sparse-pattern requires a nonempty single-line Git non-cone pattern");
@@ -1743,6 +1878,7 @@ function createWorkspace(database, args, statePath) {
     owner: one(args, "owner", name), kind: one(args, "kind", "agent"), groupId: one(args, "group", null),
     cachePaths: normalizeCachePaths(many(args, "cache")),
     ...(sparsePatterns.length ? { sparsePatterns } : {}),
+    ...(intent === null ? {} : { capacity: intent }),
     leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) });
   const input = JSON.parse(request);
   const mirror = mirrorFor(statePath, repository);
@@ -1751,34 +1887,72 @@ function createWorkspace(database, args, statePath) {
   if (row !== undefined && row.state !== "released") {
     if (row.creation_request !== request) fail(`workspace already exists with a different creation request: ${destination}${row.state === "creating" ? "; resume the original request, or use cancel-creation if its destination is absent" : ""}`);
     if (row.state === "active" && existsSync(destination)) {
-      print(rowToRecord(row), bool(args, "json"));
+      print(creationRecord(database, row.id), bool(args, "json"));
       return;
     }
     if (row.state !== "creating") fail(`workspace cannot resume creation from state ${row.state}: ${destination}`);
   } else {
     if (existsSync(destination)) fail(`workspace already exists: ${destination}`);
-    assertCapacity(root, args, database);
-    const sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
-    withResourceLock(statePath, `admission:${root}`, () => {
+    mkdirSync(root, { recursive: true });
+    let sourceCommit;
+    let plan;
+    if (intent === null) {
       assertCapacity(root, args, database);
-      const now = Date.now();
-      database.prepare(`INSERT INTO workspace
-        (id,path,root,kind,mode,owner,repository,source_commit,checkout_type,cache_paths,
-         created_at,updated_at,lease_expires_at,state,detail,group_id,creation_request)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'creating','creation reserved',?,?)
-        ON CONFLICT(path) DO UPDATE SET id=excluded.id, kind=excluded.kind, mode=excluded.mode,
-        owner=excluded.owner, repository=excluded.repository, source_commit=excluded.source_commit,
-        checkout_type=excluded.checkout_type, cache_paths=excluded.cache_paths,
-        created_at=excluded.created_at, updated_at=excluded.updated_at, lease_expires_at=excluded.lease_expires_at,
-        state=excluded.state, detail=excluded.detail, group_id=excluded.group_id, creation_request=excluded.creation_request
-        WHERE workspace.state='released'`).run(randomUUID(), destination, root, input.kind, mode,
-        input.owner, repository, sourceCommit, strategy, JSON.stringify(input.cachePaths), now, now,
-        now + input.leaseSeconds * 1000, input.groupId, request);
+      plan = { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 };
+    } else {
+      if (!existsSync(repository)) fail("source capacity estimate unknown: budgeted intent requires an existing local Git object source; remote import remains unestimated");
+      sourceCommit = git(repository, ["rev-parse", "--verify", `${ref}^{commit}`]);
+      plan = sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize);
+    }
+    const device = String(statSync(root).dev);
+    withResourceLock(statePath, `capacity:${device}`, () => {
+      plan.admission = assertCapacity(root, args, database, destination, plan);
+      if (intent === null) {
+        sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
+        plan.admission = assertCapacity(root, args, database, destination, plan);
+      }
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const now = Date.now();
+        database.prepare(`INSERT INTO workspace
+          (id,path,root,kind,mode,owner,repository,source_commit,checkout_type,cache_paths,
+           created_at,updated_at,lease_expires_at,state,detail,group_id,creation_request)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'creating','creation reserved',?,?)
+          ON CONFLICT(path) DO UPDATE SET id=excluded.id, kind=excluded.kind, mode=excluded.mode,
+          owner=excluded.owner, repository=excluded.repository, source_commit=excluded.source_commit,
+          checkout_type=excluded.checkout_type, cache_paths=excluded.cache_paths,
+          created_at=excluded.created_at, updated_at=excluded.updated_at, lease_expires_at=excluded.lease_expires_at,
+          state=excluded.state, detail=excluded.detail, group_id=excluded.group_id, creation_request=excluded.creation_request
+          WHERE workspace.state='released'`).run(randomUUID(), destination, root, input.kind, mode,
+          input.owner, repository, sourceCommit, strategy, JSON.stringify(input.cachePaths), now, now,
+          now + input.leaseSeconds * 1000, input.groupId, request);
+        const reserved = database.prepare("SELECT id, creation_request FROM workspace WHERE path=?").get(destination);
+        if (reserved.creation_request !== request) fail(`workspace creation was claimed by another request: ${destination}`);
+        database.prepare("INSERT OR REPLACE INTO workspace_capacity(workspace_id,device_id,plan_json) VALUES(?,?,?)")
+          .run(reserved.id, device, JSON.stringify(plan));
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
     });
     row = database.prepare("SELECT * FROM workspace WHERE path = ?").get(destination);
     if (row.creation_request !== request) fail(`workspace creation was claimed by another request: ${destination}`);
   }
   let sourceCommit = row.source_commit;
+  if (database.prepare("SELECT 1 FROM workspace_capacity WHERE workspace_id=?").get(row.id) === undefined) {
+    mkdirSync(root, { recursive: true });
+    if (intent !== null && sourceCommit === null) fail("budgeted pending creation has no immutable source custody");
+    const plan = intent === null
+      ? { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 }
+      : sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize);
+    const device = String(statSync(root).dev);
+    withResourceLock(statePath, `capacity:${device}`, () => {
+      plan.admission = assertCapacity(root, args, database, destination, plan);
+      database.prepare("INSERT INTO workspace_capacity(workspace_id,device_id,plan_json) VALUES(?,?,?)")
+        .run(row.id, device, JSON.stringify(plan));
+    });
+  }
   if (sourceCommit === null) {
     sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
     database.prepare("UPDATE workspace SET source_commit=?, updated_at=? WHERE id=?")
@@ -1786,12 +1960,15 @@ function createWorkspace(database, args, statePath) {
   }
   try {
     if (!existsSync(destination) || readdirSync(destination).length === 0) {
-      assertCapacity(root, args, database, destination);
+      const plan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(row.id);
+      assertCapacity(root, args, database, destination, plan === undefined ? undefined : JSON.parse(plan.plan_json));
       if (strategy === "worktree") {
         const worktreeArgs = ["--git-dir", mirror, "worktree", "add"];
         if (mode === "review") worktreeArgs.push("--detach", destination, sourceCommit);
         else worktreeArgs.push("-b", branch, destination, sourceCommit);
         run("git", worktreeArgs, { timeout: checkoutTimeout });
+      } else if (intent !== null) {
+        prepareSharedSourceClone(destination, repository, sourceCommit, input);
       } else {
         const sourceTag = cloneSourceTag(statePath, mirror, sourceCommit);
         run("git", ["clone", "--no-local", ...Object.entries(REFERENCE_CLONE_CONFIG)
@@ -1802,6 +1979,7 @@ function createWorkspace(database, args, statePath) {
           mirror, destination], { timeout: 40_000 });
       }
     }
+    if (intent !== null) prepareSharedSourceClone(destination, repository, sourceCommit, input);
     const info = gitInfo(destination);
     if (info.checkoutType !== strategy) fail("pending checkout type changed");
     if (strategy === "clone") {
@@ -1918,18 +2096,23 @@ function assertPendingClean(destination) {
   if (changes) fail(`pending checkout contains changes: ${changes.split("\n").slice(0, 8).join(" | ")}; preserve and repair them before resuming creation`);
 }
 
+function creationRecord(database, id) {
+  const plan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(id);
+  return { ...recordBy(database, { id }), ...(plan === undefined ? {} : { capacity: JSON.parse(plan.plan_json) }) };
+}
+
 function completeCreation(database, id, repository, leaseSeconds, detail, args) {
   const now = Date.now();
   database.prepare("UPDATE workspace SET repository=?, state='active', detail=?, updated_at=?, lease_expires_at=? WHERE id=? AND state='creating'")
     .run(repository, detail, now, now + leaseSeconds * 1000, id);
-  print(recordBy(database, { id }), bool(args, "json"));
+  print(creationRecord(database, id), bool(args, "json"));
 }
 
 function finalizeCreationCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "json"]);
   const record = recordBy(database, selectorFrom(args));
   if (record.state === "active") {
-    print(record, bool(args, "json"));
+    print(creationRecord(database, record.id), bool(args, "json"));
     return;
   }
   if (record.state !== "creating") fail(`workspace cannot finalize creation from state ${record.state}`);
@@ -2022,6 +2205,7 @@ function pruneReleased(database, now = Date.now()) {
     remove.run(row.id);
     pruned += 1;
   }
+  database.exec("DELETE FROM workspace_capacity WHERE NOT EXISTS (SELECT 1 FROM workspace WHERE workspace.id=workspace_capacity.workspace_id)");
   return pruned;
 }
 
@@ -2167,6 +2351,7 @@ function statusCommand(database, args) {
 function help() {
   process.stdout.write(`Usage:
   agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...] [--creation-timeout-seconds 300] [--sparse-pattern PATTERN ...]
+                         [--intent source-only|budgeted --headroom-gib N --growth-mib N]
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
   agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
   agent-workspace cancel-creation (--id ID|--path PATH)
@@ -2189,7 +2374,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;

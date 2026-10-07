@@ -43,6 +43,24 @@ Give related repositories the same `--group` value when one agent task spans the
 
 Re-registering an existing non-released path inspects its current Git layout and refreshes `checkoutType`: an owner may have replaced a clean linked worktree with an independent shared clone, or the reverse. Registration preserves the existing row identity, owner, source custody and lease; it does not bless new commits as published. Cache and group declarations still follow their normal rules. Pending creations remain pending and require their explicit resume or finalization transition.
 
+## Forecasted local-source allocations
+
+A source-only writer is not an unpriced dependency install. Use explicit intent and budgets when the immutable source is already in a local Git object store:
+
+```sh
+agent-workspace create --root ~/work/clones --name source-inspection \
+  --repo /absolute/current/repository --ref EXACT_COMMIT --mode writer \
+  --intent source-only --headroom-gib 20 --growth-mib 256 --json
+```
+
+Keep the normal sparse patterns if needed. `source-only` declares source inspection/edits, without dependency installation. `budgeted` declares additional work, including an own dependency install; for a measured 1.6 GiB install use, for example, `--intent budgeted --headroom-gib 20 --growth-mib 2048`. These are explicit caller budgets, not new host defaults. Choose operating headroom for the host and growth for the work. Recreate a released allocation with a larger budget before exceeding that intent; an active allocation's budget cannot silently change on retry.
+
+The tool forecasts an immutable **whole-tree upper bound**, including sparse exclusions, filesystem block rounding, CRLF expansion, index/directory overhead and Git metadata. It shares the existing local objects instead of copying history or fetching a new mirror. New remote imports, checkout filters/encoding transforms and explicit worktree strategy have unknown forecasts and are refused in this mode. The successful creation response carries the byte plan and source commit. A sparse pattern is not itself a claim of small size.
+
+Admission requires source construction + declared growth + operating headroom + outstanding reservations. A per-filesystem fence covers different roots, and reservation/creation rows commit together. Construction reservations persist across interruptions until completion/cancellation; completed trees are already priced in filesystem free space, while declared growth stays reserved until actual release. Lease expiry, retained dirty work and safety-blocked release do not spend that reservation twice. Growth is conservatively held even after some of it is consumed; this is admission accounting, not a filesystem quota. Existing pending creations without a price are explicitly unknown. An active creator's checkout fence blocks admission; an unowned dormant reservation is reported as `unpricedDormant` rather than inventing a size or charging nonexistent current writes. Its original resume acquires a price under the filesystem admission fence before source import or materialization can restart. Its source, files and pending state remain untouched while dormant. Unestimated ordinary clone/work remains under the existing 30 GiB guard (or its explicit caller override), held conservatively as a whole-work reservation until release; it does not acquire a small-source forecast by omitting intent. Source import also runs inside that filesystem admission fence and is checked again before reserving the destination.
+
+This ledger is native workspace state, `workspace_capacity` in the same registry. Its additive schema leaves existing source custody, leases and cleanup guards unchanged. No dependency installation, runtime activation or cache deletion occurs during admission.
+
 ## Finding out what became of a checkout
 
 Records outlive the directory. When a checkout is gone, the registry still holds why, so this is answerable rather than a matter of guesswork:
