@@ -560,11 +560,12 @@ const reconciledState = new ReconcilePublisher({ maxHistoryPerResource: 32 });
 // client's images calls this. The projection is rebuilt once per burst, and a
 // stream only hears about it when its own rows differ.
 const STATE_COALESCE_MS = 25;
-// Thread recovery can emit changes while startup awaits external services.
-let stateReady = false;
 let statePushTimer: ReturnType<typeof setTimeout> | null = null;
+let stateSyncPhase: "initializing" | "ready" = "initializing";
+let stateSyncPending = false;
 function signalSync() {
-  if (!stateReady || statePushTimer || shuttingDown) return;
+  if (stateSyncPhase === "initializing") { stateSyncPending = true; return; }
+  if (statePushTimer || shuttingDown) return;
   statePushTimer = setTimeout(() => {
     statePushTimer = null;
     refreshState();
@@ -2788,7 +2789,6 @@ process.on("uncaughtException", (cause) => {
 refreshPlanUsageIfDue();
 void refreshPeers();
 
-stateReady = true;
 signalSync();
 unwrap(await threads.start());
 watchList.start();
@@ -2867,3 +2867,5 @@ process.on("SIGTERM", () => void releaseSupervisor(0));
 process.on("SIGINT", () => void releaseSupervisor(0));
 process.on("SIGUSR2", () => void releaseSupervisor(75));
 process.on("SIGHUP", () => void releaseSupervisor(75));
+stateSyncPhase = "ready";
+if (stateSyncPending) signalSync();
