@@ -8,6 +8,7 @@ import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
+import { AgentMessage, agentMessageSender } from "./agent-message";
 import { useItemBody } from "./item-bodies";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
 import { appendLiveThinking, buildStableTranscript, type TranscriptItem } from "./transcript-model";
@@ -98,7 +99,8 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
   onReply(target: ReplyTarget): void;
 }) {
   const text = entry.text || "";
-  return <div data-transcript-seq={entry.seq}><ChatMessage
+  const senderThreadId = agentMessageSender(entry);
+  const message = <ChatMessage
     kind={entry.kind}
     label={entry.label || entry.kind}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
@@ -112,7 +114,10 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
     menu={entry.kind === "user" && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
-  /></div>;
+  />;
+  return <div data-transcript-seq={entry.seq}>{senderThreadId
+    ? <AgentMessage senderThreadId={senderThreadId}>{message}</AgentMessage>
+    : message}</div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
 function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {
