@@ -97,7 +97,7 @@ export function threadStatus(session: StatusSession): ThreadStatus {
 function dependencyStatus(session: StatusSession): ThreadStatus {
   const wait = session.waitingOnAgents;
   if (!wait) {
-    return { ...STATUS_REPORTING_ERROR, busy: false, title: "Awaiting thread has no typed dependency or observed active children." };
+    return { ...STATUS_REPORTING_ERROR, busy: false, title: "Awaiting thread has no typed dependency." };
   }
   if (!Object.hasOwn(wait, "kind")) return { ...STATUS_REPORTING_ERROR, label: "Wait type missing", short: "Wait type missing", busy: false, title: "The stored wait has no dependency type. Set an explicitly typed wait to repair it." };
   const status = (key: StatusKey, label: string): ThreadStatus => ({ key, label, short: label, busy: true, attention: false, since: wait.since, title: wait.reason });

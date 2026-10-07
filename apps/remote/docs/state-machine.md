@@ -19,7 +19,7 @@ The client's status line is composed from those facts and never from a status fi
 | Reads | From |
 | --- | --- |
 | `Thinking`, `Running bash`, `Running bash and web_search`, `Running 3 tools`, `Compacting context`, `Retrying`, `Working` | `state: running` plus the live activity and `activeTools` |
-| `Waiting on workers` | `state: idle` with running children |
+| `Waiting on agents` | Explicit `kind: agents` dependency, or observed live `thread_await`; never child activity alone |
 | `Idle`, with an unread dot until the person opens it | `state: idle` plus `idleUnread` |
 | `Stopped`, with the queue chip carrying what it holds | `held` |
 | `Archived` | `archivedAt` |
