@@ -45,7 +45,7 @@ const roots: string[] = [], services: ThreadService[] = [];
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "unified-agent-")); roots.push(root);
   const sessions = new Map<string, Native>();
-  const options = { databasePath: join(root, "threads.sqlite"), sessionsDir: root,
+  const options = { capacity: { mode: "unmanaged" } as const, databasePath: join(root, "threads.sqlite"), sessionsDir: root,
     openSession: async (input: PiSessionOptions, output: (event: PiEvent) => void) => { const session = new Native(input, output); sessions.set(input.threadId, session); return session; } };
   const service = new ThreadService(options); services.push(service);
   return { service, root, sessions, options };
@@ -196,6 +196,36 @@ it("accepted cross-owner reservations remain protected after controller replacem
   expect(await replacement.control({ action: "close", threadId: "b" })).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
   value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: [] }));
   value(await replacement.control({ action: "close", threadId: "b" }));
+});
+
+it("an unrelated unavailable owner cannot prevent local native settlement", async () => {
+  const f = fixture(), unavailable = fixture();
+  unavailable.service.list = async () => ({ ok: false, error: { code: "unavailable", message: "Peer offline" } });
+  const directory = new ThreadDirectory({ id: "local", api: f.service }, [{ id: "offline", api: unavailable.service }]);
+  f.service.setDirectory(directory);
+  value(await f.service.start());
+  value(await f.service.spawn({ requestId: "local", id: "local", cwd: f.root, message: "Local assignment" }));
+  await until(() => !!f.sessions.get("local")?.active);
+  f.sessions.get("local")!.settle("local completed");
+  await until(() => f.service.get("local")?.state === "idle");
+  expect(f.service.latestSettlement("local")).toMatchObject({ outcome: "complete", finalMessage: { role: "assistant" } });
+  expect(f.service.pending("local")).toEqual([]);
+});
+
+it("historical holds and resume inputs reopen without replaying their discarded queue", async () => {
+  const f = fixture();
+  for (const id of ["opened", "resumed"]) {
+    value(f.service.importThread({ id, title: "Historical title", cwd: f.root, sessionFile: join(f.root, `${id}.jsonl`), held: true,
+      settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" } }));
+    value(f.service.importMessage({ id: `pending:${id}`, threadId: id, text: "Do not replay", state: "queued" }));
+  }
+  value(await f.service.control({ action: "open", threadId: "opened" }));
+  value(await f.service.control({ action: "resume", threadId: "resumed" }));
+  for (const id of ["opened", "resumed"]) {
+    expect(f.service.get(id)).toMatchObject({ title: "Historical title", state: "idle", held: false, pendingMessages: 0 });
+    expect(f.service.get(id)?.agentName).toBeUndefined();
+  }
+  expect(f.sessions.size).toBe(0);
 });
 
 it("caller identity protects human placement and another agent's dependency ownership", async () => {

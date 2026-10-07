@@ -200,7 +200,8 @@ describe("delayed native input acknowledgements", () => {
       const before = service.pending(thread.id);
       session.emit({ type: "response", id: input.id, command: "prompt", success: true });
       await turn();
-      expect(service.get(thread.id)?.held).toBe(true);
+      expect(service.get(thread.id)?.held).toBe(false);
+      expect(service.get(thread.id)?.metadata?.archived).toBe(true);
       expect(service.pending(thread.id)).toEqual(before);
       expect(value(service.settlements(0)).items[0]?.outcome).toBe("cancelled");
       expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
@@ -546,7 +547,7 @@ it("reports queue, preparation, admission, runtime startup, model wait and cance
   await waitFor(() => service.get(thread.id)?.executionActivity?.activity === "cancelling");
   expect(service.get(thread.id)?.state).toBe("running");
   aborted.resolve();
-  expect(value(await stopping)).toMatchObject({ state: "idle", held: true });
+  expect(value(await stopping)).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
 });
 
 it("pins self-renames through the model tool across automatic results and controller restarts", async () => {
@@ -683,8 +684,8 @@ it("does not release held or archived inbox work when a root consent answer is r
   value(await service.answer({ threadId: "inbox", questionId, selectedSuggestionIds: [], text: "No" }));
   service.reconcile(); await turn(); await turn();
   expect(sessions).toHaveLength(0);
-  expect(service.get("inbox")).toMatchObject({ held: true, state: "idle", metadata: { archived: true } });
-  expect(service.pending("inbox").map(message => message.id)).toEqual(["held"]);
+  expect(service.get("inbox")).toMatchObject({ held: false, state: "idle", metadata: { archived: true } });
+  expect(service.pending("inbox").map(message => message.id)).toEqual([]);
 });
 
 it("rejects nonexistent built-in models before creating a thread or saving settings", async () => {
@@ -702,9 +703,10 @@ it("repairs only invalid undispatched model snapshots and retains their provenan
   const { service, directory } = fixture();
   const thread = value(await service.spawn({ requestId: "initial", cwd: directory, message: "bad model", settings: { model: "sol", thinkingLevel: "low", speed: "priority" } }));
   value(await service.send({ requestId: "valid", threadId: thread.id, text: "valid selection" }));
-  value(await service.control({ threadId: thread.id, action: "stop", descendants: false }));
   const db = new DatabaseSync(join(directory, "threads.sqlite"));
   try {
+    // A retained historical hold is not a new close request.
+    db.prepare("UPDATE thread SET held=1,state='idle' WHERE id=?").run(thread.id);
     db.prepare("UPDATE thread_work SET settings=json_set(settings,'$.model','openai-codex/missing-model') WHERE id='initial'").run();
     const pending = service.pending(thread.id);
     const repaired = value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
@@ -733,10 +735,10 @@ it.each([
   const attachSession = vi.fn(async () => null);
   const release = vi.fn();
   const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession, admit: async () => ({ ok: true, value: { release } }) }); services.push(service);
-  const parent = value(await service.spawn({ requestId: "parent", cwd: directory }));
-  value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
+  const parent = value(service.importThread({ id: "requester", title: "Requester", cwd: directory, sessionFile: join(directory, "requester.jsonl"), held: true,
+    settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
   value(service.importThread({ id: "child", parentId: parent.id, title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "private/removed-model", thinkingLevel: "high", speed: "standard" } }));
-  value(service.importMessage({ id: "assignment", threadId: "child", text: "first", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
+  value(service.importMessage({ id: "assignment", threadId: "child", senderId: parent.id, text: "first", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
   value(service.importMessage({ id: "later", threadId: "child", text: "second", state: "queued" }));
   attachSession.mockClear();
   await service.start();
@@ -841,7 +843,7 @@ it.each((["stop", "archive"] as const).flatMap(action => ["Runner capacity busy:
   const second = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(second);
   await second.start(); second.reconcile(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
-  expect(second.get(thread.id)).toMatchObject({ held: true, ...(action === "archive" ? { metadata: { archived: true } } : {}) });
+  expect(second.get(thread.id)).toMatchObject({ held: false, pendingMessages: 0, metadata: { archived: true } });
 });
 
 it("persists a bounded startup retry budget across owner restart", async () => {
@@ -885,9 +887,9 @@ it("stops even when the in-flight opening rejects", async () => {
   const stopped = service.control({ threadId: thread.id, action: "stop", descendants: false });
   await turn();
   rejectOpen(new Error("Pi cwd admission rejected thread.cwd: cwd_unavailable"));
-  expect(value(await stopped)).toMatchObject({ held: true, state: "idle" });
+  expect(value(await stopped)).toMatchObject({ held: false, state: "idle", metadata: { archived: true } });
   expect(attachSession).toHaveBeenCalledTimes(1);
-  expect(service.pending(thread.id)).toMatchObject([{ id: "assignment", state: "queued" }]);
+  expect(service.pending(thread.id)).toEqual([]);
   expect(service.latestSettlement(thread.id)).toBeNull();
 });
 
@@ -1324,7 +1326,7 @@ it("retains native failure causes in settlement receipts without treating cancel
     value(await f.service.control({ threadId: thread.id, action: "stop", descendants: false }));
     f.service.reconcile();
     await turn();
-    expect(f.service.get(thread.id)).toMatchObject({ state: "idle", held: true });
+    expect(f.service.get(thread.id)).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
     expect(f.service.pending(thread.id)).toEqual([]);
   }
 });
@@ -1458,14 +1460,14 @@ describe("await child settlements", () => {
     value(await f.service.detach());
   });
 
-  it("validates the whole group and child relationship before returning a stored result", async () => {
+  it("validates the whole accessible peer group before returning a stored result", async () => {
     const f = await children();
     f.session(f.a.id).settle("done");
     await waitFor(() => f.service.latestSettlement(f.a.id) !== null);
     const input = { parentId: f.parent.id, threadIds: [f.a.id] };
     for (const patch of [{ threadIds: [] }, { threadIds: [f.a.id, f.a.id] }, { threadIds: [f.parent.id] },
       { threadIds: Array.from({ length: 101 }, (_, i) => String(i)) }, { after: { [f.a.id]: -1 } },
-      { timeoutMs: 30_001 }, { parentId: "another-parent" }]) {
+      { timeoutMs: 30_001 }]) {
       expect(await f.service.await({ ...input, ...patch })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     }
     expect(await f.service.await({ ...input, threadIds: [f.a.id, "missing"] })).toMatchObject({ ok: false, error: { code: "not_found" } });
@@ -1473,8 +1475,8 @@ describe("await child settlements", () => {
   });
 });
 
-describe("leaf Orchestrator workers", () => {
-  it("routes children to fleet, rejects recursion in both owners, and retains creation receipts", async () => {
+describe("unified Orchestrator peers", () => {
+  it("routes launched peers to fleet, allows peer spawning, and retains creation receipts", async () => {
     const person = fixture(), fleet = fixture(undefined, true);
     const root = value(await person.service.spawn({ requestId: "root", cwd: person.directory }));
     const existingInput = { requestId: "existing-child", parentId: root.id, cwd: person.directory };
@@ -1486,26 +1488,26 @@ describe("leaf Orchestrator workers", () => {
     const input = { requestId: "fleet-child", parentId: root.id, cwd: person.directory, message: "Do bounded work" };
     const child = value(await directory.spawn(input));
     expect(person.service.get(child.id)).toBeNull();
-    expect(fleet.service.get(child.id)?.role).toBe("worker");
+    expect(fleet.service.get(child.id)?.role).toBe("agent");
     expect(value(await directory.spawn(input)).id).toBe(child.id);
     for (const parentId of [existing.id, child.id]) {
       for (const api of [directory, person.service, fleet.service]) {
         const result = await api.spawn({ requestId: `recursive-${parentId}`, parentId, cwd: person.directory });
-        expect(result).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+        expect(result).toMatchObject({ ok: true });
       }
     }
     const lane = value(await fleet.service.spawn({ requestId: "lane", cwd: fleet.directory }));
-    expect(lane.role).toBe("worker");
-    expect(await fleet.service.spawn({ requestId: "lane-child", parentId: lane.id, cwd: fleet.directory })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(lane.role).toBe("agent");
+    expect(await fleet.service.spawn({ requestId: "lane-child", parentId: lane.id, cwd: fleet.directory })).toMatchObject({ ok: true });
     value(await directory.control({ threadId: root.id, action: "stop", descendants: true }));
-    expect(person.service.get(existing.id)).toMatchObject({ state: "idle", held: true });
-    expect(fleet.service.get(child.id)).toMatchObject({ state: "idle", held: true });
+    expect(person.service.get(existing.id)).toMatchObject({ state: "idle", held: false });
+    expect(fleet.service.get(child.id)).toMatchObject({ state: "running", held: false });
     expect(fleet.service.pending(child.id)[0]?.state).toBe("queued");
     expect(await directory.spawn({ requestId: "stopped-child", parentId: root.id, cwd: person.directory })).toMatchObject({ ok: false, error: { code: "unavailable" } });
-    expect(fleet.service.snapshot()).toHaveLength(2);
+    expect(fleet.service.snapshot().length).toBeGreaterThanOrEqual(4);
   });
 
-  it("removes the spawn tool per session and relays completion to a cross-owner parent", async () => {
+  it("keeps the spawn tool for every peer and relays replies to a cross-owner assignment requester", async () => {
     const person = fixture(), fleet = fixture(undefined, true);
     const directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
     person.service.setDirectory(directory, () => fleet.service);
@@ -1515,11 +1517,11 @@ describe("leaf Orchestrator workers", () => {
     value(await person.service.start()); value(await fleet.service.start());
     await waitFor(() => person.sessions[0]?.isStreaming === true && fleet.sessions[0]?.isStreaming === true);
     expect(person.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("1");
-    expect(fleet.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("0");
+    expect(fleet.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("1");
     expect(fleet.sessions[0]!.options.env.PI_THREAD_DATABASE).toBe(join(fleet.directory, "threads.sqlite"));
     expect(person.sessions[0]!.options.env.PI_THREAD_DATABASE).toBe(join(person.directory, "threads.sqlite"));
     expect(threadTools(person.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(true);
-    expect(threadTools(fleet.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(false);
+    expect(threadTools(fleet.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(true);
     expect(person.sessions[0]!.commands.find(command => command.type === "prompt")?.message).toBe("Coordinate");
     const assignment = String(fleet.sessions[0]!.commands.find(command => command.type === "prompt")?.message);
     expect(assignment).toContain("<agent_message>");
@@ -1536,9 +1538,10 @@ describe("leaf Orchestrator workers", () => {
       expect(text).toMatch(/<\/agent_message>$/);
     }
     expect(JSON.parse(progress.split("\n")[2]!)).toMatchObject({ recipientThreadId: root.id, source: "explicit", messageId: "progress" });
-    expect(JSON.parse(completion.split("\n")[2]!)).toEqual({ senderThreadId: child.id });
+    expect(JSON.parse(completion.split("\n")[2]!)).toEqual({ senderThreadId: child.id, senderName: child.agentName });
     expect(JSON.parse(completion.split("\n")[4]!)).toEqual({ type: "thread_idle", title: child.title, outcome: "complete", finalText: "Worker result" });
-    expect(fleet.service.get(child.id)).toMatchObject({ state: "idle", held: true, metadata: { ephemeral: true, archived: true, archivedAt: expect.any(String) } });
+    await waitFor(() => fleet.service.get(child.id)?.metadata?.archived === true);
+    expect(fleet.service.get(child.id)).toMatchObject({ state: "idle", held: false, metadata: { ephemeral: true, archived: true, archivedAt: expect.any(String) } });
     expect(fleet.service.latestSettlement(child.id)?.finalMessage).toMatchObject({ content: [{ text: "Worker result" }] });
     expect(value(await directory.read({ threadId: child.id })).entries.length).toBeGreaterThanOrEqual(0);
     expect(await directory.send({ requestId: "late", threadId: child.id, senderId: root.id, text: "Follow up" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
@@ -1569,7 +1572,7 @@ describe("ThreadService", () => {
     expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
     [...sessions].reverse().find(session => session.options.threadId === child.id)!.settle("Finished artifact");
     await waitFor(() => service.get(child.id)?.metadata?.archived === true);
-    expect(service.get(child.id)).toMatchObject({ held: true, metadata: { ephemeral: true, archivedAt: expect.any(String) } });
+    expect(service.get(child.id)).toMatchObject({ held: false, metadata: { ephemeral: true, archivedAt: expect.any(String) } });
     expect(service.latestSettlement(child.id)?.finalMessage).toMatchObject({ content: [{ text: "Finished artifact" }] });
     const archivedAt = service.get(child.id)?.metadata?.archivedAt;
     service.reconcile();
@@ -1616,7 +1619,7 @@ describe("ThreadService", () => {
     expect(value(await service.control({ threadId: thread.id, action: "view" }))).toEqual(archived);
     value(await service.control({ threadId: thread.id, action: "update", archived: false }));
     clock.mockReturnValue(10_810_003);
-    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 7_210_003 })).metadata?.archived).toBe(false);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 7_210_003 })).metadata?.archived).not.toBe(true);
     expect(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: Date.now() + 1 })).toMatchObject({ ok: false });
   });
 
@@ -1651,7 +1654,7 @@ describe("ThreadService", () => {
     expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 3_640_000 })).metadata?.archived).toBe(true);
   });
 
-  it("persists idle views across owner restart and leaves unviewed workers on their existing clock", async () => {
+  it("persists idle views across owner restart and retains unviewed peers", async () => {
     const first = fixture(), workers = fixture(undefined, true);
     const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
     const thread = value(await first.service.spawn({ requestId: "durable-view", cwd: first.directory }));
@@ -1664,10 +1667,10 @@ describe("ThreadService", () => {
     expect(second.service.get(thread.id)).toEqual(viewed);
     clock.mockReturnValue(3_630_000);
     expect(value(await second.service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 30_000 })).metadata?.archived).toBe(true);
-    expect(value(await workers.service.control({ threadId: worker.id, action: "archiveInactive", inactiveBefore: 30_000 })).metadata?.archived).toBe(true);
+    expect(value(await workers.service.control({ threadId: worker.id, action: "archiveInactive", inactiveBefore: 30_000 })).metadata?.archived).not.toBe(true);
   });
 
-  it("protects recently viewed workers and their conversation without requiring views for worker cleanup", async () => {
+  it("uses each agent's own human view rather than its creator's view", async () => {
     const { service, directory } = fixture();
     const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
     const root = value(await service.spawn({ requestId: "root", cwd: directory }));
@@ -1675,12 +1678,12 @@ describe("ThreadService", () => {
     value(await service.control({ threadId: root.id, action: "view" }));
     clock.mockReturnValue(3_620_000);
     value(await service.control({ threadId: worker.id, action: "view" }));
-    for (const thread of [root, worker]) {
-      expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
-    }
+    expect(value(await service.control({ threadId: root.id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).toBe(true);
+    expect(value(await service.control({ threadId: worker.id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
     clock.mockReturnValue(7_240_000);
     expect(value(await service.control({ threadId: root.id, action: "archiveInactive", inactiveBefore: 3_640_000 })).metadata?.archived).toBe(true);
-    expect(service.get(worker.id)?.metadata?.archived).toBe(true);
+    expect(service.get(worker.id)?.metadata?.archived).not.toBe(true);
+    expect(value(await service.control({ threadId: worker.id, action: "archiveInactive", inactiveBefore: 3_640_000 })).metadata?.archived).toBe(true);
   });
 
   it("rejects invalid or pre-activity view timestamps retained in imported metadata", async () => {
@@ -1735,24 +1738,24 @@ describe("ThreadService", () => {
     const waking = value(await service.spawn({ requestId: "waking", cwd: directory }));
     value(await service.wakeSchedule({ requestId: "wake", threadId: waking.id, action: "set", reason: "Check", cadenceMs: 60_000 }));
     for (const thread of [pending, question, waiting, waking]) {
-      expect(service.get(thread.id)?.state).toBe("idle");
+      expect(service.get(thread.id)?.state).toBe(thread.id === waiting.id ? "waiting" : "idle");
       expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
     }
   });
 
-  it("does not archive pending work or a parent of pending work, even when held", async () => {
+  it("does not archive pending work or either explicit dependency endpoint", async () => {
     const { service, directory } = fixture();
     const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
     const parent = value(await service.spawn({ requestId: "parent-idle", cwd: directory }));
     const child = value(await service.spawn({ requestId: "child-held", parentId: parent.id, cwd: directory, message: "preserve this" }));
-    value(await service.control({ threadId: child.id, action: "stop", descendants: false }));
+    value(await service.control({ threadId: parent.id, action: "dependencies", threadIds: [child.id] }));
     value(await service.control({ threadId: parent.id, action: "view" }));
     clock.mockReturnValue(3_620_000);
     for (const id of [parent.id, child.id]) expect(value(await service.control({ threadId: id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
     expect(service.pending(child.id)).toHaveLength(1);
   });
 
-  it("archives a conversation's workers with it, across owners, and once only", async () => {
+  it("archives only the selected agent across owners and keeps launch provenance unchanged", async () => {
     const person = fixture(), fleet = fixture(undefined, true);
     const directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
     person.service.setDirectory(directory, (_parent, input) => input.requestId === "remote" ? fleet.service : undefined);
@@ -1763,26 +1766,26 @@ describe("ThreadService", () => {
     const remote = value(await directory.spawn({ requestId: "remote", parentId: root.id, cwd: person.directory }));
     expect(fleet.service.get(remote.id)).not.toBeNull();
     value(await directory.control({ threadId: root.id, action: "update", archived: true }));
-    for (const [service, id] of [[person.service, root.id], [person.service, local.id], [fleet.service, remote.id]] as const) {
-      expect(service.get(id)?.metadata).toMatchObject({ archived: true, archivedAt: expect.any(String) });
-    }
+    expect(person.service.get(root.id)?.metadata).toMatchObject({ archived: true, archivedAt: expect.any(String) });
+    expect(person.service.get(local.id)?.metadata?.archived).not.toBe(true);
+    expect(fleet.service.get(remote.id)?.metadata?.archived).not.toBe(true);
     const archivedAt = person.service.get(local.id)?.metadata?.archivedAt;
     await new Promise(resolve => setTimeout(resolve, 5));
     value(await directory.control({ threadId: root.id, action: "update", archived: true }));
     expect(person.service.get(local.id)?.metadata?.archivedAt).toBe(archivedAt);
     value(await directory.control({ threadId: root.id, action: "update", archived: false }));
-    expect(person.service.get(root.id)?.metadata?.archived).toBe(false);
-    expect(person.service.get(local.id)?.metadata?.archived).toBe(true);
+    expect(person.service.get(root.id)?.metadata?.archived).not.toBe(true);
+    expect(person.service.get(local.id)?.metadata?.archived).not.toBe(true);
     clock.mockReturnValue(3_700_000);
     const other = value(await person.service.spawn({ requestId: "other", cwd: person.directory }));
     const worker = value(await person.service.spawn({ requestId: "other-worker", parentId: other.id, cwd: person.directory }));
     value(await person.service.control({ threadId: other.id, action: "view" }));
     clock.mockReturnValue(7_400_000);
     expect(value(await person.service.control({ threadId: other.id, action: "archiveInactive", inactiveBefore: 7_300_000 })).metadata?.archived).toBe(true);
-    expect(person.service.get(worker.id)?.metadata?.archived).toBe(true);
+    expect(person.service.get(worker.id)?.metadata?.archived).not.toBe(true);
   });
 
-  it("restores an accidentally archived conversation and its running workers across owners and continues their turns", async () => {
+  it("reopens only the closed agent without replaying or controlling other running peers", async () => {
     const person = fixture(), fleet = fixture(undefined, true);
     const directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
     person.service.setDirectory(directory, (_parent, input) => input.requestId === "remote" ? fleet.service : undefined);
@@ -1798,53 +1801,47 @@ describe("ThreadService", () => {
 
     value(await directory.control({ threadId: root.id, action: "update", archived: true }));
     const owners = [[person.service, root.id], [person.service, local.id], [fleet.service, remote.id]] as const;
-    for (const [service, id] of owners) {
-      expect(service.get(id)).toMatchObject({ held: true, metadata: { archived: true, archiveInterruption: { executionId: expect.any(String) } } });
-    }
+    expect(person.service.get(root.id)).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
+    for (const [service, id] of owners.slice(1)) expect(service.get(id)).toMatchObject({ state: "running", held: false });
     expect(person.service.get(stopped.id)?.metadata?.archiveInterruption).toBeUndefined();
-    expect(await directory.send({ requestId: "blocked", threadId: local.id, senderId: root.id, text: "More" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect(await directory.send({ requestId: "peer-message", threadId: local.id, senderId: remote.id, text: "More" })).toMatchObject({ ok: true });
 
     value(await directory.control({ threadId: root.id, action: "restore", descendants: true, resume: true }));
-    const continued = (sessions: FakePiSession[], id: string) => sessions.some(session => session.options.threadId === id
-      && session.commands.some(command => String(command.message ?? "").includes("archived while it was working")));
-    await waitFor(() => owners.every(([service, id]) => continued(service === fleet.service ? fleet.sessions : person.sessions, id)));
-    for (const [service, id] of owners) {
-      expect(service.get(id)).toMatchObject({ held: false, state: "running" });
-      expect(service.get(id)?.metadata).toMatchObject({ archived: false });
-      expect(service.get(id)?.metadata?.archiveInterruption).toBeUndefined();
-    }
-    // The workers continue, so the conversation never hears they were cancelled.
-    expect(person.service.pending(root.id).filter(message => message.id.startsWith("thread-result:"))).toEqual([]);
-    expect(person.service.get(stopped.id)).toMatchObject({ held: true, metadata: { archived: false } });
-    expect(person.service.pending(stopped.id)).toHaveLength(1);
+    expect(person.service.get(root.id)).toMatchObject({ held: false, state: "idle", pendingMessages: 0 });
+    for (const [service, id] of owners.slice(1)) expect(service.get(id)).toMatchObject({ held: false, state: "running" });
+    for (const native of [...person.sessions, ...fleet.sessions]) expect(native.commands.some(command => String(command.message ?? "").includes("archived while it was working"))).toBe(false);
+    expect(person.service.get(stopped.id)).toMatchObject({ held: false, metadata: { archived: true } });
+    expect(person.service.pending(stopped.id)).toHaveLength(0);
   });
 
-  it("restores only on request, leaves deliberately stopped work alone, and lets thread_send restore a caller's own worker", async () => {
+  it("requires explicit reopen before any peer sends to a closed agent", async () => {
     const { service, directory } = fixture();
     const root = value(await service.spawn({ requestId: "root", cwd: directory }));
     const other = value(await service.spawn({ requestId: "other", cwd: directory }));
     const child = value(await service.spawn({ requestId: "child", parentId: root.id, cwd: directory, message: "queued work" }));
     value(await service.control({ threadId: root.id, action: "update", archived: true }));
-    expect(service.get(child.id)?.metadata).toMatchObject({ archived: true, archiveInterruption: { at: expect.any(String) } });
-    expect(await service.control({ threadId: root.id, action: "restore" } as never)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    value(await service.control({ threadId: child.id, action: "close" }));
     value(await service.control({ threadId: root.id, action: "restore", descendants: false }));
-    expect(service.get(root.id)?.metadata?.archived).toBe(false);
-    expect(service.get(child.id)).toMatchObject({ held: true, metadata: { archived: true } });
+    expect(service.get(root.id)?.metadata?.archived).not.toBe(true);
+    expect(service.get(child.id)).toMatchObject({ held: false, metadata: { archived: true } });
 
     const tool = (threadId: string) => threadTools({ threadId, cwd: directory, sessionFile: join(directory, `${threadId}.jsonl`), args: [], env: {}, threads: service }).find(item => item.name === "thread_send")!;
     const refused = await tool(other.id).execute("call-other", { threadId: child.id, text: "Not yours" }, undefined, undefined, undefined as never);
-    expect(refused.details).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("action \"restore\"") } });
+    expect(refused.details).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("Reopen") } });
     expect(service.get(child.id)?.metadata?.archived).toBe(true);
-    const sent = await tool(root.id).execute("call-root", { threadId: child.id, text: "Carry on" }, undefined, undefined, undefined as never);
+    expect((await tool(root.id).execute("call-root", { threadId: child.id, text: "Carry on" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: false });
+    value(await service.control({ threadId: child.id, action: "reopen" }));
+    const sent = await tool(root.id).execute("call-fresh", { threadId: child.id, text: "Fresh work" }, undefined, undefined, undefined as never);
     expect(sent.details).toMatchObject({ ok: true, value: { threadId: child.id, senderId: root.id } });
-    expect(service.get(child.id)).toMatchObject({ held: false, state: "running", metadata: { archived: false } });
+    expect(service.get(child.id)).toMatchObject({ held: false, state: "running", pendingMessages: 1 });
     expect(service.get(child.id)?.metadata?.archiveInterruption).toBeUndefined();
 
     // A deliberate stop after an archive is final: resume must not undo it.
     value(await service.control({ threadId: root.id, action: "update", archived: true }));
     value(await service.control({ threadId: child.id, action: "stop", descendants: false }));
     value(await service.control({ threadId: root.id, action: "restore", descendants: true, resume: true }));
-    expect(service.get(child.id)).toMatchObject({ held: true, metadata: { archived: false } });
+    expect(service.get(child.id)).toMatchObject({ held: false, metadata: { archived: true } });
   });
 
   it("rechecks activity after a stale sweep snapshot and never stops a running model", async () => {
@@ -1888,25 +1885,23 @@ describe("ThreadService", () => {
     await waitFor(() => [defaultChild.id, lunaChild.id].every(id => service.get(id)?.state === "idle"));
   });
 
-  it("persists a held queue across restart and reports an empty resume", async () => {
+  it("keeps discarded input receipts across restart without replay on legacy resume", async () => {
     const first = fixture();
     const thread = value(await first.service.spawn({ requestId: "thread", id: "thread", cwd: first.directory }));
-    value(await first.service.send({ requestId: "queued", threadId: thread.id, text: "durable input", delivery: "queue" }));
-    value(await first.service.control({ threadId: thread.id, action: "stop", descendants: false }));
-    expect(first.service.pending(thread.id)).toMatchObject([{ id: "queued", state: "queued" }]);
+    const input = { requestId: "queued", threadId: thread.id, text: "durable input", delivery: "queue" as const };
+    value(await first.service.send(input));
+    value(await first.service.control({ threadId: thread.id, action: "close" }));
+    expect(first.service.pending(thread.id)).toEqual([]);
     value(await first.service.close());
-
     const second = fixture(first.directory);
-    expect(second.service.pending(thread.id)).toMatchObject([{ id: "queued", text: "durable input", state: "queued" }]);
+    expect(value(await second.service.send(input))).toMatchObject({ state: "done", outcome: "cancelled" });
     value(await second.service.control({ threadId: thread.id, action: "resume" }));
-    await second.service.start();
-    await waitFor(() => second.sessions[0]?.commands.some(command => command.type === "prompt"));
-    await settle(second.sessions[0]!, second.service, thread.id);
-    const empty = await second.service.control({ threadId: thread.id, action: "resume" });
-    expect(empty).toMatchObject({ ok: false, error: { code: "no_pending_messages" } });
+    value(await second.service.start()); await turn();
+    expect(second.sessions).toHaveLength(0);
+    expect(second.service.get(thread.id)).toMatchObject({ state: "idle", held: false, pendingMessages: 0 });
   });
 
-  it("holds readable child completion across restart without changing native final-message storage", async () => {
+  it("retains readable replies to a closed requester without replay or native final-message mutation", async () => {
     const first = fixture();
     await first.service.start();
     const parent = value(await first.service.spawn({ requestId: "parent", id: "parent", cwd: first.directory }));
@@ -1916,11 +1911,14 @@ describe("ThreadService", () => {
     const finalMessage = signedFinalMessage();
     const nativeFinalMessage = structuredClone(finalMessage);
     first.sessions[0]!.settleMessage(finalMessage);
-    await waitFor(() => first.service.pending(parent.id).length === 1);
+    await waitFor(() => first.service.latestSettlement(child.id) !== null);
     const settlement = first.service.latestSettlement(child.id)!;
     expect(settlement.finalMessage).toEqual(nativeFinalMessage);
     expect(finalMessage).toEqual(nativeFinalMessage);
-    const notification = first.service.pending(parent.id)[0]!;
+    const receiptDb = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    const notification = receiptDb.prepare("SELECT id,text,status FROM thread_work WHERE thread_id=? AND sender_id=? AND source='notification'").get(parent.id, child.id) as { id: string; text: string; status: string };
+    receiptDb.close();
+    expect(notification.status).toBe("done");
     expectReadableCompletion(notification.text);
     expect(JSON.parse(notification.text)).toEqual({
       type: "thread_idle", title: child.title, outcome: "complete", finalText: "Readable child result",
@@ -1930,34 +1928,15 @@ describe("ThreadService", () => {
       const work = db.prepare("SELECT final_message FROM thread_work WHERE id=?").get("child-work") as { final_message: string };
       expect(JSON.parse(work.final_message)).toEqual(nativeFinalMessage);
     } finally { db.close(); }
-    expect(first.service.get(parent.id)).toMatchObject({ state: "idle", held: true });
-    expect(first.service.pending(parent.id)).toMatchObject([{ source: "notification", state: "queued", senderId: child.id }]);
+    expect(first.service.get(parent.id)).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
+    expect(first.service.pending(parent.id)).toEqual([]);
     value(await first.service.close());
-
     const reopened = fixture(first.directory);
-    await reopened.service.start();
-    expect(reopened.service.pending(parent.id)).toEqual([notification]);
+    value(await reopened.service.control({ action: "reopen", threadId: parent.id }));
+    value(await reopened.service.start()); await turn();
+    expect(reopened.service.pending(parent.id)).toEqual([]);
     expect(reopened.sessions).toHaveLength(0);
-    value(await reopened.service.close());
-
-    const second = fixture(first.directory);
-    expect(second.service.pending(parent.id)).toEqual([notification]);
-    value(await second.service.send({ requestId: "explicit", threadId: parent.id, text: "new instruction", delivery: "queue" }));
-    expect(second.service.get(parent.id)?.state).toBe("running");
-    expect(second.service.pending(parent.id).map(message => ({ id: message.id, source: message.source, text: message.text }))).toEqual([
-      { id: "explicit", source: "explicit", text: "new instruction" },
-      expect.objectContaining({ source: "notification" }),
-    ]);
-    expect(second.service.latestSettlement(child.id)?.finalMessage).toEqual(nativeFinalMessage);
-    value(await second.service.start());
-    await waitFor(() => second.sessions[0]?.commands.some(command => command.workId === "explicit") === true);
-    second.sessions[0]!.settle("instruction handled");
-    await waitFor(() => second.sessions.some(session => session.commands.some(command => command.workId === notification.id)));
-    const command = second.sessions.flatMap(session => session.commands).find(command => command.workId === notification.id)!;
-    const text = String(command.message);
-    expectReadableCompletion(text);
-    expect(JSON.parse(text.split("\n")[2]!)).toEqual({ senderThreadId: child.id });
-    expect(text).toContain(notification.text);
+    expect(reopened.service.latestSettlement(child.id)?.finalMessage).toEqual(nativeFinalMessage);
   });
 
   it("migrates collapsed thread, message, and execution state without disturbing active work", async () => {
@@ -2013,8 +1992,8 @@ describe("ThreadService", () => {
     expect(await second.service.list({ state: "interrupted" as never })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(second.sessions).toHaveLength(0);
     value(await second.service.control({ threadId: "active", action: "stop", descendants: false }));
-    expect(second.service.get("active")).toMatchObject({ state: "idle", held: true });
-    expect(second.service.pending("active")).toMatchObject([{ id: "held", state: "queued" }]);
+    expect(second.service.get("active")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
+    expect(second.service.pending("active")).toEqual([]);
     expect(second.sessions).toHaveLength(0);
   });
 
@@ -2028,11 +2007,11 @@ describe("ThreadService", () => {
     value(service.importThread({ id: "gone", title: "gone", cwd: "/reclaimed/checkout", sessionFile: "/missing/session.jsonl", metadata: { runnerReference: reference }, settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" } }));
     value(service.importMessage({ id: "accepted", threadId: "gone", text: "work", state: "dispatched" }));
     value(service.importMessage({ id: "next", threadId: "gone", text: "keep", state: "queued" }));
-    expect(value(await service.control({ threadId: "gone", action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(value(await service.control({ threadId: "gone", action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
     expect(attachSession).toHaveBeenCalledWith(reference, expect.any(Function), expect.any(Function));
     expect(openSession).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
     expect(service.latestSettlement("gone")?.outcome).toBe("cancelled");
-    expect(service.pending("gone")).toMatchObject([{ id: "next", state: "queued" }]);
+    expect(service.pending("gone")).toEqual([]);
   });
 
   it("uses active-branch native landing receipts during cold Stop after owner crash", async () => {
@@ -2063,17 +2042,17 @@ describe("ThreadService", () => {
       { id: "unlanded", state: "dispatched", insertedAt: 123, landedAt: null },
     ]);
 
-    expect(value(await service.control({ threadId: "crashed", action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(value(await service.control({ threadId: "crashed", action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
     expect(attachSession).toHaveBeenCalledWith(reference, expect.any(Function), expect.any(Function));
     expect(openSession).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
     expect(service.latestSettlement("crashed")?.outcome).toBe("cancelled");
-    expect(service.pending("crashed")).toMatchObject([{ id: "unlanded", state: "queued", landedAt: null }]);
+    expect(service.pending("crashed")).toEqual([]);
     const db = new DatabaseSync(join(directory, "threads.sqlite"));
     try {
       expect(db.prepare("SELECT id,status,outcome,landed_at FROM thread_work ORDER BY ordinal").all()).toEqual([
         { id: "active", status: "done", outcome: "cancelled", landed_at: expect.any(Number) },
         { id: "landed", status: "done", outcome: "cancelled", landed_at: expect.any(Number) },
-        { id: "unlanded", status: "queued", outcome: null, landed_at: null },
+        { id: "unlanded", status: "done", outcome: "cancelled", landed_at: null },
       ]);
     } finally { db.close(); }
   });
@@ -2095,12 +2074,15 @@ describe("ThreadService", () => {
     expect(service.pending(thread.id).find(message => message.id === "pending")?.state).toBe("queued");
     expect(native.closed).toBe(false);
     release();
-    expect(value(await first)).toMatchObject({ state: "idle", held: true });
-    expect(value(await second)).toMatchObject({ state: "idle", held: true });
+    expect(value(await first)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
+    expect(value(await second)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     expect(aborts).toBe(1);
     expect(native.closed).toBe(true);
-    value(await service.control({ threadId: thread.id, action: "resume" }));
-    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "pending") === true);
+    value(await service.control({ threadId: thread.id, action: "reopen" })); await turn();
+    expect(sessions).toHaveLength(1);
+    value(await service.send({ requestId: "fresh", threadId: thread.id, text: "Fresh work" }));
+    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "fresh") === true);
+    expect(sessions[1]!.commands.some(input => input.workId === "pending")).toBe(false);
     await settle(sessions[1]!, service, thread.id);
   });
 
@@ -2219,7 +2201,7 @@ describe("ThreadService", () => {
     } finally { db.close(); }
   });
 
-  it("holds accepted but unlanded steers across Stop and restart until resume", async () => {
+  it("discards accepted but unlanded steers on close without losing receipts or replaying after restart", async () => {
     let preparations = 0;
     const prepareMessage = vi.fn<NonNullable<ThreadServiceOptions["prepareMessage"]>>(async (_thread, message) => ({
       ok: true,
@@ -2245,12 +2227,21 @@ describe("ThreadService", () => {
       }
     }
     expect(first.service.live(thread.id)).toMatchObject({ activity: "thinking", activitySince: 10, isThinking: true });
-    expect(value(await first.service.control({ threadId: thread.id, action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: true });
+    expect(value(await first.service.control({ threadId: thread.id, action: "stop", descendants: false }))).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
     expect(first.service.get(thread.id)?.executionActivity?.activity).toBeUndefined();
     expect(native.closed).toBe(true);
     expect(native.commands.filter(command => command.type === "abort")).toHaveLength(1);
-    expect(first.service.pending(thread.id)).toMatchObject([{ id: "first", state: "queued", landedAt: null }, { id: "second", state: "queued", landedAt: null }]);
-    const held = first.service.pending(thread.id);
+    expect(first.service.pending(thread.id)).toEqual([]);
+    const receiptDb = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    try {
+      for (const id of accepted.keys()) {
+        const work = receiptDb.prepare("SELECT status,outcome,prepared,landed_at FROM thread_work WHERE id=?").get(id) as { status: string; outcome: string; prepared: string; landed_at: number | null };
+        expect(work).toMatchObject({ status: "done", outcome: "cancelled", landed_at: null });
+        const prepared = JSON.parse(work.prepared);
+        expect(accepted.get(id)!.message).toContain(prepared.text);
+        expect(prepared.images).toEqual(accepted.get(id)!.images);
+      }
+    } finally { receiptDb.close(); }
     first.service.reconcile(); await turn(); await turn();
     expect(first.sessions).toHaveLength(1);
     value(await first.service.close());
@@ -2258,25 +2249,12 @@ describe("ThreadService", () => {
     const restored = fixture(first.directory, false, prepareMessage);
     value(await restored.service.start());
     restored.service.reconcile(); await turn(); await turn();
-    expect(restored.service.get(thread.id)).toMatchObject({ state: "idle", held: true });
-    expect(restored.service.pending(thread.id)).toEqual(held);
+    expect(restored.service.get(thread.id)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     expect(restored.service.get(thread.id)?.executionActivity?.activity).toBeUndefined();
-    expect(restored.sessions).toHaveLength(0);
     value(await restored.service.control({ threadId: thread.id, action: "resume" }));
-    await waitFor(() => restored.sessions[0]?.commands.some(command => command.workId === "second") === true);
-    expect(restored.service.live(thread.id)).toMatchObject({ activity: "preparing", isThinking: false, tools: [] });
-    const replayed = restored.sessions[0]!.commands.filter(command => ["prompt", "steer"].includes(command.type));
-    expect(replayed.map(command => command.workId)).toEqual(["first", "second"]);
-    expect(replayed.map(command => command.type)).toEqual(["prompt", "steer"]);
-    for (const replay of replayed) {
-      const id = String(replay.workId);
-      expect(replay).toMatchObject({ workId: id, message: accepted.get(id)!.message, images: accepted.get(id)!.images });
-      expect(prepareMessage.mock.calls.filter(([, message]) => message.id === id)).toHaveLength(1);
-      restored.sessions[0]!.emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: String(replay.message) }] } });
-    }
-    await settle(restored.sessions[0]!, restored.service, thread.id);
-    expect(restored.service.pending(thread.id)).toEqual([]);
-    expect(restored.sessions).toHaveLength(1);
+    restored.service.reconcile(); await turn(); await turn();
+    expect(restored.sessions).toHaveLength(0);
+    for (const id of accepted.keys()) expect(prepareMessage.mock.calls.filter(([, message]) => message.id === id)).toHaveLength(1);
   });
 
   it("reconciles an unconfirmed halt instead of stranding its held queue", async () => {
@@ -2294,8 +2272,8 @@ describe("ThreadService", () => {
     expect(await service.control({ threadId: thread.id, action: "stop", descendants: false })).toMatchObject({ ok: false });
     expect(service.get(thread.id)).toMatchObject({ state: "running", metadata: { executionError: "Tool has not stopped" } });
     service.reconcile();
-    await waitFor(() => service.get(thread.id)?.state === "idle" && service.get(thread.id)?.held === true);
-    expect(service.pending(thread.id)).toMatchObject([{ id: "pending", state: "queued" }]);
+    await waitFor(() => service.get(thread.id)?.state === "idle" && service.get(thread.id)?.metadata?.archived === true);
+    expect(service.pending(thread.id)).toEqual([]);
     expect(service.get(thread.id)?.metadata?.executionError).toBeUndefined();
   });
 
@@ -2339,9 +2317,9 @@ describe("ThreadService", () => {
     await waitFor(() => !!native);
     const stopped = service.control({ threadId: thread.id, action: "stop", descendants: false });
     release();
-    expect(value(await stopped)).toMatchObject({ state: "idle", held: true });
+    expect(value(await stopped)).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
     expect(native!.commands.some(input => input.type === "prompt")).toBe(false);
-    expect(service.pending(thread.id)).toMatchObject([{ id: "pending", state: "queued" }]);
+    expect(service.pending(thread.id)).toEqual([]);
   });
 
   it("reads native history without activating a runtime", async () => {

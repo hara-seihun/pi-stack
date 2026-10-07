@@ -108,16 +108,16 @@ it("retains capacity through pending/failed native cancellation, releasing confi
     expect(f.daemon.threads.laneCustody().get("lane")).toBeUndefined();
     await f.daemon.fillCapacity();
     const next = (f.daemon.threads.db.prepare("SELECT id FROM thread WHERE id!=?").get(id) as { id: string }).id;
-    // A confirmed Stop preserves unstarted input but releases its producer slot.
+    // A confirmed close discards unstarted input and releases its producer slot.
     expect(await f.daemon.threads.control({ threadId: next, action: "stop", descendants: false })).toMatchObject({ ok: true });
-    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: true, pendingMessages: 1 });
+    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     await f.daemon.fillCapacity();
     expect(f.daemon.threads.laneCustody().get("lane")).toBe(1);
-    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: true, pendingMessages: 1 });
+    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     expect(f.daemon.threads.db.prepare("SELECT count(*) n FROM thread").get()).toEqual({ n: 3 });
     await f.restart();
     await f.daemon.fillCapacity();
-    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: true, pendingMessages: 1 });
+    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     expect(f.daemon.threads.laneCustody().get("lane")).toBe(1);
   } finally { await f.close(); }
 });
