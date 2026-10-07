@@ -239,7 +239,7 @@ function fixture(t, waitingHost, mode) {
   const events = () => readFileSync(join(root, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
   const world = () => JSON.parse(readFileSync(worldPath, "utf8"));
   const update = change => { const value = world(); change(value); writeFileSync(worldPath, JSON.stringify(value)); };
-  return { root, run, events, world, update, revision, newer, requestPath };
+  return { root, run, events, world, update, revision, newer, baseline, git, requestPath };
 }
 
 describe("publication owner host delivery", { concurrency: true }, () => {
@@ -301,6 +301,34 @@ test("owner accepts a newer already-selected host without installing the older r
   assert.equal(f.world().hosts.gmktec.selected, f.newer);
   assert.equal(f.world().hosts.gmktec.android, f.newer);
   assert.equal(existsSync(join(f.root, "gmktec.lock.publication")), false);
+});
+
+for (const divergentHost of hostIds) test(`divergent ancestry on ${divergentHost} stops only that host before artifacts or activation`, async t => {
+  const f = fixture(t, divergentHost, "ready");
+  const readyHost = hostIds.find(host => host !== divergentHost);
+  f.git("checkout", "-q", "--detach", f.baseline);
+  f.git("commit", "--allow-empty", "-qm", "divergent host source");
+  const divergent = f.git("rev-parse", "HEAD");
+  f.git("checkout", "-q", "--detach", f.revision);
+  f.update(value => { value.hosts[divergentHost].selected = divergent; });
+  const request = await f.run();
+  assert.equal(request.status, "failed");
+  assert.equal(request.hosts[divergentHost].status, "failed");
+  assert.match(request.hosts[divergentHost].failure.message, /integration omits selected or checkout source/);
+  const ancestry = JSON.parse(readFileSync(join(f.root, "proofs", id, `${divergentHost}-release-ancestry.json`), "utf8"));
+  assert.equal(ancestry.ok, false);
+  assert.deepEqual(ancestry.baselines.map(baseline => [baseline.kind, baseline.commit, baseline.included]),
+    [["live", divergent, false], ["checkout", divergent, false]]);
+  assert.equal(request.hosts[readyHost].status, "passed");
+  assert.equal(request.hosts[readyHost].android.web.revision, f.revision);
+  assert.equal(f.world().hosts[readyHost].selected, f.revision);
+  assert.equal(f.world().hosts[divergentHost].selected, divergent);
+  assert.ok(f.events().filter(event => event.host === divergentHost)
+    .every(event => ["reserve", "census", "release"].includes(event.action)));
+  for (const host of hostIds) {
+    assert.equal(request.reservations[host].state, "released");
+    assert.equal(existsSync(join(f.root, `${host}.lock.publication`)), false);
+  }
 });
 
 test("owner failure on the first host still commits the second host's matched release and releases custody", async t => {

@@ -2158,8 +2158,8 @@ function repairRun(requestId) {
     try {
       const workspace = JSON.parse(checked("agent-workspace", ["create", "--root", config.repairWorkspaceRoot,
         "--name", `publication-repair-${requestId}`, "--repo", checkout, "--ref", request.sourceSha,
-        "--owner", repair.id, "--mode", "writer", "--intent", "source-only", "--headroom-gib", "2", "--growth-mib", "512",
-        "--creation-timeout-seconds", "40", "--json"], { timeoutSeconds: 45 }));
+        "--owner", repair.id, "--mode", "writer", "--intent", "source-only", "--headroom-gib", "2",
+        "--growth-mib", "512", "--creation-timeout-seconds", "40", "--json"], { timeoutSeconds: 45 }));
       repair.workspace = workspace.path;
       writeRepair(repair);
       if (!commandResult("git", ["cat-file", "-e", `${request.sourceSha}^{commit}`], { cwd: repair.workspace }).ok) {
