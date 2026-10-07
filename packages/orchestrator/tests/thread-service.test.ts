@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -612,7 +612,7 @@ it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch an
   expect(history).toMatchObject([{ id: `question-answer:${questionId}`, source: "question-receipt", message: { role: "user", questionId, rootConsent: true } }]);
   if (choice === "dismiss") expect(JSON.stringify(history)).toContain("without selecting or authorizing any suggestion");
   expect(value(await service.read({ threadId: thread.id, entryId: `question-answer:${questionId}` })).entries).toEqual(history);
-  const context = value(await service.inspect(thread.id)).context!;
+  const context = value(await service.inspect(thread.id, { context: "full" })).context!;
   const messages = context.messages as Record<string, any>[];
   expect(messages).toHaveLength(1);
   expect(service.projectQuestionAnswers(thread.id, messages)).toEqual(messages);
@@ -650,7 +650,7 @@ it("does not project historical consent answers already owned by native message 
   expect(history[0]).toEqual(nativeEntry);
   expect(history[1]).toMatchObject({ id: `question-answer:${nextQuestion}`, source: "question-receipt" });
   expect(service.projectQuestionAnswers(thread.id, [nativeMessage])).toMatchObject([nativeMessage, { questionId: nextQuestion }]);
-  expect((value(await service.inspect(thread.id)).context!.messages as Record<string, unknown>[])).toHaveLength(2);
+  expect((value(await service.inspect(thread.id, { context: "full" })).context!.messages as Record<string, unknown>[])).toHaveLength(2);
   expect(value(await service.questionState(thread.id, oldQuestion))).toEqual(oldState);
   await service.close();
   const restored = fixture(directory);
@@ -675,7 +675,8 @@ it("keeps ordinary inbox conversation and async questions working without steeri
   await waitFor(() => inputs().length === 2);
   expect(inputs()[1]).toMatchObject({ workId: `question-answer:${ordinaryQuestion}`, message: expect.stringContaining("Continue.") });
   expect(service.pending(thread.id).map(message => message.id)).not.toContain(`question-answer:${rootQuestion}`);
-  expect(value(await service.inspect(thread.id)).context?.messages).toContainEqual(expect.objectContaining({ questionId: rootQuestion, rootConsent: true }));
+  writeFileSync(thread.sessionFile, "");
+  expect(value(await service.inspect(thread.id, { context: "full" })).context?.messages).toContainEqual(expect.objectContaining({ questionId: rootQuestion, rootConsent: true }));
   const read = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service }).find(tool => tool.name === "thread_read")!;
   const recalled = await read.execute("own-permission", { threadId: thread.id }, new AbortController().signal, () => {}, {} as never);
   expect(JSON.stringify(recalled)).toContain("Only the time.");
@@ -1582,7 +1583,8 @@ describe("unified Orchestrator peers", () => {
     await waitFor(() => fleet.service.get(child.id)?.metadata?.archived === true);
     expect(fleet.service.get(child.id)).toMatchObject({ state: "idle", held: false, metadata: { ephemeral: true, archived: true, archivedAt: expect.any(String) } });
     expect(fleet.service.latestSettlement(child.id)?.finalMessage).toMatchObject({ content: [{ text: "Worker result" }] });
-    expect(value(await directory.read({ threadId: child.id })).entries.length).toBeGreaterThanOrEqual(0);
+    writeFileSync(child.sessionFile, "");
+    expect(value(await directory.read({ threadId: child.id })).entries.length).toBe(0);
     expect(await directory.send({ requestId: "late", threadId: child.id, senderId: root.id, text: "Follow up" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
   });
 });
@@ -2542,6 +2544,305 @@ it("passes the immutable benchmark gateway policy to its runner without granting
 });
 
 describe("thread inspection", () => {
+  it("returns only intersecting native records, pairing earlier calls through directory HTTP", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "window", cwd: directory }));
+    const messages = [
+      { role: "user", content: "first", timestamp: 1 },
+      { role: "assistant", timestamp: 2, content: [{ type: "thinking", thinking: "reason" }, { type: "toolCall", id: "call", name: "Bash", arguments: { command: "true" } }, { type: "text", text: "checking" }] },
+      { role: "user", content: "interleaved", timestamp: 3 },
+      { role: "toolResult", toolCallId: "call", toolName: "Bash", content: [{ type: "text", text: "result" }], timestamp: 4 },
+      { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 5 },
+    ];
+    const entries = messages.map((message, index) => ({ type: "message", id: `m${index}`, parentId: index ? `m${index - 1}` : null, message }));
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const owner = new ThreadDirectory({ id: "owner", api: service });
+    const client = createThreadClient("http://owner/v1/threads", (async (url: RequestInfo | URL, init?: RequestInit) => (await threadHttp(owner, new Request(url, init)))!) as typeof fetch);
+    const tail = value(await client.inspect(thread.id, { contextWindow: { limit: 1 } }));
+    expect(tail.context).toBeUndefined();
+    expect(tail.contextWindow).toMatchObject({ total: 7, source: { kind: "native-jsonl", context: "native-history" }, records: [{ seq: 6, count: 1, entryId: "m4", message: messages[4], results: [] }] });
+    const tools = value(await client.inspect(thread.id, { contextWindow: { before: 4, limit: 1, generation: tail.contextWindow!.source.generation } })).contextWindow!;
+    expect(tools.records).toEqual([{ seq: 2, count: 3, entryId: "m1", message: messages[1], results: [messages[3]] }]);
+    expect(value(await client.inspect(thread.id, { contextWindow: { before: 1, limit: 1 } })).contextWindow!.records).toEqual([{ seq: 0, count: 1, entryId: "system", message: { role: "system", content: "" }, results: [] }]);
+    expect(value(await client.inspect(thread.id, { contextWindow: { before: 0, limit: 10 } })).contextWindow!.records).toEqual([]);
+    expect(await client.inspect(thread.id, { contextWindow: { limit: 1, generation: "wrong" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    const known = value(await client.inspect(thread.id, { contextWindow: { before: 1, limit: 1, toolCallIds: ["missing", "call"] } })).contextWindow!;
+    expect(known.knownToolCallIds).toEqual(["call"]);
+    expect(known.records.map(record => record.entryId)).toEqual(["system"]);
+  });
+  it("reads paired results only for tool-call items intersecting the requested window", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "many-tools", cwd: directory }));
+    const assistant = { role: "assistant", content: Array.from({ length: 100 }, (_, index) => ({ type: "toolCall", id: `call-${index}`, name: "Bash", arguments: { command: "true" } })) };
+    const entries = [{ type: "message", id: "assistant", parentId: null, message: assistant },
+      ...Array.from({ length: 100 }, (_, index) => ({ type: "message", id: `result-${index}`, parentId: index ? `result-${index - 1}` : "assistant", message: { role: "toolResult", toolCallId: `call-${index}`, content: [{ type: "text", text: "x".repeat(100 * 1024) }] } }))];
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const one = value(await service.inspect(thread.id, { contextWindow: { before: 51, limit: 1 } })).contextWindow!;
+    expect(one.total).toBe(101);
+    expect(one.records).toEqual([{ seq: 1, count: 100, entryId: "assistant", message: assistant, results: [entries[50]!.message] }]);
+    expect(await service.inspect(thread.id, { contextWindow: { limit: 100 } })).toMatchObject({ ok: false, error: { code: "oversized" } });
+  });
+  it("reuses body-free native layouts, pairing maps, and positions across warm reads", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "warm-layout", cwd: directory }));
+    const entries = Array.from({ length: 100 }, (_, index) => ({ type: "message", id: `m${index}`, parentId: index ? `m${index - 1}` : null, message: { role: "user", content: "body", timestamp: index + 1 } }));
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    value(await service.inspect(thread.id, { contextWindow: { limit: 1 } }));
+    value(await service.inspect(thread.id, { contextRecords: { limit: 1, includeEntries: true } }));
+    const layout = vi.spyOn(service as any, "nativeContextLayout").mockImplementation(() => { throw new Error("Warm layout rebuilt"); });
+    for (let index = 0; index < 3; index++) {
+      expect(value(await service.inspect(thread.id, { contextWindow: { before: 50, limit: 1 } })).contextWindow!.records[0]!.entryId).toBe("m48");
+      expect(value(await service.inspect(thread.id, { contextRecords: { before: 50, limit: 1, includeEntries: true } })).contextRecords!.records[0]!.entryId).toBe("m49");
+      expect(value(await service.read({ threadId: thread.id, offset: 99, limit: 1 })).entries[0]!.id).toBe("m99");
+    }
+    expect(layout).not.toHaveBeenCalled();
+    const cache = (service as any).nativeContexts;
+    expect(cache.size).toBe(1);
+    expect(cache.byteSize).toBeLessThan(64 * 1024 * 1024);
+    layout.mockRestore();
+    appendFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "m100", parentId: "m99", message: { role: "user", content: "appended" } }) + "\n");
+    expect(value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!.total).toBe(102);
+  });
+  it("omits native history without even opening a malformed source, including live projections", async () => {
+    const { service, directory, sessions } = fixture();
+    value(await service.start());
+    const thread = value(await service.spawn({ requestId: "omit", cwd: directory, message: "work" }));
+    await waitFor(() => sessions.length === 1);
+    sessions[0]!.emit({ type: "context_update", context: { systemPrompt: "secret full context", messages: [{ role: "user", content: "full" }], tools: [] } });
+    expect(value(await service.inspect(thread.id, { context: "full" })).context!.systemPrompt).toBe("secret full context");
+    expect(value(await service.inspect(thread.id)).context).toBeUndefined();
+    writeFileSync(thread.sessionFile, "broken\n");
+    const omitted = value(await service.inspect(thread.id, { context: "omit" }));
+    expect(omitted.context).toBeUndefined();
+    expect(omitted.contextWindow).toBeUndefined();
+    expect(omitted.thread.id).toBe(thread.id);
+    expect(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  });
+  it("opens a native tail under aggregate parse/stringify guards without transmitting live full context", async () => {
+    const { service, directory, sessions } = fixture();
+    value(await service.start());
+    const thread = value(await service.spawn({ requestId: "guarded", cwd: directory, message: "work" }));
+    await waitFor(() => sessions.length === 1);
+    const entries = Array.from({ length: 200 }, (_, index) => ({ type: "message", id: `m${index}`, parentId: index ? `m${index - 1}` : null, message: { role: "user", content: "x".repeat(100_000), timestamp: index + 1 } }));
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    sessions[0]!.emit({ type: "context_update", context: { systemPrompt: "full", tools: [], messages: [{ role: "user", content: "x".repeat(20_000_000) }] } });
+    const parse = JSON.parse;
+    const stringify = JSON.stringify;
+    vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      if (Buffer.byteLength(text) > 8 * 1024 * 1024) throw new Error("Unbounded parse");
+      return parse(text, reviver);
+    });
+    vi.spyOn(JSON, "stringify").mockImplementation(((input: unknown, replacer: any, space: any) => {
+      const text = stringify(input, replacer, space);
+      if (text && Buffer.byteLength(text) > 8 * 1024 * 1024) throw new Error("Unbounded stringify");
+      return text;
+    }) as typeof JSON.stringify);
+    const inspection = value(await service.inspect(thread.id, { contextWindow: { limit: 1 } }));
+    expect(inspection.context).toBeUndefined();
+    expect(inspection.contextWindow!.total).toBe(201);
+    expect(inspection.contextWindow!.records).toMatchObject([{ seq: 200, count: 1, entryId: "m199", message: entries[199]!.message }]);
+    const exported = value(await service.inspect(thread.id, { contextRecords: { after: -1, limit: 32 } }));
+    expect(exported.context).toBeUndefined();
+    expect(exported.contextWindow).toBeUndefined();
+    expect(exported.contextRecords!.total).toBe(200);
+    expect(exported.contextRecords!.records).toHaveLength(32);
+    expect(exported.contextRecords!.records[0]!.message).toEqual(entries[0]!.message);
+    expect(value(await service.inspect(thread.id)).context).toBeUndefined();
+    expect(await service.inspect(thread.id, { context: "full" })).toMatchObject({ ok: false, error: { code: "oversized" } });
+    const page = value(await service.read({ threadId: thread.id, offset: 199, limit: 1 }));
+    expect(page.entries).toMatchObject([{ id: "m199", message: entries[199]!.message }]);
+    expect(page.nextCursor).toBeUndefined();
+  });
+  it("projects synthetic question receipts before selecting a native source window", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "receipt-window", cwd: directory, metadata: { rootConsent: true } }));
+    writeFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "m0", parentId: null, message: { role: "user", content: "before", timestamp: 1 } }) + "\n");
+    const before = value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!;
+    const questionId = value(await service.ask({ requestId: "consent:window:question", threadId: thread.id, questions: [{ question: "Share?" }] })).questionIds[0]!;
+    value(await service.answer({ threadId: thread.id, questionId, selectedSuggestionIds: [], text: "No" }));
+    const after = value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!;
+    expect(after.total).toBe(3);
+    expect(after.records).toMatchObject([{ seq: 2, count: 1, entryId: `question-answer:${questionId}`, message: { rootConsent: true, questionId } }]);
+    expect(after.source.generation).toBe(before.source.generation);
+    expect(after.source.revision).not.toBe(before.source.revision);
+    expect(value(await service.inspect(thread.id, { contextWindow: { limit: 1, generation: before.source.generation } })).contextWindow!.records).toEqual(after.records);
+    const exported = value(await service.inspect(thread.id, { contextRecords: { after: -1, limit: 32 } })).contextRecords!;
+    expect(exported.total).toBe(2);
+    expect(exported.records.map(record => record.index)).toEqual([0, 1]);
+    expect(exported.records[1]!.message).toEqual(after.records[0]!.message);
+    expect(service.questionAnswerSource(thread.id)).toEqual([{ questionId, timestamp: after.records[0]!.message.timestamp, entryId: `question-answer:${questionId}` }]);
+    expect(value(service.questionAnswerSourceMessage(thread.id, `question-answer:${questionId}`))).toEqual(after.records[0]!.message);
+  });
+  it("does not load unselected synthetic question receipt bodies", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "receipt-metadata", cwd: directory, metadata: { rootConsent: true } }));
+    writeFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "m0", parentId: null, message: { role: "user", content: "before", timestamp: 1 } }) + "\n");
+    const questionId = value(await service.ask({ requestId: "consent:metadata:question", threadId: thread.id, questions: [{ question: "Share?" }] })).questionIds[0]!;
+    value(await service.answer({ threadId: thread.id, questionId, selectedSuggestionIds: [], text: "x".repeat(9 * 1024 * 1024) }));
+    appendFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "m1", parentId: "m0", message: { role: "user", content: "after", timestamp: Date.now() + 1000 } }) + "\n");
+    const parse = JSON.parse;
+    vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      if (Buffer.byteLength(text) > 8 * 1024 * 1024) throw new Error("Loaded an unselected receipt body");
+      return parse(text, reviver);
+    });
+    const tail = value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!;
+    expect(tail.total).toBe(4);
+    expect(tail.records).toMatchObject([{ entryId: "m1", message: { content: "after" } }]);
+    const raw = value(await service.inspect(thread.id, { contextRecords: { before: 3, limit: 1 } })).contextRecords!;
+    expect(raw.total).toBe(3);
+    expect(raw.records).toMatchObject([{ index: 2, entryId: "m1", message: { content: "after" } }]);
+    expect(service.questionAnswerSource(thread.id)).toMatchObject([{ questionId, entryId: `question-answer:${questionId}` }]);
+    expect(service.questionAnswerSourceMessage(thread.id, `question-answer:${questionId}`)).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(service.questionAnswerSourceMessage(thread.id, "m0")).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(await service.inspect(thread.id, { contextWindow: { before: 3, limit: 1 } })).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(await service.inspect(thread.id, { contextRecords: { after: 0, limit: 1 } })).toMatchObject({ ok: false, error: { code: "oversized" } });
+  });
+  it("persists native presentation generations across owner restart, body correction, append and branch replacement", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "persistent-native", cwd: directory }));
+    const root = { type: "message", id: "root", parentId: null, message: { role: "user", content: "before", timestamp: 1 } };
+    const assistant = { type: "message", id: "assistant", parentId: "root", message: { role: "assistant", timestamp: 2, content: [{ type: "toolCall", id: "call", name: "Bash", arguments: {} }] } };
+    writeFileSync(thread.sessionFile, [root, assistant].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const first = value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!;
+    await service.close();
+    const { service: restored } = fixture(directory);
+    const restarted = value(await restored.inspect(thread.id, { contextWindow: { limit: 1, generation: first.source.generation } })).contextWindow!;
+    expect(restarted.source.generation).toBe(first.source.generation);
+    expect(restarted.records).toEqual(first.records);
+    root.message.content = "corrected body";
+    writeFileSync(thread.sessionFile, [root, assistant].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const corrected = value(await restored.inspect(thread.id, { contextWindow: { limit: 1, generation: first.source.generation } })).contextWindow!;
+    expect(corrected.source.generation).toBe(first.source.generation);
+    expect(corrected.source.revision).not.toBe(first.source.revision);
+    const result = { type: "message", id: "result", parentId: "assistant", message: { role: "toolResult", toolCallId: "call", content: "complete", timestamp: 3 } };
+    appendFileSync(thread.sessionFile, JSON.stringify(result) + "\n");
+    const landed = value(await restored.inspect(thread.id, { contextWindow: { limit: 1, generation: first.source.generation } })).contextWindow!;
+    expect(landed.total).toBe(first.total);
+    expect(landed.records[0]!.results).toEqual([result.message]);
+    appendFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "next", parentId: "result", message: { role: "user", content: "next", timestamp: 4 } }) + "\n");
+    const extended = value(await restored.inspect(thread.id, { contextWindow: { limit: 1, generation: first.source.generation } })).contextWindow!;
+    expect(extended.total).toBe(first.total + 1);
+    expect(extended.source.generation).toBe(first.source.generation);
+    appendFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "branch", parentId: "root", message: { role: "user", content: "new branch", timestamp: 5 } }) + "\n");
+    expect(await restored.inspect(thread.id, { contextWindow: { limit: 1, generation: first.source.generation } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    const replacement = value(await restored.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!;
+    expect(replacement.source.generation).not.toBe(first.source.generation);
+    expect(replacement.records[0]!.entryId).toBe("branch");
+  });
+  it("pages exact raw native records, including standalone results, through directory HTTP", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "raw-pages", cwd: directory }));
+    const messages = [
+      { role: "user", timestamp: 1, content: "first" },
+      { role: "assistant", timestamp: 2, content: [{ type: "toolCall", id: "call", name: "Bash", arguments: {} }] },
+      { role: "toolResult", timestamp: 3, toolCallId: "call", toolName: "Bash", content: "result" },
+      { role: "user", timestamp: 4, content: "last" },
+    ];
+    const entries = messages.map((message, index) => ({ type: "message", id: `m${index}`, parentId: index ? `m${index - 1}` : null, message }));
+    entries.push({ type: "custom_message", id: "custom", parentId: "m3", customType: "notice", content: "custom words", details: { name: "source" } } as any);
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const owner = new ThreadDirectory({ id: "owner", api: service });
+    const client = createThreadClient("http://owner/v1/threads", (async (url: RequestInfo | URL, init?: RequestInit) => (await threadHttp(owner, new Request(url, init)))!) as typeof fetch);
+    const first = value(await client.inspect(thread.id, { contextRecords: { after: -1, limit: 2 } }));
+    expect(first.context).toBeUndefined();
+    expect(first.contextWindow).toBeUndefined();
+    expect(first.contextRecords).toMatchObject({ total: 5, records: [{ index: 0, entryId: "m0", message: messages[0] }, { index: 1, entryId: "m1", message: messages[1] }] });
+    const revision = first.contextRecords!.source.revision;
+    const second = value(await client.inspect(thread.id, { contextRecords: { after: 1, limit: 2, revision } })).contextRecords!;
+    expect(second.records).toEqual([{ index: 2, entryId: "m2", message: messages[2] }, { index: 3, entryId: "m3", message: messages[3] }]);
+    expect(second.source.revision).toBe(revision);
+    const tail = value(await client.inspect(thread.id, { contextRecords: { before: 5, limit: 2, revision } })).contextRecords!;
+    expect(tail.records).toEqual([{ index: 3, entryId: "m3", message: messages[3] }, { index: 4, entryId: "custom", message: { role: "custom", content: "custom words", customType: "notice", details: { name: "source" } } }]);
+    expect(value(await client.inspect(thread.id, { contextRecords: { before: 0, limit: 1, revision } })).contextRecords!.records).toEqual([]);
+    expect(value(await client.inspect(thread.id, { contextRecords: { after: 4, limit: 1, revision } })).contextRecords!.records).toEqual([]);
+    appendFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "appended", parentId: "custom", message: { role: "user", content: "new" } }) + "\n");
+    expect(await client.inspect(thread.id, { contextRecords: { after: 1, limit: 2, revision } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+  it("includes all native work entries as bounded room notices without changing canonical exports", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "room-native-work", cwd: directory }));
+    const root = { type: "message", id: "root", parentId: null, message: { role: "user", content: "root", timestamp: 1 } };
+    const change = { type: "model_change", id: "change", parentId: "root", modelId: "sol", timestamp: "1970-01-01T00:00:01.000Z" };
+    const input = { type: "thread_input", id: "input", parentId: "change", workId: "work", timestamp: "1970-01-01T00:00:02.000Z" };
+    const assistant = { type: "message", id: "assistant", parentId: "input", message: { role: "assistant", timestamp: 3, content: [{ type: "toolCall", id: "call", name: "Bash", arguments: {} }] } };
+    const result = { type: "message", id: "result", parentId: "assistant", message: { role: "toolResult", timestamp: 4, toolCallId: "call", content: "complete" } };
+    const settled = { type: "thread_settled", id: "settled", parentId: "result", workId: "work", outcome: "complete", timestamp: "1970-01-01T00:00:05.000Z" };
+    const discarded = { type: "message", id: "discarded", parentId: "root", message: { role: "user", content: "other branch" } };
+    writeFileSync(thread.sessionFile, [{ type: "session", id: thread.id, version: 3 }, root, change, discarded, input, assistant, result, settled].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const owner = new ThreadDirectory({ id: "owner", api: service });
+    const client = createThreadClient("http://owner/v1/threads", (async (url: RequestInfo | URL, init?: RequestInit) => (await threadHttp(owner, new Request(url, init)))!) as typeof fetch);
+    const canonical = value(await client.inspect(thread.id, { contextRecords: { limit: 32 } })).contextRecords!;
+    expect(canonical.total).toBe(3);
+    expect(canonical.records.map(record => record.entryId)).toEqual(["root", "assistant", "result"]);
+    const first = value(await client.inspect(thread.id, { contextRecords: { after: -1, limit: 2, includeEntries: true } })).contextRecords!;
+    expect(first.total).toBe(6);
+    expect(first.records).toEqual([{ index: 0, entryId: "root", message: root.message }, { index: 1, entryId: "change", message: { role: "notice", content: change, timestamp: 1000 } }]);
+    const second = value(await client.inspect(thread.id, { contextRecords: { after: 1, limit: 2, includeEntries: true, revision: first.source.revision } })).contextRecords!;
+    expect(second.records).toEqual([{ index: 2, entryId: "input", message: { role: "notice", content: input, timestamp: 2000 } }, { index: 3, entryId: "assistant", message: assistant.message }]);
+    const tail = value(await client.inspect(thread.id, { contextRecords: { before: 6, limit: 2, includeEntries: true, revision: first.source.revision } })).contextRecords!;
+    expect(tail.records).toEqual([{ index: 4, entryId: "result", message: result.message }, { index: 5, entryId: "settled", message: { role: "notice", content: settled, timestamp: 5000 } }]);
+    expect(await client.inspect(thread.id, { contextRecords: { limit: 2, includeEntries: true, revision: canonical.source.revision } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+  it("reads only selected model-history records and strips thinking/signatures", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "bounded-read", cwd: directory }));
+    const entries = [
+      { type: "message", id: "m0", parentId: null, message: { role: "user", content: "unselected native words" } },
+      { type: "message", id: "m1", parentId: "m0", message: { role: "assistant", content: [{ type: "thinking", thinking: "private", thinkingSignature: "signature" }, { type: "text", text: "visible", textSignature: "signature", encrypted_content: "secret" }] } },
+    ];
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    value(await service.inspect(thread.id, { contextWindow: { before: 0, limit: 1 } }));
+    const parse = JSON.parse;
+    vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      if (text.includes("unselected native words")) throw new Error("Read an unselected message");
+      return parse(text, reviver);
+    });
+    const page = value(await service.read({ threadId: thread.id, entryId: "m1" }));
+    expect(page.entries).toEqual([{ ...entries[1], message: { role: "assistant", content: [{ type: "text", text: "visible" }] } }]);
+  });
+  it("recovers landing receipts without reading ordinary history bodies", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "bounded-recovery", cwd: directory }));
+    value(service.importMessage({ id: "work", threadId: thread.id, text: "input", state: "dispatched", insertedAt: 1 }));
+    const entries = [
+      { type: "message", id: "m0", parentId: null, message: { role: "user", content: "ORDINARY_BODY".repeat(10_000) } },
+      { type: "custom", id: "input", parentId: "m0", customType: "thread_input", data: { workId: "work", message: "input", receiptVersion: 1 } },
+      { type: "message", id: "assistant", parentId: "input", message: { role: "assistant", content: [{ type: "text", text: "ORDINARY_BODY".repeat(10_000) }] } },
+      { type: "custom", id: "landed", parentId: "assistant", customType: "thread_landed", data: { workId: "work" } },
+      { type: "custom", id: "other", parentId: "landed", customType: "unrelated", data: { content: "ORDINARY_BODY".repeat(10_000) } },
+    ];
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    value(await service.inspect(thread.id, { contextWindow: { before: 0, limit: 1 } }));
+    const parse = JSON.parse;
+    vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      if (text.includes("ORDINARY_BODY")) throw new Error("Read an ordinary body during receipt recovery");
+      return parse(text, reviver);
+    });
+    const recovered = value((service as any).nativeInputReceipts(thread)) as { landedWorkIds: string[] };
+    expect(recovered.landedWorkIds).toEqual(["work"]);
+    expect(value(await service.inspect(thread.id)).context).toBeUndefined();
+  });
+  it("rejects invalid inspection options before fetching a context", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "validation", cwd: directory }));
+    const client = createThreadClient("http://owner/v1/threads", (async (url: RequestInfo | URL, init?: RequestInit) => (await threadHttp(service, new Request(url, init)))!) as typeof fetch);
+    for (const options of [{ contextWindow: { limit: 0 } }, { contextWindow: { limit: 1001 } }, { contextWindow: { limit: 1, before: -1 } }, { contextWindow: { limit: 1, generation: "" } }, { contextWindow: { limit: 1 }, context: "omit" }, { contextRevision: -1 }, { context: "unknown" }, { contextRecords: { limit: 0 } }, { contextRecords: { limit: 33 } }, { contextRecords: { limit: 1, after: -2 } }, { contextRecords: { limit: 1, before: -1 } }, { contextRecords: { limit: 1, after: 0, before: 2 } }, { contextRecords: { limit: 1, revision: "" } }, { contextRecords: { limit: 1, includeEntries: "true" } }, { contextRecords: { limit: 1 }, contextWindow: { limit: 1 } }, { contextWindow: { limit: 1, toolCallIds: [""] } }, { contextWindow: { limit: 1, toolCallIds: ["call", "call"] } }, { contextWindow: { limit: 1, toolCallIds: Array.from({ length: 65 }, (_, index) => `call${index}`) } }]) {
+      expect(await client.inspect(thread.id, options as any)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    }
+  });
+  it("rejects aggregate source window and raw-record transport above 8 MiB", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "oversized-window", cwd: directory }));
+    const entries = Array.from({ length: 2 }, (_, index) => ({ type: "message", id: `m${index}`, parentId: index ? `m${index - 1}` : null, message: { role: "user", content: "x".repeat(5 * 1024 * 1024), timestamp: index + 1 } }));
+    writeFileSync(thread.sessionFile, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    expect(await service.inspect(thread.id, { contextWindow: { limit: 2 } })).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!.records).toHaveLength(1);
+    expect(await service.inspect(thread.id, { contextRecords: { limit: 2 } })).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(value(await service.inspect(thread.id, { contextRecords: { limit: 1 } })).contextRecords!.records).toHaveLength(1);
+    expect(await service.inspect(thread.id, { context: "full" })).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(await service.read({ threadId: thread.id, limit: 2 })).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(value(await service.read({ threadId: thread.id, limit: 1 })).entries).toHaveLength(1);
+  });
   it("omits an idle thread's context when the caller already holds its revision, through a directory over HTTP", async () => {
     const { service, directory } = fixture();
     const thread = value(await service.spawn({ requestId: "inspected", cwd: directory }));
@@ -2551,12 +2852,13 @@ describe("thread inspection", () => {
     ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
     const owner = new ThreadDirectory({ id: "owner", api: service });
     const client = createThreadClient("http://owner/v1/threads", (async (url: RequestInfo | URL, init?: RequestInit) => (await threadHttp(owner, new Request(url, init)))!) as typeof fetch);
-    const full = value(await client.inspect(thread.id));
+    expect(value(await client.inspect(thread.id)).context).toBeUndefined();
+    const full = value(await client.inspect(thread.id, { context: "full" }));
     expect(full.context).toMatchObject({ source: "native-history", messages: [{ role: "user", content: "hello" }] });
-    const held = value(await client.inspect(thread.id, { contextRevision: full.thread.revision }));
+    const held = value(await client.inspect(thread.id, { context: "full", contextRevision: full.thread.revision }));
     expect(held.context).toBeUndefined();
     expect(held.thread.revision).toBe(full.thread.revision);
     expect(held.pending).toEqual(full.pending);
-    expect(value(await client.inspect(thread.id, { contextRevision: full.thread.revision - 1 })).context).toMatchObject({ source: "native-history" });
+    expect(value(await client.inspect(thread.id, { context: "full", contextRevision: full.thread.revision - 1 })).context).toMatchObject({ source: "native-history" });
   });
 });

@@ -34,9 +34,10 @@ function delivery(entry: ContextEntry): OutgoingDelivery {
 }
 
 /** Null for every other step, and for a call whose words did not reach the head (it stays a tool step). */
-export function outgoingAgentMessage(entry: ContextEntry): OutgoingAgentMessage | null {
+export function outgoingAgentMessage(entry: ContextEntry, body?: TranscriptItemBody): OutgoingAgentMessage | null {
   if (entry.kind !== "toolCall") return null;
-  const args = entry.toolCall?.arguments ?? {};
+  const args = body?.kind === "toolCall" ? body.arguments : entry.toolCall?.arguments ?? {};
+  if (!args || typeof args !== "object") return null;
   const tool = toolName(entry.toolCall?.name);
   if (tool === "thread_send")
     return typeof args.threadId === "string" && args.threadId && typeof args.text === "string"
@@ -45,6 +46,14 @@ export function outgoingAgentMessage(entry: ContextEntry): OutgoingAgentMessage 
     return typeof args.message === "string"
       ? { tool: "spawn", title: typeof args.title === "string" && args.title ? args.title : null, text: args.message, delivery: delivery(entry) } : null;
   return null;
+}
+
+export async function copyOutgoingMessage(entry: ContextEntry, load: () => Promise<TranscriptItemBody | undefined>): Promise<string> {
+  const body = entry.argumentsTruncated ? await load() : undefined;
+  if (entry.argumentsTruncated && body?.kind !== "toolCall") throw new Error("The complete outgoing message could not be loaded");
+  const message = outgoingAgentMessage(entry, body);
+  if (!message) throw new Error("The complete outgoing message is invalid");
+  return message.text;
 }
 
 /** The thread a successful spawn created, read from its complete result. */

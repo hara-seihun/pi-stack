@@ -114,7 +114,16 @@ bounded revision patches rather than resending the whole unchanged history. Hidd
 this stream, cancel snapshot reads/retries, and resume from their cursor. These are narrow room
 requests, not another person's event stream; intentional Meet/voice resources are unaffected. Member additions and sends serialize per room at the router. Turning the flag off preserves
 the directory, outbox and native histories. Snapshot history comes from the native branch, including
-pre-compaction messages, not only the current model context.
+pre-compaction messages, not only the current model context. Opening a room reads the newest
+32 native visible records through the indexed source, never the entire history or captured context.
+`paging` supplies the exact source revision, total, start/end indexes (end exclusive), `hasOlder`
+and `nextBefore`. Older page replaces the displayed window; Latest page restores the tail. A selected
+older page stays visible when new work arrives, but further paging requires returning to the latest
+revision. Revision conflicts return 409 instead of stitching different branches. Chat, thinking,
+tool results and notices retain native identities; input receipts are transparent work, while
+materialized user records are chat, including when those records fall on separate pages.
+The inspector identifies the selected page's scope and source revision; it does not serialize a
+full captured context.
 
 Closing a room is a per-person inbox choice, not a stop, archive, membership removal or change of
 custody. The directory retains both open and closed rooms so the picker can reopen them. `current`
@@ -137,7 +146,8 @@ The installed `pi-room` CLI lets a person's own threads list/read their rooms an
 ```
 pi-room list
 pi-room read ROOM_ID --last 5
-pi-room read ROOM_ID --last 0 --work  # all conversation plus transparent work/context
+pi-room read ROOM_ID --last 0 --work  # all chat and transparent work in this <=32-record page
+pi-room read ROOM_ID --before INDEX --revision REVISION --limit 32 --work
 pi-room send ROOM_ID 'Message' --request-id UUID
 pi-room create 'Own test room'      # only the caller, never invites anyone else
 ```
@@ -153,6 +163,10 @@ Missing UID evidence fails closed. This does not grant root a person-impersonati
 These requests reuse the same directory, membership checks and trusted room-owner
 transport as member clients; the internal listener and filesystem permissions are unchanged.
 Responses include the authenticated `person`. Nonmembers cannot enumerate, read or post.
+Reads expose one bounded page plus `paging`; use its `nextBefore` and `revision` to request earlier
+records. `--last` selects chat messages within that page, not the entire source; output reports
+`historyScope: "page"`, `pageMessages` and `shownMessages`. `--last 0` means every chat message in
+the page, not an unbounded download. `--work` includes that page's thinking, tools and notices.
 Agent-created rooms are own-only; inviting other people stays with the human UI.
 Other room controls and remote-environment proxy paths are not agent endpoints.
 `PI_ROOM_URL` selects only a loopback HTTP router origin (default port 8788).
@@ -190,7 +204,13 @@ The member-client public routes require this host's authenticated router session
   body owner holds at most one 32 MiB resource. Plain GETs retain the ordinary CLI/agent response.
 - `POST /v1/rooms` with `{ requestId: UUID, title, members: [user] }` → `{ room }`. Creator is
   included automatically; the receipt is the stable room/thread ID, including on retries.
-- `GET /v1/rooms/:id` → `{ room, state, held, error?, messages, live, questions, work, thinking, context, notificationId }`.
+- `GET /v1/rooms/:id?before=INDEX&limit=N&revision=REVISION` →
+  `{ room, state, held, error?, messages, paging, live, questions, work, thinking, notificationId }`.
+  Without `before`, reads the latest page. `limit` is 1..32 (initial size 32); `before` is an exclusive
+  nonnegative native-record index, and `revision` fences the native source. `paging` is
+  `{ revision, total, start, end, hasOlder, nextBefore }`. Old pages do not change notification
+  reconciliation or the room's latest snapshot revision. Both member and agent routes forward the
+  page query unchanged after validation.
 - `POST /v1/rooms/:id/members` with `{ members: [user] }` adds people only while idle.
 - `POST /v1/rooms/:id/prompt` with `{ requestId: UUID, text }` queues an authenticated utterance.
 - `POST /v1/rooms/:id/questions/:questionId/answer` with the standard
@@ -206,7 +226,7 @@ The member-client public routes require this host's authenticated router session
 
 Nonmembership and missing rooms both return 404 at the router. Unknown people or malformed inputs
 return 400. Adding while running or a conflicting creation receipt returns 409. Rooms currently
-render text and full work/context; attachment/inline-file/image delivery and member removal remain
+render text and page-scoped work with explicit earlier-history navigation; attachment/inline-file/image delivery and member removal remain
 outside this slice. Root may still act on files and describe the result.
 
 Focused checks run without live services, registries, keys or mounts:

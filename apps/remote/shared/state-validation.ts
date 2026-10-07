@@ -77,6 +77,8 @@ export function validateSession(value: unknown): asserts value is Session {
 export function validateTranscriptHead(value: unknown): void {
   const head = stateObject(value, "Transcript head");
   requireState(head.kind, TRANSCRIPT_KINDS, "Transcript kind");
+  if (head.textTruncated !== undefined && (head.textTruncated !== true || !["user", "assistant", "notice"].includes(String(head.kind))))
+    throw new Error("Transcript text preview: invalid marker");
 }
 export function validateMessagingMessage(value: unknown): void {
   const message = stateObject(value, "Messaging message");

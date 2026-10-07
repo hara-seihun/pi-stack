@@ -33,7 +33,7 @@ export function entryFromHead(head: TranscriptItemHead, bodyLoaded = false): Con
     : "";
   const base = {
     key: `${head.kind}:${head.seq}`,
-    signature: `${head.id}${bodyLoaded ? ":body" : ""}${metricsSignature}${head.kind === "user" || head.kind === "assistant" ? `${head.label ?? ""}:${JSON.stringify(head.agentSender ?? null)}:${head.identity?.id ?? ""}:${JSON.stringify(head.reactions ?? [])}:${JSON.stringify(head.reply ?? null)}` : ""}`,
+    signature: `${head.id}${bodyLoaded ? ":body" : ""}${"textTruncated" in head && head.textTruncated ? ":preview" : ""}${metricsSignature}${head.kind === "user" || head.kind === "assistant" ? `${head.label ?? ""}:${JSON.stringify(head.agentSender ?? null)}:${head.identity?.id ?? ""}:${JSON.stringify(head.reactions ?? [])}:${JSON.stringify(head.reply ?? null)}` : ""}`,
     kind: head.kind,
     label: entryLabel(head),
     itemId: head.id,
@@ -54,9 +54,9 @@ export function entryFromHead(head: TranscriptItemHead, bodyLoaded = false): Con
   switch (head.kind) {
     case "user":
     case "assistant":
-      return presentAgentMessage({ ...base, text: head.text, agentSender: head.agentSender, messageTimestamp: head.timestamp, identity: head.identity, reactions: head.reactions, reply: head.reply });
+      return presentAgentMessage({ ...base, text: head.text, textTruncated: head.textTruncated, agentSender: head.agentSender, messageTimestamp: head.timestamp, identity: head.identity, reactions: head.reactions, reply: head.reply });
     case "notice":
-      return { ...base, text: head.text, messageTimestamp: head.timestamp };
+      return { ...base, text: head.text, textTruncated: head.textTruncated, messageTimestamp: head.timestamp };
     case "system": case "tool": case "thinking":
       return { ...base, preview: head.preview, messageTimestamp: head.timestamp };
   }

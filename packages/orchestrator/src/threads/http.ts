@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Result, ThreadApi } from "./contracts.js";
+import { validateInspectOptions, type Result, type ThreadApi } from "./contracts.js";
 import { THREAD_TOKEN_HEADER, type AdmissionResult } from "./caller.js";
 
 type ThreadRequestContext = { lifetime: "active" | "finished"; deadline: number; signal: AbortSignal };
@@ -35,6 +35,8 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
   }
   try {
     const fields = input as Record<string, any>;
+    const inspection = operation === "inspect" ? validateInspectOptions(Object.fromEntries(Object.entries(fields).filter(([key]) => key !== "threadId"))) : undefined;
+    if (inspection && !inspection.ok) return Response.json(inspection, { status: 400 });
     const declaredDeadline = Number(request.headers.get(deadlineHeader));
     const deadline = Math.min(Date.now() + requestTimeout, declaredDeadline > 0 ? Math.floor(declaredDeadline) : Infinity);
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(Math.max(0, deadline - Date.now()))]);
@@ -46,7 +48,7 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
         : operation === "settlements" ? api.settlements(fields.after, fields.limit)
         : operation === "questionEvents" ? api.questionEvents(fields.after, fields.limit)
         : operation === "attentionEvents" ? api.attentionEvents(fields.after, fields.limit)
-        : operation === "inspect" ? api.inspect(fields.threadId, Number.isSafeInteger(fields.contextRevision) ? { contextRevision: fields.contextRevision } : undefined)
+        : operation === "inspect" ? api.inspect(fields.threadId, inspection?.ok ? inspection.value : undefined)
         : operation === "questions" ? api.questions(fields.threadId)
         : operation === "questionState" ? api.questionState(fields.threadId, fields.questionId)
         : operation === "command" ? api.command(fields.threadId, fields.command)
@@ -123,7 +125,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     questionState: (threadId, questionId) => call("questionState", { threadId, questionId }),
     spawn: input => call("spawn", input), send: input => call("send", input), list: input => call("list", input),
     read: input => call("read", input), control: input => call("control", input),
-    inspect: (threadId, inspection) => call("inspect", { threadId, ...(inspection?.contextRevision === undefined ? {} : { contextRevision: inspection.contextRevision }) }), command: (threadId, command) => call("command", { threadId, command }),
+    inspect: (threadId, inspection) => call("inspect", { threadId, ...inspection }), command: (threadId, command) => call("command", { threadId, command }),
     settlements: (after, limit) => call("settlements", { after, limit }),
     questionEvents: (after, limit) => call("questionEvents", { after, limit }),
     await: (input, signal) => call("await", input, signal),

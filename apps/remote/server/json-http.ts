@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 
+const streams = new WeakSet<Response>();
+
+/** Register JSON whose owner supplies its ETag and incremental body. */
+export function streamedJson(response: Response): Response { streams.add(response); return response; }
+
 function accepts(header: string, encoding: string): boolean {
   return header.split(",").some(part => {
     const [name, ...parameters] = part.trim().split(";");
@@ -12,6 +17,13 @@ function accepts(header: string, encoding: string): boolean {
 export async function jsonHttp(req: Request, response: Response | undefined): Promise<Response | undefined> {
   if (!response || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "") || response.headers.has("content-encoding")) return response;
   const headers = new Headers(response.headers);
+  if (streams.has(response)) {
+    if (!response.body || !accepts(req.headers.get("accept-encoding") ?? "", "gzip")) return response;
+    headers.set("content-encoding", "gzip");
+    headers.set("vary", [headers.get("vary"), "Accept-Encoding"].filter(Boolean).join(", "));
+    headers.delete("content-length");
+    return new Response(response.body.pipeThrough(new CompressionStream("gzip")), { status: response.status, headers });
+  }
   const get = req.method === "GET" && response.status === 200;
   if (get) {
     const body = Buffer.from(await response.arrayBuffer());

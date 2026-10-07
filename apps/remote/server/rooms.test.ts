@@ -6,15 +6,22 @@ import { join } from "node:path";
 import { Rooms } from "./rooms";
 import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { oneKenanEnabled as roomsEnabled } from "kenan-memory/config";
-import { handleRoomOwner, publicRoomSnapshot } from "./rooms-owner";
+import { handleRoomOwner, publicRoomSnapshot as projectRoomSnapshot, RoomHistoryError, type RoomHistory } from "./rooms-owner";
+import { createHash } from "node:crypto";
 import { roomAudienceResolver } from "./room-audience.mjs";
-import { roomInput, roomInstructions, readRoomInput } from "../shared/rooms";
+import { roomInput, roomInstructions, readRoomInput, ROOM_HISTORY_LIMIT } from "../shared/rooms";
 import type { RoomMember } from "../shared/rooms";
 import { ReconcileReplica } from "../shared/reconcile";
 
 const people: RoomMember[] = [{ user: "alice", displayName: "Alice" }, { user: "bob", displayName: "Bob" }, { user: "cara", displayName: "Cara" }];
 const cleanup: (() => void)[] = [];
 afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
+function historyPage(messages: unknown[], extra: Partial<RoomHistory> = {}): RoomHistory {
+  return { messages, live: "", paging: { revision: "fixture-revision", total: messages.length, start: 0, end: messages.length, hasOlder: false, nextBefore: null }, ...extra };
+}
+function publicRoomSnapshot(thread: Parameters<typeof projectRoomSnapshot>[0], source: Omit<RoomHistory, "paging">) {
+  return projectRoomSnapshot(thread, historyPage(source.messages, source));
+}
 const request = (path: string, method = "GET", body?: unknown, actor = "alice") => new Request(`http://fixture${path}`, { method,
   headers: { "x-pi-remote-user": actor, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 function fixture() {
@@ -46,7 +53,17 @@ function fixture() {
         threads.get(id).executionActivity = { activity: "queued", activitySince: 10, lastActivityAt: 10, activeTools: [] };
         inputs.push({ owner, actor, text }); history.get(id)!.push({ role: "user", timestamp: 10, content: text });
       },
-      history: async id => ({ messages: history.get(id) ?? [], questions: questions.get(id) ?? [], live: "" }),
+      history: async (id, options) => {
+        const all = history.get(id) ?? [];
+        const revision = createHash("sha256").update(JSON.stringify(all)).digest("hex");
+        if (options.revision !== undefined && options.revision !== revision) throw new RoomHistoryError(409, "Room history revision changed");
+        const end = options.before ?? all.length;
+        if (end > all.length) throw new RoomHistoryError(400, "Room history cursor is ahead of source");
+        const start = Math.max(0, end - (options.limit ?? ROOM_HISTORY_LIMIT));
+        return historyPage(all.slice(start, end).map((message, i) => ({ ...message, identity: message.identity ?? { id: `record:${start + i}` } })), {
+          questions: questions.get(id) ?? [], paging: { revision, total: all.length, start, end, hasOlder: start > 0, nextBefore: start > 0 ? start : null },
+        });
+      },
       stop: async id => { threads.get(id).state = "idle"; },
       answer: async (id, questionId) => { questions.set(id, (questions.get(id) ?? []).filter(question => question.id !== questionId)); threads.get(id).state = "running"; },
       notify: (id, receipt) => { const set = notices.get(owner) ?? new Set(); set.add(receipt); notices.set(owner, set); },
@@ -141,14 +158,15 @@ test("room startup failure remains visible even before a user message enters nat
   expect(snapshot.work?.map(item => item.kind)).toEqual(["model change", "thinking level change"]);
 });
 
-test("rejected room input remains a human message, while accepted native input renders only once", () => {
+test("room input receipts retain their identity as work, while materialized input renders only once", () => {
   const id = crypto.randomUUID();
   const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
   const receipt = { role: "notice", identity: { id: "receipt" }, content: { type: "custom", customType: "thread_input", timestamp: "2026-10-03T23:00:00Z", data: { workId: "work", message: roomInput(people[1]!, "Hello") } } };
   const rejection = { role: "notice", content: { type: "custom", customType: "thread_rejected", data: { error: "fetch failed" } } };
   const failed = publicRoomSnapshot(thread, { live: "", error: "fetch failed", messages: [receipt, rejection] });
-  expect(failed.messages.map(message => ({ text: message.text, sender: message.sender.user }))).toEqual([{ text: "Hello", sender: people[1]!.user }]);
-  expect(failed.work?.map(item => item.kind)).toEqual(["thread rejected"]);
+  expect(failed.messages).toEqual([]);
+  expect(failed.work?.map(item => item.kind)).toEqual(["thread input", "thread rejected"]);
+  expect(failed.work?.[0]).toMatchObject({ id: "receipt", text: expect.stringContaining("Hello") });
   expect(failed.error).toBe("fetch failed");
   const accepted = publicRoomSnapshot(thread, { live: "", messages: [receipt, { role: "user", content: receipt.content.data.message }, { role: "assistant", content: "Hi" }] });
   expect(accepted.messages.map(message => message.text)).toEqual(["Hello", "Hi"]);
@@ -159,7 +177,7 @@ test("a private thread is never converted into a room and a member cannot remove
   expect((await f.create()).status).toBe(409);
   f.threads.delete(f.id); await f.create();
   const response = await handleRoomOwner(request(`/v1/room-owner/${f.id}/members`, "POST", { members: [people[0]] }), {
-    get: id => f.threads.get(id), create: async () => {}, update: async () => {}, send: async () => {}, history: async () => ({ messages: [], live: "" }), notify: () => {},
+    get: id => f.threads.get(id), create: async () => {}, update: async () => {}, send: async () => {}, history: async () => historyPage([]), notify: () => {},
   });
   expect(response.status).toBe(400);
 });
@@ -313,7 +331,7 @@ test("room owner rereads lifecycle after awaited history inspection", async () =
   let thread: any = { id, title: "House", state: "running", executionActivity: { activity: "thinking", activeTools: [] }, metadata: { room: { id, members: people.slice(0, 2) } } };
   const response = await handleRoomOwner(request(`/v1/room-owner/${id}`), {
     get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
-    history: async () => { thread = { ...thread, state: "idle", held: true }; return { messages: [], live: "" }; },
+    history: async () => { thread = { ...thread, state: "idle", held: true }; return historyPage([]); },
   });
   expect(await response.json()).toMatchObject({ state: "idle", activity: "idle", held: true, activeTools: [] });
 });
@@ -461,11 +479,26 @@ test("awaited room history rechecks membership before returning any body", async
     get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
     history: async () => {
       thread.metadata.room.members = [people[1]!];
-      return { messages: [{ role: "assistant", content: "No longer shared" }], live: "" };
+      return historyPage([{ role: "assistant", content: "No longer shared" }]);
     },
   });
   expect(response.status).toBe(403);
   expect(await response.text()).not.toContain("No longer shared");
+});
+
+test("awaited room history errors recheck audience before returning diagnostics", async () => {
+  const id = crypto.randomUUID();
+  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const response = await handleRoomOwner(request(`/v1/room-owner/${id}?before=1&limit=2&revision=r1`), {
+    get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
+    history: async (_id, options) => {
+      expect(options).toEqual({ before: 1, limit: 2, revision: "r1" });
+      thread.metadata.room.members = [people[1]!];
+      throw new RoomHistoryError(409, "Unshared source diagnostics");
+    },
+  });
+  expect(response.status).toBe(403);
+  expect(await response.text()).not.toContain("Unshared source diagnostics");
 });
 
 test("read cursors acknowledge only displayed events, not a later arrival", async () => {
@@ -475,4 +508,68 @@ test("read cursors acknowledge only displayed events, not a later arrival", asyn
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/read`, "POST", { through: shown.readThrough }), "bob")).status).toBe(200);
   expect((await directoryRoom(f.rooms, "bob")).unreadCount).toBe(1);
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/read`, "POST", { through: shown.readThrough + 100 }), "bob")).status).toBe(400);
+});
+
+test("ordinary room opens are bounded; older pages preserve identities, work and exact source fences", async () => {
+  const f = fixture(); await f.create();
+  for (let i = 0; i < 97; i++) f.history.get(f.id)!.push(i % 2 === 0
+    ? { role: "assistant", identity: { id: `native:${i}` }, content: [{ type: "text", text: `Reply ${i}` }, { type: "thinking", thinking: `Work ${i}` }] }
+    : { role: "toolResult", identity: { id: `native:${i}` }, toolName: "read", content: `Result ${i}` });
+  const path = `/v1/rooms/${f.id}`;
+  let snapshot = await (await f.rooms.handle(request(path), "alice")).json();
+  expect(snapshot.paging).toMatchObject({ start: 65, end: 97, total: 97, hasOlder: true, nextBefore: 65 });
+  expect(snapshot.context).toBeUndefined();
+  const seen = new Set<string>();
+  const observe = () => {
+    for (const item of snapshot.messages) { expect(seen.has(item.id)).toBe(false); seen.add(item.id); }
+    for (const item of snapshot.work) {
+      const id = item.kind === "thinking" ? item.id.slice(0, -2) : item.id;
+      if (item.kind !== "thinking") { expect(seen.has(id)).toBe(false); seen.add(id); }
+      else expect(snapshot.messages.some((message: any) => message.id === id)).toBe(true);
+    }
+  };
+  observe();
+  while (snapshot.paging.hasOlder) {
+    const { nextBefore, revision } = snapshot.paging;
+    const response = await f.rooms.handle(request(`${path}?before=${nextBefore}&limit=32&revision=${revision}`), "alice");
+    expect(response.status).toBe(200);
+    snapshot = await response.json();
+    expect(snapshot.paging.end).toBe(nextBefore); expect(snapshot.paging.revision).toBe(revision);
+    observe();
+  }
+  expect(seen.size).toBe(97);
+  expect(snapshot.paging).toMatchObject({ start: 0, end: 1, nextBefore: null });
+  const revision = snapshot.paging.revision;
+  f.history.get(f.id)!.push({ role: "assistant", content: "Changed" });
+  const changed = await f.rooms.handle(request(`${path}?before=1&revision=${revision}`), "alice");
+  expect(changed.status).toBe(409);
+  expect(await changed.json()).toEqual({ error: "Room history revision changed" });
+  expect(f.calls.some(call => call.path === `/v1/room-owner/${f.id}?before=1&revision=${revision}`)).toBe(true);
+});
+
+test("invalid room history queries fail before owner reads and page sync bases are isolated", async () => {
+  const f = fixture(); await f.create();
+  const path = `/v1/rooms/${f.id}`;
+  const calls = f.calls.length;
+  for (const query of ["before=-1", "before=1.5", "limit=0", "limit=33", "revision=", "before=0&before=1", "before=9007199254740992"])
+    expect((await f.rooms.handle(request(`${path}?${query}`), "alice")).status).toBe(400);
+  expect(f.calls.length).toBe(calls);
+  f.history.get(f.id)!.push({ role: "assistant", content: "Newest", identity: { id: "newest" } });
+  const latest = await (await f.rooms.handle(request(`${path}?sync=1`), "alice")).json();
+  const older = await (await f.rooms.handle(request(`${path}?before=0&sync=1&have=${latest.revision}`), "alice")).json();
+  expect(older.kind).toBe("full"); expect(older.resource).toBe(`${path}?before=0`);
+  expect(older.value.paging).toMatchObject({ start: 0, end: 0, total: 1 });
+});
+
+test("raw input receipt/user pairs split across pages remain transparent without duplicate chat identity", () => {
+  const id = crypto.randomUUID();
+  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const input = roomInput(people[0]!, "Across pages");
+  const receipt = { role: "notice", identity: { id: "receipt" }, content: { customType: "thread_input", data: { message: input } } };
+  const user = { role: "user", identity: { id: "user" }, content: input };
+  const first = projectRoomSnapshot(thread, historyPage([receipt], { paging: { revision: "r", total: 2, start: 0, end: 1, hasOlder: false, nextBefore: null } }));
+  const second = projectRoomSnapshot(thread, historyPage([user], { paging: { revision: "r", total: 2, start: 1, end: 2, hasOlder: true, nextBefore: 1 } }));
+  expect(first.messages).toEqual([]); expect(first.work?.[0]).toMatchObject({ id: "receipt", kind: "thread input", text: expect.stringContaining("Across pages") });
+  expect(second.messages).toMatchObject([{ id: "user", text: "Across pages" }]);
+  expect(() => projectRoomSnapshot(thread, historyPage([user], { paging: { revision: "r", total: 2, start: 1, end: 2, hasOlder: false, nextBefore: null } }))).toThrow("invalid history page");
 });

@@ -1,9 +1,14 @@
 import type { Database } from "bun:sqlite";
 import type { ThreadColor } from "./protocol";
 
+export function ensureContextSourceSchema(db: Database): void {
+  db.exec("CREATE TABLE IF NOT EXISTS captured_context_unavailable (session_id TEXT PRIMARY KEY,reason TEXT NOT NULL)");
+}
+
 /** Remote stores presentation and attachments. ThreadService owns identity and execution. */
 export function ensureSupervisorSchema(db: Database): void {
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;");
+  ensureContextSourceSchema(db);
   db.exec(`
 CREATE TABLE IF NOT EXISTS thread_views (
   id TEXT PRIMARY KEY,

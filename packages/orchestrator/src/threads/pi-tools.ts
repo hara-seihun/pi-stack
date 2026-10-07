@@ -198,7 +198,7 @@ export function threadTools(options: PiSessionOptions) {
         const value = await api(signal).read(input.entryId ? { threadId: input.threadId, entryId: input.entryId }
           : { ...input, limit: Math.min(input.limit ?? 8, 8) });
         if (!value.ok) return result(value);
-        const inspected = await api(signal).inspect(input.threadId);
+        const inspected = await api(signal).inspect(input.threadId, { context: "omit" });
         if (!inspected.ok) return result(inspected);
         return result({ ok: true, value: { ...historyPreview(value.value, input.entryId, input.entryId ? input.offset ?? 0 : 0),
           thread: inspected.value.thread, pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: readableNotificationText({ ...receipt, text }).slice(0, 2000) })) } });

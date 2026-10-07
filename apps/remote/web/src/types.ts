@@ -13,6 +13,8 @@ export interface ContextEntry {
   label?: string;
   /** Inline text: user, assistant and notice items carry it with the head. */
   text?: string;
+  /** Inline text is a preview; exact words belong to the item body. */
+  textTruncated?: true;
   /** Collapsed-row text for lazy kinds until their body arrives. */
   preview?: string;
   /** Content hash of the item, and the key its body is fetched and cached by. */

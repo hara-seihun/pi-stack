@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { formatThreadMessage } from "../../../packages/orchestrator/src/threads/message-format";
-import { outgoingAgentMessage, presentAgentMessage } from "./src/features/conversation/agent-message";
+import { copyOutgoingMessage, outgoingAgentMessage, presentAgentMessage } from "./src/features/conversation/agent-message";
 import { entryFromHead, entriesFromHeads } from "./src/features/conversation/transcript-entries";
 import { Transcript } from "./src/features/conversation/Transcript";
 import { deriveTranscriptItems } from "../server/transcript-items";
 import type { ThreadMessage } from "../../../packages/orchestrator/src/threads/contracts";
 import type { ContextEntry } from "./src/types";
+import type { BodyCache } from "./src/client-cache";
+import { ItemBodies, ItemBodiesContext } from "./src/features/conversation/item-bodies";
 
 globalThis.location ??= new URL("https://router.test/") as unknown as Location;
 const sender = "7c925d87-bc2b-4293-933a-f9ffee9b3592";
@@ -124,10 +126,47 @@ test("sends and spawns read as this agent's own messages, routed to their recipi
   const entries = entriesFromHeads(deriveTranscriptItems(context).map(item => item.head));
   const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} onEdit={() => {}} onReply={() => {}} />);
   expect(html.match(/class="message assistant agent-outgoing"/g)).toHaveLength(3);
-  expect(entries.filter(entry => entry.kind === "toolCall").map(entry => outgoingAgentMessage(entry)?.text)).toEqual([words, words, "Closed?"]);
+  expect(entries.filter(entry => entry.kind === "toolCall").map(entry => outgoingAgentMessage(entry)?.text)).toEqual([words.slice(0, 120) + "…", words.slice(0, 120) + "…", "Closed?"]);
+  expect(html.match(/Load full message/g)).toHaveLength(2);
   expect(html).toMatch(/<span class="agent-route outgoing"><span class="agent-route-name self">Kenan<\/span><svg[^>]*><path[^>]*><\/path><\/svg><span class="agent-route-name">Thread 7c925d87<\/span>/);
   expect(html).toContain('class="agent-route-name new" title="Review">New agent</span>');
   expect(html).toContain('class="message-status failed">failed · Thread is closed</footer>');
   expect(html).not.toContain("tool-step");
   expect(html).not.toContain("thread_send");
+});
+
+test("truncated outgoing words stay a preview until opened and copy resolves the exact send or spawn body", async () => {
+  const words = "Exact native words **λ**. ".repeat(20_000);
+  const preview = words.slice(0, 120) + "…";
+  for (const tool of ["thread_send", "thread_spawn"] as const) {
+    const args = tool === "thread_send" ? { threadId: sender, text: words } : { title: "Review", message: words };
+    const context = { messages: [{ role: "assistant", content: [{ type: "toolCall", id: tool, name: tool, arguments: args }] }] };
+    const item = deriveTranscriptItems(context).at(-1)!;
+    const outgoing = entryFromHead(item.head);
+    const full = JSON.parse(item.body);
+    expect(outgoing.argumentsTruncated).toBe(true);
+    expect(outgoingAgentMessage(outgoing)?.text).toBe(preview);
+    expect(outgoingAgentMessage(outgoing, full)?.text).toBe(words);
+    let loads = 0;
+    const known = new Map([[item.head.id, full]]);
+    const cache: BodyCache = {
+      retainBody: () => () => {}, getBody: id => known.get(id), acceptBody: (id, body) => { known.set(id, body); },
+      loadBody: (_id, _size, fetcher) => fetcher(),
+    };
+    const bodies = new ItemBodies(recipient, async () => { loads++; return full; }, cache);
+    const html = renderToStaticMarkup(<ItemBodiesContext.Provider value={bodies}><Transcript entries={[outgoing]} sessionId={recipient} home="/" images={null} onEdit={() => {}} onReply={() => {}} /></ItemBodiesContext.Provider>);
+    expect(html).toContain("Load full message");
+    expect(html).toContain('aria-label="Copy full message"');
+    expect(html).not.toContain(words);
+    expect(loads).toBe(0);
+    let copies = 0;
+    expect(await copyOutgoingMessage(outgoing, async () => { copies++; return full; })).toBe(words);
+    expect(copies).toBe(1);
+    await expect(copyOutgoingMessage(outgoing, async () => undefined)).rejects.toThrow("could not be loaded");
+  }
+});
+
+test("copying untruncated outgoing words needs no body load", async () => {
+  const outgoing: ContextEntry = { kind: "toolCall", key: "send", signature: "send", toolCall: { name: "thread_send", arguments: { threadId: sender, text: "Exact short message" } } };
+  expect(await copyOutgoingMessage(outgoing, async () => { throw new Error("No load is needed"); })).toBe("Exact short message");
 });

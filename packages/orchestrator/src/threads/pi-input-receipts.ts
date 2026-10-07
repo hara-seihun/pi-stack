@@ -1,6 +1,6 @@
 type InputEntry = { type?: string; message?: { role: string; content?: unknown }; customType?: string; data?: unknown };
 
-export function inputReceipts(entries: readonly InputEntry[]) {
+export function inputReceipts(entries: Iterable<InputEntry>) {
   const acceptedWorkIds = new Set<string>(), completedWorkIds = new Set<string>(), landedWorkIds = new Set<string>(), deferredWorkIds = new Set<string>();
   const historicalInputs = new Map<string, string>();
   const text = (content: unknown): string => typeof content === "string" ? content : Array.isArray(content)
