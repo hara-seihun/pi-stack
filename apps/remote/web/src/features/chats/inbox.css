@@ -8,30 +8,33 @@
 .inbox-section-title { display: flex; align-items: baseline; gap: var(--space-2); margin: 0; padding: var(--space-5) var(--space-4) var(--space-1); color: var(--muted); font-size: var(--text-xs); font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .inbox-section-title span { font-weight: 600; opacity: .7; }
 .inbox-section[data-section="attention"] .inbox-section-title { color: var(--status-held); }
-.inbox-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) var(--touch); align-items: stretch; border-left: 3px solid transparent; }
-.inbox-row.selected { border-left-color: var(--accent); background: var(--surface); }
+.inbox-row { --row-bg: var(--bg); position: relative; display: grid; grid-template-columns: minmax(0, 1fr) var(--touch); align-items: stretch; border-left: 3px solid transparent; }
+.inbox-row.selected { --row-bg: var(--surface); border-left-color: var(--accent); background: var(--surface); }
 .inbox-open { min-height: 68px; display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: var(--space-3); padding: var(--space-3) 0 var(--space-3) var(--space-4); background: transparent; color: var(--text); text-align: left; }
-.inbox-open:hover { background: var(--surface); }
+.inbox-open:hover { --row-bg: var(--surface); background: var(--surface); }
 .inbox-open[aria-expanded] { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: pan-y; }
-.inbox-glyph { display: grid; place-items: center; width: 24px; height: 24px; font-size: 16px; }
+.inbox-glyph { position: relative; display: grid; place-items: center; width: 24px; height: 24px; font-size: 16px; }
+/* Presence-style badge: the state sits on the thread's own glyph, ringed in the row colour. */
+.inbox-status { --status-icon-size: 17px; position: absolute; right: -7px; bottom: -7px; padding: 2px; border-radius: 50%; background: var(--row-bg); }
 .inbox-glyph img { width: 20px; height: 20px; object-fit: contain; opacity: .8; }
 .inbox-glyph img.chat-avatar { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; opacity: 1; }
-.inbox-main { min-width: 0; display: grid; gap: 4px; }
+.inbox-main { min-width: 0; display: grid; gap: 3px; }
 .inbox-row.title-only .inbox-open { min-height: 52px; }
 .inbox-row.title-only .inbox-main { display: block; }
 .inbox-title-line { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
-.inbox-title { flex: 1; min-width: 0; overflow: hidden; font-size: var(--text-md); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.inbox-time { flex: 0 0 auto; color: var(--muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.inbox-title { flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--text-md); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-model { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.inbox-time { flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.inbox-subtitle { overflow: hidden; color: var(--muted); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .inbox-attention-summary { overflow: hidden; color: var(--text); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .inbox-status-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; overflow: hidden; }
-.inbox-status-line > .status-pill { flex: 0 1 auto; min-width: 0; }
 .inbox-unread { color: var(--status-held); font-size: var(--text-xs); font-weight: 700; white-space: nowrap; }
 .inbox-unread-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--status-unread); }
 .inbox-meta { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 /* The dot separates, so it belongs only between two things; a first item never starts with one. */
-.inbox-status-line > * + .inbox-meta::before { content: "·"; margin-right: var(--space-2); opacity: .6; }
-.inbox-chip { flex: 0 0 auto; color: var(--muted); font-size: var(--text-xs); white-space: nowrap; }
-.inbox-chip::before { content: "·"; margin-right: var(--space-2); opacity: .6; }
+.inbox-status-line > * + .inbox-meta::before, .inbox-status-line > * + .status-quiet:not(:empty)::before { content: "·"; margin-right: var(--space-2); opacity: .6; }
+.inbox-status-line .status-quiet { flex: 0 0 auto; color: var(--status-held); white-space: nowrap; }
+.inbox-status-line:not(:has(> :not(:empty))) { display: none; }
 .inbox-close { width: var(--touch); display: grid; place-items: center; padding: 0; color: var(--muted); background: transparent; opacity: .55; }
 .inbox-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .inbox-close:hover, .inbox-close:focus-visible { color: var(--danger); background: var(--surface-2); opacity: 1; }

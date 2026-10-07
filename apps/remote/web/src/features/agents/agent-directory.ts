@@ -1,4 +1,5 @@
 import type { Session } from "../../types";
+import { agentName } from "../../agent-name";
 import { assertNever } from "../../../../shared/explicit-state";
 import { conversationThreads } from "../../thread-state";
 import { attentionRank, threadStatus } from "../status/thread-status";
@@ -46,7 +47,7 @@ export function groupAgents(sessions: Session[], query: string, filter: AgentFil
   for (const agent of backgroundAgents(sessions)) {
     const launcher = agent.parentId ? byId.get(agent.parentId) : undefined;
     const id = agent.parentId ? `launcher:${agent.parentId}` : agent.watchList || agent.origin === "fleet" ? "system" : "detached";
-    const label = agent.parentId ? launcher?.agentName || `Launcher ${agent.parentId.slice(0, 8)}` : id === "system" ? "Scheduled & system" : "No launcher";
+    const label = agent.parentId ? (launcher && agentName(launcher)) || `Launcher ${agent.parentId.slice(0, 8)}` : id === "system" ? "Scheduled & system" : "No launcher";
     const task = launcher?.name ?? null;
     if (filter === "active" && agent.state !== "running" || filter === "waiting" && agent.state !== "waiting" || filter === "idle" && agent.state !== "idle") continue;
     if (search && ![agent.agentName, agent.name, agent.id, label, task].some(value => value?.toLocaleLowerCase().includes(search))) continue;

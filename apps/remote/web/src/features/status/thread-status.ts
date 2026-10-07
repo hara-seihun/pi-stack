@@ -140,6 +140,25 @@ export function attentionRank(status: ThreadStatus): number {
   return assertNever(status.key, "Status attention rank");
 }
 
+export type StatusGlyph = "working" | "agents" | "job" | "deployment" | "message" | "held" | "stopping" | "done" | "unread" | "error" | "archived" | "offline";
+
+export function statusGlyph(status: ThreadStatus): StatusGlyph {
+  switch (status.key) {
+    case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "recovering": case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "tool": case "compacting": case "retrying": return "working";
+    case "awaiting": case "waiting_on_workers": return "agents";
+    case "waiting_for_job": return "job";
+    case "waiting_for_deployment": return "deployment";
+    case "waiting_for_message": return "message";
+    case "waiting_for_capacity": case "waiting_to_retry": return "held";
+    case "cancelling": case "stopping": return "stopping";
+    case "idle": return status.attention ? "unread" : "done";
+    case "error": case "reporting_error": return "error";
+    case "archived": return "archived";
+    case "offline": return "offline";
+  }
+  return assertNever(status.key, "Status glyph");
+}
+
 function elapsed(at: number, now: number): string {
   const seconds = Math.max(0, Math.floor((now - at) / 1000));
   if (seconds < 60) return `${seconds}s`;

@@ -29,12 +29,14 @@
 .agent-group-counts { color: var(--muted); font-size: var(--text-xs); }
 .agent-group-total { flex: 0 0 auto; color: var(--muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; padding-right: var(--space-2); }
 .agent-group-list { padding: 0 0 var(--space-2) 28px; margin: 0; list-style: none; }
-.agent-open { display: grid; gap: 4px; width: 100%; min-height: 76px; padding: var(--space-3); text-align: left; border-radius: var(--radius-2); background: transparent; color: var(--text); }
+.agent-open { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: var(--space-3); row-gap: 3px; align-items: center; width: 100%; min-height: 64px; padding: var(--space-3); text-align: left; border-radius: var(--radius-2); background: transparent; color: var(--text); }
 .agent-open:hover { background: var(--surface); }
+.agent-row-status { grid-row: 1 / span 2; align-self: start; margin-top: 2px; }
+.agent-row-name, .agent-row-task, .agent-row-attention, .agent-open > .status-quiet { grid-column: 2; }
+.agent-open > .status-quiet { color: var(--status-held); font-size: var(--text-xs); }
+.agent-open > .status-quiet:empty { display: none; }
 .agent-row-name { font-size: var(--text-md); font-weight: 650; overflow-wrap: anywhere; }
-.agent-row-task { font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.agent-row-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
-.agent-row-status .status-label { white-space: normal; overflow-wrap: anywhere; }
+.agent-row-task { color: var(--muted); font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .agent-row-attention { color: var(--muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .agents-empty { padding: var(--space-5) 0; text-align: center; color: var(--muted); }
 .agents-screen button:focus-visible, .agent-group summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

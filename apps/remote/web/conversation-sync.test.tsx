@@ -38,8 +38,7 @@ function header(html: string) {
 
 test("cached idle transcript stays visible while the header updates, then idle returns when ready", () => {
   const updating = render({ syncing: true });
-  expect(header(updating)).toContain('class="conversation-syncing" role="status"');
-  expect(header(updating)).toContain("Updating…");
+  expect(header(updating)).toContain('class="conversation-syncing" role="status" aria-label="Updating"');
   expect(header(updating)).toContain('class="conversation-syncing-spinner" aria-hidden="true"');
   expect(header(updating)).not.toContain("Idle");
   expect(updating).toContain('class="message user"');
@@ -47,8 +46,8 @@ test("cached idle transcript stays visible while the header updates, then idle r
 
   const ready = render({ syncing: false });
   expect(header(ready)).toContain('data-status="idle"');
-  expect(header(ready)).toContain("Idle");
-  expect(header(ready)).not.toContain("Updating…");
+  expect(header(ready)).toContain('aria-label="Idle"');
+  expect(header(ready)).not.toContain("Updating");
   expect(ready).toContain("Cached conversation text");
 });
 

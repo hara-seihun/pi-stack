@@ -61,7 +61,7 @@ function randomSequence(length: number): Prime[] {
   }
 }
 
-function romanize(sequence: readonly Prime[], surname: boolean): string {
+function romanize(sequence: readonly Prime[]): string {
   const repaired: Prime[] = [];
   for (const prime of sequence) {
     if (repaired.at(-1)?.onset === prime.onset && prime.onset !== "s") {
@@ -74,13 +74,12 @@ function romanize(sequence: readonly Prime[], surname: boolean): string {
     if (index === 0 && prime.onset === "h") return prime.vowel;
     if (index > 0 && prime.onset === "s") return `z${prime.vowel}`;
     return prime.syllable;
-  }).join("") + (surname ? "n" : "");
+  }).join("");
   return word[0]!.toUpperCase() + word.slice(1);
 }
 
+/** Agents carry a single Nebulani first name. */
 export function getRandomName(): string {
-  const firstLength = randomInt(threePrimeCount + fourPrimeCount) < threePrimeCount ? 3 : 4;
-  const first = romanize(randomSequence(firstLength), false);
-  const last = romanize(randomSequence(3), true);
-  return `${first} ${last}`;
+  const length = randomInt(threePrimeCount + fourPrimeCount) < threePrimeCount ? 3 : 4;
+  return romanize(randomSequence(length));
 }

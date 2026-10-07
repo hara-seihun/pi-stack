@@ -140,21 +140,32 @@ test("status vocabulary covers every lifecycle and flag", () => {
   expect(selectedAiId({ selectedChatId: "ai:same-id" })).toBe("same-id");
 });
 
-test("the inbox keeps idle unread as Idle with a dot and gives multi-tool names as title detail", () => {
+test("inbox rows lead with the agent's first name, keep the task beneath and show state as a labelled glyph", () => {
+  const named = inboxRows([session("named", { agentName: "Tainetaimu Sizhukein", name: "Fix the inbox" })], [], { ...messaging, conversations: [] })[0]!;
+  expect(named.chat).toMatchObject({ kind: "ai", name: "Tainetaimu", title: "Fix the inbox" });
+  const markup = renderToStaticMarkup(createElement(InboxRowView, { row: named, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
+  expect(markup).toContain('class="inbox-title">Tainetaimu</span>');
+  expect(markup).toContain('class="inbox-subtitle">Fix the inbox</span>');
+  expect(markup).not.toContain("Sizhukein");
+  expect(markup).toMatch(/class="status-icon inbox-status"[^>]*role="img" aria-label="Idle"/);
+});
+
+test("the inbox shows idle unread as its own glyph and gives multi-tool names as title detail", () => {
   const unread = inboxRows([session("unread", { idleUnread: true })], [], { ...messaging, conversations: [] })[0]!;
   const unreadMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...unread, chat: { ...unread.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
-  expect(unreadMarkup).toContain('data-status="idle"');
-  expect(unreadMarkup).toContain('class="inbox-unread-dot"');
+  expect(unreadMarkup).toContain('data-glyph="unread"');
+  expect(unreadMarkup).toContain('aria-label="Idle, unread"');
+  expect(unreadMarkup).not.toContain('class="inbox-unread-dot"');
   expect(unreadMarkup).not.toContain("Done");
 
   const tools = inboxRows([session("tools", { state: "running", activity: "waiting_on_tool", activeTools: ["bash", "functions.web_search", "agent_browser"] })], [], { ...messaging, conversations: [] })[0]!;
   const toolsMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...tools, chat: { ...tools.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
-  expect(toolsMarkup).toContain('title="bash, web search, agent browser"');
-  expect(toolsMarkup).toContain("3 tools");
+  expect(toolsMarkup).toContain('aria-label="Running 3 tools"');
+  expect(toolsMarkup).toContain('title="Running 3 tools — bash, web search, agent browser"');
 
   // Queued is an owned scheduling phase, not a claim of model progress.
   const working = inboxRows([session("busy", { state: "running", activity: "queued" })], [], { ...messaging, conversations: [] })[0]!;
@@ -162,8 +173,8 @@ test("the inbox keeps idle unread as Idle with a dot and gives multi-tool names 
     row: { ...working, chat: { ...working.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
   expect(workingMarkup).toContain('data-status="queued"');
-  expect(workingMarkup).toContain('class="status-label">Queued</span>');
-  expect(workingMarkup).toMatch(/<span class="inbox-status-line"><span class="status-pill/);
+  expect(workingMarkup).toContain('aria-label="Queued for execution"');
+  expect(workingMarkup).toContain('data-glyph="working"');
 });
 
 test("directly discovered rows yield to the authoritative directory", () => {

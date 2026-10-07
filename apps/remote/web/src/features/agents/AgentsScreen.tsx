@@ -3,7 +3,9 @@ import { API } from "../../../../server/api";
 import { validateSession } from "../../../../shared/state-validation";
 import { api } from "../../client";
 import type { Session } from "../../types";
-import { StatusPill } from "../status/StatusPill";
+import { StatusIcon } from "../status/StatusIcon";
+import { StatusQuiet } from "../status/StatusPill";
+import { agentName } from "../../agent-name";
 import { threadStatus } from "../status/thread-status";
 import { backgroundAgents, countAgents, groupAgents, mergeAgentDirectory, type AgentFilter, type AgentGroup } from "./agent-directory";
 import "./agents.css";
@@ -52,13 +54,15 @@ function AgentGroupView({ group, expanded, onToggle, onOpen }: { group: AgentGro
       <span className="agent-group-heading"><span className="agent-group-name">{group.label}</span>{group.task && <span className="agent-group-task">{group.task}</span>}<span className="agent-group-counts">{summary}</span></span>
       <span className="agent-group-total" aria-label={`${counts.total} agents`}>{counts.total}</span>
     </summary>
-    <ul className="agent-group-list">{group.agents.map(agent => <li key={agent.id}>
+    <ul className="agent-group-list">{group.agents.map(agent => { const status = threadStatus(agent); return <li key={agent.id}>
       <button className="agent-open" type="button" onClick={() => onOpen(agent.id)} title="Open original agent in Chats">
-        <span className="agent-row-name">{agent.agentName || "Unnamed agent"}</span>
+        <StatusIcon status={status} className="agent-row-status" />
+        <span className="agent-row-name">{agentName(agent) ?? "Unnamed agent"}</span>
         <span className="agent-row-task">{agent.name}</span>
-        <span className="agent-row-status"><StatusPill status={threadStatus(agent)} compact />{agent.attentionSummary && <span className="agent-row-attention">{agent.attentionSummary}</span>}</span>
+        {agent.attentionSummary && <span className="agent-row-attention">{agent.attentionSummary}</span>}
+        {status.busy && status.lastActivityAt ? <StatusQuiet status={status} /> : null}
       </button>
-    </li>)}</ul>
+    </li>; })}</ul>
   </details>;
 }
 
