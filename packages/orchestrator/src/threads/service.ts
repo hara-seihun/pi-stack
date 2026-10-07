@@ -89,6 +89,9 @@ const ARCHIVE_RESUME_TEXT = "This thread was archived while it was working, whic
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const canonical = (value: any): any => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, canonical(value[key])])) : value;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+const resumesDependency = (dependency: import("./contracts.js").WaitDependency, message: Pick<ThreadMessage, "senderId" | "source">): boolean =>
+  message.source !== "notification" || !!message.senderId && (dependency.kind === "agents" && dependency.threadIds.includes(message.senderId)
+    || dependency.kind === "message" && dependency.fromThreadId === message.senderId);
 const questionAnswerBody = (row: Json, answer: Pick<AnswerThreadQuestion, "selectedSuggestionIds" | "text" | "dismissed">): string => {
   if (answer.dismissed) return `Dismissed question ${row.id}: ${row.question}\nThe user skipped this question without selecting or authorizing any suggestion.`;
   const choices = JSON.parse(row.suggestions) as ThreadQuestion["suggestions"];
@@ -446,6 +449,7 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found in this owner");
     if (prior.value) return good(thread);
     if (!["set", "clear"].includes(input.action)) return bad("invalid_request", "Waiting action must be set or clear");
+    const inputCursor = (this.sql("SELECT COALESCE(MAX(ordinal),0) ordinal FROM thread_work").get() as { ordinal: number }).ordinal;
     let resultAlreadyArrived = false;
     let dependency: import("./contracts.js").WaitDependency | undefined;
     if (input.action === "set") {
@@ -470,10 +474,11 @@ export class ThreadService implements ThreadApi {
     const current = this.get(thread.id)!;
     if (input.action === "set" && (current.held || current.metadata?.archived)) return bad("unavailable", "Thread was stopped while registering its wait");
     this.transaction(() => {
-      const resultQueued = dependency && this.pending(thread.id).some(message => !message.landedAt && message.senderId
-        && (dependency.kind === "agents" && message.source === "notification" && dependency.threadIds.includes(message.senderId)
-          || dependency.kind === "message" && dependency.fromThreadId === message.senderId));
-      if (input.action === "set" && dependency && !resultQueued && !resultAlreadyArrived) {
+      // Validation may cross owners while an input lands and even settles. Pending-only checks lose that resumption.
+      const arrived = this.sql("SELECT sender_id,source FROM thread_work NOT INDEXED WHERE ordinal>? AND thread_id=?").all(inputCursor, thread.id) as Array<{ sender_id: string | null; source: ThreadMessage["source"] }>;
+      const resumed = dependency && (this.pending(thread.id).some(message => !message.landedAt && resumesDependency(dependency!, message))
+        || arrived.some(message => resumesDependency(dependency!, { senderId: message.sender_id, source: message.source })));
+      if (input.action === "set" && dependency && !resumed && !resultAlreadyArrived) {
         const wait: import("./contracts.js").AgentWait = { ...dependency, reason: input.reason.trim(), since: Date.now() };
         this.sql("UPDATE thread SET metadata=json_set(metadata,'$.agentWait',json(?)) WHERE id=?").run(JSON.stringify(wait), thread.id);
       } else this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
@@ -545,12 +550,11 @@ export class ThreadService implements ThreadApi {
   private insertMessage(id: string, input: SendThread, settings: ThreadSettings, front = false): ThreadMessage {
     const wait = this.get(input.threadId)?.metadata?.agentWait;
     const dependency = validateWaitDependency(wait);
-    const matchingResult = dependency.ok && input.senderId && (dependency.value.kind === "agents" && dependency.value.threadIds.includes(input.senderId)
-      || dependency.value.kind === "message" && dependency.value.fromThreadId === input.senderId);
+    const resumed = dependency.ok && resumesDependency(dependency.value, { senderId: input.senderId ?? null, source: input.source ?? "explicit" });
     // Untyped persisted waits retain their original child-result routing until the next input or scheduled recovery.
     const priorChildResult = wait && typeof wait === "object" && !("kind" in wait) && "threadIds" in wait
       && Array.isArray(wait.threadIds) && input.senderId && wait.threadIds.includes(input.senderId);
-    if (wait && (input.source !== "notification" || matchingResult || priorChildResult)) {
+    if (wait && (input.source !== "notification" || resumed || priorChildResult)) {
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(input.threadId);
     }
     this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")

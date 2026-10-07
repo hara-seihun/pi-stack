@@ -49,7 +49,7 @@ import {
   type PersonalUsage,
   readBrokerUsage,
 } from "pi-orchestrator/api";
-import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -1335,9 +1335,8 @@ function supervisorState(): SupervisorState {
 // makes that row differ from the shared projection.
 function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archived: false })): Session[] {
   const parents = new Set(local.map(thread => thread.parentId));
-  const runningParents = runningChildParents(local, peerThreads.values());
   const localIds = new Set(local.map(thread => thread.id));
-  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
+  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), false,
     localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
 }
 function pendingMessages(id: string) {
@@ -1362,7 +1361,6 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
 }
 function publicSession(row: any,
   hasChildren = threads.snapshot({ archived: false }).some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id)),
-  hasRunningChildren = runningChildParents(threads.snapshot({ archived: false }), peerThreads.values()).has(row.id),
   queued = true,
   origin: Session["origin"] = threads.get(row.id) ? "person" : "fleet",
 ): Session {
@@ -1380,7 +1378,7 @@ function publicSession(row: any,
     ...(queued ? { contextUsage: capturedContextUsage(baseStoredContext(row.id), (row.effectiveSettings ?? row.settings).model) } : {}),
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
-    ...projectThreadActivity(row.state, live, hasRunningChildren, row.executionActivity, row.metadata, Boolean(row.held)),
+    ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held)),
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
     createdAt: row.created_at, updatedAt: row.updated_at,
     ...(row.lastUserMessageAt !== undefined ? { lastUserMessageAt: new Date(row.lastUserMessageAt).toISOString() } : {}),
@@ -2076,7 +2074,7 @@ const meet = new MeetServer((id) => {
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    ...projectThreadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id), row.executionActivity, row.metadata, Boolean(row.held)),
+    ...projectThreadActivity(row.state, runtime, row.executionActivity, row.metadata, Boolean(row.held)),
     waitingOnAgents: row.waitingOnAgents,
     tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
@@ -2163,7 +2161,7 @@ const server = Bun.serve<SocketData>({
           const failure = current.state !== "running" && settlement?.outcome === "failed"
             ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
           return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
-            execution: projectThreadActivity(current.state, liveProjections.get(id), false, current.executionActivity, current.metadata, Boolean(current.held)),
+            execution: projectThreadActivity(current.state, liveProjections.get(id), current.executionActivity, current.metadata, Boolean(current.held)),
             context: context ? JSON.parse(context.document) : null, questions };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },

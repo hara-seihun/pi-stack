@@ -10,7 +10,7 @@ export interface MeetSignal {
 }
 export interface MeetEnvelope { seq: number; from: string; signal: MeetSignal }
 export interface MeetIceServer { urls: string[]; username: string; credential: string }
-export interface MeetThreadState extends Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents" | "waitingForChildren">> {
+export interface MeetThreadState extends Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents">> {
   id: string;
   name: string;
   state: ThreadState;

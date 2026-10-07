@@ -23,7 +23,7 @@ const fail = (error: string, status = 400) => Response.json({ error }, { status 
 
 export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory): RoomSnapshot {
   const metadata = roomMetadata(thread.metadata?.room)!;
-  const execution = source.execution ?? projectThreadActivity(thread.state, undefined, false, thread.executionActivity, thread.metadata, Boolean(thread.held));
+  const execution = source.execution ?? projectThreadActivity(thread.state, undefined, thread.executionActivity, thread.metadata, Boolean(thread.held));
   const error = source.error ?? execution.executionError;
   let activity: RoomActivity;
   try {

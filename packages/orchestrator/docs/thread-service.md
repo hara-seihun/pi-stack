@@ -43,6 +43,14 @@ Dispatched work and its insertion timestamp remain durable. A runtime owns no se
 
 October 6's supervisor handoff failed because a rejected opener left an uninitialized runtime under suspension and `detach()` called `runtime.session.close` on its absent session. `tests/thread-service.test.ts` covers that exception, late successful initialization, preparation/admission, retained busy custody and retryable idle disposal across controller replacement.
 
+## Explicit dependency wait lifecycle
+
+`metadata.agentWait` is caller-local custody. `waitingOnAgents` projects only that stored wait; a settled parent does not acquire a wait from a running or waiting child. Settlement retains an explicitly registered wait while saving normal execution receipts. Restart preserves both the wait and the independent parent/child lifecycle. Stop/archive retain wait details under the hold; matching result delivery may clear the wait but never releases that hold.
+
+Registration validates child cursors or collaborator access asynchronously. It captures the durable input ordinal before that validation and rechecks both pending unlanded inputs and every input accepted during validation, including inputs already landed or settled. Explicit input or a matching result prevents a stale wait from being installed. Unrelated notifications do not clear a named dependency. The same resumption predicate owns ordinary input insertion; scheduled recovery wakes explicitly clear waiting in their input transaction. Clear creates no work, and retrying any accepted registration after resumption or clear does not reinstall it.
+
+`tests/thread-wake.test.ts` proves queued/completed input races, stable registration receipts across restart, matching/unrelated notifications, and a genuinely settled parent with a cleanup child retaining its own message wait through `get`, `list`, `inspect`, restart and parent-only Stop. It also covers existing set/clear, already-arrived child results, scheduled recovery and stop/archive lifecycle.
+
 ## Native execution contract
 
 Input commands carry a stable `workId`. Pi records `thread_input` and `thread_settled` receipts in its native session. `get_state` exposes accepted and completed work IDs. Reopening an accepted, incomplete input uses native continuation; it does not replay the user's message. A completed receipt settles the database without another model request.

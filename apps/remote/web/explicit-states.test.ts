@@ -31,7 +31,7 @@ test("durable dependency types stay distinct from each other and idle", () => {
   expect(threadStatus(idle).busy).toBe(false);
   expect(threadStatus({ ...idle, activity: "thinking" })).toMatchObject({ key: "reporting_error", busy: false, attention: true });
   expect(threadStatus({ ...idle, activity: "awaiting" })).toMatchObject({ key: "reporting_error", busy: false, attention: true });
-  expect(threadStatus({ ...idle, activity: "awaiting", waitingForChildren: true })).toMatchObject({ key: "awaiting", busy: true });
+  expect(threadStatus({ ...idle, activity: "awaiting", waitingForChildren: true } as any)).toMatchObject({ key: "reporting_error", busy: false, attention: true });
   for (const waitingOnAgents of dependencies) validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, activity: "awaiting", waitingOnAgents }] });
 });
 

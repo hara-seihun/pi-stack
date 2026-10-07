@@ -84,6 +84,110 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   expect(unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).waitingOnAgents).toBeUndefined();
 });
 
+it.each([
+  { kind: "agents" as const, completed: false },
+  { kind: "agents" as const, completed: true },
+  { kind: "message" as const, completed: false },
+  { kind: "message" as const, completed: true },
+])("explicit input wins asynchronous $kind wait registration (completed=$completed)", async ({ kind, completed }) => {
+  vi.spyOn(Date, "now").mockReturnValue(100000);
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "collaborator");
+  unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "self", cwd: f.root }));
+  const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
+  let release!: () => void, entered = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  if (kind === "agents") vi.spyOn(directory, "await").mockImplementationOnce(async input => {
+    const result = f.service.await(input); entered = true; await gate; return result;
+  });
+  else vi.spyOn(directory, "list").mockImplementationOnce(async input => {
+    const result = await f.service.list(input); entered = true; await gate; return result;
+  });
+  const request = { requestId: "racing-wait", threadId: "self", action: "set" as const, reason: "Dependency result",
+    ...(kind === "agents" ? { kind, threadIds: ["child"] } : { kind, fromThreadId: "collaborator" }) };
+  const registering = f.service.agentWait(request); await until(() => entered);
+  unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "Continue with my new instruction" }));
+  if (completed) {
+    unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(c => c.type === "prompt") === true);
+    f.sessions[0]!.settle(); await until(() => f.service.get("self")?.state === "idle");
+    expect(f.service.latestSettlement("self")?.outcome).toBe("complete");
+    expect(f.service.pending("self")).toHaveLength(0);
+  }
+  release();
+  expect(unwrap(await registering).waitingOnAgents).toBeUndefined();
+  expect(unwrap(await f.service.agentWait(request)).waitingOnAgents).toBeUndefined();
+  expect(f.service.get("self")?.metadata?.agentWait).toBeUndefined();
+  if (!completed) expect(f.service.pending("self")).toMatchObject([{ id: "human", source: "explicit" }]);
+  await boundary(); unwrap(await f.service.close());
+  const next = fixture(f.root);
+  expect(next.service.get("self")?.waitingOnAgents).toBeUndefined();
+  expect(unwrap(await next.service.agentWait(request)).waitingOnAgents).toBeUndefined();
+});
+
+it.each([
+  { kind: "agents" as const, threadIds: ["child"] },
+  { kind: "job" as const, jobId: "job-123" },
+  { kind: "deployment" as const, publicationId: "PUB-123" },
+  { kind: "message" as const, fromThreadId: "collaborator" },
+])("unlanded explicit input prevents a $kind wait even when accepted before registration", async dependency => {
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "collaborator");
+  unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "self", cwd: f.root }));
+  unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "New instruction" }));
+  const result = unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", reason: "Dependency", ...dependency }));
+  expect(result.waitingOnAgents).toBeUndefined();
+  expect(f.service.pending("self")).toMatchObject([{ id: "human" }]);
+  expect(f.sessions).toHaveLength(0);
+});
+
+it.each(["collaborator", "other"])("completed notification from %s during validation obeys the named message dependency", async senderId => {
+  const f = fixture(); for (const id of ["self", "collaborator", "other"]) await spawn(f, id);
+  const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
+  let release!: () => void, entered = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(directory, "list").mockImplementationOnce(async input => {
+    const result = await f.service.list(input); entered = true; await gate; return result;
+  });
+  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "message", reason: "Named result", fromThreadId: "collaborator" });
+  await until(() => entered);
+  unwrap(await f.service.send({ requestId: "notification", threadId: "self", senderId, source: "notification", text: "Result" }));
+  unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(c => c.type === "prompt") === true);
+  f.sessions[0]!.settle(); await until(() => f.service.get("self")?.state === "idle");
+  expect(f.service.pending("self")).toHaveLength(0);
+  release(); const result = unwrap(await registering);
+  if (senderId === "collaborator") expect(result.waitingOnAgents).toBeUndefined();
+  else expect(result.waitingOnAgents).toMatchObject({ kind: "message", fromThreadId: "collaborator" });
+});
+
+it("a settled parent has no explicit wait even when its cleanup child waits across restart", async () => {
+  const f = fixture(); await spawn(f, "parent"); await spawn(f, "collaborator");
+  unwrap(await f.service.send({ requestId: "parent-work", threadId: "parent", text: "Complete local work" }));
+  unwrap(await f.service.spawn({ requestId: "cleanup", id: "cleanup", parentId: "parent", cwd: f.root, message: "Keep cleanup custody" }));
+  unwrap(await f.service.start()); await until(() => f.sessions.filter(s => s.commands.some(c => c.type === "prompt")).length === 2);
+  const childSession = f.sessions.find(s => s.commands.some(c => c.workId === "cleanup"))!;
+  const parentSession = f.sessions.find(s => s.commands.some(c => c.workId === "parent-work"))!;
+  const request = { requestId: "cleanup-wait", threadId: "cleanup", action: "set" as const, kind: "message" as const,
+    reason: "Cleanup owner reply", fromThreadId: "collaborator" };
+  const wait = unwrap(await f.service.agentWait(request)).waitingOnAgents;
+  childSession.settle(); await until(() => !!f.service.latestSettlement("cleanup"));
+  await until(() => parentSession.commands.some(c => c.type === "steer"));
+  parentSession.settle(); await until(() => f.service.get("parent")?.state === "idle");
+  const settlement = f.service.latestSettlement("parent");
+  const assertProjection = async (service: ThreadService) => {
+    const parent = service.get("parent")!;
+    expect(parent).toMatchObject({ state: "idle", held: false, pendingMessages: 0 });
+    expect(parent.metadata?.agentWait).toBeUndefined(); expect(parent.waitingOnAgents).toBeUndefined();
+    expect(unwrap(await service.list({ id: "parent" })).threads[0]?.waitingOnAgents).toBeUndefined();
+    expect(unwrap(await service.inspect("parent")).thread.waitingOnAgents).toBeUndefined();
+    expect(service.latestSettlement("parent")).toEqual(settlement);
+    expect(service.get("cleanup")).toMatchObject({ state: "idle", held: false, pendingMessages: 0, waitingOnAgents: wait });
+  };
+  await assertProjection(f.service); await boundary(); unwrap(await f.service.close());
+  const next = fixture(f.root); unwrap(await next.service.start()); next.service.reconcile(); await boundary();
+  await assertProjection(next.service); expect(next.sessions).toHaveLength(0);
+  unwrap(await next.service.control({ threadId: "parent", action: "stop", descendants: false }));
+  expect(next.service.get("parent")?.waitingOnAgents).toBeUndefined();
+  expect(next.service.get("cleanup")?.waitingOnAgents).toEqual(wait);
+});
+
 it("Stop and archive pause wakes across restart; restore alone never releases the hold", async () => {
   const f = fixture(); await spawn(f, "held"); await spawn(f, "archived");
   unwrap(await schedule(f, "held", "wake-held")); unwrap(await schedule(f, "archived", "wake-archived"));
