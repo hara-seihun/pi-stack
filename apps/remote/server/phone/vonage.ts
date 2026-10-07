@@ -1,10 +1,15 @@
-import { randomUUID, sign, createHmac, createHash, timingSafeEqual } from "node:crypto";
+import { randomUUID, sign, createPrivateKey, createHmac, createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Result } from "./policy";
 export type Credentials = { VONAGE_APPLICATION_ID: string; VONAGE_PRIVATE_KEY: string; VONAGE_SIGNATURE_SECRET: string; VONAGE_FROM_NUMBER: string };
 export class Vonage {
   readonly credentials: Credentials;
-  constructor(path: string) { this.credentials = JSON.parse(readFileSync(path, "utf8")); }
+  constructor(path: string) {
+    const c = JSON.parse(readFileSync(path, "utf8"));
+    if (!c || typeof c !== "object" || Array.isArray(c) || ["VONAGE_APPLICATION_ID", "VONAGE_PRIVATE_KEY", "VONAGE_SIGNATURE_SECRET", "VONAGE_FROM_NUMBER"].some(k => typeof c[k] !== "string" || !c[k].trim()) || !/^\+?[1-9]\d{7,14}$/.test(c.VONAGE_FROM_NUMBER)) throw new Error("Valid Vonage credentials and caller number required");
+    if (createPrivateKey(c.VONAGE_PRIVATE_KEY).asymmetricKeyType !== "rsa") throw new Error("Vonage requires an RSA private key");
+    this.credentials = c;
+  }
   private jwt() {
     const enc = (x: unknown) => Buffer.from(JSON.stringify(x)).toString("base64url");
     const now = Math.floor(Date.now() / 1000);
@@ -13,7 +18,7 @@ export class Vonage {
   }
   async request<T>(path: string, method = "GET", body?: unknown): Promise<Result<T>> {
     try {
-      const response = await fetch(`https://api.nexmo.com/v1${path}`, { method, headers: { authorization: `Bearer ${this.jwt()}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
+      const response = await fetch(`https://api.nexmo.com/v1${path}`, { method, headers: { authorization: `Bearer ${this.jwt()}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000), redirect: "error" });
       if (!response.ok) { const data = await response.json().catch(() => ({})) as Record<string, unknown>; return { ok: false, error: `Vonage HTTP ${response.status}: ${String(data.title ?? data.error_title ?? data.detail ?? "request failed").slice(0, 300)}` }; }
       return { ok: true, value: response.status === 204 ? {} as T : await response.json() as T };
     } catch { return { ok: false, error: "Could not connect to Vonage" }; }
