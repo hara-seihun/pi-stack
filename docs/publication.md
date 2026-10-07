@@ -25,6 +25,12 @@ There is no GitHub Actions workflow or self-hosted runner attached to this publi
 
 Run `npm ci --ignore-scripts` and `npm run check` in an environment appropriate for the source being evaluated. Run Android checks with the host's local build configuration. The configured publication owner runs the integration checks and records the exact commit, commands, artifacts, deployment results and service proof.
 
+## Client before server activation
+
+After checks and the live-meeting gate, publication installs and verifies the matching APK/web artifact on every host **before** activating any server. An older mobile bundle may reject a new server state and show an empty directory; the matching bundle must already be downloadable when the server changes. Existing open clients still need to apply the update.
+
+`deploy/android-update bundle FILE` packages the checked installer and its validators into one portable Bun script. Publication transfers it with the artifact and verifies its hash before use, so publishing the client does not require changing the remote server checkout or its rollback selection. An artifact failure prevents server activation. Retries reuse the immutable APK/web bytes.
+
 ## Publication transport custody
 
 The publication command boundary disables SSH connection sharing for every remote

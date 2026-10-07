@@ -893,21 +893,27 @@ function prepareAndroidArtifact(request, logPath) {
 function publishAndroidArtifact(request, logPath) {
   if (!request.android) return;
   const { directory, manifest } = request.android;
+  // Ship the checked installer with the artifact: neither host needs to select the
+  // new server before it can offer the matching client.
+  const installer = join(directory, "android-update.js");
+  const build = runLogged(request, "prepare-android-installer", "bun", [join(checkout, "deploy/android-update"), "bundle", installer], 30, logPath);
+  if (!build.ok) throw new Error(`Android installer build exited ${build.status}`);
+  const installerHash = sha256(installer);
   for (const target of targets) {
     const remoteDirectory = target.sshHost && join(target.androidTransferRoot, request.requestId);
-    const tool = target.sshHost ? join(target.releaseRepository, "deploy/android-update") : join(checkout, "deploy/android-update");
+    const tool = target.sshHost ? join(remoteDirectory, "android-update.js") : installer;
     if (target.sshHost) {
       let result = runLogged(request, `transfer-android-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "mkdir", "-p", "-m", "700", remoteDirectory], 30, logPath);
       if (!result.ok) throw new Error(`${target.id} Android transfer directory exited ${result.status}`);
       result = runLogged(request, `transfer-android-${target.id}`, "rsync", ["-a", "--chmod=D700,F600", `${directory}/`, `${target.sshHost}:${remoteDirectory}/`], 90, logPath);
       if (!result.ok) throw new Error(`${target.id} Android transfer exited ${result.status}`);
-      const remoteSource = runCapture("ssh", ["-o", "BatchMode=yes", target.sshHost, "git", "-C", target.releaseRepository, "rev-parse", "HEAD^{commit}"], { timeoutSeconds: 30 });
-      if (remoteSource !== request.integrationSha) throw new Error(`${target.id} release checkout ${remoteSource} differs from checked integration ${request.integrationSha}`);
+      const remoteHash = runCapture("ssh", ["-o", "BatchMode=yes", target.sshHost, "sha256sum", tool], { timeoutSeconds: 30 }).split(/\s+/)[0];
+      if (remoteHash !== installerHash) throw new Error(`${target.id} Android installer differs from the checked source bundle`);
     }
-    const invocation = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, "sudo", "-n", tool, "install", remoteDirectory]] : ["sudo", ["-n", tool, "install", directory]];
+    const invocation = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, "sudo", "-n", "bun", tool, "install", remoteDirectory]] : ["sudo", ["-n", "bun", tool, "install", directory]];
     const result = runLogged(request, `publish-android-${target.id}`, ...invocation, 30, logPath);
     if (!result.ok) throw new Error(`${target.id} Android publication exited ${result.status}`);
-    const verify = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, tool, "verify", `${remoteDirectory}/manifest.json`]] : [tool, ["verify", manifest]];
+    const verify = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, "bun", tool, "verify", `${remoteDirectory}/manifest.json`]] : ["bun", [tool, "verify", manifest]];
     request.android.hosts[target.id] = JSON.parse(runCapture(...verify, { timeoutSeconds: 30 }));
     writeRequest(request);
     if (remoteDirectory) {
@@ -1811,6 +1817,7 @@ export function processRequest(request) {
         requeueBusyHost(request, busy.target, logPath, "live-meeting");
         return;
       }
+      publishAndroidArtifact(request, logPath);
       for (const target of targets) {
         if (request.hosts?.[target.id]?.status === "passed") continue;
         if (request.bootstrap?.hosts?.[target.id]?.state === "sealed") {
@@ -1837,12 +1844,12 @@ export function processRequest(request) {
         releaseCustody(request, target.id);
       }
     } else {
+      publishAndroidArtifact(request, logPath);
       for (const target of targets) {
         verifyTarget(target, request.integrationSha);
         releaseCustody(request, target.id);
       }
     }
-    publishAndroidArtifact(request, logPath);
     const finalProofs = Object.fromEntries(targets.map(target => [target.id, verifyTarget(target, request.integrationSha)]));
     const finalProofPath = join(requestProofRoot, "final-hosts.json");
     atomicWrite(finalProofPath, `${JSON.stringify(finalProofs, null, 2)}\n`);
