@@ -29,6 +29,7 @@ const jobs = [
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
   ["mail send boundary", "python3", ["-B", "tools/mail-send/test_send.py"]],
   ["Kenan memory", "npm", ["test", "--workspace=kenan-memory"]],
+  ["life import", "bun", ["test", "scripts/life-import.test.ts"]],
   ["Root Kenan", "npm", ["test", "--workspace=kenan-root"]],
   ["remote", "npm", ["test", "--workspace=pi-remote"]],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],
