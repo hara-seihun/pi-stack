@@ -140,7 +140,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   pi_stack_prepare_dependencies "$root"
   node "$root/scripts/build-workspace.mjs" orchestrator
   npm run build --workspace=kenan-memory
-  npm run build --workspace=kenan-root
+  node "$root/scripts/build-workspace.mjs" kenan-root
   rsync -a packages/kenan-memory/src packages/kenan-memory/dist packages/kenan-memory/discretion.md packages/kenan-memory/person.md "$stage/packages/kenan-memory/"
   rsync -a packages/kenan-root/src packages/kenan-root/dist packages/kenan-root/instructions.md "$stage/packages/kenan-root/"
   (cd "$stage" && npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund)

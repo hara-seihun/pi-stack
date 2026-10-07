@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepare everything deploy/host would otherwise build inside its 50-second
-# deadline: checkout dependencies, the Orchestrator and Remote builds, the
+# deadline: checkout dependencies, the Orchestrator, Remote and Root builds, the
 # production runtime tree and Write engine. Every step is
 # idempotent and receipt-cached, so deploy/host then reuses the results and
 # spends its whole budget on publishing, activation and smoke checks.

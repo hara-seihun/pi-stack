@@ -154,7 +154,13 @@ pi_stack_prepare_builds() (
   orchestrator_pid=$!
   node "$root/scripts/build-workspace.mjs" remote &
   remote_pid=$!
-  wait "$orchestrator_pid" || failed=1
+  # Root consumes Orchestrator declarations. Prepare and receipt-cache it here,
+  # not in Remote's publication deadline (PUB-a5f55198be2311c5f236dd71).
+  if wait "$orchestrator_pid"; then
+    node "$root/scripts/build-workspace.mjs" kenan-root || failed=1
+  else
+    failed=1
+  fi
   wait "$remote_pid" || failed=1
   return "$failed"
 )

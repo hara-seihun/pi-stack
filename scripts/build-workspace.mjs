@@ -6,12 +6,13 @@ import { dirname, join, resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const name = process.argv[2];
 const builds = {
-  orchestrator: { sources: ["packages/orchestrator", "packages/kenan-memory"], output: "packages/orchestrator/dist" },
-  remote: { sources: ["apps/remote", "packages/orchestrator/src", "packages/kenan-memory", "packages/kenan-root"], output: "apps/remote/web/dist" },
+  orchestrator: { workspace: "pi-orchestrator", sources: ["packages/orchestrator", "packages/kenan-memory"], output: "packages/orchestrator/dist" },
+  remote: { workspace: "pi-remote", sources: ["apps/remote", "packages/orchestrator/src", "packages/kenan-memory", "packages/kenan-root"], output: "apps/remote/web/dist" },
+  "kenan-root": { workspace: "kenan-root", sources: ["packages/kenan-root", "packages/kenan-memory", "packages/orchestrator"], output: "packages/kenan-root/dist" },
 };
 const build = builds[name];
 if (!build) {
-  console.error("usage: node scripts/build-workspace.mjs orchestrator|remote");
+  console.error("usage: node scripts/build-workspace.mjs orchestrator|remote|kenan-root");
   process.exit(64);
 }
 
@@ -62,7 +63,7 @@ if (receipt?.inputs === inputs && receipt.node === process.version && receipt.ou
 
 rmSync(receiptPath, { force: true });
 rmSync(join(root, build.output), { recursive: true, force: true });
-const result = spawnSync("npm", ["run", "build", `--workspace=pi-${name}`], { cwd: root, stdio: "inherit" });
+const result = spawnSync("npm", ["run", "build", `--workspace=${build.workspace}`], { cwd: root, stdio: "inherit" });
 if (result.status !== 0) {
   console.error(`Pi ${name} build failed: ${result.error?.message ?? result.signal ?? result.status}`);
   process.exit(result.status || 1);

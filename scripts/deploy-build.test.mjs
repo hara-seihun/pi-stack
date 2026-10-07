@@ -21,14 +21,17 @@ function fixture(t) {
   for (const file of ["package.json", "package-lock.json", "node_modules/.package-lock.json"]) put(file, "{}\n");
   put("packages/orchestrator/src/main.ts", "source\n");
   put("apps/remote/web/main.ts", "source\n");
+  put("packages/kenan-root/src/main.ts", "source\n");
+  put("packages/kenan-memory/src/main.ts", "source\n");
   put(".gitignore", "node_modules/\ndist/\n");
   put("bin/npm", `#!/usr/bin/env node
 const fs = require('node:fs');
-const name = process.argv.at(-1).replace('--workspace=pi-', '');
+const name = process.argv.at(-1).replace('--workspace=', '').replace(/^pi-/, '');
 fs.appendFileSync('calls', name + '\\n');
 fs.writeFileSync(name + '.started', '');
 async function run() {
-  if (process.env.BUILD_BARRIER) {
+  if (name === 'kenan-root' && !fs.existsSync('packages/orchestrator/dist/main.js')) process.exit(93);
+  if (process.env.BUILD_BARRIER && name !== 'kenan-root') {
     const other = name === 'remote' ? 'orchestrator' : 'remote';
     const deadline = Date.now() + 1000;
     while (!fs.existsSync(other + '.started')) {
@@ -37,7 +40,7 @@ async function run() {
     }
   }
   if (process.env.BUILD_FAIL === name) process.exit(42);
-  const out = name === 'remote' ? 'apps/remote/web/dist' : 'packages/orchestrator/dist';
+  const out = name === 'remote' ? 'apps/remote/web/dist' : 'packages/' + name + '/dist';
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(out + '/main.js', 'built');
 }
@@ -60,12 +63,44 @@ test("deployment builds overlap after dependency preparation and both failures a
   let result = run({});
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(join(f.repo, "dependencies-ready")));
-  assert.deepEqual(f.calls().sort(), ["orchestrator", "remote"]);
+  assert.deepEqual(f.calls().sort(), ["kenan-root", "orchestrator", "remote"]);
+  const before = f.calls().length;
+  assert.equal(run({}).status, 0);
+  assert.equal(f.calls().length, before, "host publication reuses all three prepared outputs");
   f.put("package-lock.json", "changed");
   result = run({ BUILD_FAIL: "orchestrator" });
   assert.equal(result.status, 1, result.stderr);
   assert.equal(existsSync(join(f.repo, "node_modules/.pi-stack-build-orchestrator.json")), false);
   assert.ok(existsSync(join(f.repo, "node_modules/.pi-stack-build-remote.json")), "the sibling finished before returning failure");
+  assert.equal(f.calls().slice(before).includes("kenan-root"), false, "failed declarations cannot build Root");
+  f.put("package-lock.json", "root failure");
+  result = run({ BUILD_FAIL: "kenan-root" });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(existsSync(join(f.repo, "node_modules/.pi-stack-build-kenan-root.json")), false);
+  assert.ok(existsSync(join(f.repo, "node_modules/.pi-stack-build-remote.json")), "Root failure also joins Remote");
+});
+
+test("Root publication reuses prepared compilation but rejects changed inputs or output", t => {
+  const f = fixture(t);
+  f.put("packages/orchestrator/dist/main.js", "declarations");
+  const build = () => {
+    const result = f.run("kenan-root");
+    assert.equal(result.status, 0, result.stderr);
+  };
+  build(); build();
+  assert.deepEqual(f.calls(), ["kenan-root"]);
+  for (const source of ["kenan-root", "kenan-memory", "orchestrator"]) {
+    f.put(`packages/${source}/src/main.ts`, "changed source");
+    build();
+  }
+  f.put("packages/kenan-root/dist/main.js", "corrupt output"); build();
+  rmSync(join(f.repo, "packages/kenan-root/dist"), { recursive: true }); build();
+  assert.equal(f.calls().length, 6);
+  f.put("package-lock.json", "changed dependencies");
+  assert.equal(f.run("kenan-root", { BUILD_FAIL: "kenan-root" }).status, 42);
+  assert.equal(existsSync(join(f.repo, "node_modules/.pi-stack-build-kenan-root.json")), false);
+  build();
+  assert.equal(f.calls().length, 8);
 });
 
 test("build reuse requires unchanged source, dependencies and complete output", t => {
