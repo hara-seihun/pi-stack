@@ -36,7 +36,10 @@ function fixture(root = mkdtempSync(join(tmpdir(), "thread-wake-")), options: Pa
   }); owners.push(service); return { root, service, sessions };
 }
 afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.detach(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-const spawn = (f: ReturnType<typeof fixture>, id: string) => f.service.spawn({ requestId: `spawn:${id}`, id, cwd: f.root });
+async function spawn(f: ReturnType<typeof fixture>, id: string) {
+  const thread = unwrap(await f.service.spawn({ requestId: `spawn:${id}`, id, cwd: f.root }));
+  return f.service.control({ threadId: thread.id, action: "placement", foreground: true });
+}
 const schedule = (f: ReturnType<typeof fixture>, threadId: string, requestId = "schedule") => f.service.wakeSchedule({ threadId, action: "set", requestId, reason: "Inspect durable job", cadenceMs: 60000, nextDueAt: 0 });
 
 it("wakes an idle existing thread once, persists observability and coalesces overdue checks under admission", async () => {
@@ -82,6 +85,9 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   expect(parent.service.pending("parent")[0]).toMatchObject({ senderId: "child", source: "notification" });
   unwrap(await parent.service.agentWait({ requestId: "release-result", threadId: "parent", action: "clear" }));
   parent.sessions[0]!.settle(); await until(() => parent.service.get("parent")?.state === "idle");
+  await until(() => child.service.get("child")?.metadata?.archived === true);
+  expect(await parent.service.agentWait({ requestId: "wait-closed-child", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  unwrap(await child.service.control({ threadId: "child", action: "reopen" }));
   expect(unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).waitingOnAgents).toBeUndefined();
 });
 

@@ -65,6 +65,10 @@ it("real Pi settlement and disposal admit a second bounded lane cycle and preser
     expect(firstReceipt.outcome).toBe("complete"); expect(readFileSync(first.sessionFile, "utf8")).toContain("Native cycle 1");
     await daemon.fillCapacity(); await until(() => calls === 2 && disposals === 2 && service.laneCustody().size === 0);
     expect(service.snapshot()).toHaveLength(2); expect(unwrap(service.settlements()).items).toHaveLength(2);
+    await until(() => service.get(first.id)?.metadata?.archived === true);
+    expect(await service.send({ requestId: "closed-continuation", threadId: first.id, text: "Continue the original history" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    unwrap(await service.control({ threadId: first.id, action: "reopen" }));
+    expect(calls).toBe(2);
     unwrap(await service.send({ requestId: "cold-continuation", threadId: first.id, text: "Continue the original history" }));
     await until(() => calls === 3 && disposals === 3 && service.laneCustody().size === 0);
     expect(service.get(first.id)!.sessionFile).toBe(first.sessionFile);
