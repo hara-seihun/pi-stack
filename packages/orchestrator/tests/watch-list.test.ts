@@ -7,7 +7,8 @@ import { ThreadDirectory } from "../src/threads/directory.js";
 import { createThreadClient, threadHttp } from "../src/threads/http.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 import { callerResolver } from "../src/threads/caller.js";
-import { WatchList, watchInterval, type WatchItem } from "../src/threads/watch-list.js";
+import { RunnerStartupError } from "../src/threads/runner-startup.js";
+import { WatchList, watchInterval, watchSettings, type WatchItem } from "../src/threads/watch-list.js";
 import type { Result, PiSessionOptions, OpenPiSession, PiEvent, PiCommand } from "../src/threads/contracts.js";
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
@@ -19,7 +20,7 @@ function fixture(openSession?: OpenPiSession, intervalMs?: number) {
   const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async (options, output, exit) => { opened.push(options); if (openSession) return openSession(options, output, exit); throw Error("no model calls in this fixture"); } });
   cleanups.push(() => owner.close());
   const options = { databasePath: join(root, "threads.sqlite"), threads: owner,
-    placement: () => ({ ok: true as const, value: { cwd: root, metadata: { profileId: "home" } } }), intervalMs, onError: vi.fn() };
+    placement: () => ({ ok: true as const, value: { cwd: root, metadata: { profileId: "home" } } }), intervalMs, onError: vi.fn(), recoveryEvidence: (id: string) => owner.watchRecoveryEvidence(id) };
   const watch = new WatchList(options); owner.setWatchList(watch);
   cleanups.push(() => watch.close());
   const add = async (what = "Check a fixture", nextDueAt = 100) => value(await watch.watch({ threadId: "agent", action: "add", requestId: `add:${what}`, item: { what, why: "Fixture state matters", nextDueAt } })) as { item: WatchItem };

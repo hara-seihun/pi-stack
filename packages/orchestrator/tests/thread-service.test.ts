@@ -828,14 +828,14 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
   } finally { db.close(); }
 });
 
-it.each(["stop", "archive"] as const)("never auto-resumes an explicit %s during runner backpressure", async action => {
+it.each((["stop", "archive"] as const).flatMap(action => ["Runner capacity busy: memory pressure", "No eligible pooled account for anthropic/claude-opus-5-5."].map(error => ({ action, error }))))("never auto-resumes an explicit $action during backpressure: $error", async ({ action, error }) => {
   const directory = mkdtempSync(join(tmpdir(), "thread-capacity-stop-")); roots.push(directory);
-  const openSession = vi.fn<OpenPiSession>(async () => { throw new Error("Runner capacity busy: memory pressure"); });
+  const openSession = vi.fn<OpenPiSession>(async () => { throw new Error(error); });
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
   const first = new ThreadService(options); services.push(first);
   const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
   await first.start();
-  await waitFor(() => first.get(thread.id)?.metadata?.startupFailure !== undefined);
+  await waitFor(() => first.get(thread.id)?.metadata?.startupFailure !== undefined || first.get(thread.id)?.metadata?.admissionWait !== undefined);
   value(await first.control(action === "archive" ? { threadId: thread.id, action: "update", archived: true } : { threadId: thread.id, action: "stop", descendants: false }));
   await first.close();
   const second = new ThreadService(options); services.push(second);
@@ -992,6 +992,43 @@ it.each([
   service.reconcile(); await turn(); expect(sessions).toHaveLength(1);
 });
 
+it.each([false, true])("preserves pooled startup refusal and the same queued/accepted work across retries and restart, accepted=%s", async accepted => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-pool-start-")); roots.push(directory);
+  const sessions: FakePiSession[] = []; let available = false;
+  const openSession = vi.fn<OpenPiSession>(async (options, output) => {
+    if (!available) throw new Error("Error: No eligible pooled account for anthropic/claude-opus-5-5.");
+    const session = new FakePiSession(options, output); sessions.push(session); return session;
+  });
+  const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
+    admit: async () => ({ ok: true as const, value: { release() {} } }) };
+  const first = new ThreadService(options); services.push(first);
+  value(first.importThread({ id: "watch", title: "Synthetic watch", cwd: directory, sessionFile: join(directory, "watch.jsonl"),
+    settings: { model: "astra", thinkingLevel: "high", speed: "standard" }, metadata: { watchList: true } }));
+  value(first.importMessage({ id: "work", threadId: "watch", text: "check", state: accepted ? "dispatched" : "queued", ...(accepted ? { executionId: "execution" } : {}) }));
+  await first.start(); await waitFor(() => first.get("watch")?.metadata?.admissionWait !== undefined);
+  expect(first.get("watch")?.metadata?.admissionWait).toMatchObject({ message: expect.stringContaining("No eligible pooled account") });
+  await first.close();
+  const second = new ThreadService(options); services.push(second); await second.start(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  const db = new DatabaseSync(options.databasePath);
+  try {
+    for (let attempt = 2; attempt <= 4; attempt++) {
+      db.prepare(accepted ? "UPDATE thread SET metadata=json_set(metadata,'$.admissionWait.retryAt',0,'$.providerWait.retryAt',0) WHERE id='watch'" : "UPDATE thread SET metadata=json_set(metadata,'$.admissionWait.retryAt',0) WHERE id='watch'").run();
+      second.reconcile(); await waitFor(() => openSession.mock.calls.length === attempt); await turn();
+      expect(second.latestSettlement("watch")).toBeNull();
+      expect(second.get("watch")).toMatchObject({ held: false });
+      expect(second.get("watch")?.metadata?.startupFailure).toBeUndefined();
+      expect(second.pending("watch")).toMatchObject([{ id: "work", state: accepted ? "dispatched" : "queued" }]);
+    }
+    available = true;
+    db.prepare(accepted ? "UPDATE thread SET metadata=json_set(metadata,'$.admissionWait.retryAt',0,'$.providerWait.retryAt',0) WHERE id='watch'" : "UPDATE thread SET metadata=json_set(metadata,'$.admissionWait.retryAt',0) WHERE id='watch'").run();
+    second.reconcile(); await waitFor(() => sessions[0]?.isStreaming === true);
+    expect(sessions[0]!.commands.filter(command => command.type === "prompt")).toMatchObject([{ workId: "work" }]);
+    sessions[0]!.settle("checked"); await waitFor(() => second.latestSettlement("watch") !== null);
+    expect(second.latestSettlement("watch")).toMatchObject({ workId: "work", outcome: "complete", ...(accepted ? { executionId: "execution" } : {}) });
+  } finally { db.close(); }
+});
+
 it("cold pooled startup without quota waits without consuming the startup failure budget",async()=>{
   const directory=mkdtempSync(join(tmpdir(),"thread-cold-capacity-"));roots.push(directory);
   const sessions:FakePiSession[]=[];let available=false;
@@ -1002,6 +1039,8 @@ it("cold pooled startup without quota waits without consuming the startup failur
   for(let i=0;i<4;i++){service.reconcile();await turn();}
   expect(service.get(thread.id)?.metadata?.startupFailure).toBeUndefined();expect(service.latestSettlement(thread.id)).toBeNull();
   expect(service.pending(thread.id)).toMatchObject([{state:"queued"}]);
+  const db = new DatabaseSync(join(directory, "threads.sqlite"));
+  db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.admissionWait.retryAt',0) WHERE id=?").run(thread.id); db.close();
   available=true;service.reconcile();await waitFor(()=>sessions[0]?.isStreaming===true);
   sessions[0]!.settle("done");await waitFor(()=>service.latestSettlement(thread.id)!==null);
 });
