@@ -5,7 +5,7 @@ import type { Server } from "node:http";
 import { afterEach, expect, it, vi } from "vitest";
 import { AgentCapacityAuthority, createAgentCapacityServer } from "../src/agent-capacity-authority.js";
 import { AGENT_CAPACITY_AUTHORITY, GLOBAL_AGENT_LIMIT, createAgentCapacityClient, configuredAgentCapacity,
-  type CapacityCustody } from "../src/agent-capacity.js";
+  type CapacityCustody, type CapacityTransport } from "../src/agent-capacity.js";
 import type { Result } from "../src/threads/contracts.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -40,7 +40,7 @@ it("admits at most 100 parallel HTTP executions across two authenticated owners 
   const authority = memoryAuthority(true);
   const url = await listen(createAgentCapacityServer(authority, owners));
   let peak = 0;
-  const transport: typeof fetch = async (input, init) => {
+  const transport: CapacityTransport = async (input, init) => {
     const response = await fetch(input, init);
     peak = Math.max(peak, authority.status().active);
     return response;
@@ -81,19 +81,24 @@ it("fails closed before census cutover and for missing client configuration", as
   expect(authority.status()).toMatchObject({ initialized: true, active: 1, queued: 0 });
 });
 
-it("preserves an existing over-limit census and admits no fresh execution until it drains below 100", () => {
+it("rejects an over-limit initial census without changing custody and holds cutover until at most 100 remain", () => {
   const authority = memoryAuthority(false);
   const census = Array.from({ length: 102 }, (_, index) => ({ ownerId: owners[index % owners.length]!.id,
     agentId: `existing-agent-${index}`, executionId: `existing-execution-${index}` }));
-  value(authority.initialize(census));
-  expect(authority.status()).toMatchObject({ initialized: true, active: 102 });
   const fresh = { agentId: "fresh-agent", executionId: "fresh-execution" };
+  expect(authority.acquire(owners[0]!.id, fresh)).toMatchObject({ ok: false });
+  const before = authority.status();
+  expect(authority.initialize(census)).toMatchObject({ ok: false, error: { message: expect.stringContaining("100") } });
+  expect(authority.status()).toEqual(before);
+  expect(authority.status()).toMatchObject({ initialized: false, active: 0, queued: 1 });
+  expect(authority.entries()).toEqual([]);
+  expect(census).toHaveLength(102);
   expect(authority.acquire(owners[0]!.id, fresh)).toMatchObject({ ok: false, error: { code: "unavailable" } });
-  const existing = authority.entries();
-  for (const entry of existing.slice(0, 2)) value(authority.release(entry.ownerId, entry));
-  expect(authority.status().active).toBe(100);
+  value(authority.initialize(census.slice(0, 100)));
+  expect(authority.status()).toMatchObject({ initialized: true, active: 100, queued: 1 });
   expect(authority.acquire(owners[0]!.id, fresh)).toMatchObject({ ok: false, error: { code: "unavailable" } });
-  value(authority.release(existing[2]!.ownerId, existing[2]!));
+  const settled = authority.entries()[0]!;
+  value(authority.release(settled.ownerId, settled));
   value(authority.acquire(owners[0]!.id, fresh));
   expect(authority.status()).toMatchObject({ active: 100, queued: 0 });
 });
@@ -158,7 +163,7 @@ it("keeps custody after a lost acquisition acknowledgement and retries the same 
   const authority = memoryAuthority(true);
   const url = await listen(createAgentCapacityServer(authority, owners));
   let loseReceipt = true;
-  const transport: typeof fetch = vi.fn(async (input, init) => {
+  const transport: CapacityTransport = vi.fn(async (input, init) => {
     const response = await fetch(input, init);
     if (loseReceipt) { loseReceipt = false; await response.body?.cancel(); throw new TypeError("acknowledgement connection lost"); }
     return response;
