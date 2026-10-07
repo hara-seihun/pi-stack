@@ -111,16 +111,23 @@ export function boundedArguments(value: unknown, limit = ARGUMENT_STRING_LIMIT, 
   };
   const tool = name.toLowerCase().replace(/^functions\./, "");
   let source = value;
+  let words: [string, string] | null = null;
   if (source && typeof source === "object" && !Array.isArray(source)) {
     const record = { ...(source as Record<string, unknown>) };
     const drop = (key: string) => { if (key in record) { delete record[key]; truncated = true; } };
     if (tool === "write") drop("content");
     if (tool === "edit" && Array.isArray(record.edits)) { record.editCount = record.edits.length; drop("edits"); }
+    const said = AGENT_MESSAGE_FIELDS[tool];
+    if (said && typeof record[said] === "string") { words = [said, record[said] as string]; delete record[said]; }
     if (tool.startsWith("thread_")) { drop("message"); drop("text"); }
     source = record;
   }
-  return { value: walk(source, 0), truncated };
+  const bounded = walk(source, 0);
+  return { value: words ? { ...(bounded as Record<string, unknown>), [words[0]]: words[1] } : bounded, truncated };
 }
+
+/** Messages an agent sends to another agent are its visible words, so they travel whole like any other message. */
+const AGENT_MESSAGE_FIELDS: Record<string, string> = { thread_send: "text", thread_spawn: "message" };
 
 function outputTail(output: string): string {
   return output.length <= PARTIAL_OUTPUT_LIMIT ? output : `…${output.slice(-PARTIAL_OUTPUT_LIMIT)}`;
