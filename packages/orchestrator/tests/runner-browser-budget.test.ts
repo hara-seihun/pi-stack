@@ -3,14 +3,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createConnection } from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { readFileSync, readlinkSync, readdirSync, existsSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, it } from "vitest";
 import type { PiEvent, PiSession } from "../src/threads/contracts.js";
 import type { createSharedPiSessionOpener } from "../src/threads/runner-transport.js";
 import { runnerSlices } from "../src/threads/runner-resources.js";
+import { RunnerBudgetFixture } from "./fixtures/runner-budget.js";
 
 const manager = spawnSync("systemctl", ["--user", "show-environment"], { stdio: "ignore" }).status === 0;
 const nativeBrowser = spawnSync("agent-browser", ["--version"], { stdio: "ignore" }).status === 0;
@@ -34,15 +35,15 @@ async function status(control: string): Promise<any> {
 
 it.skipIf(!manager || !nativeBrowser || !chrome)("native Chromium trees remain outside control and browser OOM preserves twenty accepted native sessions", async () => {
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-  const cache = join(repo, "node_modules/.cache"); mkdirSync(cache, { recursive: true });
-  const compiled = mkdtempSync(join(cache, "browser-budget-")), root = mkdtempSync(join(tmpdir(), "browser-budget-"));
+  const fixture = new RunnerBudgetFixture(repo, "browser-budget-");
+  const { compiled, root } = fixture;
   const sessions: PiSession[] = [], events: PiEvent[][] = [];
-  let opener: ReturnType<typeof createSharedPiSessionOpener> | undefined, id: string | undefined;
+  let opener: ReturnType<typeof createSharedPiSessionOpener> | undefined;
   const gate = join(root, "release"), entered = join(root, "entered"), proof = join(root, "browser.jsonl");
   const server = createServer((_request, response) => response.end("<title>Runner pressure fixture</title><h1>Native browser fixture</h1>"));
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     writeFileSync(join(compiled, "package.json"), '{"type":"module"}');
     await build({ entryPoints: ["runner-host", "runner-transport"].map(name => join(repo, `packages/orchestrator/src/threads/${name}.ts`)),
       outdir: compiled, bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
@@ -67,9 +68,8 @@ it.skipIf(!manager || !nativeBrowser || !chrome)("native Chromium trees remain o
     for (let i = 0; i < 20; i++) {
       events[i] = [];
       const session = await opener.openSession({ threadId: `thread-${i}`, cwd: root, sessionFile: join(root, `${i}.jsonl`), args: ["--extension", extension],
-        env: { HOME: root, PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: "http://127.0.0.1:1/v1/threads" } }, event => events[i].push(event), () => {});
+        env: { HOME: root, PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: "http://127.0.0.1:1/v1/threads" } }, event => { fixture.track(event); events[i].push(event); }, () => {});
       sessions.push(session);
-      if (!id) id = createHash("sha256").update(String(events[i].find(event => event.type === "runner_attached")!.control)).digest("hex").slice(0, 16);
       await session.command({ type: "prompt", id: `input-${i}`, workId: `work-${i}`, message: "/hold" });
     }
     await until(() => existsSync(entered) && readFileSync(entered, "utf8").trim().split("\n").length === 20);
@@ -80,7 +80,7 @@ it.skipIf(!manager || !nativeBrowser || !chrome)("native Chromium trees remain o
       expect(JSON.stringify(result)).toContain("Runner pressure fixture");
     }
     const control = String(events[0].find(event => event.type === "runner_attached")!.control);
-    id = createHash("sha256").update(control).digest("hex").slice(0, 16);
+    const id = createHash("sha256").update(control).digest("hex").slice(0, 16);
     const before = await status(control), slices = runnerSlices(id);
     expect(before).toMatchObject({ sessions: 20, activeSessions: 20 });
     const toolGroup = ctl("show", slices.tools, "--property=ControlGroup", "--value").trim();
@@ -107,14 +107,7 @@ it.skipIf(!manager || !nativeBrowser || !chrome)("native Chromium trees remain o
     for (let i = 0; i < 20; i++) expect(events[i].filter(event => event.type === "agent_settled")).toMatchObject([{ workIds: [`work-${i}`], outcome: "complete" }]);
     expect((await status(control)).pid).toBe(before.pid);
   } finally {
-    writeFileSync(gate, "release");
-    for (const session of sessions) await session.close().catch(() => {});
-    opener?.detach();
-    if (id) {
-      try { ctl("kill", "--signal=SIGKILL", `pi-thread-runner-${id}.service`); } catch {}
-      for (const slice of [runnerSlices(id).tools, runnerSlices(id).boundary]) { ctl("stop", slice); ctl("revert", slice); }
-    }
     server.close();
-    rmSync(root, { recursive: true, force: true }); rmSync(compiled, { recursive: true, force: true });
+    fixture.cleanup(() => opener?.detach());
   }
 }, 40000);

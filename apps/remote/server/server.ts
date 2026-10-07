@@ -59,6 +59,7 @@ import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { questionAnswerContext } from "./question-answer-context";
+import { QuestionFeed } from "./question-feed";
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
 import { oneKenanEnabled } from "kenan-memory/config";
@@ -98,7 +99,7 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { fileEditResponse } from "./file-edit";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
-import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, type ThreadQuestion, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
@@ -1201,23 +1202,11 @@ function sendImages(stream: ClientStream): void {
 function readSessionQuestions(id: string) {
   return threads.get(id) ? threads.questions(id) : peerThreads.has(id) && fleet ? fleet.questions(id) : directory.questions(id);
 }
-const questionReads = new Map<string, ReturnType<typeof readSessionQuestions>>();
-const questionSnapshots = new Map<string, ThreadQuestion[]>();
+const questionFeed = new QuestionFeed(readSessionQuestions);
 async function sendQuestions(stream: ClientStream): Promise<void> {
   const sessionId = stream.subscription.session;
   if (!sessionId || !sessionRow.get(sessionId)) return;
-  let read = questionReads.get(sessionId);
-  if (!read) {
-    read = readSessionQuestions(sessionId).finally(() => questionReads.delete(sessionId));
-    questionReads.set(sessionId, read);
-  }
-  stream.publish({ type: "questions", sessionId, state: "loading", questions: questionSnapshots.get(sessionId) ?? [] });
-  const result = await read;
-  if (result.ok) questionSnapshots.set(sessionId, result.value);
-  if (stream.closed || stream.subscription.session !== sessionId) return;
-  if (result.ok) {
-    stream.publish({ type: "questions", sessionId, state: "ready", questions: result.value });
-  } else stream.publish({ type: "questions", sessionId, state: "failed", questions: questionSnapshots.get(sessionId) ?? [], error: result.error.message });
+  await questionFeed.send(stream);
 }
 
 function sendEvents(stream: ClientStream): void {
@@ -1315,9 +1304,8 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
       sendLive(stream);
     }
     sendImages(stream);
-    void sendQuestions(stream).catch(cause => {
-      if (!stream.closed && stream.subscription.session === sessionId) stream.publish({ type: "questions", sessionId, state: "failed", questions: questionSnapshots.get(sessionId) ?? [], error: cause instanceof Error ? cause.message : String(cause) });
-    });
+    if (mode === "finite") pending.push(sendQuestions(stream));
+    else void sendQuestions(stream);
     sendEvents(stream);
     const fresh = changedSession || before.selectionId !== stream.subscription.selectionId;
     pending.push(stream.synchronizeSelection(
@@ -2458,7 +2446,7 @@ const server = Bun.serve<SocketData>({
         const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
           selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
         if (!result.ok) return threadError(result.error);
-        if (questionReads.has(answerRequest.sessionId)) await questionReads.get(answerRequest.sessionId);
+        await questionFeed.settle(answerRequest.sessionId);
         for (const stream of sessionSubscribers(answerRequest.sessionId)) void sendQuestions(stream);
         signalSync();
         return json(result.value);
