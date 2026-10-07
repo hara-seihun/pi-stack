@@ -6,7 +6,8 @@
   "license": "MIT",
   "repository": "github:hara-seihun/pi-stack",
   "bin": {
-    "pi-orchestrator": "dist/cli.js"
+    "pi-orchestrator": "dist/cli.js",
+    "pi-agent-capacity": "dist/agent-capacity-cli.js"
   },
   "files": [
     "dist",
@@ -26,6 +27,16 @@
       "types": "./src/image-service.ts",
       "bun": "./src/image-service.ts",
       "default": "./dist/image-service.js"
+    },
+    "./agent-capacity": {
+      "types": "./src/agent-capacity.ts",
+      "bun": "./src/agent-capacity.ts",
+      "default": "./dist/agent-capacity.js"
+    },
+    "./standalone-agent": {
+      "types": "./src/standalone-agent.ts",
+      "bun": "./src/standalone-agent.ts",
+      "default": "./dist/standalone-agent.js"
     },
     "./boost": {
       "types": "./src/boost.ts",

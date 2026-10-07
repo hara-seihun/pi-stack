@@ -102,7 +102,7 @@ it("owns root repair leases and recovers only recorded executions without isolat
 
 it("admits ordinary executions through a model broker without local accounts or OAuth leases", async () => {
   const store = Store.open(":memory:");
-  const config = { ...loadConfig("/missing"), modelBrokerUrl: "http://127.0.0.1:2461", maxConcurrentSessions: 2 };
+  const config = { ...loadConfig("/missing"), modelBrokerUrl: "http://127.0.0.1:2461" };
   const fleet = new Fleet(store, config);
   try {
     const admitted = await fleet.admit(thread, thread.settings, false, "broker-work");
@@ -200,10 +200,10 @@ it("cools a thread's account for the limit class the provider named", async () =
   } finally { store.close(); }
 });
 
-it.each(["force", "live"] as const)("admits %s past background account and machine ceilings, but not exhausted quota", async admission => {
+it.each(["force", "live"] as const)("account urgency %s bypasses background spend pacing, but not exhausted quota", async admission => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
-  const fleet = new Fleet(store, { ...loadConfig("/missing"), maxConcurrentSessions: 1 });
+  const fleet = new Fleet(store, loadConfig("/missing"));
   try {
     const busy = await fleet.admit(thread, thread.settings, false, "fleet-work");
     expect(busy.ok).toBe(true);

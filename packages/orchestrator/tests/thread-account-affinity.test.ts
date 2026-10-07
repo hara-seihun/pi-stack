@@ -72,12 +72,11 @@ it("scopes affinity to thread, provider and model, without changing ordinary pro
   } finally { store.close(); }
 });
 
-it("keeps background account and machine capacity checks ahead of affinity", () => {
+it("keeps background account pacing ahead of affinity, independently of global execution slots", () => {
   const { store, config, choose } = fixture();
   try {
     expect(choose()).toBe("anthropic-1");
     store.createLease("busy-preferred", "anthropic-1", "interactive");
     expect(assign(store, "thread", "background", config, Date.now(), undefined, thread.id).assignment?.accountId).toBe("anthropic-2");
-    expect(assign(store, "thread", "background", { ...config, maxConcurrentSessions: 1 }, Date.now(), undefined, thread.id).assignment).toBeUndefined();
   } finally { store.close(); }
 });

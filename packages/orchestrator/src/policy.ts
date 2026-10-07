@@ -85,7 +85,6 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   if(repair&&store.control("repair-owner")&&store.control("repair-owner")!==runId)return{refusals:[{accountId:"*",reason:"repair already owned"}]};
-  if(budget==="background"&&store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){

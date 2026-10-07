@@ -8,8 +8,8 @@ import { requestedSpeedError, type Speed } from "./speed.js";
  * `live` is live consulting: a conversation with people waiting on the other end, such as a meeting.
  * Its conversation thread only dispatches, so it stays free to answer; its workers do the work.
  * The conversation runs Sol at low thinking and priority speed; its workers also run at priority.
- * Both are admitted ahead of the fleet's ceilings. Nothing else gets these
- * speeds by default, so the extra spend is bounded by live conversations.
+ * Both request urgent account spending; the global execution cap still applies identically.
+ * Nothing else gets these speeds by default, so extra spend is bounded by live conversations.
  */
 export interface ThreadMode {
   readonly admission: Admission;

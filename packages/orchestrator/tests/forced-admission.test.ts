@@ -6,16 +6,16 @@ import { assign } from "../src/policy.js";
 import { Store } from "../src/store.js";
 import type { Thread } from "../src/threads/contracts.js";
 
-it("admits forced fan-out above both pacing ceilings and retains real admission gates", () => {
+it("account urgency ignores background pacing but retains quota and explicit pause gates", () => {
   const store = Store.open(":memory:");
-  const config = { ...loadConfig("/missing"), maxConcurrentSessions: 1 };
+  const config = loadConfig("/missing");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
   try {
     for (let i = 0; i < 48; i++) {
       expect(assign(store, "sol", "force", config).assignment?.accountId).toBe("a");
       store.createLease(`worker:${i}`, "a", "fleet");
     }
-    expect(assign(store, "sol", "background", config).refusals[0]?.reason).toBe("machine session ceiling");
+    expect(assign(store, "sol", "background", config).refusals[0]?.reason).toContain("capacity 48/1");
     for (const [key, reason] of [["launches", "emergency halt"], ["ordinary-launches", "ordinary work paused"]]) {
       store.setControl(key!, "paused");
       expect(assign(store, "sol", "force", config).refusals[0]?.reason).toBe(reason);
@@ -26,9 +26,9 @@ it("admits forced fan-out above both pacing ceilings and retains real admission 
   } finally { store.close(); }
 });
 
-it.each(["force", "live"] as const)("admits eight %s broker threads while background remains paced", async admission => {
+it.each(["force", "live"] as const)("broker account admission for %s never owns the global agent slot budget", async admission => {
   const store = Store.open(":memory:");
-  const fleet = new Fleet(store, { ...loadConfig("/missing"), modelBrokerUrl: "http://127.0.0.1:2461", maxConcurrentSessions: 1 });
+  const fleet = new Fleet(store, { ...loadConfig("/missing"), modelBrokerUrl: "http://127.0.0.1:2461" });
   const settings = { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "medium", speed: "priority" } as const;
   const thread = { settings, admission } as Thread;
   const releases: (() => void | Promise<void>)[] = [];
@@ -38,17 +38,18 @@ it.each(["force", "live"] as const)("admits eight %s broker threads while backgr
       expect(admitted.ok).toBe(true);
       if (admitted.ok) releases.push(admitted.value.release);
     }
-    expect(await fleet.admit({ ...thread, id: "background", admission: "background" }, settings, false, "background"))
-      .toMatchObject({ ok: false, error: { message: "machine session ceiling" } });
+    const background = await fleet.admit({ ...thread, id: "background", admission: "background" }, settings, false, "background");
+    expect(background.ok).toBe(true);
+    if (background.ok) releases.push(background.value.release);
     const child = await fleet.admit({ ...thread, id: "child", parentId: "parent", admission: "background" }, settings, false, "child");
     expect(child.ok).toBe(true);
     if (child.ok) releases.push(child.value.release);
   } finally { for (const release of releases) await release(); store.close(); }
 });
 
-it("fills every ready forced lane above machine capacity in a bounded readiness pass", async () => {
+it("queues every ready lane in one bounded readiness pass; execution admission owns capacity", async () => {
   const store = Store.open(":memory:");
-  const daemon = new Daemon(store, { ...loadConfig("/missing"), modelBrokerUrl: "http://127.0.0.1:2461", maxConcurrentSessions: 1 }) as any;
+  const daemon = new Daemon(store, { ...loadConfig("/missing"), modelBrokerUrl: "http://127.0.0.1:2461" }) as any;
   store.reconcileLanes(Array.from({ length: 8 }, (_, i) => ({ id: `lane:${i}`, prompt: "work", cwd: "/tmp", profile: "sol", weight: 1 })));
   const spawned: string[] = [];
   daemon.threads.snapshot = () => { throw new Error("Scheduling must not project historical threads"); };

@@ -248,11 +248,18 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
   const attachSession: AttachPiSession = async (reference, output, exit) => {
     if (reference === undefined) return null;
     const recorded = validate(reference);
-    try {
-      const status = await runnerRequest(recorded.control, { type: "status" });
-      if (status?.ok !== true) throw new Error("Thread runner did not acknowledge status");
-      return await attach(recorded, output, exit, typeof status.activeSessions === "number");
-    } catch (error) { if (socketAbsent(error)) return null; throw error; }
+    let status: any;
+    try { status = await runnerRequest(recorded.control, { type: "status" }); }
+    catch (error) { if (socketAbsent(error)) return null; throw error; }
+    if (status?.ok !== true) throw new Error("Thread runner did not acknowledge status");
+    try { return await attach(recorded, output, exit, typeof status.activeSessions === "number"); }
+    catch (error) {
+      if (!socketAbsent(error)) throw error;
+      // Fence an earlier open whose acknowledgement was lost. Native close shares its serial queue.
+      try { await runnerRequest(recorded.control, { type: "close", socketPath: recorded.socketPath }, 35_000); }
+      catch (closing) { if (!socketAbsent(closing)) throw closing; }
+      return null;
+    }
   };
   const openSession: OpenPiSession = async (options, output, exit) => {
     let retained = options.env.PI_THREAD_RUNNER_REFERENCE ? validate(JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE)) : undefined;
@@ -278,6 +285,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     const control = retained?.control ?? currentControl;
     const socketPath = retained?.socketPath ?? join(socketDir, "thread-sockets", `${group}.${hash(options.threadId)}.sock`);
     const reference = validate({ control, socketPath });
+    output({ type: "runner_attached", control, socketPath });
     mkdirSync(dirname(control), { recursive: true, mode: 0o700 });
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     let starting = starts.get(control);

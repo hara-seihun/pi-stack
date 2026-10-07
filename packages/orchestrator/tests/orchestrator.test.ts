@@ -15,7 +15,7 @@ import { ACCOUNT_USAGE, dispatch } from "../src/commands.js";
 import { CACHE_WINDOW_MS, OrchestratorClient } from "../src/client.js";
 import { outputLimitContinuation } from "../src/host/continuations.js";
 
-const config:OrchestratorConfig={peers:{},profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
+const config:OrchestratorConfig={peers:{},profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]},backgroundSpendFraction:.8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
 
 describe("current orchestrator state",()=>{
