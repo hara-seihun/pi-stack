@@ -31,9 +31,11 @@ function fixture(t, defect) {
       writeFileSync(input.outputPath, JSON.stringify({ snapshot: defect === "saved-sensitive-value" ? "4242 4242 4242 4242" : "[redacted: cc-number]" }));
       return { details: { resultCategory: "success", data: { snapshot: "[redacted: cc-number]" } } };
     }
-    if (input.args.at(-1) === "batch") {
-      const data = JSON.parse(input.stdin).map(command => ({ command, success: defect === "unsafe-eval-success" && command[0] === "eval", error: defect === "wrong-refusal" ? "Unexpected command error" : "SENSITIVE_OUTPUT_UNSUPPORTED: sensitive input page" }));
-      if (defect === "unsafe-artifact") writeFileSync(data[1].command[1], "unprotected artifact");
+    const nativeSteps = JSON.parse(input.stdin);
+    if (nativeSteps.length === 2 && nativeSteps[0][0] === "get" && ["eval", "screenshot", "pdf"].includes(nativeSteps[1][0])) {
+      assert.equal(input.args.at(-1), "--bail", "page reverification and inspection must use fail-fast batches");
+      const data = nativeSteps.map(command => ({ command, success: command[0] === "get" || defect === "unsafe-eval-success" && command[0] === "eval", error: defect === "wrong-refusal" ? "Unexpected command error" : "SENSITIVE_OUTPUT_UNSUPPORTED: sensitive input page" }));
+      if (defect === "unsafe-artifact" && data[1].command[0] === "screenshot") writeFileSync(data[1].command[1], "unprotected artifact");
       return { details: { resultCategory: "failure", data } };
     }
     assert.equal(input.args.at(-1), "--bail");
@@ -79,7 +81,7 @@ function fixture(t, defect) {
 test("complete native proof uses bounded batches and closes both named sessions", async (t) => {
   const f = fixture(t);
   await probeBrowser(f.tool, f.options);
-  assert.equal(f.calls.length, 10, "linear checks must not regress to per-command wrapper dispatch");
+  assert.equal(f.calls.length, 12, "linear checks must not regress to per-command wrapper dispatch");
   assert.deepEqual(f.closed, ["attached", "owner"]);
 });
 

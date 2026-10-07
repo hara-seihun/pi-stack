@@ -50,6 +50,7 @@ check_release() {
   grep -rlq 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
   grep -q 'Sensitive form values are redacted' "$release/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/index.js"
   grep -q 'Pi Stack sensitive form outputs' "$release/node_modules/pi-agent-browser-native/docs/TOOL_CONTRACT.md"
+  grep -q 'Closing is recovery, not reuse' "$release/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/orchestration/browser-run/managed-session-daemon-policy.js"
   grep -q 'Anthropic error tool results require text' "$release/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js"
   grep -rlq 'Anthropic error tool results require text' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
   local doctor command

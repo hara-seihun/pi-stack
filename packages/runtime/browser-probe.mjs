@@ -114,16 +114,17 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
     assertRedacted(readFileSync(sensitiveResultPath, "utf8"));
     const unsafeImage = `${screenshotPath}.sensitive.png`;
     const unsafePdf = `${screenshotPath}.sensitive.pdf`;
-    const guarded = await execute("sensitive-unsafe-operations", {
-      args: [...ownerArgs, "batch"], stdin: JSON.stringify([
-        ["eval", "btoa(document.querySelector('#cardnumber').value)"],
-        ["screenshot", unsafeImage], ["pdf", unsafePdf],
-      ]),
-    }, "failure");
-    assert.equal(guarded.data.length, 3, "each sensitive unsafe operation must have a typed refusal");
-    for (const row of guarded.data) {
-      assert.equal(row.success, false, "unsafe operations must be refused before execution");
-      assert.match(row.error, /^SENSITIVE_OUTPUT_UNSUPPORTED/);
+    for (const command of [
+      ["eval", "btoa(document.querySelector('#cardnumber').value)"],
+      ["screenshot", unsafeImage], ["pdf", unsafePdf],
+    ]) {
+      const guarded = await execute(`sensitive-unsafe-${command[0]}`, {
+        args: [...ownerArgs, "batch", "--bail"], stdin: JSON.stringify([["get", "url"], command]),
+      }, "failure");
+      assert.equal(guarded.data?.length, 2, "each sensitive unsafe operation must have a typed refusal");
+      assert.equal(guarded.data[0].success, true, "the page must remain verifiable without eval");
+      assert.equal(guarded.data[1].success, false, "unsafe operations must be refused before execution");
+      assert.match(guarded.data[1].error, /^(?:Error: )?SENSITIVE_OUTPUT_UNSUPPORTED/);
     }
     assert.equal(existsSync(unsafeImage), false, "refused screenshots must not leave unprotected artifacts");
     assert.equal(existsSync(unsafePdf), false, "refused PDFs must not leave unprotected artifacts");
