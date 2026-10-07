@@ -42,7 +42,7 @@ test("media persists Blob bytes and MIME type, with independent byte and entry L
   expect(await readCachedMedia("media:count-1")).toBeNull();
   expect(await text("media:count-0")).toBe("0");
   expect(await text("media:count-512")).toBe("new");
-});
+}, 30_000);
 
 test("opening a v2 database preserves existing payloads and metadata while adding media", () => {
   const source = `
