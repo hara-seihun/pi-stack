@@ -244,6 +244,14 @@ persisted cwd failure only with `nativeNotReady`, the exact failed/unlanded work
 and settlement, matching work-capacity source, and no current native reference,
 runtime or execution. Result notices do not become reply assignments.
 
+Startup exits preserve their native reference until ownership is reconciled.
+Missing-reference recovery enumerates the owner's retained runner generations,
+reattaches an existing thread socket, and fences queued opens through the native
+serial close before accepting absence. An unreachable generation must also have
+no process-lifetime lock owner. Unknown generations, conflicting ownership or an
+unacknowledged fence retain the original capacity identity. Recovery never
+replays stopped input or changes an already-completed assignment receipt.
+
 Provider capacity refusals preserve execution/work identity, retire inactive
 native resources, and retry through durable admission without emitting a false
 completion. Transient compaction/transport recovery has recorded retry times and
