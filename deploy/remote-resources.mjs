@@ -16,10 +16,11 @@ export const remoteResources = [
     source: `deploy/${name}`, destination: `deploy/${name}`, kind: "file",
   })),
   { source: "apps/remote/package.json", destination: "package.json", kind: "file" },
+  { source: "apps/remote/meeting-runtime.json", destination: "meeting-runtime.json", kind: "file" },
   {
     source: "apps/remote/server", destination: "server", kind: "tree",
     required: ["voice/delegation-policy.md", "meet/transcriber.ts", "write.ts", "file-edit.py"],
-    entrypoints: ["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts"],
+    entrypoints: ["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts", "meet/runtime-main.ts"],
     executables: ["pi-remote", "pi-phone", "pi-room", "pi-calendar", "pi-remote-launch", "pi-remote-supervise"],
   },
   { source: "apps/remote/shared", destination: "shared", kind: "tree" },

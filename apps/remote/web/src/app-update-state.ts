@@ -1,5 +1,6 @@
 import type { AppUpdate, AppUpdateCheck, AppUpdateInstall } from "./native";
 import { requireState } from "../../shared/explicit-state";
+import { beginAppUpdate, liveMediaActive, subscribeLiveMedia } from "./live-media";
 
 export interface UpdateState {
   visible: boolean;
@@ -42,11 +43,12 @@ export function startAppUpdateChecks(updater: AppUpdater, lifecycle: UpdateLifec
     if (!running && !updater.snapshot().busy) check();
   });
   const detach = lifecycle.subscribe(check);
+  const detachMedia = subscribeLiveMedia(() => { if (!disposed) void updater.resumeAfterMedia(); });
   check();
   return () => {
     disposed = true;
     cancelTimer?.();
-    unsubscribe(); detach();
+    unsubscribe(); detach(); detachMedia();
   };
 }
 
@@ -60,10 +62,19 @@ export class AppUpdater {
   private listeners = new Set<() => void>();
   private attempts = new Set<string>();
   private automaticAfter: number | null = null;
+  private waitingForMedia = false;
   constructor(private port: UpdatePort, private now: () => number = Date.now) {}
 
   freshnessDelay = () => this.automaticAfter === null ? 0 : Math.max(0, this.automaticAfter - this.now());
   checkFresh = (): Promise<void> => this.freshnessDelay() > 0 ? Promise.resolve() : this.check();
+
+  async resumeAfterMedia(): Promise<void> {
+    await this.checking;
+    if (!this.waitingForMedia || liveMediaActive()) return;
+    this.waitingForMedia = false;
+    this.automaticAfter = null;
+    await this.checkFresh();
+  }
 
   snapshot = () => this.state;
   subscribe = (listener: () => void) => {
@@ -105,6 +116,13 @@ export class AppUpdater {
       this.publish({ visible: true, busy: false, status: "Finish the update in Android. Tap Update to reopen installation.", error: this.state.error, approval: true });
       return;
     }
+    const releaseUpdate = beginAppUpdate();
+    if (!releaseUpdate) {
+      this.waitingForMedia = true;
+      this.publish({ visible: true, busy: false, status: "Update waits until the meeting or voice call ends.", error: "", approval: false });
+      return;
+    }
+    this.waitingForMedia = false;
     this.publish({ visible: true, busy: true, status: update.kind === "web" ? "Applying update…" : "Downloading update…", error: "", approval: false });
     try {
       const result = await this.port.install();
@@ -121,7 +139,7 @@ export class AppUpdater {
       // Android's explicit refusal is not a failed transfer to retry every minute.
       if (update.kind === "apk" && failure.includes("Allow installs from Kenan")) this.remember(update.revision);
       this.publish({ visible: true, busy: false, status: "Update needs retry. Tap Update to retry.", error: failure, approval: false });
-    }
+    } finally { releaseUpdate(); }
   }
 
   private remember(revision: string) {

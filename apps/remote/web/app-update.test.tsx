@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { AppUpdater, APP_UPDATE_FRESHNESS_MS, APP_UPDATE_RETRY_MS, startAppUpdateChecks, type UpdatePort } from "./src/app-update-state";
 import type { AppUpdateCheck, AppUpdateInstall } from "./src/native";
+import { holdLiveMedia } from "./src/live-media";
 
 const revision = "a".repeat(40);
 function fixture(kind: "web" | "apk" = "web") {
@@ -125,6 +126,51 @@ test("failed automatic checks have an explicit retry budget instead of retrying 
   now += APP_UPDATE_RETRY_MS;
   await updater.checkFresh();
   expect(checks).toBe(2);
+});
+
+test("updates wait for every live media owner, then automatically resume on explicit close", async () => {
+  const f = fixture();
+  const closeMeeting = holdLiveMedia();
+  const closeVoice = holdLiveMedia();
+  const dispose = startAppUpdateChecks(f.updater, {
+    visible: () => true,
+    subscribe: () => () => {},
+    schedule: () => () => {},
+  });
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  try {
+    await flush();
+    expect(f.installs()).toBe(0);
+    expect(f.updater.snapshot()).toMatchObject({ visible: true, busy: false, error: "" });
+    await f.updater.check(true);
+    expect(f.installs()).toBe(0);
+    closeMeeting(); await flush();
+    expect(f.installs()).toBe(0);
+    closeVoice(); await flush();
+    expect(f.installs()).toBe(1);
+    expect(f.updater.snapshot().status).toBe("Restarting…");
+  } finally { closeMeeting(); closeVoice(); dispose(); }
+});
+
+test("a call started during update discovery is held; an already-applying update refuses new capture", async () => {
+  const f = fixture();
+  const checked = f.port.check();
+  let finish!: () => void;
+  f.port.check = () => new Promise(resolve => { finish = async () => resolve(await checked); });
+  const checking = f.updater.check();
+  const close = holdLiveMedia();
+  try {
+    finish(); await checking;
+    expect(f.installs()).toBe(0);
+  } finally { close(); }
+  let installed!: (value: AppUpdateInstall) => void;
+  f.port.check = () => checked;
+  f.setInstall(() => new Promise(resolve => { installed = resolve; }));
+  const installing = f.updater.check();
+  await Promise.resolve();
+  expect(() => holdLiveMedia()).toThrow("An app update is applying");
+  installed({ status: "reloading" }); await installing;
+  const released = holdLiveMedia(); released();
 });
 
 test("update lifecycle owns one freshness timer, none while hidden, and resumes without an event storm", async () => {
