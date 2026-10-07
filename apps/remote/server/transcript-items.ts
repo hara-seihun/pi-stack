@@ -11,6 +11,7 @@
 // Item order and pairing follow what the client used to compute in the browser
 // from the whole document, so a rendered transcript keeps its shape.
 
+import { agentMessagePresentation, agentSenderLabel } from "../../../packages/orchestrator/src/threads/message-format";
 import { ResourceCache } from "../shared/resource-cache";
 import { AGENT_NAME } from "./agent-identity";
 import { sha256 } from "./sync";
@@ -144,7 +145,9 @@ type DistributiveOmit<T, K extends keyof any> = T extends unknown ? Omit<T, K> :
 type PartialHead = DistributiveOmit<TranscriptItemHead, "seq" | "id" | "size">;
 
 /** Ordered items of one captured display context. */
-export function deriveTranscriptItems(context: any): DerivedItem[] {
+export type ResolveAgentName = (threadId: string) => string | undefined;
+
+export function deriveTranscriptItems(context: any, resolveAgentName?: ResolveAgentName): DerivedItem[] {
   const items: DerivedItem[] = [];
   const add = (key: string, head: PartialHead, body: TranscriptItemBody) => {
     const encoded = JSON.stringify(body);
@@ -174,7 +177,7 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
       head.identity = message.identity;
       head.reactions = message.reactions ?? [];
       if (message.reply) head.reply = message.reply;
-      head.label = message.identity.sender.name || message.identity.sender.id;
+      if (head.kind === "user" && !head.agentSender) head.label = message.identity.sender.name || message.identity.sender.id;
       break;
     }
   };
@@ -238,7 +241,14 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
     }
     if (role === "toolResult" && paired.has(message)) continue;
     const text = contentMarkdown(message?.content);
-    if (role === "user") inline("user", `user:${identity}`, "User", text, stamp);
+    if (role === "user") {
+      const agent = agentMessagePresentation(text);
+      if (agent) {
+        const name = agent.sender.name ?? resolveAgentName?.(agent.sender.threadId);
+        const sender = { threadId: agent.sender.threadId, ...(name ? { name } : {}) };
+        add(`user:${identity}`, { kind: "user", label: agentSenderLabel(sender), text: agent.text, agentSender: sender, ...(stamp ? { timestamp: stamp } : {}) }, { kind: "user", text: agent.text });
+      } else inline("user", `user:${identity}`, "User", text, stamp);
+    }
     else if (role === "assistant") {
       inline("assistant", `assistant:${identity}`, AGENT_NAME, text, stamp);
       attachResponseMetrics(message, itemsBefore);
@@ -308,11 +318,11 @@ export class TranscriptItems {
     this.oversized = new ResourceCache({ entries: maxEntries, bytes: maxEntries * 512 });
   }
 
-  derive(sessionId: string, sourceHash: string, load: () => unknown): TranscriptUpdate {
+  derive(sessionId: string, sourceHash: string, load: () => unknown, resolveAgentName?: ResolveAgentName): TranscriptUpdate {
     const previous = this.cache.get(sessionId);
     if (previous?.sourceHash === sourceHash) return { current: previous };
     const previousLarge = this.oversized.get(sessionId);
-    const items = deriveTranscriptItems(load());
+    const items = deriveTranscriptItems(load(), resolveAgentName);
     const extended = previous
       ? previous.items.length <= items.length && previous.items.every((item, index) => item.key === items[index].key)
       : Boolean(previousLarge && previousLarge.count <= items.length
