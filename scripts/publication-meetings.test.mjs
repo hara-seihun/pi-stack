@@ -117,8 +117,8 @@ test("a preserving publication resumes its durable wait while the meeting is sti
   assert.equal(result.status, 0, result.stderr);
   const request = JSON.parse(readFileSync(join(f.state, file), "utf8"));
   assert.equal(request.attempt, 1);
-  assert.equal(request.meetingWait.probe.rooms, "");
-  assert.ok(request.meetingWait.resumedAt);
+  assert.equal(request.hosts.converge.waiting.probe.rooms, "");
+  assert.ok(request.hostWait.resumedAt);
   assert.equal(request.status, "failed", "the subsequent fixture checkout fails, not live-meeting admission");
   assert.equal(request.failure.message, "checkout preparation exited 42");
 });
