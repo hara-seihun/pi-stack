@@ -16,9 +16,9 @@ function fixture() {
   const ledger = join(root, "ledger.sqlite3"), manifest = join(root, "lanes.json");
   const config = { ...loadConfig(join(root, "missing")), modelBrokerUrl: "http://127.0.0.1:2461", maxConcurrentSessions: 100, taskManifest: manifest };
   const store = Store.open(ledger);
-  let daemon: any = new Daemon(store, config);
+  let daemon: any = new Daemon(store, config, undefined, undefined, { capacity: { mode: "unmanaged" } });
   return { root, store, manifest, config, get daemon() { return daemon; },
-    async restart() { await daemon.threads.detach(); await daemon.schedules.close(); daemon = new Daemon(store, config); return daemon; },
+    async restart() { await daemon.threads.detach(); await daemon.schedules.close(); daemon = new Daemon(store, config, undefined, undefined, { capacity: { mode: "unmanaged" } }); return daemon; },
     async close() { await daemon.threads.detach(); await daemon.schedules.close(); store.close(); } };
 }
 

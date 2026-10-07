@@ -29,7 +29,7 @@ it("real Pi settlement and disposal admit a second bounded lane cycle and preser
   const root = mkdtempSync(join(tmpdir(), "lane-native-"));
   const store = Store.open(join(root, "ledger.sqlite3"));
   store.reconcileLanes([{ id: "lane", prompt: "work", cwd: root, profile: "sol", admission: "force", weight: 1, maxActive: 1 }]);
-  const daemon: any = new Daemon(store, { ...loadConfig(join(root, "missing")), modelBrokerUrl: "http://127.0.0.1:2461" });
+  const daemon: any = new Daemon(store, { ...loadConfig(join(root, "missing")), modelBrokerUrl: "http://127.0.0.1:2461" }, undefined, undefined, { capacity: { mode: "unmanaged" } });
   const service: ThreadService = daemon.threads;
   const serviceOptions = (service as any).options;
   let calls = 0, opens = 0, disposals = 0;
