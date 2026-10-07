@@ -77,10 +77,11 @@ it("recovers refused connection and lost acceptance across owner restart without
   expect(result).toMatchObject({ ok: true, value: { id: send.requestId, text: "GO", delivery: "steer" } });
   expect(refusals).toBe(1);
   expect(bodies).toEqual([JSON.stringify(send), JSON.stringify(send)]);
-  expect(service.pending("recipient")).toHaveLength(1);
-  expect(service.get("recipient")).toMatchObject({ state: "idle", held: true });
+  expect(service.pending("recipient")).toHaveLength(0);
+  expect(service.get("recipient")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
   expect(await api.send({ ...send, text: "different instruction" })).toMatchObject({ ok: false, error: { code: "conflict" } });
-  expect(service.pending("recipient")).toHaveLength(1);
+  expect(service.pending("recipient")).toHaveLength(0);
+  expect(service.get("recipient")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
 });
 
 it("waits through a suspended controller, then returns its durable acceptance", async () => {
