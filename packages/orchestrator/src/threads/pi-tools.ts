@@ -55,6 +55,12 @@ export function threadTools(options: PiSessionOptions) {
       execute: async (id, input, signal) => result(await api(signal).attention({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
     }),
     defineTool({
+      name: "thread_title", label: "Name this thread",
+      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation), unless the title you were given already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. Your agent name is separate and never changes.",
+      parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 80, description: "The thread's topic title." }) }),
+      execute: async (_id, input, signal) => result(await api(signal).control({ action: "title", threadId: options.threadId, title: input.title })),
+    }),
+    defineTool({
       name: "thread_wait", label: "Wait for a named dependency",
       description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Messages and wakes may resume scheduling but do not release dependency protection. Both endpoints remain protected against close until you explicitly resolve/release with clear. Clear removes your wait and outgoing dependencies without creating work.",
       parameters: threadWaitParameters,
@@ -200,11 +206,10 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_control", label: "Control a thread",
-      description: "Close cancels and archives only the selected agent and discards pending input; unresolved peer dependencies protect both endpoints. Reopen unhides without replay or continuation. Cancel interrupts only local work without archiving. Dependencies replaces your own persistent outgoing peer dependencies (empty releases them); messages/wakes never release protection. Rename pins the topic title independently of immutable agentName. Omit threadId for self. Settings save future preferences; retryWaiting moves dormant capacity waiting to the selected model without interrupting live work. Pending receipts can be cancelled or promoted.",
+      description: "Close cancels and archives only the selected agent and discards pending input; unresolved peer dependencies protect both endpoints. Reopen unhides without replay or continuation. Cancel interrupts only local work without archiving. Dependencies replaces your own persistent outgoing peer dependencies (empty releases them); messages/wakes never release protection. Omit threadId for self. Settings save future preferences; retryWaiting moves dormant capacity waiting to the selected model without interrupting live work. Pending receipts can be cancelled or promoted.",
       parameters: Type.Union([
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Union([Type.Literal("close"), Type.Literal("reopen"), Type.Literal("cancel")]) }),
         Type.Object({ action: Type.Literal("dependencies"), threadIds: Type.Array(Type.String({ minLength: 1 }), { maxItems: 100, uniqueItems: true }) }),
-        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("rename"), title: Type.String({ minLength: 1, description: "Explicit thread name; automatic naming will not overwrite it." }) }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("settings"), settings }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("retryWaiting") }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("cancelMessage"), messageId: Type.String() }),

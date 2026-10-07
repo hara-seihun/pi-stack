@@ -550,37 +550,39 @@ it("reports queue, preparation, admission, runtime startup, model wait and cance
   expect(value(await stopping)).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
 });
 
-it("pins self-renames through the model tool across automatic results and controller restarts", async () => {
+it("the thread's own agent names it with thread_title; a person's rename pins it across restarts", async () => {
   const { service, directory, sessions } = fixture();
   value(await service.start());
   const thread = value(await service.spawn({ requestId: "rename-self", cwd: directory, message: "Work" }));
   await waitFor(() => sessions.length === 1 && sessions[0]!.isStreaming);
-  expect(value(service.update(thread.id, { title: "First generated title" }, { automaticTitle: true })).metadata?.titleSource).toBe("auto");
-  expect(value(service.update(thread.id, { title: "Later generated title" }, { automaticTitle: true })).title).toBe("Later generated title");
-  const tool = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service }).find(item => item.name === "thread_control")!;
-  const renamed = await tool.execute("rename-call", { action: "rename", title: "  My chosen title  " }, undefined, undefined, undefined as never);
-  expect(renamed.details).toMatchObject({ ok: true, value: { id: thread.id, title: "My chosen title", state: "running", metadata: { titleSource: "manual" } } });
-  const pinned = service.get(thread.id)!;
-  expect(value(service.update(thread.id, { title: "Stale in-flight result" }, { automaticTitle: true }))).toEqual(pinned);
-  await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "My chosen title"));
-  expect(await service.control({ threadId: thread.id, action: "rename", title: " " })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  expect(await service.control({ threadId: thread.id, action: "rename" } as never)).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  expect(service.update(thread.id, { metadata: { titleSource: "auto" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  const tools = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service });
+  expect(tools.find(item => item.name === "thread_control")!.parameters.anyOf.some((variant: { properties: { action: { const?: string } } }) => variant.properties.action.const === "rename")).toBe(false);
+  const title = tools.find(item => item.name === "thread_title")!;
+  const first = await title.execute("title-1", { title: "  First topic  " }, undefined, undefined, undefined as never);
+  expect(first.details).toMatchObject({ ok: true, value: { id: thread.id, title: "First topic", metadata: { titleSource: "agent" } } });
+  await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "First topic"));
+  expect((await title.execute("title-2", { title: "Changed topic" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: true, value: { title: "Changed topic" } });
+  value(await service.control({ threadId: thread.id, action: "rename", title: "My chosen title" }));
+  const pinned = await title.execute("title-3", { title: "Agent override" }, undefined, undefined, undefined as never);
+  expect(pinned.details).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(service.get(thread.id)).toMatchObject({ title: "My chosen title", metadata: { titleSource: "manual" } });
+  expect(await service.control({ threadId: thread.id, action: "title", title: " " })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(service.update(thread.id, { metadata: { titleSource: "agent" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
   sessions[0]!.settle("Done");
   await waitFor(() => service.get(thread.id)?.state === "idle");
   await service.close();
   const restored = fixture(directory).service;
   value(await restored.start());
-  expect(value(restored.update(thread.id, { title: "Generated after restart" }, { automaticTitle: true }))).toMatchObject({ title: "My chosen title", metadata: { titleSource: "manual" } });
+  expect(await restored.control({ threadId: thread.id, action: "title", title: "After restart" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(value(await restored.control({ threadId: thread.id, action: "rename", title: "Next chosen title" })).title).toBe("Next chosen title");
 });
 
-it("pins human title updates, including accepting the current automatic title", async () => {
+it("a person accepting the agent's title through update pins it", async () => {
   const { service, directory } = fixture();
   const thread = value(await service.spawn({ requestId: "rename-human", cwd: directory }));
-  value(service.update(thread.id, { title: "Generated" }, { automaticTitle: true }));
-  expect(value(await service.control({ threadId: thread.id, action: "update", title: "Generated" })).metadata?.titleSource).toBe("manual");
-  expect(value(service.update(thread.id, { title: "New generated title" }, { automaticTitle: true })).title).toBe("Generated");
+  value(await service.control({ threadId: thread.id, action: "title", title: "Agent topic" }));
+  expect(value(await service.control({ threadId: thread.id, action: "update", title: "Agent topic" })).metadata?.titleSource).toBe("manual");
+  expect(await service.control({ threadId: thread.id, action: "title", title: "New agent topic" })).toMatchObject({ ok: false, error: { code: "conflict" } });
 });
 
 it.each(["yes", "no", "dismiss"])("records a root consent %s without dispatch and retains its visible receipt across restart", async choice => {
