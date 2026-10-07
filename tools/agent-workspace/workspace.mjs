@@ -2112,7 +2112,7 @@ function finalizeCreationCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "json"]);
   const record = recordBy(database, selectorFrom(args));
   if (record.state === "active") {
-    print(record, bool(args, "json"));
+    print(creationRecord(database, record.id), bool(args, "json"));
     return;
   }
   if (record.state !== "creating") fail(`workspace cannot finalize creation from state ${record.state}`);
