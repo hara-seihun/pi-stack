@@ -45,7 +45,9 @@ confirmed. `waiting` describes an agent with a current `thread_wait` (agent, job
 deployment or message) but no local execution. Holding a dependency edge without a
 wait is not waiting. `idle` is genuinely available with no current work. Archived agents
 retain history but accept no automatic execution. There is no persistent Stopped
-product state.
+product state. An inactive or stopped agent with no explicit dependencies is
+idle even if agents it previously launched are still active. Launch provenance
+never supplies a non-idle status or icon; each agent owns its own activity.
 
 Execution activity names observed phases: queuing, admission, opening, inference,
 tools, compaction, cancellation or provider recovery. Missing instrumentation is

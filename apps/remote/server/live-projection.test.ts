@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { activeWorkerParents, createLiveProjection, projectThreadActivity, restoreLiveProjection, settleLiveProjection, threadActivity } from "./live-projection";
-import type { Thread } from "pi-orchestrator/api";
+import { createLiveProjection, projectThreadActivity, restoreLiveProjection, settleLiveProjection, threadActivity } from "./live-projection";
 
 test("a settled parent remains idle without inheriting its worker's activity", () => {
   const parent = createLiveProjection("parent");
@@ -23,35 +22,15 @@ test("idle dependency evidence survives owner replacement but holds and archives
   expect(projectThreadActivity("idle", undefined, undefined, { ...metadata, archived: true }).activity).toBe("idle");
 });
 
-test("active workers across both owners keep the parent waiting until the last worker settles", () => {
-  const child = (parentId: string, extra: Partial<Thread> = {}): Pick<Thread, "parentId" | "state" | "held" | "metadata"> =>
-    ({ parentId, state: "running", held: false, ...extra });
-  const local = [child("parent"), child("held", { held: true }), child("archived", { metadata: { archived: true } })];
-  const fleet = [child("parent"), child("other")];
-  let parents = activeWorkerParents(local, fleet);
-  expect([...parents]).toEqual(["parent", "other"]);
+test("launch provenance cannot contribute activity or dependency evidence", () => {
   const snapshot = { activity: "thinking" as const, activitySince: 10, lastActivityAt: 20, activeTools: ["bash"] };
-  expect(projectThreadActivity("idle", undefined, snapshot, undefined, false, parents.has("parent")))
-    .toEqual({ activity: "waiting_on_workers", activeTools: [], executionError: undefined });
-  expect(projectThreadActivity("running", undefined, snapshot, undefined, false, true).activity).toBe("thinking");
-  expect(projectThreadActivity("idle", undefined, undefined, undefined, true, true).activity).toBe("idle");
-  expect(projectThreadActivity("idle", undefined, undefined, { archived: true }, false, true).activity).toBe("idle");
-  local[0]!.state = "idle";
-  expect(activeWorkerParents(local, fleet).has("parent")).toBe(true);
-  fleet[0]!.state = "idle";
-  parents = activeWorkerParents(local, fleet);
-  expect(projectThreadActivity("idle", undefined, undefined, undefined, false, parents.has("parent")).activity).toBe("idle");
-});
-
-test("waiting worker custody is visible without inventing a durable parent dependency", () => {
-  const childMetadata = { agentWait: { kind: "message", fromThreadId: "billing-owner", reason: "Rental custody release", since: 10 } };
-  const worker = { parentId: "parent", state: "idle" as const, held: false, metadata: childMetadata };
-  expect(projectThreadActivity("idle", undefined, undefined, childMetadata)).toMatchObject({ activity: "awaiting", activityDetail: "Waiting for message · Rental custody release" });
-  expect(activeWorkerParents([worker]).has("parent")).toBe(true);
-  expect(projectThreadActivity("idle", undefined, undefined, undefined, false, true)).toEqual({ activity: "waiting_on_workers", activeTools: [], executionError: undefined });
-  expect(projectThreadActivity("idle", undefined, undefined, childMetadata, false, true).activity).toBe("awaiting");
-  expect(activeWorkerParents([{ ...worker, held: true }]).size).toBe(0);
-  expect(activeWorkerParents([{ ...worker, metadata: { agentWait: { reason: "untyped" } } }]).size).toBe(0);
+  const metadata = { parentId: "launcher", hasChildren: true };
+  for (const held of [false, true]) {
+    expect(projectThreadActivity("idle", undefined, snapshot, metadata, held)).toMatchObject({ activity: "idle", activeTools: [] });
+  }
+  expect(projectThreadActivity("running", undefined, snapshot, metadata).activity).toBe("thinking");
+  const dependency = { agentWait: { kind: "message", fromThreadId: "billing-owner", reason: "Rental custody release", since: 10 } };
+  expect(projectThreadActivity("idle", undefined, undefined, dependency)).toMatchObject({ activity: "awaiting", activityDetail: "Waiting for message · Rental custody release" });
 });
 
 test("local and fleet phase evidence survives reconnect without aging from reads", () => {

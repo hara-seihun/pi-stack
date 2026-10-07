@@ -103,25 +103,25 @@ test("destination pictures retain their artwork when a thread has a colour", () 
   expect(renderToStaticMarkup(createElement(ChatIcon, { icon: "openai", color: "#ff00ff" }))).toContain("feFlood");
 });
 
-test("worker activity puts an idle conversation in Working without manufacturing a dependency wait", () => {
-  const parent = session("parent", { hasChildren: true, activity: "waiting_on_workers" });
+test("running and dependency-waiting launched agents do not make an idle launcher busy", () => {
+  const parent = session("parent", { hasChildren: true, activity: "idle" });
   const local = session("local", { parentId: parent.id, state: "running", activity: "thinking" });
   const fleet = session("fleet", { parentId: parent.id, origin: "fleet", activity: "awaiting",
     waitingOnAgents: { kind: "message", fromThreadId: "billing-owner", reason: "Rental cleanup", since: 1 } });
-  expect(threadStatus(parent)).toMatchObject({ key: "waiting_on_workers", busy: true });
+  expect(threadStatus(parent)).toMatchObject({ key: "idle", busy: false });
   expect(parent.waitingOnAgents).toBeUndefined();
   expect(threadStatus(local)).toMatchObject({ key: "thinking", busy: true });
   expect(threadStatus(fleet)).toMatchObject({ key: "waiting_for_message", busy: true });
-  const row = inboxRows([parent, local, fleet], [], { ...messaging, conversations: [] })[0];
-  expect(row.section).toBe("working");
+  const row = inboxRows([parent, local, fleet], [], { ...messaging, conversations: [] }).find(row => row.chat.id === "ai:parent")!;
+  expect(row.section).toBe("quiet");
   expect(row.chat.id).toBe("ai:parent");
   const markup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...row, chat: { ...row.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
-  expect(markup).toContain('data-status="waiting_on_workers"');
+  expect(markup).toContain('data-status="idle"');
   expect(markup).not.toContain("Waiting on agents");
   const unread = inboxRows([{ ...parent, idleUnread: true }], [], { ...messaging, conversations: [] })[0];
-  expect(unread).toMatchObject({ section: "attention", status: { key: "waiting_on_workers", attention: true } });
+  expect(unread).toMatchObject({ section: "attention", status: { key: "idle", attention: true } });
   expect(threadStatus({ ...parent, activity: "idle" })).toMatchObject({ key: "idle", busy: false });
 });
 
