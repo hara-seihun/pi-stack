@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { projectThreadActivity } from "../server/live-projection";
 import { ChatIcon } from "./src/chat-row";
 import { InboxRowView } from "./src/features/chats/Inbox";
 import type { Session } from "../server/protocol";
@@ -104,29 +103,26 @@ test("destination pictures retain their artwork when a thread has a colour", () 
   expect(renderToStaticMarkup(createElement(ChatIcon, { icon: "openai", color: "#ff00ff" }))).toContain("feFlood");
 });
 
-test("background worker activity never turns an idle conversation into a dependency wait", () => {
-  const parent = session("parent", { hasChildren: true });
+test("worker activity puts an idle conversation in Working without manufacturing a dependency wait", () => {
+  const parent = session("parent", { hasChildren: true, activity: "waiting_on_workers" });
   const local = session("local", { parentId: parent.id, state: "running", activity: "thinking" });
   const fleet = session("fleet", { parentId: parent.id, origin: "fleet", activity: "awaiting",
     waitingOnAgents: { kind: "message", fromThreadId: "billing-owner", reason: "Rental cleanup", since: 1 } });
-  const project = () => ({ ...parent, ...projectThreadActivity(parent.state) });
-  const received = project();
-  expect(threadStatus(received)).toMatchObject({ key: "idle", busy: false });
+  expect(threadStatus(parent)).toMatchObject({ key: "waiting_on_workers", busy: true });
+  expect(parent.waitingOnAgents).toBeUndefined();
   expect(threadStatus(local)).toMatchObject({ key: "thinking", busy: true });
   expect(threadStatus(fleet)).toMatchObject({ key: "waiting_for_message", busy: true });
-  const row = inboxRows([received, local, fleet], [], { ...messaging, conversations: [] })[0];
-  expect(row.section).toBe("quiet");
+  const row = inboxRows([parent, local, fleet], [], { ...messaging, conversations: [] })[0];
+  expect(row.section).toBe("working");
   expect(row.chat.id).toBe("ai:parent");
   const markup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...row, chat: { ...row.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
+  expect(markup).toContain('data-status="waiting_on_workers"');
   expect(markup).not.toContain("Waiting on agents");
-  local.state = "idle";
-  fleet.activity = "idle";
-  delete fleet.waitingOnAgents;
-  expect(threadStatus(project())).toMatchObject({ key: "idle", busy: false });
-  parent.state = "running";
-  expect(threadStatus(project())).toMatchObject({ key: "reporting_error", busy: true });
+  const unread = inboxRows([{ ...parent, idleUnread: true }], [], { ...messaging, conversations: [] })[0];
+  expect(unread).toMatchObject({ section: "attention", status: { key: "waiting_on_workers", attention: true } });
+  expect(threadStatus({ ...parent, activity: "idle" })).toMatchObject({ key: "idle", busy: false });
 });
 
 test("status vocabulary covers every lifecycle and flag", () => {

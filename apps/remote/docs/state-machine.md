@@ -12,7 +12,7 @@ The local service runs inside the person's existing Unix account and mount names
 
 ## Execution state is an observation
 
-Remote publishes the shared `ThreadState` unchanged as `idle` or `running`, alongside `held`, which is true while a thread holds its pending messages after a confirmed stop. Live Pi events can add thinking, tool, compaction or retry display details while the thread is running, and `activeTools` names every tool running right now. These details do not control execution or add lifecycle states. An idle parent stays idle while its children run.
+Remote publishes the shared `ThreadState` unchanged as `idle` or `running`, alongside `held`, which is true while a thread holds its pending messages after a confirmed stop. Live Pi events can add thinking, tool, compaction or retry display details while the thread is running, and `activeTools` names every tool running right now. These details do not control execution or add lifecycle states. An idle parent displays **Waiting on workers** while any nonheld, nonarchived child runs or owns a valid explicit dependency wait. The aggregate activity is `waiting_on_workers`, derived across the local and fleet owners, without changing the parent's idle execution state or synthesizing durable dependency metadata. Explicit parent waits and stopped/archived labels retain precedence.
 
 The client's status line is composed from those facts and never from a status field of its own:
 
@@ -20,7 +20,8 @@ The client's status line is composed from those facts and never from a status fi
 | --- | --- |
 | `Thinking`, `Running bash`, `Running bash and web_search`, `Running 3 tools`, `Compacting context`, `Retrying`, `Working` | `state: running` plus the live activity and `activeTools` |
 | `Waiting on agents` | Explicit `kind: agents` dependency, or observed live `thread_await`; never child activity alone |
-| `Idle`, with an unread dot until the person opens it | `state: idle` plus `idleUnread` |
+| `Waiting on workers` | `state: idle`, unheld/unarchived, with active children |
+| `Idle`, with an unread dot until the person opens it | `state: idle` with no active children or explicit dependency, plus `idleUnread` |
 | `Stopped`, with the queue chip carrying what it holds | `held` |
 | `Archived` | `archivedAt` |
 

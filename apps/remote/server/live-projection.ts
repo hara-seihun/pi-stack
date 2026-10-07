@@ -2,6 +2,18 @@ import { createExecutionActivity, executionWaitActivity, restoreExecutionActivit
 import type { ToolProgress } from "./tool-progress";
 import type { Activity, Session } from "./protocol";
 
+export function activeWorkerParents(...sources: Iterable<Pick<Thread, "parentId" | "state" | "held" | "metadata">>[]): Set<string> {
+  const parents = new Set<string>();
+  for (const source of sources) for (const child of source) {
+    if (!child.parentId || child.held || child.metadata?.archived) continue;
+    const wait = child.metadata?.agentWait as import("pi-orchestrator/api").AgentWait | undefined;
+    const waiting = wait && validateWaitDependency(wait).ok && typeof wait.reason === "string"
+      && Boolean(wait.reason.trim()) && Number.isFinite(wait.since);
+    if (child.state === "running" || waiting) parents.add(child.parentId);
+  }
+  return parents;
+}
+
 export function threadActivity(state: ThreadState, live?: LiveProjection): Activity {
   if (state === "idle") return "idle";
   if (state === "running") return live?.compacting ? "compacting" : live?.retrying ? "retrying"
@@ -11,7 +23,7 @@ export function threadActivity(state: ThreadState, live?: LiveProjection): Activ
 }
 
 export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
-  snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
+  snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false, hasActiveWorkers = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
   const dependency = metadata?.agentWait as import("pi-orchestrator/api").AgentWait | undefined;
   if (state === "idle" && !held && !metadata?.archived && dependency) {
     const labels = { agents: "Waiting on agents", job: "Waiting for job", deployment: "Waiting for deployment", message: "Waiting for message" } as const;
@@ -24,6 +36,10 @@ export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
       activity: "awaiting", activitySince: dependency.since, activityDetail: `${labels[parsed.value.kind]} · ${dependency.reason}`,
       activeTools: [], executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
     };
+  }
+  if (state === "idle" && !held && !metadata?.archived && hasActiveWorkers) {
+    return { activity: "waiting_on_workers", activeTools: [],
+      executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined };
   }
   const wait = state === "running" ? executionWaitActivity(metadata) : undefined;
   const resuming = snapshot?.activity && !["waiting_for_capacity", "waiting_to_retry"].includes(snapshot.activity)

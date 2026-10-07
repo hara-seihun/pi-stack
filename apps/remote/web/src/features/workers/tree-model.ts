@@ -8,7 +8,9 @@ export type WorkerNode = {
 };
 
 export function isActiveWorker(session: Session): boolean {
-  return session.state === "running" || session.activity === "awaiting";
+  if (session.held || session.archivedAt) return false;
+  return session.state === "running" || session.activity === "waiting_on_workers"
+    || session.activity === "awaiting" && !!session.waitingOnAgents && Object.hasOwn(session.waitingOnAgents, "kind");
 }
 
 export type WorkerFilter = "active" | "all";
