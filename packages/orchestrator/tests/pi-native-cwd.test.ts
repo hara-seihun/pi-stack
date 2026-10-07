@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { openPiSession } from "../src/threads/pi-session.js";
+import { RunnerStartupError } from "../src/threads/runner-startup.js";
 import { seedPiSession } from "../src/threads/pi-session-file.js";
 import type { PiCommand, PiEvent, PiSessionOptions } from "../src/threads/contracts.js";
 
@@ -29,6 +30,15 @@ function transcript(path: string, admittedCwd: string, headerCwd: string) {
   writeFileSync(path, source);
   return source;
 }
+
+test("released cwd rejection carries positive pre-native absence before any history or session output", async () => {
+  const { cwd, options } = fixture();
+  rmSync(cwd, { recursive: true });
+  const output: PiEvent[] = [];
+  await expect(openPiSession(options, event => output.push(event), () => {})).rejects.toBeInstanceOf(RunnerStartupError);
+  expect(output).toEqual([]);
+  expect(existsSync(options.sessionFile)).toBe(false);
+});
 
 test("resume rejects a literal relative native header before creating a tree or changing history", async () => {
   const { directory, cwd, options } = fixture();
