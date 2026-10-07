@@ -19,6 +19,12 @@
       "bun": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./message-format": {
+      "types": "./src/threads/message-format.ts",
+      "browser": "./src/threads/message-format.ts",
+      "bun": "./src/threads/message-format.ts",
+      "default": "./dist/threads/message-format.js"
+    },
     "./history": {
       "types": "./src/threads/history.d.mts",
       "default": "./src/threads/history.mjs"

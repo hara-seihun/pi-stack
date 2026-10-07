@@ -11,7 +11,7 @@
 // Item order and pairing follow what the client used to compute in the browser
 // from the whole document, so a rendered transcript keeps its shape.
 
-import { agentMessagePresentation, agentSenderLabel } from "../../../packages/orchestrator/src/threads/message-format";
+import { agentMessagePresentation, agentSenderLabel } from "pi-orchestrator/message-format";
 import { ResourceCache } from "../shared/resource-cache";
 import { AGENT_NAME } from "./agent-identity";
 import { sha256 } from "./sync";

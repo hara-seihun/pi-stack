@@ -1,4 +1,4 @@
-import { agentMessagePresentation, agentSenderLabel } from "../../../../../../packages/orchestrator/src/threads/message-format";
+import { agentMessagePresentation, agentSenderLabel } from "pi-orchestrator/message-format";
 import type { ContextEntry } from "../../types";
 
 /** Old cached heads and new server projections share the same human presentation. */
