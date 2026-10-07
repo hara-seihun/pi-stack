@@ -26,7 +26,7 @@ function fixture(resources) {
     mkdirSync(dirname(join(repo, file)), { recursive: true });
     cpSync(join(root, file), join(repo, file));
   }
-  put(join(bin, "npm"), '#!/bin/sh\nmkdir -p apps/remote/web/dist\ncp "$BUILD_ASSETS"/* apps/remote/web/dist/\n', 0o755);
+  put(join(bin, "npm"), '#!/bin/sh\nif [ "$3" = --workspace=kenan-root ]; then mkdir -p packages/kenan-root/dist; printf "export {};\\n" > packages/kenan-root/dist/main.js; else mkdir -p apps/remote/web/dist; cp "$BUILD_ASSETS"/* apps/remote/web/dist/; fi\n', 0o755);
   put(join(repo, "apps/remote/package.json"), JSON.stringify({type: "module", dependencies: {"pi-orchestrator": "1.0.0", "playwright-core": "1.0.0"}}));
   cpSync(join(repo, "apps/remote/web/dist"), join(dir, "build-assets"), { recursive: true });
   for (const entrypoint of remoteEntrypoints) {
