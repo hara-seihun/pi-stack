@@ -1,0 +1,7 @@
+.notifications-screen { padding: 1.25rem; overflow-y: auto; height: 100%; box-sizing: border-box; }
+.notifications-screen header, .notification-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.notifications-screen h1 { font-size: 1.3rem; }
+.notifications-screen ol { padding: 0; list-style: none; }
+.notifications-screen li > button { width: 100%; text-align: left; padding: 1rem; margin-bottom: .5rem; }
+.notifications-screen li p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.notifications-screen time, .notification-heading > span { font-size: .8rem; opacity: .7; }

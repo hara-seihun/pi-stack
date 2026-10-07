@@ -22,37 +22,16 @@ async function findThread(api: Pick<ThreadApi, "list">, id: string): Promise<Thr
 }
 
 function conversation(thread: Thread): boolean {
-  return !thread.parentId && thread.role !== "worker" && !thread.metadata?.archived && !thread.held;
+  return (thread.metadata?.foreground === true || thread.metadata?.foreground === undefined && !thread.parentId && thread.role !== "worker")
+    && !thread.metadata?.archived && !thread.held;
 }
 
 function busy(thread: Thread): boolean {
-  return !thread.held && (thread.state === "running" || thread.pendingMessages > 0 || !!thread.waitingOnAgents || !!thread.metadata?.agentWait);
+  return !thread.held && (thread.state === "running" || thread.state === "waiting" || thread.pendingMessages > 0 || !!thread.waitingOnAgents || !!thread.metadata?.agentWait);
 }
 
-async function descendantsIdle(api: Pick<ThreadApi, "list" | "questions">, root: string): Promise<boolean> {
-  const seen = new Set([root]), queue = [root];
-  for (const parentId of queue) {
-    let cursor: string | undefined;
-    do {
-      const listed = await api.list({ parentId, limit: 100, cursor });
-      if (!listed.ok) throw new Error(listed.error.message);
-      if (listed.value.threads.some(busy)) return false;
-      const questions = await Promise.all(listed.value.threads.filter(child => !child.metadata?.archived).map(child => api.questions(child.id)));
-      for (const result of questions) {
-        if (!result.ok) throw new Error(result.error.message);
-        if (result.value.length) return false;
-      }
-      for (const child of listed.value.threads) {
-        if (!seen.has(child.id)) { seen.add(child.id); queue.push(child.id); }
-      }
-      cursor = listed.value.nextCursor;
-    } while (cursor);
-  }
-  return true;
-}
-
-/** Each owner sequences its receipts; the directory supplies the whole worker tree. */
-export async function projectThreadNotifications(db: Database, owner: string, api: NotificationApi, treeApi: Pick<ThreadApi, "list" | "questions"> = api, published?: () => void): Promise<void> {
+/** Each owner sequences receipts; launch provenance never delays another agent's notification. */
+export async function projectThreadNotifications(db: Database, owner: string, api: NotificationApi, _directory: Pick<ThreadApi, "list" | "questions"> = api, published?: () => void): Promise<void> {
   await projectAttentionNotifications(db, owner, api, published);
   await projectQuestionNotifications(db, owner, api);
   const key = `thread-settlements:${owner}`;
@@ -66,19 +45,11 @@ export async function projectThreadNotifications(db: Database, owner: string, ap
     if (!result.ok) throw new Error(result.error.message);
     const receipts = await Promise.all(result.value.items.map(async item => {
       const thread = await findThread(api, item.threadId);
-      let hasQuestions = false;
-      if (thread.parentId || thread.role === "worker") {
-        const questions = await api.questions(item.threadId);
-        if (!questions.ok) throw new Error(questions.error.message);
-        hasQuestions = questions.value.length > 0;
-      }
-      return { item, thread, hasQuestions };
+      return { item, thread };
     }));
-    for (const { item, thread, hasQuestions } of receipts) {
+    for (const { item, thread } of receipts) {
       pending.delete(item.threadId);
-      if (thread.parentId || thread.role === "worker") {
-        if (!hasQuestions) ready.push({ item, thread });
-      } else if (hasReply(item) && conversation(thread)) {
+      if (hasReply(item) && conversation(thread)) {
         pending.set(item.threadId, { executionId: item.executionId, threadId: item.threadId, time: item.time });
       }
     }
@@ -91,8 +62,7 @@ export async function projectThreadNotifications(db: Database, owner: string, ap
     const questions = await api.questions(item.threadId);
     if (!questions.ok) throw new Error(questions.error.message);
     if (!conversation(thread) || questions.value.length) { pending.delete(item.threadId); continue; }
-    if (busy(thread) || !await descendantsIdle(treeApi, item.threadId)) continue;
-    // A child's settlement can queue a parent turn while the tree is being read.
+    if (busy(thread)) continue;
     thread = await findThread(api, item.threadId);
     if (!conversation(thread)) { pending.delete(item.threadId); continue; }
     if (busy(thread)) continue;
@@ -117,7 +87,7 @@ export async function projectAttentionNotifications(db: Database, owner: string,
     const named = await Promise.all(page.items.map(async item => ({ item, thread: await findThread(api, item.threadId) })));
     db.transaction(() => {
       for (const { item, thread } of named) {
-        if (!thread.metadata?.archived) recordIdleNotification(db, `${owner}:attention:${item.seq}`, thread, item.time, { kind: "attention", body: item.summary });
+        recordIdleNotification(db, `${owner}:attention:${item.seq}`, thread, item.time, { kind: "attention", body: item.summary });
       }
       db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(key, String(page.cursor));
     })();
@@ -137,7 +107,7 @@ export async function projectQuestionNotifications(db: Database, owner: string, 
     const named = await Promise.all(page.items.map(async item => ({ item, thread: await findThread(api, item.threadId) })));
     db.transaction(() => {
       for (const { item, thread } of named) {
-        if (!thread.metadata?.archived) recordIdleNotification(db, `${owner}:question:${item.questionId}`, thread, item.time, { kind: "question", body: item.question });
+        recordIdleNotification(db, `${owner}:question:${item.questionId}`, thread, item.time, { kind: "question", body: item.question });
       }
       db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(key, String(page.cursor));
     })();

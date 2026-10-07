@@ -72,7 +72,7 @@ function setup() {
   for (const session of ["a", "b", "mine", "other"]) {
     publisher.publish(`transcript:${session}`, transcript(session));
     publisher.publish(`live:${session}`, { type: "live", sessionId: session, text: "" });
-    publisher.publish(`questions:${session}`, { type: "questions", sessionId: session, questions: [] });
+    publisher.publish(`questions:${session}`, { type: "questions", sessionId: session, state: "ready", questions: [] });
   }
   const reconcile = (resource: string, have: string | null = null) => {
     const frame = publisher.reconcile(resource, have);

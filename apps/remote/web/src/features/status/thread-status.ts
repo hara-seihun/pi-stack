@@ -6,7 +6,7 @@ import { validateThreadObservation } from "../../../../shared/state-validation";
 export type StatusKey =
   | "queued" | "admitting" | "starting" | "preparing" | "finishing" | "cancelling" | "recovering" | "reporting_error" | "thinking" | "responding" | "preparing_tool" | "waiting_for_model" | "waiting_for_capacity" | "waiting_to_retry"
   | "tool" | "compacting" | "retrying" | "awaiting" | "waiting_on_workers" | "waiting_for_job" | "waiting_for_deployment" | "waiting_for_message" | "stopping" | "error"
-  | "stopped" | "archived" | "idle" | "offline";
+  | "archived" | "idle" | "offline";
 
 export interface ThreadStatus {
   key: StatusKey;
@@ -70,9 +70,9 @@ export function threadStatus(session: StatusSession): ThreadStatus {
   if (session.activity === "status_error" && !session.held) return { ...STATUS_REPORTING_ERROR,
     ...(session.waitingOnAgents && !Object.hasOwn(session.waitingOnAgents, "kind") ? { label: "Wait type missing", short: "Wait type missing" } : {}),
     busy: session.state === "running", title: session.activityDetail || session.executionError || STATUS_REPORTING_ERROR.title };
-  if (session.executionError) return { key: "error", label: session.held && session.state === "running" ? "Stop failed" : "Execution error", short: "Error", title: session.executionError, busy: session.state === "running", attention: true };
-  if (session.held && session.state === "running") return { key: "stopping", label: "Stopping", short: "Stopping", busy: true, attention: false, title: "Cancellation has been requested, but the runtime has not confirmed it." };
-  if (session.held) return { key: "stopped", label: "Stopped", short: "Stopped", busy: false, attention: true };
+  if (session.executionError) return { key: "error", label: session.held && session.state === "running" ? "Cancellation failed" : "Execution error", short: "Error", title: session.executionError, busy: session.state === "running", attention: true };
+  if (session.held && session.state === "running") return { key: "stopping", label: "Cancelling", short: "Cancelling", busy: true, attention: false, title: "Cancellation has been requested, but the runtime has not confirmed it." };
+  if (session.held) return { key: "idle", label: "Idle", short: "Idle", busy: false, attention: session.idleUnread };
   if (session.state === "running") {
     const status = executionStatus(session);
     return { ...status,
@@ -82,9 +82,11 @@ export function threadStatus(session: StatusSession): ThreadStatus {
       ...(session.activityDetail ? { title: [status.title, session.activityDetail].filter(Boolean).join(" · ") } : {}),
     };
   }
+  if (session.state === "waiting" && session.waitingOnAgents) return dependencyStatus(session);
+  if (session.state === "waiting") return { key: "awaiting", label: "Waiting on agents", short: "Waiting", busy: true, attention: session.idleUnread };
   switch (session.activity) {
     case "awaiting": return dependencyStatus(session);
-    case "waiting_on_workers": return { key: "waiting_on_workers", label: "Waiting on workers", short: "Waiting on workers", busy: true, attention: session.idleUnread };
+    case "waiting_on_workers": return { key: "waiting_on_workers", label: "Agents working", short: "Agents working", busy: true, attention: session.idleUnread };
     case "status_error": return { ...STATUS_REPORTING_ERROR, busy: false, title: session.activityDetail || STATUS_REPORTING_ERROR.title };
     case "idle": return { key: "idle", label: "Idle", short: "Idle", busy: false, attention: session.idleUnread };
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering":
@@ -127,7 +129,6 @@ export const OFFLINE_STATUS: ThreadStatus = { key: "offline", label: "Offline", 
 
 export function attentionRank(status: ThreadStatus): number {
   if (status.key === "error" || status.key === "reporting_error") return 0;
-  if (status.key === "stopped") return 1;
   if ((status.key === "idle" || status.key === "waiting_on_workers") && status.attention) return 2;
   switch (status.key) {
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering": case "tool": case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "waiting_for_capacity": case "waiting_to_retry": case "compacting": case "retrying": case "stopping": return 10;

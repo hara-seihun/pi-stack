@@ -15,7 +15,7 @@ export type Chat =
 
 export function aiChat(session: Session, starts: ThreadStart[]): Chat {
   const start = starts.find(candidate => candidate.id === session.environment);
-  return { id: `ai:${session.id}`, kind: "ai", title: session.name || "Agent", icon: start?.icon || (["openai", "anthropic"].includes(session.provider) ? session.provider : "cloud"), label: start?.label || session.provider, session };
+  return { id: `ai:${session.id}`, kind: "ai", title: session.agentName ? `${session.agentName} · ${session.name}` : session.name || "Agent", icon: start?.icon || (["openai", "anthropic"].includes(session.provider) ? session.provider : "cloud"), label: start?.label || session.provider, session };
 }
 
 export function humanChat(conversation: MessagingConversation, backends: MessagingBackendInfo[]): Chat {

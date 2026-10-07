@@ -85,7 +85,7 @@ const thread = (patch: Record<string, unknown> = {}) => ({
 }) as any;
 
 test("meeting thread labels follow the shared held, activity and multi-tool rules", () => {
-  expect(meetThreadStatus(thread({ held: true }))).toMatchObject({ label: "Stopped" });
+  expect(meetThreadStatus(thread({ held: true }))).toMatchObject({ label: "Idle" });
   // A finished meeting worker is archived and held by its owner; the room shows Done, not Stopped (fvz-oicq-hes, September 28).
   expect(meetThreadStatus(thread({ held: false, finished: true }))).toMatchObject({ label: "Done", attention: false });
   expect(meetThreadStatus(thread({ state: "running", activity: "thinking" }))).toMatchObject({ label: "Thinking" });

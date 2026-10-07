@@ -15,7 +15,7 @@ export function activeWorkerParents(...sources: Iterable<Pick<Thread, "parentId"
 }
 
 export function threadActivity(state: ThreadState, live?: LiveProjection): Activity {
-  if (state === "idle") return "idle";
+  if (state === "idle" || state === "waiting") return "idle";
   if (state === "running") return live?.compacting ? "compacting" : live?.retrying ? "retrying"
     : live?.activeTools.size ? "waiting_on_tool" : live?.activity ?? (live?.thinkingActive ? "thinking" : "status_error");
   state satisfies never;
@@ -25,7 +25,7 @@ export function threadActivity(state: ThreadState, live?: LiveProjection): Activ
 export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
   snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false, hasActiveWorkers = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
   const dependency = metadata?.agentWait as import("pi-orchestrator/api").AgentWait | undefined;
-  if (state === "idle" && !held && !metadata?.archived && dependency) {
+  if ((state === "idle" || state === "waiting") && !held && !metadata?.archived && dependency) {
     const labels = { agents: "Waiting on agents", job: "Waiting for job", deployment: "Waiting for deployment", message: "Waiting for message" } as const;
     const parsed = validateWaitDependency(dependency);
     if (!parsed.ok || typeof dependency.reason !== "string" || !dependency.reason.trim() || !Number.isFinite(dependency.since)) {
@@ -37,7 +37,7 @@ export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
       activeTools: [], executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
     };
   }
-  if (state === "idle" && !held && !metadata?.archived && hasActiveWorkers) {
+  if ((state === "idle" || state === "waiting") && !held && !metadata?.archived && hasActiveWorkers) {
     return { activity: "waiting_on_workers", activeTools: [],
       executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined };
   }

@@ -5,7 +5,7 @@ import { validateThreadObservation } from "../shared/state-validation";
 import type { Room, RoomActivity, RoomSnapshot } from "../shared/rooms";
 import { roomInput, roomMembers, roomMetadata, readRoomInput } from "../shared/rooms";
 
-interface OwnedRoomThread { id: string; title: string; state: "idle" | "running"; held?: boolean; metadata?: Record<string, unknown>; executionActivity?: Thread["executionActivity"] }
+interface OwnedRoomThread { id: string; title: string; state: Thread["state"]; held?: boolean; metadata?: Record<string, unknown>; executionActivity?: Thread["executionActivity"] }
 interface RoomHistory { messages: unknown[]; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; context?: unknown; error?: string; execution?: RoomActivity }
 interface RoomOwner {
   get(id: string): OwnedRoomThread | null;

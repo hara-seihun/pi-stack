@@ -8,7 +8,7 @@ export const ACTIVITIES = {
   thinking: true, responding: true, preparing_tool: true, waiting_for_model: true, waiting_on_agents: true,
   waiting_on_tool: true, compacting: true, retrying: true, waiting_for_capacity: true, waiting_to_retry: true,
 } satisfies Record<Activity, true>;
-const THREAD_STATES = { idle: true, running: true } satisfies Record<Session["state"], true>;
+const THREAD_STATES = { idle: true, running: true, waiting: true } satisfies Record<Session["state"], true>;
 export const TRANSCRIPT_KINDS = { system: true, tool: true, user: true, assistant: true, thinking: true, toolCall: true, notice: true } satisfies Record<TranscriptItemKind, true>;
 export const GOVERNOR_STATES = { off: true, green: true, blue: true, red: true } satisfies Record<GovernorState, true>;
 export const BACKEND_STATES = { ready: true, unconfigured: true, connecting: true, error: true } satisfies Record<MessagingBackendInfo["status"], true>;
@@ -107,7 +107,11 @@ export function validateStreamSnapshot(resource: string, value: unknown): assert
       });
       return;
     }
-    case "questions": stateArray(snapshot.questions, "Questions"); return;
+    case "questions":
+      requireState(snapshot.state, { loading: true, ready: true, failed: true }, "Questions resource state");
+      stateArray(snapshot.questions, "Questions");
+      if (snapshot.state === "failed") stateString(snapshot.error, "Questions error");
+      return;
     case "bootstrap": stateObject(snapshot.bootstrap, "Bootstrap"); return;
     case "dashboard": {
       const dashboard = stateObject(snapshot.dashboard, "Dashboard");

@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import type { ChatId } from "../chats";
 import { assertNever, requireState } from "../../../shared/explicit-state";
 
-export type Tab = "chats" | "workers" | "files" | "calendar" | "machine";
+export type Tab = "chats" | "workers" | "notifications" | "files" | "calendar" | "machine";
 export type Panel = "inspector" | "queue" | "settings";
 
 export type Route =
@@ -14,20 +14,21 @@ export type Route =
   | { tab: "workers"; thread: string | null; panel: Panel | null }
   | { tab: "files"; path: string | null }
   | { tab: "calendar" }
+  | { tab: "notifications" }
   | { tab: "machine" };
 
-export const TABS: Tab[] = ["chats", "workers", "calendar", "files", "machine"];
+export const TABS: Tab[] = ["chats", "notifications", "calendar", "files", "machine"];
 
 export function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, "").split("/").map(part => decodeURIComponent(part));
   const [name, ...rest] = parts;
   if (name === "" && rest.length === 0) return { tab: "chats", chat: null, panel: null };
-  const tab = requireState(name, { chats: true, workers: true, files: true, calendar: true, machine: true } satisfies Record<Tab, true>, "Route tab");
+  const tab = requireState(name, { chats: true, workers: true, notifications: true, files: true, calendar: true, machine: true } satisfies Record<Tab, true>, "Route tab");
   const panel = (value: string | undefined): Panel | null => value === undefined ? null : requireState(value, { inspector: true, queue: true, settings: true } satisfies Record<Panel, true>, "Route panel");
   switch (tab) {
-    case "workers": return { tab, thread: rest[0] || null, panel: rest[0] ? panel(rest[1]) : null };
+    case "workers": return { tab: "chats", chat: rest[0] ? `ai:${rest[0]}` : null, panel: rest[0] ? panel(rest[1]) : null };
     case "files": return { tab, path: rest.length ? `/${rest.filter(Boolean).join("/")}` : null };
-    case "calendar": case "machine": return { tab };
+    case "calendar": case "machine": case "notifications": return { tab };
     case "chats": {
       const kind = rest[0];
       const id = rest[1];
@@ -50,6 +51,7 @@ export function formatRoute(route: Route): string {
     }
     case "workers": return route.thread ? `#/workers/${segment(route.thread)}${route.panel ? `/${route.panel}` : ""}` : "#/workers";
     case "files": return route.path ? `#/files/${route.path.split("/").filter(Boolean).map(segment).join("/")}` : "#/files";
+    case "notifications": return "#/notifications";
     case "calendar": return "#/calendar";
     case "machine": return "#/machine";
   }
@@ -75,6 +77,7 @@ export function routeHome(route: Route): Route {
     case "chats": return { tab: "chats", chat: null, panel: null };
     case "workers": return { tab: "workers", thread: null, panel: null };
     case "files": return { tab: "files", path: null };
+    case "notifications": return { tab: "notifications" };
     case "calendar": return { tab: "calendar" };
     case "machine": return { tab: "machine" };
   }
@@ -102,7 +105,7 @@ export function routeThreadId(route: Route): string | null {
   switch (route.tab) {
     case "chats": return route.chat?.startsWith("ai:") ? route.chat.slice(3) : null;
     case "workers": return route.thread;
-    case "files": case "calendar": case "machine": return null;
+    case "files": case "calendar": case "machine": case "notifications": return null;
   }
   return assertNever(route, "Route thread");
 }
@@ -111,7 +114,7 @@ export function routeChatId(route: Route): ChatId | null {
   switch (route.tab) {
     case "chats": return route.chat;
     case "workers": return route.thread ? `ai:${route.thread}` : null;
-    case "files": case "calendar": case "machine": return null;
+    case "files": case "calendar": case "machine": case "notifications": return null;
   }
   return assertNever(route, "Route chat");
 }

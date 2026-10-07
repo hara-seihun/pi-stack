@@ -14,7 +14,7 @@ interface StoredRoom extends Room {
   creator: string;
   ready: number;
   updatedAt: number;
-  state: "idle" | "running";
+  state: RoomSnapshot["state"];
   pendingQuestions: number;
   questionIds: string;
 }

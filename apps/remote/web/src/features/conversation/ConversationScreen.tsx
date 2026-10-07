@@ -18,7 +18,7 @@ import { Transcript } from "./Transcript";
 import type { VisibleTranscriptRange } from "./transcript-store";
 import { ConversationModelMeta } from "./ContextTokens";
 import { QuestionsComposer } from "./questions";
-import type { ThreadQuestion } from "../../../../server/protocol";
+import type { ThreadQuestion, QuestionsResource } from "../../../../server/protocol";
 import "./conversation.css";
 
 import { resolveDelivery, type Delivery } from "../../../../../../packages/orchestrator/src/threads/contracts";
@@ -41,7 +41,7 @@ export function ConversationHeader({ title, status, onBack, onOpenInspector, tra
   </header>;
 }
 
-export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, autoCollapse = true, images, offline, syncing = false, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onJumpLatest, onVisibleRange, outbox, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
+export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, autoCollapse = true, images, offline, syncing = false, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onJumpLatest, onVisibleRange, outbox, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, questionsResource, onRetryQuestions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
   session: Session;
   ancestors: Session[];
   entries: ContextEntry[];
@@ -77,6 +77,8 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onOpenAncestor(session: Session): void;
   onOpenQueue(): void;
   questions: ThreadQuestion[];
+  questionsResource?: QuestionsResource;
+  onRetryQuestions?(): void;
   onQuestionAccepted(id: string): void;
   onEdit(entry: ContextEntry): void;
   reply: ReplyTarget | null;
@@ -114,9 +116,9 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   return <div className="conversation-screen">
-    <ConversationHeader title={session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<ConversationModelMeta session={session} />} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
-      trailing={<>{questions.length > 0 && composerAction(session, "") === "stop" && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Stop thread</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
-    {ancestors.length > 0 && <nav className="ancestry" aria-label="Parent threads">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
+    <ConversationHeader title={session.agentName ? `${session.agentName} · ${session.name}` : session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status"><span className="conversation-syncing-spinner" aria-hidden="true" />Updating…</span> : <StatusPill status={status} />} meta={<ConversationModelMeta session={session} />} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
+      trailing={<>{questions.length > 0 && composerAction(session, "") === "stop" && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Cancel work</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
+    {ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
     {outbox}
     <ConversationView key={session.id} active newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
@@ -125,6 +127,8 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
       {liveText && <div className="live-answer"><ChatMessage kind="assistant" label={AGENT_NAME} avatar={agentAvatar()} text={liveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
     </InlineImagesContext.Provider>}>
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
+      {questionsResource?.state === "loading" && <p role="status">Loading questions…{questions.length > 0 && " Showing previous questions."}</p>}
+      {questionsResource?.state === "failed" && <div className="conversation-error" role="alert">Could not load questions: {questionsResource.error}. {questions.length > 0 ? "Showing previous questions; their status may have changed." : "Chat remains available."} <button type="button" onClick={onRetryQuestions}>Retry questions</button></div>}
       {questions.length > 0 ? <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} /> : <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}
         before={<>{reply && <ReplyComposer target={reply} onCancel={onCancelReply} />}{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}</>}

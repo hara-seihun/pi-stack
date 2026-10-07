@@ -39,10 +39,10 @@ test("inbox ranks attention, then work, then quiet, mixing AI and human chats", 
     session("parent", { activity: "awaiting", hasChildren: true, waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }),
     session("old", { updatedAt: "2025-01-01T00:00:00Z", lastUserMessageAt: "2025-01-01T00:00:00Z" }),
   ], [], messaging);
-  expect(rows.map(row => row.chat.id)).toEqual(["ai:held", "ai:unread", "human:unread", "ai:busy", "ai:parent", "ai:same-id", "ai:old", "human:same-id"]);
-  expect(rows.map(row => row.section)).toEqual(["attention", "attention", "attention", "working", "working", "quiet", "quiet", "quiet"]);
-  expect(rows[0].chat).toMatchObject({ kind: "ai", session: { id: "held" } });
-  expect(rows[2].chat).toMatchObject({ kind: "human", icon: "signal" });
+  expect(rows.map(row => row.chat.id)).toEqual(["ai:unread", "human:unread", "ai:busy", "ai:parent", "ai:held", "ai:same-id", "ai:old", "human:same-id"]);
+  expect(rows.map(row => row.section)).toEqual(["attention", "attention", "working", "working", "quiet", "quiet", "quiet", "quiet"]);
+  expect(rows[0].chat).toMatchObject({ kind: "ai", session: { id: "unread" } });
+  expect(rows[1].chat).toMatchObject({ kind: "human", icon: "signal" });
   expect(currentChats([ai], [], messaging).map(item => item.id)).toEqual(["human:unread", "ai:same-id", "human:same-id"]);
 });
 
@@ -132,7 +132,7 @@ test("status vocabulary covers every lifecycle and flag", () => {
   expect(threadStatus(session("a", { state: "running", activity: "waiting_on_tool", activeTools: ["functions.agent_browser"] })).label).toBe("Running agent browser");
   expect(threadStatus(session("a", { state: "running", activity: "waiting_on_tool", activeTools: ["bash", "web_search"] }))).toMatchObject({ label: "Running bash and web search", short: "2 tools" });
   expect(threadStatus(session("a", { state: "running", activity: "waiting_on_tool", activeTools: ["bash", "functions.web_search", "agent_browser"] }))).toMatchObject({ label: "Running 3 tools", short: "3 tools", title: "bash, web search, agent browser" });
-  expect(threadStatus(session("a", { held: true, queuedMessages: [queued] }))).toMatchObject({ key: "stopped", label: "Stopped", attention: true });
+  expect(threadStatus(session("a", { held: true, queuedMessages: [queued] }))).toMatchObject({ key: "idle", label: "Idle", attention: false });
   expect(threadStatus(session("a", { idleUnread: true }))).toMatchObject({ key: "idle", label: "Idle", attention: true });
   expect(threadStatus(session("a", { archivedAt: "2026" })).key).toBe("archived");
   expect(threadStatus(session("a", { activity: "awaiting", waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }))).toMatchObject({ key: "awaiting", busy: true });
