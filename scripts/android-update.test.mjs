@@ -64,8 +64,13 @@ test("web bundle preserves client bytes and ignores extraction metadata, file or
   assert.notEqual(hash(webBundleBytes(apk(root, "changed.apk", Object.keys(client)))), hash(bundled[0]));
 });
 
-test("installation repeats unchanged artifacts but refuses to replace published web bytes", t => {
+for (const bundled of [false, true]) test(`${bundled ? "standalone bundled" : "source"} installer repeats unchanged artifacts but refuses to replace published web bytes`, t => {
   const root = scratch(t);
+  const entry = bundled ? join(root, "android-update.js") : installer;
+  if (bundled) {
+    const receipt = JSON.parse(run("bun", [installer, "bundle", entry]));
+    assert.equal(receipt.sha256, hash(readFileSync(entry)));
+  }
   const source = join(root, "source");
   const destination = join(root, "installed");
   mkdirSync(source);
@@ -78,8 +83,8 @@ test("installation repeats unchanged artifacts but refuses to replace published 
   };
   record("manifest.json", "apk", Buffer.from("fixed APK"));
   const web = record("web-manifest.json", "web.zip", Buffer.from("fixed bundle"));
-  const install = () => spawnSync("bun", [installer, "install", source], {
-    encoding: "utf8", timeout: 5_000, env: { ...process.env, PI_REMOTE_APP_UPDATES_DIR: destination },
+  const install = () => spawnSync("bun", [entry, "install", source], {
+    cwd: root, encoding: "utf8", timeout: 5_000, env: { ...process.env, PI_REMOTE_APP_UPDATES_DIR: destination },
   });
   for (let i = 0; i < 2; i++) {
     const result = install();

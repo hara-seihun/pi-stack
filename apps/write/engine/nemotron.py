@@ -9,6 +9,8 @@ import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer
 from gpu_encoder import maybe_load
+from dictionary import PhraseBias
+from dictionary_decoder import DictionaryDecoder
 
 BLANK = 1024
 LOG_FLOOR = math.log(2**-24)
@@ -37,11 +39,12 @@ class Nemotron:
         self.gpu = maybe_load(Path(__file__).resolve().parent / 'gpu-model') if enable_gpu else None
 
     def create_stream(self, dictionary=None):
-        phrases = []
-        for text in (dictionary or {}).get('words', []):
-            if isinstance(text, str) and text.strip():
-                phrases.append(self.tokenizer.encode(text.strip()).ids)
-        return Stream(self, phrases)
+        dictionary = dictionary or {}
+        phrases = list(dictionary.get('words', []))
+        phrases.extend(rule['from'] for rule in dictionary.get('replacements', [])
+                       if isinstance(rule, dict) and isinstance(rule.get('from'), str)
+                       and isinstance(rule.get('to'), str) and rule['to'].strip())
+        return Stream(self, PhraseBias(self.vocab, phrases))
 
     def features(self, audio, first=0, count=None):
         """Log-mel frames [first, first+count) of `audio`, identical to slicing the
@@ -72,6 +75,7 @@ class Stream:
     def __init__(self, model, phrases):
         self.model = model
         self.phrases = phrases
+        self.dictionary_decoder = DictionaryDecoder(model, phrases, BLANK) if phrases.phrases else None
         self.ids = []
         self.audio = np.empty(0, dtype=np.float32)
         self.samples_decoded = 0
@@ -87,6 +91,7 @@ class Stream:
         self.pieces = []
         self.token_scores = []
         self.alternative_pieces = []
+        self.alternative_scores = []
         self.token_times = []
         self.timings = []
         self.stage_timings = []
@@ -104,6 +109,7 @@ class Stream:
         duplicate = object.__new__(Stream)
         duplicate.model = self.model
         duplicate.phrases = self.phrases
+        duplicate.dictionary_decoder = self.dictionary_decoder.fork() if self.dictionary_decoder else None
         duplicate.ids = self.ids.copy()
         duplicate.audio = self.audio
         duplicate.samples_decoded = self.samples_decoded
@@ -119,12 +125,13 @@ class Stream:
         duplicate.pieces = self.pieces.copy()
         duplicate.token_scores = self.token_scores.copy()
         duplicate.alternative_pieces = self.alternative_pieces.copy()
+        duplicate.alternative_scores = self.alternative_scores.copy()
         duplicate.token_times = self.token_times.copy()
         duplicate.timings = self.timings.copy()
         duplicate.stage_timings = self.stage_timings.copy()
         return duplicate
 
-    def finish(self, silence_samples=3200):
+    def finish(self, silence_samples=9600):
         if silence_samples:
             self.audio = np.concatenate((self.audio, np.zeros(silence_samples, np.float32)))
         if len(self.audio) > self.samples_decoded:
@@ -132,7 +139,19 @@ class Stream:
                 chunks = min(4, math.ceil((len(self.audio)-self.samples_decoded)/self.model.chunk_samples)) if self.model.gpu else 1
                 self._step(math.ceil(min(len(self.audio)-self.samples_decoded, chunks*self.model.chunk_samples) / 160))
                 self.samples_decoded += chunks * self.model.chunk_samples
+        if self.dictionary_decoder:
+            self.dictionary_decoder.finished = True
+            self._dictionary_visible()
         return self.result()
+
+    def _dictionary_visible(self):
+        hypothesis, count = self.dictionary_decoder.visible()
+        self.ids = list(hypothesis.ids[:count])
+        self.pieces = list(hypothesis.pieces[:count])
+        self.token_scores = list(hypothesis.probabilities[:count])
+        self.alternative_pieces = list(hypothesis.alternatives[:count])
+        self.alternative_scores = list(hypothesis.alternative_scores[:count])
+        self.token_times = list(hypothesis.times[:count])
 
     def _step(self, valid_frames):
         began = time.perf_counter()
@@ -161,6 +180,10 @@ class Stream:
             })
         encoded_at = time.perf_counter()
         for frame in range(min(int(lengths[0]), max(1, math.ceil(valid_frames/8)))):
+            if self.dictionary_decoder:
+                self.dictionary_decoder.frame(encoded[:, :, frame:frame+1],
+                                              self.samples_decoded / 16000 + frame * .08)
+                continue
             for _ in range(10):
                 logits, _, next1, next2 = self.model.decoder.run(None, {
                     'encoder_outputs': encoded[:, :, frame:frame+1],
@@ -170,26 +193,25 @@ class Stream:
                     'input_states_2': self.state2,
                 })
                 scores = logits[0, 0, 0]
-                biased = scores.copy()
-                for phrase in self.phrases:
-                    for prefix in range(len(phrase)-1, 0, -1):
-                        if self.ids[-prefix:] == phrase[:prefix]:
-                            biased[phrase[prefix]] += 3.0
-                            break
-                token = int(np.argmax(biased))
+                token = int(np.argmax(scores))
                 if token == BLANK:
                     break
                 # Exact local joiner alternatives, not a re-ranked phrase lattice.
                 best = np.argpartition(scores, -3)[-3:]
                 best = sorted(best, key=lambda index: -scores[index])
-                probability = np.exp(scores[token] - np.logaddexp.reduce(scores))
+                normalizer = np.logaddexp.reduce(scores)
+                probability = np.exp(scores[token] - normalizer)
+                alternatives = [int(index) for index in best if int(index) != token and int(index) != BLANK]
                 self.ids.append(token)
                 self.pieces.append(self.model.vocab.get(token, ''))
                 self.token_scores.append(float(probability))
-                self.alternative_pieces.append([self.model.vocab.get(int(index), '') for index in best if int(index) != token and int(index) != BLANK])
+                self.alternative_pieces.append([self.model.vocab.get(index, '') for index in alternatives])
+                self.alternative_scores.append([float(np.exp(scores[index] - normalizer)) for index in alternatives])
                 self.token_times.append((self.samples_decoded / 16000) + frame*0.08)
                 self.last = token
                 self.state1, self.state2 = next1, next2
+        if self.dictionary_decoder:
+            self._dictionary_visible()
         completed = time.perf_counter()
         self.timings.append((completed-began)*1000)
         self.stage_timings.append({'featureMs': feature_ms,
@@ -205,14 +227,19 @@ class Stream:
             if not tokens:
                 return
             text = ''.join(self.pieces[i] for i in tokens).replace('▁', ' ').strip()
-            conf = math.exp(sum(math.log(max(self.token_scores[i], 1e-9)) for i in tokens)/len(tokens))
-            alts = []
+            log_support = sum(math.log(max(self.token_scores[i], 1e-9)) for i in tokens)
+            conf = math.exp(log_support / len(tokens))
+            alternatives = {}
             for i in tokens:
-                for alternative in self.alternative_pieces[i]:
+                for alternative, probability in zip(self.alternative_pieces[i], self.alternative_scores[i]):
                     candidate = ''.join(alternative if j == i else self.pieces[j] for j in tokens).replace('▁', ' ').strip()
-                    if candidate and ' ' not in candidate and candidate != text and candidate not in alts:
-                        alts.append(candidate)
-            words.append({'w': text, 'conf': round(conf, 4), 'alts': alts[:3], 'start': round(self.token_times[tokens[0]], 2), 'end': round(self.token_times[tokens[-1]]+0.08, 2)})
+                    if candidate and ' ' not in candidate and candidate != text:
+                        support = math.exp((log_support - math.log(max(self.token_scores[i], 1e-9))
+                                            + math.log(max(probability, 1e-9))) / len(tokens))
+                        alternatives[candidate] = max(alternatives.get(candidate, 0), support)
+            alts = [{'w': candidate, 'conf': round(support, 4)} for candidate, support in
+                    sorted(alternatives.items(), key=lambda item: (-item[1], item[0]))[:3]]
+            words.append({'w': text, 'conf': round(conf, 4), 'alts': alts, 'start': round(self.token_times[tokens[0]], 2), 'end': round(self.token_times[tokens[-1]]+0.08, 2)})
         for i, piece in enumerate(self.pieces):
             if piece.startswith('▁') and tokens:
                 commit()

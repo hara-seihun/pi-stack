@@ -1,34 +1,98 @@
 import type { Database } from "bun:sqlite";
-import type { ThreadApi } from "pi-orchestrator/api";
+import type { ThreadApi, Thread, ThreadSettlement } from "pi-orchestrator/api";
 import { recordIdleNotification } from "./database";
 
-/** Each owner sequences its own execution receipts. Remote only delivers them to clients. */
-export async function projectThreadNotifications(db: Database, owner: string, api: Pick<ThreadApi, "settlements" | "questionEvents" | "questions" | "list">): Promise<void> {
+type Completion = Pick<ThreadSettlement, "executionId" | "threadId" | "time">;
+type NotificationApi = Pick<ThreadApi, "settlements" | "questionEvents" | "attentionEvents" | "questions" | "list">;
+
+function hasReply(item: ThreadSettlement): boolean {
+  const message = item.finalMessage;
+  if (item.outcome !== "complete" || message?.role !== "assistant") return false;
+  const content = message.content;
+  return typeof content === "string" ? content.trim().length > 0 : Array.isArray(content)
+    && content.some(block => block?.type === "text" && typeof block.text === "string" && block.text.trim().length > 0);
+}
+
+async function findThread(api: Pick<ThreadApi, "list">, id: string): Promise<Thread> {
+  const listed = await api.list({ id, limit: 1 });
+  if (!listed.ok) throw new Error(listed.error.message);
+  const thread = listed.value.threads.find(thread => thread.id === id);
+  if (!thread) throw new Error(`Notification names missing thread ${id}`);
+  return thread;
+}
+
+function conversation(thread: Thread): boolean {
+  return (thread.metadata?.foreground === true || thread.metadata?.foreground === undefined && !thread.parentId && thread.role !== "worker")
+    && !thread.metadata?.archived && !thread.held;
+}
+
+function busy(thread: Thread): boolean {
+  return !thread.held && (thread.state === "running" || thread.state === "waiting" || thread.pendingMessages > 0 || !!thread.waitingOnAgents || !!thread.metadata?.agentWait);
+}
+
+/** Each owner sequences receipts; launch provenance never delays another agent's notification. */
+export async function projectThreadNotifications(db: Database, owner: string, api: NotificationApi, _directory: Pick<ThreadApi, "list" | "questions"> = api, published?: () => void): Promise<void> {
+  await projectAttentionNotifications(db, owner, api, published);
   await projectQuestionNotifications(db, owner, api);
   const key = `thread-settlements:${owner}`;
+  const pendingKey = `thread-completions:${owner}`;
   let cursor = Number((db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null)?.value ?? 0);
+  const saved = (db.query("SELECT value FROM metadata WHERE key=?").get(pendingKey) as { value: string } | null)?.value;
+  const pending = new Map<string, Completion>((saved ? JSON.parse(saved) as Completion[] : []).map(item => [item.threadId, item]));
+  const ready: Array<{ item: Completion; thread: Thread }> = [];
   while (true) {
     const result = await api.settlements(cursor, 100);
     if (!result.ok) throw new Error(result.error.message);
-    const page = result.value;
-    if (!page.items.length) return;
-    const named = await Promise.all(page.items.map(async item => {
-      const listed = await api.list({ id: item.threadId, limit: 1 });
-      if (!listed.ok) throw new Error(listed.error.message);
-      const thread = listed.value.threads.find(thread => thread.id === item.threadId);
-      if (!thread) throw new Error(`Settlement ${item.executionId} names missing thread ${item.threadId}`);
-      const pending = await api.questions(item.threadId);
-      if (!pending.ok) throw new Error(pending.error.message);
-      return { item, thread, hasQuestions: pending.value.length > 0 };
+    const receipts = await Promise.all(result.value.items.map(async item => {
+      const thread = await findThread(api, item.threadId);
+      return { item, thread };
     }));
+    for (const { item, thread } of receipts) {
+      pending.delete(item.threadId);
+      if (hasReply(item) && conversation(thread)) {
+        pending.set(item.threadId, { executionId: item.executionId, threadId: item.threadId, time: item.time });
+      }
+    }
+    cursor = result.value.cursor;
+    if (result.value.items.length < 100) break;
+  }
+
+  for (const item of pending.values()) {
+    let thread = await findThread(api, item.threadId);
+    const questions = await api.questions(item.threadId);
+    if (!questions.ok) throw new Error(questions.error.message);
+    if (!conversation(thread) || questions.value.length) { pending.delete(item.threadId); continue; }
+    if (busy(thread)) continue;
+    thread = await findThread(api, item.threadId);
+    if (!conversation(thread)) { pending.delete(item.threadId); continue; }
+    if (busy(thread)) continue;
+    ready.push({ item, thread });
+    pending.delete(item.threadId);
+  }
+  db.transaction(() => {
+    for (const { item, thread } of ready) recordIdleNotification(db, `${owner}:${item.executionId}`, thread, item.time);
+    db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(key, String(cursor));
+    db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(pendingKey, JSON.stringify([...pending.values()]));
+  })();
+}
+
+export async function projectAttentionNotifications(db: Database, owner: string, api: Pick<ThreadApi, "attentionEvents" | "list">, published?: () => void): Promise<void> {
+  const key = `thread-attention:${owner}`;
+  let cursor = Number((db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null)?.value ?? 0);
+  while (true) {
+    const result = await api.attentionEvents(cursor, 100);
+    if (!result.ok) throw new Error(result.error.message);
+    const page = result.value;
+    if (page.cursor === cursor) return;
+    const named = await Promise.all(page.items.map(async item => ({ item, thread: await findThread(api, item.threadId) })));
     db.transaction(() => {
-      for (const { item, thread, hasQuestions } of named) {
-        if (!hasQuestions) recordIdleNotification(db, `${owner}:${item.executionId}`, thread, item.time);
+      for (const { item, thread } of named) {
+        recordIdleNotification(db, `${owner}:attention:${item.seq}`, thread, item.time, { kind: "attention", body: item.summary });
       }
       db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(key, String(page.cursor));
     })();
     cursor = page.cursor;
-    if (page.items.length < 100) return;
+    published?.();
   }
 }
 
@@ -40,16 +104,10 @@ export async function projectQuestionNotifications(db: Database, owner: string, 
     if (!result.ok) throw new Error(result.error.message);
     const page = result.value;
     if (page.cursor === cursor) return;
-    const named = await Promise.all(page.items.map(async item => {
-      const listed = await api.list({ id: item.threadId, limit: 1 });
-      if (!listed.ok) throw new Error(listed.error.message);
-      const thread = listed.value.threads.find(thread => thread.id === item.threadId);
-      if (!thread) throw new Error(`Question ${item.questionId} names missing thread ${item.threadId}`);
-      return { item, thread };
-    }));
+    const named = await Promise.all(page.items.map(async item => ({ item, thread: await findThread(api, item.threadId) })));
     db.transaction(() => {
       for (const { item, thread } of named) {
-        if (!thread.metadata?.archived) recordIdleNotification(db, `${owner}:question:${item.questionId}`, thread, item.time, { kind: "question", body: item.question });
+        recordIdleNotification(db, `${owner}:question:${item.questionId}`, thread, item.time, { kind: "question", body: item.question });
       }
       db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(key, String(page.cursor));
     })();

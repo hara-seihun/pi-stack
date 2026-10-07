@@ -10,9 +10,9 @@ test("running work offers Stop only while the composer has no message", () => {
   expect(composerAction(session, "")).toBe("stop");
 });
 
-test("held threads offer Resume until a draft is typed; other settled threads offer Send", () => {
+test("historical holds and settled agents offer Send without a persistent stopped state", () => {
   const held = { state: "idle", held: true, queuedMessages: [{ state: "queued" }] } as Session;
-  expect(composerAction(held, "")).toBe("resume");
+  expect(composerAction(held, "")).toBe("send");
   expect(composerAction(held, "A message")).toBe("send");
   for (const session of [
     { state: "idle", held: true, queuedMessages: [] } as unknown as Session,

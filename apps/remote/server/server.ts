@@ -1,14 +1,54 @@
 import { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
+import { capturedContextUsage } from "./context-usage";
 import { startThreadRefresh } from "./thread-refresh";
-import { WatchList, watchInterval, loadThreadModelCatalog, threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerSource, type ThreadCreator, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, THREAD_MODES, type ThreadModeName, type PlanUsageSnapshot, type PersonalUsage, readBrokerUsage } from "pi-orchestrator/api";
-import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
+import {
+  WatchList,
+  watchInterval,
+  watchSettings,
+  loadThreadModelCatalog,
+  threadSettingsMetadata,
+  modelBrokerUrl,
+  createWorkspaceAdmission,
+  ORCHESTRATOR_CATALOG,
+  OrchestratorClient,
+  catalogAgentType,
+  createSharedImageGenerationService,
+  resolveDelivery,
+  ThreadService,
+  configuredAgentCapacity,
+  ModelAvailabilityStore,
+  modelAvailabilityPath,
+  modelAvailabilityKey,
+  ThreadDirectory,
+  createThreadClient,
+  importRemoteThreads,
+  createSharedPiSessionOpener,
+  threadHttp,
+  admissionFor,
+  callerResolver,
+  hostIdentityConfig,
+  threadCapability,
+  type CallerSource,
+  type ThreadCreator,
+  type ThreadInspection,
+  type Thread,
+  type ThreadMessage,
+  type PiEvent,
+  type Result,
+  type SharedImageGenerationService,
+  type ThreadModeName,
+  type PlanUsageSnapshot,
+  type PersonalUsage,
+  readBrokerUsage,
+} from "pi-orchestrator/api";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -18,23 +58,32 @@ import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
+import { questionAnswerContext } from "./question-answer-context";
+import { QuestionFeed } from "./question-feed";
 import { appendContextPatch, readContext } from "./context-journal";
-import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor } from "./database";
-import { dismissError, observeError } from "./error-feedback";
+import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
+import { oneKenanEnabled } from "kenan-memory/config";
+import { handleRoomOwner } from "./rooms-owner";
+import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
+import { readThreadHistory } from "pi-orchestrator/history";
+import { dismissError, observeError, observeFailure } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
+import { createThreadViewRecorder } from "./thread-viewing";
 import { VoiceClient } from "./voice/client";
-import { MeetServer } from "./meet/server";
+import { MeetGateway } from "./meet/gateway";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
+import { observeExecutionActivity } from "pi-orchestrator/api";
 import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "./meet/handoff";
 import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
+import { ensureExternalMeetingThread, MEETING_MODE, MEETING_SETTINGS } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
-import { contextFilesPrompt, listContextFiles, selectContextFiles, type ContextFileSources } from "./thread-context-files";
+import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
 import { CalendarStore } from "./calendar";
@@ -42,48 +91,33 @@ import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
-import { idleNotifications } from "./notifications";
+import { idleNotifications, notificationHistory, resolveNotificationQuestions } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webResponse } from "./files";
+import { fileEditResponse } from "./file-edit";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
-import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type SupervisorState } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
+import { parsePresentationEvent } from "./pi-event-presentation";
 import { ResourceCache } from "../shared/resource-cache";
-import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-items";
+import { TranscriptItems } from "./transcript-items";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
 import { parseMessageReference } from "./message-protocol";
 import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
+import { PromptAdmissions } from "./prompt-admissions";
 import { SlackReactions } from "./slack-reactions";
 import { AGENT_NAME } from "./agent-identity";
 import { createSpeechService } from "./speech/service";
 import { closeAiChat } from "./chat-lifecycle";
 import { archivedSessions } from "./archived-sessions";
 import { availableUploadPath, storeUpload, uploadName } from "./uploads";
-import {
-  generatedThreadName,
-  localNamingPrompt,
-  localReasoningEffort,
-  LOCAL_THREAD_NAMING_INSTRUCTION,
-  LOCAL_THREAD_NAMING_MAX_TOKENS,
-  namingOutcome,
-  namingRequestId,
-  unnamedThread,
-  namingStep,
-  namingTranscript,
-  parseThreadNamingModel,
-  THREAD_NAMING_HISTORY,
-  THREAD_NAMING_INSTRUCTION,
-  type NamingMessage,
-} from "./thread-naming";
-import { ensureLocalEngine, loadLocalEngine, localNamingCompletion, withLocalEngine } from "./local-naming";
-import { BACKGROUND_RESERVATION_WAIT_SECONDS, EngineReservedError } from "./engine-reservation";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -93,9 +127,9 @@ if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_E
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
 const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
+const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
-const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
 const AUTO_ARCHIVE_AFTER_MS = autoArchiveDelay(process.env.PI_REMOTE_AUTO_ARCHIVE_AFTER_MS);
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
@@ -145,15 +179,19 @@ function assertContextMirrorLoadsLast() {
   }
 }
 
-assertContextMirrorLoadsLast();
+if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
-// Live meeting threads answer in the room, so their first call must be quick. On September 28, 2026,
-// astra at low thinking placed live-research placeholders 5.8 s after a request, against 11.1 s at
-// the destination's high default; Sara chose it over sol at medium.
-/** Meetings are live consulting: the thread mode declares the dispatcher's settings, tools, admission and its workers. */
-const MEETING_MODE = "live" satisfies ThreadModeName;
+const modelAvailability = new ModelAvailabilityStore(modelAvailabilityPath());
+function availableThreadModels() {
+  const policy = modelAvailability.disabled();
+  observeError(db, "model-availability", policy.ok ? null : policy.error.message);
+  const offered = new Set([...THREAD_DESTINATIONS.values()].flatMap(destination => destination.models));
+  return [...new Map([...THREAD_MODELS.values()].filter(model => offered.has(model.id)).map(model => [model.id, model])).values()]
+    .map(model => ({ id: model.id, label: model.label, icon: model.icon, accent: model.accent,
+      enabled: policy.ok && !policy.value.has(modelAvailabilityKey(`${model.provider}/${model.modelId}`)) }));
+}
 const OFFERED_DESTINATIONS = (process.env.PI_REMOTE_DESTINATIONS ?? "home").split(",").map((id) => id.trim()).filter(Boolean);
 const destinationDefinitions: ThreadDestination[] = process.env.PI_REMOTE_THREAD_DESTINATIONS === undefined
   ? defaultThreadDestinations()
@@ -193,6 +231,7 @@ function noteModelRecency(thread: Thread, lookup: ThreadLookup = liveThread): bo
 }
 function threadStartProfiles() {
   const history = [...modelRecency.values()];
+  const enabled = new Set(availableThreadModels().filter(model => model.enabled).map(model => model.id));
   return [...THREAD_DESTINATIONS.values()].map((destination) => {
     const contextSources = destinationContextSources(destination);
     return {
@@ -201,7 +240,7 @@ function threadStartProfiles() {
       icon: destination.icon,
       accent: destination.accent,
       defaultModel: destination.defaultModel,
-      models: recentThreadModels(destination, history, THREAD_MODELS).map((id) => {
+      models: recentThreadModels(destination, history, THREAD_MODELS).filter(id => enabled.has(id)).map((id) => {
         const model = THREAD_MODELS.get(id);
         if (!model) throw new Error(`Unknown thread model ${id} in profile ${destination.id}`);
         return { id: model.id, label: model.label, icon: model.icon, accent: model.accent };
@@ -243,6 +282,7 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
+const transcripts = new TranscriptItems(db);
 const piReactions = new PiReactions(db, MESSAGE_OWNER);
 const slackReactions = new SlackReactions(process.env.PI_REMOTE_SLACK_REACTIONS);
 const orchestrator = new OrchestratorClient({
@@ -262,6 +302,8 @@ const capability = threadCapability();
 const callers = callerResolver({ capability, host: hostIdentityConfig() });
 const threads = new ThreadService({
   capability,
+  capacity: configuredAgentCapacity(),
+  admitNewThread: settings => modelAvailability.admit(settings.model),
   attachSession: runner.attachSession,
   databasePath: join(DATA, "threads.sqlite3"),
   sessionsDir: join(DATA, "threads"),
@@ -274,12 +316,11 @@ const threads = new ThreadService({
 unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "threads"),
   resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
 ensureSupervisorSchema(db);
+const promptAdmissions = new PromptAdmissions(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
-const fleetUrl = configuredOrchestratorThreadUrl();
+const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
-const namingUrl = modelBrokerUrl() ?? fleetUrl;
-const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
 /** Assigned once the phone broker exists; thread events can arrive earlier. */
 let phoneOverlay: PhoneOverlay | null = null;
 const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
@@ -288,16 +329,29 @@ threads.setDirectory(directory, (parent, input) => {
   const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
   return privatePath(parent.cwd) || privatePath(input.cwd) ? undefined : fleet ?? undefined;
 });
+// Each watch item is checked in the destination it came from, with that destination's chosen context.
+const WATCH_DESTINATIONS = [...THREAD_DESTINATIONS.values()].filter(destination => !destination.raw && !destination.sandbox).map(destination => destination.id);
+const DEFAULT_WATCH_DESTINATION = process.env.PI_REMOTE_WATCH_DESTINATION
+  ?? (WATCH_DESTINATIONS.includes("home") ? "home" : WATCH_DESTINATIONS[0] ?? "home");
 const watchList = new WatchList({
   databasePath: join(DATA, "threads.sqlite3"), threads,
   intervalMs: watchInterval(process.env.PI_REMOTE_WATCH_INTERVAL_MS),
+  settings: unwrap(watchSettings(process.env.PI_REMOTE_WATCH_MODEL)),
+  recoveryEvidence: id => threads.watchRecoveryEvidence(id),
   enabled: process.env.PI_REMOTE_WATCH_ENABLED !== "0",
-  placement: () => {
-    const profileId = process.env.PI_REMOTE_WATCH_DESTINATION ?? "home";
+  destinations: WATCH_DESTINATIONS,
+  defaultDestination: DEFAULT_WATCH_DESTINATION,
+  destinationOf: threadId => {
+    const thread = threads.get(threadId);
+    const profileId = thread ? remotePlacement(thread, id => threads.get(id)).profileId : undefined;
+    return typeof profileId === "string" ? profileId : undefined;
+  },
+  placement: profileId => {
     const destination = THREAD_DESTINATIONS.get(profileId);
     if (!destination || destination.sandbox || destination.raw) return { ok: false, error: { code: "invalid_request", message: `Watch destination ${profileId} must be an offered full-context destination` } };
     const admitted = workspaceAdmission.resolve(destination.workspaceId);
-    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId } } }
+    const contextFiles = watchContextFiles(destination.watchContextFiles, destinationContextSources(destination)?.directory);
+    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId, ...(contextFiles.length ? { contextFiles } : {}) } } }
       : { ok: false, error: { code: "unavailable", message: admitted.error.message } };
   },
   onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
@@ -307,6 +361,21 @@ const peerThreads = new Map<string, Thread>();
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
 let peerError: string | null = null;
+let peerRecovery: "automatic" | "required" = "automatic";
+class PeerOwnershipError extends Error {}
+function peerFeedback(message: string | null) {
+  return observeFailure(db, "peer:fleet", !message ? null : peerRecovery === "required" ? {
+    message, recovery: "required", impact: "Worker status cannot be reconciled because a thread has conflicting owners.",
+    action: "Ask Kenan to repair the conflicting thread ownership.",
+  } : {
+    message, recovery: "automatic", impact: "Worker status updates are delayed; the last available listing is retained.", attentionAfterMs: 60_000,
+  });
+}
+function notificationFeedback(owner: string, message: string | null) {
+  return observeFailure(db, `notifications:${owner}`, message ? {
+    message, recovery: "automatic", impact: "Idle notifications are delayed; existing notifications are retained.", attentionAfterMs: 60_000,
+  } : null);
+}
 const notificationErrors = new Map<string, string>();
 let peerRefresh: Promise<void> | null = null;
 const notificationRefreshes = new Map<string, Promise<void>>();
@@ -318,13 +387,13 @@ function refreshThreadNotifications(): Promise<void> {
     const refresh = (async () => {
       do {
         notificationRefreshAgain.delete(owner.id);
-        await projectThreadNotifications(db, owner.id, owner.api);
+        await projectThreadNotifications(db, owner.id, owner.api, directory, () => { signalSync(); pushNotifications(); });
       } while (notificationRefreshAgain.has(owner.id));
     })()
-      .then(() => { observeError(db, `notifications:${owner.id}`, null); if (notificationErrors.delete(owner.id)) signalSync(); })
+      .then(() => { notificationFeedback(owner.id, null); if (notificationErrors.delete(owner.id)) signalSync(); })
       .catch(cause => {
         const message = cause instanceof Error ? cause.message : String(cause);
-        observeError(db, `notifications:${owner.id}`, message);
+        notificationFeedback(owner.id, message);
         if (notificationErrors.get(owner.id) !== message) { notificationErrors.set(owner.id, message); signalSync(); }
       })
       .finally(() => { notificationRefreshes.delete(owner.id); signalSync(); pushNotifications(); });
@@ -340,16 +409,16 @@ async function refreshPeers() {
     let cursor: string | undefined;
     do {
       const page = await fleet.list({ limit: 100, cursor });
-      if (!page.ok) { observeError(db, "peer:fleet", page.error.message); if (peerError !== page.error.message) { peerError = page.error.message; signalSync(); } return; }
+      if (!page.ok) { peerRecovery = "automatic"; peerError = page.error.message; peerFeedback(peerError); signalSync(); return; }
       for (const thread of page.value.threads) {
-        if (threads.get(thread.id)) throw new Error(`Thread ${thread.id} has two owners`);
+        if (threads.get(thread.id)) throw new PeerOwnershipError(`Thread ${thread.id} has two owners`);
         next.set(thread.id, thread);
       }
       cursor = page.value.nextCursor;
     } while (cursor);
     const changed = peerError !== null || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
     peerError = null;
-    observeError(db, "peer:fleet", null);
+    peerFeedback(null);
     const updated = [...next.values()].filter(thread => peerThreads.get(thread.id)?.revision !== thread.revision);
     for (const thread of updated) if (!peerThreads.has(thread.id)) ensureThreadView(db, thread.id);
     peerThreads.clear();
@@ -361,8 +430,10 @@ async function refreshPeers() {
     if (changed) { signalSync(); void refreshThreadNotifications(); }
   })().catch(cause => {
     const message = cause instanceof Error ? cause.message : String(cause);
-    observeError(db, "peer:fleet", message);
-    if (peerError !== message) { peerError = message; signalSync(); }
+    peerRecovery = cause instanceof PeerOwnershipError ? "required" : "automatic";
+    peerFeedback(message);
+    peerError = message;
+    signalSync();
   }).finally(() => { peerRefresh = null; });
   return peerRefresh;
 }
@@ -394,7 +465,15 @@ async function inspectThread(id: string, local: boolean) {
   while (peerInspections.size > 12) peerInspections.delete(peerInspections.keys().next().value!);
   ensureThreadView(db, id);
   if (changed) signalSync();
-  if (inspection.live) restoreLiveProjection(liveFor(id), inspection.live);
+  if (inspection.live) {
+    const live = liveFor(id);
+    const previous = JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]]);
+    restoreLiveProjection(live, inspection.live);
+    if (previous !== JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]])) {
+      signalSync();
+      signalLiveSync();
+    }
+  }
 }
 function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -483,11 +562,15 @@ const reconciledState = new ReconcilePublisher({ maxHistoryPerResource: 32 });
 // stream only hears about it when its own rows differ.
 const STATE_COALESCE_MS = 25;
 let statePushTimer: ReturnType<typeof setTimeout> | null = null;
+let stateSyncPhase: "initializing" | "ready" = "initializing";
+let stateSyncPending = false;
 function signalSync() {
-  if (statePushTimer || shuttingDown) return;
+  if (shuttingDown) return;
+  if (stateSyncPhase === "initializing") { stateSyncPending = true; return; }
+  if (statePushTimer) return;
   statePushTimer = setTimeout(() => {
     statePushTimer = null;
-    refreshState();
+    if (!shuttingDown) refreshState();
   }, STATE_COALESCE_MS);
 }
 
@@ -509,6 +592,8 @@ async function buildDashboard(): Promise<Dashboard> {
     actions,
     machine: readMachineUsage(),
     modelCounts: agents.models,
+    modelAvailability: availableThreadModels(),
+    canManageModels: HOST_ADMINISTRATOR,
     people: peopleUsage,
     allowance,
   };
@@ -536,6 +621,10 @@ function refreshDashboard(): Promise<void> {
   dashboardRefreshes = run;
   return run;
 }
+watchFile(modelAvailability.path, { persistent: false, interval: 1_000 }, () => {
+  signalSync();
+  if (!shuttingDown && dashboardSubscribers()) void refreshDashboard();
+});
 const dashboardTicker = setInterval(() => {
   if (!dashboardBusy && dashboardSubscribers()) void refreshDashboard();
 }, DASHBOARD_TICK_MS);
@@ -550,6 +639,7 @@ const LIVE_SYNC_INTERVAL_MS = 33;
 let liveSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let liveSyncPending = false;
 function signalLiveSync() {
+  if (shuttingDown) return;
   if (liveSyncTimer) {
     liveSyncPending = true;
     return;
@@ -557,7 +647,7 @@ function signalLiveSync() {
   pushLive();
   liveSyncTimer = setTimeout(() => {
     liveSyncTimer = null;
-    if (liveSyncPending) {
+    if (liveSyncPending && !shuttingDown) {
       liveSyncPending = false;
       signalLiveSync();
     }
@@ -573,8 +663,8 @@ const inspectedContexts = new WeakMap<ThreadInspection, StoredContext | null>();
 const openDisplayContexts = new Map<string, NonNullable<ReturnType<typeof displayContexts.get>>>();
 
 /** The newest user and assistant messages of this thread, from the context the
- * agent actually holds. Naming and Voice both want to read the conversation,
- * and the captured context is where the conversation is. */
+ * agent actually holds. Voice reads the conversation from the captured context,
+ * which is where the conversation is. */
 function recentContextMessages(sessionId: string, limit: number): Array<{ role: "user" | "assistant"; text: string }> {
   const stored = storedContext(sessionId);
   if (!stored) return [];
@@ -657,10 +747,15 @@ function releaseOpenDisplayContexts() {
 function invalidateDisplayContext(sessionId: string) {
   displayContexts.delete(sessionId);
   openDisplayContexts.delete(sessionId);
+  transcripts.invalidate(sessionId);
   signalTranscript(sessionId);
 }
 
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
+  return questionAnswerContext(threads, sessionId, baseStoredContext(sessionId));
+}
+
+function baseStoredContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
   const peer = peerInspections.get(sessionId);
   if (peer) {
     if (inspectedContexts.has(peer)) return inspectedContexts.get(peer)!;
@@ -682,6 +777,7 @@ function clearStoredContext(sessionId: string) {
     db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
   })();
   cacheStoredContext(sessionId, null);
+  transcripts.forget(sessionId);
   invalidateDisplayContext(sessionId);
   signalSync();
 }
@@ -741,8 +837,8 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
-function threadError(failure: { code: string; message: string }) {
-  return json({ error: failure.message, code: failure.code }, failure.code === "not_found" ? 404
+function threadError(failure: { code: string; message: string; dependencies?: Array<{ threadId: string; dependsOn: string; ownerId?: string }> }) {
+  return json({ error: failure.message, code: failure.code, ...(failure.dependencies ? { dependencies: failure.dependencies } : {}) }, failure.code === "not_found" ? 404
     : failure.code === "invalid_request" ? 400 : failure.code === "unavailable" ? 503 : 409);
 }
 
@@ -760,7 +856,7 @@ function meetingInstructions(sessionId: string, audience: "thread" | "voice" = "
   const thread = threads.get(sessionId) ?? peerThreads.get(sessionId);
   if (!thread || !remotePlacement(thread).meetingId) return "";
   if (audience === "voice") return liveDevInstructions();
-  return meetingThreadInstructions(thread.role === "worker" ? "worker" : "root");
+  return meetingThreadInstructions(thread.metadata?.liveDispatcher === true ? "root" : "worker");
 }
 
 /** The chosen context files of a thread, whole, for its system prompt. Children do not inherit their parent's choice. */
@@ -778,6 +874,7 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
   return [
     audience === "thread" ? chosenContextFiles(sessionId) : "",
     meetingInstructions(sessionId, audience),
+    ROOMS_ENABLED ? roomInstructions(threads.get(sessionId)?.metadata?.room) : "",
     registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
     piReactions.session(sessionId).size ? `Message reactions, keyed by stable message ID: ${JSON.stringify(Object.fromEntries(piReactions.session(sessionId)))}` : "",
     slackReactions.instructions(),
@@ -826,9 +923,9 @@ function remotePlacement(thread: Thread, lookup: ThreadLookup = liveThread): Rec
   }
   return placement;
 }
-interface ThreadView { id: string; idle_unread: number; named_at_message_count: number; color: Session["color"] }
-const threadViewRow = db.query("SELECT id,idle_unread,named_at_message_count,color FROM thread_views WHERE id=?");
-const threadViewRows = db.query("SELECT id,idle_unread,named_at_message_count,color FROM thread_views");
+interface ThreadView { id: string; idle_unread: number; color: Session["color"] }
+const threadViewRow = db.query("SELECT id,idle_unread,color FROM thread_views WHERE id=?");
+const threadViewRows = db.query("SELECT id,idle_unread,color FROM thread_views");
 /**
  * One consistent read of the threads this supervisor shows. Everything a
  * projection derives, placement, views, parents, comes from this read rather
@@ -849,10 +946,8 @@ function threadTable(options: { archived?: boolean } = {}) {
 }
 function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: ThreadView | null = threadViewRow.get(thread.id) as ThreadView | null): any {
   const meta = { ...remotePlacement(thread, lookup), ...thread.metadata };
-  const [provider, ...modelParts] = thread.settings.model.split("/");
+  const [provider, ...modelParts] = (thread.effectiveSettings ?? thread.settings).model.split("/");
   const model = { provider, modelId: modelParts.join("/") };
-  // A failed execution is a notice in the thread's own transcript and an unread
-  // marker on its row; it is not a second status the person has to dismiss.
   return { ...thread, name: thread.title, workspace_id: meta.workspaceId ?? thread.cwd,
     session_path: thread.sessionFile,
     initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
@@ -861,7 +956,7 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
     service_tier: thread.settings.speed === "standard" ? "default" : thread.settings.speed,
     bash_timeout_seconds: meta.bashTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS,
     archived_at: meta.archived ? meta.archivedAt ?? new Date(thread.updatedAt).toISOString() : null,
-    idle_unread: view?.idle_unread ?? 0, named_at_message_count: view?.named_at_message_count ?? 0,
+    idle_unread: view?.idle_unread ?? 0,
     color: view?.color ?? null,
     created_at: new Date(thread.createdAt).toISOString(), updated_at: new Date(thread.updatedAt).toISOString() };
 }
@@ -885,20 +980,11 @@ function emit(sessionId: string, type: string, payload: Record<string, unknown> 
   if (!ownsSupervisorLease()) return 0;
   const seq = activity.add(sessionId, type, payload, receiptId);
   if (!seq) return 0;
-  if (type === "user" || type === "assistant") countThreadMessage(sessionId);
   signalSync();
   // Deliver with the next live frame rather than waiting for the thread's
   // state to move.
   signalLiveSync();
   return seq;
-}
-
-/** Naming asks how far the conversation has come. The count has to keep
- * climbing across a compaction that shortens the context, so the supervisor
- * counts message boundaries as it sees them. */
-function countThreadMessage(sessionId: string) {
-  ensureThreadView(db, sessionId);
-  db.query("UPDATE thread_views SET message_count=message_count+1 WHERE id=?").run(sessionId);
 }
 
 function recordMessageFact(sessionId: string, finalizesMessage: string, column: "thinking" | "metrics", value: string) {
@@ -923,7 +1009,11 @@ function recordResponseMetrics(sessionId: string, metrics: ResponseMetrics | nul
 }
 
 function touchSession(_id: string) { signalSync(); }
-function markSessionViewed(id: string) {
+const recordThreadView = createThreadViewRecorder(directory, liveThread, thread => {
+  if (!threads.get(thread.id)) peerThreads.set(thread.id, thread);
+});
+async function markSessionViewed(id: string, reopened = false) {
+  await recordThreadView(id, reopened);
   const result = db.query("UPDATE thread_views SET idle_unread=0 WHERE id=? AND idle_unread<>0").run(id);
   if (result.changes) signalSync();
 }
@@ -943,153 +1033,6 @@ function creationName(requestId: string): string {
   })();
 }
 
-const namingThreads = new Set<string>();
-
-function recentThreadMessages(sessionId: string): NamingMessage[] {
-  return recentContextMessages(sessionId, THREAD_NAMING_HISTORY);
-}
-
-// A local engine answers in a couple of seconds and keeps no ledger receipt: the supervisor waits for
-// the title in place, and a restart mid-request simply leaves the thread for its next naming point.
-// Naming is background work, so it holds the engine's maintenance reservation for the whole attempt
-// and gives up immediately when somebody else has it.
-async function localThreadName(messages: NamingMessage[]): Promise<string> {
-  const selection = parseThreadNamingModel(THREAD_NAMING_MODEL);
-  if (selection.kind !== "local") throw new Error("Thread naming model is not a local engine");
-  const prompt = localNamingPrompt(messages);
-  const engine = await loadLocalEngine(AGENT_DIR, selection.engine);
-  return withLocalEngine(engine, BACKGROUND_RESERVATION_WAIT_SECONDS, async () => {
-    await ensureLocalEngine(engine);
-    return localNamingCompletion(engine, { model: selection.model, systemPrompt: LOCAL_THREAD_NAMING_INSTRUCTION, prompt,
-      reasoningEffort: localReasoningEffort(selection.thinkingLevel), maxTokens: LOCAL_THREAD_NAMING_MAX_TOKENS });
-  });
-}
-
-// Threads whose naming met a maintenance reservation. They are due again, and the naming reconcile
-// tick retries them once the engine is free instead of waiting for the thread's next message.
-const reservedNames = new Set<string>();
-
-type NamingReceipt = { requestId: string; messageCount: number; input: CompletionInput };
-interface NamingView { id: string; message_count: number; named_at_message_count: number; naming_attempted_count: number; naming_request: string | null }
-const namingViewRows = db.query("SELECT id,message_count,named_at_message_count,naming_attempted_count,naming_request FROM thread_views");
-function namingInput(transcript: string): CompletionInput {
-  const parts = THREAD_NAMING_MODEL.split(":");
-  if (parts.length > 2) throw new Error("Invalid naming model selection");
-  const physical = parts[0]!.split("/").at(-1)!;
-  const model = ORCHESTRATOR_CATALOG.models.find(candidate => candidate.id === physical || candidate.model === physical);
-  if (model?.id !== "luna") throw new Error("Thread naming completion currently supports Luna");
-  const thinkingLevel = parts[1];
-  if (thinkingLevel && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingLevel)) throw new Error("Invalid naming thinking level");
-  return { model: "luna", systemPrompt: THREAD_NAMING_INSTRUCTION, prompt: transcript,
-    speed: "standard", ...(thinkingLevel ? { thinkingLevel } : {}) } as CompletionInput;
-}
-function namingError(id: string, message: string | null) {
-  const view = db.query("SELECT naming_attempted_count FROM thread_views WHERE id=?").get(id) as any;
-  observeError(db, `naming:${id}`, message, String(view?.naming_attempted_count ?? 0));
-  const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
-  if (result.changes) signalSync();
-}
-async function nameThread(sessionId: string): Promise<void> {
-  if (namingThreads.has(sessionId) || shuttingDown) return;
-  namingThreads.add(sessionId);
-  try {
-    const row = sessionRow.get(sessionId);
-    if (!row) { reservedNames.delete(sessionId); return; }
-    ensureThreadView(db, sessionId);
-    const view = db.query("SELECT * FROM thread_views WHERE id=?").get(sessionId) as any;
-    const messageCount = Number(view.message_count ?? 0);
-    let receipt = view.naming_request ? JSON.parse(view.naming_request) as NamingReceipt : null;
-    const attemptedBefore = Number(view.naming_attempted_count ?? 0);
-    const step = namingStep({ name: row.name, messageCount, namedAtMessageCount: Number(view.named_at_message_count ?? 0), attemptedCount: attemptedBefore, hasReceipt: !!receipt });
-    if (step === "idle") { reservedNames.delete(sessionId); return; }
-    // Naming reads the conversation from the context mirror. Until the mirror holds this thread's
-    // messages there is nothing to title, and an empty prompt is a request no completion owner
-    // accepts, so the thread stays due for the next message or reconcile tick.
-    const conversation = () => {
-      const messages = recentThreadMessages(sessionId);
-      if (!messages.length && ownsSupervisorLease()) namingError(sessionId, null);
-      return messages;
-    };
-    if (THREAD_NAMING_MODEL.startsWith("local/")) {
-      if (receipt) db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-      const messages = conversation();
-      if (!messages.length) return;
-      db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
-      let output: string;
-      try { output = await localThreadName(messages); }
-      catch (cause) {
-        if (!(cause instanceof EngineReservedError)) throw cause;
-        // Maintenance is not a naming failure. Leave the thread due, keep it out of the error feed and
-        // let the reconcile tick try again after the lease.
-        db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(attemptedBefore, sessionId);
-        reservedNames.add(sessionId);
-        if (ownsSupervisorLease()) namingError(sessionId, null);
-        return;
-      }
-      reservedNames.delete(sessionId);
-      const title = generatedThreadName(output);
-      if (!ownsSupervisorLease() || shuttingDown) return;
-      unwrap(threads.update(sessionId, { title }));
-      db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(messageCount, sessionId);
-      signalSync();
-      return;
-    }
-    if (!namingClient) {
-      db.query("UPDATE thread_views SET naming_request=NULL,naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
-      namingError(sessionId, "Thread naming has no explicitly permitted same-person completion owner");
-      return;
-    }
-    if (!receipt) {
-      const messages = conversation();
-      if (!messages.length) return;
-      const input = namingInput(namingTranscript(messages));
-      receipt = { requestId: namingRequestId(sessionId, messageCount, input), messageCount, input };
-      db.query("UPDATE thread_views SET naming_request=?,naming_attempted_count=? WHERE id=?").run(JSON.stringify(receipt), messageCount, sessionId);
-    }
-    const submitted = step === "generate";
-    let result = submitted ? await namingClient.submit(receipt.requestId, receipt.input) : await namingClient.get(receipt.requestId);
-    if (!result.ok && result.error.code === "not-found") result = await namingClient.submit(receipt.requestId, receipt.input);
-    if (!ownsSupervisorLease() || shuttingDown) return;
-    const outcome = namingOutcome(result);
-    if (outcome.kind === "pending") { namingError(sessionId, null); return; }
-    if (outcome.kind === "failed") {
-      if (!outcome.keepReceipt) db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-      if (outcome.regenerate) db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(Number(view.named_at_message_count ?? 0), sessionId);
-      namingError(sessionId, outcome.message);
-      return;
-    }
-    db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
-    const title = generatedThreadName(outcome.text);
-    unwrap(threads.update(sessionId, { title }));
-    db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(receipt.messageCount, sessionId);
-    signalSync();
-  } catch (cause) {
-    if (ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
-  } finally { namingThreads.delete(sessionId); }
-}
-function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId); }
-/** Every thread this supervisor owns that still needs a title, whether it is mid-request, waiting for
- * a local engine, or was left numbered by an earlier process. */
-function reconcileThreadNames() {
-  const due = new Set(reservedNames);
-  for (const row of db.query("SELECT id FROM thread_views WHERE naming_request IS NOT NULL").all() as {id: string}[]) due.add(row.id);
-  const views = new Map((namingViewRows.all() as NamingView[]).map(view => [view.id, view]));
-  const live = new Set<string>();
-  for (const thread of threads.snapshot({ archived: false })) {
-    live.add(thread.id);
-    const view = views.get(thread.id);
-    if (namingStep({ name: thread.title, messageCount: Number(view?.message_count ?? 0), namedAtMessageCount: Number(view?.named_at_message_count ?? 0),
-      attemptedCount: Number(view?.naming_attempted_count ?? 0), hasReceipt: !!view?.naming_request }) !== "idle") due.add(thread.id);
-  }
-  // An archived or departed thread will never be named again, so its last failure is not something
-  // the person can act on. It leaves the error feed with the conversation.
-  if (ownsSupervisorLease()) {
-    for (const row of db.query("SELECT id FROM thread_views WHERE naming_error IS NOT NULL").all() as {id: string}[]) {
-      if (!live.has(row.id)) namingError(row.id, null);
-    }
-  }
-  for (const id of due) void nameThread(id);
-}
 
 const agentModelOrder = new Map(ORCHESTRATOR_CATALOG.agentOrder.map((key, index) => [key, index]));
 function addAgentModel(models: Map<string, AgentModelCount>, raw: string, count = 1) {
@@ -1107,7 +1050,7 @@ async function activeAgents() {
   const models = new Map<string, AgentModelCount>();
   let running = 0;
   for (const row of allThreadRows()) if (row.state === "running") {
-    running++; addAgentModel(models, row.settings.model);
+    running++; addAgentModel(models, (row.effectiveSettings ?? row.settings).model);
   }
   return { running, models: sortedAgentModels(models) };
 }
@@ -1123,11 +1066,8 @@ function supervisorState(): SupervisorState {
     sessions: publicSessions(table.rows().filter(row => !row.archived_at), table.local),
     archivedTotal: threads.archivedCount() + peerArchived,
     ownerErrors: [
-      { owner: "fleet", feedback: peerError ? observeError(db, "peer:fleet", peerError) : null },
-      ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: observeError(db, `notifications:${owner}`, message) })),
-      ...(db.query("SELECT id,naming_error,naming_attempted_count FROM thread_views WHERE naming_error IS NOT NULL").all() as any[])
-        .map(row => ({ owner: `Thread ${sessionRow.get(row.id)?.name ?? row.id} naming`,
-          feedback: observeError(db, `naming:${row.id}`, row.naming_error, String(row.naming_attempted_count)) })),
+      { owner: "fleet", feedback: peerFeedback(peerError) },
+      ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: notificationFeedback(owner, message) })),
     ].flatMap(({ owner, feedback }) => feedback ? [{ owner, ...feedback }] : []),
   };
 }
@@ -1137,15 +1077,15 @@ function supervisorState(): SupervisorState {
 // makes that row differ from the shared projection.
 function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archived: false })): Session[] {
   const parents = new Set(local.map(thread => thread.parentId));
-  const runningParents = runningChildParents(local, peerThreads.values());
   const localIds = new Set(local.map(thread => thread.id));
-  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id), false,
+  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), false,
     localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
 }
 function pendingMessages(id: string) {
   return threads.get(id) ? threads.pending(id) : peerInspections.get(id)?.pending ?? [];
 }
 function queuedMessagesFor(id: string): QueuedMessage[] {
+  const acknowledgement = liveThread(id)?.metadata?.acknowledgementWait as { overdue?: boolean } | undefined;
   return pendingMessages(id).filter(message => !message.landedAt).map(message => {
     // A message the runtime has taken cannot be edited, steered or removed;
     // one still waiting can be all three, whether or not the thread is held.
@@ -1153,6 +1093,7 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
     return {
       id: message.id, text: decodeMessageReply(message.text).text, delivery: message.delivery,
       state: waiting ? "queued" as const : "dispatched" as const,
+      ...(!waiting && message.insertedAt === null ? { acknowledgement: acknowledgement?.overdue ? "unconfirmed" as const : "pending" as const } : {}),
       canSteer: waiting && message.delivery === "queue",
       canHardSteer: waiting,
       canCancel: waiting,
@@ -1162,7 +1103,6 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
 }
 function publicSession(row: any,
   hasChildren = threads.snapshot({ archived: false }).some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id)),
-  hasRunningChildren = runningChildParents(threads.snapshot({ archived: false }), peerThreads.values()).has(row.id),
   queued = true,
   origin: Session["origin"] = threads.get(row.id) ? "person" : "fleet",
 ): Session {
@@ -1172,13 +1112,22 @@ function publicSession(row: any,
     hasChildren,
     origin,
     watchList: row.metadata?.watchList === true,
-    model: row.settings.model, name: row.name, color: row.color, cwd: row.cwd,
+    foreground: typeof row.metadata?.foreground === "boolean" ? row.metadata.foreground : origin === "person" && !row.parentId && !row.metadata?.watchList,
+    agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : liveThread(row.id)?.agentName,
+    dependencies: row.metadata?.peerDependencies,
+    attentionSummary: typeof row.metadata?.attentionSummary === "string" ? row.metadata.attentionSummary : undefined,
+    taskDescription: typeof row.metadata?.taskDescription === "string" ? row.metadata.taskDescription : undefined,
+    waitingOnAgents: row.waitingOnAgents,
+    wakeSchedule: row.wakeSchedule,
+    model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
+    ...(queued ? { contextUsage: capturedContextUsage(baseStoredContext(row.id), (row.effectiveSettings ?? row.settings).model) } : {}),
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
-    activity: threadActivity(row.state, live, hasRunningChildren),
-    activeTools: [...(live?.activeTools.values() ?? [])],
+    ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held)),
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
-    createdAt: row.created_at, updatedAt: row.updated_at, revision: row.revision,
+    createdAt: row.created_at, updatedAt: row.updated_at,
+    ...(row.lastUserMessageAt !== undefined ? { lastUserMessageAt: new Date(row.lastUserMessageAt).toISOString() } : {}),
+    revision: row.revision,
     idleUnread: Boolean(row.idle_unread),
     queuedMessages: queued ? queuedMessagesFor(row.id) : [], archivedAt: row.archived_at,
   };
@@ -1193,7 +1142,7 @@ function publicSession(row: any,
 // hold, which it remembers on the ClientStream.
 
 function bootstrap(): Bootstrap {
-  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null };
+  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
 }
 
 let stateEncoded = "";
@@ -1215,7 +1164,8 @@ function projectState(): void {
 
 function refreshState(): void {
   for (const stream of streams.values()) {
-    if (stream.subscription.viewing && stream.subscription.session) markSessionViewed(stream.subscription.session);
+    if (stream.subscription.viewing && stream.subscription.session) void markSessionViewed(stream.subscription.session)
+      .catch(error => console.error("[supervisor] recording thread view failed", error));
   }
   projectState();
   for (const stream of streams.values()) sendState(stream);
@@ -1238,7 +1188,7 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected), contextUsage: capturedContextUsage(baseStoredContext(selected), session.model) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
@@ -1258,19 +1208,14 @@ function sendImages(stream: ClientStream): void {
   stream.publish({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
 }
 
-const questionReads = new Map<string, ReturnType<typeof directory.questions>>();
+function readSessionQuestions(id: string) {
+  return threads.get(id) ? threads.questions(id) : peerThreads.has(id) && fleet ? fleet.questions(id) : directory.questions(id);
+}
+const questionFeed = new QuestionFeed(readSessionQuestions);
 async function sendQuestions(stream: ClientStream): Promise<void> {
   const sessionId = stream.subscription.session;
   if (!sessionId || !sessionRow.get(sessionId)) return;
-  let read = questionReads.get(sessionId);
-  if (!read) {
-    read = directory.questions(sessionId).finally(() => questionReads.delete(sessionId));
-    questionReads.set(sessionId, read);
-  }
-  const result = await read;
-  if (stream.closed || stream.subscription.session !== sessionId) return;
-  if (result.ok) stream.publish({ type: "questions", sessionId, questions: result.value });
-  else stream.send({ type: "error", message: `Could not load questions: ${result.error.message}` });
+  await questionFeed.send(stream);
 }
 
 function sendEvents(stream: ClientStream): void {
@@ -1285,12 +1230,15 @@ function sendEvents(stream: ClientStream): void {
 
 function pushNotifications(target?: ClientStream): void {
   for (const stream of target ? [target] : [...streams.values()]) {
-    const cursor = stream.subscription.notificationsAfter;
-    if (cursor === undefined || cursor === null) continue;
-    const feed = idleNotifications(db, cursor, id => threads.get(id) ?? null);
-    if (!feed.notifications.length) continue;
-    stream.subscription.notificationsAfter = feed.cursor;
-    stream.send({ type: "notifications", feed });
+    let cursor = stream.subscription.notificationsAfter;
+    if (cursor === undefined) continue;
+    for (let page = 0; page < 16; page++) {
+      const feed = idleNotifications(db, cursor, notificationThread);
+      stream.subscription.notificationsAfter = feed.cursor;
+      if (page === 0 && target || feed.cursor !== cursor || feed.notifications.length) stream.send({ type: "notifications", feed });
+      if (cursor === null || cursor === feed.cursor) break;
+      cursor = feed.cursor;
+    }
   }
 }
 
@@ -1309,7 +1257,6 @@ function pushLive(): void {
   }
 }
 
-const transcripts = new TranscriptItems();
 const TRANSCRIPT_COALESCE_MS = 100;
 const transcriptTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -1320,8 +1267,14 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
 /** Project a captured context once; the reconciler owns each client's differences. */
 function refreshTranscript(sessionId: string) {
   const stored = storedContext(sessionId);
-  const display = stored ? displayContext(sessionId, stored.hash, stored.document) : null;
-  const update = display ? transcripts.derive(sessionId, display.hash, () => JSON.parse(display.document)) : null;
+  if (!stored) transcripts.forget(sessionId);
+  const update = stored ? transcripts.derive(sessionId, `${SUPERVISOR_EPOCH}:${stored.hash}`, () => {
+    const display = displayContext(sessionId, stored.hash, stored.document);
+    return JSON.parse(display.document);
+  }, id => {
+    const thread = liveThread(id);
+    return thread?.agentName ?? (typeof thread?.metadata?.agentName === "string" ? thread.metadata.agentName : undefined);
+  }) : null;
   for (const stream of sessionSubscribers(sessionId)) sendTranscript(stream, update);
   return update;
 }
@@ -1339,37 +1292,42 @@ function sendTranscript(stream: ClientStream, update: ReturnType<typeof refreshT
   if (!sessionId) return;
   const current = update?.current;
   const from = stream.subscription.transcriptFrom;
-  const limit = from == null ? 60 : Math.max(60, (current?.items.length ?? 0) - from);
-  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.items.length ?? 0,
-    items: current ? transcriptWindow(current.items, limit) : [] });
+  const limit = from == null ? 60 : Math.min(600, Math.max(60, (current?.total ?? 0) - from));
+  stream.publish({ type: "transcript", sessionId, generation: current?.generation ?? "", total: current?.total ?? 0,
+    items: current ? transcripts.window(sessionId, limit) : [] });
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
-async function applySubscription(stream: ClientStream, patch: Partial<StreamSubscription>): Promise<void> {
+async function applySubscription(stream: ClientStream, patch: Partial<StreamSubscription>, mode: "push" | "finite"): Promise<void> {
   const before = stream.subscription;
   stream.declare(patch);
   const revision = stream.revision;
   const sessionId = stream.subscription.session ?? null;
   const changedSession = (before.session ?? null) !== sessionId;
   if (changedSession) releaseOpenDisplayContexts();
-  if (sessionId && stream.subscription.viewing) markSessionViewed(sessionId);
+  if (sessionId && stream.subscription.viewing) await markSessionViewed(sessionId,
+    changedSession || !before.viewing || before.selectionId !== stream.subscription.selectionId);
+  const pending: Promise<void>[] = [];
   if (sessionId) {
     const captured = storedContext(sessionId);
-    if (captured) refreshTranscript(sessionId);
-    sendLive(stream);
+    if (mode === "push") {
+      if (captured) sendTranscript(stream, refreshTranscript(sessionId));
+      sendLive(stream);
+    }
     sendImages(stream);
-    void sendQuestions(stream);
+    if (mode === "finite") pending.push(sendQuestions(stream));
+    else void sendQuestions(stream);
     sendEvents(stream);
     const fresh = changedSession || before.selectionId !== stream.subscription.selectionId;
-    void stream.synchronizeSelection(
+    pending.push(stream.synchronizeSelection(
       () => sessionRow.get(sessionId) ? refreshThreadInspection(sessionId, fresh) : Promise.resolve(),
       () => {
-        refreshTranscript(sessionId);
+        sendTranscript(stream, refreshTranscript(sessionId));
         sendLive(stream);
         projectState();
         sendState(stream);
       },
-    );
+    ));
   }
   if (!sessionId) {
     projectState();
@@ -1382,6 +1340,7 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     if (!dashboardSnapshot) await refreshDashboard();
     if (!stream.closed && stream.revision === revision && dashboardSnapshot) stream.publish({ type: "dashboard", dashboard: dashboardSnapshot });
   }
+  await Promise.all(pending);
 }
 
 function closeStream(stream: ClientStream): void {
@@ -1427,7 +1386,8 @@ function activeSessionEntries(entries: any[], leafId: unknown): any[] {
 function modelFailureText(message: any): string {
   if (!message || message.role !== "assistant") return "";
   const stopReason = String(message.stopReason ?? "");
-  if (stopReason !== "error" && stopReason !== "aborted") return "";
+  if (["pending", "stop", "length", "toolUse", "deferred"].includes(stopReason)) return "";
+  if (stopReason !== "error" && stopReason !== "aborted") return `Unsupported model completion reason: ${stopReason || "(missing)"}`;
   const rawStopReason = String(message.rawStopReason ?? "");
   const label = rawStopReason === "refusal"
     ? "Model refused the message"
@@ -1451,7 +1411,7 @@ function toolResultText(result: any): string {
   const parts = blocks.map((block: any) => {
     if (block?.type === "text") return String(block.text ?? "");
     if (block?.type === "image") return `[image${block.mimeType ? ` · ${block.mimeType}` : ""}]`;
-    return block ? JSON.stringify(block) : "";
+    return block ? `[Unsupported tool-result block · ${String(block.type ?? "missing type")}]\n${JSON.stringify(block)}` : "";
   }).filter(Boolean);
   const text = parts.join("\n");
   if (text.length <= 20_000) return text;
@@ -1464,12 +1424,26 @@ async function rpc(id: string, type: string, body: Record<string, unknown> = {})
 
 function handlePiEvent(sessionId: string, event: any) {
   if (!ownsSupervisorLease()) return;
+  const presentation = parsePresentationEvent(event);
+  if (!presentation.ok) {
+    emit(sessionId, "notice", { text: `Runtime protocol error: ${presentation.error.slice(0, 500)}` });
+    return;
+  }
   try { phoneOverlay?.event(sessionId, event); } catch (cause) { console.error("phone overlay event failed", cause); }
   ensureThreadView(db, sessionId);
   const rt = liveFor(sessionId);
+  if (observeExecutionActivity(rt, event)) {
+    rt.compacting = rt.activity === "compacting";
+    rt.retrying = rt.activity === "retrying";
+    rt.thinkingActive = rt.activity === "thinking";
+    signalSync();
+    signalLiveSync();
+  }
+  if (event.type === "agent_end" || event.type === "agent_settled") settleLiveProjection(rt);
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
     restoreLiveProjection(rt, event.data.live);
     invalidateDisplayContext(sessionId);
+    signalSync();
     signalLiveSync();
     return;
   }
@@ -1491,7 +1465,6 @@ function handlePiEvent(sessionId: string, event: any) {
     const handoff = annotation ? meetingHandoffText(JSON.parse(annotation.meeting_transcript)) : "";
     emit(sessionId, "user", { text: [event.message.text, handoff].filter(Boolean).join("\n\n"),
       delivery: event.message.delivery, workId: event.workId }, `inserted:${event.workId}`);
-    scheduleThreadNameIfDue(sessionId);
     return;
   }
   if (event.type === "thread_settled") {
@@ -1504,6 +1477,8 @@ function handlePiEvent(sessionId: string, event: any) {
     }, `failure:${event.executionId}`);
     return;
   }
+
+  if (!presentation.project) return;
 
   // Time responses by when Pi produced each event, not when it reached this
   // supervisor: delivery can arrive in bursts, which made a whole response
@@ -1567,7 +1542,6 @@ function handlePiEvent(sessionId: string, event: any) {
     }
     if (text && event.message?.role === "assistant") {
       emit(sessionId, "assistant", { text }, `assistant:${messageFinalizationKey(event.message)}`);
-      scheduleThreadNameIfDue(sessionId);
     }
   } else if (event.type === "tool_execution_start") {
     const toolCallId = String(event.toolCallId ?? crypto.randomUUID());
@@ -1653,6 +1627,7 @@ function threadEnvironment(thread: Thread) {
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
     PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
+    ...(ROOMS_ENABLED && roomMetadata(thread.metadata?.room) ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
@@ -1708,7 +1683,7 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   if (previous) return { response: JSON.parse(previous.response), status: previous.status };
   const response = name === "compact"
     ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
-    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, "queue");
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}));
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
@@ -1718,8 +1693,7 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
   const children: Thread[] = [];
   let cursor: string | undefined;
   do {
-    // Archived workers stay reachable from the archive, not the live worker list.
-    const page = await directory.list({ parentId: id, archived: false, limit: 100, cursor });
+    const page = await directory.list({ parentId: id, limit: 100, cursor });
     if (!page.ok) return page;
     children.push(...page.value.threads);
     cursor = page.value.nextCursor;
@@ -1731,8 +1705,13 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
 
 async function threadSettings(row: any) {
   const metadata = threadSettingsMetadata(row.settings, threads.get(row.id) ? THREAD_MODEL_CATALOG : undefined);
+  const effective = row.effectiveSettings ? threadSettingsMetadata(row.effectiveSettings).model : null;
   return {
     ...metadata,
+    effectiveModel: row.effectiveSettings?.model ?? null,
+    waiting: row.metadata?.admissionWait ? "admission" : row.metadata?.providerWait?.phase === "retry" ? "retry" : row.metadata?.providerWait ? "provider" : null,
+    canRetryWaiting: !row.held && !row.archived_at && Boolean(row.metadata?.providerWait || row.metadata?.admissionWait)
+      && Boolean(effective && (effective.provider !== metadata.model.provider || effective.id !== metadata.model.id)),
     bashTimeoutSeconds: bashTimeoutSeconds(row.bash_timeout_seconds),
     models: rolledUpModels(metadata.models),
   };
@@ -1771,6 +1750,13 @@ const handoffHistory: HandoffHistory = {
 };
 
 async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Promise<Result<{text: string; images?: unknown[]}>> {
+  const room = ROOMS_ENABLED && roomMetadata(thread.metadata?.room);
+  if (room && message.id.startsWith("question-answer:")) {
+    const stored = db.query("SELECT value FROM metadata WHERE key=?").get(`room-answer:${message.id}`) as { value: string } | null;
+    const sender = stored && roomMembers([JSON.parse(stored.value)])?.[0];
+    if (!sender) return { ok: false, error: { code: "unavailable", message: "Room question answer has no authenticated speaker" } };
+    return { ok: true, value: { text: roomInput(sender, message.text), images: message.images } };
+  }
   const meetingId = remotePlacement(thread).meetingId;
   if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
@@ -1783,6 +1769,14 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   } catch (cause) {
     return { ok: false, error: { code: "unavailable", message: cause instanceof Error ? cause.message : String(cause) } };
   }
+}
+
+function notificationThread(id: string): { parentId: string | null; role?: "agent" | "conversation" | "worker"; foreground?: boolean } | null {
+  const thread = threads.get(id) ?? peerThreads.get(id);
+  if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
+  if (thread) return { parentId: thread.parentId, role: thread.role,
+    foreground: typeof thread.metadata?.foreground === "boolean" ? thread.metadata.foreground : undefined };
+  return ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null;
 }
 
 async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
@@ -1800,7 +1794,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
   if (!admitted.ok) throw new Error(admitted.error.message);
   const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId, createdBy,
     cwd: admitted.value.cwd, message, settings: { model, ...settings },
-    metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode } : {}), ...(destination.raw ? { raw: true } : {}),
+    metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode, liveDispatcher: mode === "live" } : {}), ...(destination.raw ? { raw: true } : {}),
       ...(destination.sandbox ? { sandbox: true } : {}),
       ...(contextFiles.length ? { contextFiles } : {}) },
   }));
@@ -1809,7 +1803,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); signalSync(); void refreshThreadNotifications(); }
+  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
 });
 {
   const table = threadTable();
@@ -1817,17 +1811,23 @@ const unsubscribeThreads = threads.subscribe(change => {
 }
 await inlineImages.start();
 
-const meet = new MeetServer((id) => {
-  const row = sessionRow.get(id) as any;
-  return Boolean(row && !row.archived_at);
-}, undefined, db, (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
+const meetingRuntime = await MeetGateway.connect(db, {
+  sessionExists: (id) => {
+    const row = sessionRow.get(id) as any;
+    return Boolean(row && !row.archived_at);
+  },
+  threadActivity: (meetingId, rootId) => meetingActivity(id => activity.recent(id, ["tool_start", "tool_end", "assistant", "notice"], 8), allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
   const runtime = liveProjections.get(row.id);
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    activity: threadActivity(row.state, runtime, runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id)),
-    tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
-}));
+    ...projectThreadActivity(row.state, runtime, row.executionActivity, row.metadata, Boolean(row.held)),
+    waitingOnAgents: row.waitingOnAgents,
+    tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+  }),
+});
+if (!meetingRuntime.ok) throw new Error(`Meeting runtime unavailable: ${meetingRuntime.error}`);
+const meet = meetingRuntime.value;
 
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
@@ -1866,8 +1866,6 @@ const server = Bun.serve<SocketData>({
   async fetch(req, httpServer) {
     return jsonHttp(req, await (async () => {
     const url = new URL(req.url);
-    const peer = httpServer.requestIP(req);
-    const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
       return new Response(null, {
         status: 204,
@@ -1876,6 +1874,65 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
+    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT, meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } });
+    const peer = httpServer.requestIP(req);
+    const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
+    const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
+    if (url.pathname.startsWith("/v1/room-owner/")) {
+      if (!ROOMS_ENABLED) return error("Not found", 404);
+      if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || resolved.kind !== "person" || resolved.via !== "router") return error("Rooms require the authenticated local router", 403);
+      return handleRoomOwner(req, {
+        subscribe: listener => threads.subscribe(change => listener(change.threadId)),
+        get: id => threads.get(id) ?? null,
+        create: async (id, title, members) => {
+          const destination = meetingDestination();
+          if (destination.raw || destination.sandbox) throw new Error("Rooms require a full-context destination");
+          const admitted = workspaceAdmission.resolve(destination.workspaceId);
+          if (!admitted.ok) throw new Error(admitted.error.message);
+          unwrap(await directory.spawn({ id, requestId: id, title, cwd: admitted.value.cwd,
+            settings: { model: destination.defaultModel }, createdBy: { kind: "person", via: "router" },
+            metadata: { workspaceId: destination.workspaceId, profileId: destination.id, room: { id, members } } }));
+          ensureThreadView(db, id);
+        },
+        update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
+        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
+        history: async id => {
+          const thread = threads.get(id)!;
+          const messages = readThreadHistory(thread.sessionFile).map(entry => entry.type === "message"
+            ? { ...entry.message, identity: { id: `pi/${id}/${entry.id}` } }
+            : { role: "notice", content: entry, identity: { id: `pi/${id}/${entry.id}` } });
+          if (!storedContext(id)) await refreshThreadInspection(id);
+          const context = storedContext(id);
+          const questions = unwrap(await directory.questions(id));
+          const current = threads.get(id)!;
+          const settlement = threads.latestSettlement(id);
+          const rejection = messages.findLast((message: any) => message.role === "notice" && message.content?.customType === "thread_rejected" && message.content.data?.workId === settlement?.workId) as any;
+          const failure = current.state !== "running" && settlement?.outcome === "failed"
+            ? settlement.error ?? rejection?.content.data.error ?? modelFailureText(settlement.finalMessage) ?? "The room execution failed" : undefined;
+          return { messages, ...(failure ? { error: failure } : {}), live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+            execution: projectThreadActivity(current.state, liveProjections.get(id), current.executionActivity, current.metadata, Boolean(current.held)),
+            context: context ? JSON.parse(context.document) : null, questions };
+        },
+        stop: async id => { unwrap(await directory.control({ threadId: id, action: "cancel" })); },
+        answer: async (id, questionId, sender, body) => {
+          const key = `room-answer:question-answer:${questionId}`;
+          const previous = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
+          if (previous && JSON.parse(previous.value).user !== sender.user) throw new Error("Another room member already answered this question");
+          db.query("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)").run(key, JSON.stringify(sender));
+          const answered = await directory.answer({ threadId: id, questionId, selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
+          if (!answered.ok && !previous) db.query("DELETE FROM metadata WHERE key=?").run(key);
+          unwrap(answered);
+        },
+        notify: (id, receiptId, title, body, time) => {
+          const target = `room:${id}`;
+          db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`room-link:${target}`, "1");
+          recordIdleNotification(db, receiptId, { id: target, title }, time, { kind: "idle", body });
+          signalSync();
+        },
+      });
+    }
     if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
       const feed = url.pathname.startsWith("/v1/calendar/feed/");
       if (!feed) {
@@ -1941,9 +1998,7 @@ const server = Bun.serve<SocketData>({
             return { ok: false, error: { code: "not_found", message: "Message not found in this account's thread" } };
           }
           const reactions = piReactions.set(target, emoji, actor, remove);
-          displayContexts.delete(target.sessionId);
-          openDisplayContexts.delete(target.sessionId);
-          signalTranscript(target.sessionId);
+          invalidateDisplayContext(target.sessionId);
           return { ok: true, value: reactions };
         },
         messaging: (id, emoji, remove) => messaging.react(id, emoji, remove),
@@ -1959,36 +2014,20 @@ const server = Bun.serve<SocketData>({
     if (ownedThreadResponse) return ownedThreadResponse;
     const threadResponse = await threadHttp(directory, req, "/v1/threads", admissionFor(callers, caller));
     if (threadResponse) return threadResponse;
-    const externalResponse = await externalMeetingRequest(req, meet, async (sessionId, meetingId, name) => {
-      const existing = sessionRow.get(sessionId) as any;
-      if (existing) {
-        if (existing.meeting_id !== meetingId) throw new Error("The external meeting's thread is unavailable");
-        // The stable event key reopens its own thread. Auto-archive may have
-        // closed it between attempts, and a calendar retry must not fail on that.
-        if (existing.archived_at) {
-          const reopened = await directory.control({ threadId: sessionId, action: "update", archived: false });
-          if (!reopened.ok) throw new Error(`The external meeting's thread could not be reopened: ${reopened.error.message}`);
-        }
-        // A recurring meeting reuses its thread; one created before meetings became live consulting joins the mode here.
-        const thread = threads.get(sessionId);
-        if (thread && thread.metadata?.mode !== MEETING_MODE) {
-          const moded = await directory.control({ threadId: sessionId, action: "update", metadata: { mode: MEETING_MODE } });
-          if (!moded.ok) throw new Error(`The external meeting's thread could not become live: ${moded.error.message}`);
-        }
-        // Every start brings the thread to the mode's speed, so a recurring meeting follows a mode change.
-        // A thread moved off Astra keeps its own speed rather than failing the join.
-        const { speed } = THREAD_MODES[MEETING_MODE].conversation.settings;
-        if (thread && thread.settings.speed !== speed) {
-          const fast = await directory.control({ threadId: sessionId, action: "settings", settings: { speed } });
-          if (!fast.ok) console.warn(`[meet] external meeting thread ${sessionId} kept ${thread.settings.speed} speed: ${fast.error.message}`);
-        }
-        return;
-      }
-      const destination = meetingDestination();
-      const { model, thinkingLevel, speed } = THREAD_MODES[MEETING_MODE].conversation.settings;
-      if (!destination) throw new Error("This host needs a configured Astra destination for meetings");
-      await insertThread(sessionId, name, destination, THREAD_MODELS.get(model)!.id, meetingId, undefined, undefined, { thinkingLevel, speed }, [], undefined, MEETING_MODE);
-    });
+    const externalResponse = await externalMeetingRequest(req, meet, (sessionId, meetingId, name) => ensureExternalMeetingThread(sessionId, meetingId, name, {
+      existing: id => {
+        const row = sessionRow.get(id) as any;
+        return row ? { meetingId: row.meeting_id, archived: Boolean(row.archived_at) } : undefined;
+      },
+      get: id => threads.get(id),
+      control: input => directory.control(input),
+      create: async (id, meetingId, name, settings, mode) => {
+        const destination = meetingDestination();
+        if (!destination) throw new Error("This host needs a configured destination for meetings");
+        await insertThread(id, name, destination, THREAD_MODELS.get(settings.model)!.id, meetingId, undefined, undefined, settings, [], undefined, mode);
+      },
+      warn: message => console.warn(message),
+    }));
     if (externalResponse) return externalResponse;
     const meetingResponse = await meet.handle(req);
     if (meetingResponse) return meetingResponse;
@@ -2029,29 +2068,29 @@ const server = Bun.serve<SocketData>({
       if (!storedContext(id)) await refreshThreadInspection(id);
       const update = refreshTranscript(id);
       if (!update) return json({ sessionId: id, generation: "", total: 0, items: [] });
-      const items = update.current.items;
+      const total = update.current.total;
       const generation = url.searchParams.get("generation") ?? "";
       if (generation && generation !== update.current.generation) {
         // The client's window is gone; answer with the one that replaced it.
         return json({ error: "The transcript generation has been replaced", sessionId: id,
-          generation: update.current.generation, total: items.length, items: transcriptWindow(items) }, 409);
+          generation: update.current.generation, total, items: transcripts.window(id) }, 409);
       }
-      const requestedBefore = Number(url.searchParams.get("before") ?? items.length);
-      const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : items.length;
+      const requestedBefore = Number(url.searchParams.get("before") ?? total);
+      const before = Number.isSafeInteger(requestedBefore) ? requestedBefore : total;
       const requestedLimit = Number(url.searchParams.get("limit") ?? 60);
       const limit = Math.min(200, Math.max(1, Number.isSafeInteger(requestedLimit) ? requestedLimit : 60));
-      return json({ sessionId: id, generation: update.current.generation, total: items.length,
-        items: transcriptPage(items, before, limit) });
+      return json({ sessionId: id, generation: update.current.generation, total,
+        items: transcripts.page(id, before, limit) });
     }
     const itemRequest = API.sessionItem.match(req.method, url.pathname);
     if (itemRequest) {
       const id = itemRequest.sessionId;
       if (!sessionRow.get(id)) return error("Session not found", 404);
-      let body = transcripts.get(id)?.bodies.get(itemRequest.itemId);
-      if (!body) {
+      if (!transcripts.get(id)) {
         if (!storedContext(id)) await refreshThreadInspection(id);
-        body = refreshTranscript(id)?.current.bodies.get(itemRequest.itemId);
+        refreshTranscript(id);
       }
+      const body = transcripts.body(id, itemRequest.itemId);
       if (!body) return error("Transcript item not found", 404);
       const headers: Record<string, string> = {
         ...API_CORS_HEADERS,
@@ -2075,7 +2114,6 @@ const server = Bun.serve<SocketData>({
     }
     const web = webResponse(WEB_DIR, url.pathname, req.method, req);
     if (web) return web;
-    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
     if (API.requestTimingsRead.match(req.method, url.pathname)) return json({ requests: requestTimings.list() });
     if (API.requestTimings.match(req.method, url.pathname)) {
       const result = requestTimings.receive(await readBody(req));
@@ -2090,6 +2128,8 @@ const server = Bun.serve<SocketData>({
     if (API.loopLag.match(req.method, url.pathname)) return json(await measureLoopLag(Math.min(60, Math.max(1, Number(url.searchParams.get("seconds")) || 5)) * 1000));
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
     if (API.environments.match(req.method, url.pathname)) return json({ environments: [ownEnvironment()] });
+    if (API.fileEdit.match(req.method, url.pathname) || API.fileSave.match(req.method, url.pathname))
+      return fileEditResponse(req, join(DATA, "file-edit-backups"));
     if (API.fileInfo.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute path required");
@@ -2144,6 +2184,22 @@ const server = Bun.serve<SocketData>({
         await refreshDashboard();
         return json({ governors });
       } catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
+    }
+    const modelAvailabilityUpdate = API.setModelAvailability.match(req.method, url.pathname);
+    if (modelAvailabilityUpdate) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change global model availability", 403);
+      const model = THREAD_MODELS.get(modelAvailabilityUpdate.id);
+      if (!model || !availableThreadModels().some(option => option.id === model.id)) return error("Unknown offered model", 404);
+      let body: unknown;
+      try { body = await readBody(req); }
+      catch { return error("Expected JSON with an enabled boolean", 400); }
+      if (!body || typeof body !== "object" || !("enabled" in body) || typeof body.enabled !== "boolean") return error("enabled must be a boolean", 400);
+      const saved = modelAvailability.set(`${model.provider}/${model.modelId}`, body.enabled);
+      if (!saved.ok) return threadError(saved.error);
+      signalSync();
+      pushBootstrap();
+      await refreshDashboard();
+      return json({ models: availableThreadModels() });
     }
     if (API.actions.match(req.method, url.pathname)) {
       try { return json({ actions: await machineActions.refresh() }); }
@@ -2267,13 +2323,39 @@ const server = Bun.serve<SocketData>({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications();
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, id => threads.get(id)) });
+      if (url.searchParams.get("history") === "1") {
+        const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : null;
+        if (before !== null && (!Number.isSafeInteger(before) || before <= 0)) return error("Invalid history cursor");
+        return json(await resolveNotificationQuestions(notificationHistory(db, before, notificationThread), readSessionQuestions));
+      }
+      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
     }
+    if (API.reconcile.match(req.method, url.pathname)) {
+      const patch = readSubscription(await readBody(req));
+      if (patch.viewing && !humanCaller()) return error("Human viewing requires an authenticated person", 403);
+      const events: StreamWireEvent[] = [];
+      const stream = new ClientStream({
+        write: chunk => { events.push(JSON.parse(chunk.slice(chunk.indexOf("data: ") + 6).trim())); },
+        close: () => {},
+      }, reconciledState);
+      const abort = () => stream.close();
+      req.signal.addEventListener("abort", abort, { once: true });
+      try {
+        stream.send({ type: "hello", epoch: SUPERVISOR_EPOCH, streamId: stream.id, bootstrap: bootstrap() });
+        void refreshPeers();
+        await applySubscription(stream, patch, "finite");
+        return json({ events });
+      } finally {
+        req.signal.removeEventListener("abort", abort);
+        stream.close();
+      }
+    }
     if (API.stream.match(req.method, url.pathname)) {
       const patch = readSubscription(await readBody(req).catch(() => ({})));
+      if (patch.viewing && !humanCaller()) return error("Human viewing requires an authenticated person", 403);
       let stream!: ClientStream;
       const encoder = new TextEncoder();
       const body = new ReadableStream<Uint8Array>({
@@ -2291,13 +2373,14 @@ const server = Bun.serve<SocketData>({
       httpServer.timeout(req, 0);
       const ping = setInterval(() => {
         if (stream.closed) { clearInterval(ping); closeStream(stream); return; }
+        pushNotifications(stream);
         stream.ping();
       }, PING_INTERVAL_MS);
       req.signal.addEventListener("abort", () => { clearInterval(ping); closeStream(stream); }, { once: true });
       const facts = bootstrap();
       bootstrapEncoded = JSON.stringify(facts);
       stream.send({ type: "hello", epoch: SUPERVISOR_EPOCH, streamId: stream.id, bootstrap: facts });
-      void applySubscription(stream, patch).catch((cause) => {
+      void applySubscription(stream, patch, "push").catch((cause) => {
         stream.send({ type: "error", message: cause instanceof Error ? cause.message : String(cause) });
       });
       void refreshPeers();
@@ -2314,7 +2397,9 @@ const server = Bun.serve<SocketData>({
       const stream = streams.get(streamUpdate.streamId);
       if (!stream) return error("Unknown stream", 404);
       try {
-        await applySubscription(stream, readSubscription(await readBody(req)));
+        const patch = readSubscription(await readBody(req));
+        if ((patch.viewing ?? stream.subscription.viewing) && !humanCaller()) return error("Human viewing requires an authenticated person", 403);
+        await applySubscription(stream, patch, "push");
         return new Response(null, { status: 204, headers: API_CORS_HEADERS });
       } catch (cause: any) { return error(cause?.message ?? "Could not update the stream", 400); }
     }
@@ -2324,7 +2409,10 @@ const server = Bun.serve<SocketData>({
       return json({ ok: true });
     }
     if (API.sessions.match(req.method, url.pathname)) {
-      void refreshPeers();
+      if (url.searchParams.get("allAgents") === "1") {
+        await refreshPeers();
+        if (peerError) return error(`Could not load the complete agent directory: ${peerError}`, 503);
+      } else void refreshPeers();
       projectState();
       return json(currentState());
     }
@@ -2342,7 +2430,8 @@ const server = Bun.serve<SocketData>({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? "home"));
         if (!destination) return error("Unknown destination");
-        const model = String(body.model ?? destination.defaultModel);
+        const meetingSettings = body.meetingId ? MEETING_SETTINGS : undefined;
+        const model = String(body.model ?? meetingSettings?.model ?? destination.defaultModel);
         if (!destination.models.includes(model)) return error("Model not available at this destination");
         const id = String(body.sessionId ?? requestId);
         const contextFiles = selectContextFiles(destinationContextSources(destination), body.contextFiles);
@@ -2350,7 +2439,8 @@ const server = Bun.serve<SocketData>({
         const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
         if (!creator.ok) return error(creator.message, creator.status);
         const thread = await insertThread(id, creationName(requestId), destination, model, body.meetingId ?? null, body.message, body.parentId,
-          { thinkingLevel: body.thinkingLevel, speed: body.speedMode }, contextFiles.value, creator.input.createdBy);
+          { thinkingLevel: body.thinkingLevel ?? meetingSettings?.thinkingLevel, speed: body.speedMode ?? meetingSettings?.speed },
+          contextFiles.value, creator.input.createdBy, meetingSettings ? MEETING_MODE : undefined);
         const response = { session: publicSession(threadRow(thread)) };
         saveRequest(requestId, id, "create", 201, response);
         return json(response, 201);
@@ -2359,7 +2449,7 @@ const server = Bun.serve<SocketData>({
     const questionsRequest = API.sessionQuestions.match(req.method, url.pathname);
     if (questionsRequest) {
       if (!sessionRow.get(questionsRequest.sessionId)) return error("Session not found", 404);
-      const result = await directory.questions(questionsRequest.sessionId);
+      const result = await readSessionQuestions(questionsRequest.sessionId);
       return result.ok ? json({ questions: result.value }) : threadError(result.error);
     }
     const answerRequest = API.sessionQuestionAnswer.match(req.method, url.pathname);
@@ -2370,7 +2460,7 @@ const server = Bun.serve<SocketData>({
         const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
           selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
         if (!result.ok) return threadError(result.error);
-        if (questionReads.has(answerRequest.sessionId)) await questionReads.get(answerRequest.sessionId);
+        await questionFeed.settle(answerRequest.sessionId);
         for (const stream of sessionSubscribers(answerRequest.sessionId)) void sendQuestions(stream);
         signalSync();
         return json(result.value);
@@ -2397,7 +2487,7 @@ const server = Bun.serve<SocketData>({
 
     const sessionRoutes: Array<[string | undefined, (typeof API)[keyof typeof API]]> = [
       [undefined, API.session], [undefined, API.archiveSession], [undefined, API.rejectSessionEdit],
-      ["unarchive", API.unarchiveSession], ["color", API.sessionColor], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort], ["resume", API.sessionResume],
+      ["unarchive", API.unarchiveSession], ["placement", API.sessionPlacement], ["color", API.sessionColor], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort], ["resume", API.sessionResume],
       ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
       ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
       ["commands", API.sessionCommands], ["command", API.sessionCommand], ["admission", API.sessionAdmission],
@@ -2408,16 +2498,53 @@ const server = Bun.serve<SocketData>({
     const id = sessionMatch.params.sessionId;
     const action = sessionMatch.action;
     const row = sessionRow.get(id) as any;
+    if (action === "prompt" && req.method === "POST") {
+      let body: unknown;
+      try { body = await readBody(req); }
+      catch (cause) { return json({ outcome: "rejected", error: cause instanceof Error ? cause.message : "Invalid prompt JSON", code: "invalid_request" }, 400); }
+      if (body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string" && !promptAdmissions.has(body.requestId) && requestResult(body.requestId)) {
+        return json({ outcome: "rejected", error: "requestId already belongs to another operation", code: "conflict" }, 409);
+      }
+      const result = await promptAdmissions.submit(id, body, {
+        prepare: async input => {
+          if (!row) return { ok: false, error: { code: "not_found", message: "Session not found" } };
+          if (ROOMS_ENABLED && roomMetadata(row.metadata?.room)) return { ok: false, error: { code: "forbidden", message: "Use the room API for room messages" } };
+          if (row.archived_at) return { ok: false, error: { code: "conflict", message: "Thread is archived" } };
+          if (forkingSessions.has(id)) return { ok: false, error: { code: "conflict", message: "Wait for the conversation edit to finish" } };
+          const roomImages = input.includeMeetingImages === true && row.meeting_id
+            ? await meet.captureDelegation(row.meeting_id) : { images: [], note: "" };
+          let text = input.text.trim() + (roomImages.note ? `\n\n${roomImages.note}` : "");
+          if (input.replyTo !== undefined) {
+            const target = parseMessageReference(input.replyTo);
+            if (target?.transport !== "pi" || target.sessionId !== id) return { ok: false, error: { code: "invalid_request", message: "Reply must reference a message in this conversation" } };
+            const history = await directory.read({ threadId: id, entryId: target.messageId });
+            if (!history.ok) return history;
+            const reply = replyFromNativeEntry(input.replyTo, history.value.entries[0], MESSAGE_OWNER, AGENT_NAME);
+            if (!reply) return { ok: false, error: { code: "invalid_request", message: "Reply target is not a user or assistant message" } };
+            text = encodeMessageReply(text, reply);
+          }
+          return { ok: true, value: { text, delivery: input.delivery, images: roomImages.images } };
+        },
+        send: async (threadId, requestId, prepared) => {
+          if (req.signal.aborted) return { ok: false, error: { code: "unavailable", message: "The caller disconnected before admission; check the saved request explicitly." } };
+          return directory.send({ threadId, requestId, ...prepared });
+        },
+      });
+      return json(result.body.outcome === "accepted" && row ? { ...result.body, session: publicSession(row) } : result.body, result.status);
+    }
+    if (ROOMS_ENABLED && roomMetadata(row?.metadata?.room) && ["prompt", "fork", "command"].includes(action ?? "")) return error("Use the room API for room messages", 403);
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
     if (action === "unarchive" && req.method === "POST") {
-      // Opening an archived chat restores just that chat. Undo after closing
-      // one asks for the whole subtree and the work its close interrupted.
-      let body: any;
-      try { body = (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json") ? await readBody(req) : {}; }
-      catch (cause: any) { return error(cause?.message ?? "Invalid restore request", 400); }
-      if (body?.descendants !== undefined && typeof body.descendants !== "boolean" || body?.resume !== undefined && typeof body.resume !== "boolean") return error("descendants and resume must be booleans", 400);
-      const result = await directory.control({ threadId: id, action: "restore", descendants: body?.descendants === true, resume: body?.resume === true });
+      if (!humanCaller()) return error("Only a person can open an agent in Chats", 403);
+      const result = await directory.control({ threadId: id, action: "open" });
+      return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
+    }
+    if (action === "placement" && req.method === "PUT") {
+      if (!humanCaller()) return error("Only a person can change foreground placement", 403);
+      const body = await readBody(req);
+      if (typeof body.foreground !== "boolean") return error("Placement requires a foreground boolean");
+      const result = await directory.control({ threadId: id, action: "placement", foreground: body.foreground });
       return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
     }
     if (action === "color" && req.method === "PUT") {
@@ -2575,39 +2702,10 @@ const server = Bun.serve<SocketData>({
         }
       } catch (e: any) { return error(e.message ?? "Could not edit from that message", 400); }
     }
-    if (action === "prompt" && req.method === "POST") {
-      try {
-        const body = await readBody(req);
-        const requestId = String(body.requestId ?? "");
-        const old = requestResult(requestId);
-        if (old) return json(JSON.parse(old.response), old.status);
-        if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
-        const text = String(body.text ?? "").trim();
-        if (!text) return error("Prompt is empty");
-        if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        const delivery = body.delivery ?? "queue";
-        if (!["queue", "steer", "hardSteer"].includes(delivery)) return error("delivery must be queue, steer or hardSteer");
-
-        const roomImages = body.includeMeetingImages === true && row.meeting_id
-          ? meet.captureDelegation(row.meeting_id)
-          : { images: [], note: "" };
-        let message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
-        if (body.replyTo !== undefined) {
-          const target = typeof body.replyTo === "string" ? parseMessageReference(body.replyTo) : null;
-          if (target?.transport !== "pi" || target.sessionId !== id) return error("Reply must reference a message in this conversation");
-          const history = await directory.read({ threadId: id, entryId: target.messageId });
-          if (!history.ok) return threadError(history.error);
-          const reply = replyFromNativeEntry(body.replyTo, history.value.entries[0], MESSAGE_OWNER, AGENT_NAME);
-          if (!reply) return error("Reply target is not a user or assistant message");
-          message = encodeMessageReply(message, reply);
-        }
-        return json(await enqueuePrompt(id, requestId, message, delivery, roomImages.images), 202);
-      } catch (e: any) { return error(e.message ?? "Prompt failed", 400); }
-    }
     if (action === "abort" && req.method === "POST") {
       const body = await readBody(req);
-      if (typeof body.descendants !== "boolean") return error("descendants boolean required");
-      const result = await directory.control({ threadId: id, action: "stop", descendants: body.descendants });
+      if (body.descendants !== false) return error("Cancellation targets only the selected agent; descendants must be false");
+      const result = await directory.control({ threadId: id, action: "cancel" });
       return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
     }
     if (action === "resume" && req.method === "POST") {
@@ -2628,6 +2726,7 @@ const server = Bun.serve<SocketData>({
     open(socket) {
       if (socket.data.kind === "phone") { socket.data.connection = phones.open({ send: frame => socket.send(frame), close: (code, reason) => socket.close(code, reason) }); return; }
       if (socket.data.kind === "write") { socket.data.receive = connectWrite(socket as Bun.ServerWebSocket<WriteSocketData>, writeEndpoint, writeDictionary); return; }
+      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
       const audio = openCallAudio(socket.data.callId);
       if (!audio) {
         socket.close(1008, "Call is unavailable");
@@ -2650,7 +2749,8 @@ const server = Bun.serve<SocketData>({
         write.data.receive?.(message);
         return;
       }
-      if (typeof message === "string") return;
+      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
+      if (typeof message === "string") { socket.close(1008, "Call audio must be binary"); return; }
       const frame = message instanceof Uint8Array ? message : new Uint8Array(message);
       socket.data.audio?.receive(frame);
     },
@@ -2662,6 +2762,7 @@ const server = Bun.serve<SocketData>({
         write.data.upstream?.close();
         return;
       }
+      if (socket.data.kind !== "call") throw new Error("Unsupported WebSocket kind at close");
       socket.data.audio?.detach();
       socket.data.audio = undefined;
     },
@@ -2673,6 +2774,7 @@ console.log(`Pi Remote listening on http://${server.hostname}:${server.port}`);
 // slow enough to matter to an activation handshake and to a request in flight,
 // and urgent to nobody, so it happens a slice at a time between requests.
 const journalRemoval = setInterval(() => {
+  if (shuttingDown) return;
   try { if (removeEventJournal(db) === "removed") clearInterval(journalRemoval); }
   catch (cause) {
     clearInterval(journalRemoval);
@@ -2694,6 +2796,7 @@ process.on("uncaughtException", (cause) => {
 refreshPlanUsageIfDue();
 void refreshPeers();
 
+signalSync();
 unwrap(await threads.start());
 watchList.start();
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
@@ -2715,16 +2818,7 @@ function pruneUploadTransfers() {
 }
 pruneUploadTransfers();
 
-// A naming attempt that failed leaves the thread parked until its next message, which never comes for
-// a finished conversation. Starting the supervisor is new evidence — a repaired release, a reachable
-// engine, a restored account — so every thread still carrying its number gets one more attempt.
-for (const thread of threads.snapshot({ archived: false })) {
-  if (unnamedThread(thread.title)) db.query("UPDATE thread_views SET naming_attempted_count=named_at_message_count WHERE id=? AND naming_attempted_count>named_at_message_count").run(thread.id);
-}
-
 const uploadPruner = setInterval(pruneUploadTransfers, 60_000);
-const namingReceipts = setInterval(reconcileThreadNames, 15_000);
-reconcileThreadNames();
 
 const stopThreadRefresh = startThreadRefresh({
   subscriptions: () => [...streams.values()].map(stream => stream.subscription),
@@ -2738,10 +2832,17 @@ const stopThreadRefresh = startThreadRefresh({
 });
 
 function stopSupervisorTimers() {
+  if (statePushTimer) clearTimeout(statePushTimer);
+  statePushTimer = null;
+  stateSyncPending = false;
+  if (liveSyncTimer) clearTimeout(liveSyncTimer);
+  liveSyncTimer = null;
+  liveSyncPending = false;
+  clearInterval(journalRemoval);
+  unwatchFile(modelAvailability.path);
   watchList.stop();
   stopAutoArchive();
   clearInterval(uploadPruner);
-  clearInterval(namingReceipts);
   clearInterval(dashboardTicker);
   stopThreadRefresh();
   for (const timer of transcriptTimers.values()) clearTimeout(timer);
@@ -2780,3 +2881,5 @@ process.on("SIGTERM", () => void releaseSupervisor(0));
 process.on("SIGINT", () => void releaseSupervisor(0));
 process.on("SIGUSR2", () => void releaseSupervisor(75));
 process.on("SIGHUP", () => void releaseSupervisor(75));
+stateSyncPhase = "ready";
+if (stateSyncPending) signalSync();

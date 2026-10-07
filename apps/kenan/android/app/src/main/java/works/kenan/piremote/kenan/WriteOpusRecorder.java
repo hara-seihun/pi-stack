@@ -20,6 +20,7 @@ final class WriteOpusRecorder {
     }
     interface Input extends AutoCloseable {
         void start() throws IOException;
+        /** Waits for requested PCM; stop() must unblock a pending read. */
         int read(byte[] frame, int offset, int length) throws IOException;
         void stop();
         void close();
@@ -37,11 +38,14 @@ final class WriteOpusRecorder {
 
     private final Listener listener;
     private final Resources resources;
+    static final long FINISH_TAIL_MILLIS = 200;
     private volatile boolean running = true;
+    private volatile long finishAt;
     private final Object lifecycle = new Object();
     private Thread worker;
     private Input activeInput;
     private RuntimeException stopFailure;
+    private final java.util.concurrent.ScheduledExecutorService finishTimer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
 
     WriteOpusRecorder(Listener listener) { this(listener, new NativeResources()); }
     WriteOpusRecorder(Listener listener, Resources resources) {
@@ -57,14 +61,28 @@ final class WriteOpusRecorder {
     }
     void stop() {
         synchronized (lifecycle) {
-            if (!running) return;
-            running = false;
-            // AudioRecord.read(READ_BLOCKING) must be woken before the worker can release it.
-            if (activeInput != null) {
-                try { activeInput.stop(); }
-                catch (RuntimeException error) { stopFailure = error; }
+            if (!running || finishAt != 0) return;
+            if (worker == null) running = false;
+            else {
+                finishAt = System.nanoTime() + FINISH_TAIL_MILLIS * 1_000_000;
+                finishTimer.schedule(() -> { synchronized (lifecycle) { stopInput(); lifecycle.notifyAll(); } },
+                    FINISH_TAIL_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
             }
+            lifecycle.notifyAll();
         }
+    }
+    void cancel() {
+        synchronized (lifecycle) {
+            running = false;
+            stopInput();
+            lifecycle.notifyAll();
+        }
+    }
+    private void stopInput() {
+        if (activeInput == null) return;
+        try { activeInput.stop(); }
+        catch (RuntimeException error) { stopFailure = error; }
+        finally { activeInput = null; }
     }
 
     private void run() {
@@ -77,7 +95,7 @@ final class WriteOpusRecorder {
             encoder.start();
             input = resources.input();
             synchronized (lifecycle) {
-                if (!running) return;
+                if (!running || finishAt != 0) return;
                 input.start();
                 activeInput = input;
             }
@@ -85,12 +103,21 @@ final class WriteOpusRecorder {
             int filled = 0;
             long pts = 0;
             int frames = 0;
-            while (running) {
+            // AudioRecord.stop() discards unread PCM. Keep reading through the
+            // bounded capture-latency tail before stopping the microphone.
+            while (running && (finishAt == 0 || System.nanoTime() < finishAt)) {
                 int read = input.read(frame, filled, frame.length - filled);
-                if (read <= 0) {
-                    if (!running) break;
+                if (read < 0) {
+                    if (!running || finishAt != 0 && System.nanoTime() >= finishAt) break;
                     throw new IOException("Microphone read failed: " + read);
                 }
+                if (read == 0) {
+                    synchronized (lifecycle) {
+                        if (running) lifecycle.wait(20);
+                    }
+                    continue;
+                }
+                if (!running) break;
                 filled += read;
                 if (filled < frame.length) continue;
                 encoder.frame(frame, pts);
@@ -98,15 +125,22 @@ final class WriteOpusRecorder {
                 if (++frames % 4 == 0) listener.amplitude(amplitude(frame));
                 filled = 0;
             }
-            if (filled > 0) {
-                Arrays.fill(frame, filled, frame.length, (byte) 0);
-                encoder.frame(frame, pts);
-                pts += 20_000;
+            synchronized (lifecycle) { stopInput(); }
+            if (running) {
+                if (filled > 0) {
+                    Arrays.fill(frame, filled, frame.length, (byte) 0);
+                    encoder.frame(frame, pts);
+                    pts += 20_000;
+                }
+                encoder.finish(pts);
             }
-            encoder.finish(pts);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            failure = new IOException("Microphone capture interrupted", error);
         } catch (IOException | RuntimeException error) {
             failure = error;
         } finally {
+            finishTimer.shutdownNow();
             synchronized (lifecycle) {
                 running = false;
                 activeInput = null;

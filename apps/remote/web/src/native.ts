@@ -14,7 +14,7 @@ export interface InstalledApp { revision: string; versionCode: number; applicati
 export interface AppUpdateCheck { update: AppUpdate | null; installed: InstalledApp }
 export interface AppUpdateInstall { status: "installer-opened" | "reloading"; revision?: string }
 export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
-export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "writeSettings" | "deviceAdmin";
+export type PhoneSetupStep = "accessibility" | "writeAccessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "overlay" | "writeSettings" | "deviceAdmin" | "installPackages";
 export interface PhoneStatus {
   enabled: boolean;
   connected: boolean;
@@ -29,19 +29,21 @@ export interface PhoneStatus {
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
-  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean }>;
-  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean }): Promise<void>;
+  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean; overlayEnabled?: boolean }>;
+  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean } | { step: "enabled"; enabled: boolean }): Promise<void>;
   writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
-  phoneSetup?(options: { step: PhoneSetupStep }): Promise<void>;
+  phoneSetup?(options: { step: PhoneSetupStep; instruction?: string }): Promise<PhoneStatus>;
   phoneOverlay?(options: { visible: boolean }): Promise<PhoneStatus>;
   haptic?(options: { kind: string }): Promise<void>;
   keepAwake?(options: { enabled: boolean }): Promise<void>;
   notifications?(options: { request: boolean }): Promise<{ enabled: boolean }>;
   notificationTarget?(): Promise<{ environment?: string; sessionId?: string; user?: string }>;
   notificationThread?(options: { user: string; environment: string; sessionId: string }): Promise<void>;
-  notificationFeed?(options: { user: string; environment: string; name: string; feed: IdleNotificationFeed }): Promise<void>;
+  notificationCursor?(options: { user: string; session: string; environment: string }): Promise<{ after: number | null }>;
+  notificationLease?(options: { user: string; session: string; environment: string; state: "healthy" | "released" }): Promise<{ accepted: boolean; after: number | null }>;
+  notificationFeed?(options: { user: string; session: string; environment: string; name: string; feed: IdleNotificationFeed; replay: boolean; after: number | null }): Promise<{ after: number | null } | void>;
   checkAppUpdate?(): Promise<AppUpdateCheck>;
   installAppUpdate?(): Promise<AppUpdateInstall>;
   webReady?(): Promise<void>;
@@ -109,6 +111,8 @@ export const remote: RemoteBridge = !nativePlatform
         notificationTarget: () => capacitor.nativePromise("KenanRemote", "notificationTarget", {}),
         notificationThread: (options) => capacitor.nativePromise("KenanRemote", "notificationThread", options),
         notificationFeed: (options) => capacitor.nativePromise("KenanRemote", "notificationFeed", options),
+        notificationCursor: (options) => capacitor.nativePromise("KenanRemote", "notificationCursor", options),
+        notificationLease: (options) => capacitor.nativePromise("KenanRemote", "notificationLease", options),
         checkAppUpdate: () => capacitor.nativePromise("KenanRemote", "checkAppUpdate", {}),
         installAppUpdate: () => capacitor.nativePromise("KenanRemote", "installAppUpdate", {}),
         webReady: () => capacitor.nativePromise("KenanRemote", "webReady", {}),
@@ -271,8 +275,10 @@ async function verifiedState(selected: Endpoint, endpoints: Endpoint[]): Promise
   if (health.environmentId !== selected.id) throw new Error(`${selected.name} environment identity mismatch`);
   if (nativePlatform && remote.writeEnvironment) {
     await nativeSessionReady();
-    if (revision === generation) await remote.writeEnvironment({ user: auth.user, environment: selected.id });
+    if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
+    await remote.writeEnvironment({ user: auth.user, environment: selected.id });
   }
+  if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
   return { ...selected, environments: endpoints };
 }
 
@@ -281,8 +287,29 @@ async function getState(): Promise<EnvironmentState> {
   if (current) return current;
   const selectedId = sessionStorage.getItem(appStorageKey(`pi-remote-environment:${auth.user}`));
   const selected = endpoints.find(endpoint => endpoint.id === selectedId) ?? endpoints[0]!;
-  current = await verifiedState(selected, endpoints);
+  const revision = generation;
+  const verified = await verifiedState(selected, endpoints);
+  if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
+  current = verified;
   return current;
+}
+
+export async function pinnedFetch(endpoint: Endpoint, user: string, path: string, init: RequestInit): Promise<Response> {
+  const revision = generation;
+  const selected = await getState();
+  if (revision !== generation || user !== auth.user || selected.id !== endpoint.id || selected.baseUrl !== endpoint.baseUrl) {
+    throw new DOMException("Request owner changed", "AbortError");
+  }
+  const signal = init.signal ? AbortSignal.any([init.signal, personRequests.signal]) : personRequests.signal;
+  signal.throwIfAborted();
+  const headers = auth.headers(init.headers);
+  const token = auth.session;
+  const settle = beginRequest(init.method ?? "GET", path);
+  try {
+    const response = await abortable(browserFetch(new URL(`${endpoint.baseUrl}${path}`, location.href), { ...init, headers, signal, redirect: "error" }), signal);
+    if (response.status === 423) auth.clear(token);
+    return response;
+  } finally { settle(); }
 }
 
 function apiPath(input: RequestInfo | URL) {
@@ -317,7 +344,7 @@ window.fetch = async (input, init) => {
     const operation = rootPath(path, root);
     const pathname = new URL(operation, location.href).pathname;
     const publicRoute = (pathname === API.environment.path() && !auth.session) || pathname === API.unlock.path()
-      || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
+      || pathname === API.network.path() || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
     const rootRoute = publicRoute || pathname === API.environments.path() || pathname === "/v1/lock" || pathname === "/v1/lock-status";
     const selected = rootRoute || !auth.session ? null : await getState();
     const target = rootRoute ? `${root}${operation}` : explicitTarget(path, root) ?? `${selected?.baseUrl ?? root}${operation}`;
@@ -358,7 +385,9 @@ window.KenanRemote = {
     const endpoints = await loadEnvironments();
     const selected = endpoints.find(endpoint => endpoint.id === id);
     if (!selected) throw new Error(`Environment is not allowed: ${id}`);
+    const revision = generation;
     const verified = await verifiedState(selected, endpoints);
+    if (revision !== generation || user !== auth.user) throw new DOMException("Identity changed during endpoint selection", "AbortError");
     sessionStorage.setItem(appStorageKey(`pi-remote-environment:${user}`), id);
     current = verified;
     return current;

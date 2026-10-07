@@ -2,7 +2,9 @@
 import { dispatch } from "./commands.js";
 
 const args = process.argv.slice(2);
-const operation = args[0] === "model-broker"
+const operation = args[0] === "agent-capacity"
+  ? import("./agent-capacity-census.js").then(({ agentCapacityCommand }) => agentCapacityCommand(args.slice(1)))
+  : args[0] === "model-broker"
   ? import("./model-broker.js").then(({ runModelBroker }) => {
     if (args.length !== 2) throw new Error("Usage: pi-orchestrator model-broker /etc/pi-model-broker.json");
     return runModelBroker(args[1]);

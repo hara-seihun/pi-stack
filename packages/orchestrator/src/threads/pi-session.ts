@@ -1,24 +1,37 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ImageContent } from "@earendil-works/pi-ai";
+import { assertNever, requireRuntimeEvent, requireAssistantStopReason } from "./runtime-events.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, createBashTool,
-  convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
+  buildSessionContext, convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession } from "./contracts.js";
 import { threadTools } from "./pi-tools.js";
+import { convergeTools } from "./converge.js";
 import { argument, assertPiSessionFile, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
+import { scopedBashOperations } from "./pi-bash-resources.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
+import { inputReceipts } from "./pi-input-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
 import routing, { EXPLICIT_THREAD_MODEL_ENV, POOLED_ACCOUNT_WAIT, resolveSessionModel } from "../extension/routing.js";
-import { isRateLimitError } from "../provider-errors.js";
+import { isTransientFailure } from "../provider-errors.js";
 import usageLogger from "../extension/usage-logger.js";
+import { observeProviderRequests } from "../extension/provider-request-activity.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
 import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
+import { RunnerStartupError } from "./runner-startup.js";
+import { memoryExtension } from "kenan-memory/tools";
+import { oneKenanEnabled } from "kenan-memory/config";
+import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
+import { createThreadClient } from "./http.js";
+import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity, settleExecutionActivity } from "./execution-activity.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
 const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
@@ -27,21 +40,65 @@ type SharedRpc = (runtime: AgentSessionRuntime, io: { output(event: PiEvent): vo
 const inputCommands = new Set(["prompt", "steer", "follow_up"]);
 const retry = { enabled: true, maxRetries: 6, baseDelayMs: 5_000 };
 
-export const openPiSession: OpenPiSession = async (options, output, exit) => {
-  const admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
-  options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
+export function assistantWorkOutcome(stopReason: unknown): "complete" | "failed" {
+  const reason = requireAssistantStopReason(stopReason);
+  switch (reason) {
+    case "stop": case "length": case "toolUse": return "complete";
+    case "error": case "aborted": case "pending": case "deferred": return "failed";
+  }
+  return assertNever(reason);
+}
+
+export const openPiSession: OpenPiSession = async (options, emitOutput, exit) => {
+  const activity = createExecutionActivity();
+  const liveTools = new Map<string, Record<string, unknown>>();
+  const output = (input: PiEvent) => {
+    let event = requireRuntimeEvent(input);
+    if (typeof event.emittedAt !== "number") event.emittedAt = Date.now();
+    observeExecutionActivity(activity, event);
+    if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+      const id = String(event.toolCallId);
+      liveTools.set(id, { ...liveTools.get(id), toolCallId: id, toolName: event.toolName,
+        ...(event.type === "tool_execution_start" ? { args: event.args } : { output: event.partialResult }) });
+    }
+    for (const id of liveTools.keys()) if (!activity.activityTools.has(id)) liveTools.delete(id);
+    if (event.type === "response" && event.command === "get_state" && event.success) {
+      const data = event.data as Record<string, any>;
+      event = { ...event, data: { ...data, live: { ...data?.live, ...executionActivitySnapshot(activity),
+        isThinking: activity.activity === "thinking", tools: [...liveTools.values()] } } };
+    }
+    emitOutput(event);
+  };
+  const admission = (() => {
+    try {
+      const admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
+      options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
+      return admission;
+    } catch (error) { throw new RunnerStartupError(error instanceof Error ? error.message : String(error)); }
+  })();
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_ID: options.threadId,
     PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
-    PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1" };
+    PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1",
+    PI_THREAD_RESOURCE_BOUNDARY: process.env.PI_THREAD_RESOURCE_BOUNDARY };
   // A shared runner inherits its first session's launch environment. Account
   // custody belongs to this open, not to whichever session started the runner.
   for (const key of ["PI_ORCHESTRATOR_ASSIGNED", "PI_ORCHESTRATOR_ACCOUNT_ID", "PI_ORCHESTRATOR_RUN_ID", "PI_ORCHESTRATOR_PROVIDER", "PI_SUBAGENT_MODEL"])
     if (options.env[key] === undefined) delete env[key];
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_") || key === EXPLICIT_THREAD_MODEL_ENV) delete env[key];
+  delete env.PI_KENAN_MEMORY_PERSON;
+  delete env.PI_KENAN_MEMORY_TOKEN;
+  delete env.PI_KENAN_MEMORY_ROLE;
+  if (options.env.PI_REMOTE_ROOM_ID === undefined) delete env.PI_REMOTE_ROOM_ID;
+  if (options.env.PI_REMOTE_ROOMS_RUNTIME === undefined) delete env.PI_REMOTE_ROOMS_RUNTIME;
+  const room = isRoomSession(env, options.threadId);
+  if (room && !oneKenanEnabled(env)) throw new Error("Room execution requires the oneKenan host flag");
+  const memoryEligible = !isRawSession(options.args) && !options.args.includes(SANDBOX_ARGUMENT) && !options.args.includes("--orchestrator-context");
   modeEnvironment(env);
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
   return piEnvironmentScope.run(env, async () => {
     const execution = new PiExecution(() => settle());
+    const inputWork = new AsyncLocalStorage<string>();
+    const workMessages = new WeakMap<object, string>();
     const extensions = options.args.flatMap((arg, index) => arg === "--extension" ? [resolve(options.cwd, options.args[index + 1])] : []);
     const agentDir = env.PI_CODING_AGENT_DIR ?? getAgentDir();
     const raw = isRawSession(options.args);
@@ -61,19 +118,27 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       cwd = requirePiCwd(admission, cwd, "runtime.cwd");
       if (sandbox && cwd !== options.cwd) throw new Error("Sandbox sessions cannot switch workspaces");
       preparePiSession(sessionManager);
+      const memoryFactories = memoryEligible ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
+        const api = options.threads ?? createThreadClient(env.PI_THREAD_API_URL!, fetch, { token: env.PI_THREAD_TOKEN });
+        const result = await api.ask({ threadId: options.threadId, requestId: `${options.threadId}:${id}`, questions: [{ question, suggestions }] });
+        if (!result.ok) throw new Error(`Cannot ask which forget mode: ${JSON.stringify(result)}`);
+        return result.value;
+      } })] : [];
       const isolated = await isolatedPiContext({ ...options, cwd, sessionFile: sessionManager.getSessionFile()! }, env);
       // Pi Remote's context-mirror extension owns context capture when it is loaded; a raw session loads no packages, so the runner reports.
-      const contextOwner = !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
+      const contextOwner = !room && !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
       // Like the mirror, the runner also reports each finished reply. The `context` event fires only before a
       // model call, so without this a raw thread's context never held its final answer: the transcript kept it
       // as live text and the supervisor's response metrics, keyed to that message, had nothing to attach to.
       const threadContext = { name: "thread-context", factory: (pi: Parameters<typeof threadSpeed>[0]) => {
-        let reported: { systemPrompt: string; tools: unknown[]; messages: ReturnType<typeof convertToLlm> } | null = null;
+        let reported: { systemPrompt: string; tools: unknown[]; messages: ReturnType<typeof convertToLlm>;
+          contextUsage?: ReturnType<ExtensionContext["getContextUsage"]>; contextModel?: string } | null = null;
+        const usage = (ctx: ExtensionContext) => ({ contextUsage: ctx.getContextUsage(), contextModel: ctx.model?.id });
         pi.on("context", (event, ctx) => {
           const active = new Set(pi.getActiveTools());
           reported = { systemPrompt: ctx.getSystemPrompt(),
             tools: pi.getAllTools().filter(tool => active.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters })),
-            messages: convertToLlm(event.messages) };
+            messages: convertToLlm(event.messages), ...usage(ctx) };
           output({ type: "context_update", contextOwner, context: reported });
         });
         pi.on("message_end", event => {
@@ -81,10 +146,24 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           reported = { ...reported, messages: [...reported.messages, ...convertToLlm([event.message])] };
           output({ type: "context_update", contextOwner, context: reported });
         });
+        pi.on("turn_end", (_event, ctx) => {
+          if (!reported) return;
+          reported = { ...reported, ...usage(ctx) };
+          output({ type: "context_update", contextOwner, context: reported });
+        });
+        pi.on("session_compact", (_event, ctx) => {
+          if (!reported) return;
+          reported = { ...reported, messages: convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages), ...usage(ctx) };
+          output({ type: "context_update", contextOwner, context: reported });
+        });
       } };
       const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
         settingsManager: isolated?.settingsManager,
-        resourceLoaderOptions: isolated ? {
+        resourceLoaderOptions: room ? {
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
+          extensionFactories: [routing, usageLogger, threadSpeed, threadContext, ...memoryFactories, roomSessionInstructions(env)],
+        } : isolated ? {
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           extensionsOverride: () => isolated.resourceLoader.getExtensions(),
         } : raw ? {
@@ -93,7 +172,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
           extensionFactories: [routing, usageLogger, threadSpeed, rawModelContext, threadContext],
-        } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, threadContext, modeTools(env)] } });
+        } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, threadContext, modeTools(env), ...memoryFactories] } });
       if (isolated) { services.resourceLoader = isolated.resourceLoader; acceptedContext = JSON.parse(argument(options.args, "--orchestrator-context")!); }
       const errors = services.resourceLoader.getExtensions().errors;
       if (errors.length) throw new Error(`Session extensions failed: ${JSON.stringify(errors)}`);
@@ -102,12 +181,38 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const provider = argument(options.args, "--provider"), modelId = argument(options.args, "--model");
       const selection = provider && modelId ? await resolveSessionModel(services.modelRuntime.getModels(), provider, modelId, env) : undefined;
       if (selection && !selection.ok) throw new Error(selection.error);
-      const bash = createBashTool(cwd, { spawnHook: context => ({ ...context, env: { ...context.env, ...env,
+      const bash = createBashTool(cwd, { operations: scopedBashOperations(env), spawnHook: context => ({ ...context, env: { ...context.env, ...env,
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
-        tools: sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined), customTools: sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env })]) });
+        tools: room ? ROOM_TOOLS : sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined),
+        customTools: room ? threadTools({ ...options, cwd, env }).filter(tool => tool.name === "request_user_input_async")
+          : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
+      if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
+      observeProviderRequests(created.session, output);
       execution.bind(created.session);
+      const session = created.session, agent = session.agent;
+      const prompt = session.prompt.bind(session);
+      const promptWork = new WeakMap<object, string>();
+      session.prompt = (text, options) => {
+        const workId = (options && promptWork.get(options)) ?? inputWork.getStore();
+        if (!workId) return prompt(text, options);
+        if (options) promptWork.set(options, workId);
+        return inputWork.run(workId, () => prompt(text, options));
+      };
+      const remember = (message: { role: string }) => {
+        const workId = inputWork.getStore();
+        if (workId && message.role === "user") workMessages.set(message, workId);
+      };
+      const agentPrompt = agent.prompt.bind(agent) as typeof agent.prompt;
+      agent.prompt = (input: string | AgentMessage | AgentMessage[], images?: ImageContent[]) => {
+        if (typeof input !== "string") for (const message of Array.isArray(input) ? input : [input]) remember(message);
+        return typeof input === "string" ? agentPrompt(input, images) : agentPrompt(input);
+      };
+      for (const name of ["steer", "followUp"] as const) {
+        const enqueue = agent[name].bind(agent);
+        agent[name] = message => { remember(message); enqueue(message); };
+      }
       created.session.agent.steeringMode = "all";
       created.session.settingsManager.applyOverrides({ retry });
       return { ...created, services, diagnostics: services.diagnostics };
@@ -132,18 +237,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     let replacing = false;
     let closed = false;
     function branch() { return runtime.session.sessionManager.getBranch(); }
-    function receipts() {
-      const acceptedWorkIds = new Set<string>(), completedWorkIds = new Set<string>();
-      for (const entry of branch()) {
-        if (entry.type !== "custom") continue;
-        const data = entry.data as { workId?: string; workIds?: string[] } | undefined;
-        if (entry.customType === "thread_input" && data?.workId) acceptedWorkIds.add(data.workId);
-        if (entry.customType === "thread_rejected" && data?.workId) acceptedWorkIds.delete(data.workId);
-        if (entry.customType === "thread_settled") for (const id of data?.workIds ?? []) completedWorkIds.add(id);
-        if (entry.customType === "thread_resume" && data?.workId) completedWorkIds.delete(data.workId);
-      }
-      return { acceptedWorkIds: [...acceptedWorkIds], completedWorkIds: [...completedWorkIds] };
-    }
+    function receipts() { return inputReceipts(branch()); }
     function lastAssistant() {
       const entries = branch();
       const settled = [...entries].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_settled");
@@ -156,20 +250,32 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       if (closed || replacing && !cancelled || executionStart === undefined && !activeWork.size) return;
       if (execution.active || !runtime.session.isIdle || runtime.session.isBashRunning) return;
       // An unacknowledged input may still start a run (Pi defers prompts made while it emits agent_settled); its response re-checks.
-      if (!cancelled && (pendingInputs.size || execution.blocked || runtime.session.getSteeringMessages().length || runtime.session.getFollowUpMessages().length)) return;
+      if (!cancelled && (pendingInputs.size || execution.blocked)) return;
+      if (!cancelled && runtime.session.agent.hasQueuedMessages()) {
+        // Pi consumes queued steering only inside a live run. A run that ended on a terminal error (for example a
+        // fenced compaction) leaves the queue stranded, and settlement would wait on it forever. Run it now.
+        void execution.run(() => runtime.session.agent.continue()).catch(error => { output({ type: "extension_error", error: String(error) }); });
+        return;
+      }
+      // Display copies of queue entries whose run already consumed or discarded them are not pending work.
+      if (runtime.session.pendingMessageCount) runtime.session.clearQueue();
       const entries = branch();
       const firstInput = entries.findIndex(entry => entry.id === executionStart);
       const final = entries.slice(firstInput < 0 ? entries.length : firstInput + 1).reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
       const message = final?.type === "message" ? final.message : null;
-      const outcome = cancelled ? "cancelled" : message?.role === "assistant" && ["error", "aborted"].includes(message.stopReason) ? "failed" : "complete";
-      const workIds = [...activeWork];
+      const outcome = cancelled ? "cancelled" : message?.role === "assistant" ? assistantWorkOutcome(message.stopReason) : "complete";
+      const landed = new Set(receipts().landedWorkIds);
+      const deferredWorkIds = cancelled ? [...activeWork].filter(id => !landed.has(id)) : [];
+      const workIds = [...activeWork].filter(id => !deferredWorkIds.includes(id));
+      if (deferredWorkIds.length) runtime.session.sessionManager.appendCustomEntry("thread_deferred", { workIds: deferredWorkIds });
       if (workIds.length) runtime.session.sessionManager.appendCustomEntry("thread_settled", { workIds, outcome, assistantEntryId: final?.id ?? null });
       checkpointPiSession(runtime.session.sessionManager);
       activeWork.clear();
       executionStart = undefined;
       // Cancellation discards Pi's deferred inputs without a response; release their dispatch order with the receipt.
       for (const id of [...pendingInputs.keys()]) acknowledge(id);
-      output({ type: "agent_settled", workIds, outcome, lastAssistantMessage: message });
+      output({ type: "agent_settled", workIds, deferredWorkIds, outcome, lastAssistantMessage: message });
+      settleExecutionActivity(activity);
     }
     async function halt(): Promise<void> {
       const stopped = execution.halt(runtime.session, 20_000, () => settle(true));
@@ -203,11 +309,15 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const cwd = requirePiCwd(admission, override ?? assertPiSessionFile(path).cwd, "import.cwd");
       return replace(() => importFromJsonl(path, cwd));
     };
+    // Settlement is event driven; this re-evaluates it so that no missed or misordered event can leave work open.
+    const reconcile = setInterval(() => settle(), 30_000);
+    reconcile.unref();
     let rpc: PiSession;
     try {
       const sdk = join(getPackageDir(), "dist");
       const { runSharedRpcMode } = await import(pathToFileURL(join(sdk, "modes/rpc/shared-rpc-mode.js")).href) as { runSharedRpcMode: SharedRpc };
       rpc = await runSharedRpcMode(runtime, { exit, output: event => {
+        event = requireRuntimeEvent(event);
         if (event.type === "response") {
           if (internalResponses.has(String(event.id))) { internalResponses.set(String(event.id), event); return; }
           commands.finish(event, runtime.session.sessionManager);
@@ -235,6 +345,14 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         if (event.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(event.method))) dialogs.add(String(event.id));
         if (event.type === "agent_start" && executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
         if (event.type === "agent_settled") { queueMicrotask(() => settle()); return; }
+        if (event.type === "message_start" && (event.message as { role?: string })?.role === "user") {
+          const workId = workMessages.get(event.message as object);
+          if (workId) {
+            runtime.session.sessionManager.appendCustomEntry("thread_landed", { workId });
+            checkpointPiSession(runtime.session.sessionManager);
+            event = { ...event, inputWorkId: workId };
+          }
+        }
         if (event.type === "message_end") checkpointPiSession(runtime.session.sessionManager);
         output(event);
       } });
@@ -285,12 +403,21 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             if (command.workId) {
               const workId = String(command.workId);
               const existing = receipts();
-              if (existing.acceptedWorkIds.includes(workId)) {
+              const redelivery = existing.deferredWorkIds.includes(workId) || existing.acceptedWorkIds.includes(workId)
+                && !existing.landedWorkIds.includes(workId) && !existing.completedWorkIds.includes(workId) && !activeWork.has(workId);
+              if (redelivery) {
+                const receipt = [...branch()].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_input" && (entry.data as { workId?: string }).workId === workId);
+                if (receipt?.type === "custom") {
+                  const original = receipt.data as { message: string; images?: unknown };
+                  command = { ...command, message: original.message, images: original.images };
+                }
+              }
+              if (existing.acceptedWorkIds.includes(workId) && !redelivery) {
                 const settled = [...branch()].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_settled" && (entry.data as {workIds?:string[]}).workIds?.includes(workId));
                 const last = lastAssistant();
                 const capacityResume = command.resumeProviderWait === true && settled?.type === "custom"
                   && (settled.data as {outcome?:string}).outcome === "failed" && last?.role === "assistant" && last.stopReason === "error"
-                  && (isRateLimitError(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
+                  && (isTransientFailure(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
                 if (command.resumeProviderWait === true && existing.completedWorkIds.includes(workId) && !capacityResume) {
                   response(false, "Cannot resume completed work without a provider capacity failure"); return;
                 }
@@ -313,7 +440,9 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             if (command.type === "prompt" && (execution.active || !runtime.session.isIdle || executionStart !== undefined) && !(command.streamingBehavior && runtime.session.isStreaming)) { response(false, "Cannot overlap active Pi execution"); return; }
             if (command.workId) {
               const workId = String(command.workId);
-              runtime.session.sessionManager.appendCustomEntry("thread_input", { workId, message: command.message, images: command.images, delivery: command.type });
+              const original = branch().some(entry => entry.type === "custom" && entry.customType === "thread_input" && (entry.data as { workId?: string }).workId === workId);
+              runtime.session.sessionManager.appendCustomEntry(original ? "thread_redelivery" : "thread_input", original ? { workId }
+                : { workId, message: command.message, images: command.images, delivery: command.type, receiptVersion: 2 });
               if (executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
               activeWork.add(workId);
               checkpointPiSession(runtime.session.sessionManager);
@@ -350,6 +479,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             output({ ...admission.response, id: command.id });
             return;
           }
+          if (admission.kind !== "execute") return assertNever(admission);
           if (command.type === "compact") {
             backgroundCommands.add(String(command.id));
             output({ type: "compaction_start", commandId: command.id });
@@ -361,7 +491,8 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
               output({ type: "compaction_end", commandId: command.id, success: false, error: String(error) });
               output({ type: "command_settled", commandId: command.id, response: event });
             });
-          } else await rpc.command(command);
+          } else if (inputCommands.has(command.type) && command.workId) await inputWork.run(String(command.workId), () => rpc.command(command));
+          else await rpc.command(command);
           checkpointPiSession(runtime.session.sessionManager);
         }),
         close: () => piEnvironmentScope.run(env, async () => {
@@ -369,10 +500,11 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           if (backgroundCommands.size || !runtime.session.isIdle || runtime.session.isBashRunning || execution.active || execution.blocked) throw new Error("Cannot close active Pi execution; stop and confirm cancellation first");
           await halt();
           closed = true;
+          clearInterval(reconcile);
           execution.dispose();
           await rpc.close();
         }),
       };
-    } catch (error) { await runtime.dispose(); throw error; }
+    } catch (error) { clearInterval(reconcile); await runtime.dispose(); throw error; }
   });
 };

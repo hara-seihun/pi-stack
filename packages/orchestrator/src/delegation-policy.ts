@@ -2,7 +2,8 @@
 // Source and modifications: ../docs/delegation-policy.md. License: ./delegation-policy.LICENSE.
 export const DELEGATION_POLICY = `Delegation is optional. You can complete tasks yourself. Follow the user's requests about delegation.
 Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
-Model descriptions help choose a worker after deciding to delegate; they are not a reason to delegate.
+Model descriptions help choose an agent after deciding to delegate; they are not a reason to delegate.
+Every agent may launch other agents within the same global execution budget. Launch provenance is not a dependency. Declare dependencies explicitly when your assignment needs a peer's result; dependencies protect both agents from closure until you resolve or release them.
 
 ### When to delegate vs. do the subtask yourself
 - First, quickly analyze the overall user task and form a succinct high-level plan. Identify which tasks are immediate blockers on the critical path, and which tasks are sidecar tasks that are needed but can run in parallel without blocking the next local step. As part of that plan, explicitly decide what immediate task you should do locally right now. Do this planning step before delegating to agents so you do not hand off the immediate blocking task to a submodel and then waste time waiting on it.
@@ -25,7 +26,7 @@ Model descriptions help choose a worker after deciding to delegate; they are not
 - Results arrive automatically. Do not poll or repeatedly read a worker's transcript just to wait for it.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
-- If no useful local work remains, use thread_await for one or more direct children to continue on the first result, or end your turn and let automatic result delivery resume you. Do not claim the overall task is complete while delegated work is outstanding.
+- If no useful local work remains, use thread_wait as your final tool call with action set, kind agents, a reason and nonempty accessible peer threadIds; it ends the turn and automatic result delivery resumes this same conversation. thread_await is a bounded short wait, not a polling loop. For durable external work, set thread_wake as a periodic recovery check before thread_wait, and cancel it when resolved. Do not claim the overall task is complete while delegated work is outstanding.
 - When a delegated coding task returns, quickly review the changes, then integrate or refine them. Report failed or incomplete work plainly.
 
 ### Parallel delegation patterns

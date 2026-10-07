@@ -2,6 +2,10 @@ import { API } from "../../server/api";
 import { meetVoiceControl } from "../../server/meet/protocol";
 import { piFetch } from "./client";
 import { createStreamClient } from "./stream";
+import type { StreamEvent } from "../../server/protocol";
+import { assertNever, requireState } from "../../shared/explicit-state";
+import { VOICE_STATES, type VoiceState } from "./voice-state";
+import { holdLiveMedia } from "./live-media";
 
   const MAX_CONTEXT_BYTES = 500;
 
@@ -123,7 +127,8 @@ import { createStreamClient } from "./stream";
       this.streamedMessage = false;
     }
 
-    setState(state, detail = "") {
+    setState(state: VoiceState, detail = "") {
+      requireState(state, VOICE_STATES, "Voice lifecycle");
       this.state = state;
       this.onState(state, detail);
     }
@@ -141,6 +146,7 @@ import { createStreamClient } from "./stream";
       const generation = ++this.generation;
       this.setState("connecting", "Connecting…");
       try {
+        this.releaseMedia = holdLiveMedia();
         if (!this.input && !navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable");
         const configResponse = await this.request(API.voice.path(), { cache: "no-store" });
         const config = await configResponse.json();
@@ -263,6 +269,7 @@ import { createStreamClient } from "./stream";
       this.stopStream(this.microphone); this.microphone = null;
       if (this.speaker) { this.speaker.muted = true; this.speaker.pause(); this.speaker.srcObject = null; }
       this.onPlayback("stopped");
+      this.releaseMedia?.(); this.releaseMedia = null;
     }
 
     stop(clearState = true) {
@@ -535,18 +542,17 @@ import { createStreamClient } from "./stream";
       this.stream.start();
     }
 
-    handleStreamEvent(event) {
+    handleStreamEvent(event: StreamEvent) {
       if (this.state !== "live") return;
       try {
-        if (event.type === "live") {
-          this.liveTextValue = event.text;
-          this.observeLiveText(this.liveTextValue);
-        } else if (event.type === "events") {
-          this.consumeEvents(event.events || []);
-          this.stream?.remember({ eventsAfter: this.cursor });
-        } else if (event.type === "error") {
-          this.onNotice(String(event.message || "The thread stream failed"));
+        switch (event.type) {
+          case "live": this.liveTextValue = event.text; this.observeLiveText(this.liveTextValue); return;
+          case "events": this.consumeEvents(event.events); this.stream?.remember({ eventsAfter: this.cursor }); return;
+          case "error": this.onNotice(event.message); return;
+          case "hello": case "bootstrap": case "state": case "messaging": case "dashboard": case "workers": case "transcript": case "images": case "questions": case "notifications": return;
+          case "reconcile": case "selection-ready": throw new Error(`Unprocessed stream control frame reached Voice: ${event.type}`);
         }
+        assertNever(event, "Voice stream event");
       } catch (cause) {
         this.onNotice(String(cause?.message || cause));
       }

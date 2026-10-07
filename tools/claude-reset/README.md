@@ -4,18 +4,18 @@
 
 ```json
 {
-  "anthropic": "kenan-personal",
-  "anthropic-2": "limmy-google",
-  "anthropic-3": "claude-works-kenan"
+  "anthropic": "claude-profile-one",
+  "anthropic-2": "claude-profile-two",
+  "anthropic-3": "claude-profile-three"
 }
 ```
 
-The keys are ledger account IDs and the values are names of **existing** Kernel profiles. Put the map in a host-owned JSON file (for example `/etc/nixos/pi-claude-resets.json`). Each ledger Anthropic account must have its Claude web email as its label. This label is an identity check, not a token.
+The keys are ledger account IDs and the values are names of **existing** Kernel profiles; the profile names above are fictional. Put the map in a host-owned JSON file (for example `/etc/pi-stack/claude-resets.json`) and provision its schedule through the host's systemd configuration. NixOS hosts can declare the same file and schedule in their configuration. Each ledger Anthropic account must have its Claude web email as its label. This label is an identity check, not a token.
 
 ```sh
-claude-reset --config /etc/nixos/pi-claude-resets.json
-claude-reset status --config /etc/nixos/pi-claude-resets.json --json
-claude-reset --config /etc/nixos/pi-claude-resets.json --dry-run --account anthropic
+claude-reset --config /etc/pi-stack/claude-resets.json
+claude-reset status --config /etc/pi-stack/claude-resets.json --json
+claude-reset --config /etc/pi-stack/claude-resets.json --dry-run --account anthropic
 ```
 
 Default `collect` starts each mapped profile with `kernel-browser start`, reads `GET /api/organizations`, `GET /api/account` (`email_address`), and `GET /api/organizations/{uuid}/usage?cedar_ember=1&skip_spend=1` with `kernel browsers curl`, then always stops its session. It accepts exactly one organization, verifies the account email against the ledger label, and totals unpaused, unexpired `cedar_ember.grants[*].resets_left`; `ends_at` supplies the nearest expiry. The same usage response's `limits` array is parsed by Orchestrator's `parseAnthropicUsage`, mapping session, all-model weekly and Fable-scoped weekly limits to the ordinary `anthropic-5h`, `anthropic-7d` and `anthropic-7d_oi` meters. It never infers zero usage from a redeemed grant or reads the older top-level usage fields. Collection therefore reconciles quota immediately after a reset instead of waiting for the OAuth meter poll.

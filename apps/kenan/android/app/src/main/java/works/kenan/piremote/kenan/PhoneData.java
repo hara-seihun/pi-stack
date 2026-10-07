@@ -55,7 +55,6 @@ import java.util.function.BooleanSupplier;
 
 public final class PhoneData {
     public static final int MAX_FILE_BYTES = 1024 * 1024;
-    private static final String COMMANDS = "|device.info|apps.list|files.list|files.read|files.write|files.mkdir|files.delete|contacts.list|contacts.get|contacts.insert|calendar.list|calendar.events|calendar.instances|calendar.insert|location.get|sms.list|sms.send|calls.list|call.dial|usage.query|settings.get|settings.put|device.lock|device.reboot|device.wipe|apps.suspend|permissions.grant|";
     private final Context context;
     private final JSONObject args;
     private final long deadline;
@@ -69,7 +68,7 @@ public final class PhoneData {
     }
 
     public static boolean supports(String command) {
-        return command != null && !command.contains("|") && COMMANDS.contains("|" + command + "|");
+        return NativeState.parse(NativeState.DataCommand.class, command).isPresent();
     }
 
     public static JSONObject dispatch(Context context, String command, JSONObject args, long deadline) {
@@ -103,41 +102,46 @@ public final class PhoneData {
 
     private Object execute(String command) throws Exception {
         if (command.startsWith("files.") && Build.VERSION.SDK_INT < 26) throw new CommandFailure("unsupported", "File operations require Android 8 or later");
-        switch (command) {
-            case "device.info": return deviceInfo();
-            case "apps.list": return apps();
-            case "files.list": return filesList();
-            case "files.read": return filesRead();
-            case "files.write": return filesWrite();
-            case "files.mkdir": return filesMkdir();
-            case "files.delete": return filesDelete();
-            case "contacts.list": return contactsList();
-            case "contacts.get": return contactDetails();
-            case "contacts.insert": return contactsInsert();
-            case "calendar.list": return calendars();
-            case "calendar.events": return events();
-            case "calendar.instances": return instances();
-            case "calendar.insert": return calendarInsert();
-            case "location.get": return location();
-            case "sms.list": return smsList();
-            case "sms.send": return smsSend();
-            case "calls.list": return calls();
-            case "call.dial": return dial();
-            case "usage.query": return usage();
-            case "settings.get": return setting(false);
-            case "settings.put": return setting(true);
-            default: return admin(command);
-        }
+        return switch (NativeState.require(NativeState.DataCommand.class, command)) {
+            case DEVICE_INFO -> deviceInfo();
+            case APPS_LIST -> apps();
+            case FILES_LIST -> filesList();
+            case FILES_READ -> filesRead();
+            case FILES_WRITE -> filesWrite();
+            case FILES_MKDIR -> filesMkdir();
+            case FILES_DELETE -> filesDelete();
+            case CONTACTS_LIST -> contactsList();
+            case CONTACTS_GET -> contactDetails();
+            case CONTACTS_INSERT -> contactsInsert();
+            case CALENDAR_LIST -> calendars();
+            case CALENDAR_EVENTS -> events();
+            case CALENDAR_INSTANCES -> instances();
+            case CALENDAR_INSERT -> calendarInsert();
+            case LOCATION_GET -> location();
+            case SMS_LIST -> smsList();
+            case SMS_SEND -> smsSend();
+            case CALLS_LIST -> calls();
+            case CALL_DIAL -> dial();
+            case USAGE_QUERY -> usage();
+            case SETTINGS_GET -> setting(false);
+            case SETTINGS_PUT -> setting(true);
+            case DEVICE_LOCK -> admin(NativeState.AdminCommand.LOCK);
+            case DEVICE_REBOOT -> admin(NativeState.AdminCommand.REBOOT);
+            case DEVICE_WIPE -> admin(NativeState.AdminCommand.WIPE);
+            case APPS_SUSPEND -> admin(NativeState.AdminCommand.SUSPEND);
+            case PERMISSIONS_GRANT -> admin(NativeState.AdminCommand.GRANT);
+        };
     }
 
     public static JSONObject capabilities(Context c) {
         DevicePolicyManager dpm = c.getSystemService(DevicePolicyManager.class);
         boolean owner = dpm != null && dpm.isDeviceOwnerApp(c.getPackageName());
+        boolean location = granted(c, Manifest.permission.ACCESS_COARSE_LOCATION) && granted(c, Manifest.permission.ACCESS_FINE_LOCATION);
         return json("allFiles", Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager(),
             "contacts", granted(c, Manifest.permission.READ_CONTACTS) && granted(c, Manifest.permission.WRITE_CONTACTS),
             "calendar", granted(c, Manifest.permission.READ_CALENDAR) && granted(c, Manifest.permission.WRITE_CALENDAR),
-            "location", granted(c, Manifest.permission.ACCESS_COARSE_LOCATION) || granted(c, Manifest.permission.ACCESS_FINE_LOCATION),
-            "backgroundLocation", Build.VERSION.SDK_INT < 29 || granted(c, Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+            "location", location,
+            "backgroundLocation", location && (Build.VERSION.SDK_INT < 29 || granted(c, Manifest.permission.ACCESS_BACKGROUND_LOCATION)),
             "sms", granted(c, Manifest.permission.READ_SMS) && granted(c, Manifest.permission.SEND_SMS),
             "callLog", granted(c, Manifest.permission.READ_CALL_LOG), "phone", granted(c, Manifest.permission.CALL_PHONE),
             "camera", granted(c, Manifest.permission.CAMERA), "microphone", granted(c, Manifest.permission.RECORD_AUDIO),
@@ -333,17 +337,17 @@ public final class PhoneData {
                 JSONObject row = new JSONObject();
                 JSONArray truncated = new JSONArray();
                 for (int i = 0; i < cursor.getColumnCount(); i++) {
-                    Object value;
-                    switch (cursor.getType(i)) {
-                        case Cursor.FIELD_TYPE_INTEGER: value = cursor.getLong(i); break;
-                        case Cursor.FIELD_TYPE_FLOAT: value = cursor.getDouble(i); break;
-                        case Cursor.FIELD_TYPE_NULL: value = JSONObject.NULL; break;
-                        case Cursor.FIELD_TYPE_BLOB: value = "[binary]"; break;
-                        default:
+                    Object value = switch (NativeState.CursorType.require(cursor.getType(i))) {
+                        case INTEGER -> cursor.getLong(i);
+                        case FLOAT -> cursor.getDouble(i);
+                        case NULL -> JSONObject.NULL;
+                        case BLOB -> "[binary]";
+                        case STRING -> {
                             String s = cursor.getString(i);
                             if (s.length() > 16384) truncated.put(cursor.getColumnName(i));
-                            value = s.length() > 16384 ? s.substring(0, 16384) : s;
-                    }
+                            yield s.length() > 16384 ? s.substring(0, 16384) : s;
+                        }
+                    };
                     row.put(cursor.getColumnName(i), value);
                 }
                 if (truncated.length() > 0) row.put("_truncatedColumns", truncated);
@@ -562,8 +566,8 @@ public final class PhoneData {
     }
 
     private JSONObject setting(boolean write) throws Exception {
-        String namespace = args.optString("namespace", "system"), key = text("key");
-        if (!namespace.equals("system") && !namespace.equals("secure") && !namespace.equals("global")) throw new JSONException("namespace must be system, secure or global");
+        NativeState.SettingsNamespace namespace = NativeState.require(NativeState.SettingsNamespace.class, args.optString("namespace", "system"));
+        String key = text("key");
         String value = null;
         if (write) {
             confirm();
@@ -572,45 +576,52 @@ public final class PhoneData {
             if (v != JSONObject.NULL && !(v instanceof String)) throw new JSONException("value must be string or null");
             value = v == JSONObject.NULL ? null : (String) v;
             if (value != null && value.length() > 16384) throw new JSONException("value exceeds 16384 characters");
-            if (namespace.equals("system")) {
-                if (!Settings.System.canWrite(context)) throw new CommandFailure("permission_denied", "Requires Modify system settings special access");
-            } else require(Manifest.permission.WRITE_SECURE_SETTINGS);
+            boolean permission = switch (namespace) {
+                case SYSTEM -> {
+                    if (!Settings.System.canWrite(context)) throw new CommandFailure("permission_denied", "Requires Modify system settings special access");
+                    yield true;
+                }
+                case SECURE, GLOBAL -> { require(Manifest.permission.WRITE_SECURE_SETTINGS); yield true; }
+            };
         }
         check();
-        boolean written = false;
-        if (namespace.equals("system")) {
-            if (write) written = Settings.System.putString(context.getContentResolver(), key, value);
-            else value = Settings.System.getString(context.getContentResolver(), key);
-        } else if (namespace.equals("secure")) {
-            if (write) written = Settings.Secure.putString(context.getContentResolver(), key, value);
-            else value = Settings.Secure.getString(context.getContentResolver(), key);
-        } else {
-            if (write) written = Settings.Global.putString(context.getContentResolver(), key, value);
-            else value = Settings.Global.getString(context.getContentResolver(), key);
-        }
-        if (write && !written) throw new CommandFailure("operation_failed", "Android settings provider rejected write");
-        return write ? json("namespace", namespace, "key", key, "written", true) : json("namespace", namespace, "key", key, "value", value);
+        if (write) {
+            boolean written = switch (namespace) {
+                case SYSTEM -> Settings.System.putString(context.getContentResolver(), key, value);
+                case SECURE -> Settings.Secure.putString(context.getContentResolver(), key, value);
+                case GLOBAL -> Settings.Global.putString(context.getContentResolver(), key, value);
+            };
+            if (!written) throw new CommandFailure("operation_failed", "Android settings provider rejected write");
+        } else value = switch (namespace) {
+            case SYSTEM -> Settings.System.getString(context.getContentResolver(), key);
+            case SECURE -> Settings.Secure.getString(context.getContentResolver(), key);
+            case GLOBAL -> Settings.Global.getString(context.getContentResolver(), key);
+        };
+        return write ? json("namespace", namespace.wire(), "key", key, "written", true) : json("namespace", namespace.wire(), "key", key, "value", value);
     }
 
-    private JSONObject admin(String command) throws Exception {
+    private JSONObject admin(NativeState.AdminCommand command) throws Exception {
         check();
         DevicePolicyManager manager = context.getSystemService(DevicePolicyManager.class);
         ComponentName admin = new ComponentName(context, PhoneAdminReceiver.class);
         if (manager == null) throw new CommandFailure("unsupported", "Device policy service unavailable");
-        if (command.equals("device.lock")) {
-            if (!manager.isAdminActive(admin)) throw new CommandFailure("permission_denied", "Requires explicitly enrolled Device Admin");
-            check(); manager.lockNow();
-            return json("status", "requested");
-        }
-        if (!manager.isDeviceOwnerApp(context.getPackageName())) throw new CommandFailure("permission_denied", "Requires Device Owner provisioning, not ordinary Device Admin");
-        switch (command) {
-            case "device.reboot":
-                confirm(); check(); manager.reboot(admin); return json("status", "requested");
-            case "device.wipe":
+        if (command != NativeState.AdminCommand.LOCK && !manager.isDeviceOwnerApp(context.getPackageName()))
+            throw new CommandFailure("permission_denied", "Requires Device Owner provisioning, not ordinary Device Admin");
+        return switch (command) {
+            case LOCK -> {
+                if (!manager.isAdminActive(admin)) throw new CommandFailure("permission_denied", "Requires explicitly enrolled Device Admin");
+                check(); manager.lockNow();
+                yield json("status", "requested");
+            }
+            case REBOOT -> {
+                confirm(); check(); manager.reboot(admin); yield json("status", "requested");
+            }
+            case WIPE -> {
                 confirm(); check();
                 if (Build.VERSION.SDK_INT >= 34) manager.wipeDevice(0); else manager.wipeData(0);
-                return json("status", "requested", "note", "Factory reset; connection may disappear before acknowledgment");
-            case "apps.suspend": {
+                yield json("status", "requested", "note", "Factory reset; connection may disappear before acknowledgment");
+            }
+            case SUSPEND -> {
                 confirm();
                 JSONArray input = args.getJSONArray("packages");
                 if (input.length() < 1 || input.length() > 100) throw new JSONException("packages must contain 1..100 package names");
@@ -622,23 +633,20 @@ public final class PhoneData {
                 if (!(args.opt("suspended") instanceof Boolean)) throw new JSONException("suspended boolean required");
                 check();
                 String[] failed = manager.setPackagesSuspended(admin, packages, args.getBoolean("suspended"));
-                return json("suspended", args.getBoolean("suspended"), "requested", input, "failedPackages", new JSONArray(failed), "allApplied", failed.length == 0);
+                yield json("suspended", args.getBoolean("suspended"), "requested", input, "failedPackages", new JSONArray(failed), "allApplied", failed.length == 0);
             }
-            case "permissions.grant": {
+            case GRANT -> {
                 String pkg = text("package"), permission = text("permission"), state = args.optString("state", "granted");
-                int grant;
-                switch (state) {
-                    case "granted": grant = DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED; break;
-                    case "denied": confirm(); grant = DevicePolicyManager.PERMISSION_GRANT_STATE_DENIED; break;
-                    case "default": confirm(); grant = DevicePolicyManager.PERMISSION_GRANT_STATE_DEFAULT; break;
-                    default: throw new JSONException("state must be granted, denied or default");
-                }
+                int grant = switch (NativeState.require(NativeState.PermissionGrant.class, state)) {
+                    case GRANTED -> DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED;
+                    case DENIED -> { confirm(); yield DevicePolicyManager.PERMISSION_GRANT_STATE_DENIED; }
+                    case DEFAULT -> { confirm(); yield DevicePolicyManager.PERMISSION_GRANT_STATE_DEFAULT; }
+                };
                 check();
                 if (!manager.setPermissionGrantState(admin, pkg, permission, grant)) throw new CommandFailure("operation_failed", "Device policy rejected permission change");
-                return json("package", pkg, "permission", permission, "state", state, "applied", true);
+                yield json("package", pkg, "permission", permission, "state", state, "applied", true);
             }
-            default: throw new CommandFailure("unsupported", "Unknown admin command");
-        }
+        };
     }
 
     private static JSONObject page(JSONArray items, int offset, boolean more) {

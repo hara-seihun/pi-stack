@@ -5,6 +5,7 @@ import android.view.HapticFeedbackConstants;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 
 public class NativeHapticsTest {
     @Test
@@ -14,6 +15,12 @@ public class NativeHapticsTest {
         assertEquals(HapticFeedbackConstants.CLOCK_TICK, NativeHaptics.feedbackConstant("select", 36));
         assertEquals(HapticFeedbackConstants.CONFIRM, NativeHaptics.feedbackConstant("confirm", 36));
         assertEquals(HapticFeedbackConstants.REJECT, NativeHaptics.feedbackConstant("reject", 36));
+    }
+
+    @Test
+    public void undescribedHapticsAreNotSelectEvents() {
+        assertThrows(IllegalArgumentException.class, () -> NativeHaptics.feedbackConstant("unknown", 36));
+        assertEquals(HapticFeedbackConstants.CLOCK_TICK, NativeHaptics.feedbackConstant(null, 36));
     }
 
     @Test

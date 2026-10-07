@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { API } from "../../server/api";
 import type { IdleNotificationFeed } from "../../server/protocol";
 import { browserFetch, loadEnvironments, nativePlatform, nativeSessionReady, remote } from "./native";
-import { cursorKey, readIdleCursor, saveIdleCursor, setIdleSink, retainNotificationTarget, type NotificationTarget } from "./notifications";
+import { cursorKey, readIdleCursor, saveIdleCursor, setIdleSink, retainNotificationTarget, requireNotificationReplay, type NotificationTarget } from "./notifications";
 import { ThreadNotifications, threadNotificationKey } from "./thread-notifications";
 import { DismissibleError } from "./dismissible-error";
 import { toast } from "./toasts";
@@ -137,11 +137,16 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
     if (!session || !environment) return;
     let active = true;
     const current = () => active && user === window.PiRemotePerson.get() && session === window.PiRemotePerson.session();
-    const deliver = async (source: Environment, feed: IdleNotificationFeed) => {
+    let replayDelivered = false;
+    let foregroundFeedHealthy = false;
+    const deliver = async (source: Environment, feed: IdleNotificationFeed, replay = false, after: number | null = null) => {
       if (!current()) return;
       if (nativePlatform) {
         await nativeSessionReady();
-        if (current()) await remote.notificationFeed!({ user, environment: source.id, name: source.name, feed });
+        if (current()) {
+          const result = await remote.notificationFeed!({ user, session, environment: source.id, name: source.name, feed, replay, after });
+          if (replay && current() && result && result.after !== null) replayDelivered = true;
+        }
         return;
       }
       if (!enabled || !browserNotifications) return;
@@ -156,10 +161,17 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
       }
     };
     let streamDelivery = Promise.resolve();
-    const stop = setIdleSink(feed => {
+    const lease = async (healthy: boolean) => {
+      if (!nativePlatform || !current()) return;
+      await nativeSessionReady();
+      if (!current()) return;
+      await remote.notificationLease!({ user, session, environment: environment.id,
+        state: healthy && replayDelivered && document.visibilityState === "visible" ? "healthy" : "released" });
+    };
+    const stop = setIdleSink((feed, replay, after) => {
       streamDelivery = streamDelivery.then(async () => {
         if (nativePlatform) {
-          await deliver(environment, feed);
+          await deliver(environment, feed, replay, after);
           if (current()) saveIdleCursor(user, environment.id, Math.max(readIdleCursor(user, environment.id), feed.cursor));
         } else {
           await navigator.locks.request(cursorKey(user, environment.id), async () => {
@@ -169,14 +181,33 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
             if (current()) saveIdleCursor(user, environment.id, Math.max(after, feed.cursor));
           });
         }
+      }).catch(cause => {
+        replayDelivered = false;
+        void lease(false).catch(() => undefined);
+        if (current()) {
+          if (cause && typeof cause === "object" && "code" in cause && cause.code === "notification_gap") {
+            requireNotificationReplay(user, session, environment.id);
+          } else setError(String(cause));
+        }
+      });
+    }, healthy => {
+      foregroundFeedHealthy = healthy;
+      if (!nativePlatform) return;
+      streamDelivery = streamDelivery.then(() => {
+        if (!healthy) replayDelivered = false;
+        return lease(healthy);
       }).catch(cause => { if (current()) setError(String(cause)); });
     });
+    const hidden = () => { if (document.visibilityState !== "visible") void lease(false).catch(cause => { if (current()) setError(String(cause)); }); };
+    const pageHidden = () => { void lease(false).catch(cause => { if (current()) setError(String(cause)); }); };
+    document.addEventListener("visibilitychange", hidden);
+    window.addEventListener("pagehide", pageHidden);
     const controller = new AbortController();
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const failures = new Map<string, string>();
     const poll = async (source: Environment) => {
       try {
-        await navigator.locks.request(cursorKey(user, source.id), { signal: controller.signal }, async () => {
+        if (!(source.id === environment.id && foregroundFeedHealthy && document.visibilityState === "visible")) await navigator.locks.request(cursorKey(user, source.id), { signal: controller.signal }, async () => {
           const stored = localStorage.getItem(cursorKey(user, source.id));
           const response = await browserFetch(`${source.baseUrl}${API.notifications.path({}, { after: stored })}`, {
             headers: { "x-pi-remote-user": user, "x-pi-remote-session": session }, cache: "no-store", redirect: "error",
@@ -208,9 +239,15 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
       }
     };
     if (!nativePlatform && enabled && browserNotifications) void loadEnvironments().then(sources => {
-      if (!controller.signal.aborted) for (const source of sources) if (source.id !== environment.id) void poll(source);
+      if (!controller.signal.aborted) for (const source of sources) void poll(source);
     }).catch(cause => { if (current()) setError(String(cause)); });
-    return () => { active = false; stop(); controller.abort(); for (const timer of timers) clearTimeout(timer); };
+    return () => {
+      if (nativePlatform) void remote.notificationLease!({ user, session, environment: environment.id, state: "released" }).catch(() => undefined);
+      active = false; stop(); controller.abort();
+      document.removeEventListener("visibilitychange", hidden);
+      window.removeEventListener("pagehide", pageHidden);
+      for (const timer of timers) clearTimeout(timer);
+    };
   }, [nativePlatform ? true : enabled, user, session, browserNotifications, environment]);
 
   return <NotificationContext.Provider value={{ enabled, error, enable: () => void configure(true) }}>{children}</NotificationContext.Provider>;

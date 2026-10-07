@@ -3,11 +3,12 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { ThreadState } from "pi-orchestrator/api";
+import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, Delivery as ThreadDelivery } from "pi-orchestrator/api";
 import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
-export type ChatId = `ai:${string}` | `human:${string}`;
+export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
+export type FileEditSnapshot = { path: string; content: string; revision: string };
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
 
@@ -32,18 +33,26 @@ export type ContextSplice = {
   insertBase64: string;
 };
 
-export type Activity = ThreadState | "awaiting" | "thinking" | "compacting" | "retrying" | "waiting_on_tool";
+export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
-export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question"; body?: string }
+export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
+export type HistoryNotification = IdleNotification & { questionId?: string } &
+  ({ status: "needs-you" | "history" } | { status: "unavailable"; error: string });
+export interface NotificationHistory { notifications: HistoryNotification[]; before: number | null }
+export type QuestionsResource =
+  | { state: "loading"; questions: ThreadQuestion[] }
+  | { state: "ready"; questions: ThreadQuestion[] }
+  | { state: "failed"; questions: ThreadQuestion[]; error: string };
 
 export interface QueuedMessage {
   id: string;
   text: string;
-  delivery: string;
+  delivery: ThreadDelivery;
   /** Where the message is: waiting for its turn, or taken by the runtime and
    * not yet in the agent's context. The client words it. */
   state: "queued" | "dispatched";
+  acknowledgement?: "pending" | "unconfirmed";
   canSteer: boolean;
   canHardSteer: boolean;
   canCancel: boolean;
@@ -56,14 +65,29 @@ export function isThreadColor(value: unknown): value is ThreadColor {
   return THREAD_COLORS.some(color => color === value);
 }
 
+export interface ContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
 export interface Session {
   id: string;
+  agentName?: string;
+  dependencies?: string[];
   parentId: string | null;
   hasChildren: boolean;
   origin: "person" | "fleet";
   /** Scheduled watch checks belong in Workers without changing their owning supervisor. */
   watchList?: boolean;
+  /** Explicitly promoted background threads also belong in Chats. */
+  foreground?: boolean;
+  attentionSummary?: string;
+  /** Agent-authored sentence describing the task's intended outcome; absent until provided. */
+  taskDescription?: string;
   model: string;
+  /** Native Pi context estimate, not cumulative billed tokens. Null after compaction until fresh usage arrives. */
+  contextUsage?: ContextUsage;
   name: string;
   color?: ThreadColor | null;
   cwd: string;
@@ -73,11 +97,19 @@ export interface Session {
   /** Halted with cancellation confirmed, holding its pending messages. */
   held: boolean;
   activity: Activity;
+  activitySince?: number;
+  lastActivityAt?: number;
+  activityDetail?: string;
+  waitingOnAgents?: AgentWait;
+  wakeSchedule?: ThreadWakeSchedule;
+  executionError?: string;
   /** Every tool running right now, in the order they started. */
   activeTools: string[];
   provider: string;
   createdAt: string;
   updatedAt: string;
+  /** Latest accepted person input; absent before any person input. */
+  lastUserMessageAt?: string;
   revision: number;
   idleUnread: boolean;
   /** Full rows only for the stream's subscribed session; other rows carry an empty list. */
@@ -166,6 +198,16 @@ export interface ThreadStartModel {
   accent?: string;
 }
 
+export type ModelAvailability = ThreadStartModel & { enabled: boolean };
+
+export interface SetModelAvailabilityRequest {
+  enabled: boolean;
+}
+
+export interface SetModelAvailabilityResponse {
+  models: ModelAvailability[];
+}
+
 /** A Markdown file the destination offers as optional thread context, with its measured size. */
 export interface ThreadStartContext {
   /** Selection identity: folder basename or an absolute instruction-file path. */
@@ -196,6 +238,7 @@ export interface AgentModelCount {
 /** Facts every client needs once: where new threads can start and the
  * person's home. Sent with `hello` and again only when they change. */
 export interface Bootstrap {
+  rooms?: true;
   environmentId: string;
   home: string;
   threadStarts: ThreadStart[];
@@ -279,6 +322,10 @@ export interface Dashboard {
   plans: PlanCard[];
   governors: GovernorControls | null;
   actions: MachineActionState[];
+  /** Host-global availability for everyone's new threads; existing threads are unaffected. */
+  modelAvailability?: ModelAvailability[];
+  /** Only the host's administrator may change model availability. */
+  canManageModels?: boolean;
   machine: MachineUsage | null;
   modelCounts: AgentModelCount[];
   /** Null for everyone except the host's administrator. */
@@ -300,6 +347,9 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
+  effectiveModel?: string | null;
+  waiting?: "provider" | "admission" | "retry" | null;
+  canRetryWaiting?: boolean;
   models: Array<{ id: string; name?: string; provider: string; common?: boolean; thinkingLevels?: string[]; speedModes: string[] }>;
   model: { id: string; provider: string } | null;
   thinkingLevels: string[];
@@ -364,6 +414,7 @@ interface TranscriptItemBase {
 
 /** Text that is always inline: the person's and the agent's visible words. */
 export interface InlineTextItem extends TranscriptItemBase {
+  agentSender?: { threadId: string; name?: string };
   identity?: import("./message-protocol.js").MessageIdentity;
   reactions?: import("./message-protocol.js").MessageReaction[];
   reply?: import("./message-protocol.js").MessageReply;
@@ -396,8 +447,9 @@ export interface ToolCallItem extends TranscriptItemBase {
   name: string;
   /** What names the step: strings cut at 120 characters, arrays at five entries, and
    * fields that are bodies rather than names (a written file's `content`, an edit's
-   * `edits` replaced by `editCount`, a delegated `message`) left out.
-   * `argumentsTruncated` says the body has more. */
+   * `edits` replaced by `editCount`, other tools' delegated `message`) left out.
+   * `thread_send` and `thread_spawn` keep their full `message`: it is rendered as an
+   * agent-to-agent message bubble. `argumentsTruncated` says the body has more. */
   arguments: unknown;
   argumentsTruncated: boolean;
   /** Trailing output of a still-running tool, at most 4,000 characters. */
@@ -425,18 +477,16 @@ export interface TranscriptPage {
 // ---------------------------------------------------------------------------
 // The stream
 //
-// `POST /v1/stream` with a StreamSubscription body answers with
-// `text/event-stream`. The first event is `hello`. `POST /v1/stream/:streamId`
-// with a partial StreamSubscription changes what the stream carries; the
-// server answers 204 and pushes whatever the change now requires. Every event
-// is JSON; `event:` names the StreamEvent variant. The server writes a comment
-// line at least every 15 seconds so proxies and the client can detect a dead
-// connection.
+// `POST /v1/reconcile` returns finite {events: StreamWireEvent[]} from the
+// client's retained revisions, without a prior connection or stream identity.
+// `POST /v1/stream` adds disposable text/event-stream push. Both begin with
+// hello and share resource declarations and selected-owner acknowledgement.
+// Push comments every ten seconds carry liveness, never canonical state.
 
 export interface StreamSubscription {
   /** Thread whose transcript, live output and images this stream carries. */
   session?: string | null;
-  /** Client identity for this opening; changes on selection and reconnection. */
+  /** Client identity for this reconciliation generation, also used by its push attachment. */
   selectionId?: string;
   /** True only while the person can see that conversation. */
   viewing?: boolean;
@@ -470,7 +520,7 @@ export type StreamSnapshot =
   | ({ type: "transcript" } & TranscriptPage)
   | { type: "live"; sessionId: string; text: string; thinking?: string }
   | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot }
-  | { type: "questions"; sessionId: string; questions: ThreadQuestion[] };
+  | ({ type: "questions"; sessionId: string } & QuestionsResource);
 
 export type StreamEvent =
   | { type: "hello"; epoch: string; streamId: string; bootstrap: Bootstrap }

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == --help ]]; then
+  echo 'usage: deploy/capacity-bootstrap-submit /absolute/TEMPLATE.json IMMUTABLE_COMMIT'
+  echo 'Installs and submits a durable first-cutover job; does not wait for rollout.'
+  exit 0
+fi
+[[ $# == 2 && $1 =~ ^/[a-zA-Z0-9_./-]+$ && $2 =~ ^[a-f0-9]{40}$ ]] || { echo 'absolute template path and full immutable commit required' >&2; exit 64; }
+root=$(cd "$(dirname "$0")/.." && pwd)
+[[ $(git -C "$root" rev-parse HEAD) == "$2" ]] || { echo 'submit from the immutable candidate checkout, not a future publication integration' >&2; exit 65; }
+git -C "$root" ls-files --error-unmatch deploy/capacity-bootstrap-candidate.mjs deploy/capacity-bootstrap-receipt.mjs >/dev/null
+git -C "$root" diff --quiet "$2" -- deploy/capacity-bootstrap-candidate.mjs deploy/capacity-bootstrap-receipt.mjs || { echo 'durable job sources differ from the immutable candidate' >&2; exit 65; }
+sudo -n test -r "$1"
+unit=pi-agent-capacity-bootstrap-${2:0:16}.service
+job=/var/lib/pi-stack/agent-capacity/bootstrap/jobs/$2
+state=$(sudo -n systemctl show "$unit" -p ActiveState --value 2>/dev/null || true)
+if [[ $state != active && $state != activating ]]; then
+  sudo -n install -d -m 700 "$job"
+  sudo -n install -m 644 "$root/deploy/capacity-bootstrap-candidate.mjs" "$job/candidate.mjs"
+  sudo -n install -m 644 "$root/deploy/capacity-bootstrap-receipt.mjs" "$job/receipt.mjs"
+  temporary=$(mktemp)
+  trap 'rm -f "$temporary"' EXIT
+  printf '[Unit]\nDescription=Pi Stack first global-capacity cutover %s\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nTimeoutStartSec=30min\nExecStart=/usr/local/bin/node %s/candidate.mjs %s %s\nExecStopPost=/usr/local/bin/node %s/receipt.mjs %s %s\nStandardOutput=append:%s/job.log\nStandardError=append:%s/job.log\n' "$2" "$job" "$1" "$2" "$job" "$job" "$2" "$job" "$job" > "$temporary"
+  sudo -n install -m 644 "$temporary" "/etc/systemd/system/$unit"
+  sudo -n systemctl daemon-reload
+  if [[ $state == failed ]]; then sudo -n systemctl reset-failed "$unit"; fi
+  sudo -n systemctl start --no-block "$unit"
+fi
+printf '{"unit":"%s","candidateCommit":"%s","log":"%s/job.log","receipts":"%s"}\n' "$unit" "$2" "$job" "$job"

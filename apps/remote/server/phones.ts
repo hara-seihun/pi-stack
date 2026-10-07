@@ -1,8 +1,9 @@
 import { API } from "./api";
+import { actionJournal, journalWarning, type ActionTicket, type ActionJournal } from "kenan-memory/journal";
 import { OVERLAY_MAX_MESSAGE, PHONE_MAX_FRAME_BYTES, phoneCatalogue, validatePhoneCommand } from "./phone-commands";
 
 export type PhoneDevice = { id: string; name: string; model: string; android: string; capabilities: Record<string, unknown> };
-export type PhoneResult = { type: "result"; id: string; ok: true; result: unknown } | { type: "result"; id: string; ok: false; error: { code: string; message: string } };
+export type PhoneResult = ({ type: "result"; id: string; ok: true; result: unknown } | { type: "result"; id: string; ok: false; error: { code: string; message: string } }) & { journalWarning?: string };
 export type PhoneTransport = { send(frame: string): number | void; close(code: number, reason: string): void };
 type Pending = { settle(result: PhoneResult): void; timer: ReturnType<typeof setTimeout>; abort?: () => void };
 export type PhoneConnection = { transport: PhoneTransport; device?: PhoneDevice; pending: Map<string, Pending>; closed: boolean; helloTimer?: ReturnType<typeof setTimeout> };
@@ -11,7 +12,7 @@ type Registered = { device: PhoneDevice; lastSeen: number; connection?: PhoneCon
 /** A person typed to Kenan in the phone overlay. */
 export type OverlayMessage = { id: string; text: string; context: { package: string | null; label: string | null } };
 export type OverlayAck = { ok: true; threadId: string } | { ok: false; error: { code: string; message: string } };
-export type PhoneHooks = { overlayMessage?(device: PhoneDevice, message: OverlayMessage): Promise<OverlayAck>; ready?(device: PhoneDevice): void };
+export type PhoneHooks = { overlayMessage?(device: PhoneDevice, message: OverlayMessage): Promise<OverlayAck>; ready?(device: PhoneDevice): void; journal?: Pick<ActionJournal, "begin" | "finish"> };
 const failure = (id: string, code: string, message: string): PhoneResult => ({ type: "result", id, ok: false, error: { code, message } });
 const object = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
 
@@ -58,6 +59,14 @@ export class PhoneBroker {
       try { if (connection.transport.send(JSON.stringify({ type: "ready" })) === 0) this.close(connection, 1011, "Phone send failed"); }
       catch { this.close(connection, 1011, "Phone send failed"); }
       if (!connection.closed) this.hooks.ready?.(connection.device);
+      return;
+    }
+    if (connection.device && frame.type === "heartbeat") {
+      const registered = this.devices.get(connection.device.id);
+      if (registered?.connection !== connection) { this.close(connection, 1008, "Phone connection replaced"); return; }
+      registered.lastSeen = Date.now();
+      try { if (connection.transport.send(JSON.stringify({ type: "ready" })) === 0) this.close(connection, 1011, "Phone send failed"); }
+      catch { this.close(connection, 1011, "Phone send failed"); }
       return;
     }
     if (connection.device && frame.type === "overlay.message") { this.overlayMessage(connection, connection.device, frame); return; }
@@ -112,6 +121,11 @@ export class PhoneBroker {
     if (signal?.aborted) return failure(id, "cancelled", "Caller disconnected before dispatch");
     if (connection.pending.size >= 32) return failure(id, "busy", "Phone already has 32 commands in flight; command was not dispatched");
     const { command, args, timeoutMs } = parsed;
+    let ticket: ActionTicket | null = null;
+    if (["sms.send", "call.dial", "calendar.insert", "notifications.reply"].includes(command)) {
+      try { ticket = (this.hooks.journal ?? actionJournal).begin({ action: `phone.${command}`, recipients: [String(args.to ?? args.number ?? args.calendarId ?? deviceId)], summary: String(args.text ?? args.title ?? "Requested telephone dialing; not confirmation of a connected call") }); }
+      catch (cause) { return failure(id, "journal_unavailable", `Not dispatched: ${String(cause)}`); }
+    }
     return new Promise(resolve => {
       const settle = (result: PhoneResult) => {
         const pending = connection.pending.get(id);
@@ -119,7 +133,8 @@ export class PhoneBroker {
         connection.pending.delete(id);
         clearTimeout(pending.timer);
         if (pending.abort) signal?.removeEventListener("abort", pending.abort);
-        resolve(result);
+        const warning = journalWarning((this.hooks.journal ?? actionJournal).finish(ticket, result.ok ? "confirmed" : result.error.code === "unconfirmed" ? "unconfirmed" : "failed", result.ok ? `${command} accepted by Android; not proof of carrier delivery or connected call` : result.error.message));
+        resolve(warning ? { ...result, journalWarning: warning } : result);
       };
       const pending: Pending = { settle, timer: setTimeout(() => settle(failure(id, "unconfirmed", "Phone did not confirm before the deadline; execution may have happened. Nothing was retried.")), timeoutMs) };
       if (signal) { pending.abort = () => settle(failure(id, "unconfirmed", "Caller disconnected after dispatch; execution may have happened. Nothing was retried.")); signal.addEventListener("abort", pending.abort, { once: true }); }

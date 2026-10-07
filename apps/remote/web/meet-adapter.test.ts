@@ -7,7 +7,7 @@ const participant = { id: "host", name: "Mixed meeting audio", host: true };
 const joined: MeetJoined = {
   participant,
   room: { id: "room", sessionId: "thread", apiUrl: "/v1/meet/room", iceServers: [], participants: [participant],
-    browser: null, threads: [], voiceMuted: true, voiceRevision: 0, transcriptFlushRevision: 3 },
+    browser: null, threads: [], voiceMuted: true, voiceRevision: 0, voiceWake: null, platformTranscript: false, transcriptFlushRevision: 3 },
 };
 
 test("injected room transport preserves bytes and serves polling without person/native globals", async () => {

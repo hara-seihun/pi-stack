@@ -5,10 +5,15 @@ export async function updateThreadSettings(owner: Pick<ThreadApi, "control">, th
   const invalid = (message: string): Result<Thread> => ({ ok: false, error: { code: "invalid_request", message } });
   if (!body || typeof body !== "object" || Array.isArray(body)) return invalid("Expected thread settings object");
   const input = body as Record<string, unknown>;
-  if (Object.keys(input).some(key => !["modelProvider", "modelId", "thinkingLevel", "speedMode", "bashTimeoutSeconds"].includes(key))) return invalid("Unknown thread setting");
+  if (Object.keys(input).some(key => !["modelProvider", "modelId", "thinkingLevel", "speedMode", "bashTimeoutSeconds", "retryWaiting"].includes(key))) return invalid("Unknown thread setting");
   if ((input.modelId != null || input.modelProvider != null)
     && (typeof input.modelId !== "string" || !input.modelId || typeof input.modelProvider !== "string" || !input.modelProvider)) return invalid("Model provider and ID are required together");
   if (input.bashTimeoutSeconds != null && !(BASH_TIMEOUT_OPTIONS as readonly unknown[]).includes(input.bashTimeoutSeconds)) return invalid("Invalid bash timeout");
+  if (input.retryWaiting !== undefined && input.retryWaiting !== 1) return invalid("Invalid waiting retry");
+  if (input.retryWaiting === 1) {
+    if (Object.keys(input).length !== 1) return invalid("Save settings before retrying waiting work");
+    return owner.control({ threadId: thread.id, action: "retryWaiting" });
+  }
   const settings: SettingsOverrides = {};
   if (input.modelId != null) settings.model = `${input.modelProvider}/${input.modelId}`;
   if (input.thinkingLevel != null) settings.thinkingLevel = input.thinkingLevel as SettingsOverrides["thinkingLevel"];

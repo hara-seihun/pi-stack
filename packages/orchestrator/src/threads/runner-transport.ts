@@ -8,7 +8,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { AttachPiSession, OpenPiSession, PiCommand, PiEvent, PiRunnerReference, PiSession, PiSessionOptions } from "./contracts.js";
 import { underMemoryPressure } from "./runner-memory.js";
+import { RunnerStartupError } from "./runner-startup.js";
 import { isolatePiEnvironment } from "./pi-environment.js";
+import { prepareRunnerSlices, managerCommand, RUNNER_MEMORY, RUNNER_HEAP_MB } from "./runner-resources.js";
+import { assertNever, requireRuntimeEvent } from "./runtime-events.js";
+import { requireRunnerFrame, type RunnerFrame } from "./runner-protocol.js";
 
 interface Connection { send(command: PiCommand): void; detach(): void }
 const starts = new Map<string, Promise<void>>();
@@ -27,7 +31,7 @@ function runnerRequest(path: string, value: unknown, timeout = 5000): Promise<an
       const end = input.indexOf("\n");
       if (end < 0) return;
       clearTimeout(timer); socket.end();
-      try { const response = JSON.parse(input.slice(0, end)); response.error ? reject(new Error(response.error)) : resolve(response); }
+      try { const response = JSON.parse(input.slice(0, end)); response.error ? reject(response.nativeNotReady === true ? new RunnerStartupError(response.error) : new Error(response.error)) : resolve(response); }
       catch (error) { reject(error); }
     });
     socket.on("error", error => { clearTimeout(timer); reject(error); });
@@ -62,6 +66,26 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
       const timer = setTimeout(() => current.destroy(new Error("Thread runner attach timed out")), 5000);
       current.setNoDelay(true);
       current.on("connect", () => current.write(`${JSON.stringify({ type: "attach", after: sequence })}\n`));
+      function acceptFrame(value: RunnerFrame): void {
+        switch (value.type) {
+          case "attached":
+            attached = true; connected = true; clearTimeout(timer);
+            for (const line of unsent.splice(0)) current.write(line);
+            resolve(connection); return;
+          case "output": {
+            const next = value.sequence;
+            if (next <= sequence) return;
+            const event = requireRuntimeEvent(JSON.parse(value.line));
+            if (value.at !== undefined && event.emittedAt === undefined) event.emittedAt = value.at;
+            output(event);
+            sequence = next;
+            current.write(`${JSON.stringify({ type: "ack", sequence })}\n`);
+            return;
+          }
+          case "exit": finish(value.code); return;
+        }
+        assertNever(value);
+      }
       current.on("data", chunk => {
         if (current !== socket) return;
         const text = decoder.write(chunk);
@@ -77,21 +101,16 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
           if (current !== socket || current.destroyed) return;
           if (!line) continue;
           try {
-            const value = JSON.parse(line);
-            if (value.type === "attached") {
-              attached = true; connected = true; clearTimeout(timer);
-              for (const line of unsent.splice(0)) current.write(line);
-              resolve(connection);
-            } else if (value.type === "output") {
-              const next = Number(value.sequence);
-              if (!Number.isSafeInteger(next) || next <= sequence) continue;
-              const event = JSON.parse(value.line);
-              if (typeof value.at === "number" && event && typeof event === "object" && event.emittedAt === undefined) event.emittedAt = value.at;
-              output(event);
-              sequence = next;
-              current.write(`${JSON.stringify({ type: "ack", sequence })}\n`);
-            } else if (value.type === "exit") finish(Number(value.code));
-          } catch (error) { current.destroy(error instanceof Error ? error : new Error(String(error))); }
+            acceptFrame(requireRunnerFrame(JSON.parse(line)));
+          } catch (error) {
+            const failure = error instanceof Error ? error : new Error(String(error));
+            if (!attached) { ended = true; clearTimeout(timer); reject(failure); }
+            else {
+              try { output({ type: "thread_error", error: `Runner protocol failure: ${failure.message}` }); }
+              finally { finish(1); current.destroy(failure); }
+            }
+            current.destroy(failure);
+          }
         }
       });
       current.on("end", () => current.destroy());
@@ -130,13 +149,13 @@ function boundary(options: PiSessionOptions) {
   const isolation = options.args.includes("--orchestrator-context") ? `isolated:${options.cwd}` : "normal";
   return hash(JSON.stringify([import.meta.url, process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", options.env.PI_MODEL_BROKER_URL ?? "direct", isolation]));
 }
-async function ensureRunner(control: string, options: PiSessionOptions, durable: boolean): Promise<void> {
+async function ensureRunner(control: string, options: PiSessionOptions, durable: boolean, currentGeneration = true): Promise<void> {
   if (existsSync(control)) {
-    try { await runnerRequest(control, { type: "status" }); return; }
+    try { await runnerRequest(control, { type: currentGeneration ? "retain" : "status" }); return; }
     catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
   }
   if (underMemoryPressure()) throw new Error("Runner capacity busy: memory pressure");
-  const env = { ...process.env, ...options.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_RUNNER_RESIDENT: !currentGeneration || options.args.includes("--orchestrator-context") ? "0" : "1" };
   const broker = !!options.env.PI_MODEL_BROKER_URL;
   const brokerSecrets = ["PI_ORCHESTRATOR_AUTH", "PI_ORCHESTRATOR_OWNER_UID", "PI_ORCHESTRATOR_OWNER_GID", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
   if (broker) for (const key of brokerSecrets) delete env[key];
@@ -144,20 +163,26 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
     isolatePiEnvironment(options.cwd, env);
     mkdirSync(env.HOME!, { recursive: true, mode: 0o700 });
   }
-  for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_THREAD_ID|PI_THREAD_TOKEN|PI_THREAD_REQUIRE_SESSION|PI_THREAD_CAN_SPAWN|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE|PI_ORCHESTRATOR_RUN_ID|PI_SESSION_FILE)$/.test(key)) delete env[key];
+  for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_THREAD_ID|PI_THREAD_TOKEN|PI_THREAD_REQUIRE_SESSION|PI_THREAD_CAN_SPAWN|PI_THREAD_SPEED|PI_THREAD_MODE|PI_THREAD_LIVE_DISPATCHER|PI_THREAD_USAGE|PI_THREAD_ADMISSION|PI_THREAD_SESSION_KEY|PI_THREAD_RECOVERING|PI_THREAD_RUNNER_REFERENCE|PI_ORCHESTRATOR_ACCOUNT_ID|PI_ORCHESTRATOR_PROVIDER|PI_ORCHESTRATOR_ASSIGNED|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE|PI_ORCHESTRATOR_RUN_ID|PI_SESSION_FILE)$/.test(key)) delete env[key];
   const entry = runnerHostEntry();
   if (!existsSync(entry)) throw new Error(`Compiled thread runner is missing: ${entry}; build pi-orchestrator before starting threads`);
   const root = options.env.PI_ORCHESTRATOR_EXECUTION === "root-repair";
   if (root && broker) throw new Error("Root repair cannot use a model-broker execution boundary");
   if (root && (!durable || options.args.includes("--orchestrator-context"))) throw new Error("Root repair requires the fleet execution boundary without isolated context");
   if (root) { env.PI_ORCHESTRATOR_OWNER_UID = String(process.getuid!()); env.PI_ORCHESTRATOR_OWNER_GID = String(process.getgid!()); }
-  const command = [executable("flock", env.PATH), "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, executable("node", env.PATH), "--max-old-space-size=8192", entry, control];
+  delete env.PI_THREAD_RESOURCE_BOUNDARY;
+  const resourceId = hash(control);
+  const command = [executable("flock", env.PATH), "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, executable("node", env.PATH), `--max-old-space-size=${durable ? RUNNER_HEAP_MB : 8192}`, "--expose-gc", entry, control];
   if (durable) {
     if (!root) Object.assign(env, userManagerEnvironment(process.getuid!()));
+    env.PI_THREAD_RESOURCE_BOUNDARY = resourceId;
+    const slices = await prepareRunnerSlices(resourceId, env, !root);
     const validKey = (key: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
     const unset = [...new Set([...Object.keys(process.env).filter(key => validKey(key) && !(key in env)), ...(broker ? brokerSecrets : [])])];
     command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--collect", "--quiet", "--wait", "--service-type=exec",
-      "--property=KillMode=control-group", `--working-directory=${env.HOME}`,
+      "--property=KillMode=control-group", "--property=OOMPolicy=continue", `--slice=${slices.boundary}`,
+      `--property=MemoryHigh=${RUNNER_MEMORY}`, `--property=MemoryMax=${RUNNER_MEMORY}`, "--property=MemorySwapMax=256M",
+      `--working-directory=${env.HOME}`,
       ...Object.keys(env).filter(key => validKey(key) && env[key] !== undefined).map(key => `--setenv=${key}`),
       ...(unset.length ? [`--property=UnsetEnvironment=${unset.join(" ")}`] : []),
       `--unit=pi-thread-runner-${hash(control)}`);
@@ -174,7 +199,12 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
     if (launchError) throw launchError;
     if (host.exitCode !== null && host.exitCode !== 75) throw new Error(`Thread runner exited ${host.exitCode}`);
     if (existsSync(control)) {
-      try { await runnerRequest(control, { type: "status" }); return; }
+      try {
+        await runnerRequest(control, { type: "status" });
+        if (durable) await managerCommand(["set-property", "--runtime", `pi-thread-runner-${resourceId}.service`,
+          `MemoryHigh=${RUNNER_MEMORY}`, `MemoryMax=${RUNNER_MEMORY}`, "MemorySwapMax=256M"], env, !root);
+        return;
+      }
       catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
     }
     await delay(25);
@@ -192,21 +222,23 @@ export function runnerSocketDirectory(dataDir: string, uid = process.getuid!()):
 export function createSharedPiSessionOpener({ dataDir, durable = false }: { dataDir: string; durable?: boolean }): { openSession: OpenPiSession; attachSession: AttachPiSession; detach(): void } {
   const socketDir = runnerSocketDirectory(dataDir);
   const connections = new Set<Connection>();
+  const controls = new Map<string, boolean>();
   function validate(reference: PiRunnerReference): PiRunnerReference {
     if (!reference || typeof reference.control !== "string" || typeof reference.socketPath !== "string") throw new Error("Invalid recorded runner reference");
     const control = resolve(reference.control), socketPath = resolve(reference.socketPath);
     if (dirname(control) !== join(socketDir, "thread-runners") || dirname(socketPath) !== join(socketDir, "thread-sockets")) throw new Error("Recorded runner is outside this execution boundary");
     return { control, socketPath };
   }
-  async function attach({ control, socketPath }: PiRunnerReference, output: (event: PiEvent) => void, exit: (code: number) => void): Promise<PiSession> {
+  async function attach({ control, socketPath }: PiRunnerReference, output: (event: PiEvent) => void, exit: (code: number) => void, residency = true): Promise<PiSession> {
     let connection: Connection | undefined;
     connection = await connect(socketPath, output, code => { if (connection) connections.delete(connection); exit(code); });
     const attached = connection;
-    connections.add(attached);
+    connections.add(attached); controls.set(control, residency);
     try { output({ type: "runner_attached", control, socketPath }); }
     catch (error) { attached.detach(); connections.delete(attached); throw error; }
     return {
       command: async command => { attached.send(command); },
+      setActive: async active => { if (residency) await runnerRequest(control, { type: "activity", socketPath, active }); },
       close: async () => {
         await runnerRequest(control, { type: "close", socketPath }, 35_000);
         attached.detach(); connections.delete(attached);
@@ -216,30 +248,61 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
   const attachSession: AttachPiSession = async (reference, output, exit) => {
     if (reference === undefined) return null;
     const recorded = validate(reference);
-    try {
-      const status = await runnerRequest(recorded.control, { type: "status" });
-      if (status?.ok !== true) throw new Error("Thread runner did not acknowledge status");
-      return await attach(recorded, output, exit);
-    } catch (error) { if (socketAbsent(error)) return null; throw error; }
+    let status: any;
+    try { status = await runnerRequest(recorded.control, { type: "status" }); }
+    catch (error) { if (socketAbsent(error)) return null; throw error; }
+    if (status?.ok !== true) throw new Error("Thread runner did not acknowledge status");
+    try { return await attach(recorded, output, exit, typeof status.activeSessions === "number"); }
+    catch (error) {
+      if (!socketAbsent(error)) throw error;
+      // Fence an earlier open whose acknowledgement was lost. Native close shares its serial queue.
+      try { await runnerRequest(recorded.control, { type: "close", socketPath: recorded.socketPath }, 35_000); }
+      catch (closing) { if (!socketAbsent(closing)) throw closing; }
+      return null;
+    }
   };
   const openSession: OpenPiSession = async (options, output, exit) => {
-    const retained = options.env.PI_THREAD_RUNNER_REFERENCE ? validate(JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE)) : undefined;
+    let retained = options.env.PI_THREAD_RUNNER_REFERENCE ? validate(JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE)) : undefined;
     const group = boundary(options);
-    const control = retained?.control ?? join(socketDir, "thread-runners", `${group}.sock`);
+    const currentControl = join(socketDir, "thread-runners", `${group}.sock`);
+    if (retained && retained.control !== currentControl) {
+      let status: any;
+      try { status = await runnerRequest(retained.control, { type: "status" }); }
+      catch (error) { if (!socketAbsent(error)) throw error; }
+      const recoveringLive = options.env.PI_THREAD_RECOVERING === "1" && status?.threadIds?.includes(options.threadId);
+      // Request drain before closing the last idle resident: its close can remove the control socket.
+      // Recovery keeps accepted sessions, not obsolete empty generations, even after a controller crash.
+      if (typeof status?.activeSessions === "number") {
+        try { await runnerRequest(retained.control, { type: "drain" }); }
+        catch (error) { if (!socketAbsent(error)) throw error; }
+      }
+      if (!recoveringLive && status && status.sessions !== 0) {
+        try { await runnerRequest(retained.control, { type: "close", socketPath: retained.socketPath }, 35_000); }
+        catch (error) { if (!socketAbsent(error)) throw error; }
+      }
+      if (!recoveringLive) retained = undefined;
+    }
+    const control = retained?.control ?? currentControl;
     const socketPath = retained?.socketPath ?? join(socketDir, "thread-sockets", `${group}.${hash(options.threadId)}.sock`);
     const reference = validate({ control, socketPath });
+    output({ type: "runner_attached", control, socketPath });
     mkdirSync(dirname(control), { recursive: true, mode: 0o700 });
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     let starting = starts.get(control);
     if (!starting) {
-      starting = ensureRunner(control, options, durable).finally(() => starts.delete(control));
+      starting = ensureRunner(control, options, durable, control === currentControl).finally(() => starts.delete(control));
       starts.set(control, starting);
     }
     await starting;
     const { threads: _threads, ...serializable } = options;
     if (!options.env.PI_THREAD_API_URL) throw new Error("Shared Pi sessions require their owning PI_THREAD_API_URL");
-    await runnerRequest(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } });
-    return attach(reference, output, exit);
+    await runnerRequest(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } }, 35_000);
+    const status = retained ? await runnerRequest(control, { type: "status" }) : undefined;
+    return attach(reference, output, exit, !status || typeof status.activeSessions === "number");
   };
-  return { openSession, attachSession, detach() { for (const connection of connections) connection.detach(); connections.clear(); } };
+  return { openSession, attachSession, detach() {
+    for (const connection of connections) connection.detach(); connections.clear();
+    for (const [control, residency] of controls) if (residency) void runnerRequest(control, { type: "drain" }).catch(error => { if (!socketAbsent(error) && (error as NodeJS.ErrnoException).code !== "EPIPE") console.error("Runner generation drain failed:", error); });
+    controls.clear();
+  } };
 }

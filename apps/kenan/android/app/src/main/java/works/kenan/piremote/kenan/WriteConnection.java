@@ -22,11 +22,12 @@ final class WriteConnection {
         void connected();
         void partial(String text);
         void finished(String text);
+        default void notice(String message) { }
         void failed(String message);
     }
 
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
-        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false)
         .addInterceptor(RouterConnection.interceptor()).build();
     private final Context context;
@@ -41,6 +42,7 @@ final class WriteConnection {
     private WebSocket socket;
     private boolean started;
     private boolean closed;
+    private boolean finishing;
     private boolean terminal;
 
     WriteConnection(Context context, RemoteSession.Identity identity, Events events) {
@@ -104,16 +106,30 @@ final class WriteConnection {
                             if (!valid(webSocket)) { cancel(); return; }
                             try {
                                 JSONObject event = new JSONObject(message);
-                                switch (event.getString("type")) {
-                                    case "partial" -> events.partial(event.optString("committed") + event.optString("tail"));
-                                    case "final" -> {
-                                        String text = event.getString("text");
-                                        if (terminate(true)) events.finished(text);
+                                NativeState.WriteEvent type = NativeState.require(NativeState.WriteEvent.class, event.getString("type"));
+                                boolean handled = switch (type) {
+                                    case PARTIAL -> {
+                                        events.partial(event.getString("committed") + event.getString("tail"));
+                                        yield true;
                                     }
-                                    case "error" -> fail(event.optString("message", "Recognition failed"));
-                                    default -> { }
-                                }
-                            } catch (JSONException error) { fail("Invalid dictation response"); }
+                                    case FINAL -> {
+                                        String text = event.getString("text");
+                                        Object rewrite = event.opt("rewrite");
+                                        if (rewrite != null && rewrite != JSONObject.NULL && !(rewrite instanceof JSONObject))
+                                            throw new JSONException("Rewrite metadata must be an object or null");
+                                        String notice = rewriteNotice(rewrite instanceof JSONObject ? (JSONObject) rewrite : null);
+                                        if (terminate(true)) {
+                                            if (notice != null) events.notice(notice);
+                                            events.finished(text);
+                                        }
+                                        yield true;
+                                    }
+                                    case ERROR -> {
+                                        fail(event.optString("message", "Recognition failed"));
+                                        yield true;
+                                    }
+                                };
+                            } catch (JSONException | IllegalArgumentException error) { fail("Invalid dictation response: " + error.getMessage()); }
                         }
                         @Override public void onFailure(WebSocket webSocket, Throwable error, Response response) {
                             try {
@@ -137,6 +153,18 @@ final class WriteConnection {
         }, "write-connect").start();
     }
 
+    static String rewriteNotice(JSONObject rewrite) throws JSONException {
+        if (rewrite == null) return null;
+        return switch (NativeState.require(NativeState.RewriteStatus.class, rewrite.getString("status"))) {
+            case APPLIED, UNCHANGED -> null;
+            case GUARDED -> "Kept the original wording to avoid changing its meaning.";
+            case UNAVAILABLE -> switch (NativeState.require(NativeState.UnavailableRewrite.class, rewrite.getString("reason"))) {
+                case WARMING -> "Local rewrite is warming up; inserted the transcript.";
+                case WARMUP_FAILED, QUEUE_BUSY, RUNTIME_CLOSED, INFERENCE_FAILED -> "Local rewrite unavailable; inserted the transcript.";
+            };
+        };
+    }
+
     private synchronized boolean valid(WebSocket candidate) {
         return !closed && socket == candidate && current.getAsBoolean();
     }
@@ -153,14 +181,15 @@ final class WriteConnection {
     }
     synchronized boolean audio(byte[] packet) {
         if (!current.getAsBoolean()) { cancel(); return false; }
-        return !closed && socket != null && socket.queueSize() < 10_000
+        return !closed && !finishing && socket != null && socket.queueSize() < 10_000
             && socket.send(ByteString.of(packet));
     }
     synchronized long queueSize() { return socket == null ? 0 : socket.queueSize(); }
     synchronized boolean ended() { return terminal; }
     synchronized void finish() {
         if (!current.getAsBoolean()) { cancel(); return; }
-        if (socket == null || closed) return;
+        if (socket == null || closed || finishing) return;
+        finishing = true;
         if (!socket.send("{\"type\":\"finish\"}")) fail("Could not finish dictation");
     }
     void cancel() { terminate(false); }

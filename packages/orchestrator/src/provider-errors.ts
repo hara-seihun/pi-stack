@@ -7,6 +7,8 @@
  * ever going to clear — and each answer has exactly one implementation.
  */
 
+import { accountModelUnsupported } from "./auth/model-entitlement.js";
+
 /**
  * An assistant message the provider actually answered. Pi stamps `timestamp`
  * when it creates the message, before sending the request, so it orders the
@@ -40,6 +42,49 @@ const RATE_LIMIT_PATTERNS = [
 
 export function isRateLimitError(message: string): boolean {
   return RATE_LIMIT_PATTERNS.some((p) => p.test(message));
+}
+
+/**
+ * Failures that say nothing is wrong with the work itself: a compaction that could not reach its provider, or a
+ * transport that dropped. Accepted work waits these out and resumes instead of settling as failed. On 2026-10-03
+ * one "servers are currently overloaded" compaction response wedged the OV integrator for four hours.
+ */
+const COMPACTION_PATTERNS = [/Native compaction (?:failed|cancelled)/i, /^Auto-compaction failed:/, /Automatic compaction retries after/];
+
+/** A compaction fence holds the session until its own retry time, whatever capacity the account pool has. */
+export function isCompactionFailure(message: string): boolean {
+  return COMPACTION_PATTERNS.some((p) => p.test(message));
+}
+
+const TRANSIENT_PATTERNS = [
+  ...COMPACTION_PATTERNS,
+  /fetch failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|WebSocket closed/i,
+  /\b(?:50[0-4]|52\d)\b/,
+];
+
+/**
+ * Accepted work that one Codex account refused because its plan lacks the model is not broken either: admission
+ * now excludes that account/model pair, so the work waits zero time and re-admits on an entitled sibling. When every
+ * account refuses, admission fails with an actionable model-configuration error instead of waiting.
+ */
+export function isCodexModelUnsupportedError(message: string): boolean {
+  return accountModelUnsupported(message) !== undefined;
+}
+
+export function isTransientFailure(message: string): boolean {
+  return isRateLimitError(message) || isCodexModelUnsupportedError(message) || TRANSIENT_PATTERNS.some((p) => p.test(message));
+}
+
+/**
+ * When accepted work that failed with `message` should next run. A failure that names its own retry time is
+ * believed; otherwise the wait doubles with each consecutive failure and is capped, so it always runs again.
+ */
+export function transientRetryAt(message: string, attempts: number, now = Date.now()): number {
+  if (isCodexModelUnsupportedError(message)) return now;
+  const named = Date.parse(/retries after (\S+?Z)/.exec(message)?.[1] ?? "");
+  const backoff = Math.min(30_000 * 2 ** Math.max(0, attempts - 1), 30 * 60_000);
+  const floor = isRateLimitError(message) ? rateLimitCooldownMs(message) : 0;
+  return Math.max(Number.isFinite(named) ? named : 0, now + Math.max(backoff, floor));
 }
 
 /**
@@ -159,6 +204,8 @@ export function isPermanentError(message: string): boolean {
  * trip every task's circuit breaker. */
 const MODEL_CONFIGURATION_PATTERNS = [
   /unknown model|no such model|model not found|cannot alias/i,
+  // Account-scoped Codex entitlement refusal; see auth/model-entitlement.ts.
+  /model is not supported when using Codex with a ChatGPT account/i,
   /model.{0,200}(does not exist|retired|unavailable|testing period)/is,
   /\b404\b.{0,500}\bmodel\b|\bmodel\b.{0,500}\b404\b/is,
 ];

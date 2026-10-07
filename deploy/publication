@@ -21,11 +21,18 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { policy, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
+import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
 
 const config = loadPublicationConfig();
 const { repositoryUrl, canonicalRepository, stateRoot, installedCommand, userUnitRoot, targets, alertInbox } = config;
 const requestRoot = join(stateRoot, "requests");
 const logRoot = join(stateRoot, "logs");
+// Hara's explicit per-request authorization to restart through live meetings (ends them).
+const meetingOverrideRoot = join(stateRoot, "live-meeting-overrides");
+const meetingOverride = requestId => {
+  const path = join(meetingOverrideRoot, `${requestId}.json`);
+  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
+};
 const proofRoot = join(stateRoot, "proofs");
 const contractRoot = join(stateRoot, "contracts");
 const checkout = join(stateRoot, "repository");
@@ -42,6 +49,10 @@ let activeRequest;
 let activeLog;
 let trackingCommand = false;
 
+// A shared master may belong to a thread scope that exits during publication.
+const publicationSshOptions = ["-o", "ControlPath=none", "-o", "ControlMaster=no", "-o", "ControlPersist=no"];
+const publicationRsyncShell = ["ssh", ...publicationSshOptions, "-o", "BatchMode=yes"].join(" ");
+
 function usage() {
   process.stderr.write(`usage:
   deploy/publication install [--code-only]
@@ -55,11 +66,14 @@ function usage() {
   deploy/publication submit SHA --repair-of REQUEST
   deploy/publication report REQUEST [REMOTE_URL SESSION_ID]
   deploy/publication gate-status
+  deploy/publication allow-live-meetings REQUEST REASON
 
 The installed systemd user service also invokes the internal enqueue and drain commands.\n`);
 }
 
-function commandResult(command, args, options = {}) {
+export function commandResult(command, args, options = {}) {
+  if (command === "ssh") args = [...publicationSshOptions, ...args];
+  if (command === "rsync") args = ["-e", publicationRsyncShell, ...args];
   const timeoutSeconds = options.timeoutSeconds ?? 60;
   const tracked = activeRequest && !trackingCommand;
   if (tracked) {
@@ -215,7 +229,7 @@ function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -228,7 +242,7 @@ function installFrom(sourceRoot, activate = true) {
   for (const name of modules) atomicWrite(join(dirname(installedCommand), name), readFileSync(join(sourceRoot, "deploy", name)), 0o644);
   atomicWrite(installedCommand, readFileSync(commandSource), 0o750);
   if (!activate) return;
-  const replacements = { "@PUBLICATION_COMMAND@": installedCommand, "@PUBLICATION_WAKE@": join(stateRoot, "wake"), "@PUBLICATION_PATH@": `${join(homedir(), ".local/bin")}:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin` };
+  const replacements = { "@PUBLICATION_COMMAND@": installedCommand, "@PUBLICATION_WAKE@": join(stateRoot, "wake"), "@PUBLICATION_PATH@": `${join(homedir(), ".local/bin")}:/usr/local/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin` };
   for (const name of unitNames) {
     let unit = readFileSync(join(sourceRoot, "deploy/systemd", name), "utf8");
     for (const [token, value] of Object.entries(replacements)) unit = unit.replaceAll(token, value);
@@ -301,8 +315,9 @@ function submit(sourceArgument, repairedRequestId) {
     }
   }
   assertSourceRootsOnMain(sourceRoot, sourceSha);
-  const reporter = repaired?.reporter ?? requesterFromEnvironment();
-  if (reporter) remoteJson(reporter, "", "GET");
+  checkOwnerSource(sourceRoot, sourceSha);
+  const requester = repaired?.reporter ?? requesterFromEnvironment();
+  const reporter = requester ? validateReporter(requester) : null;
   const requestId = `PUB-${repaired ? createHash("sha256").update(`repair:${repairedRequestId}`).digest("hex").slice(0, 24) : randomUUID().replaceAll("-", "").slice(0, 24)}`;
   if (existsSync(requestPath(requestId))) {
     const existing = readRequest(requestId);
@@ -364,6 +379,7 @@ function enqueue(requestId, sourceSha, sourceRef, reporterJson, repairedRequestI
     attempt: 0,
     failures: [],
     reporter: reporterJson && JSON.parse(reporterJson) ? validateReporter(JSON.parse(reporterJson)) : null,
+    ...(publicationJournalEnabled() ? { actionPerson: process.env.PI_KENAN_PERSON ?? process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "kenan" } : {}),
     ...(repairedRequestId ? { repairOf: repairedRequestId, repairId: repairId(repairedRequestId),
       repairDepth: (readRequest(repairedRequestId).repairDepth ?? 0) + 1 } : {}),
   };
@@ -394,9 +410,19 @@ function retry(requestId) {
   checkCancellation(request);
   const repair = readRepair(requestId);
   if (request.repairedRetry?.repairId === repair?.id) return;
-  if (request.status !== "failed" || request.repairedRetry || repair?.outcome?.status !== "infrastructure-fixed")
+  if (repair?.explicitStop || repair?.failure?.at !== request.failure?.at || repair?.failure?.attempt !== request.failure?.attempt) throw new Error("Repair evidence is not bound to the latest failed attempt or was explicitly stopped");
+  if (request.status !== "failed" || repair?.outcome?.status !== "infrastructure-fixed")
     throw new Error("Retry requires the dedicated repair's infrastructure-fixed evidence and is allowed once");
-  request.repairedRetry = { repairId: repair.id, at: new Date().toISOString(), evidence: repair.outcome.evidence };
+  if (request.repairedRetry) request.repairedRetries = [...(request.repairedRetries ?? []), request.repairedRetry];
+  request.repairedRetry = { failureAt: request.failure.at, failedAttempt: request.failure.attempt, repairId: repair.id, at: new Date().toISOString(), evidence: repair.outcome.evidence };
+  if (repair.outcome.ownerSourceSha) {
+    request.ownerRepairSourceSha = repair.outcome.ownerSourceSha;
+    request.integrationHistory = [...(request.integrationHistory ?? []), { attempt: request.attempt, integrationSha: request.integrationSha, checks: request.checks, android: request.android }];
+    checked("git", ["-C", checkout, "update-ref", `refs/pi-stack-publication/${request.requestId}/before-owner-repair-attempt-${request.attempt}`, request.integrationSha]);
+    delete request.integrationSha; delete request.checks; delete request.android;
+  }
+  request.hostProofHistory = [...(request.hostProofHistory ?? []), { attempt: request.attempt, hosts: request.hosts }];
+  request.hosts = {}; // Both hosts must supply fresh proof for the repaired attempt.
   request.status = "queued";
   request.recoveryAttempts = 0;
   request.attemptLimit = request.attempt + 1;
@@ -526,6 +552,7 @@ function noticeBody(request) {
     `Request: ${request.requestId}`,
     `Source: ${request.sourceSha}`,
     request.integrationSha ? `Integration: ${request.integrationSha}` : undefined,
+    request.resolvedBy ? `Resolved by: ${request.resolvedBy}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
     request.repairOf ? `Repairs: ${request.repairOf} via ${request.repairId}` : undefined,
@@ -535,7 +562,7 @@ function noticeBody(request) {
     request.status === "failed" && request.failure?.reason !== request.failure?.message ? `Reason: ${compact(request.failure?.reason)}` : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
     `Log: ${request.status === "failed" ? request.failure?.log : request.status === "queued" ? request.waiting?.log : request.finalProof?.path}`,
-    request.failure?.command ? `Command: ${compact(request.failure.command)}` : undefined,
+    request.status === "failed" && request.failure?.command ? `Command: ${compact(request.failure.command)}` : undefined,
     request.status === "failed" && request.failure?.reason !== "cancelled" ? "The dedicated repair owner retains this failure. A source fix needs a new commit; an unchanged-source retry requires recorded infrastructure repair evidence." : undefined,
   ].filter(Boolean).join("\n");
 }
@@ -567,7 +594,7 @@ function remoteJson(reporter, suffix, method, body) {
   return JSON.parse(output);
 }
 
-function deliverReport(request, key) {
+function deliverReport(request, key, presentation = request) {
   if (!request.reporter) return;
   if (request.report?.key === key && request.report.status === "delivered") return;
   if (request.report?.key !== key) {
@@ -581,7 +608,7 @@ function deliverReport(request, key) {
       const accepted = remoteJson(request.reporter, "/prompt", "POST", {
         requestId: report.requestId,
         delivery: "steer",
-        text: `Publication owner report. Please tell the user this result; do not retry or submit a release without a repair.\n\n${noticeBody(request)}`,
+        text: `Publication owner report. Please tell the user this result; do not retry or submit a release without a repair.\n\n${noticeBody(presentation)}`,
       });
       if (!accepted.accepted || !accepted.workId) throw new Error("Remote did not acknowledge publication report custody");
       report.workId = accepted.workId;
@@ -611,10 +638,10 @@ function deliverReport(request, key) {
 }
 
 function noticeKey(request) {
-  const repair = readRepair(request.requestId);
   const state = request.status === "failed" ? `failed:${request.failure.at}`
     : request.status === "queued" && request.waiting ? `waiting:${request.blockedSince}` : request.status;
-  return state + (repair ? `:${repair.status}:${repair.successor?.requestId ?? ""}:${repair.successor?.status ?? ""}` : "");
+  const existing = request.report?.key;
+  return existing === state || existing?.startsWith(`${state}:`) ? existing : state;
 }
 
 function deriveIssues() {
@@ -647,7 +674,7 @@ function deriveIssues() {
     if (published) return { requestId: published.requestId, integrationSha: published.integrationSha, proof: published.finalProof?.path };
     return resolution(byId.get(repairs.get(request.requestId)?.successor?.requestId), seen);
   }
-  const resolved = [], issues = [];
+  const resolved = [], issues = [], superseded = [];
   for (const request of requests) {
     const custody = outstandingHostCustody(request);
     const cancelled = request.failure?.reason === "cancelled";
@@ -656,7 +683,10 @@ function deriveIssues() {
     if (proof) { resolved.push({ requestId: request.requestId, resolution: proof }); continue; }
     const repair = repairs.get(request.requestId);
     const successor = byId.get(repair?.successor?.requestId);
-    if (!custody && successor && successor.failure?.reason !== "cancelled") continue;
+    if (!custody && successor && successor.failure?.reason !== "cancelled") {
+      superseded.push({ requestId: request.requestId, successorId: successor.requestId });
+      continue;
+    }
     const condition = createHash("sha256").update(JSON.stringify({ source: request.sourceSha,
       status: request.status, failureAt: request.failure?.at, failure: request.failure?.message, reason: request.failure?.reason,
       step: request.step, custody, repair: repair?.status, successor: repair?.successor?.requestId })).digest("hex");
@@ -667,7 +697,7 @@ function deriveIssues() {
   const acknowledgements = existsSync(issueAcknowledgementsPath) ? JSON.parse(readFileSync(issueAcknowledgementsPath, "utf8")) : {};
   const acknowledged = issues.filter(issue => acknowledgements[issue.requestId]?.condition === issue.condition);
   const visible = issues.filter(issue => acknowledgements[issue.requestId]?.condition !== issue.condition);
-  return { issues, resolved, acknowledged: acknowledged.map(issue => issue.requestId), visible };
+  return { issues, resolved, superseded, acknowledged: acknowledged.map(issue => issue.requestId), visible };
 }
 
 function reconcileIssueAlert() {
@@ -693,24 +723,37 @@ function acknowledgeIssues() {
   process.stdout.write(`${issueAcknowledgementsPath}\n`);
 }
 
-function reconcileNotices() {
-  reconcileIssueAlert();
-  const candidates = allRequests().filter(request => {
-    if (!["failed", "published"].includes(request.status) && !(request.status === "queued" && request.waiting)) return false;
-    const key = noticeKey(request);
-    return request.reporter && (request.report?.key !== key || request.report.status !== "delivered");
-  });
-  candidates.sort((a, b) => (a.noticeCheckedAt ?? "").localeCompare(b.noticeCheckedAt ?? ""));
-  if (candidates[0]) deliverNotice(candidates[0]);
+function noticeProjection(request, index) {
+  if (!["failed", "published"].includes(request.status) && !(request.status === "queued" && request.waiting)) return null;
+  if (index.superseded.some(item => item.requestId === request.requestId)) return null;
+  const resolution = index.resolved.find(item => item.requestId === request.requestId)?.resolution;
+  if (resolution && resolution.requestId !== request.requestId) {
+    const completion = readRequest(resolution.requestId);
+    if (completion.reporter && JSON.stringify(completion.reporter) === JSON.stringify(request.reporter)) return null;
+    return { key: `resolved:${resolution.requestId}:${resolution.integrationSha}`, presentation: {
+      ...request, status: "published", step: "complete", integrationSha: resolution.integrationSha,
+      finalProof: { path: resolution.proof }, resolvedBy: resolution.requestId,
+    } };
+  }
+  return { key: noticeKey(request), presentation: request };
 }
 
-function deliverNotice(request) {
-  if (!["failed", "published"].includes(request.status) && !(request.status === "queued" && request.waiting)) return;
-  const key = noticeKey(request);
+function reconcileNotices() {
+  const index = reconcileIssueAlert();
+  const candidates = allRequests().filter(request => {
+    const projection = noticeProjection(request, index);
+    return projection && request.reporter && (request.report?.key !== projection.key || request.report.status !== "delivered");
+  });
+  candidates.sort((a, b) => (a.noticeCheckedAt ?? "").localeCompare(b.noticeCheckedAt ?? ""));
+  if (candidates[0]) deliverNotice(candidates[0], index);
+}
+
+function deliverNotice(request, index = reconcileIssueAlert()) {
+  const projection = noticeProjection(request, index);
+  if (!projection) return;
   request.noticeCheckedAt = new Date().toISOString();
   writeRequest(request);
-  reconcileIssueAlert();
-  deliverReport(request, key);
+  deliverReport(request, projection.key, projection.presentation);
 }
 
 function report(requestId, url, sessionId) {
@@ -777,6 +820,12 @@ function createIntegration(request, logPath) {
       60,
       logPath,
     );
+    if (!result.ok) return result;
+  }
+  if (request.ownerRepairSourceSha && !commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.ownerRepairSourceSha, "HEAD"]).ok) {
+    const retained = checked("git", ["-C", checkout, "rev-parse", `${ownerSourceRef}^{commit}`]);
+    if (retained !== request.ownerRepairSourceSha) throw new Error("Owner repair source changed; fresh bound evidence required");
+    result = runLogged(request, "merge-bound-owner-repair", "git", ["-C", checkout, "-c", `user.name=${config.mergeAuthor.name}`, "-c", `user.email=${config.mergeAuthor.email}`, "merge", "--no-ff", "--no-edit", "-m", `Repair publication owner for ${request.requestId} within existing publication`, retained], 60, logPath);
     if (!result.ok) return result;
   }
   const integrationSha = runCapture("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"]);
@@ -851,21 +900,27 @@ function prepareAndroidArtifact(request, logPath) {
 function publishAndroidArtifact(request, logPath) {
   if (!request.android) return;
   const { directory, manifest } = request.android;
+  // Ship the checked installer with the artifact: neither host needs to select the
+  // new server before it can offer the matching client.
+  const installer = join(directory, "android-update.js");
+  const build = runLogged(request, "prepare-android-installer", "bun", [join(checkout, "deploy/android-update"), "bundle", installer], 30, logPath);
+  if (!build.ok) throw new Error(`Android installer build exited ${build.status}`);
+  const installerHash = sha256(installer);
   for (const target of targets) {
     const remoteDirectory = target.sshHost && join(target.androidTransferRoot, request.requestId);
-    const tool = target.sshHost ? join(target.releaseRepository, "deploy/android-update") : join(checkout, "deploy/android-update");
+    const tool = target.sshHost ? join(remoteDirectory, "android-update.js") : installer;
     if (target.sshHost) {
       let result = runLogged(request, `transfer-android-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "mkdir", "-p", "-m", "700", remoteDirectory], 30, logPath);
       if (!result.ok) throw new Error(`${target.id} Android transfer directory exited ${result.status}`);
-      result = runLogged(request, `transfer-android-${target.id}`, "rsync", ["-a", "--chmod=D700,F600", "-e", "ssh -o BatchMode=yes", `${directory}/`, `${target.sshHost}:${remoteDirectory}/`], 90, logPath);
+      result = runLogged(request, `transfer-android-${target.id}`, "rsync", ["-a", "--chmod=D700,F600", `${directory}/`, `${target.sshHost}:${remoteDirectory}/`], 90, logPath);
       if (!result.ok) throw new Error(`${target.id} Android transfer exited ${result.status}`);
-      const remoteSource = runCapture("ssh", ["-o", "BatchMode=yes", target.sshHost, "git", "-C", target.releaseRepository, "rev-parse", "HEAD^{commit}"], { timeoutSeconds: 30 });
-      if (remoteSource !== request.integrationSha) throw new Error(`${target.id} release checkout ${remoteSource} differs from checked integration ${request.integrationSha}`);
+      const remoteHash = runCapture("ssh", ["-o", "BatchMode=yes", target.sshHost, "sha256sum", tool], { timeoutSeconds: 30 }).split(/\s+/)[0];
+      if (remoteHash !== installerHash) throw new Error(`${target.id} Android installer differs from the checked source bundle`);
     }
-    const invocation = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, "sudo", "-n", tool, "install", remoteDirectory]] : ["sudo", ["-n", tool, "install", directory]];
+    const invocation = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, "sudo", "-n", "bun", tool, "install", remoteDirectory]] : ["sudo", ["-n", "bun", tool, "install", directory]];
     const result = runLogged(request, `publish-android-${target.id}`, ...invocation, 30, logPath);
     if (!result.ok) throw new Error(`${target.id} Android publication exited ${result.status}`);
-    const verify = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, tool, "verify", `${remoteDirectory}/manifest.json`]] : [tool, ["verify", manifest]];
+    const verify = target.sshHost ? ["ssh", ["-o", "BatchMode=yes", target.sshHost, "bun", tool, "verify", `${remoteDirectory}/manifest.json`]] : ["bun", [tool, "verify", manifest]];
     request.android.hosts[target.id] = JSON.parse(runCapture(...verify, { timeoutSeconds: 30 }));
     writeRequest(request);
     if (remoteDirectory) {
@@ -955,9 +1010,10 @@ export function deployTarget(request, target, logPath) {
   const fd = openSync(logPath, "a", 0o600);
   const start = fstatSync(fd).size;
   closeSync(fd);
+  const env = [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, ...(meetingOverride(request.requestId) ? ["PI_STACK_ALLOW_LIVE_MEETING_RESTART=1"] : [])];
   const result = target.sshHost
-    ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "env", `PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 240, logPath)
-    : runLogged(request, `deploy-${target.id}`, "env", [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, target.releaseCommand, request.integrationSha], 180, logPath);
+    ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "env", ...env, target.releaseCommand, request.integrationSha], 420, logPath)
+    : runLogged(request, `deploy-${target.id}`, "env", [...env, target.releaseCommand, request.integrationSha], 420, logPath);
   const tail = result.status === 75 ? logTail(logPath, start) : "";
   if (/^another Pi stack deployment owns \/[^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy" };
   if (/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
@@ -993,19 +1049,30 @@ export function requeueBusyHost(request, target, logPath, waitKind = "host-lock"
 }
 
 /** Live meetings on a target, as census words; empty when none. Throws when the census cannot answer. */
-export function censusTarget(target) {
+export function censusTarget(target, protocol = null) {
   const script = readFileSync(join(dirname(self), "meeting-census"), "utf8");
+  const mode = protocol === "meet-runtime-v1" ? "--restart-blockers" : "--all";
   return target.sshHost
-    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s"], { input: script, timeoutSeconds: 45 })
-    : runCapture("bash", ["-s"], { input: script, timeoutSeconds: 45 });
+    ? runCapture("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s", "--", mode], { input: script, timeoutSeconds: 45 })
+    : runCapture("bash", ["-s", "--", mode], { input: script, timeoutSeconds: 45 });
+}
+
+function meetingRuntimeProtocol(sha) {
+  const path = "apps/remote/meeting-runtime.json";
+  const present = runCapture("git", ["-C", checkout, "ls-tree", "--name-only", sha, "--", path]);
+  if (!present) return null;
+  const manifest = JSON.parse(runCapture("git", ["-C", checkout, "show", `${sha}:${path}`]));
+  if (manifest.protocol !== "meet-runtime-v1" || manifest.lifetime !== "person-service") throw new Error("Unsupported meeting runtime lifetime contract");
+  return manifest.protocol;
 }
 
 /** Before the first host deploys, a live meeting on any target holds the whole release. */
 export function liveMeetingTarget(request) {
+  if (meetingOverride(request.requestId)) return null;
   if (targets.some(target => request.hosts?.[target.id]?.status === "passed")) return null;
   for (const target of targets) {
     let rooms;
-    try { rooms = censusTarget(target); } catch (error) { rooms = `census unavailable: ${error.message}`; }
+    try { rooms = censusTarget(target, request.meetingRuntimeProtocol); } catch (error) { rooms = `census unavailable: ${error.message}`; }
     if (rooms) return { target, rooms };
   }
   return null;
@@ -1014,7 +1081,8 @@ export function liveMeetingTarget(request) {
 export function refreshMeetingWait(request) {
   const target = targets.find(target => target.id === request.waiting.host);
   if (!target) throw new Error(`Unknown meeting-wait host: ${request.waiting.host}`);
-  const rooms = censusTarget(target);
+  if (meetingOverride(request.requestId)) return true;
+  const rooms = censusTarget(target, request.meetingRuntimeProtocol);
   request.waiting.probe = { at: new Date().toISOString(), rooms };
   delete request.waiting.probeFailingSince;
   if (rooms) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
@@ -1661,6 +1729,10 @@ export function processRequest(request) {
 
   try {
     checkCancellation(request);
+    if (!request.actionJournal) {
+      const ticket = beginPublication(request, targets);
+      if (ticket) { request.actionJournal = ticket; writeRequest(request); }
+    }
     let result = prepareCheckout(request, logPath);
     if (!result.ok) throw new Error(result.stderr.trim() || `checkout preparation exited ${result.status}`);
 
@@ -1678,6 +1750,8 @@ export function processRequest(request) {
     }
 
     checkOwnerSource(checkout, request.integrationSha);
+    request.meetingRuntimeProtocol = meetingRuntimeProtocol(request.integrationSha);
+    writeRequest(request);
     prepareAndroidArtifact(request, logPath);
     request.step = "inspect-thread-execution-contract";
     writeRequest(request);
@@ -1757,14 +1831,15 @@ export function processRequest(request) {
       }
       if (!result.ok) throw new Error(result.stderr.trim() || `main integration exited ${result.status}`);
 
-      // Any live Kenan meeting on either host holds the release before anything restarts;
-      // each host's deploy/host still checks its own rooms right before activation.
+      // Only rooms without an independent meeting owner hold the release.
+      // Each host repeats admission before activation, including the initial upgrade.
       const busy = liveMeetingTarget(request);
       if (busy) {
         appendLog(logPath, `[${new Date().toISOString()}] live meetings on ${busy.target.id}: ${busy.rooms}\n`);
         requeueBusyHost(request, busy.target, logPath, "live-meeting");
         return;
       }
+      publishAndroidArtifact(request, logPath);
       for (const target of targets) {
         if (request.hosts?.[target.id]?.status === "passed") continue;
         if (request.bootstrap?.hosts?.[target.id]?.state === "sealed") {
@@ -1791,12 +1866,12 @@ export function processRequest(request) {
         releaseCustody(request, target.id);
       }
     } else {
+      publishAndroidArtifact(request, logPath);
       for (const target of targets) {
         verifyTarget(target, request.integrationSha);
         releaseCustody(request, target.id);
       }
     }
-    publishAndroidArtifact(request, logPath);
     const finalProofs = Object.fromEntries(targets.map(target => [target.id, verifyTarget(target, request.integrationSha)]));
     const finalProofPath = join(requestProofRoot, "final-hosts.json");
     atomicWrite(finalProofPath, `${JSON.stringify(finalProofs, null, 2)}\n`);
@@ -1817,6 +1892,8 @@ export function processRequest(request) {
     request.receipt = requestPath(request.requestId);
     delete request.failure;
     writeRequest(request);
+    finishPublication(request);
+    if (request.actionJournal) writeRequest(request);
     appendLog(logPath, `[${new Date().toISOString()}] published integration=${request.integrationSha}\n`);
     if (request.android) {
       rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
@@ -1876,14 +1953,25 @@ function writeRepair(repair) {
 }
 
 function ensureRepair(request) {
-  if (isCancelled(request) || readRepair(request.requestId)) return;
+  if (isCancelled(request)) return;
+  const previous = readRepair(request.requestId);
+  if (previous && (previous.failure?.at === request.failure?.at || previous.explicitStop)) return;
+  if (previous) {
+    if (serviceBusy(previous.unit)) throw new Error("Previous repair still owns the service");
+    const archive = join(repairRoot, request.requestId, "retained", `attempt-${previous.failure?.attempt ?? 1}`);
+    mkdirSync(archive, { recursive: true });
+    for (const key of ["path", "result", "outcome"]) {
+      const file = key === "outcome" ? previous.outcome?.evidence : previous[key];
+      if (file && existsSync(file)) copyFileSync(file, join(archive, key === "path" ? "receipt.json" : key === "result" ? "result.json" : "evidence"));
+    }
+  }
   const directory = join(repairRoot, request.requestId);
-  const exhausted = (request.repairDepth ?? 0) >= policy.maxRepairDepth;
-  writeRepair({ id: repairId(request.requestId), requestId: request.requestId, sourceSha: request.sourceSha,
+  const exhausted = !!previous || (request.repairDepth ?? 0) >= policy.maxRepairDepth;
+  writeRepair({ id: previous ? `${repairId(request.requestId)}-attempt-${request.failure.attempt}` : repairId(request.requestId), priorRepairs: previous ? [...(previous.priorRepairs ?? []), { id: previous.id, failure: previous.failure, status: previous.status, explicitStop: previous.explicitStop }] : [], requestId: request.requestId, sourceSha: request.sourceSha,
     integrationSha: request.integrationSha, failure: request.failure, status: exhausted ? "blocked" : "pending",
     ...(exhausted ? { summary: "Automatic repair chain exhausted; Hara must assign the remaining blocker" } : {}),
     createdAt: new Date().toISOString(), path: repairPath(request.requestId), requestPath: requestPath(request.requestId),
-    session: join(directory, "session.jsonl"), log: join(directory, "agent.log"), result: join(directory, "result.json"),
+    session: join(directory, previous ? `attempt-${request.failure.attempt}.session.jsonl` : "session.jsonl"), log: join(directory, previous ? `attempt-${request.failure.attempt}.agent.log` : "agent.log"), result: join(directory, previous ? `attempt-${request.failure.attempt}.result.json` : "result.json"),
     prompt: join(directory, "prompt.md"), unit: repairUnit(request.requestId), launchAttempts: 0 });
 }
 
@@ -2052,8 +2140,10 @@ function repairRun(requestId) {
     const fd = openSync(repair.log, "a", 0o600);
     let result;
     try {
-      result = commandResult(config.piCommand,
-        ["--print", "--mode", "json", "--model", "openai-codex/gpt-6-astra", "--thinking", "high",
+      result = commandResult(process.execPath,
+        [join(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime", "stack-agent.mjs"),
+          "--record", join(dirname(repair.path), "capacity.json"), "--agent", `publication-repair:${repair.id}`, "--execution", repair.id,
+          "--", config.piCommand, "--print", "--mode", "json", "--model", "openai-codex/gpt-6.1-sol", "--thinking", "high",
           "--session", repair.session, `@${repair.prompt}`],
         { cwd: repair.workspace && existsSync(repair.workspace) ? repair.workspace : dirname(repair.path),
           timeoutSeconds: policy.repairMs / 1000, stdio: ["ignore", fd, fd] });
@@ -2070,6 +2160,8 @@ function repairRun(requestId) {
 }
 
 function acceptRepairResult(repair) {
+  const request = readRequest(repair.requestId);
+  if (repair.explicitStop || repair.failure?.at !== request.failure?.at || repair.failure?.attempt !== request.failure?.attempt) throw new Error("Stale or explicitly stopped repair result");
   if (!existsSync(repair.result)) throw new Error(`Repair agent returned without ${repair.result}`);
   const outcome = JSON.parse(readFileSync(repair.result, "utf8"));
   if (!["source-fixed", "infrastructure-fixed", "blocked"].includes(outcome.status) || !outcome.summary?.trim()) throw new Error("Repair result needs a status and cause/repair summary");
@@ -2079,9 +2171,14 @@ function acceptRepairResult(repair) {
     validateSha(outcome.sourceSha);
     if (!(outcome.workspace ?? repair.workspace)) throw new Error("Source repair must identify its registered workspace");
   }
+  if (outcome.ownerSourceSha) {
+    if (outcome.status !== "infrastructure-fixed") throw new Error("Owner control source belongs to an existing-publication infrastructure repair");
+    validateSha(outcome.ownerSourceSha);
+    if (checked("git", ["-C", checkout, "rev-parse", `${ownerSourceRef}^{commit}`]) !== outcome.ownerSourceSha) throw new Error("Owner repair source must be installed and retained first");
+  }
   if (outcome.status !== "blocked") {
     const evidenceSource = resolve(outcome.evidence);
-    const evidence = join(dirname(repair.path), "evidence");
+    const evidence = join(dirname(repair.path), `evidence-attempt-${repair.failure?.attempt ?? 1}`);
     atomicWrite(evidence, readFileSync(evidenceSource));
     outcome.evidence = evidence;
     outcome.evidenceSource = evidenceSource;
@@ -2106,6 +2203,7 @@ function acceptRepairResult(repair) {
 
 function completeRepair(requestId) {
   validateRequestId(requestId);
+  ensureRepair(readRequest(requestId));
   const repair = readRepair(requestId);
   if (!repair) throw new Error("No dedicated repair receipt exists for this request");
   if (["submitted", "retry-submitted", "ready-to-retry"].includes(repair.status)) {
@@ -2222,7 +2320,7 @@ function main() {
   if (operation === "repair-run" && args.length === 1) return locked("repair-agent", "repair-run", args);
   if (operation === "_repair-run" && args.length === 1) return repairRun(args[0]);
   if (operation === "repair-result" && args.length === 1) return locked("watchdog", "repair-result", args);
-  if (operation === "_repair-result" && args.length === 1) return locked("repair-agent", "complete-repair", args);
+  if (operation === "_repair-result" && args.length === 1) { validateRequestId(args[0]); return locked(`repair-result-${args[0]}`, "complete-repair", args); }
   if (operation === "_complete-repair" && args.length === 1) return completeRepair(args[0]);
   if (operation === "repair" && args.length === 1) return locked("worker", "repair", args);
   if (operation === "_repair" && args.length === 1) return requestRepair(args[0]);
@@ -2237,6 +2335,14 @@ function main() {
   if (operation === "retry") throw new Error("Blind retries are disabled; use repair REQUEST to assign its dedicated repair owner");
   if (operation === "cancel" && args.length === 1) return cancel(args[0]);
   if (operation === "gate-status" && args.length === 0) return gateStatus();
+  if (operation === "allow-live-meetings" && args.length === 2) {
+    validateRequestId(args[0]); readRequest(args[0]);
+    if (!args[1].trim()) throw new Error("allow-live-meetings needs the authorization reason");
+    mkdirSync(meetingOverrideRoot, { recursive: true });
+    atomicWrite(join(meetingOverrideRoot, `${args[0]}.json`), `${JSON.stringify({ requestId: args[0], reason: args[1].trim(), at: new Date().toISOString() }, null, 2)}\n`);
+    process.stdout.write(`${args[0]} may restart through live meetings\n`);
+    return;
+  }
   if (operation === "enqueue" && [3, 4, 5].includes(args.length)) return locked("intake", "enqueue", args);
   if (operation === "_enqueue" && [3, 4, 5].includes(args.length)) return enqueue(...args);
   if (operation === "report" && [1, 3].includes(args.length)) return locked("worker", "report", args);

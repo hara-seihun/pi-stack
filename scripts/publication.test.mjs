@@ -62,8 +62,8 @@ async function fixture(t, status = "failed") {
     await new Promise(resolve => server.close(resolve));
     rmSync(root, { recursive: true, force: true });
   });
-  async function run(...args) {
-    const child = spawn(process.execPath, [command, "report", requestId, ...args], {
+  async function runFor(id, ...args) {
+    const child = spawn(process.execPath, [command, "report", id, ...args], {
       env: { ...process.env, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_ALERT_INBOX: inbox },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -71,9 +71,10 @@ async function fixture(t, status = "failed") {
     child.stdout.on("data", chunk => stdout += chunk);
     child.stderr.on("data", chunk => stderr += chunk);
     const code = await new Promise(resolve => child.on("close", resolve));
-    return { code, stdout, stderr, receipt: JSON.parse(readFileSync(receipt, "utf8")) };
+    return { code, stdout, stderr, receipt: JSON.parse(readFileSync(join(root, "requests", `${id}.json`), "utf8")) };
   }
-  return { run, url, state, receipt, root, inbox };
+  const run = (...args) => runFor(requestId, ...args);
+  return { run, runFor, url, state, receipt, root, inbox };
 }
 
 test("a filed machine alert does not suppress requester delivery; acceptance is not delivery", async t => {
@@ -180,6 +181,80 @@ test("repair transitions replace one bounded alert derived from request receipts
   assert.equal(result.code, 0, result.stderr);
   assert.equal(existsSync(join(inbox, "pi-stack-publication-issues.md")), false);
   assert.equal(JSON.parse(readFileSync(receipt, "utf8")).status, "failed");
+});
+
+function completionCommit(root) {
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  const git = (...args) => {
+    const result = spawnSync("git", ["-C", repository, ...args], { encoding: "utf8", timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git("init", "--quiet");
+  writeFileSync(join(repository, "source.txt"), "published source\n");
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "Publication fixture");
+  return git("rev-parse", "HEAD");
+}
+
+test("repair progress and completed successors cannot replay an obsolete failure into chat", async t => {
+  const { run, runFor, url, state, receipt, root } = await fixture(t);
+  state.dispatch = true;
+  let result = await run(url, sessionId);
+  assert.equal(result.receipt.report.status, "delivered");
+  assert.equal(state.requests.length, 1);
+  const repairDirectory = join(root, "repairs", requestId);
+  mkdirSync(repairDirectory, { recursive: true });
+  const repair = { status: "running" };
+  writeFileSync(join(repairDirectory, "receipt.json"), JSON.stringify(repair));
+  result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(state.requests.length, 1, "routine repair progress is not a new user decision");
+  const successorId = "PUB-1123456789abcdef01234567";
+  repair.status = "submitted";
+  repair.successor = { requestId: successorId };
+  writeFileSync(join(repairDirectory, "receipt.json"), JSON.stringify(repair));
+  const successorPath = join(root, "requests", `${successorId}.json`);
+  const successor = { requestId: successorId, sourceSha: "b".repeat(40), status: "queued", step: "queued", reporter: result.receipt.reporter };
+  writeFileSync(successorPath, JSON.stringify(successor));
+  await run();
+  assert.equal(state.requests.length, 1);
+  successor.status = "published";
+  successor.step = "complete";
+  successor.integrationSha = completionCommit(root);
+  writeFileSync(successorPath, JSON.stringify(successor));
+  await run();
+  assert.equal(state.requests.length, 1, "the successor owns completion, never the ancestor failure");
+  result = await runFor(successorId);
+  assert.equal(result.receipt.report.status, "delivered");
+  assert.equal(state.requests.length, 2);
+  assert.match(state.requests[1].text, /Status: published/);
+  await run();
+  assert.equal(state.requests.length, 2);
+  assert.equal(JSON.parse(readFileSync(receipt, "utf8")).status, "failed", "historical evidence stays unchanged");
+});
+
+test("combined publication resolves a different requester's failure as success with the deployed proof", async t => {
+  const { run, url, state, root } = await fixture(t);
+  state.dispatch = true;
+  let result = await run(url, sessionId);
+  const repairDirectory = join(root, "repairs", requestId);
+  mkdirSync(repairDirectory, { recursive: true });
+  const successorId = "PUB-1123456789abcdef01234567";
+  writeFileSync(join(repairDirectory, "receipt.json"), JSON.stringify({ status: "submitted", successor: { requestId: successorId } }));
+  writeFileSync(join(root, "requests", `${successorId}.json`), JSON.stringify({ requestId: successorId,
+    sourceSha: "b".repeat(40), status: "published", step: "complete", integrationSha: completionCommit(root),
+    reporter: { url, sessionId: "11234567-0123-4123-a123-0123456789ab" }, finalProof: { path: "/deployed/hosts.json" } }));
+  result = await run();
+  assert.equal(result.receipt.report.status, "delivered");
+  assert.equal(state.requests.length, 2);
+  assert.match(state.requests[1].text, /Status: published/);
+  assert.match(state.requests[1].text, /Resolved by: PUB-1123456789abcdef01234567/);
+  assert.match(state.requests[1].text, /\/deployed\/hosts.json/);
+  assert.doesNotMatch(state.requests[1].text, /Failure:|integration checks exited 1/);
+  await run();
+  assert.equal(state.requests.length, 2);
 });
 
 test("acknowledgement survives reconciliation and a changed failure returns to the inbox", async t => {

@@ -3,7 +3,7 @@ import { afterAll, expect, mock, test } from "bun:test";
 mock.module("./src/meet/pcm.worklet.js?raw", () => ({ default: "" }));
 const replaced = new Map<string, PropertyDescriptor | undefined>();
 function provide(name: string, value: unknown) {
-  replaced.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+  if (!replaced.has(name)) replaced.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 }
 afterAll(() => {
@@ -85,7 +85,7 @@ const thread = (patch: Record<string, unknown> = {}) => ({
 }) as any;
 
 test("meeting thread labels follow the shared held, activity and multi-tool rules", () => {
-  expect(meetThreadStatus(thread({ held: true }))).toMatchObject({ label: "Stopped" });
+  expect(meetThreadStatus(thread({ held: true }))).toMatchObject({ label: "Idle" });
   // A finished meeting worker is archived and held by its owner; the room shows Done, not Stopped (fvz-oicq-hes, September 28).
   expect(meetThreadStatus(thread({ held: false, finished: true }))).toMatchObject({ label: "Done", attention: false });
   expect(meetThreadStatus(thread({ state: "running", activity: "thinking" }))).toMatchObject({ label: "Thinking" });
@@ -100,8 +100,13 @@ test("failed startup stops capture and retains its unfinished PCM until recovery
   provide("navigator", { mediaDevices: { getUserMedia: async () => { captures++; return input; } } });
   const participant = { id: "external-host", host: true, name: "Mixed meeting audio" };
   const room = { id: "room", sessionId: "thread", apiUrl: "", iceServers: [], participants: [participant],
-    browser: null, threads: [], voiceMuted: true, voiceRevision: 0, transcriptFlushRevision: 0, platformTranscript: false };
+    browser: null, threads: [], voiceMuted: true, voiceRevision: 0, voiceWake: null, transcriptFlushRevision: 0, platformTranscript: false };
   let connected = true;
+  provide("document", { createElement: (tag: string) => {
+    const node = element();
+    if (tag === "video") node.play = async () => { connected = false; throw new Error("adapter playback failed"); };
+    return node;
+  } });
   const uploads: Array<{ path: string; body: unknown; connected: boolean }> = [];
   let stops = 0;
   let opens = 0;
@@ -117,6 +122,7 @@ test("failed startup stops capture and retains its unfinished PCM until recovery
   let failure: InstanceType<typeof MeetAdapterStartError> | undefined;
   try { await startMeetAdapter({ request, namespace: "recall", eventKey: "event", container: element() as any }); }
   catch (error) { expect(error).toBeInstanceOf(MeetAdapterStartError); failure = error as typeof failure; }
+  finally { provide("document", { createElement: element }); }
   expect(failure).toBeDefined();
   expect(input.getTracks().every((track) => track.readyState === "ended")).toBe(true);
   expect(captures).toBe(1);

@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "./sqlite.js";
 import type { Admission, SettingsOverrides, ThreadApi, ThreadSettings } from "./threads/contracts.js";
 import { resolveThreadSettings } from "./threads/settings.js";
+import { threadHasOutstandingWork } from "./threads/work-state.js";
 
 export type ScheduleState = "active" | "paused";
 export type ScheduleOccurrenceState = "pending" | "accepted" | "failed";
@@ -258,7 +259,10 @@ export class ScheduleService {
     const result = await this.options.threads.list({ id: schedule.last_thread_id, limit: 1 });
     if (!result.ok) return false;
     const thread = result.value.threads[0];
-    return !thread || thread.state === "idle" && thread.pendingMessages === 0;
+    if (!thread) return true;
+    if (threadHasOutstandingWork(thread)) return false;
+    const questions = await this.options.threads.questions(thread.id);
+    return questions.ok && questions.value.length === 0;
   }
 
   private async dispatch(schedule: Row, occurrence: Row): Promise<void> {

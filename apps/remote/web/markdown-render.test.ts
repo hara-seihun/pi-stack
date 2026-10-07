@@ -56,6 +56,36 @@ describe("the lazy Markdown engine", () => {
       expect(table).toContain("</table>\n</div>");
     } finally { globalThis.window = previous; }
   });
+  test("room rich text leaves session media literal without resolving the viewer's resources", async () => {
+    const previous = globalThis.window;
+    const browser: Record<string, any> = { location: new URL("https://router.test/"), atob: (value: string) => Buffer.from(value, "base64").toString("binary") };
+    browser.window = browser;
+    createContext(browser);
+    for (const asset of ["markdown-it.min.js", "texmath.js", "pi-markdown-compat.js"]) {
+      runInContext(readFileSync(join(import.meta.dir, "public", "vendor", asset), "utf8"), browser);
+    }
+    let privateResolutions = 0;
+    browser.PiRemotePerson = { href: (path: string) => { privateResolutions++; return path; } };
+    globalThis.window = browser as any;
+    try {
+      const { renderMarkdown } = await import("./src/context");
+      const source = '**bold**\n<pi-remote-file src="/private/notes.txt" />\n<pi-remote-image id="drawing" prompt="A tree" />\n`<pi-remote-file src="/private/code.txt" />`\n![private](/v1/sessions/room/images/hash)\n![web](https://public.test/picture.png)';
+      for (const streaming of [false, true]) {
+        const html = renderMarkdown(source, "room", streaming, { assistant: true, sessionMedia: false });
+        expect(html).toContain("<strong>bold</strong>");
+        expect(html).toContain("&lt;pi-remote-file");
+        expect(html).toContain("&lt;pi-remote-image");
+        expect(html).toContain("<code>&lt;pi-remote-file");
+        expect(html).not.toContain("<pi-inline-text");
+        expect(html).not.toContain("Generating image");
+        expect(html).not.toContain('src="/v1/sessions/');
+        expect(html).toContain('src="https://public.test/picture.png"');
+      }
+      expect(privateResolutions).toBe(0);
+      expect(renderMarkdown('<pi-remote-file src="/private/notes.txt" />', "private-thread")).toContain("<pi-inline-text");
+      expect(privateResolutions).toBeGreaterThan(0);
+    } finally { globalThis.window = previous; }
+  });
 });
 
 describe("browser message rendering", () => {

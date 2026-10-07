@@ -3,7 +3,7 @@ package works.kenan.piremote.kenan;
 import java.util.HashSet;
 import java.util.Set;
 
-/** Stream events may be ahead of the polled cursor; only a poll can close that gap. */
+/** Partial stream events may lead the cursor; only complete ordered replay closes the gap. */
 final class NotificationSequence {
     private long cursor;
     private final Set<Long> streamed;
@@ -11,6 +11,10 @@ final class NotificationSequence {
     NotificationSequence(long cursor, Set<Long> streamed) {
         this.cursor = cursor;
         this.streamed = new HashSet<>(streamed);
+    }
+
+    static boolean canReplay(long cursor, Long after, long feedCursor) {
+        return after == null ? cursor < 0 || feedCursor <= cursor : after >= 0 && after <= cursor;
     }
 
     boolean accept(long seq, long feedCursor, boolean stream) {

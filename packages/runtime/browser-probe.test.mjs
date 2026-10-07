@@ -62,10 +62,20 @@ function fixture(t, defect) {
   return { options, tool, calls, closed };
 }
 
-test("complete native proof uses bounded batches and closes both named sessions", async (t) => {
+test("complete native proof keeps linear batches and exact download/frame subcommand custody", async (t) => {
   const f = fixture(t);
-  await probeBrowser(f.tool, f.options);
-  assert.equal(f.calls.length, 7, "linear checks must not regress to per-command wrapper dispatch");
+  const records = [];
+  await probeBrowser(f.tool, { ...f.options, record: phase => records.push(phase) });
+  const commands = records.filter(row => row.status === "running");
+  assert.equal(commands.length, f.calls.length);
+  const frameCommands = commands.filter(row => row.phase.startsWith("download-and-frames/"));
+  assert.ok(frameCommands.length > 0);
+  assert.ok(frameCommands.every(row => JSON.parse(row.command.stdin).length === 1), "troubleshooting commands each have their own bounded custody");
+  const recurring = commands.filter(row => row.command.args?.includes("batch") && !row.phase.startsWith("download-and-frames/"));
+  assert.ok(recurring.length > 0);
+  assert.ok(recurring.every(row => JSON.parse(row.command.stdin).length > 1), "recurring linear checks stay batched");
+  assert.ok(commands.every(row => row.deadlineMs === 25000));
+  assert.deepEqual(commands.map(row => row.command), f.calls.map(({ timeoutMs, ...input }) => input));
   assert.deepEqual(f.closed, ["attached", "owner"]);
 });
 
@@ -82,4 +92,21 @@ test("failed isolated cleanup prevents continuing the proof", async (t) => {
   const f = fixture(t, "script-cleanup");
   await assert.rejects(probeBrowser(f.tool, f.options), /isolated probe browser must be closed/);
   assert.equal(f.calls.length, 1);
+});
+
+
+test("unfinished download command is recorded before failure and owner cleanup", async t => {
+  const f = fixture(t), records = [], execute = f.tool.execute;
+  f.tool.execute = async (id, input) => {
+    if (input.stdin && JSON.parse(input.stdin)[0]?.[0] === "download") {
+      assert.equal(records.at(-1).status, "running");
+      throw new Error("download command stalled");
+    }
+    return execute(id, input);
+  };
+  await assert.rejects(probeBrowser(f.tool, { ...f.options, record: row => records.push(row) }), /download command stalled/);
+  const failed = records.find(row => row.status === "failed");
+  assert.equal(failed.phase, "download-and-frames/0:download");
+  assert.deepEqual(JSON.parse(failed.command.stdin)[0].slice(0, 2), ["download", "@e2"]);
+  assert.equal(f.closed.at(-1), "owner");
 });

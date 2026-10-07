@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+id=${PI_THREAD_RESOURCE_BOUNDARY:-}
+[[ $id =~ ^[a-f0-9]{16}$ ]] || { printf 'Invalid browser runner resource boundary\n' >&2; exit 125; }
+[[ ${PI_STACK_BROWSER_EXECUTABLE:-} = /* && -x $PI_STACK_BROWSER_EXECUTABLE ]] || { printf 'Missing pinned browser executable\n' >&2; exit 125; }
+manager=()
+[[ ${PI_ORCHESTRATOR_EXECUTION:-user} == root-repair ]] || manager=(--user)
+runner="pi-thread-runner-$id.service"
+exec systemd-run "${manager[@]}" --scope --collect --quiet \
+  "--unit=pi-thread-browser-$(< /proc/sys/kernel/random/uuid).scope" \
+  "--slice=pi-thread-$id-tools.slice" \
+  "--property=BindsTo=$runner" "--property=After=$runner" \
+  --property=OOMPolicy=kill --property=KillMode=control-group \
+  --property=KillSignal=SIGKILL --property=TimeoutStopSec=3s \
+  -- bash -c 'printf "1000" > /proc/self/oom_score_adj || exit 125; exec "$PI_STACK_BROWSER_EXECUTABLE" "$@"' pi-thread-browser "$@"

@@ -10,6 +10,8 @@ import { DismissibleError } from "./dismissible-error";
 import { listenForFileDrops } from "./file-drop";
 import { messagingClient } from "./messaging-client";
 import type { MessagingHistoryCache } from "./messaging-history";
+import { useVisibleHeads } from "./features/conversation/visible-heads";
+import type { VisibleTranscriptRange } from "./features/conversation/transcript-store";
 import { beginHumanSend, draftFromHumanMessage, emptyHumanDraft, mergeHumanMessages, requestFromHumanMessage, unconfirmedHumanSend, type HumanDraft } from "./messaging-state";
 import "./messages.css";
 
@@ -44,8 +46,10 @@ function MessagingConversationController({ conversation, backend, active, histor
   const [messages, setMessages] = useState<MessagingMessage[]>(() => cached.history?.messages ?? []);
   const [loaded, setLoaded] = useState(!!cached.history);
   const [historyError, setHistoryError] = useState(cached.error);
+  const [newerAvailable, setNewerAvailable] = useState(cached.newer);
+  const protect = useCallback((range: VisibleTranscriptRange | null) => { history.protect(conversation.id, range); }, [history, conversation.id]);
+  const transcript = useVisibleHeads(messages, protect);
   const [before, setBefore] = useState<number | null>(() => cached.history?.before ?? null);
-  const historyStarted = useRef(!!cached.history);
   const checking = useRef(new Set<string>());
   const [pendingChecks, setPendingChecks] = useState<string[]>([]);
   const [uploading, setUploading] = useState<Array<{ id: string; name: string }>>([]);
@@ -69,21 +73,27 @@ function MessagingConversationController({ conversation, backend, active, histor
     setMessages(current => mergeHumanMessages(current, [message]));
   }, []);
   useEffect(() => {
-    let held = cached;
+    if (!active) {
+      setMessages(current => current.filter(message => message.status === "sending" || message.status === "unknown" || message.status === "failed"));
+      setLoaded(false);
+      return;
+    }
+    let held: typeof cached = { ...cached, history: undefined };
     const apply = () => {
       const next = history.get(conversation.id);
       setHistoryError(next.error);
+      setNewerAvailable(next.newer);
       if (next.history && next.history !== held.history) {
         setLoaded(true);
-        setMessages(current => mergeHumanMessages(next.removed.size ? current.filter(message => !next.removed.has(message.id)) : current, next.history!.messages));
-        if (!historyStarted.current) { setBefore(next.history.before); historyStarted.current = true; }
+        setMessages(current => mergeHumanMessages(current.filter(message => (message.status === "sending" || message.status === "unknown" || message.status === "failed") && !next.removed.has(message.id)), next.history!.messages));
+        setBefore(next.history.before);
       }
       held = next;
     };
     const unsubscribe = history.subscribe(apply);
     apply();
     return unsubscribe;
-  }, [conversation.id, history]);
+  }, [active, conversation.id, history]);
   useEffect(() => {
     if (active) history.ensure(conversation.id);
   }, [active, conversation.id, history]);
@@ -109,8 +119,17 @@ function MessagingConversationController({ conversation, backend, active, histor
     if (lifetime.current.signal.aborted) return;
     setOlderLoading(false);
     if (result.ok) {
-      setMessages(current => mergeHumanMessages(current, result.value.messages)); setBefore(result.value.before);
+      history.acceptPage(conversation.id, result.value, "older");
     } else setError(result.error.message);
+  };
+  const latest = async () => {
+    if (olderLoading) return;
+    setOlderLoading(true);
+    const result = await messagingClient.history(conversation.id, lifetime.current.signal);
+    if (lifetime.current.signal.aborted) return;
+    setOlderLoading(false);
+    if (result.ok) history.acceptPage(conversation.id, result.value, "latest");
+    else setError(result.error.message);
   };
   const uploadFile = async (file: File): Promise<{ ok: true } | { ok: false; error: string }> => {
     if (!backend?.capabilities.attachments) return { ok: false, error: "This service does not support attachments." };
@@ -181,7 +200,7 @@ function MessagingConversationController({ conversation, backend, active, histor
     else setMessages(current => unconfirmedHumanSend(current, message, result.error.message));
   };
   const ready = backend?.status === "ready";
-  return <ConversationView active={active} label={`Messages with ${conversation.title}`} drawing={drawing} editImages={!!backend?.capabilities.attachments} transcript={<div className="transcript messaging-transcript">
+  return <ConversationView active={active} newerAvailable={newerAvailable} onJumpLatest={() => void latest()} label={`Messages with ${conversation.title}`} drawing={drawing} editImages={!!backend?.capabilities.attachments} transcript={active ? <div ref={transcript} className="transcript messaging-transcript">
         {!loaded && !messages.length && !error && !historyError && <div className="conversation-skeleton" role="status" aria-label="Loading conversation"><span /><span /><span /></div>}
         {loaded && !messages.length && <p className="chat-empty">No messages yet</p>}
         <MessagingChat messages={messages} backendId={conversation.backendId} group={conversation.kind === "group"} checking={pendingChecks}
@@ -192,7 +211,7 @@ function MessagingConversationController({ conversation, backend, active, histor
             save(draftFromHumanMessage(message));
           }} />
         {before !== null && <button type="button" className="chat-older" disabled={olderLoading} onClick={() => void older()}>{olderLoading ? "Loading…" : "Older messages"}</button>}
-      </div>}>
+      </div> : null}>
     {fileDrag && <div className="file-drop-overlay" role="status">Drop files to attach to {conversation.title}</div>}
     {!ready && <p className="messaging-notice" role="status">{backend?.detail || "This messaging service is unavailable. Open the chat picker to check its configuration."}</p>}
     <DismissibleError message={error || historyError} />

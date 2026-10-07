@@ -2,28 +2,36 @@ import type { ReactNode } from "react";
 import type { Layout } from "./layout";
 import { TABS, type Tab } from "./routes";
 import "./shell.css";
+import { assertNever } from "../../../shared/explicit-state";
 
-const LABELS: Record<Tab, string> = { chats: "Chats", workers: "Workers", files: "Files", calendar: "Calendar", machine: "Machine" };
+const LABELS: Record<Tab, string> = { chats: "Chats", agents: "Agents", notifications: "Notifications", files: "Files", calendar: "Calendar", machine: "Machine" };
 
 function TabIcon({ tab }: { tab: Tab }) {
   switch (tab) {
     case "chats": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5Z" /></svg>;
-    case "workers": return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="M12 7.5v4M6 15.5v-4h12v4" /></svg>;
+    case "agents": return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="M12 7.5v4M6 15.5v-4h12v4" /></svg>;
+    case "notifications": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3Zm5 3h4" /></svg>;
     case "files": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3v-12Z" /></svg>;
     case "calendar": return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M7 3v4m10-4v4M3 10h18m-14 4h2m3 0h2m3 0h2M7 17h2m3 0h2" /></svg>;
     case "machine": return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8m-4-4v4" /></svg>;
   }
+  return assertNever(tab, "Tab icon");
 }
 
 export interface TabBadge { count: number; attention?: boolean }
 
-export function TabNav({ layout, active, badges, onSelect }: { layout: Layout; active: Tab; badges: Partial<Record<Tab, TabBadge>>; onSelect(tab: Tab): void }) {
+export interface UpdateTab { visible: boolean; busy: boolean; status: string; onClick(): void }
+
+export function TabNav({ layout, active, badges, onSelect, update }: { layout: Layout; active: Tab; badges: Partial<Record<Tab, TabBadge>>; onSelect(tab: Tab): void; update?: UpdateTab }) {
   return <nav className={layout === "phone" ? "tabbar" : "rail"} aria-label="Sections">
     {TABS.map(tab => {
       const badge = badges[tab];
-      const showBadge = active !== tab && badge && badge.count > 0;
-      return <button key={tab} type="button" className="tab" aria-current={active === tab ? "page" : undefined} aria-label={showBadge ? `${LABELS[tab]}, ${badge.count}` : LABELS[tab]} title={LABELS[tab]} onClick={() => onSelect(tab)}>
-        <span className="tab-icon"><TabIcon tab={tab} />{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
+      const updating = tab === "machine" && update?.visible;
+      const showBadge = !updating && active !== tab && badge && badge.count > 0;
+      const label = updating ? "Update" : LABELS[tab];
+      return <button key={tab} type="button" className={`tab${updating ? " tab-update" : ""}`} aria-current={!updating && active === tab ? "page" : undefined} aria-label={showBadge ? `${label}, ${badge.count}` : label} aria-busy={updating ? update.busy : undefined} disabled={updating && update.busy} title={updating ? update.status : label} onClick={() => updating ? update.onClick() : onSelect(tab)}>
+        <span className="tab-icon">{updating ? <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" /></svg> : <TabIcon tab={tab} />}{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
+        {updating && <span className="tab-update-label">Update</span>}
       </button>;
     })}
   </nav>;

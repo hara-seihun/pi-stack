@@ -5,6 +5,8 @@ import { createElement, Fragment } from "react";
 import { createRoot } from "react-dom/client";
 import { SignInDialog } from "./SignInDialog";
 import { RequestIndicator } from "./RequestIndicator";
+import { API } from "../../server/api";
+import { api } from "./client";
 
 const authentication = document.createElement("div");
 document.body.append(authentication);
@@ -40,7 +42,13 @@ if (!sessionId) {
     },
     onNotice(message) { status.textContent = message; },
   });
-  start.addEventListener("click", () => void voice.start());
+  start.addEventListener("click", () => {
+    start.disabled = true;
+    void api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId }), {}).then(() => voice.start()).catch(cause => {
+      status.textContent = cause instanceof Error ? cause.message : String(cause);
+      start.textContent = "Try again";
+    }).finally(() => { start.disabled = false; });
+  });
   mute.addEventListener("click", () => { mute.textContent = voice.toggleMute() ? "Unmute" : "Mute"; });
   element("play").addEventListener("click", () => void voice.resumePlayback());
   element("hush").addEventListener("click", () => voice.hush());

@@ -7,11 +7,21 @@ import { InlineImagesContext, Markdown } from "../../context";
 import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
+import { assertNever } from "../../../../shared/explicit-state";
+import { AgentRoute, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
+import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
-import { buildTranscript, type TranscriptItem } from "./transcript-model";
+import { appendLiveThinking, buildStableTranscript, type TranscriptItem } from "./transcript-model";
+import { VirtualTranscript } from "./VirtualTranscript";
+import { useVisualClock } from "../status/visual-clock";
+import { useVisibleHeads } from "./visible-heads";
+import type { VisibleTranscriptRange } from "./transcript-store";
 import { duration, toolSummary } from "./tool-summary";
 import "./transcript.css";
+
+type RenderedTranscriptItem = TranscriptItem | { kind: "step"; entry: ContextEntry };
+const transcriptMessageIds = (item: RenderedTranscriptItem): readonly string[] => item.kind !== "work" && item.entry.identity ? [item.entry.identity.id] : [];
 
 export interface TranscriptProps {
   entries: ContextEntry[];
@@ -27,6 +37,9 @@ export interface TranscriptProps {
   loadingEarlier?: boolean;
   earlierError?: string;
   onShowEarlier?(): void;
+  newerAvailable?: boolean;
+  onShowNewer?(): void;
+  onVisibleRange?(range: VisibleTranscriptRange | null): void;
   /** Opening the live thinking card subscribes to its text; closing it stops. */
   onThinkingOpen?(open: boolean): void;
   onEdit(entry: ContextEntry): void;
@@ -75,14 +88,9 @@ function toolLabel(name: unknown) {
   return String(name || "Tool").replace(/^functions\./, "").replaceAll("_", " ");
 }
 
-function useElapsed(startedAt: number | undefined, running: boolean) {
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (!running || !startedAt) return;
-    const timer = setInterval(() => tick(value => value + 1), 1_000);
-    return () => clearInterval(timer);
-  }, [running, startedAt]);
-  return startedAt ? Math.max(0, Date.now() - startedAt) : undefined;
+function useElapsed<T extends HTMLElement>(startedAt: number | undefined, running: boolean) {
+  const { ref, now } = useVisualClock<T>(running && !!startedAt);
+  return { ref, elapsed: startedAt ? Math.max(0, now - startedAt) : undefined };
 }
 
 const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onReply }: {
@@ -91,10 +99,13 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
   onEdit(entry: ContextEntry): void;
   onReply(target: ReplyTarget): void;
 }) {
-  const text = entry.text || "";
-  return <ChatMessage
+  const presented = presentAgentMessage(entry);
+  const text = presented.text || "";
+  const sender = presented.agentSender;
+  return <div data-transcript-seq={entry.seq}><ChatMessage
     kind={entry.kind}
-    label={entry.label || entry.kind}
+    label={entry.kind === "assistant" ? AGENT_NAME : presented.label || entry.kind}
+    heading={sender ? <AgentRoute direction="incoming" from={{ kind: "peer", threadId: sender.threadId, name: presented.label ?? null }} to={{ kind: "self", threadId: sessionId }} /> : undefined}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
     text={text}
     timestamp={entry.messageTimestamp || undefined}
@@ -105,19 +116,45 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
     responseMetrics={entry.kind === "assistant" ? entry.responseMetrics : undefined}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
-    menu={entry.kind === "user" && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
-  />;
+    menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
+  /></div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
-function outcome(entry: ContextEntry) {
-  if (entry.kind === "toolCall") {
-    if (!entry.toolResult) return { status: "running", label: "Running" };
-    if (entry.toolResult.isError) return { status: "error", label: "Error" };
-    return { status: "done", label: "Done" };
+const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId }: { entry: ContextEntry; sessionId: string }) {
+  const message = outgoingAgentMessage(entry);
+  const spawn = message?.tool === "spawn" && message.delivery.state === "delivered";
+  const body = useItemBody(entry.itemId, spawn, entry.size);
+  if (!message) return null;
+  const created = message.tool === "spawn" ? spawnedThread(body.body) : null;
+  const to = message.tool === "send" ? { kind: "peer" as const, threadId: message.recipientId, name: null }
+    : created ? { kind: "peer" as const, threadId: created.id, name: created.name } : { kind: "new" as const, title: message.title };
+  const status = message.delivery.state === "sending" ? { status: "sending", canCheck: false, canRetry: false }
+    : message.delivery.state === "failed" ? { status: "failed", error: message.delivery.error, canCheck: false, canRetry: false } : undefined;
+  return <div data-transcript-seq={entry.seq}><ChatMessage
+    kind="assistant agent-outgoing"
+    label={AGENT_NAME}
+    heading={<AgentRoute direction="outgoing" from={{ kind: "self", threadId: sessionId }} to={to} />}
+    avatar={agentAvatar()}
+    text={message.text}
+    timestamp={Number(entry.time) || undefined}
+    delivery={status}
+    contentFormat="markdown"
+    renderMarkdown={source => <Markdown source={source} sessionId={sessionId} assistant />}
+  /></div>;
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId);
+
+function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {
+  switch (entry.kind) {
+    case "toolCall":
+      if (!entry.toolResult) return { status: "running", label: "Running" };
+      return entry.toolResult.isError ? { status: "error", label: "Error" } : { status: "done", label: "Done" };
+    case "notice":
+      if (/error|fail/i.test(`${entry.label || ""} ${entry.text || ""}`)) return { status: "error", label: "Error" };
+      return { status: "done", label: "Done" };
+    case "system": case "tool": case "thinking": case "user": case "assistant":
+      return entry.streaming ? { status: "running", label: "Running" } : { status: "done", label: "Done" };
   }
-  if (entry.kind === "notice" && /error|fail/i.test(`${entry.label || ""} ${entry.text || ""}`)) return { status: "error", label: "Error" };
-  if (entry.streaming) return { status: "running", label: "Running" };
-  return { status: "done", label: "Done" };
+  return assertNever(entry.kind, "Transcript outcome");
 }
 
 const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: {
@@ -129,10 +166,10 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
   const result = entry.toolResult;
   const state = outcome(entry);
   const [open, setOpen] = useState(forceExpanded || state.status === "error" || !result);
-  const body = useItemBody(entry.itemId, open || forceExpanded, entry.size);
+  const body = useItemBody(entry.itemId, open, entry.size);
   const full = body.body?.kind === "toolCall" ? body.body : null;
   const args = full ? full.arguments : call.arguments ?? {};
-  const elapsed = useElapsed(Number(entry.time || 0) || undefined, !result);
+  const { ref, elapsed } = useElapsed<HTMLDetailsElement>(Number(entry.time || 0) || undefined, !result);
   const timing = entry.time ? duration(result ? Number(result.timestamp || entry.time) - Number(entry.time) : elapsed || 0) : "";
   const previewOutput = full?.result ? "" : result ? result.preview || "" : String(call.partialOutput || "");
   const completeOutput = full?.result ? visibleResult(full.result.content) : [];
@@ -145,7 +182,7 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
     return [summary, json(loaded ? loaded.arguments : args), loaded?.result ? resultText(loaded.result.content) : previewOutput].filter(Boolean).join("\n\n");
   };
 
-  return <details className={`conversation-step tool-step ${state.status}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => setOpen(event.currentTarget.open)}>
+  return <details ref={ref} data-transcript-seq={entry.seq} className={`conversation-step tool-step ${state.status}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>
       <span className="step-summary">{open ? toolLabel(call.name) : summary}</span>
       <ThreadChips ids={threadIds} />
@@ -155,8 +192,8 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
     </summary>
     <div className="step-detail">
       <span className="step-detail-label">Arguments</span>
-      <pre>{json(args)}</pre>
-      {(previewOutput || completeOutput.length > 0) && <><span className="step-detail-label">Result</span><div className="step-result">
+      <pre className="step-arguments" tabIndex={0} aria-label="Tool arguments">{json(args)}</pre>
+      {(previewOutput || completeOutput.length > 0) && <><span className="step-detail-label">Result</span><div className="step-result" tabIndex={0} role="region" aria-label="Tool result">
         {previewOutput && <pre>{previewOutput}</pre>}
         {completeOutput.map((part, index) => part.kind === "image"
           ? <AttachmentImage key={index} src={imageUrl(part.image)} alt={`Tool result image, ${String(part.image.mimeType || "application/octet-stream")}`} downloadQuery />
@@ -170,9 +207,12 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
 }, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home && before.forceExpanded === after.forceExpanded);
 
 function stepLabel(entry: ContextEntry) {
-  if (entry.kind === "system") return "System prompt";
-  if (entry.kind === "tool") return `Tool schema${entry.label ? ` · ${entry.label.replace(/^Tool\s*·?\s*/i, "")}` : ""}`;
-  return entry.label || entry.kind;
+  switch (entry.kind) {
+    case "system": return "System prompt";
+    case "tool": return `Tool schema${entry.label ? ` · ${entry.label.replace(/^Tool\s*·?\s*/i, "")}` : ""}`;
+    case "thinking": case "notice": case "toolCall": case "user": case "assistant": return entry.label || entry.kind;
+  }
+  return assertNever(entry.kind, "Transcript step label");
 }
 
 const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = false, onOpen }: {
@@ -184,7 +224,7 @@ const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = fals
   const state = outcome(entry);
   const error = state.status === "error";
   const [open, setOpen] = useState(forceExpanded || error || (entry.streaming === true && !entry.live));
-  const body = useItemBody(entry.itemId, open || forceExpanded, entry.size);
+  const body = useItemBody(entry.itemId, open, entry.size);
   const loaded = body.body && body.body.kind !== "toolCall" ? body.body.text : undefined;
   const source = entry.text ?? loaded ?? "";
   const preview = (entry.preview ?? source).trim().replace(/\s+/g, " ").slice(0, 120);
@@ -199,7 +239,7 @@ const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = fals
     onOpen?.(next);
   };
   const detail = loaded ?? entry.text ?? "";
-  return <details className={`conversation-step text-step ${state.status}${thinking ? " thinking-step" : ""}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => toggle(event.currentTarget.open)}>
+  return <details data-transcript-seq={entry.seq} className={`conversation-step text-step ${state.status}${thinking ? " thinking-step" : ""}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => toggle(event.currentTarget.open)}>
     <summary>
       <span className="step-summary"><strong>{stepLabel(entry)}</strong>{!open && preview && <span>{preview}</span>}</span>
       {entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
@@ -226,9 +266,12 @@ function Step({ entry, sessionId, home, forceExpanded = false, onThinkingOpen }:
   forceExpanded?: boolean;
   onThinkingOpen?(open: boolean): void;
 }) {
-  return entry.kind === "toolCall"
-    ? <ToolStep entry={entry} home={home} forceExpanded={forceExpanded} />
-    : <TextStep entry={entry} sessionId={sessionId} forceExpanded={forceExpanded} onOpen={entry.live ? onThinkingOpen : undefined} />;
+  switch (entry.kind) {
+    case "toolCall": return <ToolStep entry={entry} home={home} forceExpanded={forceExpanded} />;
+    case "system": case "tool": case "thinking": case "notice": case "user": case "assistant":
+      return <TextStep entry={entry} sessionId={sessionId} forceExpanded={forceExpanded} onOpen={entry.live ? onThinkingOpen : undefined} />;
+  }
+  return assertNever(entry.kind, "Transcript step");
 }
 
 function workDuration(item: Extract<TranscriptItem, { kind: "work" }>, running: boolean, elapsed: number | undefined) {
@@ -239,7 +282,7 @@ function workDuration(item: Extract<TranscriptItem, { kind: "work" }>, running: 
 }
 
 function workHeading(item: Extract<TranscriptItem, { kind: "work" }>, running: boolean, elapsed: number | undefined, expanded: boolean) {
-  const steps = item.entries.length;
+  const steps = item.entries.length + (item.live ? 1 : 0);
   const time = steps > 1 ? workDuration(item, running, elapsed) : "";
   if (expanded) return `Work${time ? ` · ${time}` : ""}`;
   const parts = [`${steps} ${steps === 1 ? "step" : "steps"}`];
@@ -261,14 +304,14 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
 }) {
   const [expanded, setExpanded] = useState(false);
   const running = newest && item.running;
-  const elapsed = useElapsed(item.summary.startedAt, running);
-  return <section className={`work-card${running ? " running" : ""}${item.summary.hasErrors ? " has-errors" : ""}`}>
+  const { ref, elapsed } = useElapsed<HTMLElement>(item.summary.startedAt, running);
+  return <section ref={ref} className={`work-card${running ? " running" : ""}${item.summary.hasErrors ? " has-errors" : ""}`}>
     <button type="button" className="work-card-header" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
       <span className="work-chevron" aria-hidden="true">›</span>
       <span>{workHeading(item, running, elapsed, expanded)}</span>
     </button>
     {expanded
-      ? <div className="work-steps">{item.entries.map(entry => <Step key={entry.key} entry={entry} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />)}</div>
+      ? <div className="work-steps"><VirtualTranscript items={item.entries} itemKey={entry => entry.key} render={entry => <Step entry={entry} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />} />{item.live && <Step entry={item.live} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />}</div>
       : <div className="work-latest"><Step entry={item.latest} sessionId={sessionId} home={home} forceExpanded={running && !item.latest.live} onThinkingOpen={onThinkingOpen} /></div>}
   </section>;
 }, (before, after) => before.newest === after.newest
@@ -280,37 +323,27 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
   && before.item.entries.length === after.item.entries.length
   && before.item.entries.every((entry, index) => entry.signature === after.item.entries[index]?.signature));
 
-const CONTEXT_WINDOW_SIZE = 60;
-
-export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
-  const items = useMemo(() => buildTranscript(entries, liveThinking, thinkingActive), [entries, liveThinking, thinkingActive]);
-  const newest = Math.max(0, items.length - CONTEXT_WINDOW_SIZE);
-  const [start, setStart] = useState(newest);
-  const previousCount = useRef(0);
-
-  useEffect(() => {
-    previousCount.current = 0;
-    setStart(newest);
-  }, [sessionId]);
-  useEffect(() => {
-    setStart(value => previousCount.current === 0 ? newest : Math.min(value, newest));
-    previousCount.current = items.length;
-  }, [items.length, newest]);
-
-  const visible = items.slice(start);
-  const newestWork = visible.findLastIndex(item => item.kind === "work");
-  const earlier = start > 0 || earlierAvailable;
+export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onVisibleRange, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
+  const stable = useMemo(() => buildStableTranscript(entries), [entries]);
+  const grouped = useMemo(() => appendLiveThinking(stable, liveThinking, thinkingActive), [stable, liveThinking, thinkingActive]);
+  const items = useMemo(() => autoCollapse ? grouped : grouped.flatMap<RenderedTranscriptItem>(item => item.kind === "work" ? [...item.entries, ...(item.live ? [item.live] : [])].map(entry => ({ kind: "step" as const, entry })) : [item]), [grouped, autoCollapse]);
+  const ref = useVisibleHeads(items, onVisibleRange);
+  const visible = items;
+  const newestWork = items.findLastIndex(item => item.kind === "work");
   return <InlineImagesContext.Provider value={images}>
-    <div className="transcript conversation-transcript">
-      {earlier && <button type="button" className="context-earlier" disabled={loadingEarlier} onClick={() => start > 0 ? setStart(Math.max(0, start - CONTEXT_WINDOW_SIZE)) : onShowEarlier?.()}>
-        {loadingEarlier ? "Loading earlier…" : `Show ${start > 0 ? Math.min(CONTEXT_WINDOW_SIZE, start) : CONTEXT_WINDOW_SIZE} earlier`}
+    <div ref={ref} className="transcript conversation-transcript">
+      {earlierAvailable && <button type="button" className="context-earlier" disabled={loadingEarlier} onClick={onShowEarlier}>
+        {loadingEarlier ? "Loading earlier…" : "Show 60 earlier"}
       </button>}
       {earlierError && <p className="context-earlier-error" role="status">{earlierError}</p>}
-      {visible.flatMap((item, index) => item.kind === "work"
-        ? autoCollapse
-          ? [<WorkCard key={`${sessionId}:${item.key}`} item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />]
-          : item.entries.map(entry => <Step key={`${sessionId}:${entry.key}`} entry={entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />)
-        : [<MessageEntry key={item.entry.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />])}
+      <VirtualTranscript items={visible} messageIds={transcriptMessageIds} itemKey={item => `${sessionId}:${item.kind === "work" ? item.key : item.entry.key}`} render={(item, index) => item.kind === "work"
+        ? <WorkCard item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />
+        : item.kind === "step"
+          ? <Step entry={item.entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />
+          : item.kind === "outgoing"
+            ? <OutgoingEntry entry={item.entry} sessionId={sessionId} />
+            : <MessageEntry entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />} />
+      {newerAvailable && <button type="button" className="context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
     </div>
   </InlineImagesContext.Provider>;
 }

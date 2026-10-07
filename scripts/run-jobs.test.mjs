@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { checkParallelism, runJob, runJobs } from "./run-jobs.mjs";
+import { checkJobs } from "./test.mjs";
+import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
+import { orchestratorTestChecks } from "../packages/orchestrator/scripts/check.mjs";
 
 test("job output is visible before the process finishes", async () => {
   let complete = false;
@@ -70,6 +73,63 @@ test("the Node test driver expands file patterns and propagates failures without
     assert.match(output, /fixture failure/);
     assert.match(output, /LATER_FILE_RAN/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("publication schedules every workspace shard directly under the shared budget", async () => {
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
+  assert.equal(shards.length, 6);
+  assert.deepEqual(shards.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD), ["0/6", "1/6", "2/6", "3/6", "4/6", "5/6"]);
+  assert.deepEqual(shards.map(job => job[0]), workspaceChecks.filter(([name]) => /^agent workspace \d+\/6$/.test(name)).map(job => job[0]));
+  assert.equal(checkJobs.filter(([name]) => name === "agent workspace component deployment").length, 1);
+  assert.equal(checkJobs.some(([, command, args]) => command === "npm" && args.includes("--workspace=@hara-seihun/agent-workspace")), false);
+  let active = 0, peak = 0;
+  const results = await runJobs(shards.map(([name, , , options]) => [name, process.execPath,
+    ["-e", "if (process.env.PI_STACK_CHECK_CONCURRENCY !== '1' || !process.env.AGENT_WORKSPACE_TEST_SHARD) process.exit(1); setTimeout(() => {}, 20)"], options]), {
+    concurrency: 2,
+    write(text) {
+      if (text.includes(": started =====")) peak = Math.max(peak, ++active);
+      if (/: (passed|failed) \(/.test(text)) active--;
+    },
+  });
+  assert.equal(peak, 2);
+  assert.equal(active, 0);
+  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0]);
+});
+
+test("workspace shards execute a selected contract exactly once across the publication plan", async () => {
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
+  let output = "";
+  const results = await runJobs(shards.map(([name, command, args, options]) => [name, command,
+    [args[0], "--test-name-pattern=cache discovery walks each directory once", ...args.slice(1)], options]), {
+    concurrency: 2, write(text) { output += text; },
+  });
+  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0], output);
+  assert.equal((output.match(/✔ cache discovery walks each directory once/g) ?? []).length, 1, output);
+});
+
+test("publication shards Orchestrator under the shared budget without dropping the native proof", async () => {
+  const shards = checkJobs.filter(([name]) => /^orchestrator \d+\/6$/.test(name));
+  assert.equal(shards.length, 6);
+  assert.deepEqual(shards.map(([, , args]) => args.at(-1)), Array.from({ length: 6 }, (_, index) => `--shard=${index + 1}/6`));
+  for (const [, command, args, options] of shards) {
+    assert.equal(command, process.execPath);
+    assert.equal(args[1], "run");
+    assert.ok(args.includes("--exclude=tests/routing-runtime.test.ts"));
+    assert.deepEqual(options.dependsOn, ["orchestrator shared RPC"]);
+  }
+  const routing = checkJobs.find(([name]) => name === "orchestrator routing runtime");
+  assert.equal(routing[2].at(-1), "tests/routing-runtime.test.ts");
+  assert.deepEqual(routing[3].dependsOn, shards[0][3].dependsOn);
+  for (const prerequisite of ["orchestrator memory build", "orchestrator types", "orchestrator shared RPC"]) {
+    assert.equal(checkJobs.filter(([name]) => name === prerequisite).length, 1);
+  }
+  let output = "";
+  const jobs = orchestratorTestChecks(shards.map(([name, , args]) => ({ name, args: [
+    "tests/thread-wake-native.test.ts", "--passWithNoTests", ...args.slice(3),
+  ] })));
+  const results = await runJobs(jobs, { concurrency: checkParallelism(), write(text) { output += text; } });
+  assert.deepEqual(results.map(result => result.code), jobs.map(() => 0), output);
+  assert.equal((output.match(/✓ tests\/thread-wake-native\.test\.ts/g) ?? []).length, 1, output);
 });
 
 test("check budgets reject invalid settings and permit an empty queue", async () => {

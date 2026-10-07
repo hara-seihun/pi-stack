@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { publicationConfig } from "./publication-fixture.mjs";
 
+// Each pass performs dozens of durable writes and subprocesses alongside other check jobs.
+const fixtureTimeoutMs = 15_000;
+
 test("divergent host ancestry stops before main, intake or either deployment changes", t => {
   const root = mkdtempSync(join(tmpdir(), "publication-ancestry-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -36,7 +39,7 @@ printf '%s\\n' '{"host":"${host}","selectedCommit":"${selected}","checkoutCommit
 `, { mode: 0o700 });
   }
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../deploy/publication", import.meta.url)), "drain"], {
-    encoding: "utf8", timeout: 5000,
+    encoding: "utf8", timeout: fixtureTimeoutMs,
     env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, TRACE: root,
       PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(root), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") },
   });
@@ -98,8 +101,8 @@ printf '%s\\n' '{"selectedCommit":"${base}","checkoutCommit":"${base}","runtimes
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
       import { processRequest } from ${JSON.stringify(new URL("../deploy/publication", import.meta.url).href)};
       processRequest(${JSON.stringify(value)});
-    `], { encoding: "utf8", timeout: 5000, env });
-    assert.equal(result.status, 0, result.stderr);
+    `], { encoding: "utf8", timeout: fixtureTimeoutMs, env });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
     return JSON.parse(readFileSync(receipt, "utf8"));
   }
   const queued = processOne(request);
@@ -143,7 +146,7 @@ esac
 `, { mode: 0o700 });
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "(fail) integration fixture rejects wrong core" >&2\necho "Expected: 201" >&2\necho "Received: 409" >&2\nexit 1\n', { mode: 0o700 });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../deploy/publication", import.meta.url)), "drain"], {
-    encoding: "utf8", timeout: 5000,
+    encoding: "utf8", timeout: fixtureTimeoutMs,
     env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(root), PI_STACK_PUBLICATION_REPOSITORY: join(root, "canonical"), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") },
   });
   assert.equal(result.status, 0, result.stderr);

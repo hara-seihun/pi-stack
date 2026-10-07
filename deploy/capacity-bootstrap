@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 2 && $2 == /* ]] || { echo 'usage: deploy/capacity-bootstrap advance|status /absolute/PLAN.json' >&2; exit 64; }
+root=$(cd "$(dirname "$0")" && pwd)
+state=$(jq -er '.stateDir | select(startswith("/"))' "$2")
+mkdir -p -m 700 "$state"
+exec flock --nonblock "$state/bootstrap.lock" node "$root/capacity-bootstrap.mjs" "$@"

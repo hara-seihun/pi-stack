@@ -1,5 +1,6 @@
 import { useEffect } from "react";
-import { SPEECH_RATES, speech, useSpeech } from "./speech";
+import { SPEECH_RATES, speech, useSpeech, type SpeechState } from "./speech";
+import { assertNever } from "../../shared/explicit-state";
 import "./speech-bar.css";
 
 const PlayIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>;
@@ -9,6 +10,17 @@ const StopIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y
 function clock(seconds: number) {
   const whole = Math.max(0, Math.floor(seconds));
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function speechLabel(state: SpeechState): string {
+  switch (state.status) {
+    case "idle": return "";
+    case "loading": return "Preparing…";
+    case "error": return state.error;
+    case "paused": return `Paused · ${clock(state.position)}`;
+    case "playing": return clock(state.position);
+  }
+  return assertNever(state.status, "Speech status");
 }
 
 /** The reader: what is being read, play/pause, stop, rate and voice. Hidden until a message is spoken. */
@@ -21,7 +33,7 @@ export function SpeechBar() {
     const index = SPEECH_RATES.indexOf(state.rate as typeof SPEECH_RATES[number]);
     speech.setRate(SPEECH_RATES[(index + 1) % SPEECH_RATES.length]);
   };
-  const label = state.status === "loading" ? "Preparing…" : state.status === "error" ? state.error : state.status === "paused" ? `Paused · ${clock(state.position)}` : clock(state.position);
+  const label = speechLabel(state);
   return <div className={`speech-bar ${state.status}`} role="region" aria-label={state.title ? `Reader: ${state.title}` : "Reader"}>
     <button type="button" className="speech-control" aria-label={state.status === "playing" ? "Pause" : "Play"} disabled={state.status === "error"} onClick={() => speech.toggle()}>{state.status === "playing" ? <PauseIcon /> : <PlayIcon />}</button>
     <div className="speech-text">

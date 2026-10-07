@@ -3,7 +3,7 @@ import { threadMode, type ThreadMode } from "./modes.js";
 
 /** The conversation of a moded thread, if this session is one. Workers keep their full toolset. */
 export function modeConversation(environment: NodeJS.ProcessEnv): ThreadMode["conversation"] | undefined {
-  return environment.PI_THREAD_CAN_SPAWN === "0" ? undefined : threadMode(environment.PI_THREAD_MODE)?.conversation;
+  return environment.PI_THREAD_LIVE_DISPATCHER === "1" ? threadMode(environment.PI_THREAD_MODE)?.conversation : undefined;
 }
 
 /** Apply the mode's bash ceiling to the session environment the timeout guard reads. */

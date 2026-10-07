@@ -10,6 +10,7 @@ import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { probeBrowser } from "./browser-probe.mjs";
+import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, standaloneRecordPath } from "./standalone-agent.mjs";
 
 const { values } = parseArgs({ options: { help: { type: "boolean", short: "h" }, "worker-release": { type: "string" }, "session-file": { type: "string" } } });
 if (values.help) {
@@ -25,7 +26,7 @@ entrypoint with the host's pi-stack-release command, not pi install npm.`);
 const runtime = realpathSync(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime");
 const host = realpathSync(values["worker-release"] ?? runtime);
 const sdk = realpathSync(join(host, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
-const { createAgentSession, DefaultResourceLoader, SessionManager } = await import(pathToFileURL(sdk).href);
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager } = await import(pathToFileURL(sdk).href);
 const selected = createRequire(join(runtime, "package.json"));
 const browserPackage = selected.resolve("agent-browser/package.json");
 const bin = realpathSync(join(dirname(dirname(browserPackage)), ".bin"));
@@ -40,11 +41,12 @@ const downloadContent = `browser-download-${randomUUID()}\n`;
 const downloadPath = join(directory, "browser-download.txt");
 const screenshotPath = join(directory, "browser-screenshot.png");
 const frameValue = `frame-fill-${randomUUID()}`;
-const reactSources = Object.fromEntries([
-  ["react", "react", "react.production.js"], ["react-dom", "react-dom", "react-dom.production.js"],
-  ["react-dom/client", "react-dom", "react-dom-client.production.js"], ["scheduler", "scheduler", "scheduler.production.js"],
-].map(([id, pkg, file]) => [id, readFileSync(join(dirname(selected.resolve(pkg)), "cjs", file), "utf8")]));
-const controlledDates = `<div id="date-probe"></div><script>
+function controlledDateProbe() {
+  const reactSources = Object.fromEntries([
+    ["react", "react", "react.production.js"], ["react-dom", "react-dom", "react-dom.production.js"],
+    ["react-dom/client", "react-dom", "react-dom-client.production.js"], ["scheduler", "scheduler", "scheduler.production.js"],
+  ].map(([id, pkg, file]) => [id, readFileSync(join(dirname(selected.resolve(pkg)), "cjs", file), "utf8")]));
+  return `<div id="date-probe"></div><script>
 (() => {
   const sources = ${JSON.stringify(reactSources).replaceAll("</script", "<\\/script")}, loaded = {};
   function require(id) { if (!loaded[id]) { const module = loaded[id] = { exports: {} }; new Function('module', 'exports', 'require', sources[id])(module, module.exports, require); } return loaded[id].exports; }
@@ -58,6 +60,8 @@ const controlledDates = `<div id="date-probe"></div><script>
   }
   createRoot(document.getElementById('date-probe')).render(React.createElement(Probe));
 })();</script>`;
+}
+let controlledDates;
 const server = createServer((req, res) => {
   if (req.url === "/download") {
     res.writeHead(200, {
@@ -75,15 +79,20 @@ const server = createServer((req, res) => {
   res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button>${controlledDates}<a href="/download" download>Download probe</a><iframe title="Secure payment input frame" src="http://localhost:${server.address().port}/frame"></iframe>`);
 });
 let session;
+let capacity;
 let accepted = false;
 let browserAttempted = !!values["session-file"];
 try {
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const executionId = randomUUID();
+  capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `browser-doctor:${executionId}`, executionId });
   const agentDir = join(homedir(), ".pi/agent");
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
+  const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+  const model = modelRuntime.getModel("openai-codex", "gpt-6-luna");
+  assert.ok(model, "browser doctor requires its explicit offline catalog model; no inference is dispatched");
   const opened = await createAgentSession({
-    cwd: directory, agentDir, resourceLoader, tools: ["agent_browser"],
+    cwd: directory, agentDir, resourceLoader, modelRuntime, model, tools: ["agent_browser"],
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
   });
   session = opened.session;
@@ -95,10 +104,14 @@ try {
   const extensionErrors = [];
   await session.bindExtensions({ mode: "print", onError: (error) => extensionErrors.push(error) });
   assert.deepEqual(extensionErrors, [], "configured extensions must initialize");
-  assert.equal(process.env.PATH.split(delimiter)[0], bin, "the selected browser must own executable resolution");
+  const expectedFront = process.platform === "linux" && process.env.PI_THREAD_RESOURCE_BOUNDARY
+    ? join(runtime, "extensions/browser/bin") : bin;
+  assert.equal(process.env.PATH.split(delimiter)[0], expectedFront, "the selected browser must own executable resolution");
   assert.equal(execFileSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 5000 }).trim(), `agent-browser ${browserVersion}`);
   const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
   assert.equal(tools.length, 1, "exactly one native browser tool must be active");
+  controlledDates = controlledDateProbe();
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const url = `http://127.0.0.1:${server.address().port}/`;
   const nativeRoot = dirname(selected.resolve("pi-agent-browser-native/package.json"));
   const { compileAgentBrowserQaPreset } = await import(pathToFileURL(join(nativeRoot, "dist/extensions/agent-browser/lib/input-modes/job.js")).href);
@@ -118,7 +131,10 @@ try {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   } finally {
-    session?.dispose();
+    if (capacity) {
+      if (session) await abortAndSettleStandaloneSession(session, capacity);
+      else await settleStandaloneAgent(capacity);
+    }
     await new Promise((resolve) => server.close(resolve));
     if (accepted || !browserAttempted) rmSync(directory, { recursive: true, force: true });
     else console.error(`Browser proof failed. Session and cleanup state retained at ${sessionFile}`);

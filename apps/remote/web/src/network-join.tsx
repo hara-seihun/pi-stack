@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { API } from "../../server/api";
 import type { NetworkStatus, PrivateNetwork } from "../../server/protocol";
 import { appStorageKey } from "./app-path";
-import { bootstrapUrl, browserFetch, nativePlatform } from "./native";
+import { nativePlatform } from "./native";
 import "./network-join.css";
+import { assertNever } from "../../shared/explicit-state";
 
 const SNOOZE_MS = 24 * 60 * 60 * 1000;
 
@@ -38,10 +39,11 @@ function steps(platform: Platform, server: string) {
       <>In a terminal run <code>tailscale login --login-server {server}</code>.</>,
     ];
   }
+  return assertNever(platform, "Network join platform");
 }
 
 async function readStatus(): Promise<NetworkStatus | null> {
-  const response = await browserFetch(`${await bootstrapUrl()}${API.network.path()}`, {
+  const response = await fetch(API.network.path(), {
     cache: "no-store", headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000),
   });
   // Deployments without a router-declared network (or older routers) have nothing to join.

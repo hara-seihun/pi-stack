@@ -144,7 +144,10 @@ export function reportDiagnostic(ctx, phase, error, reason, diagnostic) {
 }
 
 export function recoveryMessage(attempt) {
-  return `Native compaction ${attempt.state}: ${attempt.error ?? "interrupted before checkpoint commit"}. Context is unchanged. Automatic resubmission is blocked; retry with /compact or the compact RPC command, or switch model.`;
+  if (attempt.kind === "invalid") return `${attempt.error}. Context is unchanged. Repair the stored attempt or use explicit /compact to supersede it; no automatic retry was inferred.`;
+  if (attempt.kind === "terminal" && (attempt.state === "failed" || attempt.state === "cancelled"))
+    return `Native compaction ${attempt.state}: ${attempt.error ?? "interrupted before checkpoint commit"}. Context is unchanged. Automatic compaction retries after ${new Date(attempt.retryAt).toISOString()}; /compact or the compact RPC command retries now.`;
+  throw new Error("Invalid compaction recovery outcome");
 }
 
 export default function codexCompaction(pi) {
@@ -190,7 +193,7 @@ export default function codexCompaction(pi) {
       const failed = { ...attempt, state: event.signal.aborted ? "cancelled" : "failed", error: result.error, diagnostic: result.diagnostic };
       pi.appendEntry(ATTEMPT, failed);
       reportDiagnostic(ctx, "compaction-failed", result.error, event.reason, result.diagnostic);
-      return event.signal.aborted ? { cancel: true } : { error: recoveryMessage(failed) };
+      return event.signal.aborted ? { cancel: true } : { error: recoveryMessage(blockedAttempt(ctx.sessionManager.getBranch(), key) ?? { ...failed, kind: "terminal", retryAt: Date.now() }) };
     }
     console.error(JSON.stringify({ component: "codex-compaction", phase: "checkpoint-ready", sessionId: ctx.sessionManager.getSessionId(), diagnostic: result.diagnostic }));
     return {

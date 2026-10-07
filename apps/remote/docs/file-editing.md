@@ -1,0 +1,25 @@
+# Editing files
+
+Files offers Edit for text and Markdown previews. Edit fetches a fresh complete UTF-8 document (at most 1 MiB), rather than reusing a truncated preview. Save requires that snapshot's opaque revision. A conflict retains the draft; Reload latest explicitly discards it after confirmation. Save errors never automatically replay a write. Drafts survive tab changes in person/environment-scoped memory and are cleared on person switch or lock. Browser reload clears them, with a before-unload warning; there is no durable browser storage.
+
+`GET /v1/files/edit?path=ABSOLUTE` returns `{path, content, revision}`. `PUT /v1/files/edit` accepts the same shape and returns the new snapshot. Both return `Cache-Control: no-store`; errors are `{error}` with 400 for invalid input, 403 for filesystem denial, 404 for absent files, 409 for a stale/replaced/busy file or pending recovery, 413 for excessive size, and 415 for unsupported content. The JSON request is separately bounded to allow UTF-8 escaping.
+
+## Authority and canonical paths
+
+The existing person-bound router session authorizes both routes, including remote-environment grants. The person's supervisor invokes `file-edit.py` using `python3` on its PATH, without privilege elevation, under its existing Unix UID and ACLs. A read-only grant is not an edit grant: even the edit snapshot requires a successful read/write open. There is no new shared-folder allowlist, person grant or privileged helper. Files retains its existing absolute-path browsing model.
+
+The helper resolves the requested path and opens each canonical directory with `O_NOFOLLOW`, pins the parent and target descriptors, and rejects non-regular files, special permission bits, executable capabilities, invalid UTF-8 and NUL-containing content. It checks that the requested path still names the pinned canonical inode before reading, before writing and after writing. The revision binds canonical path, device/inode, size, timestamps, ownership/mode/link count and a digest of the complete bytes. Replacing or retargeting a link between Edit and Save invalidates the revision even when the bytes match.
+
+## Save and failure semantics
+
+An exclusive, nonblocking `flock` on the target inode spans snapshot/revision verification, backup, write, verification and rollback. It coordinates separate supervisors and separate processes opening the same inode, including hard-link aliases. A competing operation returns 409 rather than waiting. The existing inode is written, truncated and synced, not replaced: ownership, existing ACLs, xattrs, symbolic links and hard links remain attached to that inode. No file or directory permissions are changed. Existing files only; this route cannot create a target.
+
+Before touching the target, the helper syncs a mode-0600 recovery record and its directory under the requesting supervisor's `PI_REMOTE_DATA/file-edit-backups/`. The record contains the canonical path, device/inode and base64 original bytes. An ordinary write/truncate/sync/verification failure attempts to restore and sync the original bytes under the same lock. Successful restoration reports failure, not success. A failed rollback retains the recovery record and explicitly says not to retry. Successful saves remove their record. Backup-cleanup failure reports that content was saved but cleanup failed.
+
+**This is not crash-atomic storage.** Process termination, power loss or an unrecoverable disk failure can leave a partial target plus its recovery record. Subsequent editor reads/saves by that supervisor reject an inode with a pending record, including its hard-link aliases. Recovery records are private to the requesting person; another person's supervisor cannot discover those records after a crash. Do not treat this as cross-person crash recovery or silently restore a record over newer work. An authorized maintainer must compare the recorded inode and current bytes, coordinate with other writers, and recover deliberately. There is no automatic recovery or administrative grant in this feature.
+
+**The lock coordinates only cooperating readers/writers.** Ordinary shell editors, agents using filesystem tools, existing download/preview routes and other programs do not acquire it. They may observe an in-place write or race a save; pre/post checks detect some changes but cannot provide transactions against noncooperating writers. Use one editing mechanism at a time for a shared ledger. Owner-side atomic replacement is a different design and would break hard-link inode identity.
+
+## Verification
+
+All edit/save tests use disposable fixtures, never the canonical shared ledger. `file-edit.test.ts` exercises the HTTP adapter and separate helper processes; it also runs `file_edit_test.py` in the normal Remote gate. The Python fixtures inject backup, write, truncate, sync and rollback failures and canonical-path races. Router integration tests exercise unauthenticated and wrong-person GET/PUT denial. Frontend editor tests cover transport/state ownership and retained drafts on conflicts. Deployment and deployed UI proof remain the publication worker's responsibility.

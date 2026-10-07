@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { copyDeploymentOwner, copyWriteSources } from "./deployment-fixture.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const timeout = spawnSync("bash", ["-c", "command -v timeout"], { encoding: "utf8" }).stdout.trim();
@@ -15,7 +16,7 @@ function fixture() {
   const repo = join(directory, "repo"), bin = join(directory, "bin");
   mkdirSync(join(repo, "deploy"), { recursive: true });
   mkdirSync(bin);
-  for (const name of ["lib", "release-checkout", "prepare", "runtime", "retain"]) copyFileSync(join(root, "deploy", name), join(repo, "deploy", name));
+  copyDeploymentOwner(root, repo);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", PI_STACK_WRITE_GPU_ENABLED: "0", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp"), PI_STACK_RUNTIME_DEST: join(directory, "srv/runtime"), PI_STACK_DEPENDENCIES_ROOT: join(directory, "srv/dependencies") };
   mkdirSync(env.TMPDIR);
   function executable(path, source) { writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${source}\n`, { mode: 0o755 }); }
@@ -25,10 +26,38 @@ function fixture() {
       assert.equal(result.status, 0, result.stderr);
     }
   }
-  function run(name, extra = {}) {
-    return spawnSync(join(repo, "deploy", name), [], { env: { ...env, ...extra }, encoding: "utf8", timeout: 3000 });
+  function run(name, extra = {}, args = []) {
+    return spawnSync(join(repo, "deploy", name), args, { env: { ...env, ...extra }, encoding: "utf8", timeout: 3000 });
   }
   return { directory, repo, bin, env, executable, commit, run, close: () => rmSync(directory, { recursive: true, force: true }) };
+}
+
+function rewriteFixture(f) {
+  copyWriteSources(root, f.repo);
+  const manifests = join(f.repo, "apps/write/rewrite-runtime");
+  const cache = join(f.directory, "rewrite-cache");
+  mkdirSync(manifests, { recursive: true });
+  mkdirSync(cache);
+  const archive = join(cache, "runtime.zip");
+  const packed = spawnSync("python3", ["-c", `import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as bundle:
+    bundle.writestr('build/bin/llama-server', '#!/bin/sh\\necho fixture-version\\n')
+    bundle.writestr('build/bin/LICENSE', 'MIT fixture')
+`, archive], { encoding: "utf8", timeout: 3000 });
+  assert.equal(packed.status, 0, packed.stderr);
+  const model = join(cache, "model.gguf");
+  writeFileSync(model, "GGUFfixture");
+  for (const [name, file, fields] of [
+    ["runtime", archive, { archive_prefix: "build/bin/", files: ["llama-server", "LICENSE"], minimum_glibc: "2.34", cpu_flags: [] }],
+    ["model", model, {}],
+  ]) {
+    const bytes = readFileSync(file);
+    writeFileSync(join(manifests, `${name}.json`), JSON.stringify({
+      ...fields, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length,
+      url: "https://fixture.invalid/never-download-rewrite",
+    }));
+  }
+  f.env.PI_STACK_WRITE_REWRITE_CACHE = cache;
 }
 
 function preparationFixture() {
@@ -68,18 +97,12 @@ for (const writeLoadState of ["loaded", "not-found"]) test(`Write owns host disc
   const f = preparationFixture();
   try {
     copyFileSync(join(root, "deploy/write-engine"), join(f.repo, "deploy/write-engine"));
+    rewriteFixture(f);
     f.executable(join(f.bin, "systemctl"), `[[ "$*" == "show pi-stack-write.service -p LoadState --value" ]] || exit 64
 printf 'discovery\\n' >> "$TRACE"
 printf '%s\\n' '${writeLoadState}'`);
     f.executable(join(f.bin, "uv"), 'printf "uv\\n" >> "$TRACE"; exit 23');
     f.executable(join(f.bin, "curl"), 'echo "fixture must not download weights" >&2; exit 64');
-    const sources = spawnSync("git", ["-C", root, "ls-files", "-z", "--", "apps/write/engine"], { encoding: "utf8" });
-    assert.equal(sources.status, 0, sources.stderr);
-    assert.notEqual(sources.stdout, "", "the fixture needs the tracked Write engine inputs");
-    for (const file of sources.stdout.split("\0").filter(Boolean)) {
-      mkdirSync(dirname(join(f.repo, file)), { recursive: true });
-      copyFileSync(join(root, file), join(f.repo, file));
-    }
     f.commit();
     const destination = join(f.directory, "write-engine");
     const result = f.run("prepare", { PI_STACK_WRITE_ENGINE_DEST: destination, PI_STACK_WRITE_ENGINE_FORCE: "0" });
@@ -100,10 +123,11 @@ printf '%s\\n' '${writeLoadState}'`);
   } finally { f.close(); }
 });
 
-test("Write resumes both model downloads, reuses pinned copies, and keeps weights across dependency changes", () => {
+test("Write resumes model downloads, reuses pinned copies, and keeps verified weights across dependency changes", () => {
   const f = fixture();
   try {
     copyFileSync(join(root, "deploy/write-engine"), join(f.repo, "deploy/write-engine"));
+    rewriteFixture(f);
     const source = join(f.repo, "apps/write/engine");
     mkdirSync(join(source, "cleanup"), { recursive: true });
     const bytes = Buffer.from("fixture pinned model bytes\n".repeat(8));
@@ -120,6 +144,10 @@ test("Write resumes both model downloads, reuses pinned copies, and keeps weight
       tokenizer_file: "tokenizer.json", tokenizer_repository: "fixture", tokenizer_revision: "pin", tokenizer_sha256: digest,
     }));
     writeFileSync(join(source, "cleanup/model.json"), JSON.stringify({ release: "https://fixture.invalid", files: { "joint-f32.onnx": digest } }));
+    const punctuationFiles = ["punct_cap_seg_en.onnx", "spe_32k_lc_en.model"];
+    writeFileSync(join(source, "punctuation-model.json"), JSON.stringify({
+      repository: "fixture", revision: "pin", files: Object.fromEntries(punctuationFiles.map(file => [file, digest])),
+    }));
     const store = join(f.directory, ".pi-write");
     const cached = join(store, "weights-cached/shared");
     mkdirSync(cached, { recursive: true });
@@ -148,49 +176,126 @@ printf '206'`);
     const env = { PI_STACK_WRITE_ENGINE_DEST: destination, PI_STACK_WRITE_ENGINE_FORCE: "1", PAYLOAD: payload };
     const first = f.run("write-engine", env);
     assert.equal(first.status, 0, first.stderr);
+    assert.equal(existsSync(destination), false, "preparation never selects the engine");
+    assert.equal(f.run("write-engine", env, ["--select"]).status, 0);
     const firstTree = realpathSync(destination);
     const weights = realpathSync(join(destination, "model"));
     const venv = realpathSync(join(destination, "venv"));
+    const rewriteRuntime = realpathSync(join(destination, "rewrite-runtime"));
+    const rewriteModel = realpathSync(join(destination, "rewrite-model"));
+    assert.match(readFileSync(join(rewriteRuntime, "bin/llama-server"), "utf8"), /fixture-version/);
+    assert.equal(readFileSync(join(rewriteModel, "model.gguf"), "utf8"), "GGUFfixture");
     assert.deepEqual(readFileSync(join(weights, "encoder.onnx")), bytes);
     assert.deepEqual(readFileSync(join(weights, "shared/tokenizer.json")), bytes);
     assert.deepEqual(readFileSync(join(destination, "cleanup-model/joint-f32.onnx")), bytes);
     const trace = readFileSync(f.env.TRACE, "utf8");
-    assert.equal(trace, "encoder.onnx.part 0\nencoder.onnx.part 32\nconvert\njoint-f32.onnx.part 0\njoint-f32.onnx.part 32\n");
+    assert.equal(trace, "encoder.onnx.part 0\nencoder.onnx.part 32\nconvert\njoint-f32.onnx.part 0\njoint-f32.onnx.part 32\npunct_cap_seg_en.onnx.part 0\npunct_cap_seg_en.onnx.part 32\nspe_32k_lc_en.model.part 0\nspe_32k_lc_en.model.part 32\n");
+    const punctuation = realpathSync(join(destination, "punctuation-model"));
+    for (const file of punctuationFiles) assert.deepEqual(readFileSync(join(punctuation, file)), bytes);
     writeFileSync(join(source, "requirements.lock"), "second dependencies\n");
     f.commit();
     const second = f.run("write-engine", env);
     assert.equal(second.status, 0, second.stderr);
+    assert.equal(realpathSync(destination), firstTree, "preparation leaves the live selection unchanged");
+    assert.equal(f.run("write-engine", env, ["--select"]).status, 0);
     assert.notEqual(realpathSync(destination), firstTree);
     assert.notEqual(realpathSync(join(destination, "venv")), venv);
     assert.equal(realpathSync(join(destination, "model")), weights);
     assert.equal(readFileSync(f.env.TRACE, "utf8"), trace, "dependency changes neither download nor convert weights again");
     assert.equal(existsSync(join(firstTree, "ready")), true, "previous release remains selectable");
     assert.equal(existsSync(join(firstTree, "venv/bin/python")), true, "previous dependencies remain available");
+    assert.equal(realpathSync(join(destination, "punctuation-model")), punctuation);
+    const secondTree = realpathSync(destination);
+    assert.equal(realpathSync(join(destination, "rewrite-runtime")), rewriteRuntime);
+    assert.equal(realpathSync(join(destination, "rewrite-model")), rewriteModel);
+    const selected = f.run("write-engine", env, ["--select"]);
+    assert.equal(selected.status, 0, selected.stderr);
+    assert.equal(realpathSync(`${destination}.previous`), firstTree, "repeat selection preserves the distinct rollback tree");
+    const proc = join(f.directory, "empty-proc");
+    mkdirSync(proc);
+    const retained = f.run("write-engine", { ...env, PI_STACK_WRITE_PROC_ROOT: proc }, ["--retain"]);
+    assert.equal(retained.status, 0, retained.stderr);
+    assert.equal(existsSync(join(firstTree, "venv/bin/python")), true, "acceptance retention keeps previous dependencies");
+    writeFileSync(join(rewriteModel, "model.gguf"), "BADUfixture");
+    const corruptRewrite = f.run("write-engine", env, ["--select"]);
+    assert.equal(corruptRewrite.status, 65, corruptRewrite.stderr);
+    assert.match(corruptRewrite.stderr, /rewrite runtime\/model is missing or corrupt/);
+    assert.equal(realpathSync(destination), secondTree, "selection cannot accept corrupt rewrite assets");
+    const repairedRewrite = f.run("write-engine", env);
+    assert.equal(repairedRewrite.status, 0, repairedRewrite.stderr);
+    assert.equal(readFileSync(join(rewriteModel, "model.gguf"), "utf8"), "GGUFfixture");
+    assert.equal(readFileSync(f.env.TRACE, "utf8"), trace, "rewrite preparation reuses the seed without downloading");
+    writeFileSync(join(punctuation, punctuationFiles[0]), "corrupt model");
+    const corrupt = f.run("write-engine", env);
+    assert.equal(corrupt.status, 1, corrupt.stderr);
+    assert.match(corrupt.stderr, /punctuation checksum mismatch/);
+    assert.equal(realpathSync(destination), secondTree, "a ready stamp cannot select corrupt assets");
   } finally { f.close(); }
 });
 
-test("preparation reports each failed child and never reports success", () => {
+test("failed builds skip their dependent runtime while independent Write is still awaited", () => {
   const f = preparationFixture();
   try {
     const result = f.run("prepare", { RUNTIME_EXIT: "23", WRITE_ENGINE_EXIT: "11", BUILD_EXIT: "9" });
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /builds exited 9/);
-    assert.match(result.stderr, /runtime exited 23/);
+    assert.doesNotMatch(result.stderr, /runtime exited/);
+    assert.doesNotMatch(readFileSync(f.env.TRACE, "utf8"), /runtime/);
     assert.match(result.stderr, /write-engine exited 11/);
     assert.doesNotMatch(result.stdout, /prepared Pi stack/);
+    const runtimeFailure = f.run("prepare", { RUNTIME_EXIT: "23", WRITE_ENGINE_EXIT: "11" });
+    assert.equal(runtimeFailure.status, 1, runtimeFailure.stderr);
+    assert.match(runtimeFailure.stderr, /runtime exited 23/);
+    assert.match(runtimeFailure.stderr, /write-engine exited 11/);
   } finally { f.close(); }
 });
 
-test("the caller can still terminate preparation and its children", () => {
+test("runtime consumes completed checkout declarations, never concurrent npm/build writes", () => {
   const f = preparationFixture();
   try {
-    const result = spawnSync(timeout, ["--kill-after=1s", "0.2s", join(f.repo, "deploy/prepare")], {
-      env: { ...f.env, WORK_SECONDS: "2" }, encoding: "utf8", timeout: 2000,
-    });
-    assert.equal(result.status, 124, result.stderr);
-    assert.doesNotMatch(result.stdout, /prepared Pi stack/);
-    assert.doesNotMatch(readFileSync(f.env.TRACE, "utf8"), /deadline/);
+    writeFileSync(join(f.repo, "deploy/lib"), `${readFileSync(join(root, "deploy/lib"), "utf8")}\npi_stack_prepare_builds() { sleep 0.15; touch "$DECLARATIONS_READY"; printf 'builds\\n' >> "$TRACE"; }\n`);
+    f.executable(join(f.repo, "deploy/runtime"), 'test -f "$DECLARATIONS_READY"; printf "runtime\\n" >> "$TRACE"');
+    f.commit();
+    const result = f.run("prepare", { DECLARATIONS_READY: join(f.directory, "declarations-ready") });
+    assert.equal(result.status, 0, result.stderr);
+    const trace = readFileSync(f.env.TRACE, "utf8").trim().split("\n");
+    assert.ok(trace.indexOf("builds") < trace.indexOf("runtime"));
   } finally { f.close(); }
+});
+
+test("the caller can still terminate preparation and its children", async () => {
+  const f = preparationFixture();
+  let child;
+  try {
+    // Startup deliberately exceeds the former 200ms cancellation timer.
+    f.executable(join(f.repo, "deploy/retain"), "/bin/sleep 0.3");
+    f.commit();
+    f.executable(join(f.bin, "sleep"), `printf 'ready %s\\n' "$PPID"
+exec /bin/sleep "$@"`);
+    child = spawn(timeout, ["--kill-after=1s", "10s", join(f.repo, "deploy/prepare")], {
+      env: { ...f.env, WORK_SECONDS: "30" }, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "", terminated = false;
+    child.stdout.setEncoding("utf8").on("data", chunk => {
+      stdout += chunk;
+      if (!terminated && stdout.match(/^ready \d+$/gm)?.length === 2) {
+        terminated = true;
+        child.kill("SIGTERM");
+      }
+    });
+    child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+    const result = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    assert.equal(terminated, true, `both preparation children must start before cancellation: ${stderr}`);
+    assert.deepEqual(result, { code: 124, signal: null }, stderr);
+    assert.doesNotMatch(stdout, /prepared Pi stack/);
+    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["builds", "runtime", "write-engine"]);
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    f.close();
+  }
 });
 
 test("preparation still refuses dirty source", () => {
@@ -203,6 +308,53 @@ test("preparation still refuses dirty source", () => {
   } finally { f.close(); }
 });
 
+test("runtime dependency cache tracks compaction recovery and both Kenan packages", () => {
+  const f = fixture();
+  try {
+    const runtime = readFileSync(join(root, "deploy/runtime"), "utf8");
+    const hashScript = runtime.slice(runtime.indexOf("dependency_hash=$("), runtime.indexOf('\ndependency_release='));
+    assert.ok(hashScript.startsWith("dependency_hash=$("));
+    const inputs = [...hashScript.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
+    const changedInputs = [
+      "packages/runtime/extensions/codex-compaction/retry.mjs",
+      ...["kenan-memory", "kenan-root"].flatMap(name => [
+        `packages/${name}/src/nested/fixture.ts`,
+        `packages/${name}/package.json`,
+        `packages/${name}/tsconfig.json`,
+      ]),
+      "packages/kenan-memory/discretion.md",
+      "packages/kenan-memory/person.md",
+      "packages/kenan-root/instructions.md",
+    ];
+    for (const name of new Set([...inputs, ...changedInputs])) {
+      mkdirSync(dirname(join(f.repo, name)), { recursive: true });
+      writeFileSync(join(f.repo, name), "original\n");
+    }
+    function hash() {
+      const result = spawnSync("bash", ["-euo", "pipefail", "-c", `${hashScript}\nprintf '%s' "$dependency_hash"`], {
+        cwd: f.repo, encoding: "utf8", timeout: 3000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^[a-f0-9]{64}$/);
+      return result.stdout;
+    }
+    const original = hash();
+    assert.equal(hash(), original, "unchanged inputs reuse dependencies");
+    for (const name of changedInputs) {
+      writeFileSync(join(f.repo, name), "changed\n");
+      assert.notEqual(hash(), original, `${name} must invalidate dependencies`);
+      writeFileSync(join(f.repo, name), "original\n");
+    }
+    for (const name of ["kenan-memory", "kenan-root"]) {
+      const added = join(f.repo, "packages", name, "src/added.ts");
+      writeFileSync(added, "new source\n");
+      assert.notEqual(hash(), original, `new ${name} source must invalidate dependencies`);
+      rmSync(added);
+      assert.equal(hash(), original, "removing the added source restores the original key");
+    }
+  } finally { f.close(); }
+});
+
 for (const signal of ["TERM", "INT", "HUP", "failure"]) {
   test(`runtime removes unpublished dependency stages after ${signal}`, () => {
     const f = fixture();
@@ -210,12 +362,13 @@ for (const signal of ["TERM", "INT", "HUP", "failure"]) {
       for (const dir of ["packages/runtime", "vendor/pi", "apps", "tools"]) mkdirSync(join(f.repo, dir), { recursive: true });
       for (const name of ["package.json", "package-lock.json", "vendor/pi/package.tgz"]) writeFileSync(join(f.repo, name), "{}\n");
       const runtimeSource = readFileSync(join(root, "deploy/runtime"), "utf8");
-      const hashInputs = runtimeSource.match(/sha256sum (.+)\n/)[1].split(" ");
+      const hashInputs = [...runtimeSource.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
       for (const name of hashInputs.filter((name) => name !== "package.json" && name !== "package-lock.json")) {
         mkdirSync(dirname(join(f.repo, name)), { recursive: true });
         writeFileSync(join(f.repo, name), "\n");
       }
-      f.executable(join(f.bin, "npm"), 'mkdir -p node_modules/.bin');
+      for (const name of ["kenan-memory", "kenan-root"]) mkdirSync(join(f.repo, "packages", name, "src"), { recursive: true });
+      f.executable(join(f.bin, "npm"), 'mkdir -p node_modules/.bin; printf "{}\\n" > node_modules/.package-lock.json');
       f.executable(join(f.bin, "node"), 'exit 0');
       f.executable(join(f.bin, "rsync"), `touch "\${@: -1}/partial"
 ${signal === "failure" ? "exit 23" : `kill -${signal} "$PPID"; exit 20`}`);

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { actionJournal, journalWarning } from "kenan-memory/journal";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -62,8 +63,9 @@ const gateways = new SimGateways((config.simGateways ?? []).map((g: { id: string
         try { if (c.media?.send(JSON.stringify({ type: "context", text: "The telephone connection is now live. Deliver the approved opening and listen." })) === 0) void finish(c, "failed", "SIM opening dispatch dropped"); }
         catch { void finish(c, "failed", "SIM opening dispatch failed"); }
       }
-    } else if (["ended", "failed"].includes(state)) void finish(c, state === "ended" ? "completed" : "failed", reason);
-    else db.query("UPDATE calls SET status=? WHERE id=?").run(state, id);
+    } else if (state === "ended" || state === "failed") void finish(c, state === "ended" ? "completed" : "failed", reason);
+    else if (state === "dialing" || state === "ringing") db.query("UPDATE calls SET status=? WHERE id=?").run(state, id);
+    else { state satisfies never; void finish(c, "failed", "Unsupported SIM call state"); }
   },
   audio(id, data) {
     const c = active.get(id); if (!c?.media || c.finishing || !c.telephoneConnected) return;
@@ -156,20 +158,27 @@ async function start(call: Call, shouldDial = true) {
     if (call.finishing) return;
     if (shouldDial && !call.providerId) {
       db.query("UPDATE calls SET status='dialing' WHERE id=?").run(call.id);
+      if (!call.gatewayId && (!provider || provider.kind !== call.providerKind)) { await finish(call, "failed", "PSTN provider is not configured"); return; }
+      const ticket = actionJournal.begin({ action: "telephone.dial", actedFor: owner, recipients: [call.brief.to], summary: call.brief.purpose, externalId: call.id });
+      const record = (ok: boolean, detail: string) => {
+        const warning = journalWarning(actionJournal.finish(ticket, ok ? "confirmed" : "unconfirmed", detail));
+        if (warning) { log(call.id, "journal-outcome-pending", { error: warning }); db.query("UPDATE calls SET error=? WHERE id=?").run(warning, call.id); }
+      };
       if (call.gatewayId) {
         const result = gateways.dial(call.gatewayId, call.id, call.brief.to, call.brief.maxSeconds ?? 300);
+        record(result.ok, result.ok ? "SIM dial command accepted; not proof of a connected call" : result.error);
         if (!result.ok) await finish(call, "failed", result.error);
         return;
       }
-      if (!provider || provider.kind !== call.providerKind) { await finish(call, "failed", "PSTN provider is not configured"); return; }
       call.dialState = "dispatching";
       db.query("UPDATE calls SET dial_state='dispatching',cleanup=0 WHERE id=?").run(call.id);
-      const result = await dial(provider, call.brief.to, publicBase, call.providerToken, call.id);
+      const result = await dial(provider!, call.brief.to, publicBase, call.providerToken, call.id);
+      record(result.ok, result.ok ? `Provider accepted call ${result.value.uuid}; not proof of a connected call` : result.error);
       if (!result.ok) {
         if (!call.providerId) { call.dialState = result.uncertain ? "uncertain" : "rejected"; db.query("UPDATE calls SET dial_state=? WHERE id=?").run(call.dialState, call.id); }
         await finish(call, "failed", result.error); return;
       }
-      if (!bindProviderId(call.id, provider.kind, result.value.uuid)) { await provider.client.hangup(result.value.uuid); await finish(call, "failed", "Provider call identity changed during dial"); return; }
+      if (!bindProviderId(call.id, provider!.kind, result.value.uuid)) { await provider!.client.hangup(result.value.uuid); await finish(call, "failed", "Provider call identity changed during dial"); return; }
       call.providerId = result.value.uuid; call.dialState = "accepted";
       if (call.finishing) await cleanup(cleanupRow(call));
     }
@@ -190,10 +199,15 @@ const socketOptions = {
         c.stream = new CompatibilityMediaSession(c.providerKind, c.providerId ?? null, p.value.client.settings.accountSid);
         c.streamTimer = setTimeout(() => void finish(c, "failed", "Compatibility stream startup timed out"), 5000);
       } else connected(c);
+      return;
     }
+    if (ws.data.side === "browser") return;
+    ws.data.side satisfies never;
+    ws.close(1008);
   },
   message(ws: Socket, message: string | Buffer) {
     if (ws.data.side === "gateway") { gateways.receive(ws.data.gatewayId!, ws, message); return; }
+    if (ws.data.side !== "browser" && ws.data.side !== "provider") { ws.data.side satisfies never; ws.close(1008); return; }
     if (ws.data.side === "browser" && !ws.data.call) {
       if (typeof message !== "string") { ws.close(1008); return; }
       try { const m = JSON.parse(message); const c = [...active.values()].find(c => same(m.token, c.token)); if (m.type !== "authenticate" || !c || c.media || c.finishing) { ws.close(1008); return; } ws.data.call = c; c.media = ws; return; } catch { ws.close(1008); return; }
@@ -232,20 +246,28 @@ const socketOptions = {
     } return; }
     try {
       const m = JSON.parse(message);
-      if (ws.data.side === "provider") { if (m.event === "websocket:connected") log(c.id, "connected", {}); return; }
-      if (m.type === "ready") { c.browserReady = true; c.resolveReady(); if (c.telephoneConnected) connected(c); }
-      if (m.type === "error") void finish(c, "failed", String(m.error).slice(0, 300));
+      if (ws.data.side === "provider") {
+        if (m.event === "websocket:connected") log(c.id, "connected", {});
+        else log(c.id, "unsupported-provider-event", { event: String(m.event).slice(0, 200) });
+        return;
+      }
+      if (m.type === "ready") { c.browserReady = true; c.resolveReady(); if (c.telephoneConnected) connected(c); return; }
+      if (m.type === "error") { void finish(c, "failed", String(m.error).slice(0, 300)); return; }
       if (m.type === "live-event") {
         const e = m.event;
-        if (typeof e?.type !== "string") return;
+        if (typeof e?.type !== "string") { void finish(c, "failed", "Invalid GPT Live event type"); return; }
         if (["session.input_transcript.delta", "session.output_transcript.delta", "session.output_audio.delta", "session.usage.updated", "session.delegation.created", "session.closed", "error"].includes(e.type) && e.type !== "session.output_audio.delta") log(c.id, e.type, e);
         if (["session.usage.updated", "session.closed"].includes(e.type) && Number.isFinite(e.usage?.seconds)) c.usageSeconds = Math.max(c.usageSeconds, e.usage.seconds);
         if (e.type === "session.delegation.created") c.media?.send(JSON.stringify({ type: "context", text: "No additional information or authority is available for this call. Use the approved brief, or tell the caller that you will ask Hara and note their question." }));
         if (e.type === "session.closed" || e.type === "error") void finish(c, e.type === "error" ? "failed" : "completed", e.type === "error" ? "GPT Live reported an error" : undefined);
+        if (!["session.input_transcript.delta", "session.output_transcript.delta", "session.output_audio.delta", "session.usage.updated", "session.delegation.created", "session.closed", "error"].includes(e.type))
+          log(c.id, "unsupported-live-event", { type: e.type.slice(0, 200) });
+        return;
       }
+      void finish(c, "failed", "Unsupported telephone media control type");
     } catch { void finish(c, "failed", "Malformed audio control message"); }
   },
-  close(ws: Socket) { if (ws.data.side === "gateway") { gateways.disconnected(ws.data.gatewayId!, ws); return; } const c = ws.data.call; if (c && !c.finishing) void finish(c, "completed", `${ws.data.side} disconnected`); },
+  close(ws: Socket) { if (ws.data.side === "gateway") { gateways.disconnected(ws.data.gatewayId!, ws); return; } if (ws.data.side !== "browser" && ws.data.side !== "provider") { ws.data.side satisfies never; throw new Error("Unsupported telephone WebSocket side"); } const c = ws.data.call; if (c && !c.finishing) void finish(c, "completed", `${ws.data.side} disconnected`); },
 };
 db.query("UPDATE calls SET status='interrupted',ended_at=?,error='Service restarted; call not replayed' WHERE ended_at IS NULL").run(Date.now());
 for (const row of db.query("SELECT id,provider_id,provider_kind,dial_state,voice_id FROM calls WHERE cleanup=0 AND ended_at IS NOT NULL").all() as CleanupRow[]) await cleanup(row);

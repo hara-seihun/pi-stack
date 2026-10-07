@@ -104,8 +104,15 @@ class GpuEncoder:
                 self.gate.notify_all()
 
 
+def device_mode():
+    mode = os.getenv('PI_STACK_WRITE_DEVICE', 'cpu')
+    if mode not in ('cpu', 'auto', 'gpu'):
+        raise ValueError('invalid PI_STACK_WRITE_DEVICE; expected cpu, auto or gpu')
+    return mode
+
+
 def maybe_load(directory):
-    if os.getenv('PI_STACK_WRITE_DEVICE', 'cpu') not in ('auto', 'gpu'):
+    if device_mode() == 'cpu':
         return None
     if not directory or not Path(directory, 'model.safetensors').is_file():
         LOG.warning('Write GPU weights not prepared; using CPU encoder')

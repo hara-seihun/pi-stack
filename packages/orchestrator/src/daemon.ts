@@ -10,12 +10,13 @@ import { isRunContext } from "./isolated-context-contract.js";
 import { accountCapacity, assign, assignCompletion } from "./policy.js";
 import { Store } from "./store.js";
 import { Fleet } from "./fleet.js";
+import { configuredAgentCapacity } from "./agent-capacity.js";
 import { CompletionService } from "./completion.js";
 import { CompletionPool } from "./host/completion-pool.js";
 import { accountReservation, isAccountReservation, prioritizeReservedCompletions, reservationKey } from "./admission-reservation.js";
 import { COMPLETION_OPENAPI } from "./completion-openapi.js";
 import { reconcileCompletionReceipts } from "./host/completion-receipts.js";
-import type { CompletionOutcome } from "./completion-contract.js";
+import { completionHttpStatus, type CompletionOutcome } from "./completion-contract.js";
 import { CodexMeterSampler } from "./meters-codex.js";
 import { AnthropicMeterSampler } from "./meters-anthropic.js";
 import { ORCHESTRATOR_CATALOG } from "./catalog.js";
@@ -23,11 +24,12 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { readCodexCapabilities, refreshCodexCapabilities } from "./auth/codex-capabilities.js";
-import { ThreadService } from "./threads/service.js";
+import { ThreadService, type ThreadServiceOptions } from "./threads/service.js";
+import { ModelAvailabilityStore, modelAvailabilityPath } from "./threads/model-availability.js";
 import { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 import { createThreadClient, threadHttp } from "./threads/http.js";
 import { importFleetThreads } from "./threads/import.js";
-import type { SettingsOverrides, Thread } from "./threads/contracts.js";
+import type { Result, SettingsOverrides, SpawnThread, Thread } from "./threads/contracts.js";
 import { ThreadDirectory } from "./threads/directory.js";
 import { admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerResolver, type CallerSource } from "./threads/caller.js";
 import { resolveThreadSettings } from "./threads/settings.js";
@@ -48,8 +50,10 @@ export class Daemon {
   private readiness?:LaneReadiness;
   private repairReadiness=new Map<string,{at:number;revision?:string;ready:boolean}>();
   private reconciling=false;
+  private laneAdmissionQueue:Promise<unknown>=Promise.resolve();
   private stopped=false;
   private releasePath:string;
+  private readonly releaseCommit:string|null;
   private readonly ledgerPath:string;
   private readonly port:number;
   private readonly codexMeters?:CodexMeterSampler;
@@ -64,11 +68,14 @@ export class Daemon {
   private readonly capability=threadCapability();
   private readonly callers:CallerResolver;
 
-  constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string){
+  constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string,private readonly executionOptions?:Pick<ThreadServiceOptions,"capacity">){
     this.fleet=new Fleet(store,config);
     this.completions=new CompletionService(store,process.cwd());
     this.completionPool=new CompletionPool(store,this.completions,config);
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
+    const commitMarker=join(this.releasePath,".pi-stack-commit");
+    this.releaseCommit=existsSync(commitMarker)?readFileSync(commitMarker,"utf8").trim():null;
+    if(this.releaseCommit!==null&&!/^[a-f0-9]{40}$/.test(this.releaseCommit))throw new Error("Invalid deployed Orchestrator source commit marker");
     this.ledgerPath=ledgerPath??store.path;
     this.port=config.port??2460;
     const dataDir=this.ledgerPath===":memory:"?tmpdir():dirname(this.ledgerPath);
@@ -76,7 +83,10 @@ export class Daemon {
     this.opener=createSharedPiSessionOpener({dataDir,durable:true});
     this.callers=callerResolver({capability:this.capability,host:hostIdentityConfig()});
     this.threads=new ThreadService({workersOnly:true,databasePath:threadDatabasePath,sessionsDir:join(dataDir,"threads"),capability:this.capability,
+      capacity:executionOptions?.capacity??configuredAgentCapacity(),
+      admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
       attachSession:this.opener.attachSession,
+      retireIdleSession:thread=>typeof thread.metadata?.laneId==="string"&&thread.metadata.mode!=="live"&&this.store.lane(thread.metadata.laneId)?.maxActive!==undefined,
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
         if(context)throw new Error("An isolated thread must be imported into its application ThreadService before execution");
@@ -86,7 +96,7 @@ export class Daemon {
     this.schedules=new ScheduleService({databasePath:threadDatabasePath,threads:this.threads});
     this.threads.subscribe(event=>{if("event" in event)this.fleet.event(event.threadId,event.event);});
     if(!config.modelBrokerUrl){
-      this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex")});
+      this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex"),autoReset:process.env.PI_CODEX_AUTO_RESET==="1"});
       this.anthropicMeters=new AnthropicMeterSampler(store,{auth:providerOAuth(anthropicProvider(),config.authPath)});
     }
   }
@@ -167,7 +177,7 @@ export class Daemon {
         if(!observed.length)continue;
         // A refused reset-credit balance leaves metering intact, so it is
         // reported by the sampler without holding the account in a meter alarm.
-        const failures=observed.filter((sample)=>sample.outcome!=="recorded"&&sample.outcome!=="stale-reading"&&sample.outcome!=="reset-credits-unreadable");
+        const failures=observed.filter((sample)=>sample.outcome!=="recorded"&&sample.outcome!=="stale-reading"&&sample.outcome!=="reset-credits-unreadable"&&sample.outcome!=="reset-pending");
         const key=`meter-error:${account.id}`,error=failures.length?JSON.stringify(failures):"";
         if(error!==(this.store.control(key)??"")){
           this.store.setControl(key,error);
@@ -209,30 +219,28 @@ export class Daemon {
     }));
   }
 
-  private laneReady(id:string):boolean{
+  private laneReady(id:string,repairOwner?:string):boolean{
     if(this.store.lane(id)?.repair){
       if(this.config.modelBrokerUrl)return false;
       const probe=this.repairReadiness.get(id);
-      return !this.threads.snapshot().some(thread=>thread.metadata?.execution==="root-repair"&&thread.state==="running")&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
+      return !repairOwner&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
     }
     return this.store.control("ordinary-launches")!=="paused"&&(!this.snapshotCommand||(this.readiness?.lanes[id]?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<this.readinessAt));
   }
 
   private laneEnabled(id:string):boolean{return !!this.store.lane(id)&&this.store.control(`complete:${id}`)===undefined;}
 
-  private share(lane:LaneSpec):number{
-    return (1+this.laneActive(lane.id))/lane.weight;
-  }
-
   private async fillCapacity():Promise<void>{
     if(this.store.control("launches")==="paused")return;
-    const failed=new Set<string>(),admittedForced=new Set<string>();
-    let backgroundAdmissions=0;
+    const failed=new Set<string>(),admittedLanes=new Set<string>();
     while(true){
-      const atBackgroundCeiling=backgroundAdmissions>=this.config.maxConcurrentSessions||this.threads.snapshot().filter(thread=>thread.state==="running").length>=this.config.maxConcurrentSessions;
-      const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id)
-        &&(lane.admission==="background"&&!lane.repair?!atBackgroundCeiling:!admittedForced.has(lane.id)));
-      lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||this.share(a)-this.share(b)||a.id.localeCompare(b.id));
+      const running=this.threads.runningSummary();
+      const custody=this.threads.laneCustody();
+      const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id,running.repairOwner)
+        &&(lane.maxActive===undefined||(custody.get(lane.id)??0)<lane.maxActive)
+        &&!admittedLanes.has(lane.id));
+      const share=(lane:LaneSpec)=>(1+(running.lanes.get(lane.id)??0))/lane.weight;
+      lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||share(a)-share(b)||a.id.localeCompare(b.id));
       let admitted=false;
       for(const lane of lanes){
         const key=`lane:${lane.id}`;
@@ -241,19 +249,31 @@ export class Daemon {
         if(choice&&!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map(r=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
         try{
           const prompt=await this.lanePrompt(lane);
-          const spawned=await this.threads.spawn({requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:prompt,
+          const spawned=await this.spawnLane(lane.id,{requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:prompt,
             settings:this.laneSettings(lane,choice?.assignment&&`${choice.assignment.provider}/${choice.assignment.model}`),admission:lane.repair?"force":lane.admission??"force",
             metadata:{source:"lane",laneId:lane.id,execution:lane.repair?"root-repair":"user"}});
           if(!spawned.ok)throw new Error(spawned.error.message);
           if(lane.repair||this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(lane.repair?this.repairReadiness.get(lane.id)!.at:this.readinessAt));
-          if(lane.admission==="background"&&!lane.repair)backgroundAdmissions++;
-          else admittedForced.add(lane.id);
+          admittedLanes.add(lane.id);
           this.store.setControl(`refusal:${key}`,"");
         }catch(error){failed.add(key);this.store.setControl(`refusal:${key}`,String(error));continue;}
         admitted=true;break;
       }
       if(!admitted)break;
     }
+  }
+
+  private spawnLane(id:string,input:SpawnThread):Promise<Result<Thread>>{
+    const operation=this.laneAdmissionQueue.then(()=>{
+      const lane=this.store.lane(id);
+      if(!lane)return{ok:false as const,error:{code:"not_found" as const,message:`Lane ${id} no longer exists`}};
+      if(lane.maxActive!==undefined&&(this.threads.laneCustody().get(id)??0)>=lane.maxActive)
+        return{ok:false as const,error:{code:"unavailable" as const,message:`Lane ${id} reached maxActive ${lane.maxActive}`}};
+      return this.threads.spawn(input);
+    });
+    // Both readiness and wave creation share this boundary, including while a prompt probe awaits.
+    this.laneAdmissionQueue=operation.then(()=>undefined,()=>undefined);
+    return operation;
   }
 
   /** A lane's declared thinking level belongs to every worker it starts, not just the first. */
@@ -284,6 +304,8 @@ export class Daemon {
     if(!service){
       const dataDir=join(dirname(this.ledgerPath),"applications",id);
       service=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),capability:this.capability,
+        capacity:this.executionOptions?.capacity??configuredAgentCapacity(),
+        admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
         attachSession:this.opener.attachSession,
         openSession:(options,output,exit)=>this.opener.openSession({...options,args:[...options.args,"--orchestrator-context",JSON.stringify(context)]},output,exit),
         environment:thread=>({...this.threadEnvironment(thread),PI_THREAD_API_URL:`http://127.0.0.1:${this.port}/v1/applications/${id}/threads`}),
@@ -312,7 +334,6 @@ export class Daemon {
     for (const service of this.isolated.values()) service.setWatchList(directory);
     return directory;
   }
-  private laneActive(laneId:string):number{return this.threads.snapshot().filter(thread=>thread.metadata?.laneId===laneId&&thread.state==="running").length;}
   private profileModel(profile:string):string{
     const candidate=this.config.profiles[profile]?.[0];
     if(!candidate)throw new Error(`Unknown model profile ${profile}`);
@@ -335,6 +356,10 @@ export class Daemon {
   private async request(req:IncomingMessage,res:ServerResponse):Promise<void>{
     try{
       const url=new URL(req.url??"/",`http://${HOST}:${this.port}`),method=req.method??"GET";
+      if(method==="GET"&&url.pathname==="/v1/health"){
+        const capacity=this.executionOptions?.capacity;
+        return json(res,200,{ok:true,releaseCommit:this.releaseCommit,agentCapacityRequired:!(capacity&&"mode" in capacity&&capacity.mode==="unmanaged")});
+      }
       const application=/^\/v1\/applications\/([a-f0-9]+)\/threads\//.exec(url.pathname);
       const localOwner=url.pathname.startsWith("/v1/thread-owner/");
       const caller:CallerSource={headers:new Headers(Object.entries(req.headers).flatMap(([key,value])=>value===undefined?[]:[[key,Array.isArray(value)?value.join(","):value] as [string,string]])),
@@ -388,8 +413,7 @@ export class Daemon {
       }
       const completionReply=(outcome:CompletionOutcome<unknown>)=>{
         if(outcome.ok)return json(res,200,outcome.value);
-        const statuses:Record<string,number>={"invalid-request":400,"not-found":404,"request-conflict":409,"invalid-state":409,"unsupported-option":422};
-        return json(res,statuses[outcome.error.code]??500,{error:outcome.error});
+        return json(res,completionHttpStatus(outcome.error.code),{error:outcome.error});
       };
       if(method==="GET"&&url.pathname==="/v1/completions/openapi.json")return json(res,200,COMPLETION_OPENAPI);
       const completionRoute=/^\/v1\/completions\/([^/]+)(\/(?:cancel|retry|attempts))?$/.exec(url.pathname);
@@ -479,7 +503,7 @@ export class Daemon {
         const count=input.count??1;if(!Number.isInteger(count)||count<1||count>100)return json(res,400,{error:"count must be between 1 and 100"});
         const threads:Thread[]=[];
         for(let i=0;i<count;i++){
-          const result=await this.threads.spawn({requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:await this.lanePrompt(lane),
+          const result=await this.spawnLane(lane.id,{requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:await this.lanePrompt(lane),
             settings:{...this.laneSettings(lane),...input.settings},admission:input.admission??lane.admission??"force",metadata:{source:"direct",laneId:lane.id}});
           if(!result.ok)return json(res,400,result);threads.push(result.value);
         }
@@ -490,13 +514,15 @@ export class Daemon {
     }catch(error){json(res,500,{error:String(error)});}
   }
 
-  private status():unknown{return{
-    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:this.threads.snapshot().find(thread=>thread.metadata?.execution==="root-repair"&&thread.state==="running")?.id,laneBudget:this.laneBudget,
+  private status():unknown{
+    const running=this.threads.runningSummary(),custody=this.threads.laneCustody();
+    return{
+    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:running.repairOwner,laneBudget:this.laneBudget,
     repairReadiness:this.store.lanes().filter(lane=>lane.repair).map(lane=>({lane:lane.id,...this.repairReadiness.get(lane.id),error:this.store.control(`repair-readiness-error:${lane.id}`)||undefined})),
     readinessError:this.store.control("readiness_error")||undefined,
     meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),
     capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,this.laneBudget,this.config)})),
-    accounts:this.store.accounts(),codexCapabilities:readCodexCapabilities(this.store),lanes:this.store.lanes().map((lane)=>({...lane,active:this.laneActive(lane.id)})),
+    accounts:this.store.accounts(),codexCapabilities:readCodexCapabilities(this.store),lanes:this.store.lanes().map((lane)=>({...lane,active:running.lanes.get(lane.id)??0,custody:custody.get(lane.id)??0})),
     threads:this.threads.snapshot(),leases:this.store.activeLeases(),
   };}
 }

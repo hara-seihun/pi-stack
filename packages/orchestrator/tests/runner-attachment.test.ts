@@ -8,7 +8,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { PiEvent } from "../src/threads/contracts.js";
 import { createSharedPiSessionOpener } from "../src/threads/runner-transport.js";
 
-vi.mock("node:child_process", () => ({ spawn: vi.fn(() => { throw new Error("Attach must not launch a runner"); }) }));
+vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<typeof import("node:child_process")>(),
+  spawn: vi.fn(() => { throw new Error("Attach must not launch a runner"); }) }));
 vi.mock("../src/threads/runner-memory.js", () => ({ underMemoryPressure: () => { throw new Error("Attach must not request admission"); } }));
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -46,11 +47,21 @@ it("returns absent without a reference or a listening control socket and never l
   expect(exit).not.toHaveBeenCalled();
 });
 
-it("returns absent when the runner exists but the recorded session socket does not", async () => {
+it("fences any delayed native open before declaring an absent session socket", async () => {
   const { opener, reference } = fixture(), requests: unknown[] = [];
   await listen(reference.control, (value, socket) => { requests.push(value); socket.end('{"ok":true,"sessions":1}\n'); });
   expect(await opener.attachSession(reference, () => {}, () => {})).toBeNull();
-  expect(requests).toEqual([{ type: "status" }]);
+  expect(requests).toEqual([{ type: "status" }, { type: "close", socketPath: reference.socketPath }]);
+});
+
+it("retains uncertain custody when native close cannot fence a missing session socket", async () => {
+  const { opener, reference } = fixture(), requests: unknown[] = [];
+  await listen(reference.control, (value, socket) => {
+    requests.push(value);
+    socket.end(value.type === "close" ? '{"error":"Cannot close active native custody"}\n' : '{"ok":true,"sessions":1}\n');
+  });
+  await expect(opener.attachSession(reference, () => {}, () => {})).rejects.toThrow("Cannot close active native custody");
+  expect(requests).toEqual([{ type: "status" }, { type: "close", socketPath: reference.socketPath }]);
 });
 
 it.each(["control", "socketPath"] as const)("returns absent for a refused %s socket left on disk", async key => {
@@ -130,13 +141,40 @@ it("attaches, forwards commands and owns detach/close without needing a cwd or a
   expect(requests).toHaveLength(3);
 });
 
-it("delivers multi-megabyte and multi-line output across arbitrary chunk boundaries in linear time", async () => {
+it("rejects an unknown attach frame rather than hanging for a known variant", async () => {
+  const { opener, reference } = fixture();
+  await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
+  await listen(reference.socketPath, (_value, socket) => socket.write('{"type":"new_frame"}\n'));
+  await expect(opener.attachSession(reference, () => {}, () => {})).rejects.toThrow("Invalid runner output frame");
+});
+
+it("fails an attached execution with a protocol diagnostic instead of acknowledging an unknown event", async () => {
+  const { opener, reference } = fixture(), events: PiEvent[] = [], acknowledgements: unknown[] = [];
+  await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
+  let finished!: () => void;
+  const failed = new Promise<void>(resolve => { finished = resolve; });
+  const exit = vi.fn(() => finished());
+  await listen(reference.socketPath, (value, socket) => {
+    if (value.type === "attach") socket.write('{"type":"attached"}\n');
+    if (value.type === "ack") acknowledgements.push(value);
+    if (value.type === "command") socket.write(`${JSON.stringify({ type: "output", sequence: 1, line: '{"type":"new_sdk_event"}' })}\n`);
+  });
+  const session = await opener.attachSession(reference, event => events.push(event), exit);
+  await session!.command({ type: "get_state" });
+  await failed;
+  expect(events.at(-1)).toMatchObject({ type: "thread_error", error: expect.stringContaining("Unknown runtime event type") });
+  expect(exit).toHaveBeenCalledWith(1);
+  expect(acknowledgements).toEqual([]);
+  await expect(session!.command({ type: "get_state" })).rejects.toThrow("detached");
+});
+
+it("delivers multi-megabyte and multi-line output across arbitrary chunk boundaries with linear scan work", async () => {
   const { opener, reference } = fixture(), events: PiEvent[] = [];
   await listen(reference.control, (_value, socket) => socket.end('{"ok":true}\n'));
   // 24 MiB of text in 64 KiB writes. Quadratic rescanning grows with the square of the line.
   const big = "é".repeat(12 * 1024 * 1024) + "✓";
   const lines = [
-    { type: "output", sequence: 1, line: JSON.stringify({ type: "message_update", text: big }) },
+    { type: "output", sequence: 1, line: JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta" }, text: big }) },
     { type: "output", sequence: 2, at: 1_790_000_000_123, line: JSON.stringify({ type: "agent_end" }) },
     { type: "output", sequence: 3, line: JSON.stringify({ type: "turn_end" }) },
   ].map(value => `${JSON.stringify(value)}\n`).join("");
@@ -149,13 +187,26 @@ it("delivers multi-megabyte and multi-line output across arbitrary chunk boundar
     // Odd-sized writes split UTF-8 sequences and put several lines in one chunk.
     for (let offset = 0; offset < bytes.length; offset += 65_521) socket.write(bytes.subarray(offset, offset + 65_521));
   });
-  const began = performance.now();
-  const connection = await opener.attachSession(reference, event => { if (event.type === "runner_attached") return; events.push(event); if (events.length === 3) done(); }, () => {});
-  await received;
-  // Linear parsing takes ~125 ms here; the quadratic loop took ~770 ms.
-  expect(performance.now() - began).toBeLessThan(400);
+  // Count the newline search range, not wall time shared with other publication
+  // checks. A spy would retain every growing input in the quadratic regression.
+  const indexOf = String.prototype.indexOf;
+  let scanned = 0;
+  String.prototype.indexOf = function (search, position = 0) {
+    const end = indexOf.call(this, search, position);
+    if (search === "\n") scanned += Math.max(0, (end < 0 ? this.length : end + 1) - position);
+    return end;
+  };
+  try {
+    const connection = await opener.attachSession(reference, event => { if (event.type === "runner_attached") return; events.push(event); if (events.length === 3) done(); }, () => {});
+    expect(connection).not.toBeNull();
+    await received;
+  } finally {
+    String.prototype.indexOf = indexOf;
+  }
+  // Each output character is scanned once, plus the small control/attach frames.
+  expect(scanned).toBeGreaterThanOrEqual(lines.length);
+  expect(scanned).toBeLessThanOrEqual(lines.length + 1024);
   expect((events[0] as { text?: string }).text).toBe(big);
   expect(events.slice(1).map(event => event.type)).toEqual(["agent_end", "turn_end"]);
   expect(events[1]!.emittedAt).toBe(1_790_000_000_123);
-  void connection;
 });

@@ -11,6 +11,8 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - [Web search](extensions/web-search/README.md) registers a native `web_search` tool over a host-selected search backend, so every session has web search in its tool list instead of reaching for a skill or a browser. The shipped Exa backend sends requests through the host's governed `exa-api` transport.
 - [Local models](extensions/local-models/README.md) registers the OpenAI-compatible inference engines a host lists in `~/.pi/agent/local-models.json`, starting one that is not running as a transient user unit, and mirrors them into Pi's model catalog.
 
+[Runtime wire dispatch](../../docs/runtime-wire.md) owns the closed SDK/runner/provider event domains and explicit diagnostics for unsupported values. A stored Codex compaction operation with an invalid state is a repair error, never automatically reinterpreted as failed/retryable. The invalid record remains intact; explicit compact may supersede it through its owning operation path.
+
 PiStack's [unified thread service](../../docs/threads.md) hosts Remote and fleet sessions through Pi. Pi retains these native extensions and its native JSONL history. Codex is a model provider, not a separate session engine.
 
 The stack also supplies native [Image 2.5 generation](../orchestrator/docs/image-generation.md) through the Orchestrator routing extension, which owns its OpenAI account selection and leases.
@@ -33,7 +35,7 @@ The current `agent-browser` package comes from Hara's immutable [browser repair 
 
 On 2026-09-05, a running worker retained a native extension requiring 0.34.0 while a release switched its shared executable to 0.36.0. The entrypoint now resolves both packages and pins the process's executable path when the extension loads. The 0.6.6 native package also includes upstream's stdout-spill ordering repair for large JSON diagnostics.
 
-That version's QA text predicate misses phrases split across React text nodes, including Pi Remote's client revision footer. [`patch-browser-qa.mjs`](patch-browser-qa.mjs) repairs the pinned dependency during [`deploy/runtime`](../../deploy/runtime). It joins visible text across adjacent nodes and inline markup, preserves block boundaries, and excludes hidden text. Its source participates in the immutable dependency key, and an upstream source change that no longer matches fails deployment. [`browser-doctor.mjs`](browser-doctor.mjs) compiles the installed QA predicate on every host release. Its disposable browser checks a heading split across spans, verifies a PNG screenshot and downloads a loopback attachment through a current `@ref`, requiring verified artifact metadata and exact file bytes before the release can activate.
+That version's QA text predicate misses phrases split across React text nodes, including Pi Remote's client revision footer. [`patch-browser-qa.mjs`](patch-browser-qa.mjs) repairs the pinned dependency during [`deploy/runtime`](../../deploy/runtime). It joins visible text across adjacent nodes and inline markup, preserves block boundaries, and excludes hidden text. Its source participates in the immutable dependency key, and an upstream source change that no longer matches fails deployment. [`browser-doctor.mjs`](browser-doctor.mjs) compiles the installed QA predicate on every host release. It validates the configured browser entrypoint before loading React probe assets or opening its loopback listener, so missing or duplicate browser sources report their own repair rather than an unrelated probe dependency error. Its disposable browser checks a heading split across spans, verifies a PNG screenshot and downloads a loopback attachment through a current `@ref`, requiring verified artifact metadata and exact file bytes before the release can activate.
 
 ## Anthropic error tool-result content
 
@@ -122,6 +124,49 @@ or credentials:
 ```sh
 node --test packages/runtime/summary-recovery.test.mjs packages/runtime/compaction-errors.test.mjs packages/runtime/compaction-cut.test.mjs
 ```
+
+## Shell output custody
+
+[`patch-bash-spill.mjs`](patch-bash-spill.mjs) keeps shell output in memory only.
+The shell executor and tool share Pi's byte-aware output accumulator and tail
+truncation; discarded output is never written to a temporary spill log. Tool descriptions, model-context messages and
+interactive displays report truncation without a full-output path. Deployment
+patches both the coding-agent SDK and bundled CLI, including the agent-core
+harness bash tool and shell collector, and hashes the patch into the immutable
+dependency-tree identity. Changed upstream anchors fail deployment.
+
+[`bash-spill.test.mjs`](bash-spill.test.mjs) runs actual local shell commands over
+the byte and line limits through both source forms, checks exact tail output,
+streaming updates, truncation notices and renderers, and covers cancellation,
+nonzero exit and the native environment harness. It asserts no spill logs appear.
+To prove an installed tree without patching it:
+
+```sh
+PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
+  node --test packages/runtime/bash-spill.test.mjs
+```
+
+The proof copies public runtime code for private-entrypoint instrumentation;
+shell test output is synthetic and no installed runtime files are changed.
+
+October 3, 2026: publication `PUB-aa1ead02f2677ab683a35c2f` failed on Converge
+because the executor evicted whole pipe chunks and derived truncation from only
+the remaining text. A large chunk followed by a short tail could discard part of
+the required tail and report `truncated: false`. The executor now uses the same
+UTF-8 byte-aware accumulator as the tool, retaining total-output accounting across
+evictions and flushing its decoder on completion or cancellation. Deterministic
+chunk partitions guard exact tails, flags, exit status and streaming in both SDK
+and bundled CLI forms. Reapplying the patch also upgrades already-patched trees.
+`deploy/runtime` runs this installed-tree proof before accepting each runtime
+release, then uses [`deploy/clean-shell-spills.mjs`](../../deploy/clean-shell-spills.mjs)
+to delete preexisting regular `/tmp/pi-bash-*.log` files and record the actual
+removal count in the host release log. Cleanup filters names before inspecting
+files: unrelated stale SSHFS mounts in `/tmp` must not prevent publication.
+It leaves symlinks and directories alone, tolerates candidates removed concurrently,
+and propagates other filesystem errors. Focused cleanup checks:
+`node --test scripts/deploy-runtime.test.mjs`.
+Active turns retain their original runtime until
+settlement; reopen a shell/CLI session to select the new tree.
 
 ## Session crash durability
 

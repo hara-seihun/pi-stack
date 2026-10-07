@@ -9,12 +9,13 @@ it.each([
   {argv:["resume","--ordinary"],path:"/v1/control",body:{key:"ordinary-launches",value:"enabled"}},
   {argv:["pause"],path:"/v1/control",body:{key:"launches",value:"paused"}},
   {argv:["resume"],path:"/v1/control",body:{key:"launches",value:"enabled"}},
-  {argv:["resume","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"resume"}},
-  {argv:["resume","thread/with space"],path:"/v1/threads/control",body:{threadId:"thread/with space",action:"resume"}},
-  {argv:["stop","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"stop",descendants:false}},
-  {argv:["stop","THREAD-123","--descendants"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"stop",descendants:true}},
-  {argv:["stop","--descendants","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"stop",descendants:true}},
-  {argv:["stop","THREAD-123","--descendants=false"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"stop",descendants:false}},
+  {argv:["close","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"close"}},
+  {argv:["stop","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"close"}},
+  {argv:["reopen","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"reopen"}},
+  {argv:["restore","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"reopen"}},
+  {argv:["cancel","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"cancel"}},
+  {argv:["dependencies","A","B","C"],path:"/v1/threads/control",body:{threadId:"A",action:"dependencies",threadIds:["B","C"]}},
+  {argv:["dependencies","A","--clear"],path:"/v1/threads/control",body:{threadId:"A",action:"dependencies",threadIds:[]}},
 ])("dispatches $argv to $path",async({argv,path,body})=>{
   const calls:{path:string;method:string;body:unknown}[]=[];
   vi.spyOn(console,"log").mockImplementation(()=>{});
@@ -26,20 +27,20 @@ it.each([
   expect(calls).toEqual([{path,method:"POST",body}]);
 });
 
-it("rejects an empty thread id without clearing the global launch halt",async()=>{
+it.each([
+  ["resume","THREAD-123"], ["resume",""], ["stop","THREAD-123","--descendants"],
+  ["restore","THREAD-123","--resume"], ["dependencies","A"], ["dependencies","A","B","--clear"],
+])("rejects ambiguous or recursive lifecycle commands %j",async(...argv)=>{
   const fetch=vi.spyOn(globalThis,"fetch");
-  await expect(dispatch(["resume",""])).rejects.toThrow("resume requires a thread id");
+  await expect(dispatch(argv)).rejects.toThrow();
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it("reports a held-message resume failure without clearing the global launch halt",async()=>{
+it("reports protected dependency refusal rather than claiming closure",async()=>{
   const log=vi.spyOn(console,"log").mockImplementation(()=>{});
-  const failure={ok:false,error:{code:"no_pending_messages",message:"No pending messages"}};
-  const fetch=vi.spyOn(globalThis,"fetch").mockResolvedValue(Response.json(failure));
-  await dispatch(["resume","stopped"]);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  expect(new URL(String(fetch.mock.calls[0]![0])).pathname).toBe("/v1/threads/control");
-  expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({threadId:"stopped",action:"resume"});
+  const failure={ok:false,error:{code:"dependency_conflict",message:"A depends on B",dependencies:[{threadId:"A",dependsOn:"B"}]}};
+  vi.spyOn(globalThis,"fetch").mockResolvedValue(Response.json(failure));
+  await dispatch(["close","B"]);
   expect(process.exitCode).toBe(1);
-  expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual({ok:false,error:{...failure.error,retryable:false}});
+  expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject(failure);
 });

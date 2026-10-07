@@ -2,76 +2,50 @@ import { expect, test } from "bun:test";
 import type { Thread, ThreadApi } from "pi-orchestrator/api";
 import { archiveInactiveThreads, autoArchiveDelay } from "./auto-archive";
 
-test("disabled by default and validates configuration", () => {
-  expect(autoArchiveDelay(undefined)).toBe(0);
-  expect(autoArchiveDelay("3600000")).toBe(3600000);
+const row = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { foreground: true, autoArchiveViewedAt: 2 }, ...patch } as Thread);
+function apiFor(rows: Thread[], calls: unknown[]): ThreadApi {
+  return {
+    async list({ cursor }: { cursor?: string }) { calls.push(`list:${cursor ?? "first"}`); return { ok: true, value: { threads: cursor ? rows.slice(2) : rows.slice(0, 2), ...(cursor || rows.length <= 2 ? {} : { nextCursor: "next" }) } }; },
+    async control(input: any) { calls.push(input); return { ok: true, value: { ...rows.find(row => row.id === input.threadId), metadata: { archived: true } } }; },
+  } as unknown as ThreadApi;
+}
+
+test("disabled by default and validates configured delay", () => {
+  expect(autoArchiveDelay(undefined)).toBe(0); expect(autoArchiveDelay("3600000")).toBe(3600000);
   for (const value of ["-1", "NaN", "1.5"]) expect(() => autoArchiveDelay(value)).toThrow();
 });
 
-test("collects all pages before mutation and protects recent or busy descendants", async () => {
-  const row = (id: string, patch: Partial<Thread> = {}) => ({ id, parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, ...patch }) as Thread;
-  const rows = [row("parent"), row("stale"), row("recent", { updatedAt: 6_400_000 }), row("child", { parentId: "parent", state: "running" }), row("held", { held: true, pendingMessages: 1 }), row("archived", { metadata: { archived: true } }), row("cancelling", { state: "running", metadata: { executionError: "Cancellation not confirmed" } }), row("failed", { metadata: { executionError: "Provider failed" } })];
-  const calls: string[] = [];
-  const api = {
-    async list({ cursor }: { cursor?: string }) { calls.push(`list:${cursor ?? "first"}`); return { ok: true, value: { threads: cursor ? rows.slice(3) : rows.slice(0, 3), ...(cursor ? {} : { nextCursor: "next" }) } }; },
-    async control({ threadId, action, inactiveBefore }: any) { calls.push(threadId); expect(action).toBe("archiveInactive"); expect(inactiveBefore).toBe(6_400_000); return { ok: true, value: row(threadId, { metadata: { archived: true } }) }; },
-  } as unknown as ThreadApi;
-  expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000)).toBe(2);
-  expect(calls).toEqual(["list:first", "list:next", "stale", "failed"]);
-  expect(await archiveInactiveThreads(api, 0)).toBe(0);
-  expect(await archiveInactiveThreads(api, 1, 10_000_000, () => true)).toBe(0);
-});
-
-test("an unread conversation stays current; an unread worker follows its conversation", async () => {
-  const rows = [
-    { id: "root", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0 },
-    { id: "unread-child", parentId: "root", state: "idle", updatedAt: 1, pendingMessages: 0 },
-    { id: "read", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0 },
-  ] as Thread[];
-  const calls: string[] = [];
-  const api = {
-    async list() { return { ok: true, value: { threads: rows } }; },
-    async control({ threadId }: any) { calls.push(threadId); return { ok: true, value: { ...rows.find(row => row.id === threadId), metadata: { archived: true } } }; },
-  } as unknown as ThreadApi;
-  expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000, () => false, thread => thread.id === "root")).toBe(2);
-  expect(calls).toEqual(["unread-child", "read"]);
-  calls.length = 0;
-  expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000, () => false, thread => thread.id === "unread-child")).toBe(3);
-  expect(calls).toEqual(["root", "unread-child", "read"]);
-});
-
-test("a worker whose conversation is archived or gone is archived once it stops running, however recent, unread or queued", async () => {
-  const rows = [
-    { id: "closed", parentId: null, state: "idle", updatedAt: 9_999_000, pendingMessages: 0, metadata: { archived: true } },
-    { id: "orphan", parentId: "closed", state: "idle", updatedAt: 9_999_000, pendingMessages: 2, held: true },
-    { id: "still-running", parentId: "closed", state: "running", updatedAt: 9_999_000, pendingMessages: 0 },
-    { id: "parentless", parentId: "missing", state: "idle", updatedAt: 9_999_000, pendingMessages: 0 },
-    { id: "live", parentId: null, state: "idle", updatedAt: 9_999_000, pendingMessages: 0 },
-    { id: "live-child", parentId: "live", state: "idle", updatedAt: 9_999_000, pendingMessages: 0 },
-  ] as Thread[];
+test("all pages are read before selected-only mutation; active launch descendants do not retain launcher", async () => {
   const calls: unknown[] = [];
-  const api = {
-    async list() { return { ok: true, value: { threads: rows } }; },
-    async control({ threadId, ...control }: any) {
-      calls.push([threadId, control]);
-      return { ok: true, value: { ...rows.find(row => row.id === threadId)!, metadata: { archived: true } } };
-    },
-  } as unknown as ThreadApi;
-  expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000, () => false, () => true)).toBe(2);
-  expect(calls).toEqual([["orphan", { action: "update", archived: true }], ["parentless", { action: "update", archived: true }]]);
+  const rows = [row("launcher"), row("busy", { parentId: "launcher", state: "running" }), row("old"), row("recent", { updatedAt: 9000 }), row("queued", { pendingMessages: 1 }), row("archived", { metadata: { archived: true } })];
+  const api = apiFor(rows, calls);
+  expect(await archiveInactiveThreads(api, 1000, 10000)).toBe(2);
+  expect(calls).toEqual(["list:first", "list:next", { threadId: "launcher", action: "archiveInactive", inactiveBefore: 9000 }, { threadId: "old", action: "archiveInactive", inactiveBefore: 9000 }]);
 });
 
-test("a quiet thread in a live meeting stays open with its ancestors", async () => {
-  const rows = [
-    { id: "meeting", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "room" } },
-    { id: "worker", parentId: "meeting", state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "room" } },
-    { id: "ended", parentId: null, state: "idle", updatedAt: 1, pendingMessages: 0, metadata: { meetingId: "gone" } },
-  ] as unknown as Thread[];
-  const calls: string[] = [];
-  const api = {
-    async list() { return { ok: true, value: { threads: rows } }; },
-    async control({ threadId }: any) { calls.push(threadId); return { ok: true, value: { ...rows.find(row => row.id === threadId), metadata: { archived: true } } }; },
-  } as unknown as ThreadApi;
-  expect(await archiveInactiveThreads(api, 3_600_000, 10_000_000, () => false, () => false, thread => thread.metadata?.meetingId === "room")).toBe(1);
-  expect(calls).toEqual(["ended"]);
+test("placement and provenance never override unread, unseen or live retention", async () => {
+  const calls: unknown[] = [];
+  const rows = [row("unread", { metadata: { foreground: false, autoArchiveViewedAt: 2 } }), row("unseen", { parentId: "gone", metadata: { foreground: false } }), row("live"), row("read", { parentId: "gone", metadata: { foreground: false, autoArchiveViewedAt: 2 } })];
+  expect(await archiveInactiveThreads(apiFor(rows, calls), 1000, 10000, () => false, thread => thread.id === "unread", thread => thread.id === "live")).toBe(1);
+  expect(calls.at(-1)).toEqual({ threadId: "read", action: "archiveInactive", inactiveBefore: 9000 });
+});
+
+test("live dependencies and waits protect both endpoints, while independent agents and inert edges can archive", async () => {
+  const calls: unknown[] = [];
+  const rows = [row("dependent", { dependencies: ["dependency"] }), row("dependency", { state: "running" }), row("waiting", { waitingOnAgents: { kind: "message", fromThreadId: "sender", since: 1, reason: "Need answer" } }), row("sender"), row("independent")];
+  expect(await archiveInactiveThreads(apiFor(rows, calls), 1000, 10000)).toBe(1);
+  expect(calls.at(-1)).toEqual({ threadId: "independent", action: "archiveInactive", inactiveBefore: 9000 });
+});
+
+test("an inert dependency (settled target, dependent not waiting) does not protect either endpoint", async () => {
+  const calls: unknown[] = [];
+  expect(await archiveInactiveThreads(apiFor([row("dependent", { dependencies: ["settled"] }), row("settled")], calls), 1000, 10000)).toBe(2);
+});
+
+test("a racing owner dependency refusal is retained without aborting the sweep", async () => {
+  const calls: unknown[] = [];
+  const api = apiFor([row("racing"), row("safe")], calls);
+  const control = api.control;
+  api.control = async input => input.threadId === "racing" ? { ok: false, error: { code: "dependency_conflict", message: "New dependency" } } : control(input);
+  expect(await archiveInactiveThreads(api, 1000, 10000)).toBe(1);
 });

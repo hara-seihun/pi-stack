@@ -159,7 +159,18 @@ function repairFixture(t, status = "launching") {
   };
   writeJson(repairPath, repair);
   const bin = makeCommandStubs(root);
+  const guard = join(root, "capacity-fixture.mjs");
+  writeFileSync(guard, `import { writeFileSync } from 'node:fs';
+export async function requireStandaloneAgent(options) {
+  writeFileSync(options.recordPath, JSON.stringify({ agentId: options.agentId, executionId: options.executionId, state: 'held' }));
+  return { recordPath: options.recordPath };
+}
+export async function settleStandaloneAgent(agent) { writeFileSync(agent.recordPath, JSON.stringify({ state: 'released' })); }
+export function standaloneRecordPath() { throw new Error('Repair must use its durable explicit capacity path'); }
+`);
   const environment = {
+    PI_STACK_RUNTIME_DEST: fileURLToPath(new URL("../packages/runtime", import.meta.url)),
+    PI_STACK_STANDALONE_AGENT_MODULE: guard,
     SYSTEMCTL_LOG: join(root, "systemctl.log"),
     AGENT_WORKSPACE_LOG: join(root, "agent-workspace.log"),
     STUB_WORKSPACE: workspace,
@@ -465,9 +476,15 @@ test("repair-result completes an interrupted repair once without launching anoth
   assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), f.request);
 });
 
-test("assigned repair at the automatic depth limit transfers real source custody without restarting agents", t => {
+test("assigned repair transfers real source custody despite an offline requester and the automatic depth limit", t => {
   const f = repairFixture(t, "blocked");
-  const request = { ...f.request, repairDepth: policy.maxRepairDepth };
+  const reporter = { url: "http://127.0.0.1:18791", sessionId: "144b647b-dd8e-53e0-a9b7-5f398b7e49e5" };
+  const request = { ...f.request, reporter, repairDepth: policy.maxRepairDepth };
+  const curlLog = join(f.root, "curl.log");
+  executable(join(f.bin, "curl"), `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(curlLog)}
+exit 7
+`);
   writeJson(f.requestPath, request);
   const remote = join(f.root, "hara-seihun", "pi-stack.git");
   mkdirSync(join(f.root, "hara-seihun"));
@@ -504,6 +521,8 @@ esac
   assert.equal(successor.sourceSha, f.repairedSha);
   assert.equal(successor.repairOf, requestId);
   assert.equal(successor.repairDepth, policy.maxRepairDepth + 1);
+  assert.deepEqual(successor.reporter, reporter);
+  assert.equal(existsSync(curlLog), false, "notification transport cannot gate source custody");
   assert.equal(run("git", ["rev-parse", successor.sourceRef], { cwd: remote }).stdout.trim(), f.repairedSha);
   assert.equal(runPublication(f.root, f.bin, "repair-result", environment).status, 0);
   assert.equal(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8").trim().split("\n").length, 2);
@@ -676,4 +695,40 @@ for (const kind of ["queued", "live-meeting"]) test(`unserviced ${kind} work get
   assert.equal(failed.status, "failed");
   assert.match(failed.failure.message, kind === "live-meeting" ? /Meeting probe was not serviced/ : /worker never claimed/);
   assert.equal(JSON.parse(readFileSync(fixture.repairPath, "utf8")).status, "launching");
+});
+
+
+test("later failure acquires exact attempt-bound receipt; retains old evidence and deduplicates retry", t => {
+  const f = repairFixture(t, "retry-submitted");
+  const latest = { ...f.request.failure, attempt: 2, at: "2026-04-15T12:05:00.000Z" };
+  writeJson(f.requestPath, { ...f.request, attempt: 2, failure: latest, failures: [f.request.failure, latest], repairedRetry: { repairId: f.repair.id } });
+  const env = { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "inactive" };
+  let r = runPublication(f.root, f.bin, "repair", env); assert.equal(r.status, 0, r.stderr);
+  const current = JSON.parse(readFileSync(f.repairPath));
+  assert.equal(current.failure.at, latest.at); assert.match(current.id, /attempt-2$/);
+  assert.equal(current.status, "blocked");
+  assert.equal(JSON.parse(readFileSync(join(f.root, "repairs", requestId, "retained", "attempt-1", "receipt.json"))).status, "retry-submitted");
+  const evidence = join(f.root, "proof-2.json"); writeJson(evidence, { passed: true });
+  writeJson(current.result, { status: "infrastructure-fixed", summary: "phase custody repaired", evidence });
+  r = runPublication(f.root, f.bin, "repair-result", env); assert.equal(r.status, 0, r.stderr);
+  r = run(process.execPath, [publication, "_retry", requestId], { env: { ...process.env, PATH: `${f.bin}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: f.root, ...env } });
+  assert.equal(r.status, 0, r.stderr);
+  const retried = JSON.parse(readFileSync(f.requestPath));
+  assert.equal(retried.repairedRetry.failedAttempt, 2); assert.equal(retried.repairedRetry.failureAt, latest.at);
+  assert.equal(retried.repairedRetries.length, 1); assert.equal(retried.failures.length, 2);
+  const before = readFileSync(f.requestPath, "utf8");
+  r = run(process.execPath, [publication, "_retry", requestId], { env: { ...process.env, PATH: `${f.bin}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: f.root, ...env } });
+  assert.equal(r.status, 0, r.stderr); assert.equal(readFileSync(f.requestPath, "utf8"), before);
+});
+
+test("explicit stop cannot be renewed by a later failure or accepted result", t => {
+  const f = repairFixture(t, "blocked");
+  writeJson(f.repairPath, { ...f.repair, explicitStop: true });
+  writeJson(f.requestPath, { ...f.request, attempt: 2, failure: { ...f.request.failure, attempt: 2, at: "2026-04-15T12:05:00.000Z" } });
+  const before = readFileSync(f.repairPath, "utf8");
+  const env = { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "inactive" };
+  assert.equal(runPublication(f.root, f.bin, "repair", env).status, 0);
+  assert.equal(readFileSync(f.repairPath, "utf8"), before);
+  const result = runPublication(f.root, f.bin, "repair-result", env);
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /Stale or explicitly stopped/);
 });
