@@ -13,7 +13,12 @@ import type { MemoryInput, MemoryClient } from "kenan-memory/contract";
 const roots: string[] = [];
 const services: MessagingService[] = [];
 function directory() { const path = mkdtempSync(join(tmpdir(), "pi-messaging-")); roots.push(path); return path; }
-afterEach(async () => { await Promise.all(services.splice(0).map(service => service.close())); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+async function closeFixtures() {
+  const closingServices = services.splice(0);
+  const closingRoots = roots.splice(0);
+  await Promise.all(closingServices.map(service => service.close()));
+  for (const root of closingRoots) rmSync(root, { recursive: true, force: true });
+}
 async function setup(root = directory(), onChange?: () => void, journal?: ActionJournal) {
   let context!: MessagingPluginContext;
   let sends = 0;
@@ -55,6 +60,17 @@ async function setup(root = directory(), onChange?: () => void, journal?: Action
 }
 
 describe("messaging custody", () => {
+  afterEach(closeFixtures);
+  test("fixture teardown retains roots registered while earlier services close", async () => {
+    let release!: () => void;
+    services.push({ close: () => new Promise<void>(resolve => { release = resolve; }) } as MessagingService);
+    const closing = closeFixtures();
+    const nextRoot = directory();
+    release();
+    await closing;
+    const next = await setup(nextRoot);
+    expect(next.service.snapshot().backends).toHaveLength(1);
+  });
   test("unknown backend variants fail before calls, links or messages become known states", async () => {
     const { service, context, conversation } = await setup();
     expect(() => context.status("future" as any, "unsupported")).toThrow("Unsupported messaging backend status");
