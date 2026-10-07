@@ -174,7 +174,7 @@ export function validateThreadAwait(input: AwaitThreads): Result<void> {
     || !Array.isArray(input.threadIds) || input.threadIds.length < 1 || input.threadIds.length > 100
     || input.threadIds.some(id => typeof id !== "string" || !id.trim() || id === input.parentId)
     || new Set(input.threadIds).size !== input.threadIds.length) {
-    return { ok: false, error: { code: "invalid_request", message: "Await requires a parent and 1..100 unique child thread IDs, excluding the parent" } };
+    return { ok: false, error: { code: "invalid_request", message: "Await requires a caller and 1..100 unique accessible peer thread IDs, excluding the caller" } };
   }
   if (input.after !== undefined && (!input.after || typeof input.after !== "object" || Array.isArray(input.after)
     || Object.values(input.after).some(cursor => !Number.isSafeInteger(cursor) || cursor < 0))) {
@@ -239,15 +239,15 @@ export function validateWaitDependency(input: unknown): Result<WaitDependency> {
   // request with concrete children; all normal validation/access checks still run.
   // Never infer generic waits, external kinds, or reinterpret an explicit kind.
   if (value.kind === "agents" || value.kind === undefined && value.action === "set" && Array.isArray(value.threadIds)) {
-    if (rejectForeign(["threadIds", "after"])) return invalid("An agents wait accepts only child dependencies and cursors");
+    if (rejectForeign(["threadIds", "after"])) return invalid("An agents wait accepts only peer dependencies and cursors");
     if (!Array.isArray(value.threadIds) || value.threadIds.length < 1 || value.threadIds.length > 100
       || !value.threadIds.every(nonempty) || new Set(value.threadIds).size !== value.threadIds.length)
-      return invalid("An agents wait requires 1..100 unique child thread IDs; available for assignment is idle, not waiting");
+      return invalid("An agents wait requires 1..100 unique peer thread IDs; available for assignment is idle, not waiting");
     const ids = value.threadIds;
     const after = value.after === undefined ? {} : value.after;
     if (!after || typeof after !== "object" || Array.isArray(after)
       || Object.entries(after).some(([id, cursor]) => !ids.includes(id) || !Number.isSafeInteger(cursor) || (cursor as number) < 0))
-      return invalid("Wait cursors must be nonnegative safe integers keyed only by declared child IDs");
+      return invalid("Wait cursors must be nonnegative safe integers keyed only by declared peer IDs");
     return { ok: true, value: { kind: "agents", threadIds: value.threadIds as [string, ...string[]], after: after as Record<string, number> } };
   }
   if (value.kind === "job") {

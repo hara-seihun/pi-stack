@@ -2,11 +2,12 @@ import { afterEach, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PiCommand, PiEvent, PiSession, PiSessionOptions, Result, ThreadApi } from "../src/threads/contracts.js";
+import type { PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
 import { ThreadService } from "../src/threads/service.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
 import { threadTools } from "../src/threads/pi-tools.js";
 import { modeConversation } from "../src/threads/pi-mode.js";
+import { callerResolver } from "../src/threads/caller.js";
 
 function value<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -154,6 +155,57 @@ it("turn settlement while waiting or questioning is not an assignment result or 
   f.sessions.get("assigned")!.settle("question pending");
   await until(() => !!f.service.latestSettlement("assigned")?.assignmentPending);
   expect(f.service.get("assigned")?.metadata?.archived).not.toBe(true); expect(f.service.pending("requester")).toEqual([]);
+});
+
+it("a later final turn discharges the original assignment reply exactly once without creator authority", async () => {
+  const f = fixture(); value(await f.service.start());
+  value(await f.service.spawn({ requestId: "requester", id: "requester", cwd: f.root }));
+  const assigned = value(await f.service.spawn({ requestId: "assigned", id: "assigned", parentId: "requester", cwd: f.root, message: "work" }));
+  await until(() => !!f.sessions.get("assigned")?.active);
+  value(await f.service.agentWait({ action: "set", kind: "job", threadId: "assigned", requestId: "job", reason: "Need job", jobId: "job" }));
+  f.sessions.get("assigned")!.settle("waiting");
+  await until(() => f.service.get("assigned")?.state === "waiting");
+  expect(f.service.pending("requester")).toHaveLength(0);
+  value(await f.service.agentWait({ action: "clear", threadId: "assigned", requestId: "release" }));
+  value(await f.service.send({ requestId: "continue", threadId: "assigned", text: "Finish now" }));
+  await until(() => !!f.sessions.get("assigned")?.active);
+  f.sessions.get("assigned")!.settle("actual final result");
+  await until(() => f.service.pending("requester").some(message => message.text.includes("actual final result")));
+  const replies = f.service.pending("requester").filter(message => message.senderId === "assigned");
+  expect(replies).toHaveLength(1); expect(replies[0]?.senderName).toBe(assigned.agentName);
+  expect(f.service.latestSettlement("assigned")?.assignmentPending).toBeUndefined();
+  value(await f.service.send({ requestId: "unrelated", threadId: "assigned", text: "Independent task" }));
+  await until(() => !!f.sessions.get("assigned")?.active);
+  f.sessions.get("assigned")!.settle("independent result");
+  await until(() => f.service.get("assigned")?.state === "idle");
+  expect(f.service.pending("requester").filter(message => message.senderId === "assigned")).toHaveLength(1);
+});
+
+it("accepted cross-owner reservations remain protected after controller replacement", async () => {
+  const a = fixture(), b = fixture();
+  let directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
+  value(await b.service.close()); services.splice(services.indexOf(b.service), 1);
+  const replacement = new ThreadService(b.options); services.push(replacement);
+  directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: replacement }]);
+  a.service.setDirectory(directory); replacement.setDirectory(directory);
+  expect(replacement.get("b")?.metadata?.peerDependents).toEqual(["a"]);
+  expect(await replacement.control({ action: "close", threadId: "b" })).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
+  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: [] }));
+  value(await replacement.control({ action: "close", threadId: "b" }));
+});
+
+it("caller identity protects human placement and another agent's dependency ownership", async () => {
+  const resolver = callerResolver({ capability: { issue: id => id, verify: token => token } });
+  const caller = { kind: "thread", threadId: "a" } as const;
+  for (const action of ["open", "placement", "view"]) expect(await resolver.admit("control", { action, threadId: "a", foreground: true }, caller)).toMatchObject({ ok: false, status: 403 });
+  expect(await resolver.admit("control", { action: "dependencies", threadId: "b", threadIds: [] }, caller)).toMatchObject({ ok: false, status: 403 });
+  expect(await resolver.admit("control", { action: "dependencyClaim", threadId: "b", dependentId: "a", active: false }, caller)).toMatchObject({ ok: false, status: 403 });
+  expect(await resolver.admit("control", { action: "dependencies", threadId: "a", threadIds: [] }, caller)).toMatchObject({ ok: true });
+  expect(await resolver.admit("spawn", { requestId: "launch", cwd: "/work" }, caller)).toMatchObject({ ok: true, input: { parentId: "a", createdBy: { kind: "thread", threadId: "a" } } });
 });
 
 it("dispatcher tool boundaries are explicit and independent of peer spawning", () => {
