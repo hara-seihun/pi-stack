@@ -30,15 +30,15 @@ test("each wait kind has its own label; missing or unknown kinds are reporting e
     [{ kind: "deployment", publicationId: "pub" }, "Waiting for deployment"],
     [{ kind: "message", fromThreadId: "collaborator" }, "Waiting for message"],
   ] as const) {
-    const projected = projectThreadActivity("idle", undefined, false, undefined, { agentWait: { ...dependency, reason: "Reason", since: 10 } });
+    const projected = projectThreadActivity("idle", undefined, undefined, { agentWait: { ...dependency, reason: "Reason", since: 10 } });
     expect(projected).toMatchObject({ activity: "awaiting", activitySince: 10, activityDetail: `${label} · Reason` });
   }
   for (const dependency of [{ threadIds: [], after: {} }, { kind: "other" },
     { kind: "agents", threadIds: [], after: {} }, { kind: "job", jobId: "" },
     { kind: "deployment" }, { kind: "message" }]) {
     const metadata = { agentWait: { ...dependency, reason: "Reason", since: 10 } };
-    expect(projectThreadActivity("idle", undefined, false, undefined, metadata)).toMatchObject({ activity: "status_error", executionError: expect.stringContaining("Wait reporting defect") });
+    expect(projectThreadActivity("idle", undefined, undefined, metadata)).toMatchObject({ activity: "status_error", executionError: expect.stringContaining("Wait reporting defect") });
     expect(metadata.agentWait.reason).toBe("Reason");
-    expect(projectThreadActivity("idle", undefined, false, undefined, metadata, true).activity).toBe("idle");
+    expect(projectThreadActivity("idle", undefined, undefined, metadata, true).activity).toBe("idle");
   }
 });

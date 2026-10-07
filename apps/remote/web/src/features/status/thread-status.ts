@@ -62,7 +62,7 @@ function executionStatus(session: Pick<Session, "activity" | "activeTools">): Th
 }
 
 type StatusSession = Pick<Session, "state" | "held" | "activity" | "activeTools" | "idleUnread" | "archivedAt">
-  & Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents" | "waitingForChildren">>;
+  & Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents">>;
 
 export function threadStatus(session: StatusSession): ThreadStatus {
   validateThreadObservation(session);
@@ -97,7 +97,6 @@ export function threadStatus(session: StatusSession): ThreadStatus {
 function dependencyStatus(session: StatusSession): ThreadStatus {
   const wait = session.waitingOnAgents;
   if (!wait) {
-    if (session.waitingForChildren === true) return { key: "awaiting", label: "Waiting on agents", short: "Waiting on agents", busy: true, attention: false, since: session.activitySince, title: session.activityDetail };
     return { ...STATUS_REPORTING_ERROR, busy: false, title: "Awaiting thread has no typed dependency or observed active children." };
   }
   if (!Object.hasOwn(wait, "kind")) return { ...STATUS_REPORTING_ERROR, label: "Wait type missing", short: "Wait type missing", busy: false, title: "The stored wait has no dependency type. Set an explicitly typed wait to repair it." };
@@ -119,7 +118,7 @@ export function roomThreadStatus(room: Room | RoomSnapshot): ThreadStatus {
     state: room.state, held: room.held ?? false, activity: room.activity,
     activeTools: room.activeTools ?? [], activitySince: room.activitySince, lastActivityAt: room.lastActivityAt,
     activityDetail: room.activityDetail, executionError: room.executionError ?? room.error,
-    waitingOnAgents: room.waitingOnAgents, waitingForChildren: room.waitingForChildren, idleUnread: false, archivedAt: null,
+    waitingOnAgents: room.waitingOnAgents, idleUnread: false, archivedAt: null,
   });
 }
 

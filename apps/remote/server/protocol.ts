@@ -90,8 +90,6 @@ export interface Session {
   lastActivityAt?: number;
   activityDetail?: string;
   waitingOnAgents?: AgentWait;
-  /** Observed running children, not an inferred generic dependency. */
-  waitingForChildren?: boolean;
   wakeSchedule?: ThreadWakeSchedule;
   executionError?: string;
   /** Every tool running right now, in the order they started. */

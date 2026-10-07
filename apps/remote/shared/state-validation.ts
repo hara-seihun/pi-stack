@@ -42,7 +42,6 @@ export function validateSession(value: unknown): asserts value is Session {
   stateString(row.id, "Session id");
   requireState(row.origin, { person: true, fleet: true } satisfies Record<Session["origin"], true>, "Session origin");
   if (typeof row.held !== "boolean") throw new Error("Session held: expected boolean");
-  if (row.waitingForChildren !== undefined && typeof row.waitingForChildren !== "boolean") throw new Error("Child wait evidence: expected boolean");
   stateArray(row.activeTools, "Active tools").forEach(tool => stateString(tool, "Active tool"));
   stateArray(row.queuedMessages, "Queued messages").forEach(value => {
     const message = stateObject(value, "Queued message");

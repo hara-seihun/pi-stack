@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { runningChildParents, projectThreadActivity } from "../server/live-projection";
+import { projectThreadActivity } from "../server/live-projection";
 import { ChatIcon } from "./src/chat-row";
 import { InboxRowView } from "./src/features/chats/Inbox";
 import type { Session } from "../server/protocol";
@@ -37,7 +37,7 @@ test("inbox ranks attention, then work, then quiet, mixing AI and human chats", 
     session("held", { held: true, queuedMessages: [queued] }),
     session("unread", { idleUnread: true }),
     session("busy", { state: "running", activity: "waiting_on_tool", activeTools: ["bash"] }),
-    session("parent", { activity: "awaiting", hasChildren: true, waitingForChildren: true }),
+    session("parent", { activity: "awaiting", hasChildren: true, waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }),
     session("old", { updatedAt: "2025-01-01T00:00:00Z", lastUserMessageAt: "2025-01-01T00:00:00Z" }),
   ], [], messaging);
   expect(rows.map(row => row.chat.id)).toEqual(["ai:held", "ai:unread", "human:unread", "ai:busy", "ai:parent", "ai:same-id", "ai:old", "human:same-id"]);
@@ -104,26 +104,27 @@ test("destination pictures retain their artwork when a thread has a colour", () 
   expect(renderToStaticMarkup(createElement(ChatIcon, { icon: "openai", color: "#ff00ff" }))).toContain("feFlood");
 });
 
-test("the last worker settling clears waiting status in the inbox", () => {
+test("background worker activity never turns an idle conversation into a dependency wait", () => {
   const parent = session("parent", { hasChildren: true });
-  const local = session("local", { parentId: parent.id });
-  const fleet = session("fleet", { parentId: parent.id, state: "running" });
-  const project = () => ({ ...parent, ...projectThreadActivity(parent.state, undefined, runningChildParents([local], [fleet]).has(parent.id)) });
-  const waiting = project();
-  expect(threadStatus(waiting)).toMatchObject({ key: "awaiting", busy: true });
-
-  fleet.state = "idle";
-  const settled = project();
-  const received = settled;
-  expect(received.revision).toBe(waiting.revision);
+  const local = session("local", { parentId: parent.id, state: "running", activity: "thinking" });
+  const fleet = session("fleet", { parentId: parent.id, origin: "fleet", activity: "awaiting",
+    waitingOnAgents: { kind: "message", fromThreadId: "billing-owner", reason: "Rental cleanup", since: 1 } });
+  const project = () => ({ ...parent, ...projectThreadActivity(parent.state) });
+  const received = project();
   expect(threadStatus(received)).toMatchObject({ key: "idle", busy: false });
-  const row = inboxRows([received], [], { ...messaging, conversations: [] })[0];
+  expect(threadStatus(local)).toMatchObject({ key: "thinking", busy: true });
+  expect(threadStatus(fleet)).toMatchObject({ key: "waiting_for_message", busy: true });
+  const row = inboxRows([received, local, fleet], [], { ...messaging, conversations: [] })[0];
   expect(row.section).toBe("quiet");
+  expect(row.chat.id).toBe("ai:parent");
   const markup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...row, chat: { ...row.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
-  expect(markup).not.toContain('class="inbox-chip"');
-
+  expect(markup).not.toContain("Waiting on agents");
+  local.state = "idle";
+  fleet.activity = "idle";
+  delete fleet.waitingOnAgents;
+  expect(threadStatus(project())).toMatchObject({ key: "idle", busy: false });
   parent.state = "running";
   expect(threadStatus(project())).toMatchObject({ key: "reporting_error", busy: true });
 });
@@ -138,7 +139,7 @@ test("status vocabulary covers every lifecycle and flag", () => {
   expect(threadStatus(session("a", { held: true, queuedMessages: [queued] }))).toMatchObject({ key: "stopped", label: "Stopped", attention: true });
   expect(threadStatus(session("a", { idleUnread: true }))).toMatchObject({ key: "idle", label: "Idle", attention: true });
   expect(threadStatus(session("a", { archivedAt: "2026" })).key).toBe("archived");
-  expect(threadStatus(session("a", { activity: "awaiting", waitingForChildren: true }))).toMatchObject({ key: "awaiting", busy: true });
+  expect(threadStatus(session("a", { activity: "awaiting", waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }))).toMatchObject({ key: "awaiting", busy: true });
   expect(selectedAiId({ selectedChatId: "human:same-id" })).toBeNull();
   expect(selectedAiId({ selectedChatId: "ai:same-id" })).toBe("same-id");
 });

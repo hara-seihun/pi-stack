@@ -226,8 +226,8 @@ export class Rooms {
   }
   private reconcile(room: StoredRoom, snapshot: RoomSnapshot) {
     validateThreadObservation(snapshot);
-    const { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error, waitingOnAgents, waitingForChildren } = snapshot;
-    this.statuses.set(room.id, { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error, waitingOnAgents, waitingForChildren });
+    const { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error, waitingOnAgents } = snapshot;
+    this.statuses.set(room.id, { activity, activitySince, lastActivityAt, activityDetail, activeTools, executionError, held, error, waitingOnAgents });
     this.db.transaction(() => {
       const questions = snapshot.questions ?? [];
       this.db.query("UPDATE rooms SET state=?,pendingQuestions=?,questionIds=? WHERE id=?")
