@@ -560,9 +560,11 @@ const reconciledState = new ReconcilePublisher({ maxHistoryPerResource: 32 });
 // client's images calls this. The projection is rebuilt once per burst, and a
 // stream only hears about it when its own rows differ.
 const STATE_COALESCE_MS = 25;
+// Thread recovery can emit changes while startup awaits external services.
+let stateReady = false;
 let statePushTimer: ReturnType<typeof setTimeout> | null = null;
 function signalSync() {
-  if (statePushTimer || shuttingDown) return;
+  if (!stateReady || statePushTimer || shuttingDown) return;
   statePushTimer = setTimeout(() => {
     statePushTimer = null;
     refreshState();
@@ -2786,6 +2788,8 @@ process.on("uncaughtException", (cause) => {
 refreshPlanUsageIfDue();
 void refreshPeers();
 
+stateReady = true;
+signalSync();
 unwrap(await threads.start());
 watchList.start();
 const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
