@@ -25,7 +25,7 @@ function fixture() {
   const insert = db.prepare("INSERT INTO work_items VALUES(?,'thread',?,?,'[]','followUp',?,'2026-09-01',NULL,NULL,?)");
   insert.run("complete", "req-complete", "Already answered", "complete", '[{"id":"meet-1"}]');
   insert.run("queued", "req-queued", "Next assignment", "queued", "[]");
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite3"), sessionsDir: root,
     openSession: async () => { throw new Error("Import must not open Pi"); } });
   return { root, db, native, service };
 }

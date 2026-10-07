@@ -27,7 +27,7 @@ function parent(model: string): Thread {
 function fixture(): { root: string; service: ThreadService } {
   const root = mkdtempSync(join(tmpdir(), "spawn-settings-"));
   const openSession: OpenPiSession = async () => { throw new Error("This test must not open a model session"); };
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession });
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession });
   roots.push(root);
   services.push(service);
   return { root, service };

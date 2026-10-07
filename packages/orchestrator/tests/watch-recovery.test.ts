@@ -18,7 +18,7 @@ function fixture(nativeNotReady = true) {
   const root = mkdtempSync(join(tmpdir(), "watch-recovery-"));
   cleanup.push(async () => rmSync(root, { recursive: true, force: true }));
   let available = false;
-  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, openSession: async (_options, output) => {
+  const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: root, openSession: async (_options, output) => {
     if (!available) throw nativeNotReady ? new RunnerStartupError("Model not found: synthetic SDK configuration error") : new Error("Model not found: unknown startup ownership");
     return { close: async () => {}, command: async command => output({ type: "response", id: command.id, command: command.type, success: true, data: { isStreaming: false, pendingMessageCount: 0 } }) };
   } });

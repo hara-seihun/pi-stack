@@ -17,7 +17,7 @@ function fixture(openSession?: OpenPiSession, intervalMs?: number) {
   const root = mkdtempSync(join(tmpdir(), "watch-list-"));
   cleanups.push(async () => rmSync(root, { recursive: true, force: true }));
   const opened: PiSessionOptions[] = [];
-  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async (options, output, exit) => { opened.push(options); if (openSession) return openSession(options, output, exit); throw Error("no model calls in this fixture"); } });
+  const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async (options, output, exit) => { opened.push(options); if (openSession) return openSession(options, output, exit); throw Error("no model calls in this fixture"); } });
   cleanups.push(() => owner.close());
   const options = { databasePath: join(root, "threads.sqlite"), threads: owner,
     placement: () => ({ ok: true as const, value: { cwd: root, metadata: { profileId: "home" } } }), intervalMs, onError: vi.fn(), recoveryEvidence: (id: string) => owner.watchRecoveryEvidence(id) };
@@ -166,7 +166,7 @@ it("validates timing and caller provenance, and supports disabling checks withou
 
 function routedFixture(origins: Record<string, string>, root = mkdtempSync(join(tmpdir(), "watch-routes-"))) {
   cleanups.push(async () => rmSync(root, { recursive: true, force: true }));
-  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async () => { throw Error("no model calls in this fixture"); } });
+  const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async () => { throw Error("no model calls in this fixture"); } });
   cleanups.push(() => owner.close());
   const options = { databasePath: join(root, "threads.sqlite"), threads: owner, intervalMs: 4 * 60 * 60_000, onError: vi.fn(),
     destinations: ["personal", "home"], defaultDestination: "home",

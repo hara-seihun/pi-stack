@@ -95,7 +95,7 @@ describe("delayed native input acknowledgements", () => {
   async function delayed() {
     const directory = mkdtempSync(join(tmpdir(), "thread-late-ack-")); roots.push(directory);
     let session!: FakePiSession, input!: PiCommand;
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
       openSession: async (options, output) => {
         session = new FakePiSession(options, output);
         const command = session.command.bind(session);
@@ -163,7 +163,7 @@ describe("delayed native input acknowledgements", () => {
       const wait = service.get(thread.id)?.metadata?.acknowledgementWait;
       await service.suspend();
       let recovered!: FakePiSession;
-      const replacement = new ThreadService({ databasePath: join(thread.cwd, "threads.sqlite"), sessionsDir: thread.cwd,
+      const replacement = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(thread.cwd, "threads.sqlite"), sessionsDir: thread.cwd,
         openSession: async (options, output) => {
           recovered = new FakePiSession(options, output);
           recovered.isStreaming = true;
@@ -215,7 +215,7 @@ describe("warm execution residency", () => {
     let admitted = true;
     const admit = vi.fn(async () => admitted ? { ok: true as const, value: { env: { PI_ORCHESTRATOR_ACCOUNT_ID: "account-one" }, release } }
       : { ok: false as const, error: { code: "unavailable" as const, message: "Capacity is occupied" } });
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, admit,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, admit,
       openSession: async (options, output) => { const session = new FakePiSession(options, output); session.setActive = activity; sessions.push(session); return session; } });
     services.push(service); value(await service.start());
     const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first" }));
@@ -245,7 +245,7 @@ describe("warm execution residency", () => {
     const directory = mkdtempSync(join(tmpdir(), "thread-reclaim-")); roots.push(directory);
     const sessions: FakePiSession[] = [], release = vi.fn();
     let nativeExit!: (code?: number) => void, reclaimed = false, admissions = 0, activations = 0;
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
       admit: async () => {
         if (++admissions === 2 && stage === "admission") { reclaimed = true; nativeExit(0); await turn(); }
         return { ok: true, value: { release } };
@@ -276,7 +276,7 @@ describe("warm execution residency", () => {
     const directory = mkdtempSync(join(tmpdir(), "thread-reopen-")); roots.push(directory);
     const sessions: FakePiSession[] = [], release = vi.fn();
     let admissionEnv = { PI_ORCHESTRATOR_ACCOUNT_ID: "one" } as Record<string, string>, environment = { HOME: directory };
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
       environment: () => environment, admit: async () => ({ ok: true, value: { env: admissionEnv, release } }),
       openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
     services.push(service); value(await service.start());
@@ -326,7 +326,7 @@ function fixture(root?: string, workersOnly = false, prepareMessage?: ThreadServ
     sessions.push(session);
     return session;
   };
-  const service = new ThreadService({
+  const service = new ThreadService({ capacity: { mode: "unmanaged" },
     workersOnly,
     prepareMessage,
     databasePath: join(directory, "threads.sqlite"),
@@ -362,7 +362,7 @@ describe("controller resource handoff", () => {
     let entered = false, release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const leaseRelease = vi.fn();
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
       admit: async () => ({ ok: true, value: { release: leaseRelease } }),
       openSession: async () => { entered = true; await gate; throw new Error("Session initialization interrupted by handoff"); } });
     services.push(service);
@@ -384,7 +384,7 @@ describe("controller resource handoff", () => {
     let release!: () => void, native: FakePiSession | undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const leaseRelease = vi.fn();
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
       admit: async () => ({ ok: true, value: { release: leaseRelease } }),
       openSession: async (options, output) => {
         native = new FakePiSession(options, output);
@@ -414,7 +414,7 @@ describe("controller resource handoff", () => {
     let entered = false, release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const leaseRelease = vi.fn(), openSession = vi.fn();
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
       ...(phase === "preparing" ? { prepareMessage: async (_thread, message) => { entered = true; await gate; return { ok: true, value: { text: message.text } }; } } :
         { admit: async () => { entered = true; await gate; return { ok: true, value: { release: leaseRelease } }; } }) });
     services.push(service); value(await service.start());
@@ -431,7 +431,7 @@ describe("controller resource handoff", () => {
   it("retains busy execution receipts, leases and held/archived input across detach", async () => {
     const directory = mkdtempSync(join(tmpdir(), "thread-handoff-active-")); roots.push(directory);
     const sessions: FakePiSession[] = [], leaseRelease = vi.fn();
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
       admit: async () => ({ ok: true, value: { release: leaseRelease } }),
       openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
     services.push(service);
@@ -465,7 +465,7 @@ describe("controller resource handoff", () => {
     const directory = mkdtempSync(join(tmpdir(), "thread-handoff-disposal-")); roots.push(directory);
     let refuses = true, native!: FakePiSession;
     const disposal = vi.fn(async () => { if (refuses) throw new Error("Native disposal refused"); native.closed = true; });
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
       openSession: async (options, output) => { native = new FakePiSession(options, output); native.close = disposal; return native; } });
     services.push(service);
     const thread = value(service.importThread({ id: "idle", title: "idle", cwd: directory, sessionFile: join(directory, "idle.jsonl"),
@@ -513,7 +513,7 @@ it("reports queue, preparation, admission, runtime startup, model wait and cance
   const opened = deferred<void>();
   const aborted = deferred<void>();
   let session!: FakePiSession;
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
     prepareMessage: () => prepared.promise, admit: () => admitted.promise,
     openSession: async (options, output) => {
       await opened.promise;
@@ -732,7 +732,7 @@ it.each([
   });
   const attachSession = vi.fn(async () => null);
   const release = vi.fn();
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession, admit: async () => ({ ok: true, value: { release } }) }); services.push(service);
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession, admit: async () => ({ ok: true, value: { release } }) }); services.push(service);
   const parent = value(await service.spawn({ requestId: "parent", cwd: directory }));
   value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
   value(service.importThread({ id: "child", parentId: parent.id, title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "private/removed-model", thinkingLevel: "high", speed: "standard" } }));
@@ -754,7 +754,7 @@ it.each([
   service.reconcile(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   await service.close();
-  const restored = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(restored);
+  const restored = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(restored);
   await restored.start(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   expect(restored.get("child")).toMatchObject({ state: "idle", held: true, metadata: { executionError: error } });
@@ -765,7 +765,7 @@ it("does not invent a failed settlement when retained runner absence is uncertai
   const directory = mkdtempSync(join(tmpdir(), "thread-startup-uncertain-")); roots.push(directory);
   const openSession: OpenPiSession = async () => { throw new Error("Pi cwd admission rejected thread.cwd: cwd_unavailable"); };
   const attachSession = vi.fn(async () => { throw new Error("runner status timed out"); });
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(service);
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(service);
   value(service.importThread({ id: "child", title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" }, metadata: { runnerReference: { control: "control.sock", socketPath: "session.sock" } } }));
   value(service.importMessage({ id: "assignment", threadId: "child", text: "work", state: "dispatched", executionId: "retained" }));
   await service.start();
@@ -786,7 +786,7 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
     const session = new FakePiSession(options, output); sessions.push(session); return session;
   });
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit };
-  const first = new ThreadService(options); services.push(first);
+  const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   value(first.importThread({ id: "capacity-child", title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
   value(await first.agentWait({ requestId: "wait", threadId: "capacity-child", action: "set", kind: "deployment", publicationId: "publication-fixture", reason: "Awaiting delegated release" }));
   value(first.importMessage({ id: "assignment", threadId: "capacity-child", text: "Unrelated result", source: "notification", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
@@ -796,7 +796,7 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
   first.reconcile(); first.reconcile(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   await first.close();
-  const second = new ThreadService(options); services.push(second);
+  const second = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(second);
   await second.start(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   const db = new DatabaseSync(options.databasePath);
@@ -832,13 +832,13 @@ it.each((["stop", "archive"] as const).flatMap(action => ["Runner capacity busy:
   const directory = mkdtempSync(join(tmpdir(), "thread-capacity-stop-")); roots.push(directory);
   const openSession = vi.fn<OpenPiSession>(async () => { throw new Error(error); });
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
-  const first = new ThreadService(options); services.push(first);
+  const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
   await first.start();
   await waitFor(() => first.get(thread.id)?.metadata?.startupFailure !== undefined || first.get(thread.id)?.metadata?.admissionWait !== undefined);
   value(await first.control(action === "archive" ? { threadId: thread.id, action: "update", archived: true } : { threadId: thread.id, action: "stop", descendants: false }));
   await first.close();
-  const second = new ThreadService(options); services.push(second);
+  const second = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(second);
   await second.start(); second.reconcile(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   expect(second.get(thread.id)).toMatchObject({ held: true, ...(action === "archive" ? { metadata: { archived: true } } : {}) });
@@ -848,14 +848,14 @@ it("persists a bounded startup retry budget across owner restart", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-startup-retry-")); roots.push(directory);
   const openSession = vi.fn<OpenPiSession>(async () => { throw new Error("temporary runner failure"); });
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
-  const first = new ThreadService(options); services.push(first);
+  const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
   await first.start();
   await waitFor(() => (first.get(thread.id)?.metadata?.startupFailure as { attempts: number })?.attempts === 1);
   first.reconcile(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   await first.close();
-  const second = new ThreadService(options); services.push(second);
+  const second = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(second);
   await second.start(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   const db = new DatabaseSync(options.databasePath);
@@ -879,7 +879,7 @@ it("stops even when the in-flight opening rejects", async () => {
   let rejectOpen!: (error: Error) => void;
   const openSession = vi.fn<OpenPiSession>(() => new Promise((_resolve, reject) => { rejectOpen = reject; }));
   const attachSession = vi.fn(async () => null);
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(service);
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(service);
   const thread = value(await service.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
   await service.start(); await waitFor(() => !!rejectOpen);
   const stopped = service.control({ threadId: thread.id, action: "stop", descendants: false });
@@ -897,7 +897,7 @@ it("records why a capacity refusal is waiting, keeps the work queued, and clears
   const openSession: OpenPiSession = async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; };
   const refusal = "openai-codex-8: weekly quota exhausted; openai-codex-11: cooling until 19:44";
   let admitted = false;
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
     admit: async () => admitted ? { ok: true, value: { release() {} } } : { ok: false, error: { code: "unavailable", message: refusal } } });
   services.push(service);
   await service.start();
@@ -931,7 +931,7 @@ it("keeps provider-exhausted accepted work unsettled across restart and resumes 
     sessions.push(session);return session;
   };
   const options={databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit};
-  const service=new ThreadService(options);services.push(service);
+  const service=new ThreadService({ ...options, capacity: { mode: "unmanaged" } });services.push(service);
   value(service.importThread({id:"child",parentId:"parent",title:"child",cwd:directory,sessionFile:join(directory,"child.jsonl"),settings:{model:"anthropic/claude-opus-5-5",thinkingLevel:"high",speed:"standard"}}));
   value(service.importMessage({id:"accepted",threadId:"child",text:"finish the real work"}));
   await service.start();await waitFor(()=>sessions[0]?.isStreaming===true);
@@ -948,7 +948,7 @@ it("keeps provider-exhausted accepted work unsettled across restart and resumes 
   expect(db.prepare("SELECT id FROM thread_work WHERE source='notification'").all()).toEqual([]);db.close();
   service.reconcile();await turn();expect(sessions).toHaveLength(1);
   value(await service.detach());
-  const reopened=new ThreadService(options);services.push(reopened);await reopened.start();await turn();
+  const reopened=new ThreadService({ ...options, capacity: { mode: "unmanaged" } });services.push(reopened);await reopened.start();await turn();
   expect(sessions).toHaveLength(1);
   expect(reopened.get("child")?.metadata?.providerWait).toBeDefined();
   available=true;reopened.reconcile();await waitFor(()=>sessions[1]?.isStreaming===true);
@@ -969,7 +969,7 @@ it.each([
   const directory = mkdtempSync(join(tmpdir(), "thread-provider-terminal-crash-")); roots.push(directory);
   const sessions: FakePiSession[] = [];
   const finalMessage = { role: "assistant", content: [{ type: "text", text: "durable native result" }], stopReason, ...(errorMessage ? { errorMessage } : {}) };
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
     admit: async () => ({ ok: true, value: { release() {} } }),
     openSession: async (options, output) => {
       const session = new FakePiSession(options, output);
@@ -1001,14 +1001,14 @@ it.each([false, true])("preserves pooled startup refusal and the same queued/acc
   });
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
     admit: async () => ({ ok: true as const, value: { release() {} } }) };
-  const first = new ThreadService(options); services.push(first);
+  const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   value(first.importThread({ id: "watch", title: "Synthetic watch", cwd: directory, sessionFile: join(directory, "watch.jsonl"),
     settings: { model: "astra", thinkingLevel: "high", speed: "standard" }, metadata: { watchList: true } }));
   value(first.importMessage({ id: "work", threadId: "watch", text: "check", state: accepted ? "dispatched" : "queued", ...(accepted ? { executionId: "execution" } : {}) }));
   await first.start(); await waitFor(() => first.get("watch")?.metadata?.admissionWait !== undefined);
   expect(first.get("watch")?.metadata?.admissionWait).toMatchObject({ message: expect.stringContaining("No eligible pooled account") });
   await first.close();
-  const second = new ThreadService(options); services.push(second); await second.start(); await turn();
+  const second = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(second); await second.start(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   const db = new DatabaseSync(options.databasePath);
   try {
@@ -1032,7 +1032,7 @@ it.each([false, true])("preserves pooled startup refusal and the same queued/acc
 it("cold pooled startup without quota waits without consuming the startup failure budget",async()=>{
   const directory=mkdtempSync(join(tmpdir(),"thread-cold-capacity-"));roots.push(directory);
   const sessions:FakePiSession[]=[];let available=false;
-  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+  const service=new ThreadService({ capacity: { mode: "unmanaged" },databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
     openSession:async(options,output)=>{if(!available)throw new Error("No eligible pooled account for anthropic/claude-opus-5-5");const session=new FakePiSession(options,output);sessions.push(session);return session;}});services.push(service);
   await service.start();const thread=value(await service.spawn({requestId:"cold-capacity",cwd:directory,message:"work"}));
   await waitFor(()=>service.get(thread.id)?.metadata?.admissionWait!==undefined);
@@ -1048,7 +1048,7 @@ it("cold pooled startup without quota waits without consuming the startup failur
 it("model-broker capacity waits respect a durable retry schedule rather than immediate re-admission",async()=>{
   const directory=mkdtempSync(join(tmpdir(),"thread-broker-wait-"));roots.push(directory);
   const sessions:FakePiSession[]=[];
-  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+  const service=new ThreadService({ capacity: { mode: "unmanaged" },databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
     openSession:async(options,output)=>{const session=new FakePiSession(options,output);sessions.push(session);return session;},
     admit:async()=>({ok:true,value:{env:{PI_MODEL_BROKER_URL:"http://127.0.0.1:2461"},release(){}}})});services.push(service);
   await service.start();const thread=value(await service.spawn({requestId:"broker-wait",cwd:directory,message:"work"}));
@@ -1065,7 +1065,7 @@ it("model-broker capacity waits respect a durable retry schedule rather than imm
 it("keeps the effective model and timed activity through transient retry backoff and warm reuse", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-model-backoff-")); roots.push(directory);
   const sessions: FakePiSession[] = [];
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
     admit: async (_thread, settings) => ({ ok: true, value: { release() {}, env: { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" },
       settings: { ...settings, model: "anthropic-2/claude-opus-5-5" } } }),
     openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
@@ -1120,7 +1120,7 @@ it.each([false, true])("switches dormant provider waiting Opus -> Sol with origi
       if (sessions.length) { session.acceptedWorkIds.add("same-work"); session.completedWorkIds.add("same-work"); session.lastAssistantMessage = failure; }
       sessions.push(session); return session;
     } };
-  const first = new ThreadService(options); services.push(first);
+  const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   value(first.importThread({ id: "retry", title: "Retry", cwd: directory, sessionFile: join(directory, "retry.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" } }));
   value(first.importMessage({ id: "same-work", threadId: "retry", text: "accepted assignment" }));
   await first.start(); await waitFor(() => sessions[0]?.isStreaming === true);
@@ -1138,7 +1138,7 @@ it.each([false, true])("switches dormant provider waiting Opus -> Sol with origi
   const pendingBefore = first.pending("retry");
   const queuedSettings = db.prepare("SELECT settings FROM thread_work WHERE id='later-work'").get()!.settings;
   value(await first.detach());
-  const second = new ThreadService(options); services.push(second);
+  const second = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(second);
   value(await second.control({ threadId: "retry", action: "retryWaiting" }));
   expect(second.pending("retry")).toEqual(pendingBefore);
   expect(second.get("retry")?.metadata?.admissionWait).toBeUndefined();
@@ -1147,7 +1147,7 @@ it.each([false, true])("switches dormant provider waiting Opus -> Sol with origi
   expect(db.prepare("SELECT settings FROM thread_work WHERE id='later-work'").get()!.settings).toBe(queuedSettings);
   // Persist the retry selection through another owner restart, before admission succeeds.
   value(await second.detach());
-  const third = new ThreadService(options); services.push(third); allowSol = true;
+  const third = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(third); allowSol = true;
   await third.start(); await waitFor(() => sessions[1]?.isStreaming === true);
   expect(sessions[1]!.options.args).toEqual(expect.arrayContaining(["openai-codex-8", "gpt-6.1-sol"]));
   expect(sessions[1]!.commands.filter(command => command.type === "prompt")).toMatchObject([{ workId: "same-work", resume: true, resumeProviderWait: true }]);
@@ -1163,7 +1163,7 @@ it.each([false, true])("switches dormant provider waiting Opus -> Sol with origi
 it("retries queued admission waiting work explicitly, without changing future-only receipt snapshots", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-queued-model-retry-")); roots.push(directory);
   const sessions: FakePiSession[] = [];
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
     admit: async (_thread, settings) => settings.model.startsWith("anthropic") ? { ok: false, error: { code: "unavailable", message: "Opus capacity exhausted" } } : { ok: true, value: { release() {} } },
     openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
   const thread = value(await service.spawn({ requestId: "queued-retry", cwd: directory, message: "work", settings: { model: "opus" } }));
@@ -1181,7 +1181,7 @@ it("checks the selected pooled family rather than obsolete Opus capacity on expl
   const directory = mkdtempSync(join(tmpdir(), "thread-pooled-model-retry-")); roots.push(directory);
   const availability = vi.spyOn(routing, "pooledRetryAvailability").mockImplementation(model => ({ available: model.startsWith("openai-codex"), retryAt: Date.now() + 3_600_000 }));
   const sessions: FakePiSession[] = [];
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
     openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
   value(service.importThread({ id: "pooled", title: "Pooled", cwd: directory, sessionFile: join(directory, "pooled.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" },
     metadata: { providerWait: { executionId: "pooled-execution", workId: "pooled-work", retryAt: Date.now() + 3_600_000, broker: false } } }));
@@ -1199,7 +1199,7 @@ it.each(["admission", "opening"])("cancellation wins a waiting model retry durin
   const sessions: FakePiSession[] = [], releaseLease = vi.fn();
   let unblock!: () => void, reached!: () => void;
   const gate = new Promise<void>(resolve => { unblock = resolve; }), entered = new Promise<void>(resolve => { reached = resolve; });
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
     admit: async () => { if (phase === "admission") { reached(); await gate; } return { ok: true, value: { env: { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" }, release: releaseLease } }; },
     openSession: async (options, output) => { if (phase === "opening") { reached(); await gate; } const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
   value(service.importThread({ id: "cancel", title: "Cancel", cwd: directory, sessionFile: join(directory, "cancel.jsonl"), settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" },
@@ -1221,7 +1221,7 @@ it.each(["admission", "opening"])("cancellation wins a waiting model retry durin
 it("does not bypass same-model broker backoff or switch genuinely live work", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-same-model-retry-")); roots.push(directory);
   const sessions: FakePiSession[] = [];
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
     admit: async () => ({ ok: true, value: { env: { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" }, release() {} } }),
     openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } }); services.push(service);
   await service.start(); const thread = value(await service.spawn({ requestId: "same-model", cwd: directory, message: "work", settings: { model: "opus" } }));
@@ -1240,7 +1240,7 @@ it("does not bypass same-model broker backoff or switch genuinely live work", as
 it("stop cancels provider waiting without reopening or retrying a model",async()=>{
   const directory=mkdtempSync(join(tmpdir(),"thread-provider-stop-"));roots.push(directory);
   const sessions:FakePiSession[]=[];let available=true;
-  const service=new ThreadService({databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
+  const service=new ThreadService({ capacity: { mode: "unmanaged" },databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,
     openSession:async(options,output)=>{const session=new FakePiSession(options,output);sessions.push(session);return session;},
     admit:async()=>available?{ok:true,value:{release(){}}}:{ok:false,error:{code:"unavailable",message:"quota exhausted"}}});services.push(service);
   await service.start();const thread=value(await service.spawn({requestId:"stop-wait",cwd:directory,message:"work"}));
@@ -1258,7 +1258,7 @@ it("settles a thread whose admission refusal can never succeed instead of waitin
   const sessions: FakePiSession[] = [];
   const openSession: OpenPiSession = async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; };
   const error = "Root repair cannot use an isolated application context";
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
     admit: async () => ({ ok: false, error: { code: "invalid_request", message: error } }) });
   services.push(service);
   await service.start();
@@ -1279,7 +1279,7 @@ it("waits out a transient compaction failure and resumes the same accepted work 
     sessions.push(session);return session;
   };
   const options={databasePath:join(directory,"threads.sqlite"),sessionsDir:directory,openSession,admit:async()=>({ok:true as const,value:{release(){}}})};
-  const service=new ThreadService(options);services.push(service);
+  const service=new ThreadService({ ...options, capacity: { mode: "unmanaged" } });services.push(service);
   value(service.importThread({id:"integrator",title:"integrator",cwd:directory,sessionFile:join(directory,"integrator.jsonl"),settings:{model:"openai-codex/gpt-6.1-sol",thinkingLevel:"high",speed:"standard"}}));
   value(service.importMessage({id:"accepted",threadId:"integrator",text:"integrate the train"}));
   let now=Date.parse("2026-10-03T15:53:00.000Z");vi.spyOn(Date,"now").mockImplementation(()=>now);
@@ -1380,7 +1380,7 @@ it("applies settings changed while the thread's session is still opening", async
   const sessions: FakePiSession[] = [];
   let release!: () => void, opened!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; }), opening = new Promise<void>(resolve => { opened = resolve; });
-  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
     openSession: async (options, output) => { opened(); await gate; const session = new FakePiSession(options, output); sessions.push(session); return session; } });
   services.push(service);
   await service.start();
@@ -2023,7 +2023,7 @@ describe("ThreadService", () => {
     const openSession = vi.fn(async () => { throw new Error("Stop must not initialize a session"); });
     const admit = vi.fn(async () => { throw new Error("Stop must not request admission"); });
     const attachSession = vi.fn(async () => null);
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
     const reference = { control: "/absent/runner.sock", socketPath: "/absent/session.sock" };
     value(service.importThread({ id: "gone", title: "gone", cwd: "/reclaimed/checkout", sessionFile: "/missing/session.jsonl", metadata: { runnerReference: reference }, settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" } }));
     value(service.importMessage({ id: "accepted", threadId: "gone", text: "work", state: "dispatched" }));
@@ -2040,7 +2040,7 @@ describe("ThreadService", () => {
     const openSession = vi.fn(async () => { throw new Error("Cold Stop must not initialize a session"); });
     const admit = vi.fn(async () => { throw new Error("Cold Stop must not request admission"); });
     const attachSession = vi.fn(async () => null);
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
     const reference = { control: "/absent/runner.sock", socketPath: "/absent/session.sock" };
     const sessionFile = join(directory, "crashed.jsonl");
     value(service.importThread({ id: "crashed", title: "crashed", cwd: "/reclaimed/checkout", sessionFile, metadata: { runnerReference: reference }, settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
@@ -2304,7 +2304,7 @@ describe("ThreadService", () => {
     let native: FakePiSession | undefined, release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const sessions: FakePiSession[] = [];
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
       openSession: async (options, output) => {
         const session = new FakePiSession(options, output), command = session.command.bind(session);
         sessions.push(session);
@@ -2332,7 +2332,7 @@ describe("ThreadService", () => {
     const directory = mkdtempSync(join(tmpdir(), "thread-opening-")); roots.push(directory);
     let release!: () => void, native: FakePiSession | undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
       openSession: async (options, output) => { native = new FakePiSession(options, output); await gate; return native; } });
     services.push(service); await service.start();
     const thread = value(await service.spawn({ requestId: "pending", cwd: directory, message: "work" }));

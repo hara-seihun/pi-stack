@@ -9,8 +9,8 @@ import { importFleetThreads } from "../src/threads/import.js";
 it("moves queued and settled assignments to their owners without moving completion custody", async () => {
   const root=mkdtempSync(join(tmpdir(),"fleet-import-")),store=Store.open(":memory:");
   const openSession=async()=>{throw new Error("Import must not execute work");};
-  const fleet=new ThreadService({databasePath:join(root,"fleet.sqlite3"),sessionsDir:root,openSession});
-  const app=new ThreadService({databasePath:join(root,"app.sqlite3"),sessionsDir:root,openSession});
+  const fleet=new ThreadService({ capacity: { mode: "unmanaged" },databasePath:join(root,"fleet.sqlite3"),sessionsDir:root,openSession});
+  const app=new ThreadService({ capacity: { mode: "unmanaged" },databasePath:join(root,"app.sqlite3"),sessionsDir:root,openSession});
   const create=()=>store.createRuns({count:1,source:"direct",prompt:"Do the task",cwd:root,profile:"astra",budget:"force"})[0]!;
   const queued=create(),done=create(),completion=create();
   store.updateRun(done,{state:"done",result:"Finished"});

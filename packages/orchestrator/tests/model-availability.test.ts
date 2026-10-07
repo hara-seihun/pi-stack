@@ -21,7 +21,7 @@ function value<T>(result: Result<T>): T {
   return result.value;
 }
 function service(root: string, store: ModelAvailabilityStore) {
-  const owner = new ThreadService({ databasePath: ":memory:", sessionsDir: join(root, "threads"),
+  const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: ":memory:", sessionsDir: join(root, "threads"),
     openSession: async () => { throw new Error("No inference expected"); }, admitNewThread: settings => store.admit(settings.model) });
   services.push(owner); return owner;
 }

@@ -21,7 +21,7 @@ afterEach(async () => {
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "complete-settings-")); roots.push(root);
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: root,
     openSession: async () => { throw new Error("import validation must not execute a session"); } });
   services.push(service);
   const thread: ImportThread = { id: "thread", title: "Imported", cwd: root,

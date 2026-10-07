@@ -17,7 +17,7 @@ async function until(check: () => boolean) { for (let n = 0; n < 100; n++) { if 
 function fixture(root = mkdtempSync(join(tmpdir(), "thread-attention-")), workersOnly = false) {
   if (!roots.includes(root)) roots.push(root);
   const sessions: Array<{ emit(event: PiEvent): void }> = [];
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), workersOnly,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), workersOnly,
     openSession: async (_options, output) => {
       const accepted = new Set<string>(); let running = false;
       const session = { emit(event: PiEvent) { if (event.type === "agent_settled") running = false; output(event); }, async command(command: PiCommand) {

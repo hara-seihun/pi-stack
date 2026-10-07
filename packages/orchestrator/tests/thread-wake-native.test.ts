@@ -29,7 +29,7 @@ async function until(check: () => boolean) { const deadline = performance.now() 
 it.each(["refused", "accepted", "clear", "ordinary"] as const)("real retained legacy-tool %s ends only through the correct native boundary and settles once", async mode => {
   const root = mkdtempSync(join(tmpdir(), "wait-legacy-native-"));
   let modelCalls = 0;
-  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"),
+  const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"),
     environment: () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1" }),
     openSession: (options, output, exit) => openPiSession({ ...options, args: [] }, output, exit),
   });
@@ -109,7 +109,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const client = createThreadClient(`${origin}/v1/threads`, fetch, { token: capability.issue("self"), timeoutMs: 3000 });
-  const createOwner = () => new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), capability,
+  const createOwner = () => new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), capability,
     environment: () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: `${origin}/v1/threads` }),
     openSession: (options, output, exit) => openPiSession({ ...options, threads: undefined, args: [] }, output, exit),
   });

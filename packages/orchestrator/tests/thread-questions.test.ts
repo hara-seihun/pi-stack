@@ -17,7 +17,7 @@ afterEach(async () => {
   roots.length = 0;
 });
 function owner(root: string) {
-  const service = new ThreadService({ databasePath: join(root, "owner.sqlite"), sessionsDir: join(root, "sessions"), openSession: async () => {
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "owner.sqlite"), sessionsDir: join(root, "sessions"), openSession: async () => {
     throw new Error("Question creation must not open Pi");
   } });
   services.push(service);

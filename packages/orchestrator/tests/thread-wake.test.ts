@@ -17,7 +17,7 @@ async function until(check: () => boolean) { for (let n = 0; n < 100; n++) { if 
 function fixture(root = mkdtempSync(join(tmpdir(), "thread-wake-")), options: Partial<ThreadServiceOptions> = {}, beforeOpen?: () => Promise<void>) {
   if (!roots.includes(root)) roots.push(root);
   const sessions: Array<{ commands: PiCommand[]; settle(): void; emit(event: PiEvent): void }> = [];
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), ...options,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), ...options,
     openSession: async (_options, output) => {
       await beforeOpen?.();
       let running = false;
