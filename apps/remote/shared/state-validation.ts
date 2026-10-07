@@ -40,6 +40,10 @@ export function validateSession(value: unknown): asserts value is Session {
   validateThreadObservation(value);
   const row = stateObject(value, "Session");
   stateString(row.id, "Session id");
+  if (row.taskDescription !== undefined) {
+    const description = stateString(row.taskDescription, "Task description");
+    if (!description.trim() || description.length > 240) throw new Error("Task description: expected 1..240 characters");
+  }
   requireState(row.origin, { person: true, fleet: true } satisfies Record<Session["origin"], true>, "Session origin");
   if (typeof row.held !== "boolean") throw new Error("Session held: expected boolean");
   stateArray(row.activeTools, "Active tools").forEach(tool => stateString(tool, "Active tool"));

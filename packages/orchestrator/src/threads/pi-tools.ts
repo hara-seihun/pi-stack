@@ -56,9 +56,9 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_title", label: "Name this thread",
-      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation), unless the title you were given already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. Your agent name is separate and never changes.",
-      parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 80, description: "The thread's topic title." }) }),
-      execute: async (_id, input, signal) => result(await api(signal).control({ action: "title", threadId: options.threadId, title: input.title })),
+      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation) and taskDescription; keep a supplied title when it already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. Include taskDescription: one short sentence saying what you are trying to accomplish, so the Orchestrator shows the purpose as well as the title. Update both when the task changes. Your agent name is separate and never changes.",
+      parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 80, description: "The thread's topic title." }), taskDescription: Type.Optional(Type.String({ minLength: 1, maxLength: 240, description: "One sentence describing the task's intended outcome." })) }),
+      execute: async (_id, input, signal) => result(await api(signal).control({ action: "title", threadId: options.threadId, title: input.title, ...(input.taskDescription !== undefined ? { taskDescription: input.taskDescription } : {}) })),
     }),
     defineTool({
       name: "thread_wait", label: "Wait for a named dependency",

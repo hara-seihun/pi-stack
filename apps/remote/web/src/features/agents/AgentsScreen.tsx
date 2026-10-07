@@ -8,6 +8,7 @@ import { StatusQuiet } from "../status/StatusPill";
 import { agentName } from "../../agent-name";
 import { threadStatus } from "../status/thread-status";
 import { backgroundAgents, countAgents, groupAgents, mergeAgentDirectory, type AgentFilter, type AgentGroup } from "./agent-directory";
+import { agentActivity } from "./agent-task";
 import "./agents.css";
 
 export type AgentDirectoryState =
@@ -51,18 +52,24 @@ function AgentGroupView({ group, expanded, onToggle, onOpen }: { group: AgentGro
   return <details className="agent-group" open={expanded} onToggle={event => onToggle(event.currentTarget.open)}>
     <summary>
       <span className="agent-group-chevron" aria-hidden="true">›</span>
-      <span className="agent-group-heading"><span className="agent-group-name">{group.label}</span>{group.task && <span className="agent-group-task">{group.task}</span>}<span className="agent-group-counts">{summary}</span></span>
+      <span className="agent-group-heading"><span className="agent-group-name">{group.task || group.label}</span>{group.task && <span className="agent-group-task">Launched by {group.label}</span>}<span className="agent-group-counts">{summary}</span></span>
       <span className="agent-group-total" aria-label={`${counts.total} agents`}>{counts.total}</span>
     </summary>
-    <ul className="agent-group-list">{group.agents.map(agent => { const status = threadStatus(agent); return <li key={agent.id}>
-      <button className="agent-open" type="button" onClick={() => onOpen(agent.id)} title="Open original agent in Chats">
-        <StatusIcon status={status} className="agent-row-status" />
-        <span className="agent-row-name">{agentName(agent) ?? "Unnamed agent"}</span>
-        <span className="agent-row-task">{agent.name}</span>
-        {agent.attentionSummary && <span className="agent-row-attention">{agent.attentionSummary}</span>}
-        {status.busy && status.lastActivityAt ? <StatusQuiet status={status} /> : null}
-      </button>
-    </li>; })}</ul>
+    <ul className="agent-group-list">{group.agents.map(agent => {
+      const status = threadStatus(agent), activity = agentActivity(agent), name = agentName(agent);
+      return <li key={agent.id}>
+        <button className="agent-open" type="button" onClick={() => onOpen(agent.id)} title="Open original task in Chats">
+          <StatusIcon status={status} className="agent-row-status" />
+          <span className="agent-row-task">{agent.name.trim() || "Task title not set"}</span>
+          {agent.taskDescription && <span className="agent-row-description">{agent.taskDescription}</span>}
+          <span className="agent-row-activity">{activity.label}</span>
+          {activity.detail && <span className="agent-row-detail">{activity.detail}</span>}
+          {agent.attentionSummary && agent.attentionSummary !== activity.detail && <span className="agent-row-attention">{agent.attentionSummary}</span>}
+          <span className="agent-row-identity">{name && <span className="agent-row-name">{name}</span>}<span className="agent-row-id">#{agent.id.slice(0, 8)}</span></span>
+          {status.busy && status.lastActivityAt ? <StatusQuiet status={status} /> : null}
+        </button>
+      </li>;
+    })}</ul>
   </details>;
 }
 
@@ -77,8 +84,8 @@ export function AgentsDirectory({ directory, onRefresh, onOpen }: { directory: A
     { key: "waiting", label: "Waiting", count: counts.waiting }, { key: "idle", label: "Idle", count: counts.idle },
   ];
   return <section className="agents-screen" aria-label="Background agents">
-    <header className="agents-header"><div><h1>Agents</h1><p>Background agents, grouped by launcher</p></div><button className="agents-refresh" type="button" disabled={directory.state === "loading"} onClick={onRefresh} aria-label="Refresh agent directory" title="Refresh"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1" /></svg></button></header>
-    <div className="agents-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6" /><path d="m15 15 5 5" /></svg><input type="search" aria-label="Search background agents" placeholder="Search names, tasks or launchers" value={query} onChange={event => setQuery(event.target.value)} /></div>
+    <header className="agents-header"><div><h1>Orchestrator</h1><p>Background tasks and what they’re doing</p></div><button className="agents-refresh" type="button" disabled={directory.state === "loading"} onClick={onRefresh} aria-label="Refresh agent directory" title="Refresh"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1" /></svg></button></header>
+    <div className="agents-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6" /><path d="m15 15 5 5" /></svg><input type="search" aria-label="Search background agents" placeholder="Search tasks, activity or agents" value={query} onChange={event => setQuery(event.target.value)} /></div>
     <div className="agents-filters" role="group" aria-label="Agent status">{filters.map(item => <button key={item.key} type="button" aria-pressed={filter === item.key} onClick={() => setFilter(item.key)}>{item.label} <span>{item.count}</span></button>)}</div>
     {directory.state === "loading" && <p className="agents-notice" role="status">{directory.sessions.length ? "Refreshing…" : "Loading agents…"}</p>}
     {directory.state === "failed" && <div className="agents-notice agents-error" role="alert"><p>Could not refresh agents: {directory.error}{directory.sessions.length > 0 && " Showing the last directory."}</p><button type="button" onClick={onRefresh}>Retry</button></div>}

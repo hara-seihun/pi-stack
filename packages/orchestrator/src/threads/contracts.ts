@@ -211,7 +211,7 @@ export type ThreadControl =
   /** A person's title, pinned against the agent's own naming until they rename again. */
   | { threadId: string; action: "rename"; title: string }
   /** The thread's own agent naming its thread; refused while a person's rename pins the title. */
-  | { threadId: string; action: "title"; title: string }
+  | { threadId: string; action: "title"; title: string; taskDescription?: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   /** Retry dormant waiting work on the saved model, without interrupting live native work. */
   | { threadId: string; action: "retryWaiting" }

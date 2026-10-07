@@ -220,6 +220,7 @@ describe("warm execution residency", () => {
       openSession: async (options, output) => { const session = new FakePiSession(options, output); session.setActive = activity; sessions.push(session); return session; } });
     services.push(service); value(await service.start());
     const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     await waitFor(() => sessions[0]?.isStreaming === true);
     await settle(sessions[0]!, service, thread.id);
     await waitFor(() => activity.mock.calls.some(([active]) => !active));
@@ -263,6 +264,7 @@ describe("warm execution residency", () => {
       } });
     services.push(service); value(await service.start());
     const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     await waitFor(() => sessions[0]?.isStreaming === true); await settle(sessions[0]!, service, thread.id);
     value(await service.send({ requestId: "second", threadId: thread.id, text: "second" }));
     await waitFor(() => sessions[1]?.isStreaming === true);
@@ -282,6 +284,7 @@ describe("warm execution residency", () => {
       openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
     services.push(service); value(await service.start());
     const thread = value(await service.spawn({ requestId: "first", cwd: directory, message: "first", settings: { model: "sol" } }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     await waitFor(() => sessions[0]?.isStreaming === true); await settle(sessions[0]!, service, thread.id);
     if (change === "account") admissionEnv = { PI_ORCHESTRATOR_ACCOUNT_ID: "two" };
     if (change === "broker") admissionEnv = { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" };
@@ -558,8 +561,12 @@ it("the thread's own agent names it with thread_title; a person's rename pins it
   const tools = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service });
   expect(tools.find(item => item.name === "thread_control")!.parameters.anyOf.some((variant: { properties: { action: { const?: string } } }) => variant.properties.action.const === "rename")).toBe(false);
   const title = tools.find(item => item.name === "thread_title")!;
-  const first = await title.execute("title-1", { title: "  First topic  " }, undefined, undefined, undefined as never);
-  expect(first.details).toMatchObject({ ok: true, value: { id: thread.id, title: "First topic", metadata: { titleSource: "agent" } } });
+  const first = await title.execute("title-1", { title: "  First topic  ", taskDescription: "  Publish the task-first Orchestrator on both hosts.  " }, undefined, undefined, undefined as never);
+  expect(first.details).toMatchObject({ ok: true, value: { id: thread.id, title: "First topic", metadata: { titleSource: "agent", taskDescription: "Publish the task-first Orchestrator on both hosts." } } });
+  for (const taskDescription of ["", " ", "x".repeat(241)]) {
+    expect(await service.control({ threadId: thread.id, action: "title", title: "Invalid description", taskDescription })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  }
+  expect(service.get(thread.id)?.title).toBe("First topic");
   await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "First topic"));
   expect((await title.execute("title-2", { title: "Changed topic" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: true, value: { title: "Changed topic" } });
   value(await service.control({ threadId: thread.id, action: "rename", title: "My chosen title" }));
@@ -575,6 +582,7 @@ it("the thread's own agent names it with thread_title; a person's rename pins it
   value(await restored.start());
   expect(await restored.control({ threadId: thread.id, action: "title", title: "After restart" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(value(await restored.control({ threadId: thread.id, action: "rename", title: "Next chosen title" })).title).toBe("Next chosen title");
+  expect(restored.get(thread.id)?.metadata?.taskDescription).toBe("Publish the task-first Orchestrator on both hosts.");
 });
 
 it("a person accepting the agent's title through update pins it", async () => {
@@ -854,6 +862,7 @@ it("persists a bounded startup retry budget across owner restart", async () => {
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
   const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "work" }));
+  value(await first.control({ threadId: thread.id, action: "placement", foreground: true }));
   await first.start();
   await waitFor(() => (first.get(thread.id)?.metadata?.startupFailure as { attempts: number })?.attempts === 1);
   first.reconcile(); await turn();
@@ -1101,6 +1110,7 @@ it("keeps the effective model and timed activity through transient retry backoff
     openSession: async (options, output) => { const session = new FakePiSession(options, output); sessions.push(session); return session; } });
   services.push(service); value(await service.start());
   const thread = value(await service.spawn({ requestId: "model-backoff", cwd: directory, message: "work", settings: { model: "opus" } }));
+  value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
   await waitFor(() => sessions[0]?.isStreaming === true);
   value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "sol" } }));
   const db = new DatabaseSync(join(directory, "threads.sqlite"));
@@ -1291,8 +1301,9 @@ it("settles a thread whose admission refusal can never succeed instead of waitin
   const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession,
     admit: async () => ({ ok: false, error: { code: "invalid_request", message: error } }) });
   services.push(service);
-  await service.start();
   const thread = value(await service.spawn({ requestId: "rejected", cwd: directory, message: "work" }));
+  value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
+  await service.start();
   await waitFor(() => service.get(thread.id)?.state === "idle" && service.get(thread.id)?.held === true);
   expect(service.get(thread.id)?.metadata?.executionError).toBe(error);
   expect(service.latestSettlement(thread.id)).toMatchObject({ outcome: "failed", error });
@@ -1739,6 +1750,7 @@ describe("ThreadService", () => {
   it("does not arm views during queued or running work, or pending owner operations", async () => {
     const { service, directory, sessions } = fixture();
     const thread = value(await service.spawn({ requestId: "busy-view", cwd: directory, message: "work" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
     expect(value(await service.control({ threadId: thread.id, action: "view" })).metadata?.autoArchiveViewedAt).toBeUndefined();
     value(await service.start());
     await waitFor(() => sessions[0]?.isStreaming === true);

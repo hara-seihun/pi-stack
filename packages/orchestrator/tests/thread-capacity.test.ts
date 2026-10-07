@@ -172,6 +172,7 @@ it.each([false, true])("failed pre-native startup releases its original identity
   unwrap(f.service.importThread({ id: "worker", parentId: "parent", title: "Worker", cwd: f.root, sessionFile: join(f.root, "worker.jsonl"),
     settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
   unwrap(f.service.importMessage({ id: "assignment", threadId: "worker", senderId: "parent", text: "work", source: "explicit" }));
+  unwrap(await f.service.control({ threadId: "worker", action: "placement", foreground: true }));
   unwrap(await f.service.start()); await until(() => f.sessions.get("worker")?.busy === true);
   f.sessions.get("worker")!.settle(); await until(() => f.service.latestSettlement("worker")?.outcome === "complete" && shared.status().active === 0 && !(f.service as any).runtimes.has("worker"));
   const originalReply = f.service.pending("parent");
