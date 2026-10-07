@@ -788,8 +788,8 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit };
   const first = new ThreadService(options); services.push(first);
   value(first.importThread({ id: "capacity-child", title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
-  value(first.importMessage({ id: "assignment", threadId: "capacity-child", text: "work", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
   value(await first.agentWait({ requestId: "wait", threadId: "capacity-child", action: "set", kind: "deployment", publicationId: "publication-fixture", reason: "Awaiting delegated release" }));
+  value(first.importMessage({ id: "assignment", threadId: "capacity-child", text: "Unrelated result", source: "notification", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
   const schedule = value(await first.wakeSchedule({ requestId: "wake", threadId: "capacity-child", action: "set", reason: "Fallback", cadenceMs: 600_000 }));
   await first.start();
   await waitFor(() => (first.get("capacity-child")?.metadata?.startupFailure as { attempts: number })?.attempts === 1);

@@ -93,7 +93,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
   vi.spyOn(Date, "now").mockImplementation(() => now);
   const statusCss = readFileSync(new URL("../../../apps/remote/web/src/features/status/status.css", import.meta.url), "utf8");
   const statusDocument = (thread: Thread) => {
-    const status = threadStatus({ state: thread.state, held: thread.held, waitingOnAgents: thread.waitingOnAgents, ...projectThreadActivity(thread.state, undefined, false, thread.executionActivity, thread.metadata, thread.held), idleUnread: false, archivedAt: thread.metadata?.archived ? "archived" : null });
+    const status = threadStatus({ state: thread.state, held: thread.held, waitingOnAgents: thread.waitingOnAgents, ...projectThreadActivity(thread.state, undefined, thread.executionActivity, thread.metadata, thread.held), idleUnread: false, archivedAt: thread.metadata?.archived ? "archived" : null });
     return `<!doctype html><html><head><meta charset="utf-8"><title>Thread wake lifecycle proof</title><style>body{font:18px system-ui;margin:32px}code{display:block;margin-top:24px;white-space:pre-wrap}${statusCss}</style></head><body>${renderToStaticMarkup(React.createElement(StatusPill, { status }))}<code>${JSON.stringify({ threadId: thread.id, waitingOnAgents: thread.waitingOnAgents, wakeSchedule: thread.wakeSchedule }).replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</code></body></html>`;
   };
   const server = createServer(async (request, response) => {
