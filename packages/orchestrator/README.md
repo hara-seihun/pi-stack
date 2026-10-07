@@ -1,6 +1,6 @@
 # Pi Orchestrator
 
-Pi Orchestrator runs persistent Pi threads against pooled subscription accounts. Fleet lanes, direct assignments and children use the same [ThreadService and API](../../docs/threads.md). Shared runners execute many sessions without a process per thread.
+Pi Orchestrator launches ordinary background agents against pooled subscription accounts. Lanes, direct assignments and agents launched by other agents use the same [ThreadService and API](../../docs/threads.md). [Kena](../../docs/agents.md) owns the single-agent model and global 100-executing-agent budget. Shared runners execute many sessions without a process per agent.
 
 ## Ordinary users
 
@@ -14,7 +14,7 @@ The daemon reconciles provider meters, weighted lanes and optional readiness pro
 
 `threads.sqlite3` beside the account ledger owns thread identities, pending input, executions, recurring schedules and result delivery. Native Pi JSONL files own conversation history. Account policy holds a `thread:<executionId>` activity lease until local execution settles. An idle parent releases its lease even when children continue. [`thread_wait` and `thread_wake`](../../docs/threads.md#durable-dependency-waits-and-own-thread-wakes) persist dependency status and periodic recovery checks for the caller's own existing conversation, using ThreadService reconciliation and ordinary input receipts rather than a polling model or the personal watch list.
 
-Children use ordinary thread messages and forced admission. There is no external fleet coordinator, waiting run, receipt endpoint or worker restart lifecycle. The daemon detaches from shared runners on shutdown; ThreadService recovers durable execution when it reconnects. Cutover imports existing fleet records before starting the service and must refuse active source custody rather than replay it.
+Agents use ordinary peer messages and explicit quota admission. Foreground/background placement and launch provenance confer no execution-budget exemption. There is no external fleet coordinator, waiting run, receipt endpoint or worker restart lifecycle. The daemon detaches from shared runners on shutdown; ThreadService recovers durable execution when it reconnects. Cutover imports existing fleet records before starting the service and must refuse active source custody rather than replay it.
 
 ## Pooled credentials and admission
 
@@ -82,9 +82,9 @@ The JSON config may set `modelBrokerUrl`, account-transfer `peers`, model `profi
 
 The [shared catalog](src/catalog.ts) maps Astra, Sol, and Luna to `openai-codex/gpt-6-astra`, `gpt-6.1-sol`, and `gpt-6-luna`. Explicit Sol 6 selections remain on `gpt-6-sol`. Sol 6.1 is defined in [custom model definitions](src/models.json) until the bundled catalog includes it; its limits and price use the Sol 6 entry pending provider metadata. All three share the Codex five-hour and weekly meters. `opus` selects `anthropic/claude-opus-5-5` for interactive main conversations. The [custom model definitions](src/models.json) add Opus 5.5 to the runtime and deployed account catalogues. Each definition carries its icon so a supervisor on a previous release can still load the account catalogue during handoff or rollback; the shared catalogue reads those same icons. Explicit Opus 5 selections remain on Opus 5. [Anthropic's Opus 5.5 specification](https://platform.claude.com/docs/en/models/opus-5-5/overview) supplies its 1M context, 128K output limit and pricing. Thinking is always on, and [per-turn effort](https://platform.claude.com/docs/en/build-with-claude/effort) preserves the cached prefix when the level changes. Every new Orchestrator agent and completion admission defaults to `high`, except catalog Luna defaults to `max`. This includes repair lanes, direct runs, waves and custom profiles. Thread settings and completion requests accept explicit thinking and speed overrides. Standard speed is the default. A lane that declares `thinkingLevel` replaces that default for its own workers; `threads/contracts.ts` owns the level names every consumer validates against.
 
-`SUBAGENT_MODEL_DESCRIPTIONS`, exported through `pi-orchestrator/api`, contains Hara's Sol and Luna engineering-level descriptions and her classification/inference exception, supplied on September 11, 2026. New subagents default to Sol even when their parent uses Anthropic. A child may explicitly choose Opus; the thread owner rejects Astra and Fable child models, including provider-qualified model names. Main conversations can still explicitly use Anthropic.
+`SUBAGENT_MODEL_DESCRIPTIONS`, exported through `pi-orchestrator/api`, contains Hara's Sol and Luna engineering-level descriptions and her classification/inference exception, supplied on September 11, 2026. Newly launched agents use Sol unless explicitly configured. All agents may select available models; launcher provenance does not prohibit a model.
 
-Model availability does not assign a model to a lane. Autonomous coordinator selection belongs to the submitting application or host lane manifest, which can name `astra` or `sol`. Subagents can select Sol, Opus, Luna or other installed models outside Astra and Fable. Without configured profiles, both `standard` and `expert` select Sol 6.1; Astra remains explicitly selectable through `astra`, and the strict `opus` profile and configured profiles may name Anthropic candidates for direct runs, lanes and completions. Interactive main conversations retain explicit Anthropic selection and shared account access.
+Model availability does not assign a model to a lane. Autonomous coordinator selection belongs to the submitting application or host lane manifest, which can name `astra` or `sol`. Agents can select any offered model allowed by their execution boundary. Without configured profiles, both `standard` and `expert` select Sol 6.1; Astra remains explicitly selectable through `astra`, and the strict `opus` profile and configured profiles may name Anthropic candidates for direct runs, lanes and completions. Interactive main conversations retain explicit Anthropic selection and shared account access.
 
 Profile candidates declare provider and model in preference order. Lane admission selects a candidate, then the central thread settings resolver chooses its defaults. Each execution retains its accepted settings during recovery. Configuration changes require a daemon restart.
 
@@ -115,7 +115,7 @@ The manifest defaults to forced admission. Its optional `budget` selects the man
 }
 ```
 
-A lane whose task must not be worked twice decides that from the same threads the daemon counts. `GET /v1/status` carries `threads`; each one has `cwd`, `state`, `held`, `pendingMessages` and `metadata.laneId`. A thread owns its lane's work while `state` is `running`, which already covers queued input, admission, startup, execution and cancellation, and while it is held with queued messages, because those run the moment somebody resumes it. `ThreadState` is exactly `idle | running`, so a probe that finds anything else is reading a payload it does not understand and should raise rather than report ready: the daemon then records the readiness error and admits nobody, which is the safe answer. Each lane's probe belongs with the project whose work it claims.
+A lane whose task must not be worked twice decides that from the same threads the daemon counts. `GET /v1/status` carries `threads`; each one has `cwd`, `state`, `held`, `pendingMessages` and `metadata.laneId`. A thread owns its lane's work while running or dependency-waiting. Queued input, admission, startup, execution and unconfirmed cancellation retain custody. A quiet native turn is not assignment completion; producers also account for dependencies, recovery wakes and unanswered questions. Unknown states are protocol errors, not readiness. Each lane's probe belongs with the project whose work it claims.
 
 `maxActive` counts distinct threads with the lane ID that retain runnable queued/dispatched input, an unended execution, running state or a native runner reference. Stop, archive and a failed cancellation do not release capacity until native cancellation is confirmed. An idle, held thread's preserved queue does not reserve a producer slot or restart through manifest reconciliation. The ceiling controls daemon lane creation, not explicit continuation of stopped historical threads. A completed bounded-lane assignment unloads its idle native session before releasing native custody; retaining a warm cache here would consume the lane's slot indefinitely. This applies only with no pending input, active execution, native command, dependency wait or wake schedule, and excludes live-mode threads. Ordinary interactive and uncapped sessions remain warm. Disposal must succeed before the runner reference is removed; pending or failed disposal and unknown retained references still count. Native files, accepted receipts and thread identity survive unloading. No readiness refresh or daemon restart resets live custody. Lowering the limit leaves existing workers intact and blocks new admissions until custody falls below it; increasing or removing the limit permits later admissions under the usual readiness/quota gates. Manifest reconciliation persists these changes. Status exposes `maxActive` and `custody` beside the existing running `active` count. Wave and readiness creation serialize the final capacity check with durable spawn; the count is checked again after an asynchronous opening probe.
 
@@ -156,8 +156,10 @@ Run `npm test --workspace=pi-orchestrator -- tests/catalog-config.test.ts tests/
 
 `pi-orchestrator names --count 10` generates names locally without model calls,
 creating agents or changing existing names. `getRandomName` is also exported from
-`pi-orchestrator/api`. Names are labels, not reserved identities; UUIDs remain the
-identity authority. Automatic assignment and UI display are not enabled by this command.
+`pi-orchestrator/api` and names each newly created thread. Names are labels, not
+reserved identities; thread IDs remain the identity authority. The separate task
+title stays editable. Incoming agent messages display the sender's name; each
+agent's own conversation still calls the assistant Kenan.
 
 [`src/nebulani-names.ts`](src/nebulani-names.ts) is imported unchanged from Hara's
 Lemma Dev generator (`src/nebulani-names.ts`, source commit
@@ -172,7 +174,10 @@ pi-orchestrator status
 pi-orchestrator run --prompt "..." --model astra
 pi-orchestrator schedule create --prompt "..." --cwd /home/person/work --every 1h --model sol
 pi-orchestrator wave review --count 3
-pi-orchestrator stop THREAD_ID
+pi-orchestrator close THREAD_ID
+pi-orchestrator reopen THREAD_ID
+pi-orchestrator dependencies THREAD_ID PEER_ID
+pi-orchestrator dependencies THREAD_ID --clear
 pi-orchestrator pause
 pi-orchestrator resume
 pi-orchestrator pause --ordinary

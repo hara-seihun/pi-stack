@@ -21,7 +21,9 @@ function thread(input: SpawnThread, state: Thread["state"] = "running"): Thread 
 
 function fakeThreads(spawn: (input: SpawnThread) => Promise<Result<Thread>>) {
   const records = new Map<string, Thread>();
+  const questions = new Map<string, import("../src/threads/contracts.js").ThreadQuestion[]>();
   const api = {
+    async questions(id: string) { return { ok: true, value: questions.get(id) ?? [] }; },
     async spawn(input: SpawnThread) {
       const result = await spawn(input);
       if (result.ok) records.set(result.value.id, result.value);
@@ -32,7 +34,7 @@ function fakeThreads(spawn: (input: SpawnThread) => Promise<Result<Thread>>) {
       return { ok: true, value: { threads } };
     },
   } as ThreadApi;
-  return { api, records };
+  return { api, records, questions };
 }
 
 function database(): string {
@@ -67,6 +69,28 @@ it("runs only the latest missed occurrence and never overlaps its previous threa
   await schedules.reconcile();
   expect(accepted.map(item => item.id)).toEqual(["schedule:digest:100000", "schedule:digest:130000"]);
   expect(schedules.get("digest")).toMatchObject({ ok: true, value: { nextRunAt: 140_000 } });
+  await schedules.close();
+});
+
+it("retains a quiet assignment with dependencies or unanswered questions", async () => {
+  let now = 100_000;
+  const accepted: SpawnThread[] = [];
+  const fake = fakeThreads(async input => { accepted.push(input); return { ok: true, value: thread(input) }; });
+  const schedules = new ScheduleService({ databasePath: database(), threads: fake.api, now: () => now });
+  await schedules.create({ id: "waiting", prompt: "Report", cwd: "/work", intervalMs: 10_000, startAt: now });
+  await schedules.reconcile();
+  const id = accepted[0]!.id!;
+  now += 10_000;
+  fake.records.set(id, { ...fake.records.get(id)!, state: "idle", pendingMessages: 0, dependencies: ["peer"] });
+  await schedules.reconcile();
+  expect(accepted).toHaveLength(1);
+  fake.records.set(id, { ...fake.records.get(id)!, dependencies: [] });
+  fake.questions.set(id, [{ id: "question", threadId: id, question: "Which result?", suggestions: [], createdAt: now }]);
+  await schedules.reconcile();
+  expect(accepted).toHaveLength(1);
+  fake.questions.set(id, []);
+  await schedules.reconcile();
+  expect(accepted).toHaveLength(2);
   await schedules.close();
 });
 

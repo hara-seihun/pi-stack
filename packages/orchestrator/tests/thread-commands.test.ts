@@ -66,10 +66,10 @@ it("rejects agent queue delivery before transport",async()=>{
   expect(calls).toHaveLength(0);
 });
 
-it("workers cannot bypass the missing spawn tool with CLI run or wave",async()=>{
+it("restricted execution boundaries cannot bypass the missing spawn tool with CLI run or wave",async()=>{
   vi.stubEnv("PI_THREAD_CAN_SPAWN","0");
   const calls=transport();
-  await expect(dispatch(["run","--prompt","work"])).rejects.toThrow("cannot spawn");
+  await expect(dispatch(["run","--prompt","work"])).rejects.toThrow("does not grant agent creation");
   await expect(dispatch(["wave","review"])).rejects.toThrow("unparented waves");
   expect(calls).toHaveLength(0);
 });

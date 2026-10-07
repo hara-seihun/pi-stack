@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
+import { threadHasOutstandingWork } from "./work-state.js";
 import type { Result, SpawnThread, ThreadApi, ThreadSettings } from "./contracts.js";
 import { resolveThreadSettings, validateThreadSettings } from "./settings.js";
 
@@ -273,15 +274,15 @@ export class WatchList implements WatchApi {
     const pendingDestinations = new Set((this.db.prepare("SELECT input FROM watch_wake").all() as { input: string }[]).map(row => JSON.parse(row.input).metadata?.watchDestination ?? this.defaultDestination));
     const due = this.items().filter(item => item.nextDueAt <= now || recovering.has(item.lastThreadId!));
     if (!due.length && !manual) return good([]);
-    const active = await this.options.threads.list({ state: "running", limit: 100 });
-    if (!active.ok) return active;
     const busyDestinations = pendingDestinations;
-    let page: Result<import("./contracts.js").ThreadPage> = active;
-    while (page.ok) {
-      for (const thread of page.value.threads) if (thread.metadata?.watchList) busyDestinations.add(thread.metadata.watchDestination as string ?? thread.metadata.profileId as string ?? this.defaultDestination);
-      if (!page.value.nextCursor) break;
-      page = await this.options.threads.list({ state: "running", limit: 100, cursor: page.value.nextCursor });
-      if (!page.ok) return page;
+    for (const state of ["running", "waiting"] as const) {
+      let cursor: string | undefined;
+      do {
+        const page = await this.options.threads.list({ state, archived: false, limit: 100, cursor });
+        if (!page.ok) return page;
+        for (const thread of page.value.threads) if (thread.metadata?.watchList) busyDestinations.add(thread.metadata.watchDestination as string ?? thread.metadata.profileId as string ?? this.defaultDestination);
+        cursor = page.value.nextCursor;
+      } while (cursor);
     }
     let eligible: WatchItem[] = [];
     for (const item of due) {
@@ -289,7 +290,7 @@ export class WatchList implements WatchApi {
       if (item.lastThreadId) {
         const prior = await this.options.threads.list({ id: item.lastThreadId, limit: 1 });
         if (!prior.ok) return prior;
-        if (prior.value.threads.some(thread => thread.state === "running" || thread.pendingMessages > 0 || thread.metadata?.archived || thread.metadata?.watchStopped || thread.held && !recovering.has(thread.id))) continue;
+        if (prior.value.threads.some(thread => threadHasOutstandingWork(thread) || thread.metadata?.archived || thread.metadata?.watchStopped || thread.held && !recovering.has(thread.id))) continue;
         if (recovering.has(item.lastThreadId)) {
           const snapshot = prior.value.threads[0]?.metadata?.watchItems as Array<{ id: string; updatedAt: number; nextDueAt: number }> | undefined;
           if (!snapshot?.some(saved => saved.id === item.id && saved.updatedAt === item.updatedAt && saved.nextDueAt === item.nextDueAt)) continue;
