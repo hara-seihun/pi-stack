@@ -79,7 +79,9 @@ The capacity authority owns durable execution custody. Restart, controller
 handoff and uncertain cancellation cannot free a slot by assumption. Initial
 activation requires a coordinated census of existing execution, not an empty
 counter while old agents continue. An unreachable authority cannot authorize new
-execution.
+execution. [Capacity operations](../packages/orchestrator/docs/agent-capacity.md)
+own the authority, census and managed admission; [direct executions](standalone-agent-capacity.md)
+own privileged SDK requests, CLI agents and publication doctors outside ThreadService.
 
 ## Integration
 
