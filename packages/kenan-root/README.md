@@ -2,6 +2,8 @@
 
 `pi-kenan` is a separate nonadministrator execution account. Ordinary person supervisors, Unix identities and visible traces remain unchanged. Enable only through the [additive cutover owner](../../docs/one-kenan-deployment.md), never ordinary publication.
 
+Every privileged request holds the mandatory shared global agent slot through native settlement. [Standalone execution capacity](../../docs/standalone-agent-capacity.md) owns the direct SDK/CLI inventory, records, configuration and rollout obligations.
+
 ## Admission and outgoing replies
 
 `POST /v1/ask` accepts only `{request:string}` and the minted person's `x-kenan-memory-session` capability. The memory service authenticates person/thread and, for rooms, the current full roster. Each new consultation starts one fresh native session with host-owned model, prompt and exact toolset; retrieval never starts another. Requests cannot select those resources or claim identity. `root_reply` chooses the sole outgoing text; exact disclosure accounting must acknowledge before `{reply}` returns. Native histories live outside every ordinary ThreadDirectory. [Separate admin admission](src/visibility.ts) protects list/transcript debugging.
@@ -17,6 +19,8 @@ Systemd credentials `kenan-memory-root`, `kenan-root-admin`, `kenan-root-consent
 ## Durable ask lifecycle
 
 New clients attach `x-kenan-request-id`, an opaque UUID stable for the authenticated thread's tool call. Root commits admission to [the request store](src/requests.ts) before starting any executor and promptly returns `202 {requestId,status:'pending'}`. A repeated POST with the same text/ID retrieves the same operation; changed text is refused. Headerless callers retain their synchronous reply behavior during rollout.
+
+Global-capacity or local-concurrency waits are durable `queued` requests, not failed model turns. Their original text stays in the encrypted request store without the memory credential. Pending receipts expose the bounded queue reason; the foreground reconciler retries the same admitted identity after its retry time. Root-only `/v1/root/resume-request` recovers the existing credential only while it is live and the full room audience still matches. Native creation marks `executing` only after global admission; interrupted executing requests are never replayed. Queued requests survive restart and remain runnable.
 
 `GET /v1/ask/:requestId` uses the same person-session capability. A root-only memory authorization check validates the original person/thread and current entire room audience without admitting a new root session. Only `{reply}` or `{requestId,status:'pending'|'failed'|'interrupted'}` leaves this endpoint—never native session IDs, contexts, traces or private error text. Unknown and unauthorized lookups have the same 404 response.
 

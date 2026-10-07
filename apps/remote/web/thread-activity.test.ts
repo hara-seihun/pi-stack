@@ -35,7 +35,7 @@ test("durable waiting names its dependency without pretending it is silent model
   const status = threadStatus(running({ state: "idle", activity: "awaiting", waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Publication worker", since: 1000 }, activitySince: 1000, activityDetail: "Publication worker", lastActivityAt: 1000 }));
   expect(status).toMatchObject({ key: "waiting_for_deployment", label: "Waiting for deployment", title: "Publication worker", since: 1000 });
   expect(activityTiming(status, 80000)).toEqual({ elapsed: "1m 19s" });
-  expect(threadStatus(running({ state: "idle", activity: "awaiting", held: true })).key).toBe("stopped");
+  expect(threadStatus(running({ state: "idle", activity: "awaiting", held: true })).key).toBe("idle");
   expect(threadStatus(running({ state: "idle", activity: "awaiting", archivedAt: "2026-10-05" })).key).toBe("archived");
   expect(threadStatus(running({ activity: "waiting_for_capacity" })).key).toBe("waiting_for_capacity");
 });
@@ -47,9 +47,9 @@ test("worker activity is display-only, keeps unread attention and never shows pa
   expect(attentionRank(status)).toBe(11);
   expect(activityTiming(status, 80000)).toEqual({});
   expect(activityTiming({ ...status, since: 1000, lastActivityAt: 1000 }, 80000)).toEqual({});
-  expect(renderToStaticMarkup(createElement(StatusPill, { status, compact: true }))).toContain("Waiting on workers");
+  expect(renderToStaticMarkup(createElement(StatusPill, { status, compact: true }))).toContain("Agents working");
   expect(attentionRank(threadStatus({ ...parent, idleUnread: true }))).toBe(2);
-  expect(threadStatus({ ...parent, held: true }).key).toBe("stopped");
+  expect(threadStatus({ ...parent, held: true }).key).toBe("idle");
   expect(threadStatus({ ...parent, archivedAt: "2026-10-05" }).key).toBe("archived");
   expect(threadStatus({ ...parent, executionError: "Runner exited" })).toMatchObject({ key: "error", busy: false });
   expect(threadStatus({ ...parent, state: "running" })).toMatchObject({ key: "reporting_error", busy: true });
@@ -105,8 +105,8 @@ test("settled or held threads never display stale execution clocks", () => {
 
 test("confirmed failure and pending cancellation are not confused with idle or stopped", () => {
   expect(threadStatus(running({ held: true }))).toMatchObject({ key: "stopping", busy: true });
-  expect(threadStatus(running({ held: true, executionError: "Runner could not cancel" }))).toMatchObject({ key: "error", label: "Stop failed", attention: true });
-  expect(threadStatus(running({ held: true, state: "idle" }))).toMatchObject({ key: "stopped", busy: false });
+  expect(threadStatus(running({ held: true, executionError: "Runner could not cancel" }))).toMatchObject({ key: "error", label: "Cancellation failed", attention: true });
+  expect(threadStatus(running({ held: true, state: "idle" }))).toMatchObject({ key: "idle", busy: false });
   const failure = threadStatus(running({ state: "idle", activity: "idle", executionError: "Runner exited" }));
   expect(failure).toMatchObject({ key: "error", busy: false, attention: true });
   expect(renderToStaticMarkup(createElement(StatusPill, { status: failure }))).toContain('class="status-error-detail">Runner exited</span>');

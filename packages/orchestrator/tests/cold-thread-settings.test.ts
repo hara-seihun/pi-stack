@@ -14,7 +14,7 @@ test.each([false, true])("cold settings read/write needs neither a workspace nor
   const root = mkdtempSync(join(tmpdir(), "cold-settings-"));
   const openSession = vi.fn(async () => { throw new Error("Settings must not open native sessions"); });
   const admit = vi.fn(async () => { throw new Error("Settings must not admit model work"); });
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, openSession, admit });
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: root, openSession, admit });
   cleanup.push(async () => { await service.close(); rmSync(root, { recursive: true, force: true }); });
   const imported = service.importThread({ id: "cold", title: "Cold", cwd: "/missing/checkout", sessionFile: "/missing/native.jsonl", held,
     settings: { model: "openai-codex/gpt-6-sol", thinkingLevel: "high", speed: "standard" }, metadata: { retain: true } });

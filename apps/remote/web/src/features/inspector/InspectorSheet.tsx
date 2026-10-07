@@ -8,7 +8,6 @@ import type { Session, ThreadSettings } from "../../types";
 import { Sheet } from "../../app/Sheet";
 import { StatusPill } from "../status/StatusPill";
 import { threadStatus } from "../status/thread-status";
-import { WorkersTree } from "../workers/WorkersTree";
 import { WriteSettings } from "./WriteSettings";
 import "./inspector.css";
 import { assertNever } from "../../../../shared/explicit-state";
@@ -25,18 +24,18 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   return <div className="inspector-row"><dt>{label}</dt><dd>{children}</dd></div>;
 }
 
-function WaitReference({ wait }: { wait: NonNullable<Session["waitingOnAgents"]> }) {
+function WaitReference({ wait, sessions, onOpen }: { wait: NonNullable<Session["waitingOnAgents"]>; sessions: Session[]; onOpen(id: string): void }) {
   if (!Object.hasOwn(wait, "kind")) return <Row label="Wait error">Wait type missing</Row>;
   switch (wait.kind) {
-    case "agents": return <Row label="Agent threads">{wait.threadIds.map(id => <code key={id}>{id} </code>)}</Row>;
+    case "agents": return <Row label="Agent dependencies">{wait.threadIds.map(id => <button className="inspector-link" type="button" key={id} onClick={() => onOpen(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}</Row>;
     case "job": return <Row label="Job"><code>{wait.jobId}</code></Row>;
     case "deployment": return <Row label="Publication"><code>{wait.publicationId}</code></Row>;
-    case "message": return <Row label="Message from"><code>{wait.fromThreadId}</code></Row>;
+    case "message": return <Row label="Message from"><button className="inspector-link" type="button" onClick={() => onOpen(wait.fromThreadId)}>{sessions.find(item => item.id === wait.fromThreadId)?.name ?? wait.fromThreadId}</button></Row>;
   }
   return assertNever(wait, "Inspector dependency");
 }
 
-export function InspectorSheet({ session, sessions, open, pending, autoCollapse, onAutoCollapseChange, onClose, onOpenThread, onArchive, onRestore, debug }: {
+export function InspectorSheet({ session, sessions, open, pending, autoCollapse, onAutoCollapseChange, onClose, onOpenThread, onOpenThreadId, onArchive, onRestore, onBackground, debug }: {
   session: Session;
   sessions: Session[];
   open: boolean;
@@ -45,8 +44,10 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
   onAutoCollapseChange(enabled: boolean): void;
   onClose(): void;
   onOpenThread(session: Session): void;
+  onOpenThreadId(id: string): void;
   onArchive(): void;
   onRestore(): void;
+  onBackground?(): void;
   /** Voice and Meet controls, kept for debugging. */
   debug?: ReactNode;
 }) {
@@ -153,7 +154,8 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
     <div className="inspector-tabs" role="tablist">{tabs.map(item => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
     {tab === "thread" && <div className="inspector-panel">
       <div className="inspector-controls">
-        {session.archivedAt ? <button type="button" disabled={pending} onClick={onRestore}>Restore</button> : <button type="button" disabled={pending} onClick={onArchive}>Close chat</button>}
+        {session.archivedAt ? <button type="button" disabled={pending} onClick={onRestore}>Restore</button> : <button type="button" disabled={pending} onClick={onArchive}>Close agent</button>}
+        {!session.archivedAt && session.foreground && onBackground && <button type="button" disabled={pending} onClick={onBackground}>Move to background</button>}
       </div>
       <dl className="inspector-facts">
         <Row label="Status"><StatusPill status={status} /></Row>
@@ -165,7 +167,7 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
         {session.waitingOnAgents && <>
           <Row label="Dependency">{session.waitingOnAgents.reason}</Row>
           <Row label="Waiting since">{formatTime(new Date(session.waitingOnAgents.since).toISOString())}</Row>
-          <WaitReference wait={session.waitingOnAgents} />
+          <WaitReference wait={session.waitingOnAgents} sessions={sessions} onOpen={onOpenThreadId} />
         </>}
         {session.wakeSchedule && <>
           <Row label="Wake check">{session.wakeSchedule.reason}</Row>
@@ -180,17 +182,20 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
         <Row label="Environment">{session.environment}</Row>
         <Row label="Workspace">{session.workspaceName || "—"}</Row>
         <Row label="Directory"><code>{session.cwd}</code></Row>
-        <Row label="Owner">{session.origin === "fleet" ? "Fleet" : "You"}</Row>
+        <Row label="Placement">{session.foreground ? "Foreground" : "Background"}</Row>
+        {session.agentName && <Row label="Agent">{session.agentName}</Row>}
+        <Row label="Task">{session.name}</Row>
         <Row label="Created">{formatTime(session.createdAt)}</Row>
         <Row label="Updated">{formatTime(session.updatedAt)}</Row>
         {session.archivedAt && <Row label="Archived">{formatTime(session.archivedAt)}</Row>}
         <Row label="Thread ID"><code className="inspector-id">{session.id}</code></Row>
       </dl>
-      {parent && <section className="inspector-section"><h3>Parent</h3><button type="button" className="inspector-link" onClick={() => onOpenThread(parent)}>{parent.name || parent.id}</button></section>}
+      {parent && <section className="inspector-section"><h3>Launched by</h3><button type="button" className="inspector-link" onClick={() => onOpenThread(parent)}>{parent.name || parent.id}</button></section>}
+      {!!session.dependencies?.length && <section className="inspector-section"><h3>Dependencies</h3>{session.dependencies.map(id => <button type="button" className="inspector-link" key={id} onClick={() => onOpenThreadId(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}<p className="muted">Resolve or release these dependencies before closing either agent.</p></section>}
       <section className="inspector-section">
-        <h3>Workers {childrenLoading && <span className="muted">loading</span>}</h3>
+        <h3>Agents launched {childrenLoading && <span className="muted">loading</span>}</h3>
         <DismissibleError message={childrenFailure} resetKey={attempt} />
-        {children.length ? <WorkersTree sessions={children} selectedId={null} filter="all" onFilter={() => {}} onOpen={onOpenThread} compact /> : !childrenLoading && !childrenFailure && <p className="muted">No workers spawned by this thread.</p>}
+        {children.length ? <ul className="launched-agents">{children.map(child => <li key={child.id}><button type="button" className="inspector-link" onClick={() => onOpenThread(child)}>{child.agentName && <strong>{child.agentName} · </strong>}{child.name} <StatusPill status={threadStatus(child)} /> <span className="muted">{child.foreground ? "Foreground" : "Background"}{child.archivedAt ? " · Archived" : ""}</span></button></li>)}</ul> : !childrenLoading && !childrenFailure && <p className="muted">No agents launched.</p>}
       </section>
       {debug && <section className="inspector-section"><h3>Debug</h3>{debug}</section>}
     </div>}

@@ -25,8 +25,6 @@
 .text-step .step-summary strong { flex: 0 0 auto; font-size: var(--text-sm); font-weight: 650; }
 .text-step .step-summary span { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--text-sm); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .thinking-step .step-summary span { font-style: italic; }
-.agent-message-step { margin: var(--space-2) 0; }
-.agent-message-step[open] > summary .work-chevron { transform: rotate(90deg); }
 .step-duration, .step-metrics { flex: 0 0 auto; color: var(--muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .step-outcome { flex: 0 0 auto; color: var(--muted); font-size: var(--text-xs); white-space: nowrap; }
 

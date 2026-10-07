@@ -3,7 +3,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Result, ThreadApi } from "./contracts.js";
 import { THREAD_TOKEN_HEADER, type AdmissionResult } from "./caller.js";
 
-const requestContext = new AsyncLocalStorage<{ deadline: number; signal: AbortSignal }>();
+type ThreadRequestContext = { lifetime: "active" | "finished"; deadline: number; signal: AbortSignal };
+const requestContext = new AsyncLocalStorage<ThreadRequestContext>();
 const deadlineHeader = "x-pi-thread-deadline";
 const requestTimeout = 60_000;
 export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number; /** The calling thread's PI_THREAD_TOKEN. */ token?: string }
@@ -38,17 +39,23 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
     const deadline = Math.min(Date.now() + requestTimeout, declaredDeadline > 0 ? Math.floor(declaredDeadline) : Infinity);
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(Math.max(0, deadline - Date.now()))]);
     if (signal.aborted || deadline <= Date.now()) return Response.json(failure("Thread request deadline expired"), { status: 408 });
-    const result = await requestContext.run({ deadline, signal }, () =>
-      operation === "await" ? api.await(fields as Parameters<ThreadApi["await"]>[0], signal)
-      : operation === "settlements" ? api.settlements(fields.after, fields.limit)
-      : operation === "questionEvents" ? api.questionEvents(fields.after, fields.limit)
-      : operation === "attentionEvents" ? api.attentionEvents(fields.after, fields.limit)
-      : operation === "inspect" ? api.inspect(fields.threadId, Number.isSafeInteger(fields.contextRevision) ? { contextRevision: fields.contextRevision } : undefined)
-      : operation === "questions" ? api.questions(fields.threadId)
-      : operation === "questionState" ? api.questionState(fields.threadId, fields.questionId)
-      : operation === "command" ? api.command(fields.threadId, fields.command)
-      : (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input));
-    return Response.json(result);
+    const context: ThreadRequestContext = { lifetime: "active", deadline, signal };
+    try {
+      const result = await requestContext.run(context, () =>
+        operation === "await" ? api.await(fields as Parameters<ThreadApi["await"]>[0], signal)
+        : operation === "settlements" ? api.settlements(fields.after, fields.limit)
+        : operation === "questionEvents" ? api.questionEvents(fields.after, fields.limit)
+        : operation === "attentionEvents" ? api.attentionEvents(fields.after, fields.limit)
+        : operation === "inspect" ? api.inspect(fields.threadId, Number.isSafeInteger(fields.contextRevision) ? { contextRevision: fields.contextRevision } : undefined)
+        : operation === "questions" ? api.questions(fields.threadId)
+        : operation === "questionState" ? api.questionState(fields.threadId, fields.questionId)
+        : operation === "command" ? api.command(fields.threadId, fields.command)
+        : (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input));
+      return Response.json(result);
+    } finally {
+      // Async descendants retain this object after the response, not its request budget.
+      context.lifetime = "finished";
+    }
   } catch (error) {
     return Response.json(failure(error instanceof Error ? error.message : String(error)), { status: 503 });
   }
@@ -56,17 +63,24 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
 
 export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch, options: ThreadClientOptions = {}): ThreadApi {
   const base = baseUrl.replace(/\/$/, "");
+  const diagnosticUrl = new URL(base);
+  diagnosticUrl.username = "";
+  diagnosticUrl.password = "";
+  diagnosticUrl.search = "";
+  diagnosticUrl.hash = "";
+  const ownerEndpoint = diagnosticUrl.toString().replace(/\/$/, "");
   async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
     const body = JSON.stringify(input ?? {});
     const requestId = (["send", "spawn", "ask", "watch", "agentWait", "wakeSchedule", "attention"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
     const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "questions", "questionState", "questionEvents", "attentionEvents", "answer", "settlements"].includes(operation) || ["watch", "wakeSchedule"].includes(operation) && (input as { action?: string })?.action === "list";
     const terminal = (value: Result<T>): Result<T> => value.ok ? value
       : { ok: false, error: { ...value.error, retryable: false, ...(requestId ? { requestId } : {}) } };
-    const inherited = requestContext.getStore();
+    const context = requestContext.getStore();
+    const inherited = context?.lifetime === "active" ? context : undefined;
     const deadline = Math.min(Date.now() + (options.timeoutMs ?? requestTimeout), inherited?.deadline ?? Infinity);
     const signal = AbortSignal.any([AbortSignal.timeout(Math.max(0, deadline - Date.now())),
       ...(options.signal ? [options.signal] : []), ...(inherited ? [inherited.signal] : []), ...(callSignal ? [callSignal] : [])]);
-    let lastError = "Thread owner did not acknowledge the request", attempt = 0;
+    let lastError = "Request ended before contacting the owner", attempt = 0;
     while (!signal.aborted && Date.now() < deadline) {
       let retry = false;
       try {
@@ -97,7 +111,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     const reason = callSignal?.aborted || options.signal?.aborted || inherited?.signal.aborted && Date.now() < deadline ? "cancelled"
       : Date.now() >= deadline || signal.aborted ? "deadline expired" : "failed";
     return { ok: false, error: { code: "unavailable", retryable: false, ...(requestId ? { requestId } : {}),
-      message: `Thread ${operation} ${reason}: ${lastError}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}` } };
+      message: `Thread ${operation} ${reason} at ${ownerEndpoint}/${operation}: ${lastError}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}` } };
   }
   return {
     attention: input => call("attention", input),

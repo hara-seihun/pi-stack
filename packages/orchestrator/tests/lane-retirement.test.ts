@@ -45,7 +45,7 @@ function fixture(ids = ["lane"]) {
   const root = mkdtempSync(join(tmpdir(), "lane-retirement-"));
   const store = Store.open(join(root, "ledger.sqlite3"));
   store.reconcileLanes(ids.map(id => ({ id, prompt: "work", cwd: root, profile: "sol", admission: "force", weight: 1, ...(id !== "uncapped" ? { maxActive: 1 } : {}) })));
-  const daemon = new Daemon(store, { ...loadConfig(join(root, "missing")), modelBrokerUrl: "http://127.0.0.1:2461", maxConcurrentSessions: 20 });
+  const daemon = new Daemon(store, { ...loadConfig(join(root, "missing")), modelBrokerUrl: "http://127.0.0.1:2461" }, undefined, undefined, { capacity: { mode: "unmanaged" } });
   const service = daemon.threads, sessions: NativeFixture[] = [], release = vi.fn();
   const options = (service as any).options;
   options.admit = async () => ({ ok: true, value: { env: { PI_MODEL_BROKER_URL: "http://127.0.0.1:2461" }, release } });

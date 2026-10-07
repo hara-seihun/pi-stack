@@ -35,6 +35,20 @@ test("definitive rejection is retained and dismissible, but cannot pretend repla
   expect(html).not.toContain("Retry same request");
 });
 
+test("initialization failure stays actionable without a saved entry; ready storage removes only its own callout", () => {
+  const renderStorage = (state: import("./src/prompt-storage").PromptStorageState<unknown>, entries: PromptOutboxEntry[] = []) => renderToStaticMarkup(
+    <PromptOutboxStatus entries={entries} busyRequestId={null} onRetry={() => {}} onDiscard={() => {}}
+      storage={{ state, retry: () => {} }} />);
+  expect(renderStorage({ kind: "loading" })).toContain('role="status"');
+  const failed = renderStorage({ kind: "failed", error: { kind: "unavailable", message: "Home health returned HTTP 503" } });
+  expect(failed).toContain('role="alert"');
+  expect(failed).toContain("Home health returned HTTP 503");
+  expect(failed).toContain("Retry storage");
+  expect(failed).not.toContain("Retry same request");
+  expect(renderStorage({ kind: "ready", owner: {} })).toBe("");
+  expect(renderStorage({ kind: "ready", owner: {} }, [entry({ kind: "pending", reason: "transport", message: "Acknowledgement lost" })])).toContain("Retry same request");
+});
+
 test("copy preserves the full exact saved text and returns visible clipboard failures", async () => {
   const text = "  exact saved text\\n".repeat(100);
   let copied: string | null = null;

@@ -81,12 +81,23 @@ test("questions replace messaging, expose only the next answer, and preserve dic
     expect(html).toContain('aria-label="Submit answer"');
     expect(html).toContain('aria-label="Start dictation"');
     expect(html).toContain("Dismiss question");
-    expect(html).toContain("Stop thread");
+    expect(html).toContain("Cancel work");
     expect(html).toContain("Recommended");
     expect(html).not.toContain("Second question");
     expect(html).not.toContain('checked=""');
     expect(render({ prompt: "Unsent message" })).toContain("Unsent message");
   } finally { Object.assign(globalThis, { window: originalWindow, localStorage: originalStorage }); }
+});
+
+test("question resource failure never marks chat offline and a ready resource clears its own error", () => {
+  const failed = render({ questionsResource: { state: "failed", questions: [], error: "Question owner unavailable" } });
+  expect(failed).toContain("Could not load questions");
+  expect(failed).toContain("Retry questions");
+  expect(failed).toContain('id="prompt"');
+  expect(header(failed)).toContain('data-status="idle"');
+  expect(header(failed)).not.toContain("Offline");
+  const ready = render({ questionsResource: { state: "ready", questions: [] } });
+  expect(ready).not.toContain("Question owner unavailable");
 });
 
 test("offline status and reconnect take precedence even while a refresh is pending", () => {

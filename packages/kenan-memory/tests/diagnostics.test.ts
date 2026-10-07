@@ -74,6 +74,14 @@ test("pending receipts are stable per tool call and status-only checks never sub
   const malformed = await ask(transport, 100, undefined, { request: "private-request", requestId: receipt.requestId });
   expect(malformed.result.isError).toBe(true); expect(calls).toHaveLength(3);
 });
+test("global-capacity receipts stay pending with an explicit reason, not a failed request", async () => {
+  const result = await ask((async (_url, init) => Response.json({ requestId: (init!.headers as Record<string, string>)["x-kenan-request-id"], status: "pending", reason: "global-agent-capacity", rootSessionId: "private-session" }, { status: 202 })) as typeof fetch);
+  expect(result.result.isError).toBe(false);
+  expect(result.result.details.rootRequest).toMatchObject({ status: "pending", reason: "global-agent-capacity" });
+  expect(result.result.content[0].text).toContain("100-agent capacity");
+  expect(result.result.content[0].text).not.toContain("private-session");
+});
+
 test("lost acknowledgement returns the recoverable public id, never automatically retries or trusts unrelated receipts", async () => {
   let id = "", calls = 0;
   const failed = await ask((async (_url, init) => { calls++; id = (init!.headers as Record<string, string>)["x-kenan-request-id"]; throw new Error("private-error"); }) as typeof fetch);

@@ -24,6 +24,7 @@ import {
   createSharedImageGenerationService,
   resolveDelivery,
   ThreadService,
+  configuredAgentCapacity,
   ModelAvailabilityStore,
   modelAvailabilityPath,
   modelAvailabilityKey,
@@ -91,7 +92,7 @@ import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
-import { idleNotifications } from "./notifications";
+import { idleNotifications, notificationHistory, resolveNotificationQuestions } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
@@ -99,7 +100,7 @@ import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webRes
 import { fileEditResponse } from "./file-edit";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
-import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, type ThreadQuestion, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
@@ -322,6 +323,7 @@ const capability = threadCapability();
 const callers = callerResolver({ capability, host: hostIdentityConfig() });
 const threads = new ThreadService({
   capability,
+  capacity: configuredAgentCapacity(),
   admitNewThread: settings => modelAvailability.admit(settings.model),
   attachSession: runner.attachSession,
   databasePath: join(DATA, "threads.sqlite3"),
@@ -851,8 +853,8 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
-function threadError(failure: { code: string; message: string }) {
-  return json({ error: failure.message, code: failure.code }, failure.code === "not_found" ? 404
+function threadError(failure: { code: string; message: string; dependencies?: Array<{ threadId: string; dependsOn: string; ownerId?: string }> }) {
+  return json({ error: failure.message, code: failure.code, ...(failure.dependencies ? { dependencies: failure.dependencies } : {}) }, failure.code === "not_found" ? 404
     : failure.code === "invalid_request" ? 400 : failure.code === "unavailable" ? 503 : 409);
 }
 
@@ -870,7 +872,7 @@ function meetingInstructions(sessionId: string, audience: "thread" | "voice" = "
   const thread = threads.get(sessionId) ?? peerThreads.get(sessionId);
   if (!thread || !remotePlacement(thread).meetingId) return "";
   if (audience === "voice") return liveDevInstructions();
-  return meetingThreadInstructions(thread.role === "worker" ? "worker" : "root");
+  return meetingThreadInstructions(thread.metadata?.liveDispatcher === true ? "root" : "worker");
 }
 
 /** The chosen context files of a thread, whole, for its system prompt. Children do not inherit their parent's choice. */
@@ -1372,7 +1374,9 @@ function publicSession(row: any,
     hasChildren,
     origin,
     watchList: row.metadata?.watchList === true,
-    foreground: row.metadata?.foreground === true,
+    foreground: typeof row.metadata?.foreground === "boolean" ? row.metadata.foreground : origin === "person" && !row.parentId && !row.metadata?.watchList,
+    agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : undefined,
+    dependencies: row.metadata?.peerDependencies,
     attentionSummary: typeof row.metadata?.attentionSummary === "string" ? row.metadata.attentionSummary : undefined,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
@@ -1465,19 +1469,26 @@ function sendImages(stream: ClientStream): void {
   stream.publish({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
 }
 
-const questionReads = new Map<string, ReturnType<typeof directory.questions>>();
+function readSessionQuestions(id: string) {
+  return threads.get(id) ? threads.questions(id) : peerThreads.has(id) && fleet ? fleet.questions(id) : directory.questions(id);
+}
+const questionReads = new Map<string, ReturnType<typeof readSessionQuestions>>();
+const questionSnapshots = new Map<string, ThreadQuestion[]>();
 async function sendQuestions(stream: ClientStream): Promise<void> {
   const sessionId = stream.subscription.session;
   if (!sessionId || !sessionRow.get(sessionId)) return;
   let read = questionReads.get(sessionId);
   if (!read) {
-    read = directory.questions(sessionId).finally(() => questionReads.delete(sessionId));
+    read = readSessionQuestions(sessionId).finally(() => questionReads.delete(sessionId));
     questionReads.set(sessionId, read);
   }
+  stream.publish({ type: "questions", sessionId, state: "loading", questions: questionSnapshots.get(sessionId) ?? [] });
   const result = await read;
+  if (result.ok) questionSnapshots.set(sessionId, result.value);
   if (stream.closed || stream.subscription.session !== sessionId) return;
-  if (result.ok) stream.publish({ type: "questions", sessionId, questions: result.value });
-  else stream.send({ type: "error", message: `Could not load questions: ${result.error.message}` });
+  if (result.ok) {
+    stream.publish({ type: "questions", sessionId, state: "ready", questions: result.value });
+  } else stream.publish({ type: "questions", sessionId, state: "failed", questions: questionSnapshots.get(sessionId) ?? [], error: result.error.message });
 }
 
 function sendEvents(stream: ClientStream): void {
@@ -1531,7 +1542,10 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
 function refreshTranscript(sessionId: string) {
   const stored = storedContext(sessionId);
   const display = stored ? displayContext(sessionId, stored.hash, stored.document) : null;
-  const update = display ? transcripts.derive(sessionId, display.hash, () => JSON.parse(display.document)) : null;
+  const update = display ? transcripts.derive(sessionId, display.hash, () => JSON.parse(display.document), id => {
+    const thread = liveThread(id);
+    return thread?.agentName ?? (typeof thread?.metadata?.agentName === "string" ? thread.metadata.agentName : undefined);
+  }) : null;
   for (const stream of sessionSubscribers(sessionId)) sendTranscript(stream, update);
   return update;
 }
@@ -1572,7 +1586,9 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
       sendLive(stream);
     }
     sendImages(stream);
-    pending.push(sendQuestions(stream));
+    void sendQuestions(stream).catch(cause => {
+      if (!stream.closed && stream.subscription.session === sessionId) stream.publish({ type: "questions", sessionId, state: "failed", questions: questionSnapshots.get(sessionId) ?? [], error: cause instanceof Error ? cause.message : String(cause) });
+    });
     sendEvents(stream);
     const fresh = changedSession || before.selectionId !== stream.subscription.selectionId;
     pending.push(stream.synchronizeSelection(
@@ -1951,8 +1967,7 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
   const children: Thread[] = [];
   let cursor: string | undefined;
   do {
-    // Archived workers stay reachable from the archive, not the live worker list.
-    const page = await directory.list({ parentId: id, archived: false, limit: 100, cursor });
+    const page = await directory.list({ parentId: id, limit: 100, cursor });
     if (!page.ok) return page;
     children.push(...page.value.threads);
     cursor = page.value.nextCursor;
@@ -2030,10 +2045,12 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   }
 }
 
-function notificationThread(id: string): { parentId: string | null; role?: "conversation" | "worker" } | null {
+function notificationThread(id: string): { parentId: string | null; role?: "agent" | "conversation" | "worker"; foreground?: boolean } | null {
   const thread = threads.get(id) ?? peerThreads.get(id);
   if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
-  return thread ?? (ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null);
+  if (thread) return { parentId: thread.parentId, role: thread.role,
+    foreground: typeof thread.metadata?.foreground === "boolean" ? thread.metadata.foreground : undefined };
+  return ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null;
 }
 
 async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
@@ -2051,7 +2068,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
   if (!admitted.ok) throw new Error(admitted.error.message);
   const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId, createdBy,
     cwd: admitted.value.cwd, message, settings: { model, ...settings },
-    metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode } : {}), ...(destination.raw ? { raw: true } : {}),
+    metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode, liveDispatcher: mode === "live" } : {}), ...(destination.raw ? { raw: true } : {}),
       ...(destination.sandbox ? { sandbox: true } : {}),
       ...(contextFiles.length ? { contextFiles } : {}) },
   }));
@@ -2130,6 +2147,7 @@ const server = Bun.serve<SocketData>({
     if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
+    const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);
       if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
@@ -2168,7 +2186,7 @@ const server = Bun.serve<SocketData>({
               activeWorkerParents(threads.snapshot({ archived: false }), peerThreads.values()).has(id)),
             context: context ? JSON.parse(context.document) : null, questions };
         },
-        stop: async id => { unwrap(await directory.control({ threadId: id, action: "stop", descendants: true })); },
+        stop: async id => { unwrap(await directory.control({ threadId: id, action: "cancel" })); },
         answer: async (id, questionId, sender, body) => {
           const key = `room-answer:question-answer:${questionId}`;
           const previous = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
@@ -2578,6 +2596,11 @@ const server = Bun.serve<SocketData>({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications();
+      if (url.searchParams.get("history") === "1") {
+        const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : null;
+        if (before !== null && (!Number.isSafeInteger(before) || before <= 0)) return error("Invalid history cursor");
+        return json(await resolveNotificationQuestions(notificationHistory(db, before, notificationThread), readSessionQuestions));
+      }
       return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
@@ -2585,6 +2608,7 @@ const server = Bun.serve<SocketData>({
     }
     if (API.reconcile.match(req.method, url.pathname)) {
       const patch = readSubscription(await readBody(req));
+      if (patch.viewing && !humanCaller()) return error("Human viewing requires an authenticated person", 403);
       const events: StreamWireEvent[] = [];
       const stream = new ClientStream({
         write: chunk => { events.push(JSON.parse(chunk.slice(chunk.indexOf("data: ") + 6).trim())); },
@@ -2604,6 +2628,7 @@ const server = Bun.serve<SocketData>({
     }
     if (API.stream.match(req.method, url.pathname)) {
       const patch = readSubscription(await readBody(req).catch(() => ({})));
+      if (patch.viewing && !humanCaller()) return error("Human viewing requires an authenticated person", 403);
       let stream!: ClientStream;
       const encoder = new TextEncoder();
       const body = new ReadableStream<Uint8Array>({
@@ -2645,7 +2670,9 @@ const server = Bun.serve<SocketData>({
       const stream = streams.get(streamUpdate.streamId);
       if (!stream) return error("Unknown stream", 404);
       try {
-        await applySubscription(stream, readSubscription(await readBody(req)), "push");
+        const patch = readSubscription(await readBody(req));
+        if ((patch.viewing ?? stream.subscription.viewing) && !humanCaller()) return error("Human viewing requires an authenticated person", 403);
+        await applySubscription(stream, patch, "push");
         return new Response(null, { status: 204, headers: API_CORS_HEADERS });
       } catch (cause: any) { return error(cause?.message ?? "Could not update the stream", 400); }
     }
@@ -2655,7 +2682,10 @@ const server = Bun.serve<SocketData>({
       return json({ ok: true });
     }
     if (API.sessions.match(req.method, url.pathname)) {
-      void refreshPeers();
+      if (url.searchParams.get("allAgents") === "1") {
+        await refreshPeers();
+        if (peerError) return error(`Could not load the complete agent directory: ${peerError}`, 503);
+      } else void refreshPeers();
       projectState();
       return json(currentState());
     }
@@ -2692,7 +2722,7 @@ const server = Bun.serve<SocketData>({
     const questionsRequest = API.sessionQuestions.match(req.method, url.pathname);
     if (questionsRequest) {
       if (!sessionRow.get(questionsRequest.sessionId)) return error("Session not found", 404);
-      const result = await directory.questions(questionsRequest.sessionId);
+      const result = await readSessionQuestions(questionsRequest.sessionId);
       return result.ok ? json({ questions: result.value }) : threadError(result.error);
     }
     const answerRequest = API.sessionQuestionAnswer.match(req.method, url.pathname);
@@ -2730,7 +2760,7 @@ const server = Bun.serve<SocketData>({
 
     const sessionRoutes: Array<[string | undefined, (typeof API)[keyof typeof API]]> = [
       [undefined, API.session], [undefined, API.archiveSession], [undefined, API.rejectSessionEdit],
-      ["unarchive", API.unarchiveSession], ["color", API.sessionColor], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort], ["resume", API.sessionResume],
+      ["unarchive", API.unarchiveSession], ["placement", API.sessionPlacement], ["color", API.sessionColor], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort], ["resume", API.sessionResume],
       ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
       ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
       ["commands", API.sessionCommands], ["command", API.sessionCommand], ["admission", API.sessionAdmission],
@@ -2779,13 +2809,15 @@ const server = Bun.serve<SocketData>({
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
     if (action === "unarchive" && req.method === "POST") {
-      // Opening an archived chat restores just that chat. Undo after closing
-      // one asks for the whole subtree and the work its close interrupted.
-      let body: any;
-      try { body = (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json") ? await readBody(req) : {}; }
-      catch (cause: any) { return error(cause?.message ?? "Invalid restore request", 400); }
-      if (body?.descendants !== undefined && typeof body.descendants !== "boolean" || body?.resume !== undefined && typeof body.resume !== "boolean") return error("descendants and resume must be booleans", 400);
-      const result = await directory.control({ threadId: id, action: "restore", descendants: body?.descendants === true, resume: body?.resume === true });
+      if (!humanCaller()) return error("Only a person can open an agent in Chats", 403);
+      const result = await directory.control({ threadId: id, action: "open" });
+      return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
+    }
+    if (action === "placement" && req.method === "PUT") {
+      if (!humanCaller()) return error("Only a person can change foreground placement", 403);
+      const body = await readBody(req);
+      if (typeof body.foreground !== "boolean") return error("Placement requires a foreground boolean");
+      const result = await directory.control({ threadId: id, action: "placement", foreground: body.foreground });
       return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
     }
     if (action === "color" && req.method === "PUT") {
@@ -2945,8 +2977,8 @@ const server = Bun.serve<SocketData>({
     }
     if (action === "abort" && req.method === "POST") {
       const body = await readBody(req);
-      if (typeof body.descendants !== "boolean") return error("descendants boolean required");
-      const result = await directory.control({ threadId: id, action: "stop", descendants: body.descendants });
+      if (body.descendants !== false) return error("Cancellation targets only the selected agent; descendants must be false");
+      const result = await directory.control({ threadId: id, action: "cancel" });
       return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
     }
     if (action === "resume" && req.method === "POST") {

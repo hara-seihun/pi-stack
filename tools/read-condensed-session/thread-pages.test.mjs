@@ -42,6 +42,19 @@ test("subagent pages use message recency, stable snapshots, direct ownership and
   } finally { db.close(); }
 });
 
+test("launched agents retain names and dependency waiting without a live native turn", () => {
+  const db = database();
+  try {
+    db.prepare("INSERT INTO thread VALUES(?,?,?,?,?,?,?,?)").run("a", "Investigation", "idle", 1, "root", '{"model":"sol"}', JSON.stringify({ agentName: "Mozeineizane Ketabain", peerDependencies: ["peer"] }), 1);
+    const [agent] = subagentPage(db, "root").subagents;
+    assert.equal(agent.agentName, "Mozeineizane Ketabain");
+    assert.equal(agent.state, "waiting");
+    assert.equal(agent.active, true);
+    db.prepare("UPDATE thread SET metadata='{}'").run();
+    assert.equal(subagentPage(db, "root").subagents.length, 0);
+  } finally { db.close(); }
+});
+
 test("thread pages retain branch and snapshot, and large entries can be read without lost text", () => {
   const root = mkdtempSync(join(tmpdir(), "thread-pages-"));
   const path = join(root, "session.jsonl");

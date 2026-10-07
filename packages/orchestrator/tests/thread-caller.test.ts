@@ -28,7 +28,7 @@ function owner() {
   const root = temp("thread-caller-");
   const capability = threadCapability(join(root, "state", "thread-capability.key"));
   const sessions: IdleSession[] = [];
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite3"), sessionsDir: root, capability,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite3"), sessionsDir: root, capability,
     openSession: async (options, output) => { const session = new IdleSession(options, output); sessions.push(session); return session; } });
   cleanups.push(async () => { await service.close(); });
   return { root, capability, service, sessions };

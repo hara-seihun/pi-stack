@@ -17,7 +17,7 @@ async function until(check: () => boolean) { for (let n = 0; n < 100; n++) { if 
 function fixture(root = mkdtempSync(join(tmpdir(), "thread-attention-")), workersOnly = false) {
   if (!roots.includes(root)) roots.push(root);
   const sessions: Array<{ emit(event: PiEvent): void }> = [];
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), workersOnly,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), workersOnly,
     openSession: async (_options, output) => {
       const accepted = new Set<string>(); let running = false;
       const session = { emit(event: PiEvent) { if (event.type === "agent_settled") running = false; output(event); }, async command(command: PiCommand) {
@@ -32,19 +32,19 @@ function fixture(root = mkdtempSync(join(tmpdir(), "thread-attention-")), worker
 afterEach(async () => { vi.restoreAllMocks(); for (const service of services.splice(0)) await service.detach(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const spawn = (f: ReturnType<typeof fixture>, id: string) => f.service.spawn({ id, requestId: `spawn:${id}`, cwd: f.root });
 
-it("persists an explicit notice and foreground placement atomically, replays exact receipts and keeps scheduling/parentage", async () => {
+it("persists an explicit notice without changing foreground placement, replays exact receipts and keeps scheduling/parentage", async () => {
   const f = fixture(); await spawn(f, "parent");
   unwrap(await f.service.spawn({ id: "worker", requestId: "spawn:worker", parentId: "parent", cwd: f.root, message: "Check", ephemeral: true }));
   unwrap(await f.service.wakeSchedule({ action: "set", threadId: "worker", requestId: "wake", reason: "Appointment", cadenceMs: 60000 }));
   const changes: string[] = []; f.service.subscribe(event => { if ("type" in event && event.type === "changed") changes.push(event.threadId); });
   const input = { threadId: "worker", requestId: "notice", summary: "Tour today at 2 pm Pacific. Bring ID.", foreground: true };
   const receipt = unwrap(await f.service.attention(input));
-  expect(receipt).toMatchObject({ accepted: true, threadId: "worker", foreground: true, summary: input.summary });
+  expect(receipt).toMatchObject({ accepted: true, threadId: "worker", foreground: false, summary: input.summary });
   expect(changes).toEqual(["worker"]);
   expect(unwrap(await f.service.attention(input))).toEqual(receipt);
   expect(changes).toEqual(["worker"]);
   expect((await f.service.attention({ ...input, summary: "Changed" })).ok).toBe(false);
-  expect(f.service.get("worker")).toMatchObject({ parentId: "parent", role: "worker", held: false, state: "running", metadata: { ephemeral: true, foreground: true, attentionSummary: input.summary }, wakeSchedule: { reason: "Appointment" } });
+  expect(f.service.get("worker")).toMatchObject({ parentId: "parent", role: "agent", held: false, state: "running", metadata: { ephemeral: true, foreground: false, attentionSummary: input.summary }, wakeSchedule: { reason: "Appointment" } });
   expect(f.sessions).toHaveLength(0);
   expect(unwrap(f.service.attentionEvents()).items).toEqual([receipt]);
   expect(unwrap(f.service.attentionEvents(receipt.seq))).toEqual({ cursor: receipt.seq, items: [] });
@@ -52,13 +52,13 @@ it("persists an explicit notice and foreground placement atomically, replays exa
   const restarted = fixture(f.root);
   expect(unwrap(restarted.service.attentionEvents()).items).toEqual([receipt]);
   expect(unwrap(await restarted.service.attention(input))).toEqual(receipt);
-  expect(restarted.service.get("worker")?.metadata?.foreground).toBe(true);
+  expect(restarted.service.get("worker")?.metadata?.foreground).toBe(false);
 });
 
 it("notify-only does not promote; held, archived and invalid notices do not change attention custody", async () => {
   const f = fixture(); await spawn(f, "self");
   unwrap(await f.service.attention({ threadId: "self", requestId: "one", summary: "Your pickup moved to tomorrow." }));
-  expect(f.service.get("self")?.metadata?.foreground).toBeUndefined();
+  expect(f.service.get("self")?.metadata?.foreground).toBe(false);
   for (const summary of ["", "   ", "x".repeat(1001)]) expect((await f.service.attention({ threadId: "self", requestId: "bad", summary })).ok).toBe(false);
   expect((await f.service.attention({ threadId: "self", requestId: "bad", summary: "ok", foreground: "yes" } as never)).ok).toBe(false);
   expect((await f.service.attention({ threadId: "missing", requestId: "missing", summary: "ok" })).ok).toBe(false);
@@ -90,12 +90,12 @@ it("routes only authenticated self attention across authorized owners and tool c
   const input = { summary: "Call the clinic before 4 pm Eastern.", foreground: true };
   const first = await tool.execute("call", input, new AbortController().signal, undefined, {} as never);
   expect(await tool.execute("call", input, new AbortController().signal, undefined, {} as never)).toEqual(first);
-  expect(first.details).toMatchObject({ ok: true, value: { accepted: true, foreground: true } });
+  expect(first.details).toMatchObject({ ok: true, value: { accepted: true, foreground: false } });
   expect(unwrap(fleet.service.attentionEvents()).items).toHaveLength(1);
   expect(unwrap(person.service.attentionEvents()).items).toHaveLength(0);
 });
 
-it.each([true, false])("an explicit-notice ephemeral worker still reports its result and remains reachable/leaf (foreground=%s)", async foreground => {
+it.each([true, false])("an explicit-notice ephemeral agent still reports its result and remains reachable (foreground=%s)", async foreground => {
   const f = fixture(); await spawn(f, "parent"); unwrap(await f.service.start());
   unwrap(await f.service.spawn({ id: "child", requestId: "child", cwd: f.root, parentId: "parent", ephemeral: true, message: "Check" }));
   await until(() => f.sessions.length > 0);
@@ -105,12 +105,12 @@ it.each([true, false])("an explicit-notice ephemeral worker still reports its re
   f.sessions[0]!.emit({ type: "agent_settled" });
   await until(() => f.service.get("child")?.state === "idle");
   expect(f.service.get("child")?.metadata?.archived).not.toBe(true);
-  expect(f.service.get("child")?.metadata?.foreground === true).toBe(foreground);
+  expect(f.service.get("child")?.metadata?.foreground).toBe(false);
   expect(f.service.pending("parent")).toHaveLength(1);
   const now = Date.now() + 7200000; vi.spyOn(Date, "now").mockReturnValue(now);
   unwrap(await f.service.control({ threadId: "child", action: "archiveInactive", inactiveBefore: now - 3600000 }));
   expect(f.service.get("child")?.metadata?.archived).not.toBe(true);
-  expect((await f.service.spawn({ id: "grandchild", requestId: "grandchild", parentId: "child", cwd: f.root })).ok).toBe(false);
+  expect((await f.service.spawn({ id: "grandchild", requestId: "grandchild", parentId: "child", cwd: f.root })).ok).toBe(true);
 });
 
 it("scheduled check prompts and every normal attention tool carry action-based Renia reduction", () => {

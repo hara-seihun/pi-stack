@@ -17,7 +17,7 @@ async function until(check: () => boolean) { for (let n = 0; n < 100; n++) { if 
 function fixture(root = mkdtempSync(join(tmpdir(), "thread-wake-")), options: Partial<ThreadServiceOptions> = {}, beforeOpen?: () => Promise<void>) {
   if (!roots.includes(root)) roots.push(root);
   const sessions: Array<{ commands: PiCommand[]; settle(): void; emit(event: PiEvent): void }> = [];
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), ...options,
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), ...options,
     openSession: async (_options, output) => {
       await beforeOpen?.();
       let running = false;
@@ -74,12 +74,13 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   unwrap(await child.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: child.root, message: "work" }));
   await until(() => child.sessions[0]?.commands.some(c => c.type === "prompt") === true);
   const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", ...(legacy ? {} : { kind: "agents" as const }), reason: "Need child result", threadIds: ["child"] }));
-  expect(wait).toMatchObject({ state: "idle", waitingOnAgents: { threadIds: ["child"], reason: "Need child result" } });
+  expect(wait).toMatchObject({ state: "waiting", waitingOnAgents: { threadIds: ["child"], reason: "Need child result" } });
   expect(parent.sessions).toHaveLength(0);
   child.sessions[0]!.settle(); await until(() => parent.sessions[0]?.commands.some(c => c.type === "prompt") === true);
   expect(parent.service.get("parent")?.waitingOnAgents).toBeUndefined();
   expect(parent.service.pending("parent")).toHaveLength(1);
   expect(parent.service.pending("parent")[0]).toMatchObject({ senderId: "child", source: "notification" });
+  unwrap(await parent.service.agentWait({ requestId: "release-result", threadId: "parent", action: "clear" }));
   parent.sessions[0]!.settle(); await until(() => parent.service.get("parent")?.state === "idle");
   expect(unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).waitingOnAgents).toBeUndefined();
 });
@@ -168,7 +169,7 @@ it("a settled parent has no explicit wait even when its cleanup child waits acro
     reason: "Cleanup owner reply", fromThreadId: "collaborator" };
   const wait = unwrap(await f.service.agentWait(request)).waitingOnAgents;
   childSession.settle(); await until(() => !!f.service.latestSettlement("cleanup"));
-  await until(() => parentSession.commands.some(c => c.type === "steer"));
+  expect(parentSession.commands.some(c => c.type === "steer")).toBe(false);
   parentSession.settle(); await until(() => f.service.get("parent")?.state === "idle");
   const settlement = f.service.latestSettlement("parent");
   const assertProjection = async (service: ThreadService) => {
@@ -178,7 +179,7 @@ it("a settled parent has no explicit wait even when its cleanup child waits acro
     expect(unwrap(await service.list({ id: "parent" })).threads[0]?.waitingOnAgents).toBeUndefined();
     expect(unwrap(await service.inspect("parent")).thread.waitingOnAgents).toBeUndefined();
     expect(service.latestSettlement("parent")).toEqual(settlement);
-    expect(service.get("cleanup")).toMatchObject({ state: "idle", held: false, pendingMessages: 0, waitingOnAgents: wait });
+    expect(service.get("cleanup")).toMatchObject({ state: "waiting", held: false, pendingMessages: 0, waitingOnAgents: wait });
   };
   await assertProjection(f.service); await boundary(); unwrap(await f.service.close());
   const next = fixture(f.root); unwrap(await next.service.start()); next.service.reconcile(); await boundary();
@@ -188,7 +189,7 @@ it("a settled parent has no explicit wait even when its cleanup child waits acro
   expect(next.service.get("cleanup")?.waitingOnAgents).toEqual(wait);
 });
 
-it("Stop and archive pause wakes across restart; restore alone never releases the hold", async () => {
+it("Close discards wakes across restart; reopen creates no work", async () => {
   const f = fixture(); await spawn(f, "held"); await spawn(f, "archived");
   unwrap(await schedule(f, "held", "wake-held")); unwrap(await schedule(f, "archived", "wake-archived"));
   unwrap(await f.service.agentWait({ requestId: "wait-held", threadId: "held", action: "set", kind: "job", jobId: "external-job", reason: "External job" }));
@@ -197,7 +198,9 @@ it("Stop and archive pause wakes across restart; restore alone never releases th
   const next = fixture(f.root); unwrap(await next.service.start()); next.service.reconcile(); await boundary();
   expect(next.sessions).toHaveLength(0); expect(next.service.pending("held")).toHaveLength(0);
   unwrap(await next.service.control({ threadId: "archived", action: "restore", descendants: false })); next.service.reconcile(); await boundary();
-  expect(next.sessions).toHaveLength(0); expect(next.service.get("archived")?.held).toBe(true);
+  expect(next.sessions).toHaveLength(0); expect(next.service.get("archived")?.held).toBe(false);
+  expect(next.service.get("archived")?.wakeSchedule).toBeUndefined();
+  unwrap(await next.service.control({ threadId: "held", action: "reopen" }));
   unwrap(await next.service.wakeSchedule({ threadId: "archived", action: "cancel", requestId: "cancel-archived" }));
   unwrap(await next.service.send({ requestId: "resume-held", threadId: "held", text: "Continue" }));
   await until(() => next.sessions[0]?.commands.some(c => c.type === "prompt") === true);
@@ -211,7 +214,7 @@ it("set/change/cancel retries have stable custody, invalid dependencies cannot m
   expect((await f.service.wakeSchedule({ ...input, cadenceMs: 70000 })).ok).toBe(false);
   unwrap(await f.service.wakeSchedule({ ...input, requestId: "retime", nextDueAt: 900000 }));
   unwrap(await f.service.wakeSchedule(input)); expect(f.service.get("self")?.wakeSchedule?.nextDueAt).toBe(900000);
-  const bad = await f.service.agentWait({ requestId: "bad", threadId: "self", action: "set", kind: "agents", reason: "x", threadIds: ["other"] }); expect(bad.ok).toBe(false);
+  const bad = await f.service.agentWait({ requestId: "bad", threadId: "self", action: "set", kind: "agents", reason: "x", threadIds: ["missing"] }); expect(bad.ok).toBe(false);
   expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
   unwrap(await f.service.wakeSchedule({ threadId: "self", action: "cancel", requestId: "cancel" }));
   unwrap(await f.service.wakeSchedule({ threadId: "self", action: "cancel", requestId: "cancel" }));
@@ -311,7 +314,7 @@ it("normalizes only explicit legacy child waits, preserving raw receipt identity
   expect(waiting.waitingOnAgents).toMatchObject({ kind: "agents", threadIds: ["child"] });
   expect(unwrap(await f.service.agentWait(legacy as never)).waitingOnAgents).toEqual(waiting.waitingOnAgents);
   expect(await f.service.agentWait({ ...legacy, kind: "agents" } as never)).toMatchObject({ ok: false, error: { code: "conflict" } });
-  expect(await f.service.agentWait({ ...legacy, requestId: "foreign", threadIds: ["other"] } as never)).toMatchObject({ ok: false });
+  expect(await f.service.agentWait({ ...legacy, requestId: "foreign", threadIds: ["missing"] } as never)).toMatchObject({ ok: false });
   expect(await f.service.agentWait({ ...legacy, requestId: "mixed", jobId: "guessed" } as never)).toMatchObject({ ok: false });
   f.sessions[0]!.settle(); await until(() => !!f.service.latestSettlement("child"));
   const settlement = f.service.latestSettlement("child")!;

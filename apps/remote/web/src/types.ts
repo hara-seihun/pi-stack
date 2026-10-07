@@ -6,6 +6,7 @@ export type {
 
 /** One rendered row of the model context, derived from a transcript item. */
 export interface ContextEntry {
+  agentSender?: { threadId: string; name?: string };
   key: string;
   signature: string;
   kind: import("../../server/protocol").TranscriptItemKind;

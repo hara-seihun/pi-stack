@@ -266,6 +266,16 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
       return peer(socket);
     },
     async admit(operation, input, caller) {
+      if (operation === "control") {
+        if (input.action === "dependencyClaim" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Dependency endpoint reservations require an owning runtime or service");
+        if (input.action === "open" || input.action === "placement" || input.action === "view") {
+          if (caller.kind !== "person" && caller.kind !== "service") return refuse("Only a human opening or placing an agent can change foreground placement");
+        }
+        if (input.action === "dependencies" && caller.kind === "thread" && input.threadId !== caller.threadId)
+          return refuse("Only the dependent agent can resolve or release its outgoing dependencies");
+        if (input.action === "dependencies" && caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service")
+          return refuse("Dependency changes require the dependent agent's capability or owning runtime");
+      }
       if (operation === "agentWait" || operation === "wakeSchedule") {
         if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only manage its own waiting and wakes`);
         if (caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Self waiting and wakes require a thread capability or the Pi runtime");
@@ -288,6 +298,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
           if (caller.kind === "thread" && request.parentId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only create its own children`);
           if (caller.kind === "process") return refuse("Naming a parent requires that thread's capability (PI_THREAD_TOKEN) or the Pi runtime");
         }
+        if (caller.kind === "thread") request.parentId = caller.threadId;
         let createdBy = creatorOf(caller, request.parentId ?? undefined, forwarded);
         if (createdBy.kind === "process" && createdBy.pid && attest) createdBy = { ...createdBy, attestation: await attest(createdBy.pid) };
         return { ok: true, input: { ...request, createdBy } };
@@ -309,7 +320,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
 export function admissionFor(resolver: CallerResolver, source: CallerSource): (operation: string, input: Record<string, any>) => Promise<AdmissionResult> {
   let caller: ThreadCaller | { error: string } | undefined;
   return async (operation, input) => {
-    if (operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention") return { ok: true, input };
+    if (operation !== "control" && operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention") return { ok: true, input };
     caller ??= resolver.resolve(source);
     if ("error" in caller) return { ok: false, status: 401, message: caller.error };
     return resolver.admit(operation, input, caller);

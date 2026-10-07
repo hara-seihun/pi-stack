@@ -25,7 +25,7 @@ function failureResponse(error: PromptFailure): PromptAdmissionResponse {
   switch (error.code) {
     case "invalid_request": return rejection(error.code, error.message);
     case "not_found": return rejection(error.code, error.message, 404);
-    case "conflict": return rejection(error.code, error.message, 409);
+    case "conflict": case "dependency_conflict": return rejection(error.code, error.message, 409);
     case "forbidden": return rejection(error.code, error.message, 403);
     case "unavailable":
     case "no_pending_messages":

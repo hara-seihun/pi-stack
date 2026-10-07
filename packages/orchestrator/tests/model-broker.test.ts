@@ -330,11 +330,11 @@ test("fleet, transcripts, credentials, ungranted models and provider-resource re
   expect(transport).not.toHaveBeenCalled();
 });
 
-test("foreground broker requests admit while fleet account and machine session slots are full", async () => {
+test("provider broker requests do not consume agent execution slots and remain independent of account pacing", async () => {
   const transport = vi.fn(async () => sse({}));
   const f = await fixture(transport);
   const policy = loadConfig(undefined, f.store.path);
-  for (let i = 0; i < Math.max(policy.maxConcurrentSessions, policy.defaultAccountConcurrency); i++) {
+  for (let i = 0; i < Math.max(100, policy.defaultAccountConcurrency); i++) {
     f.store.createLease(`thread:busy-${i}`, "shared", "fleet");
   }
   const before = f.store.activeLeases().length;

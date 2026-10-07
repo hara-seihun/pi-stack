@@ -37,6 +37,13 @@ export type Activity = "idle" | "awaiting" | "waiting_on_workers" | "status_erro
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
+export type HistoryNotification = IdleNotification & { questionId?: string } &
+  ({ status: "needs-you" | "history" } | { status: "unavailable"; error: string });
+export interface NotificationHistory { notifications: HistoryNotification[]; before: number | null }
+export type QuestionsResource =
+  | { state: "loading"; questions: ThreadQuestion[] }
+  | { state: "ready"; questions: ThreadQuestion[] }
+  | { state: "failed"; questions: ThreadQuestion[]; error: string };
 
 export interface QueuedMessage {
   id: string;
@@ -66,6 +73,8 @@ export interface ContextUsage {
 
 export interface Session {
   id: string;
+  agentName?: string;
+  dependencies?: string[];
   parentId: string | null;
   hasChildren: boolean;
   origin: "person" | "fleet";
@@ -403,6 +412,7 @@ interface TranscriptItemBase {
 
 /** Text that is always inline: the person's and the agent's visible words. */
 export interface InlineTextItem extends TranscriptItemBase {
+  agentSender?: { threadId: string; name?: string };
   identity?: import("./message-protocol.js").MessageIdentity;
   reactions?: import("./message-protocol.js").MessageReaction[];
   reply?: import("./message-protocol.js").MessageReply;
@@ -507,7 +517,7 @@ export type StreamSnapshot =
   | ({ type: "transcript" } & TranscriptPage)
   | { type: "live"; sessionId: string; text: string; thinking?: string }
   | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot }
-  | { type: "questions"; sessionId: string; questions: ThreadQuestion[] };
+  | ({ type: "questions"; sessionId: string } & QuestionsResource);
 
 export type StreamEvent =
   | { type: "hello"; epoch: string; streamId: string; bootstrap: Bootstrap }

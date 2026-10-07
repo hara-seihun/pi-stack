@@ -16,9 +16,9 @@ function fixture() {
   const ledger = join(root, "ledger.sqlite3"), manifest = join(root, "lanes.json");
   const config = { ...loadConfig(join(root, "missing")), modelBrokerUrl: "http://127.0.0.1:2461", maxConcurrentSessions: 100, taskManifest: manifest };
   const store = Store.open(ledger);
-  let daemon: any = new Daemon(store, config);
+  let daemon: any = new Daemon(store, config, undefined, undefined, { capacity: { mode: "unmanaged" } });
   return { root, store, manifest, config, get daemon() { return daemon; },
-    async restart() { await daemon.threads.detach(); await daemon.schedules.close(); daemon = new Daemon(store, config); return daemon; },
+    async restart() { await daemon.threads.detach(); await daemon.schedules.close(); daemon = new Daemon(store, config, undefined, undefined, { capacity: { mode: "unmanaged" } }); return daemon; },
     async close() { await daemon.threads.detach(); await daemon.schedules.close(); store.close(); } };
 }
 
@@ -108,16 +108,16 @@ it("retains capacity through pending/failed native cancellation, releasing confi
     expect(f.daemon.threads.laneCustody().get("lane")).toBeUndefined();
     await f.daemon.fillCapacity();
     const next = (f.daemon.threads.db.prepare("SELECT id FROM thread WHERE id!=?").get(id) as { id: string }).id;
-    // A confirmed Stop preserves unstarted input but releases its producer slot.
+    // A confirmed close discards unstarted input and releases its producer slot.
     expect(await f.daemon.threads.control({ threadId: next, action: "stop", descendants: false })).toMatchObject({ ok: true });
-    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: true, pendingMessages: 1 });
+    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     await f.daemon.fillCapacity();
     expect(f.daemon.threads.laneCustody().get("lane")).toBe(1);
-    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: true, pendingMessages: 1 });
+    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     expect(f.daemon.threads.db.prepare("SELECT count(*) n FROM thread").get()).toEqual({ n: 3 });
     await f.restart();
     await f.daemon.fillCapacity();
-    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: true, pendingMessages: 1 });
+    expect(f.daemon.threads.get(next)).toMatchObject({ state: "idle", held: false, pendingMessages: 0, metadata: { archived: true } });
     expect(f.daemon.threads.laneCustody().get("lane")).toBe(1);
   } finally { await f.close(); }
 });

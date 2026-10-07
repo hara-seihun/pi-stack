@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { findCheckpoint } from "./native.mjs";
+import { randomUUID } from "node:crypto";
+import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, standaloneRecordPath } from "../../standalone-agent.mjs";
 
 const { values } = parseArgs({ options: { "history-file": { type: "string" }, "continuation-file": { type: "string" }, "routing-entry": { type: "string" }, "switch-account": { type: "boolean", default: false } } });
 for (const key of ["history-file", "continuation-file", "routing-entry"]) if (!values[key]) throw new Error(`Required: --${key}`);
@@ -16,6 +18,8 @@ for (const key of Object.keys(process.env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_OR
 process.env.PI_ORCHESTRATOR_ASSIGNED = "0";
 const root = await mkdtemp(join(tmpdir(), "pi-codex-compaction-smoke-"));
 let session, deadline;
+const executionId = randomUUID();
+const capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `compaction-smoke:${executionId}`, executionId });
 try {
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 2048 } });
   const modelRuntime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: join(root, "models.json") });
@@ -57,6 +61,9 @@ try {
   console.log(JSON.stringify({ producer, provider: session.model.provider, model: session.model.id, checkpointEntry: checkpoint.value.entry.id, nativeItemCount: checkpoint.value.details.replacementHistory.filter(item => item.type === "compaction").length, compactionUsage: checkpoint.value.entry.usage, continuationUsage: response.usage, resumed: true, forked: true, answer: response.content.filter(block => block.type === "text").map(block => block.text).join("\n").slice(0, 2000) }));
 } finally {
   clearTimeout(deadline);
-  if (session) { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); }
+  if (session) {
+    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    await abortAndSettleStandaloneSession(session, capacity);
+  } else await settleStandaloneAgent(capacity);
   await rm(root, { recursive: true, force: true });
 }

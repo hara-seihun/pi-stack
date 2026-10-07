@@ -10,6 +10,7 @@ import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { probeBrowser } from "./browser-probe.mjs";
+import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, standaloneRecordPath } from "./standalone-agent.mjs";
 
 const { values } = parseArgs({ options: { help: { type: "boolean", short: "h" }, "worker-release": { type: "string" }, "session-file": { type: "string" } } });
 if (values.help) {
@@ -78,9 +79,12 @@ const server = createServer((req, res) => {
   res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button>${controlledDates}<a href="/download" download>Download probe</a><iframe title="Secure payment input frame" src="http://localhost:${server.address().port}/frame"></iframe>`);
 });
 let session;
+let capacity;
 let accepted = false;
 let browserAttempted = !!values["session-file"];
 try {
+  const executionId = randomUUID();
+  capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `browser-doctor:${executionId}`, executionId });
   const agentDir = join(homedir(), ".pi/agent");
   const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
@@ -122,7 +126,10 @@ try {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   } finally {
-    session?.dispose();
+    if (capacity) {
+      if (session) await abortAndSettleStandaloneSession(session, capacity);
+      else await settleStandaloneAgent(capacity);
+    }
     await new Promise((resolve) => server.close(resolve));
     if (accepted || !browserAttempted) rmSync(directory, { recursive: true, force: true });
     else console.error(`Browser proof failed. Session and cleanup state retained at ${sessionFile}`);

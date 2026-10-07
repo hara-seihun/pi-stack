@@ -186,14 +186,17 @@ it.each(["call", "client", "deadline"])("cancels directory HTTP awaits through t
 });
 
 describe("directory await", () => {
-  it("validates every child before starting any owner's await", async () => {
+  it("validates every accessible peer before starting any owner's await", async () => {
     const local = owner([{ id: "child", parentId: "parent" }]);
     const peer = owner([{ id: "unrelated", parentId: "someone-else" }]);
     const directory = new ThreadDirectory(local, [peer]);
-    expect(await directory.await({ parentId: "parent", threadIds: ["child", "unrelated"] })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(await directory.await({ parentId: "parent", threadIds: ["child", "missing"] })).toMatchObject({ ok: false, error: { code: "not_found" } });
     expect(local.calls.await).not.toHaveBeenCalled();
     expect(peer.calls.await).not.toHaveBeenCalled();
     expect((await directory.await({ parentId: "parent", threadIds: ["child", "child"] })).ok).toBe(false);
+    expect(await directory.await({ parentId: "parent", threadIds: ["child", "unrelated"] })).toMatchObject({ ok: true });
+    expect(local.calls.await).toHaveBeenCalledOnce();
+    expect(peer.calls.await).toHaveBeenCalledOnce();
   });
 
   it("returns the first owner result, aborts losing waits and advances only the winner", async () => {

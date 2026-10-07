@@ -1,38 +1,14 @@
-import type { ReactNode } from "react";
+import { agentMessagePresentation, agentSenderLabel } from "pi-orchestrator/message-format";
 import type { ContextEntry } from "../../types";
 
-const PREFIX = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
-const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Recognize the persisted thread transport envelope, not mentions or quoted examples.
- * This is presentation only: it never changes a message's text, identity or history.
- * Both older heads and newly streamed heads carry the same envelope.
- */
-export function agentMessageSender(entry: Pick<ContextEntry, "kind" | "text">): string | null {
-  if (entry.kind !== "user" || !entry.text?.startsWith(PREFIX)) return null;
-  const text = entry.text;
-  const end = text.indexOf("\n\n", PREFIX.length);
-  if (end < 0 || !text.includes("\n</agent_message>", end)) return null;
-  try {
-    const metadata = JSON.parse(text.slice(PREFIX.length, end));
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
-      || typeof metadata.senderThreadId !== "string" || !THREAD_ID.test(metadata.senderThreadId)) return null;
-    // Child completion notices have only senderThreadId. Explicit sends also
-    // carry recipientThreadId/messageId/source. Reject incomplete examples.
-    if (Object.keys(metadata).length !== 1 && (metadata.source !== "explicit"
-      || typeof metadata.recipientThreadId !== "string" || !THREAD_ID.test(metadata.recipientThreadId)
-      || typeof metadata.messageId !== "string" || !metadata.messageId)) return null;
-    return metadata.senderThreadId;
-  } catch { return null; }
-}
-
-/** Native details/summary matches Thinking's pointer, touch and keyboard semantics. */
-export function AgentMessage({ senderThreadId, children }: { senderThreadId: string; children: ReactNode }) {
-  return <details className="conversation-step text-step agent-message-step">
-    <summary>
-      <span className="work-chevron" aria-hidden="true">›</span>
-      <span className="step-summary"><strong>Agent message</strong><span title={senderThreadId}>From thread {senderThreadId.slice(0, 8)}</span></span>
-    </summary>
-    <div className="step-detail">{children}</div>
-  </details>;
+/** Old cached heads and new server projections share the same human presentation. */
+export function presentAgentMessage(entry: ContextEntry): ContextEntry {
+  if (entry.kind !== "user") return entry;
+  const envelope = entry.agentSender || entry.text === undefined ? null : agentMessagePresentation(entry.text);
+  const sender = entry.agentSender ?? envelope?.sender;
+  if (!sender) return entry;
+  const label = agentSenderLabel(sender);
+  const text = envelope ? envelope.text : entry.text;
+  if (entry.agentSender && entry.label === label && entry.text === text) return entry;
+  return { ...entry, label, text, agentSender: sender, signature: `${entry.signature}:agent:${JSON.stringify(sender)}:${label}` };
 }

@@ -10,7 +10,7 @@ import { sha256 } from "./sync";
 test("projects root answers over captured local context and streams a visible user receipt without running Pi", async () => {
   const root = mkdtempSync(join(tmpdir(), "consent-context-"));
   let opened = 0;
-  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root,
+  const owner = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" },
     openSession: async () => { opened++; throw Error("Consent answers must not open Pi"); } });
   try {
     await owner.start();

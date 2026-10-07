@@ -99,7 +99,8 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
             const result = await response.json() as any;
             if (result?.requestId === requestId && typeof result.status === "string" && Object.hasOwn(rootReceiptStates, result.status) && !("reply" in result)) {
               const receiptState = stateValue(rootReceiptStates, result.status as KenanRequestStatus);
-              const receipt = { requestId, status: result.status, message: receiptState.message };
+              const queued = result.status === "pending" && result.reason === "global-agent-capacity";
+              const receipt = { requestId, status: result.status, message: queued ? "Queued for the shared global 100-agent capacity; no new native session has started. The chosen reply will arrive automatically." : receiptState.message, ...(queued ? { reason: "global-agent-capacity" } : {}) };
               report({ component: "root-client", stage: "request", outcome: "ok", status: response.status, durationMs: Math.round(performance.now() - started) });
               return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], details: { rootRequest: receipt }, isError: receiptState.isError };
             }

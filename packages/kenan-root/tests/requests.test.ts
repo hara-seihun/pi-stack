@@ -28,21 +28,22 @@ function fixture() {
     expect(["Only the chosen reply", kenanRequestNotice(id, "failed"), kenanRequestNotice(id, "interrupted")]).toContain(input.reply);
     acknowledged.resolve(); return { ok: true, value: { accepted: true } };
   } };
-  const service = (store: RootRequestStore, executor: RootExecutor, delivery = bridge, admissionGate?: Promise<void>) => rootService({ requestStore: store, bridge: delivery, enabled: () => true, memoryUrl: "http://memory", memoryRootToken: "service-token", adminCapability: "a".repeat(64), sessionsDir: directory, report() {},
-    executor: async (root, text) => { executions++; return executor(root, text); },
+  const service = (store: RootRequestStore, executor: RootExecutor, delivery = bridge, admissionGate?: Promise<void>, maxConcurrent = 4) => rootService({ requestStore: store, bridge: delivery, maxConcurrent, enabled: () => true, memoryUrl: "http://memory", memoryRootToken: "service-token", adminCapability: "a".repeat(64), sessionsDir: directory, report() {},
+    executor: async (root, text, onExecution) => { executions++; return executor(root, text, onExecution); },
     transport: (async (url, init) => {
       const body = JSON.parse(String(init!.body));
       if (String(url).endsWith("admit")) { admissions++; await admissionGate; return Response.json({ ok: true, value: admission }); }
+      if (String(url).endsWith("resume-request")) return Response.json({ ok: true, value: admission });
       if (String(url).endsWith("authorize-request")) return body.callerToken === "person-token" ? Response.json({ ok: true, value: { authorized: true } }) : Response.json({ ok: false }, { status: 403 });
       accounting++; return allowAccounting ? Response.json({ ok: true }) : Response.json({ ok: false }, { status: 503 });
     }) as typeof fetch });
   return { path, admission, id, post, get, service, bridge, accepted, acknowledged, counts: () => ({ admissions, executions, accounting, deliveries }), setAccounting: (allowed: boolean) => allowAccounting = allowed };
 }
-const chosen: RootExecutor = async () => ({ ok: true, value: { reply: "Only the chosen reply", subjects: ["bob"] } });
+const chosen: RootExecutor = async (_admission, _request, onExecution) => { onExecution?.(); return { ok: true, value: { reply: "Only the chosen reply", subjects: ["bob"] } }; };
 
 test("asynchronous admission returns before the model; concurrent retries never repeat execution and completion arrives without status polling", async () => {
   const f = fixture(), store = new RootRequestStore(f.path), model = deferred(), admitted = deferred();
-  const handle = f.service(store, async () => { await model.promise; return chosen(f.admission, "fixture-request"); }, f.bridge, admitted.promise);
+  const handle = f.service(store, async (_root, _text, onExecution) => { onExecution?.(); await model.promise; return chosen(f.admission, "fixture-request"); }, f.bridge, admitted.promise);
   const original = handle(f.post()), retry = handle(f.post());
   admitted.resolve();
   for (const response of await Promise.all([original, retry])) {
@@ -103,6 +104,62 @@ test("lost delivery acknowledgement survives restart with the same idempotent re
   expect(await recovered.drain()).toEqual({ errors: 0 });
   expect(f.accepted.size).toBe(1); expect(f.counts()).toMatchObject({ executions: 0, accounting: 3, deliveries: 2 });
   expect(await recovered.drain()).toEqual({ errors: 0 }); expect(f.counts().deliveries).toBe(2); store.close();
+});
+
+test("local root concurrency also keeps accepted work queued rather than dropping it as busy", async () => {
+  const f = fixture(), store = new RootRequestStore(f.path), model = deferred(), started = deferred();
+  const handle = f.service(store, async (admission, text, onExecution) => { onExecution?.(); started.resolve(); await model.promise; return chosen(admission, text); }, f.bridge, undefined, 1);
+  const first = handle(new Request("http://root/v1/ask", { method: "POST", headers: { "x-kenan-memory-session": "person-token" }, body: JSON.stringify({ request: "First inline request" }) }));
+  await started.promise;
+  const queued = await handle(f.post());
+  expect(queued.status).toBe(202);
+  expect(await queued.json()).toEqual({ requestId: f.id, status: "pending", reason: "root-concurrency" });
+  expect(f.counts().executions).toBe(1);
+  expect(store.get(f.id)?.state).toBe("queued");
+  model.resolve(); expect((await first).status).toBe(200);
+  await Promise.all([handle.drain(), handle.drain()]);
+  expect(f.counts().executions).toBe(2);
+  expect(store.get(f.id)?.state).toBe("completed");
+  store.close();
+});
+
+test("101 denied root agents remain durable runnable requests; restart and release admit only a new granted execution", async () => {
+  const f = fixture(); let store = new RootRequestStore(f.path), available = 0, nativeStarts = 0;
+  const started = deferred(), model = deferred(), admissions = new Map<string, RootAdmission>(), delivered = new Set<string>();
+  const service = (storage: RootRequestStore) => rootService({ requestStore: storage, enabled: () => true, memoryUrl: "http://memory", memoryRootToken: "service-token", adminCapability: "a".repeat(64), sessionsDir: "/fixture", report() {},
+    bridge: { reply: async input => { delivered.add(input.consentId); return { ok: true, value: { accepted: true } }; } },
+    executor: async (_root, _request, onExecution) => {
+      if (!available) return { ok: false, error: "capacity-unavailable", message: "Global 100-agent cap", retryAt: Date.now() + 5_000 };
+      available--; onExecution?.(); nativeStarts++; started.resolve(); await model.promise;
+      return { ok: true, value: { reply: "Only the chosen reply", subjects: ["alice"] } };
+    }, transport: (async (url, init) => {
+      const body = JSON.parse(String(init!.body));
+      if (String(url).endsWith("admit")) { const admission = { ...f.admission, rootSessionId: randomUUID() }; admissions.set(admission.rootSessionId, admission); return Response.json({ ok: true, value: admission }); }
+      if (String(url).endsWith("resume-request")) return Response.json({ ok: true, value: admissions.get(body.rootSessionId) });
+      return Response.json({ ok: true, value: { authorized: true } });
+    }) as typeof fetch });
+  const first = service(store), ids: string[] = [];
+  for (let n = 0; n < 101; n++) {
+    const id = randomUUID(); ids.push(id);
+    const response = await first(new Request("http://root/v1/ask", { method: "POST", headers: { "x-kenan-memory-session": "person-token", [KENAN_REQUEST_HEADER]: id }, body: JSON.stringify({ request: `Root request ${n}` }) }));
+    expect(response.status).toBe(202);
+  }
+  expect(nativeStarts).toBe(0); expect(delivered.size).toBe(0);
+  for (const id of ids) expect(store.get(id)).toMatchObject({ state: "queued", reason: "global-agent-capacity" });
+  expect(JSON.stringify(store.get(ids[0]!))).not.toContain("private-root-token");
+  store.close(); store = new RootRequestStore(f.path); const recovered = service(store);
+  for (const id of ids) {
+    const queued = store.get(id)!; expect(queued.state).toBe("queued");
+    if (queued.state === "queued") store.save({ ...queued, retryAt: 0 });
+  }
+  available = 1;
+  const draining = recovered.drain(); await started.promise;
+  expect(nativeStarts).toBe(1); expect(delivered.size).toBe(0);
+  model.resolve(); await draining;
+  expect(delivered.size).toBe(1);
+  expect(ids.filter(id => store.get(id)?.state === "queued")).toHaveLength(100);
+  expect(ids.filter(id => store.get(id)?.state === "completed")).toHaveLength(1);
+  store.close();
 });
 
 test("failed executors report terminal status without exposing internal error text or authorizing replay", async () => {

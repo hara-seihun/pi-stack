@@ -3,7 +3,8 @@ import type { ThreadCreator } from "./caller.js";
 import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
+export interface ThreadDependency { threadId: string; dependsOn: string; ownerId?: string }
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "dependency_conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; dependencies?: ThreadDependency[]; retryable?: boolean; retryAt?: number; requestId?: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
@@ -12,7 +13,7 @@ import type { Speed } from "./speed.js";
 export type { Speed } from "./speed.js";
 /** `live` is never requested directly; it comes from a thread mode (see modes.ts). */
 export type Admission = "force" | "background" | "live";
-export const THREAD_STATES = ["idle", "running"] as const;
+export const THREAD_STATES = ["idle", "running", "waiting"] as const;
 export type ThreadState = typeof THREAD_STATES[number];
 export const isThreadState = (state: unknown): state is ThreadState => THREAD_STATES.some(value => value === state);
 export type WorkOutcome = "complete" | "failed" | "cancelled";
@@ -25,8 +26,13 @@ export interface ThreadSettings {
 export type SettingsOverrides = Partial<ThreadSettings>;
 export interface Thread {
   id: string;
+  ownerId?: string;
   parentId: string | null;
-  role?: "conversation" | "worker";
+  role?: "agent" | "conversation" | "worker";
+  /** Immutable generated identity; historical threads may not have one. */
+  agentName?: string;
+  /** Persistent outgoing peer dependencies, independent of scheduling waits. */
+  dependencies?: string[];
   title: string;
   cwd: string;
   sessionFile: string;
@@ -86,6 +92,7 @@ export interface ThreadMessage {
   id: string;
   threadId: string;
   senderId: string | null;
+  senderName?: string;
   text: string;
   images?: unknown[];
   delivery: Delivery;
@@ -143,6 +150,8 @@ export interface ThreadSettlement {
   threadId: string;
   workId: string;
   outcome: WorkOutcome;
+  /** Native turn settled, but its assignment still owns waits, dependencies or questions. */
+  assignmentPending?: boolean;
   time: number;
   finalMessage: Record<string, unknown> | null;
   error?: string;
@@ -165,7 +174,7 @@ export function validateThreadAwait(input: AwaitThreads): Result<void> {
     || !Array.isArray(input.threadIds) || input.threadIds.length < 1 || input.threadIds.length > 100
     || input.threadIds.some(id => typeof id !== "string" || !id.trim() || id === input.parentId)
     || new Set(input.threadIds).size !== input.threadIds.length) {
-    return { ok: false, error: { code: "invalid_request", message: "Await requires a parent and 1..100 unique child thread IDs, excluding the parent" } };
+    return { ok: false, error: { code: "invalid_request", message: "Await requires a caller and 1..100 unique accessible peer thread IDs, excluding the caller" } };
   }
   if (input.after !== undefined && (!input.after || typeof input.after !== "object" || Array.isArray(input.after)
     || Object.values(input.after).some(cursor => !Number.isSafeInteger(cursor) || cursor < 0))) {
@@ -184,10 +193,15 @@ export interface ThreadInspection {
   live?: Record<string, unknown>;
 }
 export type ThreadControl =
-  /** `reason: "archive"` records the work this stop interrupts so a restore can resume it. */
+  | { threadId: string; action: "close" | "reopen" | "open" | "cancel" }
+  | { threadId: string; action: "placement"; foreground: boolean }
+  | { threadId: string; action: "dependencies"; threadIds: string[] }
+  /** Owner-to-owner durable endpoint reservation, never a model operation. */
+  | { threadId: string; action: "dependencyClaim"; dependentId: string; active: boolean }
+  /** Retained callers' stop/restore act on the selected agent only; no recursive control or replay. */
   | { threadId: string; action: "stop"; descendants: boolean; reason?: "archive" }
   | { threadId: string; action: "resume" }
-  /** Unarchive a thread, or its whole subtree; `resume` continues the turns and held work its archive interrupted. */
+  /** Retained restore input: descendants/resume do not confer authority or replay work. */
   | { threadId: string; action: "restore"; descendants: boolean; resume?: boolean }
   /** Record an idle human view using the owner's clock, without changing execution activity or emitting changed. */
   | { threadId: string; action: "view" }
@@ -225,15 +239,15 @@ export function validateWaitDependency(input: unknown): Result<WaitDependency> {
   // request with concrete children; all normal validation/access checks still run.
   // Never infer generic waits, external kinds, or reinterpret an explicit kind.
   if (value.kind === "agents" || value.kind === undefined && value.action === "set" && Array.isArray(value.threadIds)) {
-    if (rejectForeign(["threadIds", "after"])) return invalid("An agents wait accepts only child dependencies and cursors");
+    if (rejectForeign(["threadIds", "after"])) return invalid("An agents wait accepts only peer dependencies and cursors");
     if (!Array.isArray(value.threadIds) || value.threadIds.length < 1 || value.threadIds.length > 100
       || !value.threadIds.every(nonempty) || new Set(value.threadIds).size !== value.threadIds.length)
-      return invalid("An agents wait requires 1..100 unique child thread IDs; available for assignment is idle, not waiting");
+      return invalid("An agents wait requires 1..100 unique peer thread IDs; available for assignment is idle, not waiting");
     const ids = value.threadIds;
     const after = value.after === undefined ? {} : value.after;
     if (!after || typeof after !== "object" || Array.isArray(after)
       || Object.entries(after).some(([id, cursor]) => !ids.includes(id) || !Number.isSafeInteger(cursor) || (cursor as number) < 0))
-      return invalid("Wait cursors must be nonnegative safe integers keyed only by declared child IDs");
+      return invalid("Wait cursors must be nonnegative safe integers keyed only by declared peer IDs");
     return { ok: true, value: { kind: "agents", threadIds: value.threadIds as [string, ...string[]], after: after as Record<string, number> } };
   }
   if (value.kind === "job") {

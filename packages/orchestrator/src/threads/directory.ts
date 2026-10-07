@@ -70,57 +70,7 @@ export class ThreadDirectory implements ThreadApi {
   async control(input: ThreadControl): Promise<Result<Thread>> {
     const owner = await this.owner(input.threadId);
     if (!owner.ok) return owner;
-    if (input.action === "restore" && input.descendants) return this.restoreTree(input.threadId, owner.value, input.resume === true);
-    const cascade = input.action === "stop" && input.descendants ? { ...input, descendants: false } as const
-      : input.action === "update" && input.archived ? { threadId: input.threadId, action: "update", archived: true } as const
-      : null;
-    if (!cascade) return owner.value.api.control(input);
-    // The parent first: holding it closes admission, archiving it stops its own
-    // workers, before children in other owners are discovered. An archived
-    // conversation takes its workers with it; a finished worker with no
-    // conversation above it would otherwise sit in every list for good.
-    const root = await owner.value.api.control(input.action === "stop" ? cascade : input);
-    let failure: Result<Thread> | undefined = root.ok ? undefined : root;
-    const seen = new Set([input.threadId]), queue = [input.threadId];
-    for (const parentId of queue) {
-      let cursor: string | undefined;
-      do {
-        const page = await this.list({ parentId, cursor, limit: 100 });
-        if (!page.ok) { failure ??= page; break; }
-        const children = page.value.threads.filter(thread => !seen.has(thread.id));
-        for (const child of children) { seen.add(child.id); queue.push(child.id); }
-        const results = await Promise.all(children.map(child => this.owner(child.id).then(childOwner => childOwner.ok ? childOwner.value.api.control({ ...cascade, threadId: child.id }) : childOwner)));
-        failure ??= results.find(result => !result.ok);
-        cursor = page.value.nextCursor;
-      } while (cursor);
-    }
-    return failure ?? root;
-  }
-  /**
-   * Restore a subtree that may span owners, deepest first so a resumed worker
-   * never reports to a conversation that is still archived. Each thread is
-   * restored by its own owner; the root's result is returned.
-   */
-  private async restoreTree(threadId: string, root: ThreadOwner, resume: boolean): Promise<Result<Thread>> {
-    const levels: string[][] = [[threadId]], seen = new Set([threadId]);
-    for (let level = levels[0]!; level.length; level = levels.at(-1)!) {
-      const next: string[] = [];
-      for (const parentId of level) {
-        let cursor: string | undefined;
-        do {
-          const page = await this.list({ parentId, cursor, limit: 100 });
-          if (!page.ok) return page;
-          for (const child of page.value.threads) if (!seen.has(child.id)) { seen.add(child.id); next.push(child.id); }
-          cursor = page.value.nextCursor;
-        } while (cursor);
-      }
-      levels.push(next);
-    }
-    for (const id of levels.slice(1).reverse().flat()) {
-      const owner = await this.owner(id); if (!owner.ok) return owner;
-      const restored = await owner.value.api.control({ threadId: id, action: "restore", descendants: false, resume }); if (!restored.ok) return restored;
-    }
-    return root.api.control({ threadId, action: "restore", descendants: false, resume });
+    return owner.value.api.control(input);
   }
   async inspect(threadId: string, options?: InspectOptions): Promise<Result<ThreadInspection>> {
     const owner = await this.owner(threadId);
@@ -150,7 +100,7 @@ export class ThreadDirectory implements ThreadApi {
         if (!page.ok) return page;
         const thread = page.value.threads.find(thread => thread.id === threadId);
         if (!thread) return error("not_found", `Thread ${threadId} was not found`);
-        if (thread.parentId !== input.parentId) return error("invalid_request", `Thread ${threadId} is not a direct child of ${input.parentId}`);
+
         return { ok: true as const, value: { owner: owner.value, threadId } };
       }));
       if (controller.signal.aborted) return cancelled;
@@ -207,7 +157,7 @@ export class ThreadDirectory implements ThreadApi {
     while (position.owner < this.owners.length && threads.length < limit) {
       const result = await this.owners[position.owner]!.api.list({ ...input, cursor: position.cursor, limit: limit - threads.length });
       if (!result.ok) return result;
-      threads.push(...result.value.threads);
+      threads.push(...result.value.threads.map(thread => ({ ...thread, ownerId: this.owners[position.owner]!.id })));
       if (result.value.nextCursor) { position.cursor = result.value.nextCursor; break; }
       position = { owner: position.owner + 1, query };
     }

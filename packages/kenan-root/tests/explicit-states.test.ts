@@ -8,6 +8,8 @@ import { RootConsentManager } from "../src/consent.js";
 test("stored root lifecycle rejects unknown states, delivery variants and incomplete replies", () => {
   for (const record of [
     { state: "pending", delivery: "pending" },
+    { state: "queued", delivery: "pending" },
+    { state: "queued", delivery: "pending", request: "text", requestHash: "incorrect", reason: "global-agent-capacity", retryAt: 0 },
     { state: "executing", delivery: "new_delivery" },
     { state: "completed", delivery: "delivered" },
     { state: "finalizing", delivery: "pending", chosen: { reply: "chosen" } },

@@ -13,10 +13,10 @@ function session(names: string[]) {
   return { pi, turn: () => handlers.forEach(handler => handler()), active: () => active };
 }
 
-it("leaves a live conversation only its dispatching tools and a short bash ceiling, and leaves workers alone", () => {
+it("applies an explicit live dispatcher tool profile independently of peer spawning", () => {
   const tools = ["bash", "read", "edit", "write", "web_search", "agent_browser", "thread_spawn", "thread_await", "meet_voice"];
   const conversation = session(tools);
-  const env: NodeJS.ProcessEnv = { PI_THREAD_MODE: "live", PI_THREAD_CAN_SPAWN: "1", PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: "1800" };
+  const env: NodeJS.ProcessEnv = { PI_THREAD_MODE: "live", PI_THREAD_CAN_SPAWN: "1", PI_THREAD_LIVE_DISPATCHER: "1", PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: "1800" };
   modeEnvironment(env);
   modeTools(env)(conversation.pi as never);
   conversation.turn();
@@ -24,7 +24,7 @@ it("leaves a live conversation only its dispatching tools and a short bash ceili
   expect(env.PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS).toBe("10");
 
   const worker = session(tools);
-  const workerEnv: NodeJS.ProcessEnv = { PI_THREAD_MODE: "live", PI_THREAD_CAN_SPAWN: "0", PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: "1800" };
+  const workerEnv: NodeJS.ProcessEnv = { PI_THREAD_MODE: "live", PI_THREAD_CAN_SPAWN: "1", PI_THREAD_LIVE_DISPATCHER: "0", PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: "1800" };
   modeEnvironment(workerEnv);
   modeTools(workerEnv)(worker.pi as never);
   worker.turn();

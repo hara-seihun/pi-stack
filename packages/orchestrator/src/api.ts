@@ -13,6 +13,8 @@ export {
 export { DELEGATION_POLICY } from "./delegation-policy.js";
 export { getRandomName } from "./nebulani-names.js";
 export { loadConfig, orchestratorUrl } from "./config.js";
+export { configuredAgentCapacity, configuredAgentCapacitySettings, configuredAgentCapacityStatus, createAgentCapacityClient, GLOBAL_AGENT_LIMIT, AGENT_CAPACITY_AUTHORITY, AGENT_CAPACITY_CLIENT_CONFIG } from "./agent-capacity.js";
+export type { AgentCapacity, AgentExecution, CapacityCustody, CapacityLease, CapacityObservation, AgentCapacityStatus, AgentCapacityClientManifest } from "./agent-capacity.js";
 export { modelBrokerUrl } from "./model-broker-contract.js";
 export type { OrchestratorConfig } from "./domain.js";
 export { createWorkspaceAdmission, createCwdAdmission,

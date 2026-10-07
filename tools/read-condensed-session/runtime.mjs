@@ -152,7 +152,11 @@ export async function summarizeWithRuntime(runtime, prompt, options = {}) {
 }
 
 export async function summarizeDirect(prompt, options = {}) {
-  return summarizeWithRuntime(await modelRuntime(), prompt, options);
+  const { requireStandaloneAgent, settleStandaloneAgent, standaloneRecordPath } = await import("pi-orchestrator/standalone-agent");
+  const id = randomUUID();
+  const custody = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `condenser:${id}`, executionId: id });
+  try { return await summarizeWithRuntime(await modelRuntime(), prompt, options); }
+  finally { await settleStandaloneAgent(custody); }
 }
 
 export async function disposeModelRuntime() {

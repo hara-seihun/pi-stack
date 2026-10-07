@@ -17,7 +17,7 @@ afterEach(async () => {
   roots.length = 0;
 });
 function owner(root: string) {
-  const service = new ThreadService({ databasePath: join(root, "owner.sqlite"), sessionsDir: join(root, "sessions"), openSession: async () => {
+  const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "owner.sqlite"), sessionsDir: join(root, "sessions"), openSession: async () => {
     throw new Error("Question creation must not open Pi");
   } });
   services.push(service);
@@ -128,16 +128,17 @@ it("prevents inactivity archiving and reopens an explicitly archived thread on a
   expect(service.pending("thread")[0]).toMatchObject({ delivery: "steer", text: expect.stringContaining("Here are the details") });
 });
 
-it("places an explicit answer before previously held messages", async () => {
+it("reopens a closed thread for an explicit answer without replaying cancelled messages", async () => {
   const { service } = await setup();
   const asked = await service.ask({ requestId: "held-question", threadId: "thread", questions: [{ question: "What next?" }] });
   if (!asked.ok) throw Error(asked.error.message);
   await service.send({ requestId: "earlier", threadId: "thread", text: "Earlier queued work" });
   await service.control({ threadId: "thread", action: "stop", descendants: false });
-  expect(service.get("thread")?.held).toBe(true);
+  expect(service.get("thread")).toMatchObject({ held: false, pendingMessages: 0, metadata: { archived: true } });
   expect(await service.answer({ threadId: "thread", questionId: asked.value.questionIds[0]!, selectedSuggestionIds: [], text: "This decision first" })).toMatchObject({ ok: true });
-  expect(service.pending("thread").map(message => message.id)).toEqual([`question-answer:${asked.value.questionIds[0]}`, "earlier"]);
+  expect(service.pending("thread").map(message => message.id)).toEqual([`question-answer:${asked.value.questionIds[0]}`]);
   expect(service.get("thread")?.held).toBe(false);
+  expect(service.get("thread")?.metadata?.archived).toBeUndefined();
 });
 
 it("routes owner HTTP requests and deduplicates a lost ask acknowledgement", async () => {

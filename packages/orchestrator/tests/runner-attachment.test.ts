@@ -47,11 +47,21 @@ it("returns absent without a reference or a listening control socket and never l
   expect(exit).not.toHaveBeenCalled();
 });
 
-it("returns absent when the runner exists but the recorded session socket does not", async () => {
+it("fences any delayed native open before declaring an absent session socket", async () => {
   const { opener, reference } = fixture(), requests: unknown[] = [];
   await listen(reference.control, (value, socket) => { requests.push(value); socket.end('{"ok":true,"sessions":1}\n'); });
   expect(await opener.attachSession(reference, () => {}, () => {})).toBeNull();
-  expect(requests).toEqual([{ type: "status" }]);
+  expect(requests).toEqual([{ type: "status" }, { type: "close", socketPath: reference.socketPath }]);
+});
+
+it("retains uncertain custody when native close cannot fence a missing session socket", async () => {
+  const { opener, reference } = fixture(), requests: unknown[] = [];
+  await listen(reference.control, (value, socket) => {
+    requests.push(value);
+    socket.end(value.type === "close" ? '{"error":"Cannot close active native custody"}\n' : '{"ok":true,"sessions":1}\n');
+  });
+  await expect(opener.attachSession(reference, () => {}, () => {})).rejects.toThrow("Cannot close active native custody");
+  expect(requests).toEqual([{ type: "status" }, { type: "close", socketPath: reference.socketPath }]);
 });
 
 it.each(["control", "socketPath"] as const)("returns absent for a refused %s socket left on disk", async key => {

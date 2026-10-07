@@ -32,10 +32,12 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
   const accepting = new Map<string, Promise<void>>();
   const finalizing = new Map<string, Promise<void>>();
   const delivering = new Map<string, Promise<void>>();
+  const running = new Map<string, Promise<void>>();
+  const resuming = new Map<string, Promise<void>>();
   let active = 0;
   const rpc = async <T>(path: string, body: unknown): Promise<MemoryResult<T>> => {
     const started = performance.now();
-    const stage = path === "/v1/root/admit" ? "admit" : path === "/v1/root/authorize-request" ? "authorize" : path === "/v1/root/log-request-status" ? "request-status" : "finalize";
+    const stage = path === "/v1/root/admit" ? "admit" : (path === "/v1/root/authorize-request" || path === "/v1/root/resume-request") ? "authorize" : path === "/v1/root/log-request-status" ? "request-status" : "finalize";
     try {
       const response = await transport(new URL(path, options.memoryUrl), { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.memoryRootToken }, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
       const result = await response.json();
@@ -80,7 +82,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
         } else if (record.state === "failed" || record.state === "interrupted") {
           reply = kenanRequestNotice(id, record.state);
           logged = await rpc("/v1/root/log-request-status", { rootSessionId: record.admission.rootSessionId, requestId: id, status: record.state });
-        } else if (record.state === "executing" || record.state === "finalizing") return;
+        } else if (record.state === "queued" || record.state === "executing" || record.state === "finalizing") return;
         else throw new Error("Invalid root request delivery state");
         if (!logged.ok) return;
         const result = await options.bridge!.reply({ consentId: id, person: record.admission.person, threadId: record.admission.threadId, reply });
@@ -93,18 +95,26 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
   const drain = async () => {
     if (!options.enabled() || releaseState.quiescing) return { errors: 0 };
     const results = await Promise.all(requests.pending(options.maxConcurrent ?? 4).map(async record => {
-      try { await finalize(record); await deliver(record.id); }
+      try { if (record.state === "queued") await resume(record); else { await finalize(record); await deliver(record.id); } }
       catch (error) { report({ component: "root-service", stage: "request", outcome: "failed", reason: infrastructureReason(error), durationMs: 0 }); }
       const current = requests.get(record.id)!;
-      return current.state === "finalizing" || current.delivery === "pending";
+      return current.state !== "queued" && (current.state === "finalizing" || current.delivery === "pending");
     }));
     return { errors: results.filter(Boolean).length };
   };
-  const execute = async (record: RootRequest, admission: RootAdmission, text: string) => {
+  const execute = (record: Extract<RootRequest, { state: "queued" }>, admission: RootAdmission, text: string): Promise<void> => {
+    const pending = running.get(record.id);
+    if (pending) return pending;
+    requests.save({ ...record, reason: "global-agent-capacity" });
     const started = performance.now();
+    const operation = (async () => {
     try {
-      const result = await options.executor(admission, text);
-      if (!result.ok) { requests.save({ ...record, state: "failed" }); await deliver(record.id); return; }
+      const result = await options.executor(admission, text, () => requests.save({ ...record, state: "executing" }));
+      if (!result.ok) {
+        if (result.error === "capacity-unavailable" && requests.get(record.id)?.state === "queued") requests.save({ ...record, reason: "global-agent-capacity", retryAt: result.retryAt, attemptedAt: Date.now() });
+        else { requests.save({ ...record, state: "failed" }); await deliver(record.id); }
+        return;
+      }
       const chosen: RootRequest = { ...record, state: "finalizing", chosen: result.value };
       requests.save(chosen);
       await finalize(chosen);
@@ -112,15 +122,44 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
     } catch (error) {
       report({ component: "root-service", stage: "request", outcome: "failed", reason: infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
       const current = requests.get(record.id);
-      if (current?.state === "executing") {
+      if (current?.state === "queued" || current?.state === "executing") {
         requests.save({ ...current, state: "failed" });
         await deliver(record.id);
       }
-    } finally { active--; }
+    } finally { active--; running.delete(record.id); }
+    })();
+    running.set(record.id, operation);
+    return operation;
+  };
+  const resume = (record: Extract<RootRequest, { state: "queued" }>): Promise<void> => {
+    if (record.retryAt > Date.now() || running.has(record.id) || resuming.has(record.id) || active >= (options.maxConcurrent ?? 4)) return Promise.resolve();
+    requests.save({ ...record, attemptedAt: Date.now(), retryAt: Date.now() + 5_000 });
+    active++;
+    const operation = (async () => {
+      let launched = false;
+      try {
+        const admitted = await rpc<RootAdmission>("/v1/root/resume-request", { rootSessionId: record.admission.rootSessionId });
+        if (!admitted.ok) {
+          if (admitted.error === "unauthenticated") { requests.save({ ...record, state: "failed" }); await deliver(record.id); }
+          else requests.save({ ...record, reason: "admission-unavailable", retryAt: Date.now() + 5_000, attemptedAt: Date.now() });
+          return;
+        }
+        if (admitted.value.rootSessionId !== record.admission.rootSessionId || admitted.value.person !== record.admission.person || admitted.value.threadId !== record.admission.threadId || JSON.stringify(admitted.value.recipients) !== JSON.stringify(record.admission.recipients)) throw new Error("Queued root admission changed during recovery");
+        launched = true;
+        await execute(record, admitted.value, record.request);
+      } catch (error) {
+        report({ component: "root-service", stage: "request", outcome: "failed", reason: infrastructureReason(error), durationMs: 0 });
+        requests.save({ ...record, state: "failed" });
+      } finally { if (!launched) active--; resuming.delete(record.id); }
+    })();
+    resuming.set(record.id, operation);
+    return operation;
   };
   const status = (record: RootRequest): Response => {
     switch (record.state) {
       case "completed": return rootReplyResponse(record.chosen.reply);
+      case "queued":
+        return Response.json({ requestId: record.id, status: "pending", reason: record.reason }, { status: 202, headers: { "cache-control": "no-store" } });
       case "executing": case "finalizing":
         return Response.json({ requestId: record.id, status: "pending" }, { status: 202, headers: { "cache-control": "no-store" } });
       case "failed": case "interrupted":
@@ -194,7 +233,6 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       return status(prior);
     }
     if (releaseState.quiescing) return Response.json({ error: "Root Kenan is preparing a release; try again" }, { status: 503 });
-    if (active >= (options.maxConcurrent ?? 4)) return Response.json({ error: "Root Kenan is busy; try again" }, { status: 503 });
     active++;
     let release!: () => void;
     accepting.set(id, new Promise<void>(resolve => release = resolve));
@@ -203,14 +241,16 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
     try {
       const root = await rpc<RootAdmission>("/v1/root/admit", { callerToken, request: (body as any).request });
       if (!root.ok) return Response.json({ error: root.message }, { status: root.error === "unauthenticated" ? 403 : 503 });
-      const record = requests.accept(id, (body as any).request, root.value, !!suppliedId);
+      const record = requests.accept(id, (body as any).request, root.value, !!suppliedId, "queued");
+      if (record.state !== "queued") throw new Error("Root acceptance did not create a runnable queued request");
+      if (active > (options.maxConcurrent ?? 4)) return status(record);
       executing = true;
       const operation = execute(record, root.value, (body as any).request);
-      if (suppliedId) return status(record);
+      if (suppliedId) return status(requests.get(record.id)!);
       // Headerless callers used a synchronous reply before durable receipts existed.
       await operation;
       const settled = requests.get(id)!;
-      return settled.state === "completed" ? status(settled) : Response.json({ error: "Root Kenan could not complete the request", requestId: id }, { status: 503 });
+      return settled.state === "completed" || settled.state === "queued" ? status(settled) : Response.json({ error: "Root Kenan could not complete the request", requestId: id }, { status: 503 });
     } catch (error) {
       report({ component: "root-service", stage: "request", outcome: "failed", reason: infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
       return Response.json({ error: "Root Kenan could not accept the request" }, { status: 503 });

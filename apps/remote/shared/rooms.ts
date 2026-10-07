@@ -11,7 +11,7 @@ export interface Room extends RoomActivity {
   members: RoomMember[];
   current?: boolean;
   updatedAt?: number;
-  state?: "idle" | "running";
+  state?: Session["state"];
   unreadCount?: number;
   readThrough?: number;
   pendingQuestions?: number;
@@ -19,7 +19,7 @@ export interface Room extends RoomActivity {
 export interface RoomSender extends RoomMember { agent?: true }
 export interface RoomMessage { id: string; sender: RoomSender; text: string; time: number }
 export interface RoomWork { id: string; kind: string; text: string; name?: string }
-export interface RoomSnapshot extends RoomActivity { room: Room; state: "idle" | "running"; messages: RoomMessage[]; live: string; notificationId: string | null; questions?: import("pi-orchestrator/api").ThreadQuestion[]; work?: RoomWork[]; thinking?: string; context?: unknown }
+export interface RoomSnapshot extends RoomActivity { room: Room; state: Session["state"]; messages: RoomMessage[]; live: string; notificationId: string | null; questions?: import("pi-orchestrator/api").ThreadQuestion[]; work?: RoomWork[]; thinking?: string; context?: unknown }
 
 export function roomMembers(value: unknown): RoomMember[] | null {
   if (!Array.isArray(value) || !value.length || value.length > 64) return null;

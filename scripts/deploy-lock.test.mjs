@@ -337,6 +337,14 @@ process.exit(Number(process.env.${name}_SMOKE_EXIT ?? 0));
     function installModelDoctor() {
       mkdirSync(doctorBin, { recursive: true });
       writeFileSync(join(doctorBin, "pi-model-selection-doctor"), doctorProof("MODEL", "BROWSER"));
+      const capacityDir = join(destinations.PI_STACK_ORCHESTRATOR_DEST, "dist");
+      mkdirSync(capacityDir, { recursive: true });
+      writeFileSync(join(capacityDir, "agent-capacity.js"), `
+export async function configuredAgentCapacityStatus() {
+  return { ok: true, value: { authority: 'pi-stack-global-agents-v1', limit: 100,
+    initialized: process.env.CAPACITY_UNINITIALIZED !== '1', active: 0, queued: 0 } };
+}
+`);
     }
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
@@ -484,6 +492,13 @@ exit 64
     assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
     assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
     rmSync(systemctlTrace,{force:true});
+    const uninitialized = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, CAPACITY_UNINITIALIZED: "1" }, cwd: directory });
+    assert.equal(uninitialized.status, 75, uninitialized.stderr);
+    assert.match(uninitialized.stderr, /Global agent capacity cutover incomplete/);
+    assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote@alice.service\n", "capacity readiness gates further activation");
+    assert.doesNotMatch(uninitialized.stdout, /phase=(browser-doctor|model-doctor|activation) started/, "capacity readiness gates native doctors");
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m);
+    rmSync(systemctlTrace);
     const doctorSettlement = join(directory, "doctor-settlement");
     mkdirSync(doctorSettlement);
     const stagingFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ORCHESTRATOR_EXIT: "23", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });

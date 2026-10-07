@@ -17,7 +17,7 @@ import type { Session, ThreadStart } from "./types";
 import "./chat-picker-trigger.css";
 import "./chat-picker.css";
 
-type Category = { kind: "root" } | { kind: "models" } | { kind: "archived" } | { kind: "backend"; id: string } | { kind: "room" };
+type Category = { kind: "root" } | { kind: "models" } | { kind: "archived" } | { kind: "agents" } | { kind: "backend"; id: string } | { kind: "room" };
 type ArchivePage = { query: string; sessions: Session[]; total: number };
 export type ChatPickerEntry = { kind: "root" } | { kind: "archived"; query?: string };
 export type ChatPickerHandle = { open(entry?: ChatPickerEntry): void };
@@ -42,6 +42,8 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
   const [opening, setOpening] = useState(false);
   const [archivePage, setArchivePage] = useState<ArchivePage | null>(null);
   const [archiveError, setArchiveError] = useState("");
+  const [agents, setAgents] = useState<Session[] | null>(null);
+  const [placement, setPlacement] = useState<"all" | "foreground" | "background">("background");
   const [archiveAttempt, setArchiveAttempt] = useState(0);
   const [state, setState] = useState<ThreadStartState>({ kind: "closed" });
   const current = useRef(state);
@@ -60,8 +62,9 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
   const busy = opening || state.kind === "creating";
   const models = pickerOptions(chosen?.models ?? [], query, item => `${item.label} ${item.id}`);
   const recipients = pickerOptions(recentRecipients(messaging.conversations, backend?.id ?? ""), query, item => `${item.title} ${item.externalId}`);
-  const searchable = category.kind === "archived" || (category.kind === "models" ? models.searchable : category.kind === "backend" && recipients.searchable);
-  const title = category.kind === "room" ? "Room" : category.kind === "archived" ? "Archived" : backend?.label || chosen?.label || "New chat";
+  const agentOptions = pickerOptions((agents ?? []).filter(item => placement === "all" || (item.foreground ? "foreground" : "background") === placement), query, item => `${item.agentName ?? ""} ${item.name} ${item.id}`);
+  const searchable = category.kind === "agents" || category.kind === "archived" || (category.kind === "models" ? models.searchable : category.kind === "backend" && recipients.searchable);
+  const title = category.kind === "agents" ? "Open agent" : category.kind === "room" ? "Room" : category.kind === "archived" ? "Archived" : backend?.label || chosen?.label || "New chat";
   const close = useCallback((restoreFocus = false) => {
     setOpen(false); setCategory({ kind: "root" }); setQuery(""); setAddress(""); setError("");
     dispatch({ type: "dismiss" }); operation.current?.abort(); operation.current = null; setOpening(false);
@@ -102,11 +105,22 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
     };
   }, [open, close]);
   useEffect(() => {
+    if (!open || category.kind !== "agents") return;
+    let active = true;
+    setAgents(null); setArchiveError("");
+    void api(API.sessions.method, `${API.sessions.path()}?allAgents=1`).then(result => {
+      if (!active) return;
+      stateArray(result.sessions, "Agent directory").forEach(validateSession);
+      setAgents(result.sessions);
+    }, cause => { if (active) setArchiveError(String(cause)); });
+    return () => { active = false; };
+  }, [open, category.kind, archiveAttempt]);
+  useEffect(() => {
     if (!open || category.kind !== "archived") return;
     let active = true;
     setArchiveError("");
     const timer = setTimeout(() => {
-      void api(API.archivedSessions.method, API.archivedSessions.path({}, { query, conversationsOnly: true, limit: PICKER_RESULT_LIMIT }))
+      void api(API.archivedSessions.method, API.archivedSessions.path({}, { query, limit: PICKER_RESULT_LIMIT }))
         .then((result: { sessions: Session[]; total: number }) => {
           if (!active) return;
           stateArray(result.sessions, "Archived directory").forEach(validateSession);
@@ -156,7 +170,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
     onSettled();
   };
   const archiveReady = archivePage?.query === query;
-  const total = category.kind === "archived" ? archivePage?.total ?? 0 : category.kind === "models" ? models.total : recipients.total;
+  const total = category.kind === "agents" ? agentOptions.total : category.kind === "archived" ? archivePage?.total ?? 0 : category.kind === "models" ? models.total : recipients.total;
   const destinations = [...(selection?.starts ?? starts)].sort((a, b) => {
     const rank = (id: string) => id === "personal" ? 0 : id === "home" ? 1 : 2;
     return rank(a.id) - rank(b.id);
@@ -180,6 +194,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
       {category.kind === "root" ? <div className="chat-picker-identities">
         {destinations.map(choice => <button className="chat-picker-identity" type="button" key={choice.id} aria-label={choice.label} title={choice.label} onClick={() => { setCategory({ kind: "models" }); choose(choice.id); }}>{showRootIcon(choice.icon) ? <ChatIcon icon={choice.icon} /> : <span className="chat-picker-identity-label">{choice.label}</span>}</button>)}
         {rooms && <button className="chat-picker-identity" type="button" aria-label="Room" title="Room" onClick={() => navigate({ kind: "room" })}><ChatIcon icon="room" /></button>}
+        <button className="chat-picker-identity" type="button" aria-label="Open agent" title="Open agent" onClick={() => navigate({ kind: "agents" })}><span className="chat-picker-identity-label">Open agent</span></button>
         <button className="chat-picker-identity" type="button" aria-label="Archived" title="Archived" onClick={() => navigate({ kind: "archived" })}><svg className="chat-picker-archive-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v12H4V8Zm-1-4h18v4H3V4Zm6 9h6" /></svg></button>
         {messaging.backends.map(item => <button className="chat-picker-identity" type="button" key={item.id} aria-label={item.label} title={item.label} onClick={() => navigate({ kind: "backend", id: item.id })}>{showRootIcon(item.icon) ? <ChatIcon icon={item.icon} /> : <span className="chat-picker-identity-label">{item.label}</span>}</button>)}
       </div> : category.kind === "room" && rooms ? <>
@@ -199,7 +214,10 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
             <span className="chat-picker-context-tokens">{formatTokens(context.tokens)} tokens</span>
           </label>)}
         </fieldset>}
+        {category.kind === "agents" && <label>Placement <select aria-label="Agent placement" value={placement} onChange={event => setPlacement(event.target.value as typeof placement)}><option value="background">Background</option><option value="foreground">Foreground</option><option value="all">All</option></select></label>}
         <div className="chat-picker-list">
+          {category.kind === "agents" && agents === null && !archiveError && <p role="status">Loading agents…</p>}
+          {category.kind === "agents" && agentOptions.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><span>{item.agentName ? `${item.agentName} · ` : ""}{item.name}<small>{item.foreground ? "Foreground" : "Background"}</small></span></button>)}
           {category.kind === "models" && modelGroups.map(group => <section className="chat-picker-model-group" key={group.id} aria-label={[group.title, group.description].filter(Boolean).join(" · ")}>
             <h3>{group.title}{group.description && <small>{group.description}</small>}</h3>
             <div className="chat-picker-identities">{group.models.map(choice => {
@@ -208,7 +226,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
             })}</div>
           </section>)}
           {category.kind === "backend" && recipients.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(humanChat(item, messaging.backends))}><span>{item.title}<small>{item.kind === "group" ? "Group" : item.externalId}</small></span></button>)}
-          {category.kind === "archived" && archiveReady && archivePage.sessions.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><ChatIcon icon={aiChat(item, starts).icon} /><span>{item.name || "Agent"}</span></button>)}
+          {category.kind === "archived" && archiveReady && archivePage.sessions.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><ChatIcon icon={aiChat(item, starts).icon} /><span>{item.agentName ? `${item.agentName} · ` : ""}{item.name || "Agent"}</span></button>)}
         </div>
         {category.kind === "archived" && !archiveReady && !archiveError ? <p role="status">Loading chats…</p> : !archiveError && <p className="chat-picker-count" role="status">{total === 0 ? (query ? "No matches" : "No options yet") : total > PICKER_RESULT_LIMIT ? `Showing ${PICKER_RESULT_LIMIT} of ${total}. Search to narrow the list.` : ""}</p>}
         {backend && backend.status === "ready" && <details className="chat-picker-address"><summary>Open by address</summary><form onSubmit={event => { event.preventDefault(); void openRecipient(); }}><input aria-label="Recipient address or group ID" value={address} onChange={event => setAddress(event.target.value)} placeholder="Address or group ID" /><button type="submit" disabled={busy || !address.trim() || backend.status !== "ready"}>Open recipient</button></form></details>}

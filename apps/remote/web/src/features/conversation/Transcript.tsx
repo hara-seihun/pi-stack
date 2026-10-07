@@ -8,7 +8,8 @@ import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
-import { AgentMessage, agentMessageSender } from "./agent-message";
+import { presentAgentMessage } from "./agent-message";
+import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
 import { appendLiveThinking, buildStableTranscript, type TranscriptItem } from "./transcript-model";
@@ -98,11 +99,11 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
   onEdit(entry: ContextEntry): void;
   onReply(target: ReplyTarget): void;
 }) {
-  const text = entry.text || "";
-  const senderThreadId = agentMessageSender(entry);
-  const message = <ChatMessage
+  const presented = presentAgentMessage(entry);
+  const text = presented.text || "";
+  return <div data-transcript-seq={entry.seq}><ChatMessage
     kind={entry.kind}
-    label={entry.label || entry.kind}
+    label={entry.kind === "assistant" ? AGENT_NAME : presented.label || entry.kind}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
     text={text}
     timestamp={entry.messageTimestamp || undefined}
@@ -113,11 +114,8 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
     responseMetrics={entry.kind === "assistant" ? entry.responseMetrics : undefined}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
-    menu={entry.kind === "user" && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
-  />;
-  return <div data-transcript-seq={entry.seq}>{senderThreadId
-    ? <AgentMessage senderThreadId={senderThreadId}>{message}</AgentMessage>
-    : message}</div>;
+    menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
+  /></div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
 function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {

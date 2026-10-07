@@ -275,8 +275,10 @@ async function verifiedState(selected: Endpoint, endpoints: Endpoint[]): Promise
   if (health.environmentId !== selected.id) throw new Error(`${selected.name} environment identity mismatch`);
   if (nativePlatform && remote.writeEnvironment) {
     await nativeSessionReady();
-    if (revision === generation) await remote.writeEnvironment({ user: auth.user, environment: selected.id });
+    if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
+    await remote.writeEnvironment({ user: auth.user, environment: selected.id });
   }
+  if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
   return { ...selected, environments: endpoints };
 }
 
@@ -285,7 +287,10 @@ async function getState(): Promise<EnvironmentState> {
   if (current) return current;
   const selectedId = sessionStorage.getItem(appStorageKey(`pi-remote-environment:${auth.user}`));
   const selected = endpoints.find(endpoint => endpoint.id === selectedId) ?? endpoints[0]!;
-  current = await verifiedState(selected, endpoints);
+  const revision = generation;
+  const verified = await verifiedState(selected, endpoints);
+  if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
+  current = verified;
   return current;
 }
 
@@ -380,7 +385,9 @@ window.KenanRemote = {
     const endpoints = await loadEnvironments();
     const selected = endpoints.find(endpoint => endpoint.id === id);
     if (!selected) throw new Error(`Environment is not allowed: ${id}`);
+    const revision = generation;
     const verified = await verifiedState(selected, endpoints);
+    if (revision !== generation || user !== auth.user) throw new DOMException("Identity changed during endpoint selection", "AbortError");
     sessionStorage.setItem(appStorageKey(`pi-remote-environment:${user}`), id);
     current = verified;
     return current;
