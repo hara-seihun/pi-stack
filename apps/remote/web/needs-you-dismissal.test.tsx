@@ -42,8 +42,9 @@ test("busy dismissal keeps the source answer link and card visible, suppresses r
   const onDismiss = (value: NeedsYouItem) => { calls.push(value); };
   const ready = NeedsYouCard({ item, busy: false, onDismiss });
   const busy = NeedsYouCard({ item, busy: true, onDismiss });
-  const readyButton = ready.props.children[3].props.children[1];
-  const busyButton = busy.props.children[3].props.children[1];
+  const dismissalButton = (card: ReturnType<typeof NeedsYouCard>) => card.props.children.find((child: any) => child?.props?.className === "attention-card-footer").props.children.find((child: any) => child?.props?.className === "needs-you-actions").props.children.find((child: any) => child?.type === "button");
+  const readyButton = dismissalButton(ready);
+  const busyButton = dismissalButton(busy);
   readyButton.props.onClick();
   busyButton.props.onClick();
   expect(calls).toEqual([item]);
