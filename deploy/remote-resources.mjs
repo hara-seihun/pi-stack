@@ -24,7 +24,7 @@ export const remoteResources = [
     source: "apps/remote/server", destination: "server", kind: "tree",
     required: ["voice/delegation-policy.md", "meet/transcriber.ts", "pi-editor-launch", "phone/dist/retell-sdk.js"],
     entrypoints: ["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts", "meet/runtime-main.ts"],
-    executables: ["pi-remote", "pi-phone", "pi-room", "pi-signal", "pi-calendar", "pi-remote-launch", "pi-remote-supervise", "pi-editor-launch"],
+    executables: ["pi-remote", "pi-phone", "pi-room", "pi-signal", "pi-calendar", "pi-remote-launch", "pi-remote-supervise", "pi-editor-launch", "pi-timezone-provision"],
   },
   { source: "apps/remote/shared", destination: "shared", kind: "tree" },
   { source: "apps/remote/skills", destination: "skills", kind: "tree", dereference: true, required: ["livedev/SKILL.md"] },
