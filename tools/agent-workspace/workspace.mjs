@@ -419,7 +419,7 @@ const REFERENCE_GC_WARNINGS = new Set([
   "warning: There are too many unreachable loose objects; run 'git prune' to remove them.",
 ]);
 
-function maintainReferenceClone(workspace, execute) {
+function maintainReferenceClone(workspace, execute, statePath) {
   const gitDirectory = path.join(workspace, ".git");
   const alternates = path.join(gitDirectory, "objects", "info", "alternates");
   if (!existsSync(alternates) || !readFileSync(alternates, "utf8").trim()) return null;
@@ -444,16 +444,17 @@ function maintainReferenceClone(workspace, execute) {
     gcLog = execute ? "removed-diagnosed-warning" : "would-remove-diagnosed-warning";
     if (execute) rmSync(log);
   }
-  return { path: workspace, settings: settings.map(([name]) => name), gcLog };
+  const objectCustody = stabilizeObjectCustody(workspace, alternates, execute, statePath);
+  return { path: workspace, settings: settings.map(([name]) => name), gcLog, objectCustody };
 }
 
 function register(database, input) {
   return withWorkspaceLock(database, input.path, () => registerWorkspace(database, input), input.groupId);
 }
 
-function registrationInspection(workspace) {
+function registrationInspection(workspace, statePath) {
   const info = gitInfo(workspace);
-  maintainReferenceClone(workspace, true);
+  maintainReferenceClone(workspace, true, statePath);
   return info;
 }
 
@@ -467,7 +468,7 @@ function registerWorkspace(database, input, inspectedInfo) {
     }
   }
   if (existing?.state === "creating") return rowToRecord(existing);
-  const info = inspectedInfo ?? registrationInspection(input.path);
+  const info = inspectedInfo ?? registrationInspection(input.path, registryPaths.get(database));
   if (existing !== undefined && existing.state !== "released") {
     if (input.groupId != null && existing.group_id !== null && existing.group_id !== input.groupId) {
       fail(`workspace ${path.resolve(input.path)} already belongs to group ${existing.group_id}; requested ${input.groupId}`);
@@ -1393,7 +1394,7 @@ function reconcileRecords(database, selected, options) {
     try {
       results.push(...withWorkspaceLock(database, selectedRecord.path, () => {
         const current = recordsInGroup(database, recordBy(database, { id: selectedRecord.id }));
-        const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, maintainReferenceClone(record.path, options.execute)])));
+        const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, maintainReferenceClone(record.path, options.execute, options.statePath)])));
         const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
           : current.length === 1 ? [reconcileRecord(database, current[0], options)] : [];
         return reconciled.map((result) => ({ ...result, gitMaintenance: maintenance.get(result.record.id) }));
@@ -1646,7 +1647,7 @@ function adoptCommand(database, args, statePath) {
       .map((registration) => ({
         ...registration,
         cachePaths: cachePathsForRepository(registration.path, args),
-        inspection: registrationInspection(registration.path),
+        inspection: registrationInspection(registration.path, statePath),
       }));
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -1683,7 +1684,7 @@ function capacityIntent(args) {
   return { intent, headroomBytes, growthBytes };
 }
 
-function sourceCapacityPlan(repository, sourceCommit, intent, blockSize) {
+function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror) {
   if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
   const filters = command("git", ["-C", repository, "config", "--get-regexp", "^filter\\..*\\.(smudge|process)$"]);
   if (filters.status !== 1) fail("source capacity estimate unknown: configured checkout filters need an independently budgeted installer");
@@ -1700,8 +1701,24 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize) {
     // Whole-tree upper bound includes sparse exclusions, CRLF expansion, index and directories.
     constructionBytes += (size === "-" ? 0 : 2 * Math.ceil(Number(size) / blockSize) * blockSize) + 4 * blockSize + Buffer.byteLength(name) * 2;
   }
+  const sourceImportBytes = sourceImportCapacity(repository, sourceCommit, mirror);
+  constructionBytes += sourceImportBytes;
   if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
-  return { ...intent, estimate: "whole-tree-upper-bound", constructionBytes, sourceCommit };
+  return { ...intent, estimate: "whole-tree-upper-bound", constructionBytes, sourceImportBytes, sourceCommit };
+}
+
+function sourceImportCapacity(repository, sourceCommit, mirror) {
+  if (mirror && existsSync(mirror) && command("git", ["--git-dir", mirror, "cat-file", "-e", `${sourceCommit}^{commit}`]).status === 0) return 0;
+  const objects = git(repository, ["rev-list", "--objects", "--no-object-names", sourceCommit]);
+  const sizes = run("git", ["-C", repository, "cat-file", "--batch-check=%(objectsize)"], { input: `${objects}\n` });
+  let bytes = 16 * 1024 ** 2;
+  for (const size of sizes.split("\n")) {
+    if (!/^\d+$/u.test(size)) fail("source capacity estimate unknown: source history object is unavailable");
+    // Pack construction can temporarily hold both incoming and installed files.
+    bytes += 2 * (Number(size) + Math.ceil(Number(size) / 1000) + 128);
+  }
+  if (!Number.isSafeInteger(bytes)) fail("source history capacity exceeds supported byte range");
+  return bytes;
 }
 
 function capacityRequirement(plan, reservations) {
@@ -1856,8 +1873,46 @@ function sourceRefFor(repository, ref) {
   return `refs/pi-workspace/sources/${createHash("sha256").update(`${repository}\0${ref}`).digest("hex")}`;
 }
 
+function renameAlternate(file, objectSource) {
+  const temporary = `${file}.${randomUUID()}`;
+  try {
+    writeFileSync(temporary, `${objectSource}\n`, { flag: "wx", mode: 0o600 });
+    renameSync(temporary, file);
+  } finally { rmSync(temporary, { force: true }); }
+}
+
+function stabilizeObjectCustody(workspace, alternates, execute, statePath) {
+  if (!statePath) fail("reference clone custody requires the owning workspace registry");
+  const mirrorRoot = path.join(path.dirname(statePath), "mirrors");
+  const objectDirectory = path.dirname(path.dirname(alternates));
+  const stores = readFileSync(alternates, "utf8").split("\n").filter(Boolean)
+    .map(value => path.resolve(objectDirectory, value));
+  if (stores.every(store => existsSync(store) && path.basename(store) === "objects"
+    && path.dirname(path.dirname(store)) === mirrorRoot
+    && !existsSync(path.join(store, "info", "alternates")))) return "durable-mirror";
+  if (!execute) return "would-import-durable-mirror";
+  const upstream = repositoryRemotes(workspace);
+  const mirror = mirrorFor(statePath, upstream.fetch);
+  withResourceLock(statePath, `mirror:${mirror}`, () => {
+    prepareMirror(mirror, workspace, upstream);
+    const objects = new Set([
+      git(workspace, ["rev-parse", "--verify", "HEAD"]),
+      ...git(workspace, ["for-each-ref", "--format=%(objectname)"]).split("\n"),
+      ...git(workspace, ["reflog", "--all", "--format=%H"]).split("\n"),
+    ].filter(Boolean));
+    const refs = [...objects].map(object => `+${object}:refs/pi-workspace/objects/${object}`);
+    for (let index = 0; index < refs.length; index += 128) {
+      run("git", ["--git-dir", mirror, "fetch", "--no-tags", "--no-auto-maintenance", workspace,
+        ...refs.slice(index, index + 128)], { timeout: 120_000 });
+    }
+    renameAlternate(alternates, path.join(mirror, "objects"));
+  });
+  return "imported-durable-mirror";
+}
+
 function cachedImmutableSource(mirror, repository, ref) {
   if (!/^[0-9a-f]{40}$/u.test(ref) || !existsSync(mirror)) return null;
+  if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
   const cached = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRefFor(repository, ref)}^{commit}`]);
   return cached.status === 0 && cached.stdout === ref ? ref : null;
 }
@@ -1895,6 +1950,10 @@ function resolveSource(statePath, mirror, repository, upstream, ref) {
 function prepareMirror(mirror, repository, upstream) {
   mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
   if (!existsSync(mirror)) run("git", ["init", "--bare", mirror]);
+  if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
+  for (const [name, value] of Object.entries({ ...REFERENCE_CLONE_CONFIG, "fetch.unpackLimit": "0" })) {
+    run("git", ["--git-dir", mirror, "config", "--local", name, value]);
+  }
   for (const [name, url] of [["origin", upstream.fetch], ["workspace-source", repository]]) {
     const existing = command("git", ["--git-dir", mirror, "remote", "get-url", name]);
     if (existing.status !== 0 && existing.status !== 2) {
@@ -1919,7 +1978,7 @@ function fetchSource(mirror, repository, ref) {
     resolved = commit.stdout;
   }
   const sourceRef = sourceRefFor(repository, ref);
-  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: 120_000 });
+  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "--no-auto-maintenance", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: 120_000 });
   return run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
 }
 
@@ -1947,8 +2006,8 @@ function cloneSourceTag(statePath, mirror, sourceCommit) {
   });
 }
 
-function prepareSharedSourceClone(destination, repository, sourceCommit, input) {
-  const objectSource = git(repository, ["rev-parse", "--path-format=absolute", "--git-path", "objects"]);
+function prepareSharedSourceClone(destination, repository, sourceCommit, input, mirror) {
+  const objectSource = path.join(mirror, "objects");
   if (!existsSync(path.join(destination, ".git"))) {
     if (existsSync(destination) && readdirSync(destination).length !== 0) fail("pending shared-source directory has non-Git files");
     run("git", ["init", "-b", input.branch, destination]);
@@ -1956,7 +2015,9 @@ function prepareSharedSourceClone(destination, repository, sourceCommit, input) 
   const rawDirectory = git(destination, ["rev-parse", "--absolute-git-dir"]);
   if (rawDirectory !== path.join(destination, ".git")) fail("pending shared source is not an independent clone");
   const alternates = path.join(rawDirectory, "objects", "info", "alternates");
-  if (existsSync(alternates) && readFileSync(alternates, "utf8") !== `${objectSource}\n`) fail("pending shared source object store differs");
+  if (existsSync(alternates) && readFileSync(alternates, "utf8") !== `${objectSource}\n`) {
+    fail("pending shared source object store differs; use maintain --path with --execute to import its current refs before resuming");
+  }
   const head = command("git", ["-C", destination, "rev-parse", "--verify", "HEAD"]);
   if (head.status !== 0 && (existsSync(path.join(rawDirectory, "index")) || readdirSync(destination).some(name => name !== ".git"))) {
     fail("pending shared source lacks HEAD but contains materialized work; preserve it for repair");
@@ -2015,8 +2076,8 @@ function createWorkspace(database, args, statePath) {
     ...(intent === null ? {} : { capacity: intent }),
     leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) });
   const input = JSON.parse(request);
-  const mirror = mirrorFor(statePath, repository);
   const upstream = repositoryRemotes(repository);
+  const mirror = mirrorFor(statePath, intent === null ? repository : upstream.fetch);
   let row = database.prepare("SELECT * FROM workspace WHERE path = ?").get(destination);
   if (row !== undefined && row.state !== "released") {
     if (row.creation_request !== request) fail(`workspace already exists with a different creation request: ${destination}${row.state === "creating" ? "; resume the original request, or use cancel-creation if its destination is absent" : ""}`);
@@ -2036,15 +2097,13 @@ function createWorkspace(database, args, statePath) {
     } else {
       if (!existsSync(repository)) fail("source capacity estimate unknown: budgeted intent requires an existing local Git object source; remote import remains unestimated");
       sourceCommit = git(repository, ["rev-parse", "--verify", `${ref}^{commit}`]);
-      plan = sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize);
+      plan = sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror);
     }
     const device = String(statSync(root).dev);
     withResourceLock(statePath, `capacity:${device}`, () => {
       plan.admission = assertCapacity(root, args, database, destination, plan);
-      if (intent === null) {
-        sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
-        plan.admission = assertCapacity(root, args, database, destination, plan);
-      }
+      sourceCommit = resolveSource(statePath, mirror, repository, upstream, sourceCommit ?? ref);
+      plan.admission = assertCapacity(root, args, database, destination, plan);
       database.exec("BEGIN IMMEDIATE");
       try {
         const now = Date.now();
@@ -2079,7 +2138,7 @@ function createWorkspace(database, args, statePath) {
     if (intent !== null && sourceCommit === null) fail("budgeted pending creation has no immutable source custody");
     const plan = intent === null
       ? { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 }
-      : sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize);
+      : sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror);
     const device = String(statSync(root).dev);
     withResourceLock(statePath, `capacity:${device}`, () => {
       plan.admission = assertCapacity(root, args, database, destination, plan);
@@ -2092,6 +2151,7 @@ function createWorkspace(database, args, statePath) {
     database.prepare("UPDATE workspace SET source_commit=?, updated_at=? WHERE id=?")
       .run(sourceCommit, Date.now(), row.id);
   }
+  if (intent !== null) resolveSource(statePath, mirror, repository, upstream, sourceCommit);
   try {
     if (!existsSync(destination) || readdirSync(destination).length === 0) {
       const plan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(row.id);
@@ -2102,7 +2162,7 @@ function createWorkspace(database, args, statePath) {
         else worktreeArgs.push("-b", branch, destination, sourceCommit);
         run("git", worktreeArgs, { timeout: checkoutTimeout });
       } else if (intent !== null) {
-        prepareSharedSourceClone(destination, repository, sourceCommit, input);
+        prepareSharedSourceClone(destination, repository, sourceCommit, input, mirror);
       } else {
         const sourceTag = cloneSourceTag(statePath, mirror, sourceCommit);
         run("git", ["clone", "--no-local", ...Object.entries(REFERENCE_CLONE_CONFIG)
@@ -2113,7 +2173,7 @@ function createWorkspace(database, args, statePath) {
           mirror, destination], { timeout: 40_000 });
       }
     }
-    if (intent !== null) prepareSharedSourceClone(destination, repository, sourceCommit, input);
+    if (intent !== null) prepareSharedSourceClone(destination, repository, sourceCommit, input, mirror);
     const info = gitInfo(destination);
     if (info.checkoutType !== strategy) fail("pending checkout type changed");
     if (strategy === "clone") {
@@ -2132,7 +2192,7 @@ function createWorkspace(database, args, statePath) {
       configurePushUrl(["-C", destination], upstream);
       const cloneSource = command("git", ["-C", destination, "config", "--local", "--get", "remote.workspace-source.url"]);
       if (cloneSource.status === 0 && cloneSource.stdout === mirror) git(destination, ["remote", "remove", "workspace-source"]);
-      maintainReferenceClone(destination, true);
+      maintainReferenceClone(destination, true, statePath);
     }
     completeCreation(database, row.id, upstream.fetch, input.leaseSeconds, "creation completed", args);
   } catch (error) {
@@ -2271,7 +2331,7 @@ function finalizeCreationCommand(database, args, statePath) {
   assertPendingClean(record.path);
   if (info.checkoutType === "clone") {
     ensureOriginFetch(record.path);
-    maintainReferenceClone(record.path, true);
+    maintainReferenceClone(record.path, true, statePath);
   }
   completeCreation(database, record.id, info.repository ?? record.repository, input.leaseSeconds,
     "creation finalized; existing HEAD, branches, remotes and ignored output preserved; origin fetch mapping verified", args);
@@ -2398,7 +2458,7 @@ function maintainCommand(database, args) {
   const results = [];
   for (const record of records) {
     try {
-      const result = withWorkspaceLock(database, record.path, () => maintainReferenceClone(record.path, bool(args, "execute")), record.groupId);
+      const result = withWorkspaceLock(database, record.path, () => maintainReferenceClone(record.path, bool(args, "execute"), registryPaths.get(database)), record.groupId);
       if (result) results.push(result);
     } catch (error) {
       results.push({ path: record.path, error: error instanceof Error ? error.message : String(error) });
@@ -2406,7 +2466,7 @@ function maintainCommand(database, args) {
     }
   }
   if (bool(args, "json")) print(results, true);
-  else for (const result of results) process.stdout.write(`${result.path}\t${result.error ?? `${result.settings.join(",") || "configured"}; gc.log ${result.gcLog}`}\n`);
+  else for (const result of results) process.stdout.write(`${result.path}\t${result.error ?? `${result.settings.join(",") || "configured"}; gc.log ${result.gcLog}; objects ${result.objectCustody}`}\n`);
 }
 
 function statusCommand(database, args) {

@@ -20,7 +20,17 @@ function fixture(t, defect) {
   const tool = { async execute(_id, input) {
     calls.push(input);
     if (input.script) return { details: { resultCategory: "success", data: { refs: 3 }, scriptSession: { cleanup: defect === "script-cleanup" ? "failed" : "closed" } } };
-    const name = input.args[input.args.indexOf("--session") + 1];
+    const name = input.semanticAction?.session ?? input.args[input.args.indexOf("--session") + 1];
+    if (input.semanticAction) {
+      const state = sessions.get(name);
+      assert.ok(state, "semantic fill reuses the owned live session");
+      assert.equal(input.semanticAction.action, "fill");
+      assert.equal(input.semanticAction.locator, "label");
+      const target = input.semanticAction.value === "Controlled date" ? "#controlled-date" : input.semanticAction.value === "Controlled datetime" ? "#controlled-datetime" : "#controlled-timezone";
+      if (defect !== "semantic-date-value") state.values.set(`main:${target}`, input.semanticAction.text);
+      state.dateRoute = "semantic";
+      return { details: { resultCategory: "success" } };
+    }
     const remote = name.startsWith("doctor-attach-");
     if (remote) assert.equal(input.args[input.args.indexOf("--cdp") + 1], "ws://127.0.0.1/probe");
     if (input.args.at(-1) === "close") {
@@ -32,6 +42,13 @@ function fixture(t, defect) {
       return { details: { resultCategory: "success", data: { snapshot: "[redacted: cc-number]" } } };
     }
     const nativeSteps = JSON.parse(input.stdin);
+    if (nativeSteps.length === 2 && nativeSteps[1][0] === "find" && nativeSteps[1][2] === "Rejected datetime" || nativeSteps.length === 2 && nativeSteps[1][0] === "fill" && nativeSteps[1][1] === "#readonly-date") {
+      const success = defect === "rejected-fill-success";
+      return { details: { resultCategory: success ? "success" : "failure", data: [
+        { command: nativeSteps[0], success: true },
+        { command: nativeSteps[1], success, error: "fill_value_not_retained: controlled value rejected" },
+      ] } };
+    }
     if (nativeSteps.length === 2 && nativeSteps[0][0] === "get" && ["eval", "screenshot", "pdf"].includes(nativeSteps[1][0])) {
       assert.equal(input.args.at(-1), "--bail", "page reverification and inspection must use fail-fast batches");
       const data = nativeSteps.map(command => ({ command, success: command[0] === "get" || defect === "unsafe-eval-success" && command[0] === "eval", error: defect === "wrong-refusal" ? "Unexpected command error" : "SENSITIVE_OUTPUT_UNSUPPORTED: sensitive input page" }));
@@ -47,7 +64,13 @@ function fixture(t, defect) {
       let result = {};
       if (command[0] === "open") state.sensitive = command[1].endsWith("/sensitive");
       if (command[0] === "frame") state.frame = command[1];
-      if (command[0] === "fill") state.values.set(`${state.frame}:${command[1]}`, command[2]);
+      if (command[0] === "fill") { state.values.set(`${state.frame}:${command[1]}`, command[2]); state.dateRoute = "direct"; }
+      if (command[0] === "find") {
+        assert.equal(command[1], "label"); assert.equal(command[3], "fill");
+        const target = command[2] === "Controlled date" ? "#controlled-date" : command[2] === "Controlled datetime" ? "#controlled-datetime" : "#controlled-timezone";
+        if (defect !== "find-date-value") state.values.set(`${state.frame}:${target}`, command[4]);
+        state.dateRoute = "find-label";
+      }
       if (command[0] === "snapshot") result = { refs, snapshot: state.sensitive ? defect === "sensitive-snapshot" ? "4000 0000 0000 0077" : "[redacted: cc-number]" : "ordinary page" };
       if (command[0] === "get") {
         if (command[1] === "title") result = { title: options.title };
@@ -55,12 +78,13 @@ function fixture(t, defect) {
         if (command[1] === "url") result = { url: options.url };
         if (command[1] === "value") {
           const sensitive = { "#cardnumber": "[redacted: cc-number]", "#exp-date": "[redacted: cc-exp]", "#cvc": "[redacted: cc-csc]", "#secret-password": "[redacted: password]", "#otp": "[redacted: one-time-code]", "#cardholder": "Public Test Name" };
+          if (["#readonly-date", "#rejected-datetime"].includes(command[2])) state.values.set(`${state.frame}:${command[2]}`, defect === "rejected-value-mutated" ? "2030-01-01" : command[2] === "#readonly-date" ? "2026-10-02" : "2026-10-02T23:00");
           result = { value: state.sensitive ? defect === "sensitive-getter" && command[2] === "#cvc" ? "937" : sensitive[command[2]] : remote && defect === "remote-value" || defect === "date-value" && command[2] === "#controlled-date" ? "" : state.values.get(`${state.frame}:${command[2]}`) };
         }
         if (["text", "html"].includes(command[1]) && state.sensitive) result = { [command[1]]: defect === "sensitive-html" && command[1] === "html" ? '<input value="fixture-password-82">' : "[redacted: password]" };
       }
       if (command[0] === "eval") {
-        result = { result: command[1] === "location.hostname" ? "localhost" : command[1].includes("controlled-state") ? { date: defect === "date-state" ? "2026-10-02" : state.values.get("main:#controlled-date"), datetime: state.values.get("main:#controlled-datetime") } : true };
+        result = { result: command[1] === "location.hostname" ? "localhost" : command[1].includes("controlled-state") ? { date: defect === "date-state" || defect === "find-date-state" && state.dateRoute === "find-label" || defect === "semantic-date-state" && state.dateRoute === "semantic" ? "2026-10-02" : state.values.get("main:#controlled-date"), datetime: state.values.get("main:#controlled-datetime") } : true };
         if (defect === "dynamic-realm" && state.frame === "#dynamic-frame") result.result = "127.0.0.1";
         if (defect === "static-realm" && !remote && state.frame.includes("Secure payment")) result.result = "127.0.0.1";
       }
@@ -95,7 +119,7 @@ test("complete native proof keeps linear batches and exact download/frame subcom
   assert.deepEqual(f.closed, ["attached", "owner"]);
 });
 
-for (const defect of ["date-value", "date-state", "static-realm", "dynamic-realm", "remote-value", "download-bytes", "unverified-artifact", "truncated-batch", "failed-row", "attached-cleanup", "sensitive-snapshot", "sensitive-getter", "sensitive-html", "saved-sensitive-value", "unsafe-eval-success", "wrong-refusal", "unsafe-artifact"]) {
+for (const defect of ["date-value", "date-state", "find-date-value", "find-date-state", "semantic-date-value", "semantic-date-state", "rejected-fill-success", "rejected-value-mutated", "static-realm", "dynamic-realm", "remote-value", "download-bytes", "unverified-artifact", "truncated-batch", "failed-row", "attached-cleanup", "sensitive-snapshot", "sensitive-getter", "sensitive-html", "saved-sensitive-value", "unsafe-eval-success", "wrong-refusal", "unsafe-artifact"]) {
   test(`rejects ${defect} and still closes the owner`, async (t) => {
     const f = fixture(t, defect);
     await assert.rejects(probeBrowser(f.tool, f.options));
