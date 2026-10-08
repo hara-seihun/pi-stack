@@ -401,23 +401,27 @@ const notificationErrors = new Map<string, string>();
 let peerRefresh: Promise<void> | null = null;
 const notificationRefreshes = new Map<string, Promise<void>>();
 const notificationRefreshAgain = new Set<string>();
-function refreshThreadNotifications(): Promise<void> {
+function refreshThreadNotifications(cause: "read" | "change" = "change"): Promise<void> {
   return Promise.all(directory.owners.map(owner => {
     const existing = notificationRefreshes.get(owner.id);
-    if (existing) { notificationRefreshAgain.add(owner.id); return existing; }
+    if (existing) { if (cause === "change") notificationRefreshAgain.add(owner.id); return existing; }
     const refresh = (async () => {
-      do {
-        notificationRefreshAgain.delete(owner.id);
-        await projectThreadNotifications(db, owner.id, owner.api, directory, () => { signalSync(); pushNotifications(); });
-      } while (notificationRefreshAgain.has(owner.id));
-    })()
-      .then(() => { notificationFeedback(owner.id, null); if (notificationErrors.delete(owner.id)) signalSync(); })
-      .catch(cause => {
+      try {
+        do {
+          notificationRefreshAgain.delete(owner.id);
+          await projectThreadNotifications(db, owner.id, owner.api, directory, () => { signalSync(); pushNotifications(); });
+        } while (notificationRefreshAgain.has(owner.id));
+        notificationFeedback(owner.id, null);
+        if (notificationErrors.delete(owner.id)) signalSync();
+      } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         notificationFeedback(owner.id, message);
         if (notificationErrors.get(owner.id) !== message) { notificationErrors.set(owner.id, message); signalSync(); }
-      })
-      .finally(() => { notificationRefreshes.delete(owner.id); signalSync(); pushNotifications(); });
+      } finally {
+        notificationRefreshes.delete(owner.id);
+        signalSync(); pushNotifications();
+      }
+    })();
     notificationRefreshes.set(owner.id, refresh);
     return refresh;
   })).then(() => {});
@@ -2347,7 +2351,7 @@ const server = Bun.serve<SocketData>({
     if (API.notifications.match(req.method, url.pathname)) {
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
-      await refreshThreadNotifications();
+      await refreshThreadNotifications("read");
       if (url.searchParams.get("history") === "1") {
         const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : null;
         if (before !== null && (!Number.isSafeInteger(before) || before <= 0)) return error("Invalid history cursor");

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ThreadApi, Thread, ThreadSettlement, ThreadQuestion, QuestionEvents } from "pi-orchestrator/api";
 import { ensureSupervisorSchema } from "./database";
 import { idleNotifications, notificationHistory } from "./notifications";
@@ -23,6 +26,93 @@ function apiFor(threads: Thread[], receipts: ThreadSettlement[] = [], pending: T
 }
 function database(): Database { const db = new Database(":memory:"); ensureSupervisorSchema(db); return db; }
 function count(db: Database): number { return (db.query("SELECT count(*) n FROM idle_notifications").get() as { n: number }).n; }
+function changes(db: Database): number { return (db.query("SELECT total_changes() n").get() as { n: number }).n; }
+
+test("quiet fresh and initialized projections mutate no durable rows", async () => {
+  const db = database();
+  const api = apiFor([]);
+  const before = changes(db);
+  await projectThreadNotifications(db, "person", api);
+  expect(changes(db) - before).toBe(0);
+  db.query("INSERT INTO metadata(key,value) VALUES('thread-settlements:person','7'),('thread-completions:person','[]')").run();
+  const initialized = changes(db);
+  await projectThreadNotifications(db, "person", api);
+  expect(changes(db) - initialized).toBe(0);
+  db.close();
+});
+
+test("cursor-only settlement progress changes exactly one durable row", async () => {
+  const db = database();
+  const before = changes(db);
+  await projectThreadNotifications(db, "person", apiFor([thread("agent")], [settlement("agent", 1, { outcome: "cancelled" })]));
+  expect(changes(db) - before).toBe(1);
+  expect(db.query("SELECT key,value FROM metadata WHERE key LIKE 'thread-%'").all()).toEqual([{ key: "thread-settlements:person", value: "1" }]);
+  db.close();
+});
+
+test("deferred completions are write-free while busy and persist removal without cursor progress", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-notification-noop-"));
+  const path = join(directory, "supervisor.sqlite3");
+  let db = new Database(path);
+  try {
+    ensureSupervisorSchema(db);
+    const agent = thread("agent", { state: "running" });
+    const api = apiFor([agent], [settlement("agent")]);
+    const before = changes(db);
+    await projectThreadNotifications(db, "person", api);
+    expect(changes(db) - before).toBe(2);
+    const busyBefore = changes(db);
+    await projectThreadNotifications(db, "person", api);
+    expect(changes(db) - busyBefore).toBe(0);
+    db.close(); db = new Database(path); ensureSupervisorSchema(db);
+    const reopened = changes(db);
+    await projectThreadNotifications(db, "person", api);
+    expect(changes(db) - reopened).toBe(0);
+    agent.metadata = { foreground: false };
+    await projectThreadNotifications(db, "person", api);
+    expect(changes(db) - reopened).toBe(1);
+    expect(db.query("SELECT value FROM metadata WHERE key='thread-completions:person'").get()).toEqual({ value: "[]" });
+    db.close(); db = new Database(path); ensureSupervisorSchema(db);
+    agent.metadata = { foreground: true }; agent.state = "idle";
+    await projectThreadNotifications(db, "person", api);
+    expect(count(db)).toBe(0);
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("pending completion publishes and clears atomically without rewriting its cursor", async () => {
+  const db = database();
+  const agent = thread("agent", { state: "running" });
+  const api = apiFor([agent], [settlement("agent")]);
+  await projectThreadNotifications(db, "person", api);
+  db.exec("CREATE TRIGGER reject_pending BEFORE INSERT ON metadata WHEN NEW.key='thread-completions:person' BEGIN SELECT RAISE(ABORT,'pending write failed'); END");
+  agent.state = "idle";
+  await expect(projectThreadNotifications(db, "person", api)).rejects.toThrow("pending write failed");
+  expect(count(db)).toBe(0);
+  expect(db.query("SELECT count(*) n FROM thread_views").get()).toEqual({ n: 0 });
+  expect(JSON.parse((db.query("SELECT value FROM metadata WHERE key='thread-completions:person'").get() as { value: string }).value)).toHaveLength(1);
+  db.exec("DROP TRIGGER reject_pending");
+  const before = changes(db);
+  await projectThreadNotifications(db, "person", api);
+  expect(changes(db) - before).toBe(4);
+  expect(db.query("SELECT seq,receipt_id FROM idle_notifications").all()).toEqual([{ seq: 1, receipt_id: "person:execution-agent-1" }]);
+  const replay = changes(db);
+  await projectThreadNotifications(db, "person", api);
+  expect(changes(db) - replay).toBe(0);
+  db.close();
+});
+
+test("new completion cursor and notification roll back together on cursor failure", async () => {
+  const db = database();
+  const api = apiFor([thread("agent")], [settlement("agent")]);
+  db.exec("CREATE TRIGGER reject_cursor BEFORE INSERT ON metadata WHEN NEW.key='thread-settlements:person' BEGIN SELECT RAISE(ABORT,'cursor write failed'); END");
+  await expect(projectThreadNotifications(db, "person", api)).rejects.toThrow("cursor write failed");
+  expect(count(db)).toBe(0);
+  expect(db.query("SELECT value FROM metadata WHERE key='thread-settlements:person'").get()).toBeNull();
+  db.exec("DROP TRIGGER reject_cursor");
+  await projectThreadNotifications(db, "person", api);
+  expect(db.query("SELECT seq,receipt_id FROM idle_notifications").all()).toEqual([{ seq: 1, receipt_id: "person:execution-agent-1" }]);
+  db.close();
+});
 
 test("attention from a running background agent publishes before failed settlement retrieval", async () => {
   const db = database();
