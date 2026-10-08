@@ -7,6 +7,7 @@ import { createAssistantMessageEventStream, type AssistantMessage } from "@earen
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { openPiSession } from "../src/threads/pi-session.js";
 import type { PiEvent } from "../src/threads/contracts.js";
+import { nativeModels } from "../src/models.js";
 
 const captured = vi.hoisted(() => ({ session: undefined as AgentSession | undefined, prepare: undefined as ((session: AgentSession) => void) | undefined }));
 vi.mock("@earendil-works/pi-coding-agent", async importOriginal => {
@@ -321,7 +322,15 @@ it("applies validated speed changes to this session's provider requests", async 
   expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "priority" });
   expect(await f.command("set_speed", { speed: "turbo" })).toMatchObject({ success: false, error: "Invalid thread speed: turbo" });
   expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "priority" });
-  expect(await f.command("set_speed", { speed: "ultrafast" })).toMatchObject({ success: false, error: "Ultrafast speed requires OpenAI Codex Astra" });
+  expect(await f.command("set_speed", { speed: "ultrafast" })).toMatchObject({ success: true, data: { speed: "ultrafast" } });
+  expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "ultrafast" });
+  const sol = nativeModels.find(model => model.provider === "openai-codex" && model.id === "gpt-6.1-sol")!;
+  vi.spyOn(f.native.modelRuntime, "getModels").mockReturnValue([...f.native.modelRuntime.getModels(), sol]);
+  f.native.agent.state.model = sol;
+  expect(await f.command("set_speed", { speed: "ultrafast" })).toMatchObject({ success: true, data: { speed: "ultrafast" } });
+  expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "ultrafast" });
+  f.native.agent.state.model = f.native.modelRuntime.getModel("openai-codex", "gpt-6-luna")!;
+  expect(await f.command("set_speed", { speed: "ultrafast" })).toMatchObject({ success: false, error: "Ultrafast speed requires OpenAI Codex Astra or Sol" });
   f.native.agent.state.model = f.native.modelRuntime.getModel("openai-codex", "gpt-6-astra")!;
   expect(await f.command("set_speed", { speed: "ultrafast" })).toMatchObject({ success: true, data: { speed: "ultrafast" } });
   expect(await providerPayload()).toMatchObject({ request: "fixture", service_tier: "ultrafast" });

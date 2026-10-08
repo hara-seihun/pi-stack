@@ -103,21 +103,33 @@ describe("child spawn settings", () => {
   });
 });
 
-describe("Astra ultrafast settings", () => {
-  it.each(["astra", "gpt-6-astra", "openai-codex/gpt-6-astra", "openai-codex-8/gpt-6-astra"])("accepts ultrafast for %s", model => {
-    expect(resolveSpawnSettings({ model, speed: "ultrafast" }, null)).toMatchObject({ ok: true, value: { model: "openai-codex/gpt-6-astra", speed: "ultrafast" } });
+describe("Astra and Sol ultrafast settings", () => {
+  it.each([
+    ["astra", "openai-codex/gpt-6-astra"],
+    ["gpt-6-astra", "openai-codex/gpt-6-astra"],
+    ["openai-codex/gpt-6-astra", "openai-codex/gpt-6-astra"],
+    ["openai-codex-8/gpt-6-astra", "openai-codex/gpt-6-astra"],
+    ["sol", "openai-codex/gpt-6.1-sol"],
+    ["gpt-6.1-sol", "openai-codex/gpt-6.1-sol"],
+    ["openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-sol"],
+    ["openai-codex-8/gpt-6.1-sol", "openai-codex/gpt-6.1-sol"],
+    ["openai-codex/gpt-6-sol", "openai-codex/gpt-6-sol"],
+    ["openai-codex-8/gpt-6-sol", "openai-codex-8/gpt-6-sol"],
+  ])("accepts ultrafast for %s", (model, canonical) => {
+    expect(resolveSpawnSettings({ model, speed: "ultrafast" }, null)).toMatchObject({ ok: true, value: { model: canonical, speed: "ultrafast" } });
   });
 
   it("persists the selected speed, rejects unsupported combinations and resets it on model change", async () => {
     const { root, service } = fixture();
     const thread = value(await service.spawn({ requestId: "ultrafast", cwd: root, settings: { model: "astra", speed: "ultrafast" } }));
     expect(service.get(thread.id)?.settings.speed).toBe("ultrafast");
-    for (const model of ["sol", "luna", "opus", "alternate/gpt-6-astra"]) {
+    for (const model of ["luna", "opus", "alternate/gpt-6-astra", "alternate/gpt-6.1-sol"]) {
       expect(await service.control({ action: "settings", threadId: thread.id, settings: { model, speed: "ultrafast" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
       expect(service.get(thread.id)?.settings).toEqual(thread.settings);
     }
-    expect(value(await service.control({ action: "settings", threadId: thread.id, settings: { model: "sol" } })).settings.speed).toBe("standard");
-    expect(await service.spawn({ requestId: "child", cwd: root, parentId: thread.id, settings: { model: "astra", speed: "ultrafast" } })).toMatchObject({ ok: true, value: { settings: { speed: "ultrafast" } } });
+    expect(value(await service.control({ action: "settings", threadId: thread.id, settings: { model: "sol", speed: "ultrafast" } })).settings).toMatchObject({ model: "openai-codex/gpt-6.1-sol", speed: "ultrafast" });
+    expect(await service.spawn({ requestId: "child", cwd: root, parentId: thread.id, settings: { model: "sol", speed: "ultrafast" } })).toMatchObject({ ok: true, value: { settings: { model: "openai-codex/gpt-6.1-sol", speed: "ultrafast" } } });
+    expect(value(await service.control({ action: "settings", threadId: thread.id, settings: { model: "luna" } })).settings.speed).toBe("standard");
   });
 });
 
