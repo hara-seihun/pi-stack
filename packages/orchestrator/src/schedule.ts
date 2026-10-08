@@ -3,7 +3,7 @@ import { isAbsolute } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "./sqlite.js";
 import type { Admission, SettingsOverrides, ThreadApi, ThreadSettings } from "./threads/contracts.js";
-import { resolveThreadSettings } from "./threads/settings.js";
+import { resolveSpawnSettings } from "./threads/settings.js";
 import { threadHasOutstandingWork } from "./threads/work-state.js";
 
 export type ScheduleState = "active" | "paused";
@@ -52,6 +52,8 @@ export interface ScheduleServiceOptions {
   databasePath: string;
   threads: ThreadApi;
   now?: () => number;
+  /** Owner default applied only when accepting a NEW schedule, never to existing occurrences. */
+  spawnDefaultModel?: () => string | undefined;
 }
 
 type Row = Record<string, any>;
@@ -184,7 +186,7 @@ export class ScheduleService {
     }
     if (input.startAt !== undefined && (!Number.isSafeInteger(input.startAt) || input.startAt < 0)) return bad("invalid_request", "Schedule startAt must be a Unix timestamp in milliseconds");
     if (input.admission !== undefined && input.admission !== "force" && input.admission !== "background") return bad("invalid_request", "Schedule admission must be force or background");
-    const settings = resolveThreadSettings(input.settings);
+    const settings = resolveSpawnSettings(input.settings, null, undefined, input.settings?.model == null ? this.options.spawnDefaultModel?.() : undefined);
     return settings.ok ? good(settings.value) : bad("invalid_request", settings.error.message);
   }
 

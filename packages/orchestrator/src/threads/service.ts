@@ -54,6 +54,8 @@ export interface ThreadServiceOptions {
   workersOnly?: boolean;
   capacity?: import("../agent-capacity.js").AgentCapacity | { mode: "unmanaged" };
   admitNewThread?: (settings: ThreadSettings) => Result<void>;
+  /** Owning person's implicit model for NEW spawns only. Explicit choices and accepted receipts win. */
+  spawnDefaultModel?: () => string | undefined;
   environment?: (thread: Thread) => Record<string, string | undefined>;
   admit?: (thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string) => Promise<Result<ThreadAdmission>>;
   prepareMessage?: (thread: Thread, message: ThreadMessage) => Promise<Result<{ text: string; images?: unknown[] }>>;
@@ -894,7 +896,7 @@ export class ThreadService implements ThreadApi {
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
       if (input.metadata?.mode !== undefined && (!isThreadModeName(input.metadata.mode) || parent && input.metadata.mode !== parent.metadata?.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts, and a child keeps its parent's mode");
-      const settings = resolveSpawnSettings(input.settings, parent, input.metadata?.mode); if (!settings.ok) return settings;
+      const settings = resolveSpawnSettings(input.settings, parent, input.metadata?.mode, input.settings?.model == null ? this.options.spawnDefaultModel?.() : undefined); if (!settings.ok) return settings;
       const available = this.options.admitNewThread?.(settings.value); if (available && !available.ok) return available;
       // Check local receipts first so retries of previously accepted children retain their identity.
       const workerOwner = parent && this.workerOwner?.(parent, input);

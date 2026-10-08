@@ -32,6 +32,7 @@ import { importFleetThreads } from "./threads/import.js";
 import type { Result, SettingsOverrides, SpawnThread, Thread } from "./threads/contracts.js";
 import { ThreadDirectory } from "./threads/directory.js";
 import { admissionFor, callerResolver, hostIdentityConfig, threadCapability, type CallerResolver, type CallerSource } from "./threads/caller.js";
+import { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
 import { resolveThreadSettings } from "./threads/settings.js";
 import type { RunContext } from "./domain.js";
 import { ScheduleService, scheduleHttp } from "./schedule.js";
@@ -84,6 +85,7 @@ export class Daemon {
     this.callers=callerResolver({capability:this.capability,host:hostIdentityConfig()});
     this.threads=new ThreadService({workersOnly:true,databasePath:threadDatabasePath,sessionsDir:join(dataDir,"threads"),capability:this.capability,
       capacity:executionOptions?.capacity??configuredAgentCapacity(),
+      spawnDefaultModel:()=>configuredPersonSpawnModel(),
       admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
       attachSession:this.opener.attachSession,
       recoverSession:this.opener.recoverSession,
@@ -94,7 +96,7 @@ export class Daemon {
         return this.opener.openSession(options,output,exit);
       },
       environment:thread=>this.threadEnvironment(thread),admit:(...args)=>this.fleet.admit(...args)});
-    this.schedules=new ScheduleService({databasePath:threadDatabasePath,threads:this.threads});
+    this.schedules=new ScheduleService({databasePath:threadDatabasePath,threads:this.threads,spawnDefaultModel:()=>configuredPersonSpawnModel()});
     this.threads.subscribe(event=>{if("event" in event)this.fleet.event(event.threadId,event.event);});
     if(!config.modelBrokerUrl){
       this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex"),autoReset:process.env.PI_CODEX_AUTO_RESET==="1"});
@@ -306,6 +308,7 @@ export class Daemon {
       const dataDir=join(dirname(this.ledgerPath),"applications",id);
       service=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),capability:this.capability,
         capacity:this.executionOptions?.capacity??configuredAgentCapacity(),
+        spawnDefaultModel:()=>configuredPersonSpawnModel(),
         admitNewThread:settings=>new ModelAvailabilityStore(modelAvailabilityPath()).admit(settings.model),
         attachSession:this.opener.attachSession,
         recoverSession:this.opener.recoverSession,

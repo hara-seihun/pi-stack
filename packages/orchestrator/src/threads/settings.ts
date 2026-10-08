@@ -4,8 +4,13 @@ import { threadMode } from "./modes.js";
 import { isSpeed, requestedSpeedError } from "./speed.js";
 import { isThinkingLevel, type Result, type SettingsOverrides, type Thread, type ThreadSettings } from "./contracts.js";
 
-export function resolveSpawnSettings(input: SettingsOverrides | undefined, parent: Thread | null, requestedMode?: unknown): Result<ThreadSettings> {
+export function resolveSpawnSettings(input: SettingsOverrides | undefined, parent: Thread | null, requestedMode?: unknown, defaultModel?: string): Result<ThreadSettings> {
   const mode = threadMode(parent ? parent.metadata?.mode : requestedMode);
+  // This is an owner-selected default, never a request-supplied identity or a model migration.
+  // Merge only the model; retain mode thinking/speed and validate the original overrides.
+  if (defaultModel !== undefined && (input === undefined || input && typeof input === "object" && !Array.isArray(input))) {
+    input = { ...input, model: input?.model ?? defaultModel };
+  }
   if (!parent) return mode ? resolveModeSettings(input, mode.conversation.settings) : resolveThreadSettings(input);
   return mode ? resolveModeSettings(input, mode.worker.settings) : resolveThreadSettings(input, { model: "sol", thinkingLevel: "high", speed: "standard" });
 }

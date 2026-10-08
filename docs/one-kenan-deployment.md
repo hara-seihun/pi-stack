@@ -308,3 +308,15 @@ New root generations expose startup `releaseCommit` and `releaseProtocol:1`. The
 Rooms use the existing `pi-remote-supervise` rolling handoff, so active runtime hosts keep running and the replacement supervisor adopts them without replay. The helper installs a room-only launcher drop-in. For an existing direct-Bun room unit, it temporarily sets `KillMode=process`, sends `SIGUSR2` to only the legacy main PID, and waits for a new main PID **and** expected startup health before removing that migration drop-in. Later handoffs keep `KillMode=control-group` for deliberate service shutdown. A failed first handoff retains its migration setting for repair rather than killing active hosts. Ordinary users' units are untouched.
 
 `proof` checks each consumer's live HTTP startup commit, not selected symlinks or service start times. Its output contains only role/unit/revision metadata. Existing general publication receipts cover ordinary supervisors, router and voice; host activation now checks rooms, but receipts still do not imply root/memory were activated.
+
+### Person-scoped implicit execution model
+
+An owner's nonsecret person registry may opt into `environment.PI_THREAD_DEFAULT_MODEL`
+with a catalogue or provider/model selection. Remote, the person's Orchestrator (including
+isolated owners), and new schedules read this owner setting at admission. It replaces
+only an omitted model, including notification/consent inboxes and live workers; explicit
+models, mode thinking/speed, global availability, accepted receipts, existing schedules
+and running executions remain unchanged. Rooms have no personal override. With no opt-in,
+all previous defaults are retained. An unreadable/malformed registry fails admission closed.
+Inbox payloads and request IDs are unchanged, so durable outboxes reconcile using the
+same custody rather than new sends. Updating this setting alone requires no restart.
