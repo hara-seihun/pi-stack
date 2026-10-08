@@ -3,6 +3,7 @@ export const FEATURES = {
   agents: { label: "Agents", coverage: "Agent list opens and accepted launches" },
   attention: { label: "Attention", coverage: "Attention screen opens" },
   machine: { label: "Machine", coverage: "Machine screen opens" },
+  settings: { label: "Settings", coverage: "Settings screen opens" },
   context: { label: "Context inspection", coverage: "Inspector opens" },
   editor: { label: "Browser editor", coverage: "Editor launches" },
   attachment: { label: "Attachments", coverage: "Completed uploads" },

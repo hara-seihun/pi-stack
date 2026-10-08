@@ -34,8 +34,8 @@ function prefixMessage(message: AgentMessage, prefix: string): DeliveryResult<Ag
     }
     case "compactionSummary": case "branchSummary": return { ok: true, value: { ...message, summary: prefix + message.summary, [stamped]: true } as StampedMessage };
     case "bashExecution": return { ok: true, value: { ...message, output: prefix + message.output, [stamped]: true } as StampedMessage };
-    default: return { ok: false, error: { code: "invalid", message: `Unsupported incoming model-message role: ${(message as { role: string }).role}` } };
   }
+  return { ok: false, error: { code: "invalid", message: `Unsupported incoming model-message role: ${(message as { role: string }).role}` } };
 }
 
 function sourceKeys(branch: SessionEntry[]): Map<string, string[]> {

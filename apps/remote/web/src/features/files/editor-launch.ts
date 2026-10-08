@@ -1,5 +1,6 @@
 import { API } from "../../../../server/api";
 import { api } from "../../client";
+import { recordFeatureUsage } from "../../feature-usage";
 
 export type EditorLaunch = { url: string; ticket: string };
 let opened: { popup: Window; user: string; session: string } | null = null;
@@ -48,6 +49,7 @@ export async function openPersonEditor(path: string | null, kind: "file" | "dire
       opened = { popup, ...identity };
       form.submit();
     } else return { ok: false, error: "The editor window was closed" };
+    recordFeatureUsage("editor");
     return { ok: true };
   } catch (cause) { popup?.close(); return { ok: false, error: cause instanceof Error ? cause.message : "Could not open your editor" }; }
 }
