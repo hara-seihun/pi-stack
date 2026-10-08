@@ -26,6 +26,13 @@ function speechLabel(state: SpeechState): string {
 /** The reader: what is being read, play/pause, stop, rate and voice. Hidden until a message is spoken. */
 export function SpeechBar() {
   const state = useSpeech();
+  useEffect(() => {
+    const refresh = () => speech.refreshIdentity();
+    refresh();
+    window.addEventListener("pi-person", refresh);
+    window.addEventListener("pi-auth", refresh);
+    return () => { window.removeEventListener("pi-person", refresh); window.removeEventListener("pi-auth", refresh); speech.stop(); };
+  }, []);
   const open = state.status !== "idle";
   useEffect(() => { if (open) void speech.loadVoices(); }, [open, state.engine]);
   if (!open) return null;

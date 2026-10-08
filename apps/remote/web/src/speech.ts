@@ -194,8 +194,6 @@ class SpeechPlayer {
 }
 
 export const speech = new SpeechPlayer();
-window.addEventListener("pi-person", () => speech.refreshIdentity());
-window.addEventListener("pi-auth", () => speech.refreshIdentity());
 
 export function useSpeech(): SpeechState {
   return useSyncExternalStore(speech.subscribe, speech.snapshot, speech.snapshot);
