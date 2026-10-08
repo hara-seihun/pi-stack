@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -7,6 +7,9 @@ import { AgentCapacityAuthority } from "../src/agent-capacity-authority.js";
 import type { AgentCapacity, AgentExecution, CapacityCustody } from "../src/agent-capacity.js";
 import type { Result } from "../src/threads/contracts.js";
 import { createManagedAgentSession } from "../src/threads/native-session.js";
+import { recoverNativeSessionOwners, type NativeOwnerRecord } from "../src/threads/native-owner-recovery.js";
+import { ThreadCapacityLedger } from "../src/threads/capacity-ledger.js";
+import { openSqlite } from "../src/sqlite.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -219,4 +222,41 @@ it("keeps async close and custody pending until an abort-resistant detached tool
   await fixture.managed.close();
   expect(fixture.nativeDispose).toHaveBeenCalledTimes(1);
   expect(fixture.release).toHaveBeenCalledTimes(1);
+}, 3_000);
+
+it.each<{ label: string; proof: Result<boolean>; active: number }>([
+  { label: "positive native-owner absence", proof: { ok: true, value: true }, active: 0 },
+  { label: "a still-present native owner", proof: { ok: true, value: false }, active: 1 },
+  { label: "an unavailable absence proof", proof: { ok: false, error: { code: "unavailable", message: "fixture absence unknown" } }, active: 1 },
+])("recovers crash custody only on positive absence: $label", async ({ proof, active }) => {
+  const fixture = capacityFixture();
+  const paths = options(fixture.capacity);
+  const owner: NativeOwnerRecord = {
+    threadId: "crashed-native-thread", databasePath: paths.databasePath,
+    unit: "pi-native-01234567.service", cgroup: "/user.slice/fixture-native-owner", bootId: "fixture-boot-id",
+  };
+  const db = openSqlite(paths.databasePath);
+  try {
+    const ledger = new ThreadCapacityLedger(db, fixture.capacity);
+    value(await ledger.acquire(owner.threadId, "crashed-execution", "crashed-command", "command"));
+    ledger.entered(owner.threadId, "crashed-execution");
+  } finally { db.close(); }
+  writeFileSync(join(paths.cwd, "threads.owner.json"), JSON.stringify(owner));
+  const absent = vi.fn(async () => proof);
+  const recovery = await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent });
+  expect(absent).toHaveBeenCalledExactlyOnceWith(owner);
+  expect(recovery).toEqual(proof.ok ? { ok: true, value: undefined } : proof);
+  expect(fixture.authority.status().active).toBe(active);
+  expect(fixture.release).toHaveBeenCalledTimes(active === 0 ? 1 : 0);
+  const reopened = openSqlite(paths.databasePath);
+  try {
+    const ledger = new ThreadCapacityLedger(reopened, fixture.capacity);
+    expect(ledger.current(owner.threadId)).toHaveLength(active);
+    if (active) expect(ledger.current(owner.threadId)[0]).toMatchObject({ state: "held", entered_native: 1 });
+  } finally { reopened.close(); }
+  if (active === 0) {
+    expect(await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent })).toEqual({ ok: true, value: undefined });
+    expect(absent).toHaveBeenCalledTimes(1);
+    expect(fixture.release).toHaveBeenCalledTimes(1);
+  }
 }, 3_000);
