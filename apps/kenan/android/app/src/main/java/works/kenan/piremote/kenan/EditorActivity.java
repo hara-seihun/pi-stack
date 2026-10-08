@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -22,7 +21,6 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.Toast;
 import java.io.ByteArrayInputStream;
@@ -95,14 +93,9 @@ public final class EditorActivity extends Activity {
         }));
         registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED);
         receiverRegistered = true;
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(11, 13, 16));
-        Button close = new Button(this);
-        close.setText("Close editor");
-        close.setOnClickListener(view -> closeEditor(null));
-        root.addView(close, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        editor = new WebView(this);
+        NativeShells.Editor shell = NativeShells.editor(this, () -> closeEditor(null));
+        LinearLayout root = shell.root();
+        editor = shell.web();
         WebSettings settings = editor.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -151,7 +144,6 @@ public final class EditorActivity extends Activity {
                 return true;
             }
         });
-        root.addView(editor, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) -> {
             androidx.core.graphics.Insets bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars()

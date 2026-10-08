@@ -319,6 +319,7 @@ final class KenanOverlay {
     void say(String text, long duration) {
         if (closed || actionOnly) return;
         main.removeCallbacks(clearBubble);
+        if (text.isEmpty()) { scene.words = null; scene.invalidate(); return; }
         scene.words = StaticLayout.Builder.obtain(text, 0, text.length(), scene.textPaint, Math.max(dp(100), Math.round(width() * .75f) - dp(28)))
             .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false).setMaxLines(6)
             .setEllipsize(TextUtils.TruncateAt.END).setLineSpacing(dp(3), 1).build();
@@ -380,6 +381,8 @@ final class KenanOverlay {
     }
     private Button button(String title, Runnable action) {
         Button button = new Button(service); button.setText(title); button.setTextColor(Color.WHITE);
+        button.setBackground(card(0xff354261)); button.setMinHeight(dp(48));
+        button.setPadding(dp(12), dp(8), dp(12), dp(8));
         button.setAllCaps(false); button.setOnClickListener(view -> action.run()); return button;
     }
     private static final class BackControl {
@@ -423,8 +426,20 @@ final class KenanOverlay {
         input = new EditText(service); input.setTextColor(Color.WHITE); input.setHintTextColor(0xffb5bdd1);
         input.setHint("Talk to Kenan…"); input.setTextSize(16); input.setMinLines(2); input.setMaxLines(4);
         input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        input.setBackgroundTintList(android.content.res.ColorStateList.valueOf(ACCENT));
         input.setFilters(new InputFilter[] { new InputFilter.LengthFilter(8000) }); input.setText(draft); panel.addView(input);
-        panel.addView(button("Send", this::send));
+        Button send = button("Send", this::send);
+        EditText composer = input;
+        Runnable readiness = () -> {
+            boolean ready = !composer.getText().toString().trim().isEmpty();
+            send.setEnabled(ready); send.setAlpha(ready ? 1f : .45f);
+        };
+        input.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { readiness.run(); }
+            @Override public void afterTextChanged(android.text.Editable text) {}
+        });
+        readiness.run(); panel.addView(send);
         panelAt = new WindowManager.LayoutParams(-1, -2, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT);
         panelAt.gravity = Gravity.BOTTOM;
