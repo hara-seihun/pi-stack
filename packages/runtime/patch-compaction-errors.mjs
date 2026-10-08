@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -67,14 +67,11 @@ export function patchContextErrors(source) {
 
 export function patchCompactionErrorCopies(nodeModules) {
   const base = join(nodeModules, "@earendil-works/pi-coding-agent/dist");
-  const chunks = join(base, "bundle/chunks");
-  const bundled = readdirSync(chunks).filter(name => name.endsWith(".js")).map(name => join(chunks, name));
-  for (const [file, marker, patch] of [
-    ["core/agent-session.js", "async _runAutoCompaction(", patchCompactionErrors],
-    ["core/extensions/runner.js", "async emitContext(messages)", patchContextErrors],
+  for (const [file, patch] of [
+    ["core/agent-session.js", patchCompactionErrors],
+    ["core/extensions/runner.js", patchContextErrors],
   ]) {
-    const paths = [join(base, file), ...bundled.filter(path => readFileSync(path, "utf8").includes(marker))];
-    if (paths.length !== 2) throw new Error(`Expected two Pi failure consumers for ${file}, found ${paths.length}`);
+    const paths = [join(base, file)];
     for (const path of paths) {
       const source = readFileSync(path, "utf8"), patched = patch(source);
       if (source !== patched) writeFileSync(path, patched);

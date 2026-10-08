@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -147,7 +147,6 @@ function patchHarnessCollector(source) {
 
 export function patchBashSpillCopies(nodeModules) {
   const base = join(nodeModules, "@earendil-works/pi-coding-agent/dist");
-  const sdk = new Map();
   const changes = [
     ["core/bash-executor.js", patchExecutor],
     ["core/tools/output-accumulator.js", patchAccumulator],
@@ -162,51 +161,12 @@ export function patchBashSpillCopies(nodeModules) {
     const source = readFileSync(path, "utf8");
     let patched = source.includes(MARKER) ? source : MARKER + patch(source);
     if (name === "core/bash-executor.js") patched = patchExecutorTail(patched);
-    sdk.set(name, patched);
     pending.set(path, patched);
   }
   for (const [name, patch] of [["tools/bash.js", patchHarnessTool], ["utils/shell-output.js", patchHarnessCollector], ["messages.js", patchMessages]]) {
     const path = join(nodeModules, "@earendil-works/pi-agent-core/dist/harness", name);
     const source = readFileSync(path, "utf8");
     pending.set(path, source.includes(MARKER) ? source : MARKER + patch(source));
-  }
-  const chunks = join(base, "bundle/chunks");
-  const bundles = readdirSync(chunks).filter(name => name.endsWith(".js"))
-    .map(name => join(chunks, name))
-    .filter(path => readFileSync(path, "utf8").includes("async function executeBashWithOperations("));
-  if (bundles.length !== 1) throw new Error("Pinned Pi bundled bash executor not found uniquely");
-  for (const path of bundles) {
-    let source = readFileSync(path, "utf8");
-    const executor = sdk.get("core/bash-executor.js");
-    const executorSource = executor.slice(executor.indexOf("export async function executeBashWithOperations"), executor.indexOf("//# sourceMappingURL"))
-      .replace("export async function", "async function");
-    if (source.includes(MARKER)) {
-      pending.set(path, cut(source, "async function executeBashWithOperations(", 'import*as os5 from"node:os";', executorSource));
-      continue;
-    }
-    const accumulator = sdk.get("core/tools/output-accumulator.js");
-    const classSource = accumulator.slice(accumulator.indexOf("export class OutputAccumulator"), accumulator.indexOf("//# sourceMappingURL"))
-      .replace("export class OutputAccumulator", "var OutputAccumulator = class").replaceAll("truncateTail(", "truncateTail2(")
-      .replaceAll("DEFAULT_MAX_LINES", "2000").replaceAll("DEFAULT_MAX_BYTES", "51200");
-    source = cut(source, "function defaultTempFilePath(prefix)", "function byteLength(text)");
-    source = cut(source, "var OutputAccumulator=class", 'import*as os4 from"node:os";', classSource + ";");
-    source = cut(source, "async function executeBashWithOperations(", 'import*as os5 from"node:os";', executorSource);
-    source = replace(source, "If truncated, full output is saved to a temp file.", "Truncated output is discarded; shell output is kept in memory only.", 2);
-    source = replace(source, "spill:!0", "spill:!1", 2);
-    source = replace(source, ",fullOutputPath:view.spillPath", "");
-    source = replace(source, ",fullOutputPath:capture.spillPath", "");
-    source = replace(source, ". Full output: ${capture.spillPath}", ". Output truncated", 3);
-    source = replace(source, ',...output.spillPath===void 0?{}:{fullOutputPath:output.spillPath}', "");
-    source = replace(source, "new OutputAccumulator({tempFilePrefix:config.tempFilePrefix})", "new OutputAccumulator");
-    source = replace(source, "output.snapshot({persistIfTruncated:!0})", "output.snapshot()", 2);
-    source = replace(source, "await output.closeTempFile(),", "");
-    source = replace(source, ",fullOutputPath:snapshot.fullOutputPath", "", 2);
-    source = replace(source, ". Full output: ${snapshot.fullOutputPath}", ". Output truncated", 3);
-    source = replace(source, ',tempFilePrefix:"pi-bash"', "");
-    source = replace(source, ',fullOutputPath:result.fullOutputPath', "");
-    source = replace(source, `msg.truncated&&msg.fullOutputPath&&(text+=\`\n\n[Output truncated. Full output: \${msg.fullOutputPath}]\`)`, 'msg.truncated&&(text+="\\n\\n[Output truncated]")', 2);
-    source = replace(source, `(this.truncationResult?.truncated||contextTruncation.truncated)&&this.fullOutputPath&&statusParts.push(theme.fg("warning",\`Output truncated. Full output: \${this.fullOutputPath}\`))`, '(this.truncationResult?.truncated||contextTruncation.truncated)&&statusParts.push(theme.fg("warning","Output truncated"))');
-    pending.set(path, MARKER + source);
   }
   for (const [path, source] of pending) {
     if (readFileSync(path, "utf8") !== source) writeFileSync(path, source);

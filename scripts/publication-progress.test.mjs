@@ -159,18 +159,7 @@ function repairFixture(t, status = "launching") {
   };
   writeJson(repairPath, repair);
   const bin = makeCommandStubs(root);
-  const guard = join(root, "capacity-fixture.mjs");
-  writeFileSync(guard, `import { writeFileSync } from 'node:fs';
-export async function requireStandaloneAgent(options) {
-  writeFileSync(options.recordPath, JSON.stringify({ agentId: options.agentId, executionId: options.executionId, state: 'held' }));
-  return { recordPath: options.recordPath };
-}
-export async function settleStandaloneAgent(agent) { writeFileSync(agent.recordPath, JSON.stringify({ state: 'released' })); }
-export function standaloneRecordPath() { throw new Error('Repair must use its durable explicit capacity path'); }
-`);
   const environment = {
-    PI_STACK_RUNTIME_DEST: fileURLToPath(new URL("../packages/runtime", import.meta.url)),
-    PI_STACK_STANDALONE_AGENT_MODULE: guard,
     SYSTEMCTL_LOG: join(root, "systemctl.log"),
     AGENT_WORKSPACE_LOG: join(root, "agent-workspace.log"),
     STUB_WORKSPACE: workspace,

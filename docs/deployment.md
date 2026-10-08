@@ -62,7 +62,7 @@ Focused checks:
 node --test scripts/publication-adoption.test.mjs scripts/publication-config.test.mjs scripts/publication-roots.test.mjs scripts/publication-proof.test.mjs scripts/publication.test.mjs scripts/publication-gate.test.mjs scripts/publication-source.test.mjs scripts/publication-meetings.test.mjs scripts/publication-progress.test.mjs
 ```
 
-Publication fixtures never acquire capacity from the host's live authority: Orchestrator setup removes inherited capacity settings and points at a missing manifest in its temporary home. Missing-configuration tests select their own absent absolute manifest. Browser-doctor preflight tests bundle the source-owned standalone guard into their fixture, so they need no generated Orchestrator `dist`. Host-deployment fixtures provide an explicit synthetic readiness receipt and exercise both initialized and uninitialized gates.
+Publication fixtures never acquire capacity from the host's live authority: Orchestrator setup removes inherited capacity settings and points at a missing manifest in its temporary home. Missing-configuration tests select their own absent absolute manifest. Browser-doctor preflight fixtures use an explicit unmanaged test owner and never call the host's live capacity authority. Host-deployment fixtures provide an explicit synthetic readiness receipt and exercise both initialized and uninitialized gates.
 
 ## Release checkout ownership
 

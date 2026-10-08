@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,10 +22,7 @@ export function patchCodexServiceRecovery(source) {
 
 export function patchCodexServiceTransports(nodeModules) {
   const sdk = join(nodeModules, "@earendil-works/pi-ai/dist/api/openai-codex-responses.js");
-  const chunks = join(nodeModules, "@earendil-works/pi-coding-agent/dist/bundle/chunks");
-  const bundles = readdirSync(chunks).filter(name => /^openai-codex-responses-[^.]+\.js$/u.test(name));
-  if (bundles.length !== 1) throw new Error(`Expected one bundled Codex provider, found ${bundles.length}`);
-  for (const path of [sdk, ...bundles.map(name => join(chunks, name))]) {
+  for (const path of [sdk]) {
     const source = readFileSync(path, "utf8");
     const patched = patchCodexServiceRecovery(source);
     if (patched !== source) writeFileSync(path, patched);
