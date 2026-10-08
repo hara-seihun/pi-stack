@@ -88,7 +88,9 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   await until(() => child.service.get("child")?.metadata?.archived === true);
   expect(await parent.service.agentWait({ requestId: "wait-closed-child", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).toMatchObject({ ok: false, error: { code: "conflict" } });
   unwrap(await child.service.control({ threadId: "child", action: "reopen" }));
-  expect(unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).waitingOnAgents).toBeUndefined();
+  const arrived = unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] }));
+  expect(arrived.waitingOnAgents).toBeUndefined();
+  expect(arrived.waitRegistration).toMatchObject({ status: "already_arrived", settlement: { threadId: "child", outcome: "complete" } });
 });
 
 it.each([
@@ -120,14 +122,131 @@ it.each([
     expect(f.service.pending("self")).toHaveLength(0);
   }
   release();
-  expect(unwrap(await registering).waitingOnAgents).toBeUndefined();
-  expect(unwrap(await f.service.agentWait(request)).waitingOnAgents).toBeUndefined();
+  const result = unwrap(await registering);
+  expect(result.waitingOnAgents).toBeUndefined();
+  expect(result.waitRegistration).toEqual({ status: "resumed", messageIds: ["human"] });
+  expect(unwrap(await f.service.agentWait(request)).waitRegistration).toEqual(result.waitRegistration);
   expect(f.service.get("self")?.metadata?.agentWait).toBeUndefined();
   if (!completed) expect(f.service.pending("self")).toMatchObject([{ id: "human", source: "explicit" }]);
   await boundary(); unwrap(await f.service.close());
   const next = fixture(f.root);
   expect(next.service.get("self")?.waitingOnAgents).toBeUndefined();
-  expect(unwrap(await next.service.agentWait(request)).waitingOnAgents).toBeUndefined();
+  expect(unwrap(await next.service.agentWait(request)).waitRegistration).toEqual(result.waitRegistration);
+});
+
+it.each(["queued", "running", "waiting"])("historical assignment results and parked notifications cannot swallow a %s peer wait", async state => {
+  const parent = fixture(), first = fixture(undefined, { workersOnly: true });
+  let directory = new ThreadDirectory({ id: "person", api: parent.service }, [{ id: "fleet", api: first.service }]);
+  parent.service.setDirectory(directory); first.service.setDirectory(directory);
+  await spawn(parent, "parent"); unwrap(await first.service.start());
+  unwrap(await first.service.spawn({ requestId: "assignment-one", id: "child", parentId: "parent", cwd: first.root, message: "First assignment" }));
+  unwrap(await first.service.control({ threadId: "child", action: "placement", foreground: true }));
+  await until(() => first.sessions[0]?.commands.some(c => c.type === "prompt") === true);
+  first.sessions[0]!.settle(); await until(() => first.service.latestSettlement("child")?.outcome === "complete");
+  await until(() => parent.service.pending("parent").length === 1);
+  const historical = first.service.latestSettlement("child")!;
+  expect(parent.service.pending("parent")[0]).toMatchObject({ source: "notification", senderId: "child", landedAt: null });
+  await boundary(); unwrap(await first.service.close());
+  const next = fixture(first.root, { workersOnly: true });
+  directory = new ThreadDirectory({ id: "person", api: parent.service }, [{ id: "fleet", api: next.service }]);
+  parent.service.setDirectory(directory); next.service.setDirectory(directory);
+  unwrap(await next.service.send({ requestId: "assignment-two", threadId: "child", senderId: "parent", text: "Second assignment" }));
+  if (state !== "queued") {
+    unwrap(await next.service.start()); await until(() => next.sessions[0]?.commands.some(c => c.type === "prompt") === true);
+    if (state === "waiting") {
+      unwrap(await next.service.agentWait({ requestId: "child-job", threadId: "child", action: "set", kind: "job", jobId: "current-job", reason: "Finish second assignment" }));
+      next.sessions[0]!.settle(); await until(() => next.service.latestSettlement("child")?.assignmentPending === true);
+    }
+  }
+  expect(unwrap(await directory.await({ parentId: "parent", threadIds: ["child"], timeoutMs: 0 })).settlement?.seq).toBe(historical.seq);
+  const request = { requestId: "current-wait", threadId: "parent", action: "set" as const, kind: "agents" as const, threadIds: ["child"], reason: "Second assignment result" };
+  const waiting = unwrap(await parent.service.agentWait(request));
+  expect(waiting).toMatchObject({ waitRegistration: { status: "registered" }, dependencies: ["child"], metadata: { agentWait: { kind: "agents", threadIds: ["child"] } } });
+  expect(waiting.waitRegistration).toEqual({ status: "registered", wait: waiting.waitingOnAgents });
+  expect(unwrap(await directory.await({ parentId: "parent", threadIds: ["child"], timeoutMs: 0, currentAssignment: true })).settlement).toBeNull();
+  await boundary(); unwrap(await parent.service.close());
+  const recovered = fixture(parent.root);
+  const retried = unwrap(await recovered.service.agentWait(request));
+  expect(retried.waitRegistration).toEqual(waiting.waitRegistration);
+  expect(retried.waitingOnAgents).toEqual(waiting.waitingOnAgents);
+  expect(retried.dependencies).toEqual(["child"]);
+});
+
+it.each([false, true])("delayed historical notifications preserve a current peer wait (cross-owner=%s)", async crossOwner => {
+  const parent = fixture(), peer = crossOwner ? fixture(undefined, { workersOnly: true }) : parent;
+  const directory = new ThreadDirectory({ id: "person", api: parent.service }, crossOwner ? [{ id: "fleet", api: peer.service }] : []);
+  parent.service.setDirectory(directory); peer.service.setDirectory(directory);
+  await spawn(parent, "parent"); await spawn(peer, "peer");
+  unwrap(await peer.service.send({ requestId: "first", threadId: "peer", text: "First assignment" }));
+  unwrap(await peer.service.start()); await until(() => peer.sessions[0]?.commands.some(c => c.workId === "first") === true);
+  peer.sessions[0]!.settle(); await until(() => peer.service.latestSettlement("peer")?.workId === "first");
+  const historical = peer.service.latestSettlement("peer")!;
+  unwrap(await peer.service.send({ requestId: "second", threadId: "peer", text: "Second assignment" }));
+  await until(() => peer.sessions[0]?.commands.some(c => c.workId === "second") === true);
+  const request = { requestId: "wait", threadId: "parent", action: "set" as const, kind: "agents" as const, threadIds: ["peer"], reason: "Second result" };
+  const registered = unwrap(await parent.service.agentWait(request));
+  const staleId = `thread-result:${historical.executionId}:parent`;
+  const notification = { requestId: staleId, threadId: "parent", senderId: "peer", source: "notification" as const, text: "Delayed first result" };
+  unwrap(await parent.service.send(notification));
+  expect(parent.service.get("parent")?.waitingOnAgents).toEqual(registered.waitingOnAgents);
+  expect(parent.service.pending("parent")).toContainEqual(expect.objectContaining({ id: staleId }));
+  expect(unwrap(await parent.service.agentWait(request)).waitRegistration).toEqual(registered.waitRegistration);
+  peer.sessions[0]!.settle(); await until(() => peer.service.latestSettlement("peer")?.workId === "second");
+  await until(() => parent.service.get("parent")?.waitingOnAgents === undefined);
+  const current = peer.service.latestSettlement("peer")!;
+  expect(parent.service.pending("parent")).toContainEqual(expect.objectContaining({ id: `thread-result:${current.executionId}:parent` }));
+});
+
+it("reports the latest completed assignment and new input without terminating either path", async () => {
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "child");
+  unwrap(await f.service.send({ requestId: "first", threadId: "child", text: "First" }));
+  unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(c => c.workId === "first") === true);
+  f.sessions[0]!.settle(); await until(() => f.service.latestSettlement("child")?.workId === "first");
+  unwrap(await f.service.send({ requestId: "second", threadId: "child", text: "Second" }));
+  await until(() => f.sessions[0]?.commands.some(c => c.workId === "second") === true);
+  f.sessions[0]!.settle(); await until(() => f.service.latestSettlement("child")?.workId === "second");
+  const tools = threadTools({ threadId: "self", cwd: f.root, sessionFile: "none", args: [], env: {}, threads: f.service });
+  const wait = tools.find(t => t.name === "thread_wait")!;
+  const execute = (id: string, input: unknown) => wait.execute(id, input as never, undefined, undefined, {} as never);
+  const arrived = await execute("arrived", { action: "set", kind: "agents", threadIds: ["child"], reason: "Result" });
+  expect(arrived).toMatchObject({ details: { ok: true, value: { waitRegistration: { status: "already_arrived", settlement: { workId: "second" } } } } });
+  expect(arrived).not.toHaveProperty("terminate");
+  unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "Next instruction" }));
+  const resumed = await execute("resumed", { action: "set", kind: "job", jobId: "job", reason: "Result" });
+  expect(resumed).toMatchObject({ details: { ok: true, value: { waitRegistration: { status: "resumed", messageIds: ["human"] } } } });
+  expect(resumed).not.toHaveProperty("terminate");
+});
+
+it("withdrawn unlanded input cannot swallow a wait during validation", async () => {
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "child");
+  const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
+  let release!: () => void, entered = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(directory, "await").mockImplementationOnce(async input => {
+    const result = f.service.await(input); entered = true; await gate; return result;
+  });
+  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], reason: "Child result" });
+  await until(() => entered);
+  unwrap(await f.service.send({ requestId: "withdrawn", threadId: "self", text: "Never mind" }));
+  unwrap(await f.service.control({ threadId: "self", action: "cancelMessage", messageId: "withdrawn" }));
+  release();
+  expect(unwrap(await registering)).toMatchObject({ waitRegistration: { status: "registered" }, metadata: { agentWait: { reason: "Child result" } } });
+});
+
+it("rejects a competing registration without overwriting accepted intent", async () => {
+  const f = fixture(); await spawn(f, "self"); await spawn(f, "child");
+  const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
+  let release!: () => void, entered = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(directory, "await").mockImplementationOnce(async input => {
+    const result = f.service.await(input); entered = true; await gate; return result;
+  });
+  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], reason: "Child result" });
+  await until(() => entered);
+  expect(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  release();
+  expect(unwrap(await registering)).toMatchObject({ waitRegistration: { status: "registered" }, metadata: { agentWait: { reason: "Child result" } } });
+  expect(unwrap(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" }))).toMatchObject({ waitRegistration: { status: "cleared" }, dependencies: [] });
 });
 
 it.each([
@@ -141,6 +260,7 @@ it.each([
   unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "New instruction" }));
   const result = unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", reason: "Dependency", ...dependency }));
   expect(result.waitingOnAgents).toBeUndefined();
+  expect(result.waitRegistration).toEqual({ status: "resumed", messageIds: ["human"] });
   expect(f.service.pending("self")).toMatchObject([{ id: "human" }]);
   expect(f.sessions).toHaveLength(0);
 });
