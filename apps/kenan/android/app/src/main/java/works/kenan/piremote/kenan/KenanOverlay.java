@@ -47,7 +47,7 @@ import java.util.UUID;
 import java.util.function.Function;
 import org.json.JSONObject;
 
-/** All windows and timers are owned by one accessibility-service lifetime. */
+/** A chat scope or a finite phone-action scope owns every window and callback. */
 final class KenanOverlay {
     private static final int CARD = 0xff242b40;
     private static final int ACCENT = 0xffb8c8ff;
@@ -70,18 +70,23 @@ final class KenanOverlay {
     private String foregroundPackage;
     private NativeState.OverlayAnimation state = NativeState.OverlayAnimation.IDLE;
     private ValueAnimator flight;
-    private boolean visible, closed, dragging, pressed;
-    private OverlayPolicy.Mode mode = OverlayPolicy.Mode.HIDDEN;
-    private OverlayPolicy.Dismissal overDismiss;
-    private WriteBubblePosition.Bounds lastBounds;
+    private final boolean actionOnly;
+    private final DotTouch touch = new DotTouch();
+    private boolean closed, dragging, pressed, overDismiss;
+    private OverlayPosition.Bounds lastBounds;
     private int gestures, captures;
     private final Runnable home = this::goHome;
     private final Runnable clearBubble;
     private final Runnable clearHighlight;
 
-    KenanOverlay(AccessibilityService service) { this(service, (WindowManager) service.getSystemService(Context.WINDOW_SERVICE)); }
-    KenanOverlay(AccessibilityService service, WindowManager windows) {
+    KenanOverlay(AccessibilityService service) { this(service, false); }
+    KenanOverlay(AccessibilityService service, boolean actionOnly) {
+        this(service, (WindowManager) service.getSystemService(Context.WINDOW_SERVICE), actionOnly);
+    }
+    KenanOverlay(AccessibilityService service, WindowManager windows) { this(service, windows, false); }
+    KenanOverlay(AccessibilityService service, WindowManager windows, boolean actionOnly) {
         this.service = service;
+        this.actionOnly = actionOnly;
         this.windows = windows;
         scene = new Scene(); dot = new Dot();
         clearBubble = () -> { scene.words = null; scene.invalidate(); };
@@ -90,10 +95,10 @@ final class KenanOverlay {
             WindowManager.LayoutParams.MATCH_PARENT, true);
         dotAt = placement(dp(50), dp(50), false);
         dotAt.x = homeX(); dotAt.y = homeY();
-        visible = isVisible(service);
         dot.setVisibility(View.INVISIBLE);
         dot.setContentDescription("Kenan. Tap to chat, drag to move.");
-        dot.setOnTouchListener(new DotTouch());
+        dot.setOnTouchListener(actionOnly ? null : touch);
+        if (actionOnly) dotAt.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         if (!add(scene, canvasAt)) return;
         add(dot, dotAt);
     }
@@ -108,7 +113,6 @@ final class KenanOverlay {
     private void unavailable(RuntimeException failure) {
         Log.w("KenanOverlay", "Overlay window unavailable", failure);
         close();
-        if (writer() != null) writer().overlayUnavailable();
     }
     private boolean add(View view, WindowManager.LayoutParams at) {
         try { windows.addView(view, at); ownedWindows.add(view); return true; }
@@ -126,13 +130,11 @@ final class KenanOverlay {
         try { windows.removeViewImmediate(view); }
         catch (IllegalArgumentException | SecurityException failure) { Log.w("KenanOverlay", "Window already detached", failure); }
     }
-    void foreground(String name) { foregroundPackage = name; }
-    private WriteAccessibilityService writer() { return SharedOverlay.writer(); }
-    private boolean micVisible() { return writer() != null && writer().visible(); }
-    private boolean kenanVisible() { return SharedOverlay.hasPhone() && visible; }
+    void foreground(String name) { if (!closed) foregroundPackage = name; }
+    private boolean kenanVisible() { return !closed && !actionOnly && isVisible(service); }
     void refreshGeometry() {
         if (closed) return;
-        WriteBubblePosition.Bounds previous = lastBounds;
+        OverlayPosition.Bounds previous = lastBounds;
         lastBounds = readAvailable();
         if (!dragging && !lastBounds.equals(previous)) {
             if (flight != null) flight.cancel();
@@ -143,25 +145,12 @@ final class KenanOverlay {
     private String renderedDot;
     void refresh() {
         if (closed) return;
-        boolean wasVisible = visible;
-        OverlayPolicy.Mode previousMode = mode;
-        visible = isVisible(service);
-        OverlayPolicy.Mode next = OverlayPolicy.mode(kenanVisible(), micVisible());
-        if (mode != next) {
-            mode = next;
-            if (flight != null) flight.cancel();
-            main.removeCallbacks(home);
-            scene.tip = false;
-        }
-        dot.setContentDescription(mode == OverlayPolicy.Mode.MIC ? writer().description() : "Kenan. Tap to chat, drag to move.");
-        dot.setAlpha(mode == OverlayPolicy.Mode.MIC && !writer().busy() && !pressed ? .6f : 1f);
-        if (!kenanVisible()) { closePanel(); scene.words = null; }
+        if (!actionOnly && !isVisible(service)) { close(); return; }
         restoreVisibility();
-        String visual = mode + ":" + pressed + ":" + (mode == OverlayPolicy.Mode.MIC ? writer().visualState() : state);
+        String visual = pressed + ":" + state;
         if (!visual.equals(renderedDot)) { renderedDot = visual; dot.invalidate(); }
-        if (wasVisible != visible || previousMode != mode) scene.invalidate();
     }
-    void haptic() { dot.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); }
+    void haptic() { if (!closed) dot.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); }
 
     PhoneResult command(String command, JSONObject args, Function<String, Rect> resolve) throws Exception {
         if (closed) return PhoneResult.error("unavailable", "Kenan overlay is not running");
@@ -170,7 +159,7 @@ final class KenanOverlay {
         return switch (parsed.get()) {
             case SHOW, HIDE -> {
                 setVisible(service, command.equals("overlay.show"));
-                yield PhoneResult.success(new JSONObject().put("visible", visible));
+                yield PhoneResult.success(new JSONObject().put("visible", isVisible(service)));
             }
             case CLEAR -> {
                 main.removeCallbacks(clearBubble); main.removeCallbacks(clearHighlight); main.removeCallbacks(home);
@@ -225,11 +214,11 @@ final class KenanOverlay {
     private int dp(float value) { return Math.round(value * service.getResources().getDisplayMetrics().density); }
     private int width() { return service.getResources().getDisplayMetrics().widthPixels; }
     private int height() { return service.getResources().getDisplayMetrics().heightPixels; }
-    private WriteBubblePosition.Bounds available() {
+    private OverlayPosition.Bounds available() {
         if (lastBounds == null) lastBounds = readAvailable();
         return lastBounds;
     }
-    private WriteBubblePosition.Bounds readAvailable() {
+    private OverlayPosition.Bounds readAvailable() {
         int left = dp(6), top = dp(30), right = width() - dp(6), bottom = height() - dp(30);
         if (Build.VERSION.SDK_INT >= 30) {
             WindowMetrics metrics = windows.getCurrentWindowMetrics();
@@ -248,27 +237,28 @@ final class KenanOverlay {
             if (keyboard.top > top + dp(50) && keyboard.bottom >= bottom - dp(80))
                 bottom = Math.min(bottom, keyboard.top - dp(8));
         }
-        return new WriteBubblePosition.Bounds(left, top, Math.max(left + dp(50), right), Math.max(top + dp(50), bottom));
+        return new OverlayPosition.Bounds(left, top, Math.max(left + dp(50), right), Math.max(top + dp(50), bottom));
     }
     private int homeX() {
-        WriteBubblePosition.Bounds bounds = available();
+        OverlayPosition.Bounds bounds = available();
         return PhoneControlService.settings(service).getBoolean("overlayRight", true) ? bounds.right() - dp(50) : bounds.left();
     }
-    private int homeY() { return WriteBubblePosition.restoreY(PhoneControlService.settings(service).getFloat("overlayY", .42f), available(), dp(50)); }
-    private void goHome() { if (!closed && !dragging && !micVisible()) { scene.tip = false; fly(homeX(), homeY(), 320); } }
+    private int homeY() { return OverlayPosition.restoreY(PhoneControlService.settings(service).getFloat("overlayY", .42f), available(), dp(50)); }
+    private void goHome() { if (!closed && !actionOnly && !dragging) { scene.tip = false; fly(homeX(), homeY(), 320); } }
     private void activity() {
         if (closed) return;
         main.removeCallbacks(home);
-        if (state == NativeState.OverlayAnimation.IDLE && gestures == 0 && !micVisible()) main.postDelayed(home, 6000);
+        if (!actionOnly && state == NativeState.OverlayAnimation.IDLE && gestures == 0) main.postDelayed(home, 6000);
     }
     private void position(int x, int y) {
         if (closed) return;
-        WriteBubblePosition.Point at = WriteBubblePosition.clamp(x, y, available(), dp(50));
+        OverlayPosition.Point at = OverlayPosition.clamp(x, y, available(), dp(50));
         if (dotAt.x == at.x() && dotAt.y == at.y()) return;
         dotAt.x = at.x(); dotAt.y = at.y();
         update(dot, dotAt); scene.invalidate();
     }
     private void fly(int x, int y, long duration) {
+        if (closed) return;
         if (flight != null) flight.cancel();
         if (duration == 0) { position(x, y); return; }
         int fromX = dotAt.x, fromY = dotAt.y;
@@ -282,12 +272,14 @@ final class KenanOverlay {
         flight.start();
     }
     void moveToTarget(float x, float y, long duration) {
+        if (closed) return;
         scene.tipX = x; scene.tipY = y; scene.tip = true;
         int offset = x > width() / 2f ? -dp(58) : dp(10);
-        if (!micVisible()) fly(Math.round(x) + offset, Math.round(y) - dp(58), duration);
+        fly(Math.round(x) + offset, Math.round(y) - dp(58), duration);
         activity();
     }
     void highlight(Rect bounds, float x, float y, long duration) {
+        if (closed) return;
         main.removeCallbacks(clearHighlight);
         scene.highlight = bounds == null ? new RectF(x - dp(18), y - dp(18), x + dp(18), y + dp(18)) : new RectF(bounds);
         scene.pointHighlight = bounds == null; scene.invalidate();
@@ -295,6 +287,7 @@ final class KenanOverlay {
     }
     void highlight(Rect bounds) { highlight(bounds, bounds.exactCenterX(), bounds.exactCenterY(), 1500); moveToTarget(bounds.exactCenterX(), bounds.exactCenterY(), 0); }
     void gesture(float x, float y, float x2, float y2, long duration, boolean tap) {
+        if (closed) return;
         closePanel(); gestures++; touchability(); dot.invalidate(); main.removeCallbacks(home);
         scene.gestureX = x; scene.gestureY = y; scene.endX = x2; scene.endY = y2;
         scene.gestureStart = SystemClock.uptimeMillis(); scene.gestureDuration = duration;
@@ -303,7 +296,7 @@ final class KenanOverlay {
     void gestureFinished() { if (closed) return; if (gestures > 0) gestures--; touchability(); dot.invalidate(); activity(); }
     private void touchability() {
         if (closed) return;
-        if (gestures > 0) dotAt.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        if (actionOnly || gestures > 0) dotAt.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         else dotAt.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         if (!update(dot, dotAt)) return;
         if (panel != null) {
@@ -324,6 +317,7 @@ final class KenanOverlay {
         reconcile.run();
     }
     void say(String text, long duration) {
+        if (closed || actionOnly) return;
         main.removeCallbacks(clearBubble);
         scene.words = StaticLayout.Builder.obtain(text, 0, text.length(), scene.textPaint, Math.max(dp(100), Math.round(width() * .75f) - dp(28)))
             .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false).setMaxLines(6)
@@ -356,10 +350,12 @@ final class KenanOverlay {
         if (uncertain) say("Connection lost. Your message may not have reached Kenan.", 5000);
     }
     void resetSession() {
+        if (closed || actionOnly) return;
         closePanel(); main.removeCallbacksAndMessages(null); pending.clear(); transcript.clear(); threadId = null; draft = "";
         scene.words = null; scene.highlight = null; scene.tip = false; scene.gestureUntil = 0; state("idle"); goHome();
     }
     private void send() {
+        if (closed || actionOnly || input == null) return;
         String text = input.getText().toString().trim();
         if (text.isEmpty()) return;
         String id = UUID.randomUUID().toString();
@@ -435,12 +431,14 @@ final class KenanOverlay {
         panelAt.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE;
         if (!add(panel, panelAt)) return;
         input.requestFocus();
-        input.post(() -> {
-            if (input == null) return;
+        EditText openedInput = input;
+        LinearLayout openedPanel = panel;
+        main.post(() -> {
+            if (closed || input != openedInput || panel != openedPanel) return;
             if (Build.VERSION.SDK_INT >= 33) backControl = new BackControl(panel, this::closePanel);
             ((InputMethodManager) service.getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
         });
-        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+        main.post(() -> { if (!closed && panel == openedPanel) scroll.fullScroll(View.FOCUS_DOWN); });
     }
     void closePanel() {
         if (panel == null) return;
@@ -449,48 +447,44 @@ final class KenanOverlay {
         ((InputMethodManager) service.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(panel.getWindowToken(), 0);
         remove(panel); panel = null; panelAt = null; input = null; history = null;
     }
-    void suspendCapture() { captures++; restoreVisibility(); }
-    void restoreCapture() { if (captures > 0) captures--; restoreVisibility(); }
+    void suspendCapture() { if (!closed) { captures++; restoreVisibility(); } }
+    void restoreCapture() { if (!closed) { if (captures > 0) captures--; restoreVisibility(); } }
     private void restoreVisibility() {
         if (closed) return;
         scene.setVisibility(captures > 0 ? View.INVISIBLE : View.VISIBLE);
-        dot.setVisibility(mode != OverlayPolicy.Mode.HIDDEN && captures == 0 ? View.VISIBLE : View.INVISIBLE);
+        dot.setVisibility(captures == 0 ? View.VISIBLE : View.INVISIBLE);
         if (panel != null) panel.setVisibility(captures > 0 ? View.INVISIBLE : View.VISIBLE);
     }
     void close() {
         if (closed) return;
         closePanel(); closed = true; main.removeCallbacksAndMessages(null); pending.clear();
-        if (flight != null) flight.cancel(); remove(dot); remove(scene);
+        touch.cancel(); dot.setOnTouchListener(null); dot.removeCallbacks(dot.frame);
+        if (flight != null) { flight.cancel(); flight.removeAllUpdateListeners(); flight = null; }
+        remove(dot); remove(scene);
+        transcript.clear(); draft = ""; threadId = null; foregroundPackage = null;
+        scene.words = null; scene.highlight = null; scene.tip = false; scene.gestureUntil = 0;
     }
-    private float dismissX(OverlayPolicy.Dismissal target) {
-        WriteBubblePosition.Bounds bounds = available();
-        return bounds.left() + bounds.width() * (target.ordinal() + 1) / 4f;
-    }
+    private float dismissX() { return available().left() + available().width() / 2f; }
     private float dismissY() { return available().bottom() - dp(48); }
-    private boolean canDismiss(OverlayPolicy.Dismissal target) {
-        return OverlayPolicy.canDismiss(target, kenanVisible(), micVisible(), writer() != null && writer().busy());
-    }
-    private void dismiss(OverlayPolicy.Dismissal target) {
-        OverlayPolicy.dismiss(target, kenanVisible(), micVisible(), writer() != null && writer().busy(),
-            () -> setVisible(service, false), () -> writer().dismiss());
-    }
     private void snap(float velocity) {
-        WriteBubblePosition.Bounds bounds = available();
-        WriteBubblePosition.Point edge = WriteBubblePosition.snap(dotAt.x, dotAt.y, bounds, dp(50), velocity);
+        OverlayPosition.Bounds bounds = available();
+        OverlayPosition.Point edge = OverlayPosition.snap(dotAt.x, dotAt.y, bounds, dp(50), velocity);
         PhoneControlService.settings(service).edit().putBoolean("overlayRight", edge.x() != bounds.left())
-            .putFloat("overlayY", WriteBubblePosition.saveY(edge.y(), bounds, dp(50))).apply();
+            .putFloat("overlayY", OverlayPosition.saveY(edge.y(), bounds, dp(50))).apply();
         scene.tip = false; fly(edge.x(), edge.y(), 180);
     }
     private final class DotTouch implements View.OnTouchListener {
         private float downX, downY;
         private int startX, startY;
         private VelocityTracker velocity;
+        private void cancel() { if (velocity != null) { velocity.recycle(); velocity = null; } }
         private void track(MotionEvent event) {
             if (velocity == null) return;
             MotionEvent raw = MotionEvent.obtain(event); raw.setLocation(event.getRawX(), event.getRawY());
             velocity.addMovement(raw); raw.recycle();
         }
         @Override public boolean onTouch(View view, MotionEvent event) {
+            if (closed || actionOnly) return false;
             return switch (NativeState.Touch.require(event.getActionMasked())) {
                 case DOWN -> {
                     if (flight != null) flight.cancel(); main.removeCallbacks(home);
@@ -501,21 +495,16 @@ final class KenanOverlay {
                 }
                 case MOVE -> {
                     track(event);
-                    if (WriteBubblePosition.dragged(downX, downY, event.getRawX(), event.getRawY(), ViewConfiguration.get(service).getScaledTouchSlop())) dragging = true;
+                    if (OverlayPosition.dragged(downX, downY, event.getRawX(), event.getRawY(), ViewConfiguration.get(service).getScaledTouchSlop())) dragging = true;
                     if (dragging) {
                         int x = startX + Math.round(event.getRawX() - downX), y = startY + Math.round(event.getRawY() - downY);
-                        WriteBubblePosition.Point wanted = WriteBubblePosition.clamp(x, y, available(), dp(50));
-                        OverlayPolicy.Dismissal near = null;
-                        float closest = dp(54);
-                        for (OverlayPolicy.Dismissal target : OverlayPolicy.Dismissal.values()) {
-                            float distance = (float) Math.hypot(wanted.x() + dp(25) - dismissX(target), wanted.y() + dp(25) - dismissY());
-                            if (canDismiss(target) && distance < closest) { near = target; closest = distance; }
-                        }
-                        if (near != null && near != overDismiss) haptic();
+                        OverlayPosition.Point wanted = OverlayPosition.clamp(x, y, available(), dp(50));
+                        boolean near = Math.hypot(wanted.x() + dp(25) - dismissX(), wanted.y() + dp(25) - dismissY()) < dp(54);
+                        if (near && !overDismiss) haptic();
                         overDismiss = near;
-                        if (near != null) {
-                            WriteBubblePosition.Point at = WriteBubblePosition.magnet(wanted,
-                                new WriteBubblePosition.Point(Math.round(dismissX(near)) - dp(26), Math.round(dismissY()) - dp(26)), dp(50), dp(52));
+                        if (near) {
+                            OverlayPosition.Point at = OverlayPosition.magnet(wanted,
+                                new OverlayPosition.Point(Math.round(dismissX()) - dp(26), Math.round(dismissY()) - dp(26)), dp(50), dp(52));
                             position(at.x(), at.y());
                         } else position(wanted.x(), wanted.y());
                         scene.invalidate();
@@ -526,18 +515,13 @@ final class KenanOverlay {
                     float vx = 0;
                     if (velocity != null) { track(event); velocity.computeCurrentVelocity(1000); vx = velocity.getXVelocity(); velocity.recycle(); velocity = null; }
                     boolean moved = dragging;
-                    OverlayPolicy.Dismissal dropped = moved && event.getActionMasked() == MotionEvent.ACTION_UP ? overDismiss : null;
-                    dragging = false; pressed = false; overDismiss = null; scene.invalidate();
-                    if (dropped != null && canDismiss(dropped)) { dismiss(dropped); fly(homeX(), homeY(), 180); }
+                    boolean dropped = moved && event.getActionMasked() == MotionEvent.ACTION_UP && overDismiss;
+                    dragging = false; pressed = false; overDismiss = false; scene.invalidate();
+                    if (dropped) setVisible(service, false);
                     else if (moved) snap(vx);
                     else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
                         dot.performClick();
-                        Runnable tap = switch (mode) {
-                            case MIC -> () -> writer().tapped();
-                            case KENAN -> KenanOverlay.this::openPanel;
-                            case HIDDEN -> () -> { }; // A queued up after the dot was hidden cannot open it again.
-                        };
-                        tap.run();
+                        openPanel();
                     }
                     refresh();
                     yield true;
@@ -563,12 +547,6 @@ final class KenanOverlay {
             if (closed || !isShown() || getWindowVisibility() != View.VISIBLE) return;
             float cx = getWidth() / 2f, cy = getHeight() / 2f;
             long now = SystemClock.uptimeMillis();
-            if (mode == OverlayPolicy.Mode.MIC && writer() != null) {
-                writer().draw(canvas, paint, cx, cy, service.getResources().getDisplayMetrics().density);
-                removeCallbacks(frame);
-                if (writer().animates()) postDelayed(frame, 55);
-                return;
-            }
             NativeState.OverlayAnimation animation = gestures > 0 ? NativeState.OverlayAnimation.WORKING : state;
             double period = switch (animation) { case WORKING -> 170.0; case IDLE, THINKING -> 850.0; };
             float pulse = animation == NativeState.OverlayAnimation.IDLE ? .5f : (float) (.5 + .5 * Math.sin(now / period));
@@ -596,6 +574,7 @@ final class KenanOverlay {
         private long gestureStart, gestureDuration, gestureUntil;
         Scene() { super(service); textPaint.setColor(Color.WHITE); textPaint.setTextSize(dp(15)); setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS); }
         @Override protected void onDraw(Canvas canvas) {
+            if (closed || !isShown() || getWindowVisibility() != View.VISIBLE) return;
             long now = SystemClock.uptimeMillis();
             paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2)); paint.setColor(ACCENT); paint.setAlpha(255);
             if (highlight != null) {
@@ -614,7 +593,7 @@ final class KenanOverlay {
                 }
             }
             paint.setAlpha(255);
-            if (kenanVisible() && tip) {
+            if (tip) {
                 paint.setStrokeWidth(dp(2)); paint.setColor(ACCENT); paint.setAlpha(170);
                 canvas.drawLine(dotAt.x + dp(24), dotAt.y + dp(24), tipX, tipY, paint);
                 canvas.drawCircle(tipX, tipY, dp(3), paint); paint.setAlpha(255);
@@ -634,19 +613,16 @@ final class KenanOverlay {
                 canvas.save(); canvas.translate(left + dp(14), top + dp(12)); words.draw(canvas); canvas.restore();
             }
             if (dragging) {
-                for (OverlayPolicy.Dismissal target : OverlayPolicy.Dismissal.values()) {
-                    float cx = dismissX(target), cy = dismissY();
-                    paint.setStyle(Paint.Style.FILL); paint.setColor(overDismiss == target ? 0xffa44155 : CARD);
-                    paint.setAlpha(canDismiss(target) ? 255 : 70);
+                    float cx = dismissX(), cy = dismissY();
+                    paint.setStyle(Paint.Style.FILL); paint.setColor(overDismiss ? 0xffa44155 : CARD);
+                    paint.setAlpha(255);
                     canvas.drawCircle(cx, cy, dp(26), paint);
-                    paint.setColor(Color.WHITE); paint.setAlpha(canDismiss(target) ? 255 : 70);
+                    paint.setColor(Color.WHITE); paint.setAlpha(255);
                     paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2));
                     canvas.drawLine(cx - dp(6), cy - dp(11), cx + dp(6), cy + dp(1), paint);
                     canvas.drawLine(cx - dp(6), cy + dp(1), cx + dp(6), cy - dp(11), paint);
                     paint.setStyle(Paint.Style.FILL); paint.setTextSize(dp(11)); paint.setTextAlign(Paint.Align.CENTER);
-                    String label = switch (target) { case KENAN -> "Kenan"; case MIC -> "Mic"; case BOTH -> "Both"; };
-                    canvas.drawText(label, cx, cy + dp(17), paint);
-                }
+                    canvas.drawText("Hide", cx, cy + dp(17), paint);
                 paint.setAlpha(255);
             }
             if (highlight != null || now < gestureUntil) postInvalidateOnAnimation();
