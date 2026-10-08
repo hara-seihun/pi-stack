@@ -3,6 +3,7 @@ import type { NeedsYouDismissal, NeedsYouDismissResult, NeedsYouItem, NeedsYouPr
 import { API } from "../../server/api";
 import { piFetch } from "./client";
 import { formatRoute } from "./app/routes";
+import { QuestionText } from "./features/conversation/question-content";
 import "./needs-you.css";
 
 const labels: Record<NeedsYouItem["kind"], string> = { question: "Question", decision: "Decision", "missing-fact": "Only you know", "person-only-action": "Only you can do", commitment: "Your commitment" };
@@ -48,15 +49,17 @@ export function NeedsYouCard({ item, busy, onDismiss }: { item: NeedsYouItem; bu
   const recommendation = item.recommendation !== action ? item.recommendation : null;
   return <article className="attention-decision" aria-busy={busy}>
     <div className="attention-card-meta"><span>{labels[item.kind]}</span>{item.deadline !== null && <time dateTime={item.deadline.at}>{timestamp(item.deadline.at, item.deadline.timeZone)}</time>}</div>
-    <h3>{item.title}</h3>
-    {action !== null && action !== item.title && <p className="attention-card-body">{action}</p>}
+    {item.kind === "question" ? <QuestionText source={item.title} className="question-prompt" /> : <h3>{item.title}</h3>}
+    {action !== null && action !== item.title && (item.kind === "question" ? <div className="question-action">
+      {item.nextAction === null && <span className="question-recommended">Recommended</span>}<QuestionText source={action} />
+    </div> : <p className="attention-card-body">{action}</p>)}
     <div className="attention-card-footer"><div className="needs-you-actions">
       {item.location !== null && <a className="needs-you-open" aria-label={item.location.questionId !== null ? "Answer in original conversation" : "Open source conversation"} href={formatRoute({ tab: "chats", chat: `ai:${item.location.threadId}`, panel: null, ...(item.location.questionId === null ? {} : { questionId: item.location.questionId }) })}>{item.location.questionId !== null ? "Answer" : "Open conversation"}</a>}
       <button type="button" disabled={busy} title={item.dismissal.kind === "commitment" ? "Hides this reminder; does not cancel your commitment." : undefined} onClick={() => { if (!busy) onDismiss(item); }}>{busy ? "Dismissing…" : item.dismissal.kind === "commitment" ? "Dismiss reminder" : "Dismiss"}</button>
     </div>
     {(item.consequence !== null || recommendation !== null) && <details className="attention-card-details"><summary>Details</summary><dl>
       {item.consequence !== null && <div><dt>Consequence</dt><dd>{item.consequence}</dd></div>}
-      {recommendation !== null && <div><dt>Kenan recommends</dt><dd>{recommendation}</dd></div>}
+      {recommendation !== null && <div><dt>Kenan recommends</dt><dd>{item.kind === "question" ? <QuestionText source={recommendation} /> : recommendation}</dd></div>}
     </dl></details>}</div>
   </article>;
 }

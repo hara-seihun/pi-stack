@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { NeedsYouDismissal, NeedsYouItem } from "../shared/needs-you";
 import { dismissNeed, NeedsYouCard } from "./src/needs-you";
+import { QuestionText } from "./src/features/conversation/question-content";
 
 const item: NeedsYouItem = {
   id: "question:thread-a:q-a", kind: "question", title: "Choose a time", consequence: null,
@@ -50,7 +51,8 @@ test("busy dismissal keeps the source answer link and card visible, suppresses r
   expect(calls).toEqual([item]);
   expect(busyButton.props.disabled).toBe(true);
   const html = renderToStaticMarkup(busy);
-  expect(html).toContain("Choose a time");
+  expect(busy.props.children.find((child: any) => child?.type === QuestionText)?.props.source).toBe(item.title);
+  expect(html).toContain("question-markdown");
   expect(html).toContain('aria-busy="true"');
   expect(html).toContain("Answer in original conversation");
   expect(html).toContain("question=q-a");

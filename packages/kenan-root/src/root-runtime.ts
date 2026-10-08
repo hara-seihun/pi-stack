@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { installMessageDelivery, type AgentCapacity, type PiEvent } from "pi-orchestrator/api";
 import { managedRootSession, RootCapacityUnavailable } from "./managed-session.js";
+import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION } from "pi-orchestrator/question-policy";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
 import { join, isAbsolute } from "node:path";
@@ -120,8 +121,8 @@ async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
     const replyTool = defineTool({ name: "root_reply", label: "Choose Kenan's reply", description: "Select the only text to disclose to this request's entire verified recipient set. List the people whose information was used or discussed, including file reads. The service logs the reply before delivery.",
       parameters: Type.Object({ reply: Type.String({ minLength: 1 }), subjects: Type.Array(Type.String({ minLength: 1 }), { maxItems: 100 }) }),
       execute: async (_id, input) => { chosen = input; return { content: [{ type: "text", text: "Reply selected for disclosure accounting; finish this session." }], details: {} }; } });
-    const consentTool = defineTool({ name: "root_request_consent", label: "Ask a person for permission", description: "Deliver a narrow permission question into the subject's own inbox. Name what the authenticated requester asked for and what you propose to share. Identity and full reply audience are supplied by the service. Only a delivered:true receipt means the person was actually asked. Their answer returns privately to a fresh root session, which chooses and delivers a reply into the original thread; no session waits for a human.",
-      parameters: Type.Object({ subject: Type.String({ minLength: 1 }), question: Type.String({ minLength: 1, maxLength: 16000 }) }),
+    const consentTool = defineTool({ name: "root_request_consent", label: "Ask a person for permission", description: `Deliver a narrow permission question into the subject's own inbox. ${QUESTION_AUTHORING_POLICY} Ask permission for the exact disclosure first; retain what was requested and what you propose to share where it changes consent. Identity and full reply audience are supplied by the service. Only a delivered:true receipt means the person was actually asked. Their answer returns privately to a fresh root session, which chooses and delivers a reply into the original thread; no session waits for a human.`,
+      parameters: Type.Object({ subject: Type.String({ minLength: 1 }), question: Type.String({ minLength: 1, maxLength: 16000, description: QUESTION_TEXT_DESCRIPTION }) }),
       execute: async (_id, input) => { const result = spec.requestConsent ? await spec.requestConsent(input) : { ok: false, message: "Consent delivery is unavailable; nobody was asked" };
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} }; } });
     const notificationTool = defineTool({ name: "root_notify", label: "Notify a person", description: "Send exact chosen text to a registered person's own inbox through the authenticated router. The durable outbox handles unavailable supervisors and retries the same delivery identity. queued:true means custody, delivered:true means the recipient inbox acknowledged it. Never use guessed supervisor ports or raw shell sends. Include all people discussed and classify intimate content as private.",

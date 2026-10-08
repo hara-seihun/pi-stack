@@ -72,6 +72,30 @@ test.each([true, false])("Bob asks Alice, fresh root delivers once across restar
   } finally { manager?.close(); await f.close(); }
 });
 
+test("root routing keeps the exact authored Markdown decision first with its authenticated consent scope", async () => {
+  const f = await fixture(); let manager: RootConsentManager | undefined;
+  try {
+    const question = "**May I share your meeting time with Bob?**\n\nOnly the time, not your reason for choosing it. See [meeting scope](https://example.com/meeting).";
+    const input = { subject: "alice", question };
+    const path = join(f.root, "consent.sqlite");
+    const options = { memory: f.memory, enabled: () => true, bridge: f.bridge,
+      executor: async () => { throw Error("Question delivery must not invoke a rewrite model"); } };
+    manager = new RootConsentManager(path, options);
+    const receipt = await manager.request(f.admission, "When can Alice meet?", input);
+    expect(receipt).toMatchObject({ ok: true, value: { delivered: true } });
+    const threads = await f.owners.alice.list(); if (!threads.ok) throw Error("No consent inbox");
+    const threadId = threads.value.threads[0].id;
+    const questions = await f.owners.alice.questions(threadId); if (!questions.ok) throw Error("No consent question");
+    const delivered = questions.value[0];
+    expect(delivered.question).toBe(`${question}\n\nAuthenticated requester: bob\n\nChosen answer would go to: bob\n\nYour answer returns privately to Kenan, who decides what to share for this request. Skipping is not permission.`);
+    manager.close(); manager = new RootConsentManager(path, options);
+    expect(await manager.request(f.admission, "When can Alice meet?", input)).toEqual(receipt);
+    expect(await f.owners.alice.questions(threadId)).toMatchObject({ ok: true, value: [delivered] });
+    const state = await f.bridge.answer({ consentId: receipt.ok ? receipt.value.consentId : "", subject: "alice", threadId, questionId: delivered.id });
+    expect(state).toMatchObject({ ok: true, value: { question: delivered.question } });
+  } finally { manager?.close(); await f.close(); }
+});
+
 test("notification outbox survives refused delivery, lost ACK and restart without another model or duplicate message", async () => {
   const f = await fixture(); let manager: RootConsentManager | undefined;
   try {

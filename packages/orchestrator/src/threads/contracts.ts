@@ -173,6 +173,8 @@ export interface AwaitThreads {
   threadIds: string[];
   after?: Record<string, number>;
   timeoutMs?: number;
+  /** Registration probes only: historical results cannot satisfy newer unfinished work. */
+  currentAssignment?: true;
 }
 export interface ThreadAwaitResult {
   settlement: ThreadSettlement | null;
@@ -192,6 +194,9 @@ export function validateThreadAwait(input: AwaitThreads): Result<void> {
   }
   if (input.timeoutMs !== undefined && (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > THREAD_AWAIT_TIMEOUT_MS)) {
     return { ok: false, error: { code: "invalid_request", message: `Await timeoutMs must be 0..${THREAD_AWAIT_TIMEOUT_MS}` } };
+  }
+  if (input.currentAssignment !== undefined && input.currentAssignment !== true) {
+    return { ok: false, error: { code: "invalid_request", message: "currentAssignment must be true when supplied" } };
   }
   return { ok: true, value: undefined };
 }
@@ -306,6 +311,13 @@ export type WaitDependency =
   | { kind: "deployment"; publicationId: string }
   | { kind: "message"; fromThreadId: string };
 export type AgentWait = { reason: string; since: number } & WaitDependency;
+export type AgentWaitRegistration =
+  | { status: "registered"; wait: AgentWait }
+  | { status: "already_arrived"; settlement: ThreadSettlement }
+  | { status: "resumed"; messageIds: [string, ...string[]] }
+  | { status: "cleared" };
+/** Current thread snapshot and immutable outcome of this request, also on retry. */
+export type AgentWaitResult = Thread & { waitRegistration: AgentWaitRegistration };
 export type AgentWaitRequest = { threadId: string; requestId: string } & (
   | ({ action: "set"; reason: string } & (
       // Retained pre-typed runners send concrete child waits without kind.
@@ -368,7 +380,7 @@ export interface ThreadAttentionEvents { cursor: number; items: ThreadAttentionR
 export interface ThreadApi {
   attention(input: ThreadAttentionRequest): Promise<Result<ThreadAttentionReceipt>>;
   attentionEvents(after?: number, limit?: number): Result<ThreadAttentionEvents> | Promise<Result<ThreadAttentionEvents>>;
-  agentWait(input: AgentWaitRequest): Promise<Result<Thread>>;
+  agentWait(input: AgentWaitRequest): Promise<Result<AgentWaitResult>>;
   wakeSchedule(input: ThreadWakeRequest): Promise<Result<ThreadWakeSchedule | null>>;
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;

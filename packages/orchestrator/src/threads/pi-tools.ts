@@ -10,6 +10,7 @@ import { threadMode } from "./modes.js";
 import { SPEEDS } from "./speed.js";
 import { threadWaitParameters } from "./wait-contract.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
+import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION, QUESTION_SUGGESTION_DESCRIPTION } from "./question-policy.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
@@ -62,11 +63,12 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_wait", label: "Wait for a named dependency",
-      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Dependencies subscribe to durable peer results, including cancellation when a peer is closed; they never veto explicit Close. Clear removes your wait and outgoing subscriptions without creating work.",
+      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Dependencies subscribe to durable peer results, including cancellation when a peer is closed; they never veto explicit Close. Clear removes your wait and outgoing subscriptions without creating work. The returned waitRegistration distinguishes registered (durable wait), already_arrived (current assignment result), resumed (new input IDs; continue with that input), and cleared. Only a still-active registered wait ends the turn.",
       parameters: threadWaitParameters,
       execute: async (id, input, signal) => {
         const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
-        return { ...result(waited), ...(waited.ok && input.action === "set" && waited.value.metadata?.agentWait ? { terminate: true } : {}) };
+        return { ...result(waited), ...(waited.ok && waited.value.waitRegistration.status === "registered"
+          && JSON.stringify(waited.value.metadata?.agentWait) === JSON.stringify(waited.value.waitRegistration.wait) ? { terminate: true } : {}) };
       },
     }),
     defineTool({
@@ -111,8 +113,8 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "request_user_input_async", label: "Ask the user asynchronously",
-      description: "Post an array of questions for the human and continue working immediately. Put each independently answerable question in its own array item, with its own suggestions; use a one-item array for a single question. Each stays pending after this turn ends and across restarts. Suggestions are optional and may be any number; optionally recommend one by its zero-based index. The human can answer each question separately, choose any number of suggestions and add free text. Each answer arrives as a correlated ordinary user message at a safe turn boundary, without cancelling current work.",
-      parameters: Type.Object({ questions: Type.Array(Type.Object({ question: Type.String({ minLength: 1, description: "One independently answerable question." }), suggestions: Type.Optional(Type.Array(Type.String({ minLength: 1 }))), recommendedSuggestionIndex: Type.Optional(Type.Integer({ minimum: 0 })) }), { minItems: 1 }) }),
+      description: `Post an array of questions for the human and continue working immediately. ${QUESTION_AUTHORING_POLICY} Put each independently answerable question in its own array item, with its own suggestions; use a one-item array for a single question. Each stays pending after this turn ends and across restarts. Suggestions are optional and may be any number; optionally recommend one by its zero-based index. The human can answer each question separately, choose any number of suggestions and add free text. Each answer arrives as a correlated ordinary user message at a safe turn boundary, without cancelling current work.`,
+      parameters: Type.Object({ questions: Type.Array(Type.Object({ question: Type.String({ minLength: 1, description: QUESTION_TEXT_DESCRIPTION }), suggestions: Type.Optional(Type.Array(Type.String({ minLength: 1, description: QUESTION_SUGGESTION_DESCRIPTION }))), recommendedSuggestionIndex: Type.Optional(Type.Integer({ minimum: 0 })) }), { minItems: 1 }) }),
       execute: async (id, input, signal) => {
         const asked = await api(signal).ask({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
         return asked.ok ? { content: [{ type: "text" as const, text: JSON.stringify(asked.value) }], details: asked } : result(asked);

@@ -10,6 +10,7 @@ import { ConversationHeader } from "./features/conversation/ConversationScreen";
 import { StatusIcon } from "./features/status/StatusIcon";
 import { roomThreadStatus } from "./features/status/thread-status";
 import { QuestionDrafts, answerIsValid, toggleSuggestion } from "./features/conversation/question-drafts";
+import { QuestionContent } from "./features/conversation/question-content";
 import { Markdown } from "./context";
 import { DismissibleError } from "./dismissible-error";
 import { appStorageKey } from "./app-path";
@@ -105,13 +106,9 @@ function RoomQuestion({ question, roomId, onAnswered }: { question: NonNullable<
       placeholder="Your answer or additional context" sendLabel="Submit answer" layoutKey={question.id}
       disabled={pending || !answerIsValid(draft)} readOnly={pending} hideAttachments
       attachments={[]} onRemove={() => {}} onUpload={() => {}} onPaste={() => {}} onDraw={() => {}}
-      before={<><h3>{question.question}</h3>{error && <p role="alert" className="question-error">{error}</p>}</>}
-      afterPrompt={question.suggestions.length > 0 && <fieldset disabled={pending}><legend>Suggested answers (choose any)</legend>
-        {question.suggestions.map(suggestion => <label key={suggestion.id} className="question-option">
-          <input type="checkbox" checked={draft.selectedSuggestionIds.includes(suggestion.id)} onChange={() => change(toggleSuggestion(draft, suggestion.id))} />
-          <span>{suggestion.text}{question.recommendedSuggestionId === suggestion.id && <span className="question-recommended">Recommended</span>}</span>
-        </label>)}
-      </fieldset>}
+      before={<><QuestionContent question={question} selected={draft.selectedSuggestionIds} disabled={pending}
+        onToggle={id => change(toggleSuggestion(draft, id))} />
+        {error && <p role="alert" className="question-error">{error}</p>}</>}
       actions={<button type="button" className="question-dismiss" disabled={pending} onClick={() => void answer(true)}>{pending ? "Sending…" : "Dismiss question"}</button>} />
   </div>;
 }
@@ -271,7 +268,7 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
       </div>}>
       <DismissibleError className="conversation-error" message={snapshot?.error || (snapshot?.held ? "Kenan is stopped in this room." : "") || error} resetKey={id} dismissLabel="Dismiss conversation error" />
       {question ? <section className="questions-composer" aria-label="Questions to answer">
-        <div className="questions-heading" role="status">{snapshot!.questions!.length === 1 ? "Question to answer" : `${snapshot!.questions!.length} questions to answer`}<span>Answer or dismiss to return to messaging</span></div>
+        <div className="questions-heading" role="status">{snapshot!.questions!.length === 1 ? "Your answer" : `${snapshot!.questions!.length} questions`}</div>
         <RoomQuestion key={question.id} question={question} roomId={id} onAnswered={load} />
       </section> : <Composer id="room-prompt" value={text} onChange={changeText} onSend={() => void (action === "stop" ? stop() : send())}
         placeholder={`Message ${snapshot?.room.title ?? "Kenan"}`} sendLabel={receipt ? "Retry send" : "Send message"} action={action}

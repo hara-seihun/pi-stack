@@ -1,0 +1,17 @@
+.question-markdown { min-width: 0; font-size: var(--text-md, 15px); line-height: 1.55; overflow-wrap: anywhere; }
+.question-markdown > :first-child { margin-top: 0; }
+.question-markdown > :last-child { margin-bottom: 0; }
+.question-markdown :is(p, ul, ol, blockquote, pre, .table-scroll) { margin-block: .65em; }
+.question-markdown :is(h1, h2, h3, h4, h5, h6) { margin: .9em 0 .35em; font-size: 1em; line-height: 1.45; font-weight: 650; }
+.question-markdown :is(ul, ol) { padding-left: 1.4em; }
+.question-markdown li + li { margin-top: .25em; }
+.question-markdown pre { max-width: 100%; overflow-x: auto; }
+.question-markdown .table-scroll { max-width: 100%; overflow-x: auto; }
+.question-prompt > p:first-child { font-weight: 600; }
+.question-option-content { flex: 1; min-width: 0; }
+.question-option-content .question-markdown { font-size: var(--text-sm, 14px); }
+.question-recommended { display: block; margin-top: 4px; color: var(--accent); font-size: var(--text-xs); font-weight: 500; }
+.attention-decision > .question-markdown { margin-top: 6px; }
+.question-action { margin-top: 10px; }
+.question-action .question-markdown { font-size: var(--text-sm, 14px); }
+.question-action .question-recommended { margin: 0 0 4px; }
