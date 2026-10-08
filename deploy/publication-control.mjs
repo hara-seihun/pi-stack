@@ -14,6 +14,19 @@ export const policy = Object.freeze({
   repairMs: 1_200_000,
 });
 
+export function canResumeRebootedIntegration(request, bootId) {
+  const validBoot = value => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+  return request.status === "running"
+    && validBoot(request.workerBootId) && validBoot(bootId) && request.workerBootId !== bootId
+    && ["integrate-main", "confirm-integrated-main"].includes(request.step)
+    && request.checks?.status === "passed"
+    && /^[a-f0-9]{40}$/.test(request.integrationSha ?? "")
+    && /^[a-f0-9]{40}$/.test(request.baseSha ?? "")
+    && !request.integratedAt && !request.recoveryInProgress
+    && !request.hosts && !request.reservations && !request.bootstrap && !request.maintenance
+    && (request.workerRestarts?.length ?? 0) < policy.maxAttempts;
+}
+
 export function stallReason(request, now = Date.now()) {
   if (request.status !== "running") return null;
   const progress = request.progress;
