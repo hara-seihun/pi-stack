@@ -22,6 +22,7 @@ import {
   createSharedImageGenerationService,
   resolveDelivery,
   ThreadService,
+  configuredPersonSpawnModel,
   configuredAgentCapacity,
   ModelAvailabilityStore,
   modelAvailabilityPath,
@@ -317,6 +318,7 @@ const callers = callerResolver({ capability, host: hostIdentityConfig() });
 const threads = new ThreadService({
   capability,
   capacity: configuredAgentCapacity(),
+  spawnDefaultModel: () => configuredPersonSpawnModel(),
   admitNewThread: settings => modelAvailability.admit(settings.model),
   attachSession: runner.attachSession,
   recoverSession: runner.recoverSession,

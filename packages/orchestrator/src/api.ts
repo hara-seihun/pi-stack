@@ -25,6 +25,7 @@ export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, Th
   ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, SpawnThread, SendThread, ThreadList, ThreadPage,
   ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
+export { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
 export { ThreadService } from "./threads/service.js";
 export { validateWaitDependency } from "./threads/contracts.js";
 export type { AgentWait, AgentWaitRequest, WaitDependency, WaitKind, ThreadWakeSchedule, ThreadWakeRequest, ThreadAttentionRequest, ThreadAttentionReceipt, ThreadAttentionEvents } from "./threads/contracts.js";
