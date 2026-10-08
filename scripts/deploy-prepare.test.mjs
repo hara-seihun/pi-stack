@@ -44,11 +44,26 @@ printf '%s\\n' "${name}" >> "$TRACE"
 sleep "\${WORK_SECONDS:-0}"
 exit "\${${name.toUpperCase().replaceAll("-", "_")}_EXIT:-0}"`);
   }
+  f.executable(join(f.repo, "deploy/native-history-boundary"), `[[ $1 == /* && $2 == /* && $3 =~ ^[a-f0-9]{40}$ ]] || exit 64
+if [[ \${HISTORY_BOUNDARY_BUSY:-0} == 1 ]]; then
+  echo 'native history boundary waiting: fixture admitted errands' >&2
+  exit 75
+fi`);
   // Any nested activation deadline fails immediately, without a 50-second test.
   f.executable(join(f.bin, "timeout"), 'printf "deadline %s\\n" "$*" >> "$TRACE"; exit 124');
   f.commit();
   return f;
 }
+
+test("preparation cannot build or select artifacts while native history maintenance is busy", () => {
+  const f = preparationFixture();
+  try {
+    const result = f.run("prepare", { PI_STACK_SERVICES: "1", HISTORY_BOUNDARY_BUSY: "1", PI_STACK_HOST_FILE: join(f.directory, "host.json") });
+    assert.equal(result.status, 75, result.stderr);
+    assert.match(result.stderr, /native history boundary waiting:/);
+    assert.equal(existsSync(f.env.TRACE), false);
+  } finally { f.close(); }
+});
 
 test("preparation uses the caller deadline for every child; standalone components keep theirs", () => {
   const f = preparationFixture();

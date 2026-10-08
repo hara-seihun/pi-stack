@@ -16,6 +16,7 @@
 #     later imports through the releases that were selected when it began;
 #   - recorded by a queued, starting or running Orchestrator run in any
 #     account's ledger (fleet recovery resumes a run under its release);
+#   - bound by a native-history first-unlock source manifest;
 #   - published within the grace period (PI_STACK_RETAIN_GRACE_SECONDS, 3600).
 #
 # A dependency tree stays while a kept release links into it, a process names
@@ -86,6 +87,25 @@ for name in os.listdir(stable):
         if os.path.dirname(os.path.dirname(target)) == releases:
             keep(target, f"selected by {link}")
             selected[link] = target
+
+# Locked owners may still need the exact old decoder at their next unlock.
+# These manifests are public source custody; no private owner history is opened.
+for manifest_path in glob.glob(os.path.join(stable, '.pi-stack-maintenance', 'native-history', '*', 'legacy.json')):
+    try:
+        with open(manifest_path) as file:
+            manifest = json.load(file)
+        if manifest.get('version') != 1 or not COMMIT.fullmatch(manifest.get('candidate', '')) or not COMMIT.fullmatch(manifest.get('legacySource', '')):
+            raise ValueError('invalid source identity')
+        for field in ('legacyRemote', 'legacyOrchestrator'):
+            target = os.path.realpath(manifest[field])
+            if not os.path.isabs(manifest[field]) or os.path.dirname(os.path.dirname(target)) != releases:
+                raise ValueError('source lies outside the release store')
+            with open(os.path.join(target, '.pi-stack-commit')) as file:
+                if file.read().strip() != manifest['legacySource']:
+                    raise ValueError('immutable source marker differs')
+            keep(target, f'first-unlock decoder custody in {manifest_path}')
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        sys.exit(f'deploy/retain: cannot resolve {manifest_path}: {error}; nothing removed')
 
 # Rollback depth and the grace period.
 for name, entries in components.items():

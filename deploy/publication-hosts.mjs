@@ -2,6 +2,7 @@ export function hostWaitKind(wait) {
   switch (wait.kind) {
     case "live-meeting": return "waiting-for-live-meetings";
     case "native-source": return "waiting-for-native-source";
+    case "native-history": return "waiting-for-native-history";
     case "host-lock": return "waiting-for-host-deployment-lock";
     case "thread-contract": return "waiting-for-thread-execution-contract";
     default: throw new Error(`Unknown host wait: ${wait.kind}`);
