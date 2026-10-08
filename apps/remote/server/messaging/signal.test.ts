@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BackendCall, BackendConversation, BackendMessage, BackendSender, MessagingPlugin, MessagingPluginContext } from "./plugin";
+import type { BackendConversation, BackendMessage, BackendSender, MessagingPlugin, MessagingPluginContext } from "./plugin";
 import type { MessagingLink } from "./protocol";
 import { createMessagingPlugin } from "./signal";
 
@@ -37,7 +37,8 @@ createInterface({input:process.stdin}).on('line', line => {
   if(request.method==='listContacts') return reply(request,[{uuid:friend,number:'+12025550101',name:'Friend'}]);
   if(request.method==='listGroups') return reply(request,[{id:'YWJjZA==',name:'Friends',isMember:true}]);
   if(request.method==='subscribeReceive') return reply(request,0);
-  reply(request,{});
+  if(request.method==='unsubscribeReceive') return reply(request,{});
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error:{code:-32601,message:'Unsupported fixture method'}})+'\\n');
 });
 `, { mode: 0o700 });
   await chmod(binary, 0o700);
@@ -48,11 +49,9 @@ createInterface({input:process.stdin}).on('line', line => {
   const senders: BackendSender[] = [];
   const conversations: BackendConversation[] = [];
   const links: MessagingLink[] = [];
-  const calls: BackendCall[] = [];
   const settled = deferred<MessagingLink>();
   const arrived = deferred<BackendMessage>();
-  const { calls: enableCalls, ...profileOptions } = options;
-  const plugin = createMessagingPlugin({ id: "signal", plugin: "signal", label: "Signal", options: { binary, callTunnelBinary: enableCalls ? binary : "/no-such-call-tunnel", ...profileOptions } });
+  const plugin = createMessagingPlugin({ id: "signal", plugin: "signal", label: "Signal", options: { binary, ...options } });
   cleanups.push(() => plugin.close());
   const context: MessagingPluginContext = {
     dataDir: join(root, "profile"),
@@ -61,12 +60,11 @@ createInterface({input:process.stdin}).on('line', line => {
     self() {},
     async message(message) { messages.push(message); arrived.resolve(message); },
     async reaction(value) { reactions.push(value); },
-    call(value) { calls.push(value); },
     status(status, detail) { statuses.push({ status, detail }); },
     log(message) { logs.push(message); },
     link(value) { links.push(value); if (value.status !== "waiting") settled.resolve(value); },
   };
-  return { root, binary, plugin, context, statuses, logs, messages, reactions, senders, conversations, arrived, links, settled, calls };
+  return { root, binary, plugin, context, statuses, logs, messages, reactions, senders, conversations, arrived, links, settled };
 }
 
 async function start(plugin: MessagingPlugin, context: MessagingPluginContext) {
@@ -103,7 +101,7 @@ const linkScript = (finish: string) => `
   if(request.method==='finishLink') { ${finish} }
 `;
 
-test("an unlinked profile links from the app and reports the account it linked", async () => {
+test("an unlinked profile exposes a provisioning URI and reports the account it linked", async () => {
   const f = await fixture(linkScript(`
     if(request.params.deviceLinkUri!==${JSON.stringify(LINK_URI)} || request.params.deviceName!=='Martine phone') process.exit(4);
     return setTimeout(()=>reply(request,{number:account}),20);
@@ -113,7 +111,6 @@ test("an unlinked profile links from the app and reports the account it linked",
   const started = await f.plugin.startLink!("Martine phone");
   expect(started).toMatchObject({ ok: true, value: { status: "waiting", uri: LINK_URI, deviceName: "Martine phone", account: null } });
   if (!started.ok) return;
-  expect(started.value.qr === null || started.value.qr.startsWith("<svg")).toBe(true);
   expect(await f.settled.promise).toMatchObject({ status: "linked", account, uri: null, error: null });
   expect(f.links.map(link => link.status)).toEqual(["waiting", "linked"]);
 });
@@ -244,37 +241,12 @@ test("sender directory uses Signal nickname, contact and profile names, includin
   ]);`);
   await start(f.plugin, f.context);
   expect(f.senders).toEqual([
-    { id: friend, aliases: [friend, '+12025550101', 'u:friend.01'], name: 'Nickname', avatar: null },
-    { id: 'contact', aliases: ['contact'], name: 'Address Book', avatar: null },
-    { id: 'profile', aliases: ['profile'], name: 'Profile Only', avatar: null },
-    { id: 'unknown', aliases: ['unknown', '+12025550102'], name: null, avatar: null },
+    { id: friend, aliases: [friend, '+12025550101', 'u:friend.01'], name: 'Nickname' },
+    { id: 'contact', aliases: ['contact'], name: 'Address Book' },
+    { id: 'profile', aliases: ['profile'], name: 'Profile Only' },
+    { id: 'unknown', aliases: ['unknown', '+12025550102'], name: null },
   ]);
   expect(f.conversations.some(value => value.id === 'profile')).toBe(false);
-});
-
-test("pictures signal-cli has fetched are offered by uuid, number or group id and refreshed on receive", async () => {
-  const f = await fixture(`if(request.method==='listContacts') return reply(request,[
-    {uuid:friend,number:'+12025550101',name:'Friend'},
-    {number:'+12025550102',name:'By Number'},
-    {uuid:'nobody',name:'No Picture'}
-  ]);
-  if(request.method==='subscribeReceive') { reply(request,0); receive({sourceUuid:friend,sourceNumber:'+12025550101',sourceName:'Friend',dataMessage:{timestamp:101,message:'hello'}}); return; }`);
-  const avatars = join(f.context.dataDir, "signal-cli", "avatars");
-  await mkdir(avatars, { recursive: true });
-  await writeFile(join(avatars, `profile-${friend}`), "jpeg bytes");
-  await writeFile(join(avatars, "profile-+12025550102"), "jpeg bytes");
-  await writeFile(join(avatars, "group-YWJjZA=="), "png bytes");
-  await writeFile(join(avatars, "profile-nobody"), "");
-  await start(f.plugin, f.context);
-  await f.arrived.promise;
-  const picture = (value: { avatar?: { path: string; updatedAt: number } | null } | undefined) => value?.avatar ? { name: value.avatar.path.slice(avatars.length + 1), fresh: value.avatar.updatedAt > 0 } : value?.avatar;
-  expect(picture(f.senders.find(value => value.id === friend))).toEqual({ name: `profile-${friend}`, fresh: true });
-  expect(picture(f.senders.find(value => value.id === "+12025550102"))).toEqual({ name: "profile-+12025550102", fresh: true });
-  expect(picture(f.senders.find(value => value.id === "nobody"))).toBeNull();
-  expect(picture(f.conversations.find(value => value.id === friend))).toEqual({ name: `profile-${friend}`, fresh: true });
-  expect(picture(f.conversations.find(value => value.id === "group:YWJjZA=="))).toEqual({ name: "group-YWJjZA==", fresh: true });
-  // The receive-time sender update carries the picture too, so a contact whose photo landed after discovery still shows it.
-  expect(picture(f.senders.at(-1))).toEqual({ name: `profile-${friend}`, fresh: true });
 });
 
 test("receive names update group authors without changing sender or replay identity", async () => {
@@ -442,6 +414,28 @@ test("RPC rejections remain definite failures and send timeouts remain unknown",
   expect(await f.plugin.send(conversation.value, { requestId: "b", text: "timeout", attachments: [] })).toMatchObject({ ok: false, error: { code: "unknown" } });
 });
 
+test("reaction rejection is definite while timeout, transport loss and network errors stay unknown", async () => {
+  const f = await fixture(`if(request.method==='sendReaction') {
+    if(request.params.emoji==='reject' || request.params.emoji==='network') {
+      const error=request.params.emoji==='reject' ? {code:-32602,message:'Invalid params'} : {code:-3,message:'Connection reset'};
+      process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error})+'\\n');
+    }
+    if(request.params.emoji==='close') incoming('reaction dispatched');
+    return;
+  }`, { timeoutMs: 150 });
+  await start(f.plugin, f.context);
+  const conversation = await f.plugin.openConversation(friend);
+  if (!conversation.ok) throw new Error("missing fixture contact");
+  const react = (emoji: string) => f.plugin.react!(conversation.value, { author: friend, timestamp: 101 }, emoji, false);
+  expect(await react("reject")).toMatchObject({ ok: false, error: { code: "signal_-32602" } });
+  expect(await react("network")).toMatchObject({ ok: false, error: { code: "unknown" } });
+  expect(await react("timeout")).toMatchObject({ ok: false, error: { code: "unknown" } });
+  const pending = react("close");
+  await f.arrived.promise;
+  await f.plugin.close();
+  expect(await pending).toMatchObject({ ok: false, error: { code: "unknown" } });
+});
+
 test("RPC network/internal errors and generic send failures are unknown", async () => {
   const f = await fixture(`if(request.method==='send') {
     const errors = {
@@ -531,53 +525,6 @@ test("a receive subscription that goes quiet is rebuilt rather than trusted", as
   await Bun.sleep(300);
   expect(f.logs.some(line => line.includes("receive subscription rebuilt as 2"))).toBe(true);
   expect(f.statuses.at(-1)?.status).toBe("ready");
-});
-
-test("call events and command responses preserve unsigned 64-bit ids as strings", async () => {
-  const incomingId = "9007199254740993";
-  const outgoingId = "18446744073709551610";
-  const f = await fixture(`
-    if(request.method==='subscribeCallEvents') {
-      if(process.env.SIGNAL_CALL_TUNNEL_AUDIO_MODE!=='pipe' || process.env.SIGNAL_CALL_TUNNEL_BIN!==process.argv[1] || !process.env.SIGNAL_CALL_TUNNEL_SOCKET_DIR.endsWith('/tmp')) process.exit(8);
-      reply(request,7);
-      process.stdout.write('{"jsonrpc":"2.0","method":"callEvent","params":{"subscription":7,"result":{"callId":${incomingId},"state":"RINGING_INCOMING","number":"+12025550101","uuid":"'+friend+'","isOutgoing":false,"inputDeviceName":"unix:/tmp/incoming.sock","outputDeviceName":"unix:/tmp/incoming.sock","reason":null}}}\\n');
-      return;
-    }
-    if(request.method==='startCall') {
-      if(request.params.recipient!==friend || Array.isArray(request.params.recipient)) process.exit(9);
-      process.stdout.write('{"jsonrpc":"2.0","id":'+request.id+',"result":{"callId":${outgoingId},"state":"RINGING_OUTGOING","inputDeviceName":"unix:/tmp/outgoing.sock","outputDeviceName":"unix:/tmp/outgoing.sock"}}\\n');
-      return;
-    }
-    if(request.method==='rejectCall') {
-      if(request.params.callId!==${JSON.stringify(incomingId)}) process.exit(10);
-      return reply(request,{});
-    }
-    if(request.method==='acceptCall') {
-      if(request.params.callId!==${JSON.stringify(incomingId)}) process.exit(11);
-      process.stdout.write('{"jsonrpc":"2.0","id":'+request.id+',"result":{"callId":${incomingId},"state":"CONNECTING","inputDeviceName":"unix:/tmp/incoming.sock","outputDeviceName":"unix:/tmp/incoming.sock"}}\\n');
-      return;
-    }
-    if(request.method==='hangupCall') {
-      if(request.params.callId!==${JSON.stringify(outgoingId)}) process.exit(12);
-      return reply(request,{});
-    }
-    if(request.method==='unsubscribeCallEvents') return reply(request,true);
-  `, { calls: true });
-  await start(f.plugin, f.context);
-  await Bun.sleep(10);
-  expect(f.plugin.capabilities.calls).toBe(true);
-  expect(f.calls[0]).toMatchObject({ externalId: incomingId, peer: friend, direction: "incoming", state: "ringing_incoming" });
-  expect(await f.plugin.calls!.hangup(incomingId)).toMatchObject({ ok: true });
-  expect(await f.plugin.calls!.accept(incomingId)).toMatchObject({ ok: true, value: { externalId: incomingId, state: "connecting" } });
-  const started = await f.plugin.calls!.start(friend);
-  expect(started).toMatchObject({ ok: true, value: { externalId: outgoingId, peer: friend, direction: "outgoing" } });
-  expect(await f.plugin.calls!.hangup(outgoingId)).toMatchObject({ ok: true });
-});
-
-test("calling stays unavailable when the configured tunnel executable is missing", async () => {
-  const f = await fixture("");
-  expect(f.plugin.capabilities.calls).toBe(false);
-  expect(f.plugin.calls).toBeUndefined();
 });
 
 test("signal-cli diagnostics reach the host log instead of an in-memory ring", async () => {

@@ -18,6 +18,7 @@ import { networkStatus, readPrivateNetwork } from "./private-network";
 import { Rooms, ROOM_CUSTODIAN } from "./rooms";
 import { loopbackPeer } from "pi-orchestrator/api";
 import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
+import { handleAgentSignal, isSignalProductPath } from "./agent-signal";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 
@@ -283,6 +284,7 @@ async function openUpstream(target: string, protocols: string[], user: string, s
 }
 
 async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySocketData>): Promise<Response | undefined> {
+  if (isSignalProductPath(url.pathname)) return Response.json({ error: "Signal has no app WebSocket transport" }, { status: 403 });
   if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
   const identity = requestIdentity(req, url);
   if (identity.error) return identity.error;
@@ -416,6 +418,9 @@ const consentBridge = rootConsentHandler({ capability: rootConsentCapability, pe
   roomsOrigin: process.env.PI_REMOTE_ROOMS_OWNER_URL });
 async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Response> {
   if (/^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname)) return handleAgentRooms(req, peer, roomPeople, activeRooms());
+  if (/^\/v1\/agent-signal(?:\/|$)/.test(url.pathname)) return handleAgentSignal(req, peer, roomPeople, user => byUser.get(user),
+    (person, request, target) => proxy(person, `http://127.0.0.1:${person.port}`, request, target, request.signal));
+  if (isSignalProductPath(url.pathname)) return Response.json({ error: "Signal is an agent tool, not an app endpoint", code: "forbidden" }, { status: 403 });
   const consent = await consentBridge(req);
   if (consent) return consent;
   activeRooms();
@@ -493,7 +498,7 @@ Bun.serve<ProxySocketData>({
     if (url.pathname.startsWith("/v1/auth/")) return oauthRoute(req, url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return preflight();
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);
-    const socket = /^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
+    const socket = /^\/v1\/(?:agent-rooms|agent-signal)(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
     const peer = socket?.address === "127.0.0.1" && HOST === "127.0.0.1"
       ? loopbackPeer({ address: socket.address, port: socket.port, localAddress: HOST, localPort: PORT }, "/proc", false) : undefined;
     const response = await route(req, url, peer);

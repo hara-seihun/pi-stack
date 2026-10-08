@@ -21,7 +21,7 @@ test("agent messages keep their header and put actions on the long-press menu", 
 });
 
 test("agent messages show stable reactions and quote replies", () => {
-  const identity = { id: "messaging/one", timestamp: 1, sender: { id: "sam", name: "Sam" } };
+  const identity = { id: "pi/thread/one", timestamp: 1, sender: { id: "kenan", name: "Kenan" } };
   const reactions = [{ emoji: "❤️", sender: { id: "me", name: "You" }, timestamp: 2, own: true }];
   const agent = renderToStaticMarkup(<ChatMessage kind="assistant" label="Agent" text="answer" contentFormat="literal" identity={identity} reactions={reactions} />);
   expect(agent).not.toContain('aria-label="Add reaction"');
@@ -29,11 +29,11 @@ test("agent messages show stable reactions and quote replies", () => {
   expect(agent).not.toContain('<button');
   expect(agent).toContain("You");
   const reply = { messageId: identity.id, sender: identity.sender, text: "the first message" };
-  expect(renderToStaticMarkup(<ChatMessage kind="user" label="You" text="quoted answer" contentFormat="literal" identity={{ ...identity, id: "messaging/two" }} reply={reply} onReply={() => {}} />)).toContain("the first message");
+  expect(renderToStaticMarkup(<ChatMessage kind="user" label="You" text="quoted answer" contentFormat="literal" identity={{ ...identity, id: "pi/thread/two" }} reply={reply} onReply={() => {}} />)).toContain("the first message");
 });
 
 test("menu-opened reaction picker includes owned custom emoji for removal", () => {
-  const identity = { id: "messaging/one", timestamp: 1, sender: { id: "sam" } };
+  const identity = { id: "pi/thread/one", timestamp: 1, sender: { id: "kenan" } };
   const props = { identity, reactions: [{ emoji: "🦦", sender: { id: "me" }, timestamp: 2, own: true }], onOpenChange: () => {} };
   const closed = renderToStaticMarkup(<MessageReactions {...props} open={false} />);
   expect(closed).not.toContain("<button");

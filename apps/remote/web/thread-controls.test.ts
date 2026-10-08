@@ -14,9 +14,8 @@ test("placement, not custody or provenance, controls Chats", () => {
   const rows = [session("foreground", { foreground: true, origin: "fleet", parentId: "other" }), session("background", { foreground: false }), session("historical")];
   expect(conversationThreads(rows).map(row => row.id)).toEqual(["foreground", "historical"]);
   for (const row of rows) expect(conversationTab(row)).toBe("chats");
-  const messaging = { version: 0, backends: [], conversations: [], calls: [] };
-  expect(inboxRows(rows, [], messaging).map(row => row.chat.id)).not.toContain("ai:background");
-  expect(selectionAfterSync("ai:historical", { sessions: rows, messaging }, { sessions: rows, messaging })).toBe("ai:historical");
+  expect(inboxRows(rows, []).map(row => row.chat.id)).not.toContain("ai:background");
+  expect(selectionAfterSync("ai:historical", { sessions: rows }, { sessions: rows })).toBe("ai:historical");
 });
 
 test("cancelling targets only the selected agent even when it launched agents", () => {

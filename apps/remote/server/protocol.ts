@@ -4,9 +4,8 @@
 // the other instead of silently reading undefined at runtime.
 
 import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, Delivery as ThreadDelivery } from "pi-orchestrator/api";
-import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
-export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
+export type ChatId = `ai:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
 export type FileEditSnapshot = { path: string; content: string; revision: string };
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
@@ -516,7 +515,6 @@ import type { ThreadQuestion } from "pi-orchestrator/api";
 export type StreamSnapshot =
   | { type: "bootstrap"; bootstrap: Bootstrap }
   | ({ type: "state" } & SupervisorState)
-  | { type: "messaging"; snapshot: MessagingSnapshot }
   | { type: "dashboard"; dashboard: Dashboard }
   | { type: "workers"; sessions: Session[] }
   | ({ type: "transcript" } & TranscriptPage)

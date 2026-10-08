@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -110,6 +110,17 @@ test("root drain discovers only known mounted person journals plus its root spoo
   }
   for (const directory of paths) expect(await new ActionJournal({ directory, enabled: () => true, autoDrain: false, client: client(items) }).drain()).toEqual({ ok: true });
   expect(items.filter(item => item.source.action === "email.send:confirmed").map(item => item.setting.person).sort()).toEqual(["alice", "bob", "root"]);
+});
+test("Signal journal drain stays inside configured mounted own-person data", () => {
+  const registry = root(), privateDir = root(), outside = root(), data = join(privateDir, "remote");
+  mkdirSync(data);
+  writeFileSync(join(registry, "alice.json"), JSON.stringify({ version: 1, unlock: { mountpoint: privateDir }, environment: { PI_REMOTE_DATA: data } }));
+  const env = { PI_REMOTE_PERSONS_DIR: registry, PI_KENAN_ACTION_JOURNAL_DIR: join(root(), "spool") };
+  expect(journalDrainDirectories(env, () => true)).toContain(join(data, "messaging", "action-journal"));
+  mkdirSync(join(data, "messaging"));
+  symlinkSync(outside, join(data, "messaging", "action-journal"));
+  expect(journalDrainDirectories(env, () => true)).not.toContain(join(data, "messaging", "action-journal"));
+  expect(journalDrainDirectories(env, () => false)).toEqual([env.PI_KENAN_ACTION_JOURNAL_DIR]);
 });
 test("missing publisher uses verified UID, never expired inherited session token", async () => {
   const previous = { ...process.env }, store = new MemoryStore(join(root(), "memory.sqlite3"));

@@ -1,5 +1,4 @@
 import type { Activity, GovernorState, Session, StreamSnapshot, TranscriptItemKind } from "../server/protocol.js";
-import type { MessagingBackendInfo, MessagingCallState, MessagingLink, MessagingMessage } from "../server/messaging/protocol.js";
 import { assertNever, requireState } from "./explicit-state.js";
 
 export const ACTIVITIES = {
@@ -11,11 +10,7 @@ export const ACTIVITIES = {
 const THREAD_STATES = { idle: true, running: true, waiting: true } satisfies Record<Session["state"], true>;
 export const TRANSCRIPT_KINDS = { system: true, tool: true, user: true, assistant: true, thinking: true, toolCall: true, notice: true } satisfies Record<TranscriptItemKind, true>;
 export const GOVERNOR_STATES = { off: true, green: true, blue: true, red: true } satisfies Record<GovernorState, true>;
-export const BACKEND_STATES = { ready: true, unconfigured: true, connecting: true, error: true } satisfies Record<MessagingBackendInfo["status"], true>;
-export const LINK_STATES = { waiting: true, linked: true, failed: true, cancelled: true } satisfies Record<MessagingLink["status"], true>;
-export const MESSAGE_STATES = { received: true, sending: true, sent: true, failed: true, unknown: true } satisfies Record<MessagingMessage["status"], true>;
-export const CALL_STATES = { ringing_incoming: true, ringing_outgoing: true, connecting: true, connected: true, reconnecting: true, ended: true } satisfies Record<MessagingCallState, true>;
-const SNAPSHOT_TYPES = { bootstrap: true, state: true, messaging: true, dashboard: true, workers: true, transcript: true, live: true, images: true, questions: true } satisfies Record<StreamSnapshot["type"], true>;
+const SNAPSHOT_TYPES = { bootstrap: true, state: true, dashboard: true, workers: true, transcript: true, live: true, images: true, questions: true } satisfies Record<StreamSnapshot["type"], true>;
 
 export function stateObject(value: unknown, owner: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${owner}: expected object`);
@@ -80,21 +75,6 @@ export function validateTranscriptHead(value: unknown): void {
   if (head.textTruncated !== undefined && (head.textTruncated !== true || !["user", "assistant", "notice"].includes(String(head.kind))))
     throw new Error("Transcript text preview: invalid marker");
 }
-export function validateMessagingMessage(value: unknown): void {
-  const message = stateObject(value, "Messaging message");
-  requireState(message.status, MESSAGE_STATES, "Message delivery");
-  requireState(message.direction, { incoming: true, outgoing: true } satisfies Record<MessagingMessage["direction"], true>, "Message direction");
-}
-
-export function validateMessagingResponse(value: unknown): void {
-  const response = stateObject(value, "Messaging response");
-  if (Object.hasOwn(response, "message")) validateMessagingMessage(response.message);
-  if (Object.hasOwn(response, "messages")) stateArray(response.messages, "Message history").forEach(validateMessagingMessage);
-  if (Object.hasOwn(response, "call")) requireState(stateObject(response.call, "Call response").state, CALL_STATES, "Call state");
-  if (Object.hasOwn(response, "link")) requireState(stateObject(response.link, "Link response").status, LINK_STATES, "Link status");
-  if (Object.hasOwn(response, "conversation")) requireState(stateObject(response.conversation, "Conversation response").kind, { direct: true, group: true }, "Conversation kind");
-}
-
 export function validateStreamSnapshot(resource: string, value: unknown): asserts value is StreamSnapshot {
   const snapshot = stateObject(value, "Stream snapshot");
   const type = requireState(snapshot.type, SNAPSHOT_TYPES, "Stream snapshot type");
@@ -132,17 +112,6 @@ export function validateStreamSnapshot(resource: string, value: unknown): assert
           stateArray(metric.accounts, "Plan accounts").forEach(value => requireState(stateObject(value, "Plan account").state, { ready: true, stale: true, unavailable: true }, "Account reading"));
         });
       });
-      return;
-    }
-    case "messaging": {
-      const messaging = stateObject(snapshot.snapshot, "Messaging snapshot");
-      stateArray(messaging.backends, "Messaging backends").forEach(value => {
-        const backend = stateObject(value, "Messaging backend");
-        requireState(backend.status, BACKEND_STATES, "Backend status");
-        if (backend.link !== null) requireState(stateObject(backend.link, "Messaging link").status, LINK_STATES, "Link status");
-      });
-      stateArray(messaging.conversations, "Messaging conversations").forEach(value => requireState(stateObject(value, "Conversation").kind, { direct: true, group: true }, "Conversation kind"));
-      stateArray(messaging.calls, "Messaging calls").forEach(value => requireState(stateObject(value, "Call").state, CALL_STATES, "Call state"));
       return;
     }
   }

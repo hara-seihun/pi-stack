@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ThreadColor } from "../../../../server/protocol";
 import { useThreadColor, threadColorStyle } from "./use-thread-color";
 import { useVisibleSelection } from "../../app/use-visible-selection";
-import { ChatAvatar } from "../../chat-row";
+import { ChatIcon } from "../../chat-row";
 import { INBOX_SECTIONS, type Chat, type ChatId, type InboxRow } from "../../chats";
 import { DismissibleError } from "../../dismissible-error";
 import { StatusIcon } from "../status/StatusIcon";
@@ -27,9 +27,8 @@ function relativeTime(at: number, now = Date.now()) {
 export const InboxRowView = memo(function InboxRowView({ row, selected, compactSelected, place, onOpen, onPrefetch, onClose }: { row: InboxRow; selected: boolean; compactSelected: boolean; place: string; onOpen(chat: Chat): void; onPrefetch?(chat: Chat): void; onClose(chat: Chat): void }) {
   const { chat, status } = row;
   const session = chat.kind === "ai" ? chat.session : null;
-  const conversation = chat.kind === "human" ? chat.conversation : null;
   const room = chat.kind === "room" ? chat.room : null;
-  const unread = conversation?.unread ?? room?.unreadCount ?? 0;
+  const unread = room?.unreadCount ?? 0;
   const [color, setColor] = useState<ThreadColor | null>(session?.color ?? null);
   useEffect(() => setColor(session?.color ?? null), [session?.color]);
   const colour = useThreadColor({ id: session?.id, name: chat.title, color: session?.color, onPreview: setColor });
@@ -43,7 +42,7 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
     {/* The press starts before the tap lands: that is when this thread's
         newest window is worth asking for. */}
     <button ref={colour.button} type="button" className="inbox-open" {...colour.handlers} onClick={event => { colour.handlers.onClick(event); if (!event.defaultPrevented) onOpen(chat); }} onPointerDown={event => { colour.handlers.onPointerDown(event); onPrefetch?.(chat); }} aria-current={selected || undefined} aria-expanded={colour.expanded} aria-controls={colour.controls} aria-description={session ? "Long press, right click or press Shift+F10 to change thread colour" : undefined} title={session ? "Long press to change thread colour" : undefined}>
-      <span className="inbox-glyph"><ChatAvatar avatar={chat.kind === "human" ? chat.avatar : undefined} icon={chat.icon} color={color ? "var(--thread-color)" : undefined} />{status && <StatusIcon status={status} className="inbox-status" />}</span>
+      <span className="inbox-glyph"><ChatIcon icon={chat.icon} color={color ? "var(--thread-color)" : undefined} />{status && <StatusIcon status={status} className="inbox-status" />}</span>
       <span className="inbox-main">
         <span className="inbox-title-line">
           <span className="inbox-title">{chat.title}</span>

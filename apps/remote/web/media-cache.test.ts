@@ -13,19 +13,17 @@ afterAll(() => Object.assign(globalThis, previous));
 
 const picture = () => new Blob(["picture"], { type: "image/png" });
 
-test("avatar identity changes with its version, not credentials; mutable files bypass persistence", () => {
-  const path = "https://router.test/pi-stack/v1/remotes/home/v1/messaging/backends/slack/avatars/alice";
-  const key = mediaCacheKey(`${path}?v=1&user=alice&session=secret`);
-  expect(key).toBe(`${path}?v=1`);
-  expect(mediaCacheKey(`${path}?v=1&user=alice&session=renewed`)).toBe(key);
-  expect(mediaCacheKey(`${path}?v=2&session=secret`)).not.toBe(key);
-  expect(mediaCacheKey(path)).toBeNull();
+test("content-addressed session images ignore credentials; mutable files bypass persistence", () => {
+  const path = "https://router.test/pi-stack/v1/remotes/home/v1/sessions/thread/images/hash";
+  const key = mediaCacheKey(`${path}?user=alice&session=secret`);
+  expect(key).toBe(path);
+  expect(mediaCacheKey(`${path}?user=alice&session=renewed`)).toBe(key);
+  expect(mediaCacheKey(path.replace("hash", "next-hash"))).not.toBe(key);
   expect(mediaCacheKey("/v1/files/download?path=/mutable.png")).toBeNull();
   expect(mediaCacheKey("https://images.example/photo.jpg")).toBeNull();
-  expect(mediaCacheKey("/v1/messaging/preview-images/hash?session=secret")).not.toContain("secret");
 });
 
-test("navigation and simultaneous avatar consumers share one load and a synchronously reusable URL", async () => {
+test("navigation and simultaneous image consumers share one load and a synchronously reusable URL", async () => {
   const cache = new ClientCache(async () => "media-navigation");
   let requests = 0;
   const fetcher = async () => { requests++; return picture(); };
@@ -41,9 +39,9 @@ test("navigation and simultaneous avatar consumers share one load and a synchron
   cache.dispose();
 });
 
-test("a remounted avatar paints the retained image before effects or network", async () => {
+test("a remounted image paints the retained image before effects or network", async () => {
   const cache = new ClientCache(async () => "media-paint");
-  const src = "https://router.test/v1/messaging/backends/slack/avatars/alice?v=1&session=secret";
+  const src = "https://router.test/v1/sessions/thread/images/hash?session=secret";
   const lease = await cache.acquireMedia(mediaCacheKey(src)!, async () => picture());
   lease.release();
   const markup = renderToStaticMarkup(createElement(ClientCacheContext.Provider, { value: cache },

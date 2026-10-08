@@ -6,11 +6,11 @@ test("white paper and each source image keep separate drafts in their owning cha
   const drafts: DrawingDraft[] = [
     { id: "white", chatId: "agent" },
     { id: "image", chatId: "agent", background },
-    { id: "signal-image", chatId: "signal", background },
+    { id: "other-image", chatId: "other-agent", background },
   ];
   expect(findDrawingDraft(drafts, "agent")?.id).toBe("white");
   expect(findDrawingDraft(drafts, "agent", { ...background, alt: "New caption" })?.id).toBe("image");
-  expect(findDrawingDraft(drafts, "signal", background)?.id).toBe("signal-image");
-  expect(findDrawingDraft(drafts, "signal")).toBeUndefined();
+  expect(findDrawingDraft(drafts, "other-agent", background)?.id).toBe("other-image");
+  expect(findDrawingDraft(drafts, "other-agent")).toBeUndefined();
   expect(findDrawingDraft(drafts, "agent", { src: "/different.png", alt: "" })).toBeUndefined();
 });
