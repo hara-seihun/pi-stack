@@ -33,6 +33,7 @@ export async function probeTabRestoration(tool, { url, statePath, record }) {
     await execute(names[0], "tab-state-capture", [
       ["open", url],
       ["eval", "sessionStorage.setItem('fixture-tab-auth', 'fixture-tab-token'); true"],
+      ["get", "url"],
       ["state", "save-tab", statePath, account, origin, "120"],
     ]);
     assert.ok(existsSync(statePath), "authorized tab capsule must exist");
@@ -58,10 +59,10 @@ export async function probeTabRestoration(tool, { url, statePath, record }) {
       ]);
       assert.equal(restored[2].result.text, "authorized-at-startup", "tab auth must be restored before app code runs");
       const newTab = await execute(name, "tab-state-restored-new-tab", [
-        ["tab", "new", "about:blank"], ["state", "load-tab", statePath, account, origin],
+        ["tab", "new", "about:blank"], ["get", "url"], ["state", "load-tab", statePath, account, origin],
         ["open", new URL("/tab-auth", url).href], ["get", "text", "#tab-startup"],
       ]);
-      assert.equal(newTab[3].result.text, "authorized-at-startup", "each new tab must explicitly restore auth before startup");
+      assert.equal(newTab[4].result.text, "authorized-at-startup", "each new tab must explicitly restore auth before startup");
       await close(name);
     }
   } finally {

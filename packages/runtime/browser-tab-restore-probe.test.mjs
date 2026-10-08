@@ -19,10 +19,13 @@ function fixture(t, defect) {
       let result = {}, success = true;
       if (command[0] === "open") {
         state.url = command[1];
+        state.verified = true;
         state.startup = state.auth ? "authorized-at-startup" : "unauthorized-at-startup";
       }
-      if (command[0] === "eval") state.auth = true;
-      if (command[0] === "tab") state.auth = false;
+      if (command[0] === "eval") { state.auth = true; state.verified = false; }
+      if (command[0] === "tab") { state.auth = false; state.verified = false; }
+      if (command[0] === "get" && command[1] === "url") state.verified = true;
+      if (command[0] === "state") assert.equal(state.verified, true, "state operations require a current URL checkpoint after transitions");
       if (command[0] === "state" && command[1] === "save-tab") {
         capsule = { account: command[3], origin: command[4] };
         writeFileSync(command[2], "synthetic private capsule", { mode: 0o600 });
