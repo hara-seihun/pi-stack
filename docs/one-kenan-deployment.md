@@ -314,8 +314,8 @@ Rooms use the existing `pi-remote-supervise` rolling handoff, so active runtime 
 An owner's nonsecret person registry may opt into `environment.PI_THREAD_DEFAULT_MODEL`
 with a catalogue or provider/model selection. Remote, the person's Orchestrator (including
 isolated owners), and new schedules read this owner setting at admission. It replaces
-only an omitted model, including notification/consent inboxes and live workers; explicit
-models, mode thinking/speed, global availability, accepted receipts, existing schedules
+only an omitted non-mode model, including notification/consent inboxes; explicit
+models, declared mode choices (including permitted live Luna), global availability, accepted receipts, existing schedules
 and running executions remain unchanged. Rooms have no personal override. With no opt-in,
 all previous defaults are retained. An unreadable/malformed registry fails admission closed.
 Inbox payloads and request IDs are unchanged, so durable outboxes reconcile using the

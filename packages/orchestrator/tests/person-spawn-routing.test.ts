@@ -30,13 +30,13 @@ it("owner registry is person-scoped, dynamic, rooms-excluded and fails closed", 
   expect(() => configuredPersonSpawnModel(env, "../alice")).toThrow();
   expect(configuredPersonSpawnModel(env, "unregistered")).toBe("luna");
 });
-it("implicit parentless and ordinary/live workers use only the owner's model, preserving mode knobs and explicit settings", async () => {
+it("implicit legacy fallbacks use the owner model; permitted live Luna and explicit settings remain intact", async () => {
   const path = root(), martine = owner(path, () => SOL), other = owner(root());
   expect(await martine.spawn({ requestId: "parentless", id: "parentless", cwd: path })).toMatchObject({ ok: true, value: { settings: { model: SOL, thinkingLevel: "high", speed: "standard" } } });
   expect(await other.spawn({ requestId: "parentless", cwd: path })).toMatchObject({ ok: false, error: { message: "Astra disabled" } });
   const live = await martine.spawn({ requestId: "live", id: "live", cwd: path, metadata: { mode: "live" } });
   expect(live).toMatchObject({ ok: true, value: { settings: { model: SOL, thinkingLevel: "low", speed: "priority" } } });
-  expect(await martine.spawn({ requestId: "live-worker", parentId: "live", cwd: path })).toMatchObject({ ok: true, value: { settings: { model: SOL, thinkingLevel: "medium", speed: "priority" } } });
+  expect(await martine.spawn({ requestId: "live-worker", parentId: "live", cwd: path })).toMatchObject({ ok: true, value: { settings: { model: LUNA, thinkingLevel: "medium", speed: "priority" } } });
   expect(await martine.spawn({ requestId: "ordinary-worker", parentId: "parentless", cwd: path })).toMatchObject({ ok: true, value: { settings: { model: SOL, thinkingLevel: "high", speed: "standard" } } });
   const parent = live.ok ? live.value : null;
   expect(resolveSpawnSettings(undefined, parent)).toMatchObject({ ok: true, value: { model: LUNA, thinkingLevel: "medium", speed: "priority" } });
