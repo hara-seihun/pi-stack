@@ -49,8 +49,26 @@ class Tests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_probe_is_readonly(self):
-        self.assertTrue(boundary.transition(self.host, 'b' * 40, probe=True)['ready'])
+        result = boundary.transition(self.host, 'b' * 40, probe=True)
+        self.assertTrue(result['ready'])
+        self.assertTrue(result['requiresAtomicGate'])
+        self.assertFalse(result['admissionGated'])
+        self.assertEqual(result['state'], 'probe-atomic-gate-required')
         self.assertFalse(boundary.JOURNAL.exists())
+        self.assertEqual(self.host.calls, [])
+
+    def test_probe_does_not_wait_forever_on_durable_custody(self):
+        self.host.evidence = dict(self.host.evidence, rootSessions=7, pendingConsents=3, runtimeConnections=6)
+        result = boundary.transition(self.host, 'b' * 40, probe=True)
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['executorState'], 'unobservable-readonly')
+        self.assertTrue(result['requiresAtomicGate'])
+        self.assertEqual(self.host.calls, [])
+        self.assertFalse(boundary.JOURNAL.exists())
+
+    def test_probe_obeys_declared_live_executor_counters(self):
+        self.host.health = lambda role: {'ok': True, 'releaseProtocol': 1, 'releaseCommit': self.host.source, 'activeExecutions': 1, 'consentActive': False}
+        self.assertFalse(boundary.transition(self.host, 'b' * 40, probe=True)['ready'])
         self.assertEqual(self.host.calls, [])
 
     def test_busy_does_not_gate_or_cancel(self):

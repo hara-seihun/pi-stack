@@ -112,12 +112,19 @@ def transition(host, candidate, *, probe=False, restore=False):
     # Protocol 1 gates active executors and the consent poller atomically.
     # Durable unanswered consents and idle HTTP pool sockets are not native
     # writers; keep them intact, rather than waiting for or cancelling them.
-    retained = any(evidence.values()) if probe else any(evidence[field] for field in ('childProcesses', 'escapedNativeProcesses'))
+    retained = any(evidence[field] for field in ('childProcesses', 'escapedNativeProcesses'))
+    counter_keys = set(health) & {'activeExecutions', 'consentActive'}
+    if probe and counter_keys:
+        if counter_keys != {'activeExecutions', 'consentActive'} or type(health['activeExecutions']) is not int or health['activeExecutions'] < 0 or type(health['consentActive']) is not bool:
+            raise RuntimeError('Root readonly executor counters are invalid')
+        retained = retained or health['activeExecutions'] != 0 or health['consentActive']
     if retained:
         return {'ready': False, 'state': 'writers-retained', 'unit': UNIT, 'evidence': evidence}
     if host.command('systemctl', 'show', UNIT, '-p', 'MainPID', '--value') != pid:
         return {'ready': False, 'state': 'generation-changed', 'unit': UNIT}
-    return {'ready': True, 'state': 'probe-idle' if probe else 'gated-idle', 'unit': UNIT, 'pid': pid, 'source': source, 'evidence': evidence, 'admissionGated': not probe}
+    return {'ready': True, 'state': 'probe-atomic-gate-required' if probe else 'gated-idle', 'unit': UNIT, 'pid': pid, 'source': source, 'evidence': evidence,
+            'admissionGated': not probe, 'requiresAtomicGate': probe,
+            'executorState': 'readonly-counters' if probe and counter_keys else 'unobservable-readonly' if probe else 'atomically-quiesced'}
 
 
 def main():
