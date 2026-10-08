@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const directory = dirname(fileURLToPath(import.meta.url));
@@ -32,11 +32,43 @@ export function bootstrapConfiguration(properties) {
   return `router=${value("piRemoteRouterUrl")}\npublic=${value("piRemotePublicRouterUrl")}`;
 }
 
+export function nativeDependencyClosure(git, revision) {
+  const { packages } = JSON.parse(git("show", `${revision}:package-lock.json`));
+  const app = packages?.["apps/kenan"];
+  if (!app) throw new Error("Android dependency lock is missing the Kenan workspace.");
+  const entries = new Map();
+  const visit = (from, name, optional) => {
+    let directory = from;
+    let path;
+    for (;;) {
+      const candidate = posix.join(directory, "node_modules", name);
+      if (packages[candidate]) { path = candidate; break; }
+      if (!directory) break;
+      directory = posix.dirname(directory);
+      if (directory === ".") directory = "";
+    }
+    if (!path) {
+      if (optional) return;
+      throw new Error(`Android dependency lock cannot resolve ${name} from ${from}`);
+    }
+    if (entries.has(path)) return;
+    const dependency = packages[path];
+    if (dependency.link) throw new Error(`Android dependency is not immutable: ${path}`);
+    entries.set(path, dependency);
+    const optionalDependencies = dependency.optionalDependencies ?? {};
+    for (const child of Object.keys({ ...dependency.dependencies, ...optionalDependencies }).sort()) {
+      visit(path, child, Object.hasOwn(optionalDependencies, child));
+    }
+  };
+  for (const name of Object.keys({ ...app.dependencies, ...app.devDependencies }).sort()) visit("apps/kenan", name, false);
+  return JSON.stringify([...entries].sort(([left], [right]) => left.localeCompare(right)));
+}
+
 export function shellIdentity(git, revision, bootstrap = "") {
   const entries = git("ls-tree", "-r", "--full-tree", revision, "--", ...SHELL_PATHS).split("\n").filter(Boolean)
     .filter(line => !SHELL_EXCLUDED.test(line.split("\t")[1] ?? ""));
   if (!entries.length) throw new Error("Android shell sources are missing from the revision.");
-  return createHash("sha256").update(entries.join("\n")).update(`\n${bootstrap}`).digest("hex").slice(0, 16);
+  return createHash("sha256").update(entries.join("\n")).update(`\n${nativeDependencyClosure(git, revision)}\n${bootstrap}`).digest("hex").slice(0, 16);
 }
 
 export function releaseInfo() {
