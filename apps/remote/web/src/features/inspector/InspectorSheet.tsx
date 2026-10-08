@@ -29,7 +29,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 function WaitReference({ wait, sessions, onOpen }: { wait: NonNullable<Session["waitingOnAgents"]>; sessions: Session[]; onOpen(id: string): void }) {
   if (!Object.hasOwn(wait, "kind")) return <Row label="Wait error">Wait type missing</Row>;
   switch (wait.kind) {
-    case "agents": return <Row label="Agent dependencies">{wait.threadIds.map(id => <button className="inspector-link" type="button" key={id} onClick={() => onOpen(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}</Row>;
+    case "agents": return <Row label="Waiting for">{wait.threadIds.map(id => <button className="inspector-link" type="button" key={id} onClick={() => onOpen(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}</Row>;
     case "job": return <Row label="Job"><code>{wait.jobId}</code></Row>;
     case "deployment": return <Row label="Publication"><code>{wait.publicationId}</code></Row>;
     case "message": return <Row label="Message from"><button className="inspector-link" type="button" onClick={() => onOpen(wait.fromThreadId)}>{sessions.find(item => item.id === wait.fromThreadId)?.name ?? wait.fromThreadId}</button></Row>;
@@ -161,16 +161,17 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
         {!session.archivedAt && session.foreground && onBackground && <button type="button" disabled={pending} onClick={onBackground}>Move to background</button>}
       </div>
       <dl className="inspector-facts">
-        <Row label="Status"><StatusPill status={status} /></Row>
+        <Row label="Activity"><StatusPill status={status} /></Row>
+        {!session.archivedAt && <Row label="Close">{pending ? "Unavailable while an action is finishing" : "Available"}</Row>}
         {session.state === "running" && <>
           {status.title && <Row label="Phase evidence">{status.title}</Row>}
           <Row label="Phase started">{session.activitySince ? formatTime(new Date(session.activitySince).toISOString()) : "Not reported"}</Row>
           <Row label="Last activity">{session.lastActivityAt ? formatTime(new Date(session.lastActivityAt).toISOString()) : "Not reported"}</Row>
         </>}
-        {session.waitingOnAgents && <>
-          <Row label="Dependency">{session.waitingOnAgents.reason}</Row>
-          <Row label="Waiting since">{formatTime(new Date(session.waitingOnAgents.since).toISOString())}</Row>
-          <WaitReference wait={session.waitingOnAgents} sessions={sessions} onOpen={onOpenThreadId} />
+        {status.key === "waiting" && <>
+          {status.title && <Row label="Reason">{status.title}</Row>}
+          {session.waitingOnAgents ? <WaitReference wait={session.waitingOnAgents} sessions={sessions} onOpen={onOpenThreadId} />
+            : !!session.dependencies?.length && <Row label="Waiting for">{session.dependencies.map(id => <button type="button" className="inspector-link" key={id} onClick={() => onOpenThreadId(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}</Row>}
         </>}
         {session.wakeSchedule && <>
           <Row label="Wake check">{session.wakeSchedule.reason}</Row>
@@ -194,7 +195,6 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
         <Row label="Thread ID"><code className="inspector-id">{session.id}</code></Row>
       </dl>
       {parent && <section className="inspector-section"><h3>Launched by</h3><button type="button" className="inspector-link" onClick={() => onOpenThread(parent)}>{agentName(parent) && <strong>{agentName(parent)} </strong>}{parent.name || parent.id}</button></section>}
-      {!!session.dependencies?.length && <section className="inspector-section"><h3>Dependencies</h3>{session.dependencies.map(id => <button type="button" className="inspector-link" key={id} onClick={() => onOpenThreadId(id)}>{sessions.find(item => item.id === id)?.name ?? id}</button>)}<p className="muted">Resolve or release these dependencies before closing either agent.</p></section>}
       <section className="inspector-section">
         <h3>Agents launched {childrenLoading && <span className="muted">loading</span>}</h3>
         <DismissibleError message={childrenFailure} resetKey={attempt} />

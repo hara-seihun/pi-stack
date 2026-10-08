@@ -51,7 +51,8 @@ test("resource failure keeps a visibly stale usable directory, never a successfu
   expect(html).toContain("Owner unavailable");
   expect(html).toContain("Task quiet");
   expect(html).toContain('class="agent-group" open=""');
-  expect(html).toContain("Waiting for job");
+  expect(html).toContain('data-status="waiting"');
+  expect(html).toContain("Wait for build");
   expect(html).not.toContain("No background agents.");
 });
 

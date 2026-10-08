@@ -18,7 +18,7 @@ test("invalid lifecycle and activity are rejected even when held or archived", (
   expect(() => validateThreadObservation({ state: "idle" })).toThrow("invalid state");
 });
 
-test("durable dependency types stay distinct from each other and idle", () => {
+test("durable wait identities stay distinct while human activity is one Waiting state", () => {
   const dependencies: NonNullable<Session["waitingOnAgents"]>[] = [
     { kind: "agents", threadIds: ["child"], after: {}, reason: "Worker result", since: 1000 },
     { kind: "job", jobId: "job", reason: "Heavy job", since: 1000 },
@@ -26,7 +26,11 @@ test("durable dependency types stay distinct from each other and idle", () => {
     { kind: "message", fromThreadId: "collaborator", reason: "Reply", since: 1000 },
   ];
   const statuses = dependencies.map(waitingOnAgents => threadStatus({ ...idle, activity: "awaiting", waitingOnAgents }));
-  expect(new Set(statuses.map(status => status.key)).size).toBe(4);
+  expect(new Set(statuses.map(status => status.key))).toEqual(new Set(["waiting"]));
+  expect(statuses.map(status => status.title)).toEqual(dependencies.map(wait => wait.reason));
+  const subscription = threadStatus({ ...idle, state: "waiting", activity: "awaiting", activityDetail: "Waiting for agent results" });
+  expect(subscription).toMatchObject({ key: "waiting", label: "Waiting", busy: true, title: "Waiting for agent results" });
+  expect(threadStatus({ ...idle, dependencies: ["not-authoritative-state"] } as any).key).toBe("idle");
   expect(statuses.every(status => status.busy && !status.attention && attentionRank(status) === 11)).toBe(true);
   expect(threadStatus(idle).busy).toBe(false);
   expect(threadStatus({ ...idle, activity: "thinking" })).toMatchObject({ key: "reporting_error", busy: false, attention: true });

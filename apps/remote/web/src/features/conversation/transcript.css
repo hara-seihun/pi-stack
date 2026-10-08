@@ -62,7 +62,8 @@
 @media (prefers-reduced-motion: reduce) { .work-chevron { transition: none; } }
 .agent-route { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .agent-route-name { min-width: 0; padding: 0; overflow: hidden; border: 0; background: transparent; color: inherit; font: inherit; text-overflow: ellipsis; }
-button.agent-route-name { color: var(--accent); cursor: pointer; }
+.agent-route-name.peer, button.agent-route-name { color: var(--accent); }
+button.agent-route-name { cursor: pointer; }
 button.agent-route-name:hover, button.agent-route-name:focus-visible { text-decoration: underline; }
 .agent-route-name.self { color: var(--success); }
 .agent-route-name.new { font-style: italic; font-weight: 600; }
