@@ -53,16 +53,21 @@ test.each([
   ["openai-codex/gpt-6-astra", ["standard", "priority", "ultrafast"]],
   ["openai-codex-8/gpt-6-astra", ["standard", "priority", "ultrafast"]],
   ["openai-codex/gpt-6-luna", ["standard", "priority"]],
-  ["openai-codex/gpt-6-sol", ["standard", "priority"]],
+  ["openai-codex/gpt-6-sol", ["standard", "priority", "ultrafast"]],
+  ["openai-codex-8/gpt-6-sol", ["standard", "priority", "ultrafast"]],
+  ["openai-codex/gpt-6.1-sol", ["standard", "priority", "ultrafast"]],
+  ["openai-codex-8/gpt-6.1-sol", ["standard", "priority", "ultrafast"]],
   ["openai-codex/gpt-6-astra-preview", ["standard", "priority", "ultrafast"]],
   ["anthropic/claude-fable-5-1", []],
   ["private/gpt-6-astra", []],
+  ["private/gpt-6.1-sol", []],
 ])("cold settings expose the same model speed capabilities in selection and picker: %s", (model, modes) => {
   const settings = threadSettingsMetadata({ model, thinkingLevel: "high", speed: "standard" });
   expect(settings.speedModes).toEqual(modes);
   expect(settings.model.speedModes).toEqual(modes);
   expect(settings.models.find(candidate => candidate.provider === settings.model.provider && candidate.id === settings.model.id)?.speedModes).toEqual(modes);
   expect(settings.models.find(candidate => candidate.provider === "openai-codex" && candidate.id === "gpt-6-astra")?.speedModes).toEqual(["standard", "priority", "ultrafast"]);
+  expect(settings.models.find(candidate => candidate.provider === "openai-codex" && candidate.id === "gpt-6.1-sol")?.speedModes).toEqual(["standard", "priority", "ultrafast"]);
   expect(settings.models.find(candidate => candidate.provider === "openai-codex" && candidate.id === "gpt-6-luna")?.speedModes).toEqual(["standard", "priority"]);
   expect(settings.models.find(candidate => candidate.provider === "anthropic" && candidate.id === "claude-fable-5-1")?.speedModes).toEqual([]);
 });

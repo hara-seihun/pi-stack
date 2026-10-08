@@ -4,6 +4,8 @@
 
 ## Routing contract
 
+Thread settings and Remote's speed picker offer Ultrafast for Codex Astra and Sol, including `gpt-6.1-sol` and numbered account providers. The shared model-speed contract owns this eligibility; live per-account discovery still decides which account may execute it. A Sol request never borrows Astra's tier entitlement.
+
 ```ts
 codexTierExclusions(
   store: Store,

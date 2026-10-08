@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import { normalizeContext, type Provider } from "@earendil-works/pi-ai";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { nativeProviders } from "../src/models.js";
 import { Store } from "../src/store.js";
 import { loadConfig } from "../src/config.js";
 import { Fleet } from "../src/fleet.js";
@@ -22,8 +22,9 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
-const codex = builtinProviders().find(provider => provider.id === "openai-codex")!;
+const codex = nativeProviders.find(provider => provider.id === "openai-codex")!;
 const astra = codex.getModels().find(model => model.id === "gpt-6-astra")!;
+const sol = codex.getModels().find(model => model.id === "gpt-6.1-sol")!;
 const unsupported = "openai-codex-1", entitled = "openai-codex-2";
 const thread: Thread = {
   id: "ultrafast-thread", parentId: null, title: "work", cwd: "/tmp", sessionFile: "/tmp/ultrafast-thread.jsonl",
@@ -31,7 +32,7 @@ const thread: Thread = {
   state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1,
 };
 
-function fixture() {
+function fixture(model = astra) {
   const root = mkdtempSync(join(tmpdir(), "ultrafast-routing-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const ledger = join(root, "ledger.sqlite3"), authPath = join(root, "auth.json");
@@ -50,14 +51,15 @@ function fixture() {
     expect(init?.method).toBe("GET");
     const id = new Headers(init?.headers).get("chatgpt-account-id")!;
     expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${tokens.get(id)}`);
-    return Response.json({ models: [{ slug: astra.id, service_tiers: [{ id: "priority" }, ...(grants.has(id) ? [{ id: "ultrafast" }] : [])] }] });
+    return Response.json({ models: [{ slug: model.id, service_tiers: [{ id: "priority" }, ...(grants.has(id) ? [{ id: "ultrafast" }] : [])] }] });
   });
   vi.stubGlobal("fetch", catalogs);
   const env = { PI_ORCHESTRATOR_LEDGER: ledger, PI_ORCHESTRATOR_AUTH: authPath,
     PI_ORCHESTRATOR_CONFIG: join(root, "missing-config.json"), PI_THREAD_SPEED: "ultrafast", PI_ORCHESTRATOR_ASSIGNED: "0" };
-  const models = [astra, ...[unsupported, entitled].map(provider => ({ ...astra, provider }))];
+  const models = [model, ...[unsupported, entitled].map(provider => ({ ...model, provider }))];
+  const settings = { ...thread.settings, model: `openai-codex/${model.id}` };
   const auth = providerOAuth(codex, authPath);
-  return { store, auth, authPath, tokens, grants, catalogs, env, models };
+  return { store, auth, authPath, tokens, grants, catalogs, env, models, settings };
 }
 
 function fleetFor(f: ReturnType<typeof fixture>) {
@@ -119,6 +121,17 @@ test("fleet routes only Ultrafast to tier-only broker custody without local acco
   if (admitted.ok) await admitted.value.release();
 });
 
+test.each(["cerebras/gpt-oss-120b", "openai-codex/gpt-6-luna", "private/gpt-6.1-sol"])("fleet refuses %s Ultrafast before acquiring broker custody", async model => {
+  const store = Store.open(":memory:");
+  cleanups.push(() => store.close());
+  const fleet = new Fleet(store, { ...loadConfig("/missing", undefined, {}), ultrafastModelBrokerUrl: "http://127.0.0.1:2462" });
+  const settings = { ...thread.settings, model };
+  expect(await fleet.admit({ ...thread, settings }, settings, false, "invalid-ultra"))
+    .toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(store.control("broker-execution:invalid-ultra")).toBeUndefined();
+  expect(store.activeLeases()).toEqual([]);
+});
+
 test("tier-only routes reject nonloopback addresses from configuration and environment", () => {
   const f = fixture();
   writeFileSync(f.env.PI_ORCHESTRATOR_CONFIG, JSON.stringify({ ultrafastModelBrokerUrl: "http://192.0.2.1:2462" }));
@@ -154,32 +167,32 @@ test("ThreadService resolves the tier-only endpoint before the runner environmen
   expect(sessions.find(session => session.threadId === "ultrafast")!.env.PI_THREAD_SPEED).toBe("ultrafast");
 });
 
-test("direct canonical Ultrafast selection chooses the sole entitled account", async () => {
-  const f = fixture();
-  const result = await resolveSessionModel(f.models, "openai-codex", astra.id, f.env);
+test.each([astra, sol])("direct canonical $id Ultrafast selection chooses the sole entitled account", async model => {
+  const f = fixture(model);
+  const result = await resolveSessionModel(f.models, "openai-codex", model.id, f.env);
   expect(result).toEqual({ ok: true, model: f.models.find(model => model.provider === entitled) });
   expect(f.catalogs).toHaveBeenCalledTimes(2);
 });
 
-test.each(["explicit", "assigned"])("an unentitled %s account pin is refused rather than silently moved", async pin => {
-  const f = fixture();
-  const result = await resolveSessionModel(f.models, pin === "explicit" ? unsupported : "openai-codex", astra.id,
+test.each([astra, sol].flatMap(model => ["explicit", "assigned"].map(pin => ({ model, pin }))))("an unentitled $pin $model.id account pin is refused rather than silently moved", async ({ model, pin }) => {
+  const f = fixture(model);
+  const result = await resolveSessionModel(f.models, pin === "explicit" ? unsupported : "openai-codex", model.id,
     { ...f.env, ...(pin === "assigned" ? { PI_ORCHESTRATOR_ASSIGNED: "1", PI_ORCHESTRATOR_ACCOUNT_ID: unsupported } : {}) });
   expect(result).toMatchObject({ ok: false, error: expect.stringContaining("advertising ultrafast") });
 });
 
-test("direct Ultrafast refuses a pool with no advertising account", async () => {
-  const f = fixture();
+test.each([astra, sol])("direct $id Ultrafast refuses a pool with no advertising account", async model => {
+  const f = fixture(model);
   f.grants.clear();
-  expect(await resolveSessionModel(f.models, "openai-codex", astra.id, f.env))
+  expect(await resolveSessionModel(f.models, "openai-codex", model.id, f.env))
     .toMatchObject({ ok: false, error: expect.stringContaining("advertising ultrafast") });
 });
 
-test("fleet admission excludes an unsupported account even when it has more remaining quota", async () => {
-  const f = fixture();
+test.each([astra, sol])("fleet $id admission excludes an unsupported account even when it has more remaining quota", async model => {
+  const f = fixture(model);
   f.store.recordMeter(unsupported, "codex-7d", 0, Date.now() + 60_000);
   f.store.recordMeter(entitled, "codex-7d", 90, Date.now() + 60_000);
-  const admitted = await fleetFor(f).admit(thread, thread.settings, false, "work");
+  const admitted = await fleetFor(f).admit({ ...thread, settings: f.settings }, f.settings, false, "work");
   expect(admitted).toMatchObject({ ok: true, value: { env: { PI_ORCHESTRATOR_ACCOUNT_ID: entitled } } });
   expect(f.store.activeLeases().map(lease => lease.account_id)).toEqual([entitled]);
   if (admitted.ok) await admitted.value.release();
@@ -196,17 +209,17 @@ test.each(["quota", "reservation"])("fleet Ultrafast entitlement does not bypass
   expect(f.store.activeLeases()).toEqual([]);
 });
 
-test("fleet recovery refuses a recorded account that no longer advertises Ultrafast", async () => {
-  const f = fixture();
+test.each([astra, sol])("fleet $id recovery refuses a recorded account that no longer advertises Ultrafast", async model => {
+  const f = fixture(model);
   f.store.createLease("thread:recovery", unsupported, "fleet", thread.id);
-  const result = await fleetFor(f).admit(thread, thread.settings, true, "recovery");
+  const result = await fleetFor(f).admit({ ...thread, settings: f.settings }, f.settings, true, "recovery");
   expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining("does not currently advertise ultrafast") } });
 });
 
-test.each(["stream", "streamSimple"] as const)("the final %s payload hook cannot dispatch Ultrafast on an unentitled account", async method => {
-  const f = fixture();
+test.each([astra, sol].flatMap(model => (["stream", "streamSimple"] as const).map(method => ({ requested: model, method }))))("the final $method $requested.id payload hook cannot dispatch Ultrafast on an unentitled account", async ({ requested, method }) => {
+  const f = fixture(requested);
   const provider = withCodexTierGuard(sharedOAuthProvider(codex, unsupported, undefined, f.auth), f.store, f.auth, unsupported);
-  const model = provider.getModels().find(model => model.id === astra.id)!;
+  const model = provider.getModels().find(model => model.id === requested.id)!;
   const inference = vi.fn(async () => new Response("should not dispatch"));
   const hook = vi.fn((payload: unknown) => ({ ...(payload as object), service_tier: "ultrafast" }));
   const result = await provider[method](model, normalizeContext({ messages: [{ role: "user", content: "hello", timestamp: Date.now() }] }),
@@ -218,14 +231,14 @@ test.each(["stream", "streamSimple"] as const)("the final %s payload hook cannot
   expect(inference).not.toHaveBeenCalled();
 });
 
-test("the final wire guard preserves Ultrafast for an entitled account", async () => {
-  const f = fixture();
+test.each([astra, sol])("the final $id wire guard preserves Ultrafast for an entitled account", async requested => {
+  const f = fixture(requested);
   const provider = withCodexTierGuard(sharedOAuthProvider(codex, entitled, undefined, f.auth), f.store, f.auth, entitled);
-  const model = provider.getModels().find(model => model.id === astra.id)!;
+  const model = provider.getModels().find(model => model.id === requested.id)!;
   const inference = vi.fn(async (_url: unknown, init?: RequestInit) => {
     const bytes = new Headers(init?.headers).get("content-encoding") === "zstd"
       ? zstdDecompressSync(init!.body as Uint8Array).toString("utf8") : String(init?.body);
-    expect(JSON.parse(bytes).service_tier).toBe("ultrafast");
+    expect(JSON.parse(bytes)).toMatchObject({ model: requested.id, service_tier: "ultrafast" });
     return new Response(`data: ${JSON.stringify({ type: "response.completed", response: { id: "response", status: "completed", output: [], usage: {} } })}\n\n`,
       { headers: { "content-type": "text/event-stream" } });
   });
@@ -248,7 +261,7 @@ test.each(["session_start", "before_agent_start"])("%s refuses Cerebras Ultrafas
   const f = fixture();
   const h = routingHarness(f, "cerebras");
   h.ctx.model.id = "gpt-oss-120b";
-  await expect(h.emit(event)).rejects.toThrow("Ultrafast speed requires OpenAI Codex Astra");
+  await expect(h.emit(event)).rejects.toThrow("Ultrafast speed requires OpenAI Codex Astra or Sol");
   expect(f.catalogs).not.toHaveBeenCalled();
   expect(h.pi.setModel).not.toHaveBeenCalled();
 });

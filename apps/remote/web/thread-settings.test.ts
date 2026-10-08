@@ -7,6 +7,7 @@ const settings: ThreadSettings = {
   models: [
     { provider: "anthropic", id: "claude-fable-5-1", thinkingLevels: ["low", "high"], speedModes: [] },
     { provider: "openai-codex", id: "gpt-6-astra", thinkingLevels: ["low", "high", "max"], speedModes: ["standard", "priority", "ultrafast"] },
+    { provider: "openai-codex", id: "gpt-6.1-sol", thinkingLevels: ["low", "high", "max"], speedModes: ["standard", "priority", "ultrafast"] },
     { provider: "openai-codex", id: "gpt-6-luna", thinkingLevels: ["high", "max"], speedModes: ["standard", "priority"] },
   ],
   model: { provider: "openai-codex", id: "gpt-6-astra" }, thinkingLevels: ["high", "max"], thinkingLevel: "high",
@@ -74,6 +75,7 @@ test("optimistic speed choices follow model metadata instead of a client-side mo
 test("speed controls reflect the selected model immediately after an optimistic switch", () => {
   for (const [provider, id, expected] of [
     ["openai-codex", "gpt-6-astra", ["Standard", "Priority", "Ultrafast"]],
+    ["openai-codex", "gpt-6.1-sol", ["Standard", "Priority", "Ultrafast"]],
     ["openai-codex", "gpt-6-luna", ["Standard", "Priority"]],
     ["anthropic", "claude-fable-5-1", []],
   ] as const) {
@@ -86,6 +88,19 @@ test("speed controls reflect the selected model immediately after an optimistic 
   }
 });
 
+test("Sol's optimistic selection submits Ultrafast and retains it until a model change", () => {
+  const sol = optimisticThreadSettings(settings, { modelProvider: "openai-codex", modelId: "gpt-6.1-sol" });
+  const changes: unknown[] = [];
+  const nodes = elements(SettingsFields({ session: {} as Session, settings: sol, saving: "", onUpdate: (field, body) => changes.push({ field, body }) }));
+  nodes.find(node => node.props.role === "radio" && node.props.children === "Ultrafast")!.props.onClick();
+  expect(changes).toEqual([{ field: "speed", body: { speedMode: "ultrafast" } }]);
+  const selected = optimisticThreadSettings(sol, { speedMode: "ultrafast" });
+  expect(selected.speedMode).toBe("ultrafast");
+  const selectedNodes = elements(SettingsFields({ session: {} as Session, settings: selected, saving: "", onUpdate: () => {} }));
+  expect(selectedNodes.find(node => node.props.role === "radio" && node.props.children === "Ultrafast")!.props["aria-checked"]).toBe(true);
+  expect(optimisticThreadSettings(selected, { modelProvider: "openai-codex", modelId: "gpt-6-luna" }).speedMode).toBe("standard");
+});
+
 test("existing-thread model selector uses the new-chat groups without dropping custom choices", () => {
   const all: ThreadSettings = {
     ...settings,
@@ -93,13 +108,14 @@ test("existing-thread model selector uses the new-chat groups without dropping c
   };
   const groups = elements(SettingsFields({ session: {} as Session, settings: all, saving: "", onUpdate: () => {} }))
     .filter(node => node.type === "optgroup");
-  expect(groups.map(node => node.props.label)).toEqual(["God intelligence · Super expensive", "Cheap and fast", "Other models"]);
+  expect(groups.map(node => node.props.label)).toEqual(["God intelligence · Super expensive", "Smart models", "Cheap and fast", "Other models"]);
   expect(groups.map(node => elements(node.props.children).filter(child => child.type === "option").map(child => child.props.value))).toEqual([
     ["anthropic\0claude-fable-5-1", "openai-codex\0gpt-6-astra"],
+    ["openai-codex\0gpt-6.1-sol"],
     ["openai-codex\0gpt-6-luna", "local\0bonsai-2-27b"],
     ["custom\0bespoke"],
   ]);
-  expect(elements(groups[1]!.props.children).find(node => node.props.value === "openai-codex\0gpt-6-luna")?.props.children).toContain("🌙 ");
+  expect(elements(groups[2]!.props.children).find(node => node.props.value === "openai-codex\0gpt-6-luna")?.props.children).toContain("🌙 ");
 });
 
 test("picker selects its saved model and submits the chosen model, thinking, speed and timeout", () => {

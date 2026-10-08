@@ -5,10 +5,10 @@ export const isSpeed = (value: unknown): value is Speed => SPEEDS.some(speed => 
 export function requestedSpeedError(model: { provider: string; id: string } | undefined, speed: unknown): string | undefined {
   if (!isSpeed(speed)) return `Invalid thread speed: ${String(speed)}`;
   if (speed === "standard" || modelSpeedModes(model?.provider ?? "", model?.id ?? "").includes(speed)) return;
-  return speed === "ultrafast" ? "Ultrafast speed requires OpenAI Codex Astra" : `Priority speed is unavailable for ${model?.provider ?? "unknown"}/${model?.id ?? "unknown"}`;
+  return speed === "ultrafast" ? "Ultrafast speed requires OpenAI Codex Astra or Sol" : `Priority speed is unavailable for ${model?.provider ?? "unknown"}/${model?.id ?? "unknown"}`;
 }
 
 export function modelSpeedModes(provider: string, id: string): Speed[] {
   if (provider.replace(/-\d+$/, "") !== "openai-codex") return [];
-  return /(^|[-_.])astra([-_.]|$)/i.test(id) ? [...SPEEDS] : ["standard", "priority"];
+  return /(^|[-_.])(astra|sol)([-_.]|$)/i.test(id) ? [...SPEEDS] : ["standard", "priority"];
 }
