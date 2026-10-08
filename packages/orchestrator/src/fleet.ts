@@ -12,6 +12,7 @@ import { providerOAuth } from "./auth/shared-oauth.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
 import { accountModelExcluded, noEntitledAccountError, recordAccountModelUnsupported } from "./auth/model-entitlement.js";
 import { allowsAccountUse } from "./domain.js";
+import { requestedSpeedError } from "./threads/speed.js";
 import { assertNever, requireRuntimeEvent, type RuntimeEvent } from "./threads/runtime-events.js";
 
 /** Account spending urgency is separate from the global agent execution limit. */
@@ -26,15 +27,16 @@ export class Fleet {
   constructor(private readonly store: Store, private readonly config: OrchestratorConfig) {}
 
   async admit(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string): Promise<Result<ThreadAdmission>> {
+    const slash = settings.model.indexOf("/");
+    const speedError = requestedSpeedError({ provider: settings.model.slice(0, slash), id: settings.model.slice(slash + 1) }, settings.speed);
+    if (speedError) return { ok: false, error: { code: "invalid_request", message: speedError } };
     const rootRepair = thread.metadata?.execution === "root-repair";
     const brokerUrl = settings.speed === "ultrafast" ? this.config.ultrafastModelBrokerUrl ?? this.config.modelBrokerUrl : this.config.modelBrokerUrl;
     if (brokerUrl) return this.admitBroker(thread, settings, recovering, executionId, brokerUrl);
     if (rootRepair && thread.metadata?.context) return { ok: false, error: { code: "invalid_request", message: "Root repair cannot use an isolated application context" } };
-    const slash = settings.model.indexOf("/");
     const candidate = { provider: settings.model.slice(0, slash), model: settings.model.slice(slash + 1), thinking: settings.thinkingLevel };
     const codex = settings.speed === "ultrafast" ? builtinProviders().find(provider => provider.id === candidate.provider && provider.id === "openai-codex") : undefined;
     const excluded = codex ? await codexTierExclusions(this.store, providerOAuth(codex, this.config.authPath), candidate.model, settings.speed, new Set()) : new Set<string>();
-    if (settings.speed === "ultrafast" && !codex) return { ok: false, error: { code: "invalid_request", message: "Ultrafast speed requires OpenAI Codex Astra" } };
     return this.store.transaction(() => {
       const leaseId = `thread:${executionId}`;
       const held = recovering ? this.store.db.prepare("SELECT account_id FROM lease WHERE id=? AND run_id=?").get(leaseId, thread.id) as { account_id: string } | undefined : undefined;

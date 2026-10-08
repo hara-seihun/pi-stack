@@ -197,7 +197,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       if (invalid) { json(res, 400, invalid); return; }
       if (!grant.models.includes(`${family}/${body.model}`)) { json(res, 403, "This model is not shared with your Unix account"); return; }
       const ultrafast = body.service_tier === "ultrafast";
-      if (ultrafast && !modelSpeedModes(family, body.model).includes("ultrafast")) { json(res, 400, "Ultrafast is only available for Codex Astra models"); return; }
+      if (ultrafast && !modelSpeedModes(family, body.model).includes("ultrafast")) { json(res, 400, "Ultrafast is only available for Codex Astra or Sol models"); return; }
       const refusal = overAllowance(listener.principal);
       if (refusal) { json(res, 403, refusal); return; }
       const shared = auth.get(family)!;

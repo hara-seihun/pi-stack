@@ -264,7 +264,7 @@ export default function routing(pi:ExtensionAPI):void{
     const current=store.account(ctx.model?.provider??"");
     const tierAllowed=current&&environment.PI_THREAD_SPEED==="ultrafast"?(await requireCodexTier(store,shared.get(current.provider),current.id,ctx.model!.id,"ultrafast",lifecycle.signal)).ok:true;
     if(current&&(!shared.get(current.provider)?.has(current.id)||!fleetAssigned&&(!allowsAccountUse(current,"interactive")||interactiveQuotaExhausted(store,current.id,current.provider,ctx.model!.id)||accountModelExcluded(store,current.id,ctx.model!.id))||!tierAllowed)){
-      if(fleetAssigned)throw new Error(tierAllowed?`Account ${current.id} shared OAuth credential requires recovery before this assigned run can continue`:`Assigned account ${current.id} no longer advertises Astra ultrafast; refusing to downgrade`);
+      if(fleetAssigned)throw new Error(tierAllowed?`Account ${current.id} shared OAuth credential requires recovery before this assigned run can continue`:`Assigned account ${current.id} no longer advertises ${ctx.model!.id} ultrafast; refusing to downgrade`);
       const moved=await bind(ctx,new Set([current.id]),undefined,true);
       if(!moved){
         if(interactiveQuotaExhausted(store,current.id,current.provider,ctx.model!.id))return;

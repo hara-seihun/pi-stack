@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { nativeProviders } from "../src/models.js";
 import { installBrokerRouting } from "../src/extension/broker-routing.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -24,7 +24,7 @@ function fixture(model: { provider: string; id: string }, speed: string, pin?: s
     getThinkingLevel: () => "low", setThinkingLevel: vi.fn(),
     setModel: vi.fn(async (selected: typeof model) => { context.model = selected; return true; }),
   };
-  installBrokerRouting(pi as never, "http://broker.invalid", builtinProviders(), join(root, "ledger.sqlite3"),
+  installBrokerRouting(pi as never, "http://broker.invalid", nativeProviders, join(root, "ledger.sqlite3"),
     { PI_THREAD_SPEED: speed, ...(pin ? { PI_SUBAGENT_MODEL: pin } : {}) });
   const emit = async (name: string) => { for (const handler of handlers.get(name) ?? []) await handler({}, context); };
   cleanup.push(async () => { await emit("session_shutdown"); rmSync(root, { recursive: true, force: true }); });
@@ -45,11 +45,18 @@ test("broker permits an explicitly selected Cerebras model at standard speed", a
   expect(f.network).not.toHaveBeenCalled();
 });
 
-test("broker rechecks a switched model before the provider request", async () => {
-  const f = fixture({ provider: "openai-codex", id: "gpt-6-astra" }, "ultrafast");
+test.each(["gpt-6-astra", "gpt-6.1-sol"])("broker rechecks a switched %s model before the provider request", async id => {
+  const f = fixture({ provider: "openai-codex", id }, "ultrafast");
   await f.emit("session_start");
   f.context.model = { provider: "cerebras", id: "qwen-3.8-27b" };
-  await expect(f.emit("before_provider_request")).rejects.toThrow("Ultrafast speed requires OpenAI Codex Astra");
+  await expect(f.emit("before_provider_request")).rejects.toThrow("Ultrafast speed requires OpenAI Codex Astra or Sol");
+  expect(f.network).not.toHaveBeenCalled();
+});
+
+test.each(["openai-codex", "openai-codex-8"])("broker accepts %s Sol Ultrafast at every request gate", async provider => {
+  const f = fixture({ provider, id: "gpt-6.1-sol" }, "ultrafast");
+  for (const event of ["session_start", "before_agent_start", "before_provider_request"]) await f.emit(event);
+  expect(f.context.model).toMatchObject({ id: "gpt-6.1-sol" });
   expect(f.network).not.toHaveBeenCalled();
 });
 

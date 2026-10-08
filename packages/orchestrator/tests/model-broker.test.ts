@@ -44,8 +44,9 @@ async function fixture(transport: BrokerTransport) {
   return { root, store, token, post, url, regrant };
 }
 
-const astraBody = (tier?: string) => ({ ...body(), model: "gpt-6-astra", ...(tier ? { service_tier: tier } : {}) });
-function tierTransport(entitled: Set<string>) {
+const modelBody = (model: string, tier?: string) => ({ ...body(), model, ...(tier ? { service_tier: tier } : {}) });
+const astraBody = (tier?: string) => modelBody("gpt-6-astra", tier);
+function tierTransport(entitled: Set<string>, model = "gpt-6-astra") {
   const catalogs: string[] = [];
   const requests: { account: string; tier: string | undefined }[] = [];
   const transport = vi.fn(async (url: string, init: RequestInit) => {
@@ -53,7 +54,7 @@ function tierTransport(entitled: Set<string>) {
     if (init.method === "GET") {
       expect(new URL(url).pathname).toBe("/backend-api/codex/models");
       catalogs.push(account);
-      return Response.json({ models: [{ slug: "gpt-6-astra", service_tiers: [{ id: "priority" }, ...(entitled.has(account) ? [{ id: "ultrafast" }] : [])] }] });
+      return Response.json({ models: [{ slug: model, service_tiers: [{ id: "priority" }, ...(entitled.has(account) ? [{ id: "ultrafast" }] : [])] }] });
     }
     expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
     requests.push({ account, tier: JSON.parse(String(init.body)).service_tier });
@@ -62,16 +63,16 @@ function tierTransport(entitled: Set<string>) {
   return { transport, catalogs, requests };
 }
 
-test("Ultrafast replaces default affinity with the sole entitled granted account", async () => {
-  const t = tierTransport(new Set(["owner-account"]));
+test.each(["gpt-6-astra", "gpt-6.1-sol"])("%s Ultrafast replaces default affinity with the sole entitled granted account", async model => {
+  const t = tierTransport(new Set(["owner-account"]), model);
   const f = await fixture(t.transport);
-  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
-  await (await f.post(astraBody())).text();
+  f.regrant(["shared"], [`openai-codex/${model}`]);
+  await (await f.post(modelBody(model))).text();
   expect(t.catalogs).toEqual([]);
-  f.regrant(["shared", "owner-only"], ["openai-codex/gpt-6-astra"]);
+  f.regrant(["shared", "owner-only"], [`openai-codex/${model}`]);
   // Cooling remains an ordering preference, not permission to use an unentitled sibling.
-  f.store.setCooldown("owner-only", Date.now() + 60_000, { model: "gpt-6-astra" });
-  const response = await f.post(astraBody("ultrafast"));
+  f.store.setCooldown("owner-only", Date.now() + 60_000, { model });
+  const response = await f.post(modelBody(model, "ultrafast"));
   expect(response.status).toBe(200);
   await response.text();
   expect(t.requests).toEqual([{ account: "shared-account", tier: undefined }, { account: "owner-account", tier: "ultrafast" }]);
@@ -81,7 +82,7 @@ test("Ultrafast replaces default affinity with the sole entitled granted account
   const { dispatches } = await (await fetch(`${f.url}/v1/dispatches`)).json();
   expect(dispatches).toHaveLength(2);
   expect(dispatches[1]).toMatchObject({ id: response.headers.get("x-pi-broker-dispatch-id"), principal: "sybil",
-    accountId: "owner-only", model: "gpt-6-astra", serviceTier: "ultrafast", httpStatus: 200, outcome: "completed" });
+    accountId: "owner-only", model, serviceTier: "ultrafast", httpStatus: 200, outcome: "completed" });
   expect(Object.keys(dispatches[1]).sort()).toEqual(["accountId", "at", "httpStatus", "id", "model", "outcome", "principal", "requestId", "serviceTier", "updatedAt"]);
   expect(JSON.stringify(dispatches)).not.toMatch(/fixture-refresh|signature|hello|owner-cookie|Bearer/);
 });
@@ -103,11 +104,11 @@ test("dispatch evidence is bounded, principal-local and distinguishes refusal fr
   expect(JSON.stringify(receipts)).not.toContain("private-other-principal");
 });
 
-test("Ultrafast never probes or selects an entitled account outside the principal grant", async () => {
-  const t = tierTransport(new Set(["owner-account"]));
+test.each(["gpt-6-astra", "gpt-6.1-sol"])("%s Ultrafast never probes or selects an entitled account outside the principal grant", async model => {
+  const t = tierTransport(new Set(["owner-account"]), model);
   const f = await fixture(t.transport);
-  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
-  const response = await f.post(astraBody("ultrafast"));
+  f.regrant(["shared"], [`openai-codex/${model}`]);
+  const response = await f.post(modelBody(model, "ultrafast"));
   expect(response.status).toBe(503);
   expect((await response.json()).error.message).toMatch(/Ultrafast.*no slower tier/i);
   expect(t.catalogs).toEqual(["shared-account"]);
@@ -115,12 +116,12 @@ test("Ultrafast never probes or selects an entitled account outside the principa
   expect(f.store.activeLeases()).toHaveLength(0);
 });
 
-test("a stale default affinity cannot bypass Ultrafast refusal", async () => {
-  const t = tierTransport(new Set());
+test.each(["gpt-6-astra", "gpt-6.1-sol"])("a stale %s default affinity cannot bypass Ultrafast refusal", async model => {
+  const t = tierTransport(new Set(), model);
   const f = await fixture(t.transport);
-  f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
-  await (await f.post(astraBody())).text();
-  const response = await f.post(astraBody("ultrafast"));
+  f.regrant(["shared"], [`openai-codex/${model}`]);
+  await (await f.post(modelBody(model))).text();
+  const response = await f.post(modelBody(model, "ultrafast"));
   expect(response.status).toBe(503);
   expect((await response.json()).error.message).toContain("no slower tier was used");
   expect(t.requests).toEqual([{ account: "shared-account", tier: undefined }]);
@@ -184,7 +185,19 @@ test.each([undefined, "default", "priority"])("Codex tier %s does not need an Ul
   expect(t.requests).toEqual([{ account: "shared-account", tier }]);
 });
 
-test("Ultrafast rejects non-Astra Codex and Anthropic requests before provider calls", async () => {
+test("Sol cannot borrow an Astra account's advertised Ultrafast entitlement", async () => {
+  const t = tierTransport(new Set(["shared-account"]));
+  const f = await fixture(t.transport);
+  f.regrant(["shared"], ["openai-codex/gpt-6.1-sol"]);
+  const response = await f.post(modelBody("gpt-6.1-sol", "ultrafast"));
+  expect(response.status).toBe(503);
+  expect((await response.json()).error.message).toContain("no slower tier was used");
+  expect(t.catalogs).toEqual(["shared-account"]);
+  expect(t.requests).toEqual([]);
+  expect(f.store.activeLeases()).toEqual([]);
+});
+
+test("Ultrafast rejects non-Astra/Sol Codex and Anthropic requests before provider calls", async () => {
   const transport = vi.fn(async () => sse({}));
   const f = await fixture(transport);
   expect((await f.post({ ...body(), service_tier: "ultrafast" })).status).toBe(400);

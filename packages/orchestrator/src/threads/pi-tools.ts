@@ -24,7 +24,7 @@ const watchFields = {
 const settings = Type.Object({
   model: Type.Optional(Type.String()),
   thinkingLevel: Type.Optional(Type.Union(THINKING_LEVELS.map(value => Type.Literal(value)))),
-  speed: Type.Optional(Type.Union(SPEEDS.map(value => Type.Literal(value)), { description: "Ultrafast is available for Astra only." })),
+  speed: Type.Optional(Type.Union(SPEEDS.map(value => Type.Literal(value)), { description: "Ultrafast is available for Astra and Sol with an entitled account." })),
 });
 function result(value: Result<unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value, isError: !value.ok };
