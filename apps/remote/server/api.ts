@@ -35,6 +35,7 @@ export const API = Object.freeze({
   network: route("GET", "/v1/network"),
   notifications: route("GET", "/v1/notifications"),
   needsYou: route("GET", "/v1/needs-you"),
+  dismissNeed: route("POST", "/v1/needs-you/dismiss"),
   phones: route("GET", "/v1/phones"), phoneConnect: route("GET", "/v1/phones/connect"), phoneCommands: route("GET", "/v1/phones/commands"), phoneCommand: route("POST", "/v1/phones/:phoneId/commands"),
   writeStream: route("GET", "/v1/write/stream"), writeDictionary: route("GET", "/v1/write/dictionary"), updateWriteDictionary: route("PUT", "/v1/write/dictionary"), writeLearn: route("POST", "/v1/write/learn"), writeUndo: route("POST", "/v1/write/undo"),
   messageReaction: route("POST", "/v1/messages/reactions"),
