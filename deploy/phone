@@ -16,8 +16,35 @@ case ${1:---activate} in
     fi
     ;;
   --activate)
-    pi_stack_as_root systemctl restart pi-stack-phone.service
-    systemctl is-active --quiet pi-stack-phone.service
+    bindings=$(systemctl show pi-stack-phone.service -p BindsTo --value)
+    supervisors=()
+    for unit in $bindings; do
+      [[ $unit == pi-remote@*.service ]] && supervisors+=("$unit")
+    done
+    [[ ${#supervisors[@]} == 1 ]] || { echo 'Phone unit must bind to exactly one personal supervisor' >&2; exit 66; }
+    supervisor=${supervisors[0]}
+    state=$(systemctl show "$supervisor" -p ActiveState --value)
+    case $state in
+      active)
+        pi_stack_as_root systemctl reset-failed pi-stack-phone.service
+        pi_stack_as_root systemctl restart pi-stack-phone.service
+        systemctl is-active --quiet pi-stack-phone.service
+        ;;
+      inactive)
+        pi_stack_as_root systemctl stop pi-stack-phone.service
+        pi_stack_as_root systemctl reset-failed pi-stack-phone.service
+        echo "Phone remains stopped with $supervisor"
+        ;;
+      failed)
+        echo "Phone owner supervisor failed: $supervisor" >&2
+        exit 66
+        ;;
+      activating|deactivating|reloading|refreshing)
+        echo "Phone owner supervisor is transitioning: $supervisor ($state)" >&2
+        exit 75
+        ;;
+      *) echo "Unknown phone owner supervisor state: $supervisor ($state)" >&2; exit 66 ;;
+    esac
     ;;
   *) echo 'usage: deploy/phone [--check|--activate]' >&2; exit 64 ;;
 esac
