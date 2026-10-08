@@ -1,0 +1,18 @@
+[Unit]
+Description=Private encrypted workspace editor for %i
+BindsTo=pi-remote@%i.service
+After=pi-remote@%i.service
+
+[Service]
+Type=exec
+User=root
+WorkingDirectory=/
+ExecStart=/srv/pi/pi-remote/server/pi-editor-launch %i
+ExecStartPost=/srv/pi/pi-remote/server/pi-editor-launch --ready %i
+RuntimeDirectory=pi-editor/%i
+RuntimeDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=15
+TimeoutStopSec=10
+KillMode=control-group
+Restart=no
