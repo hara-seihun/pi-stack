@@ -27,6 +27,8 @@ An explicit matrix configuration:
 }
 ```
 
+The Machine case waits for loaded governor controls, not merely `.machine-screen`. Use an individual shell-only spec when measuring its module/render separately; an unavailable data predicate is missing coverage, not an instant load.
+
 Start on a different destination from the first case. Cold-module samples require a new document; repeated tab remounts in one document are warm-module samples, not cold ones. Browser HTTP cache, app data cache and server caches are distinct. Record which is cold; do not claim every layer was flushed. Idle module preparation on a candidate is part of its normal first-visit behavior, not an excuse to force-remove that preparation.
 
 ## Individual actions
