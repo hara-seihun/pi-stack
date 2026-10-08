@@ -8,6 +8,7 @@ import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-us
 import { projectThreadNotifications } from "./thread-notifications";
 import { capturedContextUsage } from "./context-usage";
 import { startThreadRefresh } from "./thread-refresh";
+import { readLivePeers, readPeerAncestors, readPeerSession } from "./peer-directory";
 import {
   WatchList,
   watchInterval,
@@ -28,6 +29,7 @@ import {
   modelAvailabilityPath,
   modelAvailabilityKey,
   ThreadDirectory,
+  archivedAcrossOwners,
   createThreadClient,
   importRemoteThreads,
   createSharedPiSessionOpener,
@@ -123,7 +125,7 @@ import { SlackReactions } from "./slack-reactions";
 import { AGENT_NAME } from "./agent-identity";
 import { createSpeechService } from "./speech/service";
 import { closeAiChat } from "./chat-lifecycle";
-import { archivedSessions } from "./archived-sessions";
+import { archivedSessionQuery } from "./archived-sessions";
 import { availableUploadPath, storeUpload, uploadName } from "./uploads";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
@@ -375,6 +377,7 @@ const watchList = new WatchList({
 });
 threads.setWatchList(watchList);
 const peerThreads = new Map<string, Thread>();
+let peerArchivedTotal = 0;
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
 let peerError: string | null = null;
@@ -422,18 +425,15 @@ async function refreshPeers() {
   if (!fleet) return;
   if (peerRefresh) return peerRefresh;
   peerRefresh = (async () => {
-    const next = new Map<string, Thread>();
-    let cursor: string | undefined;
-    do {
-      const page = await fleet.list({ limit: 100, cursor });
-      if (!page.ok) { peerRecovery = "automatic"; peerError = page.error.message; peerFeedback(peerError); signalSync(); return; }
-      for (const thread of page.value.threads) {
-        if (threads.get(thread.id)) throw new PeerOwnershipError(`Thread ${thread.id} has two owners`);
-        next.set(thread.id, thread);
-      }
-      cursor = page.value.nextCursor;
-    } while (cursor);
-    const changed = peerError !== null || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
+    const loaded = await readLivePeers(fleet, id => threads.get(id), peerThreads);
+    if (!loaded.ok) {
+      if (loaded.error.code === "conflict") throw new PeerOwnershipError(loaded.error.message);
+      peerRecovery = "automatic"; peerError = loaded.error.message; peerFeedback(peerError); signalSync(); return;
+    }
+    const next = new Map([...peerThreads].filter(([, thread]) => thread.metadata?.archived));
+    for (const [id, thread] of loaded.value.threads) next.set(id, thread);
+    const changed = peerError !== null || peerArchivedTotal !== loaded.value.archivedTotal || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
+    peerArchivedTotal = loaded.value.archivedTotal;
     peerError = null;
     peerFeedback(null);
     const updated = [...next.values()].filter(thread => peerThreads.get(thread.id)?.revision !== thread.revision);
@@ -935,8 +935,22 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
 const sessionRow = { get(id: string) { const found = threads.get(id) ?? peerThreads.get(id); return found ? threadRow(found) : null; } };
 function allThreadRows() { return threadTable().rows(); }
 const activeSessionRows = { all: () => threadTable({ archived: false }).rows().filter(row => !row.archived_at) };
-function archivedSessionPage(params = new URLSearchParams()) {
-  return archivedSessions(allThreadRows(), params, id => Boolean(threads.get(id)));
+async function archivedSessionPage(params = new URLSearchParams()) {
+  const query = archivedSessionQuery(params);
+  const owners = query.conversationsOnly || !fleet ? [threads] : [threads, fleet];
+  const result = await archivedAcrossOwners(owners, query);
+  if (!result.ok) return result;
+  if (result.value.kind !== "page") return { ok: false as const, error: { code: "unavailable" as const, message: "The archive owner did not return a page" } };
+  const selected = result.value.threads;
+  if (fleet) {
+    const ancestors = await readPeerAncestors(fleet, selected.filter(thread => !threads.get(thread.id)), id => threads.get(id), peerThreads);
+    if (!ancestors.ok) return ancestors;
+    for (const [id, thread] of ancestors.value) { peerThreads.set(id, thread); ensureThreadView(db, id); }
+  }
+  const lookup = cachedThreadLookup(new Map(selected.map(thread => [thread.id, thread])), liveThread);
+  const sessions = publicSessions(selected.map(thread => threadRow(thread, lookup)));
+  return { ok: true as const, value: { sessions, total: result.value.total, offset: query.offset, limit: query.limit,
+    hasMore: query.offset + sessions.length < result.value.total } };
 }
 
 const supervisorEpochRow = db.query("SELECT value FROM metadata WHERE key='supervisor_epoch'");
@@ -1021,7 +1035,7 @@ function sortedAgentModels(models: Map<string, AgentModelCount>): AgentModelCoun
 async function activeAgents() {
   const models = new Map<string, AgentModelCount>();
   let running = 0;
-  for (const row of allThreadRows()) if (row.state === "running") {
+  for (const row of activeSessionRows.all()) if (row.state === "running") {
     running++; addAgentModel(models, (row.effectiveSettings ?? row.settings).model);
   }
   return { running, models: sortedAgentModels(models) };
@@ -1032,11 +1046,9 @@ async function activeAgents() {
 // client's thread list needs.
 function supervisorState(): SupervisorState {
   const table = threadTable({ archived: false });
-  let peerArchived = 0;
-  for (const thread of peerThreads.values()) if (thread.metadata?.archived) peerArchived++;
   return {
     sessions: publicSessions(table.rows().filter(row => !row.archived_at), table.local),
-    archivedTotal: threads.archivedCount() + peerArchived,
+    archivedTotal: threads.archivedCount() + peerArchivedTotal,
     ownerErrors: [
       { owner: "fleet", feedback: peerFeedback(peerError) },
       ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: notificationFeedback(owner, message) })),
@@ -1656,14 +1668,15 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
   const children: Thread[] = [];
   let cursor: string | undefined;
   do {
-    const page = await directory.list({ parentId: id, limit: 100, cursor });
+    const page = await directory.list({ parentId: id, limit: 1000, cursor });
     if (!page.ok) return page;
     children.push(...page.value.threads);
     cursor = page.value.nextCursor;
   } while (cursor);
   for (const thread of children) if (!threads.get(thread.id)) { peerThreads.set(thread.id, thread); ensureThreadView(db, thread.id); }
   if (!threads.get(id)) peerChildren.set(id, children.length > 0);
-  return { ok: true, value: publicSessions(children.map(thread => threadRow(thread))) };
+  const lookup = cachedThreadLookup(new Map(children.map(thread => [thread.id, thread])), liveThread);
+  return { ok: true, value: publicSessions(children.map(thread => threadRow(thread, lookup))) };
 }
 
 async function threadSettings(row: any) {
@@ -1998,6 +2011,15 @@ const server = Bun.serve<SocketData>({
     if (ownedThreadResponse) return ownedThreadResponse;
     const threadResponse = await threadHttp(directory, req, "/v1/threads", admissionFor(callers, caller));
     if (threadResponse) return threadResponse;
+    const requestedSession = /^\/v1\/sessions\/([^/]+)(?:\/|$)/.exec(url.pathname);
+    if (fleet && requestedSession && requestedSession[1] !== "archived") {
+      const id = decodeURIComponent(requestedSession[1]!);
+      if (!sessionRow.get(id)) {
+        const loaded = await readPeerSession(fleet, id, id => threads.get(id), peerThreads);
+        if (!loaded.ok) return threadError(loaded.error);
+        if (loaded.value) for (const [id, thread] of loaded.value) { peerThreads.set(id, thread); ensureThreadView(db, id); }
+      }
+    }
     const externalResponse = await externalMeetingRequest(req, meet, (sessionId, meetingId, name) => ensureExternalMeetingThread(sessionId, meetingId, name, {
       existing: id => {
         const row = sessionRow.get(id) as any;
@@ -2398,8 +2420,8 @@ const server = Bun.serve<SocketData>({
     }
     if (API.archivedSessions.match(req.method, url.pathname)) {
       await refreshPeers();
-      const page = archivedSessionPage(url.searchParams);
-      return json({ ...page, sessions: publicSessions(page.sessions) });
+      const page = await archivedSessionPage(url.searchParams);
+      return page.ok ? json(page.value) : threadError(page.error);
     }
     if (API.createSession.match(req.method, url.pathname)) {
       try {

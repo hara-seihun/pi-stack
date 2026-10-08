@@ -295,6 +295,8 @@ The encrypted ledger backup runs in an owned worker on a separate SQLite connect
 
 ## Diagnosing a slow supervisor
 
+[Read-only API probes and isolated locator benchmarks](server/tools/README.md) cover bootstrap/sync, live and archived directories, selected sessions, context pages, lazy bodies and panels. Normal peer refresh reads live rows and an exact archive count, while archive search and direct archived URLs hydrate only their requested rows. Transcript locators commit atomically per page and unchanged locators never rewrite durable rows.
+
 The supervisor is one Bun process, and every request, stream frame and runtime event shares its main thread; a slow request is almost always a request waiting behind synchronous work. Two loopback endpoints on the supervisor port answer what that work is without restarting anything (a restart with `--cpu-prof` would end every running turn):
 
 ```sh

@@ -23,6 +23,24 @@ describe("authorized thread directory", () => {
     expect(peer.calls.list).not.toHaveBeenCalled();
     expect(local.calls.control).toHaveBeenCalledOnce();
   });
+  it("supports the owner's 1000-record batch without expanding the normal 100-record page", async () => {
+    const first = owner(Array.from({ length: 600 }, (_,i) => `local-${i}`));
+    const second = owner(Array.from({ length: 600 }, (_,i) => `peer-${i}`));
+    const directory = new ThreadDirectory({ id: "person", api: first.api }, [{ id: "fleet", api: second.api }]);
+    const normal = await directory.list();
+    expect(normal).toMatchObject({ ok: true, value: { threads: expect.any(Array) } });
+    if (!normal.ok) throw new Error(normal.error.message);
+    expect(normal.value.threads).toHaveLength(100);
+    const batch = await directory.list({ limit: 1000 });
+    if (!batch.ok) throw new Error(batch.error.message);
+    expect(batch.value.threads).toHaveLength(1000);
+    const last = await directory.list({ limit: 1000, cursor: batch.value.nextCursor });
+    if (!last.ok) throw new Error(last.error.message);
+    expect(last.value.threads).toHaveLength(200);
+    expect(last.value.nextCursor).toBeUndefined();
+    expect(new Set([...batch.value.threads, ...last.value.threads].map(thread => thread.id)).size).toBe(1200);
+    expect(await directory.list({ limit: 1001 })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  });
   it("pages owner records without skipping a boundary or changing filters", async () => {
     const first = owner(["a", "b"]), second = owner(["c", "d"]);
     const directory = new ThreadDirectory({ id: "person", api: first.api }, [{ id: "fleet", api: second.api }]);
