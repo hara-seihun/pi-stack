@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { ThreadDirectory } from "../src/threads/directory.js";
 import type { Thread, ThreadApi } from "../src/threads/contracts.js";
 
-function owner(ids: string[]) {
+function owner(ids: string[], parents: Record<string, string> = {}) {
   const api = {
-    list: vi.fn(async (input: { id?: string; limit?: number; cursor?: string } = {}) => {
-      const selected = input.id ? ids.filter(id => id === input.id) : ids;
+    list: vi.fn(async (input: { id?: string; parentId?: string; limit?: number; cursor?: string } = {}) => {
+      const selected = ids.filter(id => (!input.id || id === input.id) && (!input.parentId || parents[id] === input.parentId));
       const offset = Number(input.cursor ?? 0), end = offset + (input.limit ?? 100);
       return { ok: true as const, value: { threads: selected.slice(offset, end).map(id => ({ id } as Thread)), ...(end < selected.length ? { nextCursor: String(end) } : {}) } };
     }),
@@ -23,17 +23,28 @@ describe("authorized thread directory", () => {
     expect(peer.calls.list).not.toHaveBeenCalled();
     expect(local.calls.control).toHaveBeenCalledOnce();
   });
-  it("lists known fleet identities and child pages without contacting a locked personal owner", async () => {
-    const local = owner(["parent", "a", "b"]), locked = owner([]);
+  it("resolves known fleet identities locally but never claims a complete child list when another owner is locked", async () => {
+    const local = owner(["parent", "a", "b"], { a: "parent", b: "parent" }), locked = owner([]);
     locked.calls.list.mockResolvedValue({ ok: false, error: { code: "unavailable", message: "Personal supervisor locked" } } as never);
     const directory = new ThreadDirectory({ id: "fleet", api: local.api }, [{ id: "person", api: locked.api }]);
     expect(await directory.list({ id: "parent", limit: 100 })).toMatchObject({ ok: true, value: { threads: [{ id: "parent", ownerId: "fleet" }] } });
+    expect(locked.calls.list).not.toHaveBeenCalled();
     const first = await directory.list({ parentId: "parent", limit: 2 });
     if (!first.ok) throw new Error(first.error.message);
-    const next = await directory.list({ parentId: "parent", limit: 2, cursor: first.value.nextCursor });
-    expect(next).toMatchObject({ ok: true, value: { threads: [{ id: "b", ownerId: "fleet" }] } });
-    expect(locked.calls.list).not.toHaveBeenCalled();
+    expect(first.value.threads.map(thread => thread.id)).toEqual(["a", "b"]);
+    expect(await directory.list({ parentId: "parent", limit: 2, cursor: first.value.nextCursor })).toMatchObject({ ok: false, error: { code: "unavailable" } });
     expect(await directory.list({ id: "unknown" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  });
+  it("lists direct children across execution owners and preserves filters through pagination", async () => {
+    const person = owner(["parent", "private-child", "unrelated"], { "private-child": "parent", unrelated: "other" });
+    const fleet = owner(["worker", "worker-two", "grandchild"], { worker: "parent", "worker-two": "parent", grandchild: "worker" });
+    const directory = new ThreadDirectory({ id: "person", api: person.api }, [{ id: "fleet", api: fleet.api }]);
+    const first = await directory.list({ parentId: "parent", limit: 2 });
+    if (!first.ok) throw new Error(first.error.message);
+    expect(first.value.threads.map(thread => [thread.id, thread.ownerId])).toEqual([["private-child", "person"], ["worker", "fleet"]]);
+    const next = await directory.list({ parentId: "parent", limit: 2, cursor: first.value.nextCursor });
+    expect(next).toMatchObject({ ok: true, value: { threads: [{ id: "worker-two", ownerId: "fleet" }] } });
+    expect(next.ok && next.value.nextCursor).toBeUndefined();
   });
   it("supports the owner's 1000-record batch without expanding the normal 100-record page", async () => {
     const first = owner(Array.from({ length: 600 }, (_,i) => `local-${i}`));

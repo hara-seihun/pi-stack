@@ -85,7 +85,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
     PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1",
     PI_THREAD_RESOURCE_BOUNDARY: process.env.PI_THREAD_RESOURCE_BOUNDARY, PI_THREAD_RUNNER_UNIT: process.env.PI_THREAD_RUNNER_UNIT };
-  for (const key of ["PI_PERSON_SETTINGS_DATA", "PI_REMOTE_DATA"]) {
+  for (const key of ["PI_PERSON_SETTINGS_DATA", "PI_REMOTE_DATA", "PI_THREAD_SPEED"]) {
     if (options.env[key] === undefined) delete env[key];
   }
   // A shared runner inherits its first session's launch environment. Account

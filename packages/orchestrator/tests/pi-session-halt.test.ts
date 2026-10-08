@@ -281,7 +281,7 @@ it("starts a fresh observed request after tools and after a native provider retr
   expect(f.events.filter(event => event.type === "model_request_start")).toHaveLength(2);
   const end = f.events.findIndex(event => event.type === "tool_execution_end");
   expect(f.events.findIndex((event, index) => index > end && event.type === "model_request_start")).toBeGreaterThan(end);
-  expect(next.body.messages.at(-1)).toMatchObject({ role: "tool", content: "tool result" });
+  expect(next.body.messages.at(-1)).toMatchObject({ role: "tool", content: expect.stringMatching(/^\[Model delivery: [^\n]+\]\n\s*tool result$/) });
   expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "waiting_for_model", tools: [] } } });
   next.response.writeHead(503, { "content-type": "application/json" });
   next.response.end(JSON.stringify({ error: { message: "Service unavailable", type: "server_error" } }));
@@ -600,7 +600,7 @@ it("runs steers stranded by a terminal error instead of leaving the execution op
   first.end();
   const settled = await f.waitFor(event => event.type === "agent_settled");
   expect(settled.workIds).toEqual(["root", "steer-1", "steer-2", "steer-3"]);
-  expect(requests.at(-1)?.slice(-3)).toEqual(["steer 1", "steer 2", "steer 3"]);
+  expect(requests.at(-1)?.slice(-3)).toEqual([1, 2, 3].map(number => expect.stringMatching(new RegExp(`^\\[Model delivery: [^\\n]+\\]\\nsteer ${number}$`))));
   expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0 } });
 }, 3000);
 
