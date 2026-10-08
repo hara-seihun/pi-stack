@@ -41,6 +41,13 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     void overlayAck(JSONObject frame) { if (SharedOverlay.current() != null) SharedOverlay.current().ack(frame); }
     void overlayDisconnected() { if (SharedOverlay.current() != null) SharedOverlay.current().disconnected(); }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (SharedOverlay.current() == null) {
+            for (AccessibilityWindowInfo window : getWindows()) {
+                if (window.getId() == event.getWindowId()
+                    && (window.getType() == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+                        || window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD)) return;
+            }
+        }
         if (SharedOverlay.overlayWindow(event.getWindowId())) return;
         int type = event.getEventType();
         if (type == AccessibilityEvent.TYPE_WINDOWS_CHANGED || type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
@@ -93,6 +100,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
             if (overlayCommand.isPresent()) {
                 if (overlayCommand.get() == NativeState.OverlayCommand.SHOW || overlayCommand.get() == NativeState.OverlayCommand.HIDE) {
                     KenanOverlay.setVisible(this, overlayCommand.get() == NativeState.OverlayCommand.SHOW);
+                    ensureOverlay();
                     done.accept(PhoneResult.success(new JSONObject().put("visible", KenanOverlay.isVisible(this))));
                     return;
                 }

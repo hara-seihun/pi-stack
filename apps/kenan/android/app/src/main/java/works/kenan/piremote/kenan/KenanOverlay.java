@@ -105,7 +105,6 @@ final class KenanOverlay {
 
     static boolean isVisible(Context context) { return PhoneControlService.settings(context).getBoolean("overlayVisible", true); }
     static void setVisible(Context context, boolean value) {
-        if (isVisible(context) == value) return;
         PhoneControlService.settings(context).edit().putBoolean("overlayVisible", value).apply();
         SharedOverlay.refresh();
         PhoneControlService.refresh();
