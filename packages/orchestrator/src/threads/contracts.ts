@@ -203,16 +203,15 @@ export interface InspectOptions {
   contextWindow?: { before?: number; limit: number; generation?: string; toolCallIds?: string[] };
   contextRecords?: { after?: number; before?: number; limit: number; revision?: string; includeEntries?: boolean };
 }
+export type ThreadContextSource = {
+  context: "native-history";
+  path: string;
+  revision: string;
+  generation: string;
+} & ({ kind: "native-jsonl"; size: number; leafId: string | null }
+  | { kind: "unstarted"; size: 0; leafId: null });
 export interface ThreadContextWindow {
-  source: {
-    kind: "native-jsonl";
-    context: "native-history";
-    path: string;
-    revision: string;
-    generation: string;
-    size: number;
-    leafId: string | null;
-  };
+  source: ThreadContextSource;
   total: number;
   records: Array<{ seq: number; count: number; entryId: string; message: Record<string, any>; results: Record<string, any>[] }>;
   knownToolCallIds: string[];

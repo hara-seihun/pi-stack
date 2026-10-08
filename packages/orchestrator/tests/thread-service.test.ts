@@ -2600,6 +2600,40 @@ it("passes the immutable benchmark gateway policy to its runner without granting
 });
 
 describe("thread inspection", () => {
+  it("synchronizes a fresh thread before native history exists and fences its first native generation", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "fresh-view", cwd: directory, createdBy: { kind: "person", via: "router" } }));
+    const owner = new ThreadDirectory({ id: "owner", api: service });
+    const client = createThreadClient("http://owner/v1/threads", (async (url: RequestInfo | URL, init?: RequestInit) => (await threadHttp(owner, new Request(url, init)))!) as typeof fetch);
+    const initial = value(await client.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!;
+    expect(initial).toMatchObject({ source: { kind: "unstarted", path: thread.sessionFile, size: 0, leafId: null }, total: 0, records: [], knownToolCallIds: [] });
+    expect(value(await client.inspect(thread.id, { contextWindow: { limit: 1, generation: initial.source.generation } })).contextWindow).toEqual(initial);
+    const records = value(await client.inspect(thread.id, { contextRecords: { limit: 32, includeEntries: true } })).contextRecords!;
+    expect(records).toMatchObject({ source: initial.source, total: 0, records: [] });
+    expect(await client.inspect(thread.id, { contextWindow: { limit: 1, generation: "stale" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await client.inspect(thread.id, { contextRecords: { limit: 1, revision: "stale" } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(sessions).toEqual([]);
+    const entry = { type: "message", id: "first", parentId: null, message: { role: "user", content: "hello" } };
+    writeFileSync(thread.sessionFile, JSON.stringify(entry) + "\n");
+    const started = value(await client.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!;
+    expect(started.source.kind).toBe("native-jsonl");
+    expect(started.source.generation).not.toBe(initial.source.generation);
+    expect(started.records.at(-1)?.message).toEqual(entry.message);
+    expect(await client.inspect(thread.id, { contextWindow: { limit: 60, generation: initial.source.generation } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await client.inspect(thread.id, { contextRecords: { limit: 32, revision: records.source.revision } })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+  it("does not turn lost required or malformed native history into an empty fresh thread", async () => {
+    const { service, directory } = fixture();
+    const required = value(service.importThread({ id: "lost-native", title: "Lost", cwd: directory,
+      sessionFile: join(directory, "lost-native.jsonl"), settings: { model: "sol", thinkingLevel: "high", speed: "standard" },
+      metadata: { nativeHistoryRequired: true } }));
+    const fresh = value(await service.spawn({ requestId: "malformed-view", cwd: directory }));
+    writeFileSync(fresh.sessionFile, "broken\n");
+    for (const thread of [required, fresh]) {
+      expect(await service.inspect(thread.id, { contextWindow: { limit: 60 } })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+      expect(await service.inspect(thread.id, { contextRecords: { limit: 32 } })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    }
+  });
   it("returns only intersecting native records, pairing earlier calls through directory HTTP", async () => {
     const { service, directory } = fixture();
     const thread = value(await service.spawn({ requestId: "window", cwd: directory }));

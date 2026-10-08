@@ -6,6 +6,7 @@ export type ReadingSnapshot = {
   top: number;
   height: number;
   anchor: Element | null;
+  identity: { attribute: string; value: string } | null;
   anchorTop: number;
 };
 
@@ -22,17 +23,22 @@ function capture(scroller: HTMLElement): ReadingSnapshot {
     const candidate = scroller.ownerDocument.elementFromPoint(x, rect.top + rect.height / 2)?.closest(".transcript");
     if (candidate && scroller.contains(candidate)) visibleAnchor = candidate;
   }
+  const identified = visibleAnchor?.closest("[data-message-id], [data-transcript-seq], [data-virtual-key]");
+  const attribute = identified && ["data-message-id", "data-transcript-seq", "data-virtual-key"].find(name => identified.hasAttribute(name));
+  if (identified && scroller.contains(identified)) visibleAnchor = identified;
   return {
     top: scroller.scrollTop,
     height: scroller.scrollHeight,
     anchor: visibleAnchor,
+    identity: attribute && identified ? { attribute, value: identified.getAttribute(attribute)! } : null,
     anchorTop: visibleAnchor?.getBoundingClientRect().top ?? 0,
   };
 }
 
 export function restoreReadingPosition(scroller: HTMLElement, before: ReadingSnapshot): ReadingSnapshot {
-  const anchor = before.anchor;
-  if (anchor && scroller.contains(anchor)) {
+  const anchor = before.anchor && scroller.contains(before.anchor) ? before.anchor
+    : before.identity ? [...scroller.querySelectorAll(`[${before.identity.attribute}]`)].find(node => node.getAttribute(before.identity!.attribute) === before.identity!.value) : null;
+  if (anchor) {
     scroller.scrollTop += anchor.getBoundingClientRect().top - before.anchorTop;
   } else {
     // Completion can replace the live message itself, leaving no surviving anchor.
@@ -42,26 +48,25 @@ export function restoreReadingPosition(scroller: HTMLElement, before: ReadingSna
 }
 
 export class ReadingAnchor {
-  readonly needsFallback = !(typeof CSS !== "undefined" && CSS.supports("overflow-anchor", "auto"));
   private latest: ReadingSnapshot | null = null;
   private reading = false;
 
   setReading(scroller: HTMLElement, reading: boolean) {
     this.reading = reading;
-    this.latest = this.needsFallback && reading ? capture(scroller) : null;
+    this.latest = reading ? capture(scroller) : null;
   }
 
   beforeUpdate(scroller: HTMLElement | null): ReadingSnapshot | null {
-    return this.needsFallback && this.reading && scroller ? capture(scroller) : null;
+    return this.reading && scroller ? capture(scroller) : null;
   }
 
   afterUpdate(scroller: HTMLElement | null, before: ReadingSnapshot | null) {
-    if (!scroller || !this.reading || !this.needsFallback) return;
+    if (!scroller || !this.reading) return;
     this.latest = before ? restoreReadingPosition(scroller, before) : capture(scroller);
   }
 
   afterResize(scroller: HTMLElement) {
-    if (!this.reading || !this.needsFallback || !this.latest) return;
+    if (!this.reading || !this.latest) return;
     this.latest = restoreReadingPosition(scroller, this.latest);
   }
 }
