@@ -49,8 +49,10 @@ test('native WebRTC duplex sends GPT audio to the telephone and only caller audi
     await page.route('http://127.0.0.1:8802/media/retell-sdk.js', route => route.fulfill({ contentType: 'text/javascript', body: mockSdk }));
     await page.addInitScript(() => {
       const context = new AudioContext({ sampleRate: 48000 });
-      const state = (window as any).testAudio = { context, ready: false, takenOver: false, proof: false, error: '', callerInput: { low: 0, high: 0 }, telephoneOutput: { low: 0, high: 0 }, requests: [] as string[], nativeCapture: navigator.mediaDevices.getUserMedia };
-      state.measure = (stream: MediaStream, name: string) => {
+      type AudioProbe = { low: number; high: number };
+      type TestAudio = { context: AudioContext; ready: boolean; takenOver: boolean; proof: boolean; error: string; callerInput: AudioProbe; telephoneOutput: AudioProbe; requests: string[]; nativeCapture: typeof navigator.mediaDevices.getUserMedia; measure(stream: MediaStream, name: 'callerInput' | 'telephoneOutput'): void };
+      const state: TestAudio = (window as any).testAudio = { context, ready: false, takenOver: false, proof: false, error: '', callerInput: { low: 0, high: 0 }, telephoneOutput: { low: 0, high: 0 }, requests: [], nativeCapture: navigator.mediaDevices.getUserMedia,
+        measure(stream: MediaStream, name: 'callerInput' | 'telephoneOutput') {
         const playback = new Audio(); playback.volume = 0; playback.srcObject = stream; void playback.play();
         const source = context.createMediaStreamSource(stream);
         const analyser = context.createAnalyser(); analyser.fftSize = 4096;
@@ -64,7 +66,7 @@ test('native WebRTC duplex sends GPT audio to the telephone and only caller audi
           requestAnimationFrame(measure);
         };
         requestAnimationFrame(measure);
-      };
+      } };
       (window as any).WebSocket = class {
         static OPEN = 1; readyState = 1;
         onopen?: () => void; onmessage?: (event: { data: string }) => void;

@@ -318,7 +318,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const replyRef = useRef<ReplyTarget | null>(null);
   const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
-  const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [notificationVersion, setNotificationVersion] = useState(0);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
   const [pendingQuestions, setPendingQuestions] = useState<({ sessionId: string } & QuestionsResource) | null>(null);
@@ -1106,7 +1105,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     } catch (error) { setControlError({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) }); }
     finally { kick(); }
   };
-  const toggleAction = async (id: string) => { setPendingAction(id); try { await api(API.actionToggle.method, API.actionToggle.path({ id }), {}); } finally { setPendingAction(null); kick(); } };
 
   const dashboard = state.dashboard;
   const threadStarts = useMemo(() => state.bootstrap?.threadStarts ?? [], [state.bootstrap]);
@@ -1237,7 +1235,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     switch (route.tab) {
       case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
       case "attention": return <Suspense fallback={<Loading label="Loading attention…" />}><AttentionScreen version={notificationVersion} /></Suspense>;
-      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
+      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
       case "settings": return <Suspense fallback={<Loading label="Loading settings…" />}><SettingsScreen sessions={knownSessions} initialThreadId={selectedAiId(stateRef.current)} update={update} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onOpenThread={openThreadId} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
       case "chats": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;

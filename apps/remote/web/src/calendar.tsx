@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { navigate } from "./app/routes";
 import { Temporal } from "@js-temporal/polyfill";
 import type { CalendarEvent, CalendarSnapshot } from "../../server/calendar-protocol";

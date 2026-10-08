@@ -11,8 +11,6 @@ export type MachineScreenProps = {
   ownerErrors: { id: string; owner: string; message: string }[];
   offline: string;
   syncing: boolean;
-  pendingAction: string | null;
-  onToggleAction(id: string): void;
   onDismissOwnerError(id: string): void;
   onReconnect(): void;
   features: ReactNode;
