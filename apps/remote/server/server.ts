@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { telephoneDispatcher } from "./phone/dispatcher";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -1848,6 +1849,13 @@ const server = Bun.serve<SocketData>({
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
+    if (url.pathname.startsWith("/v1/telephone/")) {
+      const destination = meetingDestination();
+      const admitted = workspaceAdmission.resolve(destination.workspaceId);
+      if (!admitted.ok) return error(admitted.error.message, 503);
+      return telephoneDispatcher(req, { threads, owner: MESSAGE_OWNER.id, cwd: admitted.value.cwd,
+        model: destination.defaultModel, loopback: peer?.address === "127.0.0.1" || peer?.address === "::1" });
+    }
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);
       if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);

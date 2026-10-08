@@ -32,6 +32,7 @@ import { oneKenanEnabled } from "kenan-memory/config";
 import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
 import { createThreadClient } from "./http.js";
 import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity, settleExecutionActivity } from "./execution-activity.js";
+import { TELEPHONE_CONTEXT_ARGUMENT, isTelephoneContext, telephoneModelContext } from "./telephone-context.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
 const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
@@ -103,6 +104,9 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     const agentDir = env.PI_CODING_AGENT_DIR ?? getAgentDir();
     const raw = isRawSession(options.args);
     const sandbox = options.args.includes(SANDBOX_ARGUMENT);
+    const telephoneArgument = argument(options.args, TELEPHONE_CONTEXT_ARGUMENT);
+    const telephone = telephoneArgument ? JSON.parse(telephoneArgument) : undefined;
+    if (telephone !== undefined && (!raw || sandbox || !isTelephoneContext(telephone))) throw new RunnerStartupError("Invalid telephone execution boundary");
     const policyArgument = argument(options.args, SANDBOX_POLICY_ARGUMENT);
     const sandboxTools = sandbox ? await createSandboxTools(options.cwd,
       policyArgument ? JSON.parse(policyArgument) as SandboxPolicy : { profile: "public" }) : undefined;
@@ -171,7 +175,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
           // usage evidence, service tier, the empty system prompt and context reporting for the owning controller.
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
-          extensionFactories: [routing, usageLogger, threadSpeed, rawModelContext, threadContext],
+          extensionFactories: [routing, usageLogger, threadSpeed, telephone ? telephoneModelContext(telephone) : rawModelContext, threadContext],
         } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, threadContext, modeTools(env), ...memoryFactories] } });
       if (isolated) { services.resourceLoader = isolated.resourceLoader; acceptedContext = JSON.parse(argument(options.args, "--orchestrator-context")!); }
       const errors = services.resourceLoader.getExtensions().errors;
@@ -189,6 +193,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         customTools: room ? threadTools({ ...options, cwd, env }).filter(tool => tool.name === "request_user_input_async")
           : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
       if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
+      if (telephone && created.session.agent.state.tools.length !== 0) throw new RunnerStartupError("Telephone sessions cannot expose host tools");
       observeProviderRequests(created.session, output);
       execution.bind(created.session);
       const session = created.session, agent = session.agent;
