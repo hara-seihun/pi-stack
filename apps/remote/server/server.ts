@@ -57,7 +57,7 @@ import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
 import { displayAssistantMessage } from "./context-display";
-import { openIndexedContext } from "./indexed-context";
+import { readRecentContextMessages } from "./recent-context-messages";
 import { CapturedTranscriptSource } from "./captured-transcript-source";
 import { ThreadTranscriptSource } from "./thread-transcript-source";
 import { contextResponse } from "./context-response";
@@ -677,20 +677,9 @@ const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheL
  * agent actually holds. Voice reads the conversation from the captured context,
  * which is where the conversation is. */
 function recentContextMessages(sessionId: string, limit: number): Array<{ role: "user" | "assistant"; text: string }> {
-  const opened = openIndexedContext(db, sessionId);
-  if (!opened.ok) throw new Error(`${opened.error.code}: ${opened.error.detail}`);
-  if (!opened.value) return [];
-  const context = opened.value;
-  const found: Array<{ role: "user" | "assistant"; text: string }> = [];
-  for (let index = context.messages.length - 1; index >= 0 && found.length < limit; index--) {
-    const descriptor = context.messages[index];
-    if (descriptor.role !== "user" && descriptor.role !== "assistant") continue;
-    const read = context.readMessage(descriptor.index);
-    if (!read.ok) throw new Error(`${read.error.code}: ${read.error.detail}`);
-    const text = contentText(read.value.content).trim();
-    if (text) found.push({ role: descriptor.role, text });
-  }
-  return found.reverse();
+  const read = readRecentContextMessages(db, sessionId, limit, contentText);
+  if (!read.ok) throw new Error(`${read.error.code}: ${read.error.detail}`);
+  return read.value;
 }
 
 function hasCapturedContext(sessionId: string): boolean {

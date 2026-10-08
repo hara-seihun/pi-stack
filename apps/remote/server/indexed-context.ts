@@ -63,7 +63,10 @@ export interface ContextByteStream {
   next(): ContextReadResult<Uint8Array | null>;
   close(): ContextReadResult<void>;
 }
-export interface IndexedContext {
+export interface ContextMessageReader {
+  readMessage(index: number, expectedRevision?: string): ContextReadResult<any>;
+}
+export interface IndexedContext extends ContextMessageReader {
   capturedAt: number;
   revision: string;
   metadataBytes: number;
@@ -71,7 +74,7 @@ export interface IndexedContext {
   totalBytes: number;
   header: IndexedContextHeader;
   messages: ContextMessageDescriptor[];
-  readMessage(index: number, expectedRevision?: string): ContextReadResult<any>;
+  withMessageReader<T>(action: (reader: ContextMessageReader) => T, expectedRevision?: string): ContextReadResult<T>;
   readBytes(offset: number, bytes: number, expectedRevision?: string): ContextReadResult<Uint8Array>;
   openByteStream(expectedRevision?: string): ContextReadResult<ContextByteStream>;
 }
@@ -579,6 +582,17 @@ function buildIndexedContext(db: Database, sessionId: string): ContextReadResult
     if (!fresh.ok) return fresh;
     const revision = scanned.value;
     const memoryBytes = headerBytes * 16 + messages.length * 512 + entries * 256 + metadataBytes * 4 + source.state.token.length * 2;
+    const readMessage = (owned: ByteSource, index: number, expectedRevision: string): ContextReadResult<any> => {
+      if (expectedRevision !== revision) return { ok: false, error: { code: "stale", detail: "Captured context revision does not match" } };
+      const before = owned.fresh();
+      if (!before.ok) return before;
+      if (!Number.isSafeInteger(index) || index < 0 || index >= messages.length) return invalid("Message index is outside the captured context");
+      const message = messages[index];
+      const parsed = parseSpan(owned, { offset: message.offset, bytes: message.bytes, kind: "object", recordHash: message.recordHash }, CONTEXT_RECORD_BYTES);
+      if (!parsed.ok) return parsed;
+      const after = owned.fresh();
+      return after.ok ? parsed : after;
+    };
     return ok({ capturedAt: source.capturedAt, revision, metadataBytes: memoryBytes, sourceToken: source.state.token, totalBytes: source.bytes, header, messages,
       openByteStream(expectedRevision = revision): ContextReadResult<ContextByteStream> {
         if (expectedRevision !== revision) return { ok: false, error: { code: "stale", detail: "Captured context revision does not match" } };
@@ -636,18 +650,25 @@ function buildIndexedContext(db: Database, sessionId: string): ContextReadResult
           return after.ok ? read : after;
         });
       },
-      readMessage(index: number, expectedRevision = revision): ContextReadResult<any> {
-        return source.using(() => {
+      withMessageReader<T>(action: (reader: ContextMessageReader) => T, expectedRevision = revision): ContextReadResult<T> {
+        const owned = source.fork();
+        return owned.using(() => {
           if (expectedRevision !== revision) return { ok: false, error: { code: "stale", detail: "Captured context revision does not match" } };
-          const before = source.fresh();
+          const before = owned.fresh();
           if (!before.ok) return before;
-          if (!Number.isSafeInteger(index) || index < 0 || index >= messages.length) return invalid("Message index is outside the captured context");
-          const message = messages[index];
-          const parsed = parseSpan(source, { offset: message.offset, bytes: message.bytes, kind: "object", recordHash: message.recordHash }, CONTEXT_RECORD_BYTES);
-          if (!parsed.ok) return parsed;
-          const after = source.fresh();
-          return after.ok ? parsed : after;
+          let open = true;
+          try {
+            const value = action({ readMessage(index, requestedRevision = revision) {
+              return open ? readMessage(owned, index, requestedRevision) : invalid("Captured message reader is closed");
+            } });
+            const after = owned.fresh();
+            return after.ok ? ok(value) : after;
+          } finally { open = false; }
         });
+      },
+      readMessage(index: number, expectedRevision = revision): ContextReadResult<any> {
+        const owned = source.fork();
+        return owned.using(() => readMessage(owned, index, expectedRevision));
       },
     });
     });
