@@ -57,10 +57,13 @@ export function silentReply(value: unknown): Result<SilentResponse | null> {
   }
 }
 export function silentAgent(settings: RetellSettings): Record<string, unknown> {
-  return { agent_name: "Kenan GPT Live silent carrier", response_engine: { type: "custom-llm", llm_websocket_url: settings.silentUrl }, voice_id: "retell-Cimo", ambient_sound: null, enable_backchannel: false, reminder_max_count: 0, voicemail_option: null, ivr_option: null, contact_memory_config: { enable_read: false, enable_write: false }, max_call_duration_ms: 600_000, data_storage_setting: "basic_attributes_only" };
+  return { agent_name: "Kenan GPT Live silent carrier", response_engine: { type: "custom-llm", llm_websocket_url: settings.silentUrl }, voice_id: "retell-Cimo", ambient_sound: null, enable_backchannel: false, reminder_max_count: 0, voicemail_option: null, ivr_option: null, contact_memory_config: { enable_read: false, enable_update: false }, max_call_duration_ms: 600_000, data_storage_setting: "basic_attributes_only" };
 }
+// Retell omits cleared nullable options in GET responses. Unset and null both
+// mean no handler/sound; any present non-null option must be rejected.
+const disabledOption = (value: Record<string, unknown>, key: string): boolean => !Object.hasOwn(value, key) || value[key] === null;
 export function verifiedSilentAgent(value: unknown, settings: RetellSettings): boolean {
-  return record(value) && value.agent_id === settings.agentId && value.version === settings.agentVersion && value.is_published === true && record(value.response_engine) && value.response_engine.type === "custom-llm" && value.response_engine.llm_websocket_url === settings.silentUrl && value.ambient_sound === null && value.enable_backchannel === false && value.reminder_max_count === 0 && value.voicemail_option === null && value.ivr_option === null && record(value.contact_memory_config) && value.contact_memory_config.enable_read === false && value.contact_memory_config.enable_write === false;
+  return record(value) && value.agent_id === settings.agentId && value.version === settings.agentVersion && value.is_published === true && record(value.response_engine) && value.response_engine.type === "custom-llm" && value.response_engine.llm_websocket_url === settings.silentUrl && disabledOption(value, "ambient_sound") && value.enable_backchannel === false && value.reminder_max_count === 0 && disabledOption(value, "voicemail_option") && disabledOption(value, "ivr_option") && disabledOption(value, "call_screening_option") && record(value.contact_memory_config) && value.contact_memory_config.enable_read === false && value.contact_memory_config.enable_update === false;
 }
 export function retellTerminal(status: RetellStatus): boolean { return status === "unanswered" || status === "completed" || status === "failed"; }
 export class RetellTakeover {
@@ -70,9 +73,9 @@ export class RetellTakeover {
     if (!parsed.ok) throw new Error(parsed.error);
     this.settings = parsed.value;
   }
-  private async request(path: string, method: "GET" | "POST", body?: unknown): Promise<RequestResult> {
+  private async request(path: string, method: "GET" | "POST", body?: unknown, lifecycle?: AbortSignal): Promise<RequestResult> {
     try {
-      const response = await fetch(`https://api.retellai.com${path}`, { method, headers: { authorization: `Bearer ${this.settings.apiKey}`, "content-type": "application/json", "X-Retell-Client-JS-SDK-Version": "3.0.2" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000), redirect: "error" });
+      const response = await fetch(`https://api.retellai.com${path}`, { method, headers: { authorization: `Bearer ${this.settings.apiKey}`, "content-type": "application/json", "X-Retell-Client-JS-SDK-Version": "3.0.2" }, body: body === undefined ? undefined : JSON.stringify(body), signal: lifecycle ? AbortSignal.any([lifecycle, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000), redirect: "error" });
       if (!response.ok) return { ok: false, error: `Retell HTTP ${response.status}`, uncertain: response.status >= 500 || response.status === 408 };
       const text = await response.text();
       return { ok: true, value: text === "" ? null : JSON.parse(text) };
@@ -87,13 +90,14 @@ export class RetellTakeover {
     if (!record(number.value) || number.value.phone_number !== s.callerId || number.value.phone_number_type !== "retell-twilio") return { ok: false, error: "Retell caller number ownership or managed carrier does not match" };
     return { ok: true, value: { agentId: s.agentId, agentVersion: s.agentVersion, callerId: s.callerId } };
   }
-  async dial(brief: CallBrief, id: string): Promise<DialResult> {
+  async dial(brief: CallBrief, id: string, lifecycle: AbortSignal): Promise<DialResult> {
     const parsed = callBrief(brief);
     if (!parsed.ok || !boundedId(id) || brief.maxSeconds < 60) return { ok: false, error: parsed.ok ? "A bounded local call ID and 60–1800 second call duration are required" : parsed.error, uncertain: false };
     const verified = await this.verify();
     if (!verified.ok) return { ...verified, uncertain: false };
+    if (lifecycle.aborted) return { ok: false, error: "Call cancelled before dial dispatch", uncertain: false };
     const s = this.settings;
-    const result = await this.request("/v2/create-phone-call", "POST", { from_number: s.callerId, to_number: brief.to, override_agent_id: s.agentId, override_agent_version: s.agentVersion, idempotency_key: id, agent_override: { agent: { max_call_duration_ms: brief.maxSeconds * 1000 } }, metadata: { local_call_id: id, approved_request_id: brief.requestId } });
+    const result = await this.request("/v2/create-phone-call", "POST", { from_number: s.callerId, to_number: brief.to, override_agent_id: s.agentId, override_agent_version: s.agentVersion, idempotency_key: id, agent_override: { agent: { max_call_duration_ms: brief.maxSeconds * 1000 } }, metadata: { local_call_id: id, approved_request_id: brief.requestId } }, lifecycle);
     if (!result.ok) return result;
     if (!record(result.value) || !boundedId(result.value.call_id)) return { ok: false, error: "Retell accepted dial without a call ID; outcome unknown", uncertain: true };
     return { ok: true, value: { uuid: result.value.call_id } };

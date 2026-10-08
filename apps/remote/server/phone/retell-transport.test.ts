@@ -16,7 +16,7 @@ function fixture(t: any) {
   const file = join(root, "credentials.json"), silentTokenFile = join(root, "silent-token"), adminTokenFile = join(root, "admin-token");
   writeFileSync(file, JSON.stringify(creds), { mode: 0o600 }); writeFileSync(silentTokenFile, token, { mode: 0o600 }); writeFileSync(adminTokenFile, "admin-token".repeat(8), { mode: 0o600 });
   const client = new RetellTakeover(file, url);
-  const agent = { ...silentAgent(client.settings), agent_id: creds.RETELL_AGENT_ID, version: 0, is_published: true };
+  const agent: Record<string, unknown> = { ...silentAgent(client.settings), agent_id: creds.RETELL_AGENT_ID, version: 0, is_published: true };
   const config = { callingEnabled: false, pstnProvider: "retell-takeover", retellCredentialFile: file, silentTokenFile, adminTokenFile, publicBaseUrl: "https://phone.example", owner: "kenan", localPort: 8802, publicPort: 8803, voiceUrl: "http://127.0.0.1:8794", dispatcherUrl: "http://127.0.0.1:8804", chromium: "/usr/bin/true" };
   return { root, file, client, agent, config };
 }
@@ -48,7 +48,11 @@ test("explicit transport selection and owner-only credentials preserve disabled 
 test("verified immutable agent has no hosted brain, memory or speech bypass", t => {
   const { agent, client } = fixture(t);
   assert.equal(verifiedSilentAgent(agent, client.settings), true);
-  for (const changed of [{ is_published: false }, { version: 1 }, { agent_id: "wrong" }, { response_engine: { type: "retell-llm", llm_id: "hosted" } }, { response_engine: { type: "custom-llm", llm_websocket_url: url + "/wrong" } }, { enable_backchannel: true }, { ambient_sound: "call-center" }, { reminder_max_count: 1 }, { voicemail_option: { action: { type: "static_text", text: "say this" } } }, { ivr_option: {} }, { contact_memory_config: { enable_read: true, enable_write: false } }]) assert.equal(verifiedSilentAgent({ ...agent, ...changed }, client.settings), false);
+  const { ambient_sound, voicemail_option, ivr_option, ...cleared } = agent;
+  assert.equal(verifiedSilentAgent(cleared, client.settings), true);
+  assert.equal(verifiedSilentAgent({ ...agent, ambient_sound: undefined }, client.settings), false);
+  assert.equal(verifiedSilentAgent({ ...agent, call_screening_option: { agent_identity: "hosted", call_purpose: "hosted" } }, client.settings), false);
+  for (const changed of [{ is_published: false }, { version: 1 }, { agent_id: "wrong" }, { response_engine: { type: "retell-llm", llm_id: "hosted" } }, { response_engine: { type: "custom-llm", llm_websocket_url: url + "/wrong" } }, { enable_backchannel: true }, { ambient_sound: "call-center" }, { reminder_max_count: 1 }, { voicemail_option: { action: { type: "static_text", text: "say this" } } }, { ivr_option: {} }, { contact_memory_config: { enable_read: true, enable_update: false } }]) assert.equal(verifiedSilentAgent({ ...agent, ...changed }, client.settings), false);
 });
 
 test("dial verifies number and published silence, sends no approved errand to Retell brain", async t => {
@@ -59,13 +63,13 @@ test("dial verifies number and published silence, sends no approved errand to Re
     if (url.includes("get-phone-number")) return Response.json({ phone_number: creds.RETELL_FROM_NUMBER, phone_number_type: "retell-twilio" });
     return Response.json({ call_id: "call_synthetic" });
   });
-  assert.deepEqual(await client.dial(brief, "local_call_123"), { ok: true, value: { uuid: "call_synthetic" } });
+  assert.deepEqual(await client.dial(brief, "local_call_123", new AbortController().signal), { ok: true, value: { uuid: "call_synthetic" } });
   assert.equal(requests.length, 3); assert.match(requests[0].url, /get-agent\/agent_synthetic\?version=0$/);
   const create = requests.find(r => r.url.endsWith("/v2/create-phone-call"))!;
   const body = JSON.parse(String(create.options.body)); assert.equal(body.override_agent_id, creds.RETELL_AGENT_ID); assert.equal(body.override_agent_version, 0); assert.equal(body.idempotency_key, "local_call_123"); assert.equal(body.from_number, creds.RETELL_FROM_NUMBER); assert.equal(body.agent_override.agent.max_call_duration_ms, 60_000);
   assert.equal(new Headers(create.options.headers).get("authorization"), `Bearer ${creds.RETELL_API_KEY}`); assert.equal(create.options.redirect, "error");
   for (const secret of [brief.purpose, brief.opening, brief.shareableFacts[0], creds.RETELL_API_KEY, token]) assert.ok(!String(create.options.body).includes(secret));
-  const before = requests.length; assert.equal((await client.dial({ ...brief, maxSeconds: 59 }, "valid-id")).ok, false); assert.equal(requests.length, before);
+  const before = requests.length; assert.equal((await client.dial({ ...brief, maxSeconds: 59 }, "valid-id", new AbortController().signal)).ok, false); assert.equal(requests.length, before);
 });
 
 test("no create retry after rejection, uncertain network, malformed response or mismatched resource", async t => {
@@ -79,10 +83,22 @@ test("no create retry after rejection, uncertain network, malformed response or 
     return new Response("private diagnostic", { status: mode === "server" ? 500 : 401 });
   });
   for (const [state, uncertain] of [["reject", false], ["network", true], ["malformed", true], ["server", true], ["hosted", false], ["number", false]] as const) {
-    mode = state; const before = creates, result = await client.dial(brief, "local_call_123");
+    mode = state; const before = creates, result = await client.dial(brief, "local_call_123", new AbortController().signal);
     assert.equal(result.ok, false); if (!result.ok) { assert.equal(result.uncertain, uncertain); assert.ok(!result.error.includes("private")); }
     assert.equal(creates - before, ["hosted", "number"].includes(state) ? 0 : 1);
   }
+});
+
+test("owner cancellation during carrier verification never dispatches an irreversible dial", async t => {
+  const { client, agent } = fixture(t), controller = new AbortController(); let creates = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("get-agent")) { controller.abort(); return Response.json(agent); }
+    if (url.includes("get-phone-number")) return Response.json({ phone_number: creds.RETELL_FROM_NUMBER, phone_number_type: "retell-twilio" });
+    creates++; return Response.json({ call_id: "call_should_not_exist" });
+  });
+  const result = await client.dial(brief, "local_call_123", controller.signal);
+  assert.deepEqual(result, { ok: false, error: "Call cancelled before dial dispatch", uncertain: false });
+  assert.equal(creates, 0);
 });
 
 test("listen and permanent takeover retain explicit transport credentials and participant identity", async t => {
