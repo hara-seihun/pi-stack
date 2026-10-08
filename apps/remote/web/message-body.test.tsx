@@ -66,7 +66,7 @@ test("ordinary large messages offer explicit load and exact copy without renderi
     entries={[entryFromHead(head("user")), entryFromHead({ ...head("assistant"), seq: 2 })]}
     sessionId="thread" home="/" images={null} onEdit={() => {}} onReply={() => {}}
   /></ItemBodiesContext.Provider>);
-  expect(html.match(/Load full message/g)).toHaveLength(2);
+  expect(html.match(/<footer class="message-expansion"><button type="button" class="message-expand-action">Load more<\/button><button[^>]*aria-label="Copy full message"/g)).toHaveLength(2);
   expect(html.match(/aria-label="Copy full message"/g)).toHaveLength(2);
   expect(html).not.toContain(words);
   expect(requests).toBe(0);

@@ -44,19 +44,20 @@ export async function dismissNeed(dismissal: NeedsYouDismissal): Promise<Dismiss
 }
 
 export function NeedsYouCard({ item, busy, onDismiss }: { item: NeedsYouItem; busy: boolean; onDismiss: (item: NeedsYouItem) => void }) {
+  const action = item.nextAction !== null ? item.nextAction : item.recommendation;
+  const recommendation = item.recommendation !== action ? item.recommendation : null;
   return <article className="attention-decision" aria-busy={busy}>
-        <span className="needs-you-kind">{labels[item.kind]}</span><h2>{item.title}</h2>
-        <dl><div><dt>Consequence</dt><dd>{item.consequence === null ? "Unknown — not recorded" : item.consequence}</dd></div>
-          <div><dt>Required by</dt><dd>{item.deadline === null ? "Unknown — no deadline recorded" : <time dateTime={item.deadline.at}>{timestamp(item.deadline.at, item.deadline.timeZone)}</time>}</dd></div>
-          <div><dt>Kenan recommends</dt><dd>{item.recommendation === null ? "Unknown — no recommendation recorded" : item.recommendation}</dd></div>
-          {item.nextAction !== null && <div><dt>Next action</dt><dd>{item.nextAction}</dd></div>}
-        </dl>
-        <div className="needs-you-actions">
-          {item.location !== null ? <a className="needs-you-open" href={formatRoute({ tab: "chats", chat: `ai:${item.location.threadId}`, panel: null, ...(item.location.questionId === null ? {} : { questionId: item.location.questionId }) })}>{item.location.questionId !== null ? "Answer in original conversation" : "Open source conversation"}</a>
-            : <p className="needs-you-muted">Original conversation location not available</p>}
-          <button type="button" disabled={busy} onClick={() => { if (!busy) onDismiss(item); }}>{busy ? "Dismissing…" : item.dismissal.kind === "commitment" ? "Dismiss reminder" : "Dismiss"}</button>
-        </div>
-        {item.dismissal.kind === "commitment" && <p className="needs-you-muted">Hides this reminder; does not cancel your commitment.</p>}
+    <div className="attention-card-meta"><span>{labels[item.kind]}</span>{item.deadline !== null && <time dateTime={item.deadline.at}>{timestamp(item.deadline.at, item.deadline.timeZone)}</time>}</div>
+    <h3>{item.title}</h3>
+    {action !== null && action !== item.title && <p className="attention-card-body">{action}</p>}
+    <div className="attention-card-footer"><div className="needs-you-actions">
+      {item.location !== null && <a className="needs-you-open" aria-label={item.location.questionId !== null ? "Answer in original conversation" : "Open source conversation"} href={formatRoute({ tab: "chats", chat: `ai:${item.location.threadId}`, panel: null, ...(item.location.questionId === null ? {} : { questionId: item.location.questionId }) })}>{item.location.questionId !== null ? "Answer" : "Open conversation"}</a>}
+      <button type="button" disabled={busy} title={item.dismissal.kind === "commitment" ? "Hides this reminder; does not cancel your commitment." : undefined} onClick={() => { if (!busy) onDismiss(item); }}>{busy ? "Dismissing…" : item.dismissal.kind === "commitment" ? "Dismiss reminder" : "Dismiss"}</button>
+    </div>
+    {(item.consequence !== null || recommendation !== null) && <details className="attention-card-details"><summary>Details</summary><dl>
+      {item.consequence !== null && <div><dt>Consequence</dt><dd>{item.consequence}</dd></div>}
+      {recommendation !== null && <div><dt>Kenan recommends</dt><dd>{recommendation}</dd></div>}
+    </dl></details>}</div>
   </article>;
 }
 
