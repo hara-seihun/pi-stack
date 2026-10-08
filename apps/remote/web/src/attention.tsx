@@ -2,10 +2,10 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { API } from "../../server/api";
 import type { CalendarEvent } from "../../server/calendar-protocol";
 import type { NotificationHistory } from "../../server/protocol";
-import type { NeedsYouProjection } from "../../shared/needs-you";
+import type { NeedsYouItem, NeedsYouProjection } from "../../shared/needs-you";
 import { piFetch } from "./client";
 import { CalendarScreen } from "./calendar";
-import { NeedsYouCard, NeedsYouDetails } from "./needs-you";
+import { dismissNeed, NeedsYouCard, NeedsYouDetails } from "./needs-you";
 import { NotificationCard } from "./features/notifications/NotificationCard";
 import { attentionFeed, type AttentionItem } from "./attention-model";
 import { assertNever } from "../../shared/explicit-state";
@@ -70,15 +70,32 @@ function ResourceStatus({ label, resource }: { label: string; resource: Resource
   }
   return assertNever(resource, "Attention resource");
 }
+type DismissalState = { state: "pending"; title: string } | { state: "failed"; title: string; message: string };
 export function AttentionScreen({ version }: { version: number }) {
   const [attempt, refresh] = useState(0);
+  const [dismissals, setDismissals] = useState<Record<string, DismissalState>>({});
+  const pendingDismissals = useRef(new Set<string>());
   const needs = useNeeds(version, attempt), notifications = useNotifications(version, attempt);
   const view = needs.value;
+  async function dismiss(item: NeedsYouItem) {
+    if (pendingDismissals.current.has(item.id)) return;
+    pendingDismissals.current.add(item.id);
+    setDismissals(current => ({ ...current, [item.id]: { state: "pending", title: item.title } }));
+    const result = await dismissNeed(item.dismissal);
+    pendingDismissals.current.delete(item.id);
+    if (result.ok) {
+      setDismissals(current => { const next = { ...current }; delete next[item.id]; return next; });
+      refresh(value => value + 1);
+    } else {
+      setDismissals(current => ({ ...current, [item.id]: { state: "failed", title: item.title, message: result.message } }));
+      if (result.questionDismissed === true) refresh(value => value + 1);
+    }
+  }
   function agenda(events: CalendarEvent[], renderEvent: (event: CalendarEvent) => ReactNode, zone: string) {
     const feed = attentionFeed(view === null ? [] : view.items, notifications.resource.value === null ? [] : notifications.resource.value.notifications, events, zone, Date.now());
     function card(item: AttentionItem) {
       switch (item.kind) {
-        case "need": return <NeedsYouCard item={item.value} />;
+        case "need": return <NeedsYouCard item={item.value} busy={dismissals[item.value.id]?.state === "pending"} onDismiss={dismiss} />;
         case "update": return <NotificationCard item={item.value} />;
         case "event": return renderEvent(item.value);
       }
@@ -94,6 +111,7 @@ export function AttentionScreen({ version }: { version: number }) {
   return <section className="attention-screen" aria-label="Attention">
     <header className="attention-header"><div><h1>Attention</h1><p>What needs you, what changed, and what's coming up.</p></div><button type="button" disabled={needs.state === "loading" || notifications.resource.state === "loading"} onClick={() => refresh(value => value + 1)}>Refresh</button></header>
     <ResourceStatus label="decisions and questions" resource={needs} /><ResourceStatus label="updates" resource={notifications.resource} />
+    {Object.entries(dismissals).map(([id, status]) => status.state === "failed" && <p key={id} className="attention-error" role="alert">Could not dismiss “{status.title}”: {status.message}</p>)}
     {view?.life.state === "failed" && <p className="attention-error" role="alert">Life model unavailable: {view.life.error}. Questions still come from their original owners.</p>}
     {view?.questions.state === "partial" && <details className="attention-error"><summary>Some question sources are unavailable</summary><ul>{view.questions.errors.map((error, index) => <li key={index}>{error}</li>)}</ul></details>}
     <CalendarScreen refreshVersion={`${version}:${attempt}`} renderAgenda={({ events, renderEvent, zone }) => agenda(events, renderEvent, zone)} />

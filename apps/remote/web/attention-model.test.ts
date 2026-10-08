@@ -6,7 +6,7 @@ import type { HistoryNotification } from "../server/protocol";
 
 const now = Date.parse("2026-10-08T12:00:00Z");
 function need(id: string, deadline: string | null, location: NeedsYouItem["location"] = null): NeedsYouItem {
-  return { id, title: id, kind: "decision", deadline: deadline === null ? null : { at: deadline, timeZone: "UTC" }, location, consequence: null, recommendation: null, nextAction: null, commitmentId: null };
+  return { id, title: id, kind: "decision", deadline: deadline === null ? null : { at: deadline, timeZone: "UTC" }, location, consequence: null, recommendation: null, nextAction: null, commitmentId: null, dismissal: { kind: "life", id, revision: 1 } };
 }
 function event(id: string, start: string, allDay = false): CalendarEvent {
   return { id, title: id, start, end: allDay ? "2026-10-09" : "2026-10-08T18:00:00Z", zone: "UTC", allDay, notes: "", location: "", updated: "2026-10-01T00:00:00Z" };

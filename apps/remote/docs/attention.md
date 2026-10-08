@@ -6,6 +6,8 @@ Open **Attention** at `#/attention` in the browser or Android app. The mixed fee
 - **Upcoming**: future personal deadlines and calendar events interleaved by instant. All-day events use the selected display zone for ordering.
 - **History**: resolved notifications and finished events in the selected calendar window, newest first. Event editing remains available. **Load earlier updates** pages the durable notification ledger.
 
+Personal need cards have **Dismiss**, which settles their original owner and reloads the sources. Commitment dismissal hides only the reminder, not the obligation; source changes can bring it back. Submission failures and partial effects remain visible. See [dismissal semantics](needs-you.md).
+
 A question notification already represented by a linked personal item appears once. Question links select the original question in its source conversation; answers and dismissals stay with that owner. Opening an update opens the original thread, not a copy.
 
 Calendar controls remain on this surface: **New event**, occurrence/series editing and deletion with **Undo**, display zone, optional month selection, **Upcoming**, **Refresh calendars** and **Sync**. The month selector changes the calendar window, not the personal deadlines or updates.

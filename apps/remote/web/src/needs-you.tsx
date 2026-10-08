@@ -1,5 +1,7 @@
 import type { LifeCoverage } from "kenan-memory/life-contract";
-import type { NeedsYouItem, NeedsYouProjection } from "../../shared/needs-you";
+import type { NeedsYouDismissal, NeedsYouDismissResult, NeedsYouItem, NeedsYouProjection } from "../../shared/needs-you";
+import { API } from "../../server/api";
+import { piFetch } from "./client";
 import { formatRoute } from "./app/routes";
 import "./needs-you.css";
 
@@ -20,16 +22,41 @@ function coverageStatus(coverage: LifeCoverage, now: number): string {
   return value.state === "partial" ? "Partial" : "Current";
 }
 
-export function NeedsYouCard({ item }: { item: NeedsYouItem }) {
-  return <article className="attention-decision">
+type DismissNeedResult = { ok: true } | Pick<Extract<NeedsYouDismissResult, { ok: false }>, "ok" | "message" | "questionDismissed">;
+export async function dismissNeed(dismissal: NeedsYouDismissal): Promise<DismissNeedResult> {
+  try {
+    const response = await piFetch(API.dismissNeed.path(), {
+      method: "POST", headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify(dismissal), signal: AbortSignal.timeout(20_000), cache: "no-store",
+    });
+    const result: unknown = await response.json();
+    if (typeof result === "object" && result !== null && "ok" in result) {
+      if (result.ok === true && response.ok) return { ok: true };
+      if (result.ok === false && "error" in result && typeof result.error === "string" && "message" in result && typeof result.message === "string") {
+        if (!("questionDismissed" in result)) return { ok: false, message: result.message };
+        if (result.questionDismissed === true) return { ok: false, message: result.message, questionDismissed: true };
+      }
+    }
+    return { ok: false, message: `Dismissal returned an invalid response (HTTP ${response.status}). Refresh before trying again.` };
+  } catch (error) {
+    return { ok: false, message: `${error instanceof Error ? error.message : String(error)}. Dismissal was not confirmed; refresh before trying again.` };
+  }
+}
+
+export function NeedsYouCard({ item, busy, onDismiss }: { item: NeedsYouItem; busy: boolean; onDismiss: (item: NeedsYouItem) => void }) {
+  return <article className="attention-decision" aria-busy={busy}>
         <span className="needs-you-kind">{labels[item.kind]}</span><h2>{item.title}</h2>
         <dl><div><dt>Consequence</dt><dd>{item.consequence === null ? "Unknown — not recorded" : item.consequence}</dd></div>
           <div><dt>Required by</dt><dd>{item.deadline === null ? "Unknown — no deadline recorded" : <time dateTime={item.deadline.at}>{timestamp(item.deadline.at, item.deadline.timeZone)}</time>}</dd></div>
           <div><dt>Kenan recommends</dt><dd>{item.recommendation === null ? "Unknown — no recommendation recorded" : item.recommendation}</dd></div>
           {item.nextAction !== null && <div><dt>Next action</dt><dd>{item.nextAction}</dd></div>}
         </dl>
-        {item.location !== null ? <a className="needs-you-open" href={formatRoute({ tab: "chats", chat: `ai:${item.location.threadId}`, panel: null, ...(item.location.questionId === null ? {} : { questionId: item.location.questionId }) })}>{item.location.questionId !== null ? "Answer in original conversation" : "Open source conversation"}</a>
-          : <p className="needs-you-muted">Original conversation location not available</p>}
+        <div className="needs-you-actions">
+          {item.location !== null ? <a className="needs-you-open" href={formatRoute({ tab: "chats", chat: `ai:${item.location.threadId}`, panel: null, ...(item.location.questionId === null ? {} : { questionId: item.location.questionId }) })}>{item.location.questionId !== null ? "Answer in original conversation" : "Open source conversation"}</a>
+            : <p className="needs-you-muted">Original conversation location not available</p>}
+          <button type="button" disabled={busy} onClick={() => { if (!busy) onDismiss(item); }}>{busy ? "Dismissing…" : item.dismissal.kind === "commitment" ? "Dismiss reminder" : "Dismiss"}</button>
+        </div>
+        {item.dismissal.kind === "commitment" && <p className="needs-you-muted">Hides this reminder; does not cancel your commitment.</p>}
   </article>;
 }
 

@@ -1,6 +1,7 @@
 import type { LifeResult, LifeSnapshot, LifePolicyView } from "kenan-memory/life-contract";
 import type { ThreadApi, Thread, ThreadQuestion, WatchItem, WatchResponse, Result } from "pi-orchestrator/api";
 import type { NeedsYouItem, NeedsYouProjection } from "../shared/needs-you";
+import { commitmentReminderDismissed } from "./needs-you-dismissal";
 
 export type NeedsYouQuestions = { questions: ThreadQuestion[]; threadIds: Set<string>; errors: string[] };
 
@@ -54,12 +55,12 @@ function lifeItems(snapshot: LifeSnapshot, pending: NeedsYouQuestions): NeedsYou
     if (value.kind === "needs-you" && value.state === "open") {
       if (value.questionId !== null && !activeQuestions.has(value.questionId) && pending.errors.length === 0) continue;
       const question = value.questionId === null ? undefined : activeQuestions.get(value.questionId);
-      items.push({ id: `life:${entity.id}`, kind: question ? "question" : value.reason, title: value.title,
+      items.push({ id: `life:${entity.id}`, dismissal: { kind: "life", id: entity.id, revision: entity.revision }, kind: question ? "question" : value.reason, title: value.title,
         consequence: value.consequence, deadline: value.requiredBy, recommendation: value.recommendation,
         nextAction: null, commitmentId: value.commitmentId,
         location: question ? { threadId: question.threadId, questionId: question.id } : thread });
-    } else if (value.kind === "commitment" && value.state === "waiting" && value.waiting?.for === "person" && value.owner.kind === "person" && value.owner.person === snapshot.subject && !linkedCommitments.has(entity.id)) {
-      items.push({ id: `life:${entity.id}`, kind: "commitment", title: value.title, consequence: null,
+    } else if (value.kind === "commitment" && value.state === "waiting" && value.waiting?.for === "person" && value.owner.kind === "person" && value.owner.person === snapshot.subject && !linkedCommitments.has(entity.id) && !commitmentReminderDismissed(entity, current)) {
+      items.push({ id: `life:${entity.id}`, dismissal: { kind: "commitment", id: entity.id, revision: entity.revision }, kind: "commitment", title: value.title, consequence: null,
         deadline: value.due, recommendation: null, nextAction: value.nextAction, commitmentId: entity.id, location: thread });
     }
   }
@@ -68,7 +69,7 @@ function lifeItems(snapshot: LifeSnapshot, pending: NeedsYouQuestions): NeedsYou
 }
 
 function questionItems(questions: ThreadQuestion[]): NeedsYouItem[] {
-  return questions.map(question => ({ id: `question:${question.id}`, kind: "question", title: question.question,
+  return questions.map(question => ({ id: `question:${question.id}`, dismissal: { kind: "question", threadId: question.threadId, questionId: question.id }, kind: "question", title: question.question,
     consequence: null, deadline: null,
     recommendation: question.recommendedSuggestionId === undefined ? null : question.suggestions.find(suggestion => suggestion.id === question.recommendedSuggestionId)?.text ?? null,
     nextAction: null, commitmentId: null, location: { threadId: question.threadId, questionId: question.id } }));

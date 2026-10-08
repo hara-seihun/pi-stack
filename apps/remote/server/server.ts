@@ -71,6 +71,7 @@ import { oneKenanEnabled } from "kenan-memory/config";
 import { lifeClient } from "kenan-memory/life-client";
 import type { LifePolicyView, LifeSnapshot } from "kenan-memory/life-contract";
 import { projectNeedsYou, readNeedsYouQuestions } from "./needs-you";
+import { dismissNeedsYou, parseNeedsYouDismissal } from "./needs-you-dismissal";
 import { handleRoomOwner, RoomHistoryError } from "./rooms-owner";
 import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
 import { dismissError, observeError, observeFailure } from "./error-feedback";
@@ -1903,12 +1904,43 @@ const server = Bun.serve<SocketData>({
         },
       });
     }
-    if (API.needsYou.match(req.method, url.pathname)) {
+    const dismissNeed = API.dismissNeed.match(req.method, url.pathname);
+    if (API.needsYou.match(req.method, url.pathname) || dismissNeed) {
       const resolved = callers.resolve(caller);
       if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Needs you requires this person's authorized router or local caller", 403);
       if (process.env.PI_REMOTE_ROOMS_RUNTIME === "1") return error("Life projections are not available in rooms", 403);
       if (url.search) return error("Needs you accepts no person or scope parameters", 400);
       const client = lifeClient();
+      if (dismissNeed) {
+        const target = parseNeedsYouDismissal(await readBody(req));
+        if (target === null) return json({ ok: false, error: "invalid-request", message: "Expected a current need dismissal target." }, 400);
+        const result = await dismissNeedsYou(target, {
+          client, now: new Date().toISOString(),
+          findQuestion: async questionId => {
+            const pending = await readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room));
+            const question = pending.questions.find(question => question.id === questionId);
+            if (question) return { ok: true, threadId: question.threadId };
+            return pending.errors.length ? { ok: false, message: pending.errors.join("; ") } : { ok: true, threadId: null };
+          },
+          dismissQuestion: async (threadId, questionId) => {
+            let questionDismissed = false;
+            try {
+              const source = await directory.inspect(threadId, { context: "omit" });
+              if (!source.ok) return { ok: false, error: "question-failed", message: source.error.message };
+              if (roomMetadata(source.value.thread.metadata?.room)) return { ok: false, error: "invalid-state", message: "Room questions must be settled in their room." };
+              const answer = await directory.answer({ threadId, questionId, selectedSuggestionIds: [], text: "", dismissed: true });
+              if (!answer.ok) return { ok: false, error: "question-failed", message: answer.error.message };
+              questionDismissed = true;
+              await questionFeed.settle(threadId);
+              for (const stream of sessionSubscribers(threadId)) void sendQuestions(stream);
+              return { ok: true };
+            } catch (cause) { return { ok: false, error: "unavailable", message: cause instanceof Error ? cause.message : String(cause), ...(questionDismissed ? { questionDismissed: true as const } : {}) }; }
+          },
+        });
+        signalSync();
+        const status = result.ok ? 200 : result.error === "conflict" ? 409 : result.error === "not-found" ? 404 : result.error === "invalid-request" || result.error === "invalid-state" ? 400 : 503;
+        return json(result, status);
+      }
       const [life, pending, watch, policy] = await Promise.all([
         client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } }),
         readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room)),
