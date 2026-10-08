@@ -1198,5 +1198,98 @@
     "status": "fixed",
     "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-questions-media/agent-route-chips-desktop.png",
     "judgment": "Fresh capture after fixture gained its production transcript context: busy dot is visible, long known name ellipsizes inside its chip, unresolved/failed lookups retain ID labels, and all three buttons measure 44px high."
+  },
+  {
+    "caseId": "room-waiting", "viewport": "phone", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-waiting-phone.png",
+    "judgment": "390×844 PNG judged: typed agents dependency renders the waiting hourglass, not running/idle; title, details, history and editable empty composer remain legible. Empty send is disabled and no running Stop action is invented."
+  },
+  {
+    "caseId": "room-waiting", "viewport": "tablet", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-waiting-tablet.png",
+    "judgment": "768×1024 PNG judged: typed waiting glyph, complete room identity and participant subtitle coexist clearly; history and empty composer fit with no horizontal overflow or invented Stop action."
+  },
+  {
+    "caseId": "room-waiting", "viewport": "desktop", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-waiting-desktop.png",
+    "judgment": "1440×900 PNG judged: waiting hourglass and room identity remain distinct from centered transcript; page navigation and disabled empty Send remain readable. This is a typed dependency wait, not an execution-error fixture."
+  },
+  {
+    "caseId": "room-running-draft", "viewport": "phone", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-running-draft-phone-settled.png",
+    "judgment": "390×844 PNG judged: running glyph and separate 44px Stop thread action stay visible while an editable nonempty draft keeps Send enabled. Room identity truncates without crowding actions; draft wraps and live answer/work disclosure fit. Mutation outcomes remain a separate queue item."
+  },
+  {
+    "caseId": "room-running-draft", "viewport": "tablet", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-running-draft-tablet-settled.png",
+    "judgment": "768×1024 PNG judged: running header has full title/subtitle, separate Stop thread and details control; retained editable draft and Send coexist below readable live output and work disclosure. No send/stop transition is inferred."
+  },
+  {
+    "caseId": "room-running-draft", "viewport": "desktop", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-running-draft-desktop-settled.png",
+    "judgment": "1440×900 PNG judged: full room identity, running glyph, details and separate Stop thread action are clear; centered work/live transcript does not obscure the retained editable draft or enabled Send."
+  },
+  {
+    "caseId": "room-questions-multiple", "viewport": "phone", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-questions-multiple-phone.png",
+    "judgment": "390×844 PNG judged: 3 questions count is explicit, only the first active question is rendered, independent options/recommendation are readable, and answer field, Dismiss and disabled empty Submit fit. Queue advancement is not claimed."
+  },
+  {
+    "caseId": "room-questions-multiple", "viewport": "tablet", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-questions-multiple-tablet.png",
+    "judgment": "768×1024 PNG judged: three-question queue count, first-question card, recommendation and independent options have clear hierarchy; answer/Dismiss/Submit remain separate and reachable below the transcript."
+  },
+  {
+    "caseId": "room-questions-multiple", "viewport": "desktop", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-questions-multiple-desktop.png",
+    "judgment": "1440×900 PNG judged: explicit 3 questions heading distinguishes queue size from the single active form; option text, recommendation, empty answer field and actions remain legible without transcript overlap."
+  },
+  {
+    "caseId": "room-no-back", "viewport": "phone", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-no-back-phone.png",
+    "judgment": "390×844 PNG judged: showBack=false removes the Back button and its space; status becomes the leading header control while room identity and details remain visible. History and composer retain normal layout."
+  },
+  {
+    "caseId": "room-no-back", "viewport": "tablet", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-no-back-tablet.png",
+    "judgment": "768×1024 PNG judged: header begins with status, not an invisible Back slot; full identity/subtitle and details survive. Transcript and disabled empty Send remain readable."
+  },
+  {
+    "caseId": "room-no-back", "viewport": "desktop", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-no-back-desktop.png",
+    "judgment": "1440×900 PNG judged: Back is absent rather than disabled; leading status, complete room identity and details retain alignment above centered history and normal composer."
+  },
+  {
+    "caseId": "room-no-identity", "viewport": "phone", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-no-identity-phone.png",
+    "judgment": "390×844 PNG judged: showIdentity=false removes title and subtitle while Back, status and details remain present; history and message placeholder preserve the room context without stray clipped identity text."
+  },
+  {
+    "caseId": "room-no-identity", "viewport": "tablet", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-no-identity-tablet.png",
+    "judgment": "768×1024 PNG judged: title/subtitle are genuinely absent; Back/status/details keep their positions and usable targets. Room context remains in transcript and composer placeholder."
+  },
+  {
+    "caseId": "room-no-identity", "viewport": "desktop", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-no-identity-desktop.png",
+    "judgment": "1440×900 PNG judged: identity-free header leaves clean space between leading navigation/status and details, with no rendered title/subtitle fragments; centered history and composer remain unchanged."
+  },
+  {
+    "caseId": "room-create-large-roster", "viewport": "phone", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-create-large-roster-phone.png",
+    "additionalEvidence": ["/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-create-large-roster-phone-bottom.png"],
+    "judgment": "Both 390×844 PNGs judged: valid 64-person directory shows 63 selectable people after self exclusion. 120-character multilingual/unbroken labels wrap within phone width; actual 120-character title remains editable. Scrolled to last person, checked it, then Tab focused the visible 44px Create action; no creation submission is claimed."
+  },
+  {
+    "caseId": "room-create-large-roster", "viewport": "tablet", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-create-large-roster-tablet.png",
+    "additionalEvidence": ["/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-create-large-roster-tablet-bottom.png"],
+    "judgment": "Both 768×1024 PNGs judged: actual 120-character title and 63 selectable rows from valid 64-person directory fit; boundary-length multilingual names wrap in two lines without horizontal overflow. Last-member selection and keyboard focus on enabled Create were observed at roster end."
+  },
+  {
+    "caseId": "room-create-large-roster", "viewport": "desktop", "theme": "dark", "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-create-large-roster-desktop.png",
+    "additionalEvidence": ["/home/kenan/data/pi-ui-review-20261009/rooms-followup/room-create-large-roster-desktop-bottom.png"],
+    "judgment": "Both 1440×900 PNGs judged: full valid 120-character title is readable, 120-character directory labels fit single-line 44px rows, and all 63 eligible members remain accessible through scrolling. Last member is visibly checked; Tab focuses the enabled Create action at the bottom."
   }
 ]

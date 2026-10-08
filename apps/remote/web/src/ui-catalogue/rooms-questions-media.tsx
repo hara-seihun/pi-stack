@@ -3,7 +3,7 @@ import type { UiCase } from "./contract";
 import { configureFixtureTransport, type FixtureRoute } from "./transport";
 import { RoomConversation, RoomCreator } from "../rooms";
 import type { RoomMember, RoomSnapshot } from "../../../shared/rooms";
-import { readRoomPaging, roomMetadata } from "../../../shared/rooms";
+import { readRoomPaging, roomMetadata, roomMembers } from "../../../shared/rooms";
 import { revisionOf, type ReconcileFrame } from "../../../shared/reconcile";
 import { readRoomRevisions, type RoomRevisions } from "../../../shared/room-sync";
 import { validateThreadObservation } from "../../../shared/state-validation";
@@ -46,7 +46,11 @@ function question(id = "question-1", kind: "options" | "free" | "markdown" | "lo
   return value;
 }
 
-type CreatorMode = "empty" | "members" | "retry" | "corrupt" | "pending" | "failure";
+const largeRoster: RoomMember[] = [people[0]!, ...Array.from({ length: 63 }, (_, index) => ({ user: `member_${index + 1}`, displayName: `Member ${index + 1} · ${unicode} · ${"boundary-name".repeat(12)}`.slice(0, 120) }))];
+if (!roomMembers(largeRoster)) throw new Error("Invalid synthetic large roster");
+const boundaryRoomTitle = "Synthetic planning room · ".repeat(5).slice(0, 120);
+
+type CreatorMode = "empty" | "members" | "retry" | "corrupt" | "pending" | "failure" | "large-roster";
 function CreatorFixture({ mode }: { mode: CreatorMode }) {
   const [created, setCreated] = useState<string | null>(null);
   useMemo(() => {
@@ -56,7 +60,7 @@ function CreatorFixture({ mode }: { mode: CreatorMode }) {
     if (mode === "corrupt") localStorage.setItem(key, "{");
     configureFixtureTransport([{ method: "POST", path: "/v1/rooms", reply: mode === "pending" ? pending : mode === "failure" ? fail : () => Response.json({ room: roomSnapshot("empty").room }, { status: 201 }) }]);
   }, [mode]);
-  return <Frame>{created ? <p role="status">Created synthetic room.</p> : <RoomCreator people={mode === "members" ? [...people, { user: "member_long", displayName: token }] : people} onCreated={setCreated} onRefresh={resolved} />}</Frame>;
+  return <Frame>{created ? <p role="status">Created synthetic room.</p> : <RoomCreator people={mode === "large-roster" ? largeRoster : mode === "members" ? [...people, { user: "member_long", displayName: token }] : people} onCreated={setCreated} onRefresh={resolved} />}</Frame>;
 }
 
 type QuestionMode = "free" | "options" | "selected" | "multiple" | "markdown" | "long" | "pending" | "failure" | "empty";
@@ -77,17 +81,18 @@ function ContentFixture({ disabled }: { disabled: boolean }) {
   return <Frame><QuestionContent question={question("content", "markdown")} selected={selected} disabled={disabled} onToggle={id => setSelected(items => items.includes(id) ? items.filter(value => value !== id) : [...items, id])} /></Frame>;
 }
 
-type RoomMode = "loading" | "denied" | "empty" | "history" | "running" | "held" | "error" | "question" | "question-pending" | "question-failure" | "details" | "add" | "retry" | "older";
+type RoomMode = "loading" | "denied" | "empty" | "history" | "running" | "held" | "error" | "question" | "question-pending" | "question-failure" | "details" | "add" | "retry" | "older" | "waiting" | "running-draft" | "questions-multiple" | "no-back" | "no-identity";
 function roomSnapshot(mode: RoomMode): RoomSnapshot {
-  const running = mode === "running";
+  const running = mode === "running" || mode === "running-draft";
   const answering = mode.startsWith("question");
-  const value: RoomSnapshot = { room: { id: roomId, title: "Synthetic planning room", members: people.slice(0, 3), state: running ? "running" : "idle", activity: running ? "thinking" : "idle", unreadCount: 0, readThrough: 0 },
-    state: running ? "running" : "idle", activity: running ? "thinking" : "idle", held: mode === "held", activeTools: [],
+  const observation: Pick<RoomSnapshot, "state" | "activity" | "activityDetail" | "waitingOnAgents"> = mode === "waiting" ? { state: "waiting", activity: "awaiting", activityDetail: "Waiting for the synthetic route worker to finish.", waitingOnAgents: { kind: "agents", threadIds: [peerId], after: {}, reason: "Waiting for the synthetic route worker to finish.", since: epoch } } : running ? { state: "running", activity: "thinking" } : { state: "idle", activity: "idle" };
+  const value: RoomSnapshot = { room: { id: roomId, title: "Synthetic planning room", members: people.slice(0, 3), ...observation, unreadCount: 0, readThrough: 0 },
+    ...observation, held: mode === "held", activeTools: [],
     messages: mode === "empty" ? [] : [{ id: "message-1", sender: people[1]!, text: `Let's plan together. ${unicode}`, time: epoch }, { id: "message-2", sender: { user: "assistant", displayName: "Kenan" }, text: "The **local route** is ready.\n\n- Preserve the draft\n- Keep everyone informed", time: epoch + 1000 }],
     paging: { revision: "synthetic-history-v1", total: mode === "empty" ? 0 : mode === "older" ? 8 : 2, start: mode === "older" ? 6 : 0, end: mode === "empty" ? 0 : mode === "older" ? 8 : 2, hasOlder: mode === "older", nextBefore: mode === "older" ? 6 : null },
     live: running ? "I am checking the available **routes**…" : "", thinking: running ? "Compare the choices and preserve everyone's visible context." : "", notificationId: null,
     work: mode === "history" || running ? [{ id: "work-1", kind: "toolCall", name: "functions.read", text: `Synthetic route notes\n${token}` }] : [],
-    questions: answering ? [{ ...question(), threadId: roomId }] : [],
+    questions: answering ? (mode === "questions-multiple" ? [question(), question("question-2", "free"), question("question-3", "markdown")] : [question()]).map(item => ({ ...item, threadId: roomId })) : [],
     ...(mode === "error" ? { error: `Synthetic operation failed. Draft retained. ${token}` } : {}),
   };
   if (!roomMetadata(value.room) || !readRoomPaging(value.paging)) throw new Error("Invalid synthetic room");
@@ -99,7 +104,7 @@ function RoomFixture({ mode }: { mode: RoomMode }) {
     const snapshot = roomSnapshot(mode);
     const draftKey = appStorageKey(`pi-remote-room-draft:${window.PiRemotePerson.get()}:${roomId}`);
     localStorage.removeItem(draftKey);
-    if (mode === "retry") localStorage.setItem(draftKey, JSON.stringify({ text: "Synthetic message awaiting acknowledgement", receipt: requestId }));
+    if (mode === "retry" || mode === "running-draft") localStorage.setItem(draftKey, JSON.stringify({ text: mode === "running-draft" ? "Keep the local route and preserve this draft." : "Synthetic message awaiting acknowledgement", receipt: mode === "running-draft" ? null : requestId }));
     const drafts = new QuestionDrafts(localStorage, window.PiRemotePerson.get());
     drafts.clear(roomId, "question-1");
     if (mode === "question-pending" || mode === "question-failure") drafts.save(roomId, "question-1", { text: "Synthetic answer", selectedSuggestionIds: ["local"] });
@@ -116,7 +121,7 @@ function RoomFixture({ mode }: { mode: RoomMode }) {
     ];
     configureFixtureTransport(routes);
   }, [mode]);
-  return <div style={{ height: "100dvh" }}><RoomConversation id={roomId} people={[...people, { user: "member_long", displayName: token }]} onBack={noop} onRefresh={resolved} /></div>;
+  return <div style={{ height: "100dvh" }}><RoomConversation id={roomId} people={[...people, { user: "member_long", displayName: token }]} onBack={noop} onRefresh={resolved} showBack={mode !== "no-back"} showIdentity={mode !== "no-identity"} /></div>;
 }
 
 type ImageMode = "queued" | "dependencies" | "generating" | "complete" | "error" | "conflict" | "missing" | "registration" | "partial" | "load-failure";
@@ -156,9 +161,10 @@ function AgentsFixture({ mode }: { mode: "incoming" | "outgoing" | "new" | "clos
 const fixtureCase = (id: string, component: string, contract: string, boundary: UiCase["boundary"], render: UiCase["render"]): UiCase => ({ id, title: id.replaceAll("-", " "), component, contract, boundary, render });
 export const roomsQuestionsMediaCases: UiCase[] = [
   ...(["empty", "members", "retry", "corrupt", "pending", "failure"] as const).map(mode => fixtureCase(`room-create-${mode}`, "RoomCreator MemberPicker", `Room creation ${mode}; pending/failure are reached by Retry creation.`, mode === "members" ? "content-boundary" : "finite-variant", () => <CreatorFixture mode={mode} />)),
+  fixtureCase("room-create-large-roster", "RoomCreator MemberPicker", `64 valid directory members (self excluded by production picker); enter this valid 120-character title: ${boundaryRoomTitle}`, "content-boundary", () => <CreatorFixture mode="large-roster" />),
   ...(["free", "options", "selected", "multiple", "markdown", "long", "pending", "failure", "empty"] as const).map(mode => fixtureCase(`questions-${mode}`, "QuestionsComposer QuestionForm QuestionContent", `Question queue ${mode}; pending/failure are reached by Submit answer.`, mode === "long" || mode === "markdown" ? "content-boundary" : "finite-variant", () => <QuestionsFixture mode={mode} />)),
   ...([false, true] as const).map(disabled => fixtureCase(`question-content-${disabled ? "disabled" : "enabled"}`, "QuestionContent QuestionText", `Markdown question and recommendations; disabled=${disabled}.`, "finite-variant", () => <ContentFixture disabled={disabled} />)),
-  ...(["loading", "denied", "empty", "history", "running", "held", "error", "question", "question-pending", "question-failure", "details", "add", "retry", "older"] as const).map(mode => fixtureCase(`room-${mode}`, "RoomConversation RoomQuestion", `Contract-valid room ${mode}; details/add/older and pending/failure reached through production controls.`, "composition", () => <RoomFixture mode={mode} />)),
+  ...(["loading", "denied", "empty", "history", "running", "held", "error", "question", "question-pending", "question-failure", "details", "add", "retry", "older", "waiting", "running-draft", "questions-multiple", "no-back", "no-identity"] as const).map(mode => fixtureCase(`room-${mode}`, "RoomConversation RoomQuestion", `Contract-valid room ${mode}; details/add/older and pending/failure reached through production controls.`, "composition", () => <RoomFixture mode={mode} />)),
   ...(["queued", "dependencies", "generating", "complete", "error", "conflict", "missing", "registration", "partial", "load-failure"] as const).map(mode => fixtureCase(`inline-image-${mode}`, "Markdown InlineImagesContext", `InlineImage presentation ${mode}; synthetic file transport, no provider calls.`, "finite-variant", () => <InlineFixture mode={mode} />)),
   ...(["loading", "ready", "failure", "decode-failure"] as const).map(mode => fixtureCase(`cached-image-${mode}`, "CachedImage", `Real ClientCache fetch ${mode}, isolated synthetic disk scope.`, "finite-variant", () => <CachedFixture mode={mode} />)),
   ...(["incoming", "outgoing", "new", "closed", "chips"] as const).map(mode => fixtureCase(`agent-route-${mode}`, "AgentDisclosure AgentRoute ThreadChips", `Agent route ${mode}; name-known/name-unknown/lookup-failed and busy chips.`, mode === "chips" ? "content-boundary" : "finite-variant", () => <AgentsFixture mode={mode} />)),
