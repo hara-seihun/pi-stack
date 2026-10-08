@@ -41,12 +41,16 @@ export async function probeTabRestoration(tool, { url, statePath, record }) {
     for (const name of names.slice(1)) {
       owned.add(name);
       await execute(name, "tab-state-new-owner", [["open", "about:blank"]]);
-      for (const [wrongAccount, wrongOrigin] of [["other-account", origin], [account, origin.replace("127.0.0.1", "localhost")]]) {
-        const refused = await execute(name, "tab-state-mismatch-refusal", [
-          ["get", "url"], ["state", "load-tab", statePath, wrongAccount, wrongOrigin],
+      for (const [path, wrongAccount, wrongOrigin] of [
+        [`${statePath}.absent`, account, origin],
+        [statePath, "other-account", origin],
+        [statePath, account, origin.replace("127.0.0.1", "localhost")],
+      ]) {
+        const refused = await execute(name, "tab-state-authorization-refusal", [
+          ["get", "url"], ["state", "load-tab", path, wrongAccount, wrongOrigin],
         ], "failure");
         assert.equal(refused[0].success, true);
-        assert.equal(refused[1].success, false, "wrong account/origin must not authorize tab restoration");
+        assert.equal(refused[1].success, false, "missing or mismatched state must not authorize tab restoration");
       }
       const restored = await execute(name, "tab-state-restored-startup", [
         ["state", "load-tab", statePath, account, origin], ["open", new URL("/tab-auth", url).href],

@@ -22,14 +22,14 @@ function fixture(t, defect) {
         state.startup = state.auth ? "authorized-at-startup" : "unauthorized-at-startup";
       }
       if (command[0] === "eval") state.auth = true;
-      if (command[0] === "tab") state.auth = defect === "new-tab-leak";
+      if (command[0] === "tab") state.auth = false;
       if (command[0] === "state" && command[1] === "save-tab") {
         capsule = { account: command[3], origin: command[4] };
         writeFileSync(command[2], "synthetic private capsule", { mode: 0o600 });
         if (defect === "public-capsule") chmodSync(command[2], 0o644);
       }
       if (command[0] === "state" && command[1] === "load-tab") {
-        const match = command[3] === capsule.account && command[4] === capsule.origin;
+        const match = !command[2].endsWith(".absent") && command[3] === capsule.account && command[4] === capsule.origin;
         success = match || defect === "mismatch-accepted";
         if (success && defect !== "late-restore" && defect !== "new-tab-unrestored" ) state.auth = true;
         if (defect === "new-tab-unrestored" && !state.url?.endsWith("/tab-auth")) state.auth = true;
