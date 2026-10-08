@@ -15,8 +15,10 @@ for file in "$dir"/*.json; do
   user=$("${become[@]}" jq -er '.user | select(type == "string")' "$file")
   [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ && $file == "$dir/$user.json" ]] || { echo "invalid person identity in $file" >&2; exit 1; }
   port=$("${become[@]}" jq -er '.port | select(type == "number" and . > 0 and . < 65536)' "$file")
-  if response=$("${become[@]}" curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/meet" 2>&1); then
-    count=$(jq -er '.rooms | arrays | length' <<< "$response")
+  probe=meet
+  [[ $mode != --restart-blockers ]] || probe=health
+  if response=$("${become[@]}" curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/$probe" 2>&1); then
+    :
   else
     status=$?
     [[ $status == 7 ]] || { echo "cannot census $user (curl $status): $response" >&2; exit 1; }
@@ -30,21 +32,21 @@ for file in "$dir"/*.json; do
     done
     continue
   fi
-  preserved=0
   if [[ $mode == --restart-blockers ]]; then
-    health=$("${become[@]}" curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/health") || {
-      echo "cannot inspect meeting runtime for $user" >&2; exit 1;
-    }
-    jq -e 'type == "object" and .ok == true' <<< "$health" >/dev/null || {
+    jq -e 'type == "object" and .ok == true' <<< "$response" >/dev/null || {
       echo "invalid supervisor health for $user" >&2; exit 1;
     }
-    if jq -e '.meetingRuntime.protocol == "meet-runtime-v1" and .meetingRuntime.lifetime == "person-service"' <<< "$health" >/dev/null; then
-      preserved=1
+    if jq -e '.meetingRuntime.protocol == "meet-runtime-v1" and .meetingRuntime.lifetime == "person-service"' <<< "$response" >/dev/null; then
       preserved_count=$((preserved_count + 1))
+      continue
     fi
-    (( preserved )) || all_preserved=0
+    all_preserved=0
+    response=$("${become[@]}" curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/meet" 2>&1) || {
+      echo "cannot census rooms for $user: $response" >&2; exit 1;
+    }
   fi
-  if (( count > 0 && !preserved )); then live+=("$user:$count"); fi
+  count=$(jq -er '.rooms | arrays | length' <<< "$response")
+  if (( count > 0 )); then live+=("$user:$count"); fi
 done
 # Meetings a host service owns outside Pi Remote (a Recall bot waiting in a lobby, a
 # scheduler about to join) have no room here yet, but a restart still cuts them. The
