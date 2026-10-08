@@ -92,16 +92,16 @@ export function PermissionsSetup() {
     {phone.state === "loading" && <p role="status">Checking this phone…</p>}
     {phone.state === "error" && <><p role="alert">{phone.message}</p><button type="button" disabled={busy !== null} onClick={() => void refreshPhone.current?.()}>Retry phone status</button></>}
     {status && <>
-      <div className="settings-switch-row"><div><strong>Enable phone control</strong><p>Connect this device to Kenan. Only the permissions granted below are available.</p></div>
+      <label className="settings-switch-row"><span><strong>Enable phone control</strong><span className="settings-switch-detail">Connect this device to Kenan. Only the permissions granted below are available.</span></span>
         <input type="checkbox" aria-label="Enable phone control" checked={status.enabled} disabled={disabled || !remote.phoneConfigure} onChange={event => void configure(event.target.checked)} />
-      </div>
+      </label>
       <p role="status">{status.name} · {status.enabled ? status.connected ? "Connected" : "Reconnecting" : "Phone control is off"}</p>
-      {typeof status.overlay === "boolean" && remote.phoneOverlay ? <div className="settings-switch-row"><div><strong>Show Kenan over other apps</strong><p>Independent of phone-control permissions.</p></div>
+      {typeof status.overlay === "boolean" && remote.phoneOverlay ? <label className="settings-switch-row"><span><strong>Show Kenan over other apps</strong><span className="settings-switch-detail">Independent of phone-control permissions.</span></span>
         <input type="checkbox" aria-label="Show Kenan over other apps" checked={status.overlay} disabled={disabled || (!status.overlay && status.capabilities.overlay !== true)} onChange={event => {
           const visible = event.target.checked;
           void run("overlay-visible", async () => { await remote.phoneOverlay!({ visible }); });
         }} />
-      </div> : <p>Overlay preferences are unavailable in this Android shell.</p>}
+      </label> : <p>Overlay preferences are unavailable in this Android shell.</p>}
       <details className="settings-phone-grants"><summary>Device permissions</summary>
         <p>Each grant is separate. Enabling phone control does not grant access or perform an action.</p>
         <ul>{phoneGrants.map(({ step, label, help }) => {

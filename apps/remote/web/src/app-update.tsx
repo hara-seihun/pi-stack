@@ -52,6 +52,6 @@ export function AppUpdateStatus({ update }: { update: ReturnType<typeof useAppUp
   return <section className="app-update" aria-label="App update" aria-live="polite">
     <DismissibleError message={update.error} dismissLabel="Dismiss update error" />
     {update.error && <button type="button" disabled={update.busy} onClick={update.onClick}>Retry update</button>}
-    {update.approval && <p role="status">{update.status}</p>}
+    {update.approval && <><p role="status">{update.status}</p><button type="button" disabled={update.busy} onClick={update.onClick}>Update</button></>}
   </section>;
 }

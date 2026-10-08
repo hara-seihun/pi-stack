@@ -1,0 +1,546 @@
+[
+  {
+    "caseId": "settings-set",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-settings-set.png",
+    "judgment": "Configured values, speech/notification controls, calendar, thread-empty and account sections fit the phone scroll sequence. Auto-collapse now has a full-row semantic label instead of a checkbox-only target."
+  },
+  {
+    "caseId": "settings-unset",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-unset-unavailable.png",
+    "judgment": "Unset timezone and collapse are named explicitly; calendar action remains disabled until configured. Reviewed personal and calendar sections."
+  },
+  {
+    "caseId": "settings-unavailable",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-unset-unavailable.png",
+    "judgment": "Unavailable owner values remain distinct from unset and do not pretend to be editable; explanatory text wraps. Reviewed personal and calendar sections."
+  },
+  {
+    "caseId": "settings-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-loading-error-long.png",
+    "judgment": "Settings loading remains explicit without guessed registry values; the top-level loading composition fits."
+  },
+  {
+    "caseId": "settings-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-loading-error-long.png",
+    "judgment": "Settings error and Retry settings are readable and reachable; failed registry is not displayed as empty success."
+  },
+  {
+    "caseId": "settings-administrator",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-administrator.png",
+    "judgment": "Administrator registry beginning, middle sample and ending sections were viewed; sampled owner rows and detail wrapping fit. Not every intermediate owner row was visually inspected."
+  },
+  {
+    "caseId": "settings-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-loading-error-long.png",
+    "judgment": "Opened long owner coordinate wraps within the panel; finite long calendar name and upstream error remain readable. These content boundaries were inspected."
+  },
+  {
+    "caseId": "settings-thread",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-thread.png",
+    "judgment": "Selected synthetic thread and model/thinking/speed/timeout remain visible after native auth restoration. Fixed unchanged identity events clearing thread selection; both selected-thread sections were viewed."
+  },
+  {
+    "caseId": "settings-calendar-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-thread.png",
+    "judgment": "Calendar failure has Retry and now says to reload the calendar timezone, rather than falsely asking to set an already configured timezone."
+  },
+  {
+    "caseId": "settings-native-update-approval",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-native.png",
+    "judgment": "Pending Android installer status fits and the action now matches its instruction: Update, not Check for updates. Reviewed update and account sections."
+  },
+  {
+    "caseId": "settings-native-update-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-native.png",
+    "judgment": "Native update error wraps and leaves a reachable enabled check/retry action; reviewed update and account sections."
+  },
+  {
+    "caseId": "settings-native-updating",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-native.png",
+    "judgment": "Applying update is explicitly busy with a disabled Updating action; reviewed update and account sections."
+  },
+  {
+    "caseId": "settings-native-update-media",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-native.png",
+    "judgment": "Live-media waiting status is legible and distinct from applying; reviewed update and account sections."
+  },
+  {
+    "caseId": "permissions-off",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-repair-phone.png",
+    "judgment": "Both preferences now use full-row labels. Actual label click changes phone control off to checked/Reconnecting. Expanded grant list also inspected in sheet-permissions-off.png; grant states and prerequisite-disabled background location fit."
+  },
+  {
+    "caseId": "permissions-reconnecting",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-phone-status.png",
+    "judgment": "Reconnecting is explicit, separate from connected; preference labels provide full-row targets and status text fits."
+  },
+  {
+    "caseId": "permissions-granted",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-permissions-granted.png",
+    "judgment": "Expanded grant list inspected through its ending. Granted states do not show unnecessary Grant actions; independent overlay preference remains distinct from its capability."
+  },
+  {
+    "caseId": "permissions-unavailable",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-permissions-unavailable.png",
+    "judgment": "Expanded absent-capability list inspected; unavailable is not interpreted as granted, and disabled preferences remain legible."
+  },
+  {
+    "caseId": "permissions-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-phone-status.png",
+    "judgment": "Checking this phone is the only status while pending; no capabilities are guessed."
+  },
+  {
+    "caseId": "permissions-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-phone-status.png",
+    "judgment": "Phone status failure offers a reachable Retry phone status action without fabricated values."
+  },
+  {
+    "caseId": "permissions-service-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-repair-phone.png",
+    "judgment": "Reconnecting and transport error are both shown after the fixture correction; no contradictory Connected label. Preference targets use full-row labels."
+  },
+  {
+    "caseId": "permissions-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-platform-empty.png",
+    "judgment": "Long finite device name wraps cleanly beneath full-row preference labels without pushing checkbox targets outside the panel."
+  },
+  {
+    "caseId": "environment-ready",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-environment-phone.png",
+    "judgment": "Environment picker and declared person rows fit; only synthetic options are present."
+  },
+  {
+    "caseId": "environment-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-environment-phone.png",
+    "judgment": "Loading discovery is explicit and does not present guessed options."
+  },
+  {
+    "caseId": "environment-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-environment-phone.png",
+    "judgment": "Separate people/environment failures wrap without overlapping their dismiss targets."
+  },
+  {
+    "caseId": "environment-locked",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-environment-phone.png",
+    "judgment": "Locked person selection is readable; no unlocked account is implied."
+  },
+  {
+    "caseId": "environment-account",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-environment-phone.png",
+    "judgment": "Account sign-in action is visible and fits within the picker panel."
+  },
+  {
+    "caseId": "auth-sign-in",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-auth-update-phone.png",
+    "judgment": "Real sign-in modal fits the phone with readable title, explanation and synthetic account action."
+  },
+  {
+    "caseId": "auth-sign-in-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-auth-update-phone.png",
+    "judgment": "Real session-failure modal fits; dismiss, Retry session and account sign-in remain distinct and reachable."
+  },
+  {
+    "caseId": "network-collapsed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-phone.png",
+    "judgment": "Summary and Set up/Not now fit after replacing undersized browser-default buttons with themed 44px targets."
+  },
+  {
+    "caseId": "network-expanded",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-phone.png",
+    "judgment": "Expanded setup steps and actions fit the phone after touch-target repair; content is vertically bounded and scrollable."
+  },
+  {
+    "caseId": "network-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-phone.png",
+    "judgment": "Long finite network name and coordination URL wrap without horizontal clipping; themed 44px actions remain usable."
+  },
+  {
+    "caseId": "network-connected",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-platform-empty.png",
+    "judgment": "Connected state intentionally renders no network-join prompt; empty surface visually inspected."
+  },
+  {
+    "caseId": "network-absent",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-platform-empty.png",
+    "judgment": "No declared network intentionally renders no join prompt; empty surface visually inspected."
+  },
+  {
+    "caseId": "network-android",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-platform-empty.png",
+    "judgment": "Android-specific setup steps and links wrap within the phone prompt; repaired buttons remain at least 44px."
+  },
+  {
+    "caseId": "network-ios",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-platform-empty.png",
+    "judgment": "iOS-specific setup instructions fit the phone prompt, with repaired touch buttons and bounded content."
+  },
+  {
+    "caseId": "update-approval",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-native.png",
+    "judgment": "Installer approval notice now includes the Update action its text instructs the person to use; status and action fit."
+  },
+  {
+    "caseId": "update-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-auth-update-phone.png",
+    "judgment": "Download failure text wraps; Retry update and dismiss are separate reachable controls."
+  },
+  {
+    "caseId": "update-idle",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-platform-empty.png",
+    "judgment": "Idle update intentionally renders no interrupting notice; empty surface visually inspected."
+  },
+  {
+    "caseId": "settings-set",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-phone-light.png",
+    "judgment": "Entire scroll sequence through account ending inspected. Timezone input/action stacks on phone and shares a row at wider sizes; cards, controls and explicit empty thread/calendar states fit. Semantic auto-collapse row target retained. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "permissions-off",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-permissions-phone-light.png",
+    "judgment": "Expanded grant list inspected from preference rows through App updates. Text, grant states and controls remain separated; background-location prerequisite is visibly disabled. Full-row preference labels retained. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "environment-error",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-phone-light.png",
+    "judgment": "Both discovery failures and dismiss controls fit without clipping or overlap. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "auth-sign-in-error",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-phone-light.png",
+    "judgment": "Centered real session-failure modal fits; dismiss, session retry and account sign-in are distinct and reachable. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "network-long",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-light.png",
+    "judgment": "Expanded prompt fits; finite long network name and URL wrap, setup instructions stay readable and repaired touch targets remain distinct. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "update-error",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-phone-light.png",
+    "judgment": "Error notice stays within viewport; wrapped download error, Retry update and dismiss remain usable. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "settings-set",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-tablet-dark-0.png; /home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-tablet-dark-1.png",
+    "judgment": "Entire scroll sequence through account ending inspected. Timezone input/action stacks on phone and shares a row at wider sizes; cards, controls and explicit empty thread/calendar states fit. Semantic auto-collapse row target retained."
+  },
+  {
+    "caseId": "permissions-off",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-permissions-tablet-dark.png",
+    "judgment": "Expanded grant list inspected from preference rows through App updates. Text, grant states and controls remain separated; background-location prerequisite is visibly disabled. Full-row preference labels retained."
+  },
+  {
+    "caseId": "environment-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-tablet-dark.png",
+    "judgment": "Both discovery failures and dismiss controls fit without clipping or overlap."
+  },
+  {
+    "caseId": "auth-sign-in-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-tablet-dark.png",
+    "judgment": "Centered real session-failure modal fits; dismiss, session retry and account sign-in are distinct and reachable."
+  },
+  {
+    "caseId": "network-long",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-wide.png",
+    "judgment": "Expanded prompt fits; finite long network name and URL wrap, setup instructions stay readable and repaired touch targets remain distinct."
+  },
+  {
+    "caseId": "update-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-tablet-dark.png",
+    "judgment": "Error notice stays within viewport; wrapped download error, Retry update and dismiss remain usable."
+  },
+  {
+    "caseId": "settings-set",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-tablet-light-0.png; /home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-tablet-light-1.png",
+    "judgment": "Entire scroll sequence through account ending inspected. Timezone input/action stacks on phone and shares a row at wider sizes; cards, controls and explicit empty thread/calendar states fit. Semantic auto-collapse row target retained. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "permissions-off",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-permissions-tablet-light.png",
+    "judgment": "Expanded grant list inspected from preference rows through App updates. Text, grant states and controls remain separated; background-location prerequisite is visibly disabled. Full-row preference labels retained. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "environment-error",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-tablet-light.png",
+    "judgment": "Both discovery failures and dismiss controls fit without clipping or overlap. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "auth-sign-in-error",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-tablet-light.png",
+    "judgment": "Centered real session-failure modal fits; dismiss, session retry and account sign-in are distinct and reachable. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "network-long",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-light.png",
+    "judgment": "Expanded prompt fits; finite long network name and URL wrap, setup instructions stay readable and repaired touch targets remain distinct. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "update-error",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-tablet-light.png",
+    "judgment": "Error notice stays within viewport; wrapped download error, Retry update and dismiss remain usable. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "settings-set",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-desktop-dark-0.png; /home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-desktop-dark-1.png",
+    "judgment": "Entire scroll sequence through account ending inspected. Timezone input/action stacks on phone and shares a row at wider sizes; cards, controls and explicit empty thread/calendar states fit. Semantic auto-collapse row target retained."
+  },
+  {
+    "caseId": "permissions-off",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-permissions-desktop-dark.png",
+    "judgment": "Expanded grant list inspected from preference rows through App updates. Text, grant states and controls remain separated; background-location prerequisite is visibly disabled. Full-row preference labels retained."
+  },
+  {
+    "caseId": "environment-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-desktop-dark.png",
+    "judgment": "Both discovery failures and dismiss controls fit without clipping or overlap."
+  },
+  {
+    "caseId": "auth-sign-in-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-desktop-dark.png",
+    "judgment": "Centered real session-failure modal fits; dismiss, session retry and account sign-in are distinct and reachable."
+  },
+  {
+    "caseId": "network-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-wide.png",
+    "judgment": "Expanded prompt fits; finite long network name and URL wrap, setup instructions stay readable and repaired touch targets remain distinct."
+  },
+  {
+    "caseId": "update-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-desktop-dark.png",
+    "judgment": "Error notice stays within viewport; wrapped download error, Retry update and dismiss remain usable."
+  },
+  {
+    "caseId": "settings-set",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-desktop-light-0.png; /home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-settings-desktop-light-1.png",
+    "judgment": "Entire scroll sequence through account ending inspected. Timezone input/action stacks on phone and shares a row at wider sizes; cards, controls and explicit empty thread/calendar states fit. Semantic auto-collapse row target retained. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "permissions-off",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-permissions-desktop-light.png",
+    "judgment": "Expanded grant list inspected from preference rows through App updates. Text, grant states and controls remain separated; background-location prerequisite is visibly disabled. Full-row preference labels retained. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "environment-error",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-desktop-light.png",
+    "judgment": "Both discovery failures and dismiss controls fit without clipping or overlap. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "auth-sign-in-error",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-desktop-light.png",
+    "judgment": "Centered real session-failure modal fits; dismiss, session retry and account sign-in are distinct and reachable. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "network-long",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/sheet-network-light.png",
+    "judgment": "Expanded prompt fits; finite long network name and URL wrap, setup instructions stay readable and repaired touch targets remain distinct. Product remains its actual dark palette under OS light preference."
+  },
+  {
+    "caseId": "update-error",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/settings-auth/read-errors-desktop-light.png",
+    "judgment": "Error notice stays within viewport; wrapped download error, Retry update and dismiss remain usable. Product remains its actual dark palette under OS light preference."
+  }
+]
