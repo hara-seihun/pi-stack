@@ -28,6 +28,7 @@ function parseReviews(value: unknown): UiReview[] {
     for (const key of ["caseId", "evidence", "judgment"]) {
       if (typeof review[key] !== "string" || !review[key].trim()) throw new Error(`UI review ${key} must be nonempty`);
     }
+    if (review.additionalEvidence !== undefined && (!Array.isArray(review.additionalEvidence) || !review.additionalEvidence.every((path: unknown) => typeof path === "string" && path.trim().length > 0))) throw new Error("Additional visual evidence must contain nonempty paths");
     if (!["phone", "tablet", "desktop"].includes(String(review.viewport))) throw new Error("Unknown review viewport");
     if (!["light", "dark"].includes(String(review.theme))) throw new Error("Unknown review theme");
     if (!["passed", "fixed", "needs-fix"].includes(String(review.status))) throw new Error("Unknown review status");

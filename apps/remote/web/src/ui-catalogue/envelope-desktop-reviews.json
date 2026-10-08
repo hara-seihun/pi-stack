@@ -4,8 +4,11 @@
     "viewport": "desktop",
     "theme": "dark",
     "status": "fixed",
-    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-empty-fixed.png; /home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-empty.png",
-    "judgment": "Original PNG viewed at 1440×1000. Desktop empty inbox initially hid its guidance; owning shell CSS was corrected. Fresh navigation now shows No current chats and create/reopen guidance beneath the available + control, separate from Choose a chat in the detail pane."
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-empty-fixed.png",
+    "judgment": "Original PNG viewed at 1440×1000. Desktop empty inbox initially hid its guidance; owning shell CSS was corrected. Fresh navigation now shows No current chats and create/reopen guidance beneath the available + control, separate from Choose a chat in the detail pane.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-empty.png"
+    ]
   },
   {
     "caseId": "app-loading",
@@ -28,8 +31,12 @@
     "viewport": "desktop",
     "theme": "dark",
     "status": "fixed",
-    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close-restored-idle.png; /home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close-child-survives.png; /home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close.png",
-    "judgment": "Original PNGs viewed at 1440×1000. Actual Close removes only the parent from Chats; Synthetic active worker stays Thinking in Agents. Owning fixture directory route and lifecycle validation were corrected, rejecting invalid archive combinations. Ctrl+z restores the parent in Quiet/Idle, not Waiting: cancelled work is not resumed. Independent Close and navigation controls remain available."
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close-restored-idle.png",
+    "judgment": "Original PNGs viewed at 1440×1000. Actual Close removes only the parent from Chats; Synthetic active worker stays Thinking in Agents. Owning fixture directory route and lifecycle validation were corrected, rejecting invalid archive combinations. Ctrl+z restores the parent in Quiet/Idle, not Waiting: cancelled work is not resumed. Independent Close and navigation controls remain available.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close-child-survives.png",
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close.png"
+    ]
   },
   {
     "caseId": "app-close-failure",
@@ -44,8 +51,11 @@
     "viewport": "desktop",
     "theme": "dark",
     "status": "fixed",
-    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-undo-failure-final.png; /home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-undo-failure.png",
-    "judgment": "Original PNG viewed at 1440×1000 after Close, empty-list condition, Ctrl+z, mounted-toast condition and 400 ms animation settlement. Failed restore leaves the parent closed, now with visible empty-list guidance; error title, explanation, Retry Undo and dismiss remain fully inside the viewport. Captured within the production three-second duration."
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-undo-failure-final.png",
+    "judgment": "Original PNG viewed at 1440×1000 after Close, empty-list condition, Ctrl+z, mounted-toast condition and 400 ms animation settlement. Failed restore leaves the parent closed, now with visible empty-list guidance; error title, explanation, Retry Undo and dismiss remain fully inside the viewport. Captured within the production three-second duration.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-undo-failure.png"
+    ]
   },
   {
     "caseId": "error-plain",
@@ -76,8 +86,11 @@
     "viewport": "desktop",
     "theme": "dark",
     "status": "fixed",
-    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-failed-final.png; /home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-failed.png",
-    "judgment": "Original PNG viewed at 1440×1000 after actual dismissal click and failure condition. Original delivery error is retained above the wrapped dismissal failure. Owning flex correction leaves the full-size dismissal button intact beside the long multilingual failure, allowing another attempt."
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-failed-final.png",
+    "judgment": "Original PNG viewed at 1440×1000 after actual dismissal click and failure condition. Original delivery error is retained above the wrapped dismissal failure. Owning flex correction leaves the full-size dismissal button intact beside the long multilingual failure, allowing another attempt.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-failed.png"
+    ]
   },
   {
     "caseId": "error-renewed",
@@ -100,8 +113,11 @@
     "viewport": "desktop",
     "theme": "dark",
     "status": "passed",
-    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/readiness-loading.png; /home/kenan/data/pi-ui-review-20261009/envelope/desktop/readiness-loading-finished.png",
-    "judgment": "Original PNGs viewed at 1440×1000. Owned load shows the top readiness bar and centered loading explanation with Finish loading. Clicked Finish loading: Screen ready replaces loading and the request indicator is absent, proving release of the owned load."
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/readiness-loading.png",
+    "judgment": "Original PNGs viewed at 1440×1000. Owned load shows the top readiness bar and centered loading explanation with Finish loading. Clicked Finish loading: Screen ready replaces loading and the request indicator is absent, proving release of the owned load.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/readiness-loading-finished.png"
+    ]
   },
   {
     "caseId": "toast-update",
@@ -124,7 +140,10 @@
     "viewport": "desktop",
     "theme": "dark",
     "status": "fixed",
-    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-long.png; /home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-long-scrolled.png",
-    "judgment": "Original PNGs viewed at 1440×1000 after Show notice, mounted condition and 400 ms animation settlement. Owning correction bounds multilingual content to a scrollable area; Retry Undo and dismiss remain visible outside it. Native container scroll moved scrollTop above zero and exposed lower description; actual Retry Undo produced Action received. Fresh notice was dismissed by actual Close toast, with visible-toast absence confirmed. Fixture explicitly holds 30 seconds."
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-long.png",
+    "judgment": "Original PNGs viewed at 1440×1000 after Show notice, mounted condition and 400 ms animation settlement. Owning correction bounds multilingual content to a scrollable area; Retry Undo and dismiss remain visible outside it. Native container scroll moved scrollTop above zero and exposed lower description; actual Retry Undo produced Action received. Fresh notice was dismissed by actual Close toast, with visible-toast absence confirmed. Fixture explicitly holds 30 seconds.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-long-scrolled.png"
+    ]
   }
 ]
