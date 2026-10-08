@@ -17,7 +17,7 @@ const message: ThreadMessage = { id: "one", threadId: recipient, senderId: sende
 const text = formatThreadMessage(message, message.text);
 const entry = (text: string): ContextEntry => ({ kind: "user", key: "one", signature: "one", text });
 
-test("new incoming agent words render under the immutable sender name, without a disclosure or wrapper", () => {
+test("new incoming agent words retain immutable sender routes in toggle-controlled disclosures", () => {
   const context = { messages: [
     { role: "user", timestamp: 1, content: "Human message" },
     { role: "user", timestamp: 2, content: text, identity: { id: "incoming", timestamp: 2, sender: { id: "person", name: "User" } } },
@@ -35,8 +35,10 @@ test("new incoming agent words render under the immutable sender name, without a
     const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
     expect(html).toMatch(/<span class="agent-route incoming"><span class="agent-route-name">Kelana<\/span><svg[^>]*aria-label="to".*?<span class="agent-route-name self">Kenan<\/span>/);
     expect(html).toContain('class="message-label">KENAN</span>');
-    expect(html).not.toContain("Agent message");
-    expect(html).not.toContain("agent-message-step");
+    expect(html).toContain("Agent message");
+    const disclosures = html.match(/<details class="conversation-step agent-message-step"[^>]*>/g) ?? [];
+    expect(disclosures).toHaveLength(1);
+    expect(disclosures[0]!.includes('open=""')).toBe(!autoCollapse);
     expect(html).not.toContain("agent_message");
     expect(html.indexOf('data-transcript-seq="1"')).toBeLessThan(html.indexOf("agent-route incoming"));
     expect(html.indexOf("agent-route incoming")).toBeLessThan(html.indexOf('data-transcript-seq="3"'));
@@ -169,4 +171,48 @@ test("truncated outgoing words stay a preview until opened and copy resolves the
 test("copying untruncated outgoing words needs no body load", async () => {
   const outgoing: ContextEntry = { kind: "toolCall", key: "send", signature: "send", toolCall: { name: "thread_send", arguments: { threadId: sender, text: "Exact short message" } } };
   expect(await copyOutgoingMessage(outgoing, async () => { throw new Error("No load is needed"); })).toBe("Exact short message");
+});
+
+test("all three native user-role envelopes collapse without requiring explicit source metadata", () => {
+  const prefix = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
+  const envelopes = [
+    { metadata: { senderThreadId: sender, senderName: "Kelana", recipientThreadId: recipient, messageId: "explicit", source: "explicit" }, words: "Explicit full update", label: "Kelana" },
+    { metadata: { senderThreadId: sender, senderName: "Kelana" }, words: '{"type":"thread_idle","outcome":"completed","finalText":"Completion full report"}', label: "Kelana" },
+    { metadata: { senderThreadId: "kenan-root" }, words: "Root full reply", label: "Agent · kenan-ro" },
+  ];
+  for (const { metadata, words, label } of envelopes) {
+    const raw = prefix + JSON.stringify(metadata) + "\n\n" + words + "\n</agent_message>";
+    const native = { messages: [{ role: "user", content: raw }] };
+    const projected = entriesFromHeads(deriveTranscriptItems(native).map(item => item.head)).at(-1)!;
+    const historical = entryFromHead({ kind: "user", seq: 0, id: "old", size: raw.length, text: raw });
+    for (const incoming of [projected, historical]) {
+      expect(incoming.agentSender?.threadId).toBe(metadata.senderThreadId);
+      expect(incoming.label).toBe(label);
+      expect(incoming.text).toBe(words.startsWith('{"type"') ? "Completion full report" : words);
+      for (const autoCollapse of [true, false]) {
+        const html = renderToStaticMarkup(<Transcript entries={[incoming]} sessionId={recipient} home="/" images={null} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
+        const opening = html.match(/<details class="conversation-step agent-message-step"[^>]*>/)?.[0];
+        expect(opening).toBeDefined();
+        expect(opening!.includes('open=""')).toBe(!autoCollapse);
+        expect(html).toContain(`agent-route-name">${label}</span>`);
+        expect(html).not.toContain("work-card");
+      }
+    }
+    expect(native.messages[0]!.content).toBe(raw);
+  }
+});
+
+test("send and spawn disclosures honor both toggle states in historical and streamed delivery states", () => {
+  for (const name of ["thread_send", "thread_spawn"]) for (const completed of [false, true]) {
+    const args = name === "thread_send" ? { threadId: sender, text: "Exact outgoing update" } : { title: "Topic-only title", message: "Exact outgoing task" };
+    const outgoing: ContextEntry = { kind: "toolCall", key: name, signature: `${name}:${completed}`, toolCall: { name, arguments: args }, ...(completed ? { toolResult: { preview: "Accepted", size: 8, isError: false } } : {}) };
+    for (const autoCollapse of [true, false]) {
+      const html = renderToStaticMarkup(<Transcript entries={[outgoing]} sessionId={recipient} home="/" images={null} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
+      const opening = html.match(/<details class="conversation-step agent-message-step"[^>]*>/)?.[0];
+      expect(opening).toBeDefined();
+      expect(opening!.includes('open=""')).toBe(!autoCollapse);
+      expect(html).toContain("agent-route outgoing");
+      expect(html).not.toContain("work-card");
+    }
+  }
 });
