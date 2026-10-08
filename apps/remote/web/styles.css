@@ -67,7 +67,6 @@ button:disabled { cursor: default; opacity: .45; }
 .scrollback-frame { position: relative; min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .conversation.is-drawing > .scrollback-frame { display: none; }
 .scrollback { min-height: 0; flex: 1; display: flex; flex-direction: column-reverse; overflow: auto; overflow-anchor: none; }
-.scrollback.is-reading { overflow-anchor: auto; }
 .scroll-content { flex: 0 0 auto; width: 100%; padding: var(--space-5) clamp(16px, 4vw, 48px) var(--space-4); }
 .jump-latest { position: absolute; right: var(--space-4); bottom: var(--space-4); z-index: 5; width: var(--touch); height: var(--touch); display: grid; place-items: center; padding: 0; border-radius: 50%; color: var(--text); background: var(--surface-3); box-shadow: 0 6px 18px rgb(0 0 0 / 40%); }
 .jump-latest svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
