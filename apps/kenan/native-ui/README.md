@@ -14,7 +14,7 @@ The current host's existing plugin directory is `/home/kenan/projects/pi-stack/a
 
 For work exceeding the shell ceiling, give the command to `kjob run NAME --owner-thread THREAD --cwd CHECKOUT -- ...`. The durable job owns its exit receipt. View `index.html` through native `agent_browser` with `--allow-file-access` and inspect screenshots. A successful build or generated PNG is not a visual judgment.
 
-`manifest.json` lists each rendered state and its rendering boundary, plus separate `editorLifecycle` absence checks for Close, identity change, screen-off and Activity stop. These are assertions that the editor finishes, releases its handoff/session reference and destroys/removes its WebView—not fabricated screenshots of Files. `review.json` records the actually viewed states for a particular capture. Generated bitmaps, galleries, logs and build output are not checked in. Delete the supplied output directory to remove this fixture's generated state; never delete shared SDK/dependency caches.
+`manifest.json` lists each rendered state, pixel dimensions, font scale and rendering boundary, plus separate `editorLifecycle` absence checks for Close, identity change, screen-off and Activity stop. These are assertions that the editor finishes, releases its handoff/session reference and destroys/removes its WebView—not fabricated screenshots of Files. `review.json` records the actually viewed states for a particular capture. Generated bitmaps, galleries, logs and build output are not checked in. Delete the supplied output directory to remove this fixture's generated state; never delete shared SDK/dependency caches.
 
 ## Finite native inventory
 
@@ -39,6 +39,8 @@ For work exceeding the shell ceiling, give the command to `kjob run NAME --owner
 | Permission/setup surfaces | runtime grant dialogs, special access settings, installer approval | Closed `NativeState.PhoneSetup`; only effective grants count | Android-owned screens **not viewed** |
 
 The opening explanation is an opaque native layer over a drawable WebView; it blocks touches and hides WebView accessibility until `onPageCommitVisible` reveals the page. Loading does not make Chromium's view `GONE` and wait for a draw-dependent callback.
+
+The editor's closed `EditorProfile` domain adds opening, ready native shell, connection failure and longest session-check failure at 320×480 dp, 640×360 dp landscape, 360×800 dp with 1.6 font scale, and compact/landscape with 1.6 font scale. These 20 probes extend the 37 baseline captures to 57; the gallery preserves each bitmap's actual width instead of shrinking landscape text into a portrait column. All 20 added captures were actually viewed: explanations wrap without clipping, the full-width Close control remains readable, and opening/ready/failure occupy the intended native layer. No production layout repair was needed at these profiles. The 37 regenerated baseline captures were not re-reviewed in this run; their existing judgments remain in the preserved initial and editor receipts. Exact visual judgments and historical receipt counts live in `catalogue.json` and its referenced external `review.json` files.
 
 Protocol/state variants with identical Views are grouped by their rendering fibre, not multiplied into fictional combinations. Capture hides all owned Views; closed removes them. Action-only cannot open chat or produce chat replies. Editor failure explanations contain no document or ticket; reopening always starts a new Files handoff. APK/web update selection is not an extra native banner.
 

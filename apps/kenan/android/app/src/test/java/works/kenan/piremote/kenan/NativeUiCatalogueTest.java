@@ -38,6 +38,19 @@ public class NativeUiCatalogueTest {
         PANEL_LARGE_FONT, CAPTURE_HIDDEN, ACTION_ONLY, CLOSED
     }
     enum EditorCase { OPENING, READY, HANDOFF_ENDED, ACCESS_ENDED, HTTP_ERROR, CONNECTION_FAILED, VIEW_STOPPED, SESSION_UNAVAILABLE, CLOSE, IDENTITY_CHANGED, SCREEN_OFF, STOPPED, REPLAY }
+    enum EditorProfile {
+        COMPACT("w320dp-h480dp-mdpi", 1, "-compact"),
+        LANDSCAPE("w640dp-h360dp-land-mdpi", 1, "-landscape"),
+        LARGE_FONT("w360dp-h800dp-mdpi", 1.6f, "-large-font"),
+        COMPACT_LARGE_FONT("w320dp-h480dp-mdpi", 1.6f, "-compact-large-font"),
+        LANDSCAPE_LARGE_FONT("w640dp-h360dp-land-mdpi", 1.6f, "-landscape-large-font");
+        final String qualifiers;
+        final float fontScale;
+        final String suffix;
+        EditorProfile(String qualifiers, float fontScale, String suffix) {
+            this.qualifiers = qualifiers; this.fontScale = fontScale; this.suffix = suffix;
+        }
+    }
     private final org.json.JSONArray editorLifecycle = new org.json.JSONArray();
     private final Map<String, org.json.JSONObject> rendered = new LinkedHashMap<>();
     private File output;
@@ -80,7 +93,7 @@ public class NativeUiCatalogueTest {
         view.draw(new Canvas(bitmap));
         try (FileOutputStream stream = new FileOutputStream(new File(output, id + ".png"))) { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)); }
         bitmap.recycle();
-        rendered.put(id, new org.json.JSONObject().put("id", id).put("image", id + ".png").put("scope", scope).put("widthPixels", width).put("heightPixels", height));
+        rendered.put(id, new org.json.JSONObject().put("id", id).put("image", id + ".png").put("scope", scope).put("widthPixels", width).put("heightPixels", height).put("fontScale", view.getResources().getConfiguration().fontScale));
     }
 
     private void touch(View dot, int action, float x, float y) {
@@ -146,7 +159,7 @@ public class NativeUiCatalogueTest {
         };
     }
 
-    private void editors() throws Exception {
+    private void editors(EditorCase[] cases, String suffix) throws Exception {
         var server = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
         var status = new java.util.concurrent.atomic.AtomicInteger(200);
         var fixtureErrors = new java.util.concurrent.atomic.AtomicReference<Throwable>();
@@ -174,7 +187,7 @@ public class NativeUiCatalogueTest {
         preferences.edit().putString("router", origin).commit();
         ReflectionHelpers.setStaticField(RouterConnection.class, "preferences", preferences);
         try {
-            for (EditorCase state : EditorCase.values()) {
+            for (EditorCase state : cases) {
                 status.set(state == EditorCase.SESSION_UNAVAILABLE ? 503 : 200);
                 Windows owner = new Windows();
                 RemoteSession session = new RemoteSession();
@@ -234,7 +247,7 @@ public class NativeUiCatalogueTest {
                         web = shell.web(); shadow = Shadows.shadowOf(web);
                     }
                 }
-                String id = "editor-" + state.name().toLowerCase(java.util.Locale.ROOT);
+                String id = "editor-" + state.name().toLowerCase(java.util.Locale.ROOT) + suffix;
                 boolean noWindow = switch (state) { case CLOSE, IDENTITY_CHANGED, SCREEN_OFF, STOPPED -> true; default -> false; };
                 if (noWindow) {
                     assertTrue(activity.isFinishing());
@@ -278,8 +291,15 @@ public class NativeUiCatalogueTest {
         overlay(OverlayCase.PANEL_TRANSCRIPT, "-landscape");
         overlay(OverlayCase.BUBBLE_LIMIT, "-landscape");
         org.robolectric.RuntimeEnvironment.setQualifiers("w360dp-h800dp-mdpi");
+        editors(EditorCase.values(), "");
+        for (EditorProfile profile : EditorProfile.values()) {
+            org.robolectric.RuntimeEnvironment.setQualifiers(profile.qualifiers);
+            org.robolectric.RuntimeEnvironment.setFontScale(profile.fontScale);
+            editors(new EditorCase[]{EditorCase.OPENING, EditorCase.READY, EditorCase.CONNECTION_FAILED, EditorCase.SESSION_UNAVAILABLE}, profile.suffix);
+        }
+        org.robolectric.RuntimeEnvironment.setQualifiers("w360dp-h800dp-mdpi");
+        org.robolectric.RuntimeEnvironment.setFontScale(1);
         Windows windows = new Windows();
-        editors();
         for (NativeShells.SignInState state : NativeShells.SignInState.values()) {
             NativeShells.SignIn signIn = NativeShells.signIn(windows.activity); signIn.state(state);
             windows.root.addView(signIn.root(), new FrameLayout.LayoutParams(-1, -1));

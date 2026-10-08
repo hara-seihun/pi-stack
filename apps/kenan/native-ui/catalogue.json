@@ -42,24 +42,42 @@
       "replay": "consumed-ticket-cannot-reopen",
       "closed": "no-editor-owned-window-and-destroyed-WebView",
       "identity": "synthetic-loopback-fixture-only"
+    },
+    {
+      "source": "apps/kenan/android/app/src/test/java/works/kenan/piremote/kenan/NativeUiCatalogueTest.java",
+      "domain": "EditorProfile",
+      "representativeProfiles": 5,
+      "casesPerProfile": ["OPENING", "READY", "CONNECTION_FAILED", "SESSION_UNAVAILABLE"],
+      "representativeCaptures": 20,
+      "consumer": "actual EditorActivity lifecycle fixture",
+      "content": "native close-control, opaque opening layer, ready native shell, connection and longest-session-failure explanation"
     }
   ],
   "viewportProfiles": [
     {"widthDp": 360, "heightDp": 800, "fontScale": 1, "coverage": "all-case-domains"},
-    {"widthDp": 360, "heightDp": 800, "fontScale": 1.6, "coverage": "overlay-panel-large-font"},
-    {"widthDp": 320, "heightDp": 480, "fontScale": 1, "coverage": "overlay-panel-empty"},
-    {"widthDp": 320, "heightDp": 480, "fontScale": 1.6, "coverage": "overlay-panel-large-font"},
-    {"widthDp": 640, "heightDp": 360, "fontScale": 1, "coverage": "overlay-panel-transcript-and-long-bubble"}
+    {"widthDp": 360, "heightDp": 800, "fontScale": 1.6, "coverage": "overlay-panel-large-font-and-editor-representatives"},
+    {"widthDp": 320, "heightDp": 480, "fontScale": 1, "coverage": "overlay-panel-empty-and-editor-representatives"},
+    {"widthDp": 320, "heightDp": 480, "fontScale": 1.6, "coverage": "overlay-panel-large-font-and-editor-representatives"},
+    {"widthDp": 640, "heightDp": 360, "fontScale": 1, "coverage": "overlay-panel-transcript-long-bubble-and-editor-representatives"},
+    {"widthDp": 640, "heightDp": 360, "fontScale": 1.6, "coverage": "editor-representatives"}
   ],
-  "renderedCaptures": 37,
+  "renderedCaptures": 57,
+  "viewedCurrentCasesAcrossReceipts": 57,
+  "latestRun": {"renderedCaptures": 57, "actuallyViewedCaptures": 20, "renderedButNotViewedCaptures": 37, "unchangedHistoricalReviewedCases": 37},
   "renderer": {"engine": "Robolectric 4.16 native Android Skia", "androidApi": 28, "windowOwner": "synthetic WindowManager adapter"},
   "reviewReceipts": {
-    "directory": "/home/kenan/data/pi-ui-review-20261009/native-editor",
+    "directory": "/home/kenan/data/pi-ui-review-20261009/native-editor-layout",
     "renderManifest": "manifest.json",
     "judgments": "review.json",
-    "gallery": "index.html"
+    "gallery": "index.html",
+    "historicalReceipts": [
+      {"directory": "/home/kenan/data/pi-ui-review-20261009/native", "judgments": "review.json", "viewedCaptures": 29, "currentCases": 28, "scope": "25 overlay, 3 sign-in, 1 superseded editor shell"},
+      {"directory": "/home/kenan/data/pi-ui-review-20261009/native-editor", "judgments": "review.json", "viewedCaptures": 9, "scope": "360x800 font-1 real EditorActivity opening/ready/failure/replay"}
+    ]
   },
   "notYetViewed": [
+    {"scope": "editor-nonrepresentative-layouts", "states": ["HANDOFF_ENDED, ACCESS_ENDED, HTTP_ERROR, VIEW_STOPPED and REPLAY at the five added EditorProfile sizes; longest SESSION_UNAVAILABLE failure is the representative, not a screenshot of these variants"]},
+    {"scope": "native-sign-in-layouts", "states": ["compact, landscape and large-font native sign-in controls"]},
     {"scope": "system-window-compositor", "states": ["Android 36 status-navigation-cutout insets", "keyboard visibility and resize", "accessibility token and elevation", "Dialog system insets"]},
     {"scope": "remote-WebView-content", "states": ["actual Chromium editor POST redirect HTML and loaded documents", "FLAG_SECURE system compositor enforcement", "visual return into shared React Files", "third-party Access email and code pages"]},
     {"scope": "Android-update", "states": ["package installer approval/cancellation", "allow-from-this-source settings"]},
