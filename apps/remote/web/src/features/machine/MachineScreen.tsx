@@ -1,12 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { Dashboard, Governor, GovernorProvider, GovernorState, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
+import type { Dashboard, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
 import { Sheet } from "../../app/Sheet";
 import { Models } from "./Models";
 import { iconUrl } from "../../chat-row";
 import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens, formatWeekReset } from "./format";
 import "./machine.css";
-import { assertNever, requireState } from "../../../../shared/explicit-state";
-import { GOVERNOR_STATES } from "../../../../shared/state-validation";
 
 export type MachineScreenProps = {
   dashboard: Dashboard | null;
@@ -16,34 +14,12 @@ export type MachineScreenProps = {
   syncing: boolean;
   pendingAction: string | null;
   onToggleAction(id: string): void;
-  onToggleGovernor(provider: GovernorProvider): void;
   onDismissOwnerError(id: string): void;
   onReconnect(): void;
   environment: ReactNode;
   permissions: ReactNode;
   clientRevision: string;
 };
-
-function governorModeLabel(mode: GovernorState, governor: Governor): string {
-  requireState(mode, GOVERNOR_STATES, "Governor label");
-  switch (mode) {
-    case "off": return "Normal";
-    case "green": return "3×";
-    case "blue": return `${governor.boostedMultiplier}×`;
-    case "red": return "Halted";
-  }
-  return assertNever(mode, "Governor label");
-}
-
-function nextGovernorMode(governor: Governor): GovernorState {
-  switch (governor.state) {
-    case "off": return "green";
-    case "green": return "blue";
-    case "blue": return "red";
-    case "red": return "off";
-  }
-  return assertNever(governor.state, "Governor cycle");
-}
 
 function percentage(text: string): number | null {
   const match = text.match(/(\d+(?:\.\d+)?)\s*%/);
@@ -217,19 +193,6 @@ export function MachineScreen(props: MachineScreenProps) {
       {dashboard?.modelAvailability && <Card title="Models"><Models models={dashboard.modelAvailability} canManage={dashboard.canManageModels ?? false} /></Card>}
       {dashboard?.allowance && <Allowance allowance={dashboard.allowance} />}
       {dashboard?.people && <People usage={dashboard.people} />}
-      {dashboard?.governors && <Card title="Background launch pace">
-        {(["openai", "anthropic"] as const).map((provider) => {
-          const governor = dashboard.governors![provider];
-          const pending = props.pendingAction === provider;
-          const current = governorModeLabel(governor.state, governor);
-          const next = governorModeLabel(nextGovernorMode(governor), governor);
-          const providerLabel = provider === "openai" ? "OpenAI" : "Anthropic";
-          return <div className="machine-governor" key={provider}>
-            <strong>{providerLabel}</strong>
-            <button type="button" disabled={pending} aria-label={`${providerLabel} background launch pace is ${current}. Change to ${next}.`} title={`Change ${providerLabel} from ${current} to ${next}`} onClick={() => props.onToggleGovernor(provider)}>{pending ? "Changing…" : `${current} → ${next}`}</button>
-          </div>;
-        })}
-      </Card>}
       {dashboard && dashboard.actions.length > 0 && <Card title="Actions"><div className="machine-actions">
         {dashboard.actions.map((action) => {
           const pending = props.pendingAction === action.id;

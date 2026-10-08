@@ -307,7 +307,7 @@ export async function prepareWithDrainWait(
 }
 
 const COLUMNS: Record<string, string[]> = {
-  account: ["id", "provider", "label", "enabled", "cooldown_until", "concurrency", "last_admitted_meter_at", "created_at"],
+  account: ["id", "provider", "label", "enabled", "cooldown_until", "concurrency", "created_at"],
   meter: ["account_id", "meter_id", "observed_at", "used_percent", "reset_at"],
   usage_hour: ["account_id", "hour", "source", "run_id", "model", "component", "tokens"],
   lease: ["id", "account_id", "kind", "run_id", "started_at", "heartbeat_at", "ended_at"],

@@ -43,7 +43,6 @@ function fixture(resources) {
 
   put(join(orchestrator, "package.json"), JSON.stringify({name: "pi-orchestrator", exports: {"./api": "./src/api.ts"}}));
   put(join(orchestrator, "src/api.ts"), "export const ok = true;");
-  put(join(orchestrator, "src/boost.ts"), "export {};");
   put(join(dependencies, "playwright-core/package.json"), JSON.stringify({name: "playwright-core", main: "index.js"}));
   // An optional dependency must not be eagerly bundled or executed by the check.
   put(join(dependencies, "playwright-core/index.js"), 'exports.chromium = true; if (false) require("optional-electron");');

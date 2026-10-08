@@ -1,8 +1,8 @@
-# OpenAI surprise-reset statistics and the pacing policy
+# OpenAI surprise-reset observations
 
-Provider-issued surprise resets are a measured phenomenon, not folklore. This
-records what is publicly known (as of 2026-08) and how the calibrator exploits
-it.
+Provider-issued surprise resets are a measured phenomenon. These public
+observations (as of 2026-08) describe meter recovery; admission uses observed
+quota rather than predicting resets.
 
 ## Mechanics (confirmed by OpenAI support/staff statements)
 
@@ -24,37 +24,6 @@ Mar 3 (incident compensation), Apr 28, Jun 3, Jul 9 (rollout issue), Aug 9,
 Aug 11 ("performative reset"). Users report windows surprise-reset "three or
 four times" within a couple of months. Empirical rate: roughly one surprise
 reset every 2–4 weeks, occasionally twice within one week.
-
-Default hazard prior for OpenAI weekly meters: **λ ≈ 1/14 per day**. The
-calibrator measures λ per account from classified surprise resets and the
-prior only matters before enough history exists.
-
-## The pacing policy
-
-Budget planned for time `t` from now survives with probability `exp(-λt)`.
-The sustainable spend rate therefore divides remaining budget by the expected
-usable horizon instead of the scheduled horizon:
-
-```
-T_eff = (1 - exp(-λT)) / λ        (= E[min(T, Exp(λ))])
-rate  = remaining / T_eff          (> remaining / T whenever λ > 0)
-```
-
-Recomputed continuously this front-loads spend: early in a fresh window the
-rate approaches `remaining × λ`, late in the window it approaches naive
-pacing. Monte Carlo (tests/scenarios.test.ts S9b) confirms the trade-off
-triangle:
-
-- hazard pacing strictly reduces wasted budget versus naive even pacing;
-- a binge policy (spend everything in 2 days) wastes less still, but starves
-  the final 5 days of every surprise-free window;
-- hazard pacing is the unique point with **zero starved hours** and full spend
-  by window end.
-
-The waste reduction at λ = 1/14/day is ~9% of plan per window; it grows with
-λ·T (at λ = 1/7 it is ~20%). "Use more of the plan toward the start of the
-week" is exactly what the formula produces, with the aggressiveness tied to
-the measured reset frequency rather than a hardcoded curve.
 
 ## Sources
 

@@ -1,5 +1,5 @@
 // Everything the Machine screen needs and nothing else does: the plan and
-// governor cards, the environment picker and notification permission.
+// plan cards, the environment picker and notification permission.
 // The app loads this chunk when the person opens Machine.
 import { EnvironmentControl } from "../../EnvironmentControl";
 import { NotificationControl } from "../../notification-control";

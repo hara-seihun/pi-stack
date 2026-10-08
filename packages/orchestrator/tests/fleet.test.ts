@@ -8,7 +8,7 @@ const thread: Thread = { id: "thread", parentId: null, title: "work", cwd: "/tmp
   settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" }, admission: "force",
   state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 
-it("leases executions without creating fleet runs and retains background account pacing", async () => {
+it("leases executions without creating fleet runs or pacing background admission", async () => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
   const fleet = new Fleet(store, loadConfig("/missing"));
@@ -17,7 +17,9 @@ it("leases executions without creating fleet runs and retains background account
     expect(first.ok).toBe(true);
     expect(store.runs()).toEqual([]);
     expect(store.activeSessionLeases().map(lease => lease.id)).toEqual(["thread:execution-one"]);
-    expect((await fleet.admit({ ...thread, id: "other", admission: "background" }, thread.settings, false, "execution-two")).ok).toBe(false);
+    const concurrent = await fleet.admit({ ...thread, id: "other", admission: "background" }, thread.settings, false, "execution-two");
+    expect(concurrent.ok).toBe(true);
+    if (concurrent.ok) await concurrent.value.release();
     if (!first.ok) throw new Error(first.error.message);
     await first.value.release();
     expect(store.activeSessionLeases()).toEqual([]);
@@ -35,7 +37,6 @@ it("leases executions without creating fleet runs and retains background account
 it("forces children but never bypasses exhausted quota, including root repair", async () => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
-  store.setControl("boost:openai-codex", "0");
   const fleet = new Fleet(store, loadConfig("/missing"));
   try {
     const child = await fleet.admit({ ...thread, parentId: "parent", admission: "background" }, thread.settings, false, "child-work");
@@ -200,15 +201,17 @@ it("cools a thread's account for the limit class the provider named", async () =
   } finally { store.close(); }
 });
 
-it.each(["force", "live"] as const)("account urgency %s bypasses background spend pacing, but not exhausted quota", async admission => {
+it.each(["background", "force", "live"] as const)("account admission %s permits concurrent work but not exhausted quota", async admission => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
   const fleet = new Fleet(store, loadConfig("/missing"));
   try {
     const busy = await fleet.admit(thread, thread.settings, false, "fleet-work");
     expect(busy.ok).toBe(true);
-    expect((await fleet.admit({ ...thread, id: "queued", admission: "background" }, thread.settings, false, "queued-work")).ok).toBe(false);
-    const live = await fleet.admit({ ...thread, id: "live", parentId: "meeting", admission }, thread.settings, false, "live-work");
+    const queued = await fleet.admit({ ...thread, id: "queued", admission: "background" }, thread.settings, false, "queued-work");
+    expect(queued.ok).toBe(true);
+    if (queued.ok) await queued.value.release();
+    const live = await fleet.admit({ ...thread, id: "live", admission }, thread.settings, false, "live-work");
     expect(live).toMatchObject({ ok: true, value: { env: { PI_THREAD_ADMISSION: admission } } });
     if (live.ok) await live.value.release();
     store.recordMeter("a", "weekly", 100, Date.now() + 1000);
@@ -217,7 +220,7 @@ it.each(["force", "live"] as const)("account urgency %s bypasses background spen
   } finally { store.close(); }
 });
 
-it.each(["force", "live"] as const)("sends %s to the least loaded account rather than the least spent one", async admission => {
+it.each(["background", "force", "live"] as const)("sends %s to the least loaded account rather than the least spent one", async admission => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "busy", provider: "openai-codex", concurrency: 4 });
   store.upsertAccount({ id: "quiet", provider: "openai-codex", concurrency: 4 });

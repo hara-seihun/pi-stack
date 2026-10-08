@@ -6,7 +6,7 @@ export const destinations = [
   { name: "agents-nav", label: "Agents", scope: ".pane-detail", ready: ".agents-screen", absent: ".agents-refresh:disabled", loading: null },
   { name: "attention-nav", label: "Attention", scope: ".pane-detail", ready: ".attention-coverage", absent: '.attention-screen > [role="status"], .attention-screen > .attention-error[role="alert"]', loading: { selector: ".calendar-screen > p", texts: ["Loading calendar…"] } },
   { name: "files-nav", label: "Files", scope: ".pane-detail", ready: ".files-tree-row", absent: ".files-tree-loading", loading: { selector: ".files-tree-name", texts: ["Loading…"] } },
-  { name: "machine-nav", label: "Machine", scope: ".pane-detail", ready: ".machine-governor button", absent: null, loading: null },
+  { name: "machine-nav", label: "Machine", scope: ".pane-detail", ready: ".machine-plan-row", absent: null, loading: null },
 ];
 
 export function measureSteps({ name, cache, trigger, scope, ready, absent, loading }, action, quietMs, timeoutMs) {

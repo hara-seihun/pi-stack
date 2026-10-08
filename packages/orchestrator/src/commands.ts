@@ -32,12 +32,11 @@ export const COMMANDS=[
   ["reopen","Restore THREAD_ID without resuming interrupted work"],
   ["dependencies","Set this agent's dependencies: THREAD_ID PEER_ID...; --clear releases them"],
   ["pause / resume","Set or clear the global launch halt; --ordinary controls only ordinary work"],
-  ["boost","Set a provider pacing multiplier or halt"],
   ["account","Import, refresh, inspect capabilities, remove, list, reserve, or exclusively transfer pooled accounts"],
   ["peer","List configured account-transfer peers"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
-export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | capabilities [ID] | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID`;
+export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | capabilities [ID] | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID`;
 
 const base=()=>orchestratorUrl();
 const threadBase=()=>process.env.PI_THREAD_API_URL??`${base()}/v1/threads`;
@@ -223,7 +222,6 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(!['queue','steer','hardSteer'].includes(delivery))throw new Error(`--delivery must be ${senderId?"steer or hardSteer":"queue, steer, or hardSteer"}`);
     threadOutput(await threadClient().send({requestId:randomUUID(),threadId,senderId,text,delivery:delivery as Delivery}));return;
   }
-  if(command==="boost"){const {named,positional}=flags(rest),provider=positional[0],value=positional[1]??named.get("multiplier");if(!provider||value===undefined)throw new Error("boost requires provider and multiplier");output(await request("/v1/control","POST",{key:`boost:${provider}`,value:String(value)}));return;}
   if(command==="peer"){
     if(rest.length!==1||rest[0]!=="list")throw new Error("usage: pi-orchestrator peer list");
     const peers=loadConfig().peers;
@@ -307,7 +305,7 @@ export async function dispatch(argv:string[]):Promise<void>{
     // polled; admitted workers keep their leases as usual.
     if(action==="disable"||action==="enable"){output(await request(`/v1/accounts/${encodeURIComponent(id)}/enabled`,"PUT",{enabled:action==="enable"}));return;}
     const config=loadConfig();
-    if(action==="import"){const provider=named.get("provider")??positional[1];if(provider!=="openai-codex"&&provider!=="anthropic")throw new Error("--provider must be openai-codex or anthropic");const credentialFile=required(named,"credential-file"),credential=JSON.parse(readFileSync(credentialFile,"utf8"));output(await transactSharedCredential(config.authPath,id,credential,()=>request("/v1/accounts","POST",{id,provider,label:named.get("label"),concurrency:Number(named.get("concurrency")??config.defaultAccountConcurrency)})));return;}
+    if(action==="import"){if(named.has("concurrency"))throw new Error("account import does not accept --concurrency");const provider=named.get("provider")??positional[1];if(provider!=="openai-codex"&&provider!=="anthropic")throw new Error("--provider must be openai-codex or anthropic");const credentialFile=required(named,"credential-file"),credential=JSON.parse(readFileSync(credentialFile,"utf8"));output(await transactSharedCredential(config.authPath,id,credential,()=>request("/v1/accounts","POST",{id,provider,label:named.get("label")})));return;}
     if(action==="remove"){output(await transactSharedCredential(config.authPath,id,undefined,()=>request(`/v1/accounts/${encodeURIComponent(id)}`,"DELETE")));return;}
     // Exchanges the account's refresh token for a new access token whatever
     // the stored expiry claims. The samplers and interactive routing do this

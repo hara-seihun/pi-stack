@@ -19,7 +19,6 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `reopen`: Restore THREAD_ID without resuming interrupted work.
 - `dependencies`: Set this agent's dependencies: THREAD_ID PEER_ID...; --clear releases them.
 - `pause / resume`: Set or clear the global launch halt; --ordinary controls only ordinary work.
-- `boost`: Set a provider pacing multiplier or halt.
 - `account`: Import, refresh, inspect capabilities, remove, list, reserve, or exclusively transfer pooled accounts.
 - `peer`: List configured account-transfer peers.
 

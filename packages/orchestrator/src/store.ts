@@ -37,7 +37,6 @@ CREATE TABLE account (
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
   cooldown_until INTEGER,
   concurrency INTEGER NOT NULL DEFAULT 1 CHECK (concurrency > 0),
-  last_admitted_meter_at INTEGER,
   created_at INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE meter (

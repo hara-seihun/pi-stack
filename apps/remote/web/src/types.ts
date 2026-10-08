@@ -1,5 +1,5 @@
 export type {
-  Activity, Bootstrap, Dashboard, Governor, GovernorControls,
+  Activity, Bootstrap, Dashboard,
   MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, StreamEvent, StreamSubscription, SupervisorState,
   ResponseMetrics, ThreadSettings, ThreadStart, ThreadStartContext, TranscriptItemBody, TranscriptItemHead, TranscriptPage,
 } from "../../server/protocol";

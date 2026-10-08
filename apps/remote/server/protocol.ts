@@ -164,19 +164,6 @@ export interface PlanCard {
   spent: { day: number; week: number } | null;
 }
 
-export type GovernorProvider = "openai" | "anthropic";
-/** The drawer button's four states, in cycle order: normal pace, 3× (green),
- * 10× (blue), and background halted (red). Forced runs bypass these controls;
- * running sessions finish naturally. */
-export type GovernorState = "off" | "green" | "blue" | "red";
-export interface Governor {
-  state: GovernorState;
-  boosted: boolean;
-  multiplier: number;
-  boostedMultiplier: number;
-}
-export type GovernorControls = Record<GovernorProvider, Governor>;
-
 export interface MachineActionState {
   id: string;
   label: string;
@@ -320,7 +307,6 @@ export interface PeopleUsage {
  * lifecycles) and travels only to streams that subscribed to it. */
 export interface Dashboard {
   plans: PlanCard[];
-  governors: GovernorControls | null;
   actions: MachineActionState[];
   /** Host-global availability for everyone's new threads; existing threads are unaffected. */
   modelAvailability?: ModelAvailability[];

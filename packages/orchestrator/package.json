@@ -43,11 +43,6 @@
       "types": "./src/standalone-agent.ts",
       "bun": "./src/standalone-agent.ts",
       "default": "./dist/standalone-agent.js"
-    },
-    "./boost": {
-      "types": "./src/boost.ts",
-      "bun": "./src/boost.ts",
-      "default": "./dist/boost.js"
     }
   },
   "pi": {

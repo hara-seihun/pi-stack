@@ -1,89 +1,61 @@
 import { describe, expect, it } from "vitest";
 import { Store } from "../src/store.js";
-import { accountCapacity } from "../src/policy.js";
+import { accountCapacity, assign } from "../src/policy.js";
 import { Daemon } from "../src/daemon.js";
 import { loadConfig } from "../src/config.js";
 
 const HOUR=3_600_000;
-const config={...loadConfig("/missing"),profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra"}]},maxConcurrentSessions:10,meterMaxAgeMs:HOUR};
-function account(store:Store,id="openai-codex"){store.upsertAccount({id,provider:"openai-codex",concurrency:10});}
+const config={...loadConfig("/missing"),profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra"}]},meterMaxAgeMs:HOUR};
+function account(store:Store){store.upsertAccount({id:"openai-codex",provider:"openai-codex",concurrency:1});}
 
-describe("quota-paced admission",()=>{
+describe("subscription admission",()=>{
   it("accepts boolean queue readiness and rejects numerical worker demand",async()=>{
     const store=Store.open(":memory:"),daemon=new Daemon(store,config,"/release") as any;
-    daemon.snapshotCommand=`printf '%s' '{"revision":"a","lanes":{"math":{"ready":true}}}'`;
-    await daemon.refreshReadiness();expect(daemon.laneReady("math")).toBe(true);
-    store.setControl("readiness-admitted:math",String(daemon.readinessAt));expect(daemon.laneReady("math")).toBe(false);
-    daemon.snapshotCommand=`printf '%s' '{"revision":"b","lanes":{"math":{"count":30}}}'`;daemon.readinessAt=0;
-    await daemon.refreshReadiness();expect(daemon.laneReady("math")).toBe(false);expect(store.control("readiness_error")).toContain("ready: boolean");store.close();
+    try{
+      daemon.snapshotCommand=`printf '%s' '{"revision":"a","lanes":{"math":{"ready":true}}}'`;
+      await daemon.refreshReadiness();expect(daemon.laneReady("math")).toBe(true);
+      store.setControl("readiness-admitted:math",String(daemon.readinessAt));expect(daemon.laneReady("math")).toBe(false);
+      daemon.snapshotCommand=`printf '%s' '{"revision":"b","lanes":{"math":{"count":30}}}'`;daemon.readinessAt=0;
+      await daemon.refreshReadiness();expect(daemon.laneReady("math")).toBe(false);expect(store.control("readiness_error")).toContain("ready: boolean");
+    }finally{await daemon.threads.close();await daemon.schedules.close();store.close();}
   });
 
-  it("does not treat two equal whole-percent readings as permission to spend ahead of plan",()=>{
+  it.each(["background","force","live"] as const)("admits %s independent of elapsed window, consumption history and account load",budget=>{
     const store=Store.open(":memory:"),now=Date.now();account(store);
-    store.recordMeter("openai-codex","codex-7d",65,now+144*HOUR,now-5*60_000);
-    store.recordMeter("openai-codex","codex-7d",65,now+144*HOUR,now);
-    expect(accountCapacity(store,"openai-codex","background",config,now)).toMatchObject({sessions:0,reason:expect.stringContaining("paced allowance")});
-    expect(accountCapacity(store,"openai-codex","force",config,now).sessions).toBe(Infinity);store.close();
+    try{
+      for(let i=0;i<48;i++)store.createLease(`active:${i}`,"openai-codex","fleet",undefined,now-4*HOUR);
+      store.recordMeter("openai-codex","codex-7d",70,now+167*HOUR,now-20*60_000);
+      store.recordMeter("openai-codex","codex-7d",99,now+167*HOUR,now);
+      store.recordMeter("openai-codex","codex-5h",99,now+5*HOUR,now);
+      for(let i=0;i<3;i++)expect(assign(store,"standard",budget,config,now).assignment?.accountId).toBe("openai-codex");
+      expect(accountCapacity(store,"openai-codex",budget,config,now).state).toBe("available");
+      store.recordMeter("openai-codex","codex-5h",100,now+5*HOUR,now+1);
+      expect(assign(store,"standard",budget,config,now+1).refusals[0]?.reason).toContain("provider quota exhausted");
+    }finally{store.close();}
   });
 
-  it("admits one discrete worker while spend remains within calendar pace",()=>{
-    const store=Store.open(":memory:"),now=Date.now(),reset=now+150*HOUR;account(store);
-    store.createLease("history","openai-codex","fleet",undefined,now-20*60_000);
-    store.endLease("history",now);
-    store.recordMeter("openai-codex","codex-7d",3,reset,now-20*60_000);
-    store.recordMeter("openai-codex","codex-7d",4,reset,now);
-    expect(accountCapacity(store,"openai-codex","background",config,now)).toMatchObject({
-      sessions:1,
-      reason:expect.stringContaining("% per session-hour"),
-    });
-    store.recordMeter("openai-codex","codex-7d",10,reset,now+1000);
-    expect(accountCapacity(store,"openai-codex","background",config,now+1000)).toMatchObject({
-      sessions:0,
-      reason:expect.stringContaining("exceeds paced allowance"),
-    });
-    store.close();
-  });
-
-  it("uses hours of consumption and lease exposure, not the last flat sample",()=>{
-    const store=Store.open(":memory:"),now=Date.now(),reset=now+84*HOUR;account(store);
-    for(let i=0;i<4;i++)store.createLease(`session:${i}`,"openai-codex","fleet",undefined,now-4*HOUR);
-    for(let i=0;i<4;i++)store.heartbeatLease(`session:${i}`,now);
-    store.recordMeter("openai-codex","codex-7d",10,reset,now-4*HOUR);
-    store.recordMeter("openai-codex","codex-7d",18,reset,now-5*60_000);
-    store.recordMeter("openai-codex","codex-7d",18,reset,now);
-    expect(accountCapacity(store,"openai-codex","background",config,now).sessions).toBe(1);
-    store.recordMeter("openai-codex","codex-7d",18,reset,now+1000);
-    expect(accountCapacity(store,"openai-codex","background",config,now+1000).sessions).toBe(1);store.close();
-  });
-
-  it("does not mix reset windows or let a fresh meter hide a stale binding meter",()=>{
+  it.each(["background","force","live"] as const)("does not require calibration readings or fresh sub-exhaustion readings for %s",budget=>{
     const store=Store.open(":memory:"),now=Date.now();account(store);
-    store.recordMeter("openai-codex","codex-7d",70,now-1000,now-2*HOUR);
-    store.recordMeter("openai-codex","codex-7d",0,now+168*HOUR,now);
-    expect(accountCapacity(store,"openai-codex","background",config,now).sessions).toBe(1);
-    store.recordMeter("openai-codex","codex-5h",5,now+HOUR,now-2*HOUR);
-    expect(accountCapacity(store,"openai-codex","background",config,now)).toMatchObject({sessions:0,reason:"meter is stale"});store.close();
+    try{
+      store.createLease("completed","openai-codex","fleet",undefined,now-4*HOUR);store.endLease("completed",now-3*HOUR);
+      expect(assign(store,"standard",budget,config,now).assignment).toBeDefined();
+      store.recordMeter("openai-codex","codex-7d",99,now+168*HOUR,now-2*HOUR);
+      expect(assign(store,"standard",budget,config,now).assignment).toBeDefined();
+      store.recordMeter("openai-codex","codex-7d",100,now+168*HOUR,now-HOUR);
+      expect(assign(store,"standard",budget,config,now).assignment).toBeUndefined();
+      store.recordMeter("openai-codex","codex-7d",0,now+168*HOUR,now);
+      expect(assign(store,"standard",budget,config,now).assignment).toBeDefined();
+    }finally{store.close();}
   });
 
-  it("multiplies calculated capacity after calibration and fills from one meter even ahead of calendar pace",async()=>{
-    const store=Store.open(":memory:"),now=Date.now(),reset=now+144*HOUR;
-    store.upsertAccount({id:"openai-codex",provider:"openai-codex",concurrency:4});
-    store.createLease("history","openai-codex","fleet",undefined,now-4*HOUR);
-    store.endLease("history",now);
-    store.recordMeter("openai-codex","codex-7d",8,reset,now-4*HOUR);
-    store.recordMeter("openai-codex","codex-7d",9,reset,now);
-    const cfg={...config,backgroundSpendFraction:1,maxConcurrentSessions:90};
-    expect(accountCapacity(store,"openai-codex","background",cfg,now).sessions).toBe(1);
-    store.setControl("boost:openai-codex","10");
-    expect(accountCapacity(store,"openai-codex","background",cfg,now)).toMatchObject({sessions:10,reason:expect.stringContaining("1 base × 10 = 10")});
-    store.recordMeter("openai-codex","codex-7d",25,reset,now+1000);
-    expect(accountCapacity(store,"openai-codex","background",cfg,now+1000).reason).not.toContain("exceeds paced allowance");
-    store.setControl("boost:openai-codex","1");
-    expect(accountCapacity(store,"openai-codex","background",cfg,now+1000).reason).toContain("exceeds paced allowance");
-    store.setControl("boost:openai-codex","10");
-    store.recordMeter("openai-codex","codex-7d",100,reset,now+2000);
-    expect(accountCapacity(store,"openai-codex","background",cfg,now+2000)).toMatchObject({sessions:0,reason:"provider quota exhausted"});
-    store.close();
+  it("cannot revive pacing from persisted multiplier or reserve configuration",()=>{
+    const store=Store.open(":memory:");account(store);
+    try{
+      const cfg={...config,backgroundSpendFraction:0,defaultAccountConcurrency:0};
+      for(const multiplier of ["0","1","10","invalid"]){
+        store.setControl("boost:openai-codex",multiplier);
+        expect(assign(store,"standard","background",cfg).assignment).toBeDefined();
+      }
+    }finally{store.close();}
   });
-
 });

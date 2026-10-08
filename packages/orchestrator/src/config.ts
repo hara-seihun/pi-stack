@@ -54,8 +54,6 @@ export function loadConfig(
     listenHost: env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
     peers: parsePeerHosts(local.peers),
     profiles: Object.fromEntries(Object.entries(profiles).map(([profile, candidates]) => [profile, (candidates as ModelCandidate[]).map(candidate)])),
-    backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),
-    defaultAccountConcurrency: Number(local.defaultAccountConcurrency ?? 4),
     meterMaxAgeMs: Number(local.meterMaxAgeMs ?? 90*60_000),
     reconcileIntervalMs: Number(local.reconcileIntervalMs ?? 5_000),
     stallAfterMs: Number(local.stallAfterMs ?? 20*60_000),

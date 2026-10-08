@@ -1,6 +1,6 @@
 # Global agent execution capacity
 
-Pi Stack has one durable admission authority and a hard limit of **100 executing agents**, across every host, person, foreground/background placement, application, peer and root agent. Account spending urgency, subscription pacing and native memory/residency limits are separate controls. None grants an execution-slot exemption. Dependency waits and settled warm sessions do not hold slots.
+Pi Stack has one durable admission authority and a hard limit of **100 executing agents**, across every host, person, foreground/background placement, application, peer and root agent. Provider availability, explicit spending controls and native memory/residency limits are separate controls. None grants an execution-slot exemption. Dependency waits and settled warm sessions do not hold slots.
 
 [`agent-capacity.ts`](../src/agent-capacity.ts) supplies the typed client. [`agent-capacity-authority.ts`](../src/agent-capacity-authority.ts) owns the SQLite ledger and HTTP server. The shared native runner continues hosting many sessions in one process; capacity does not create a process per agent.
 

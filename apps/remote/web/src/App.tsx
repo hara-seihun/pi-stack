@@ -5,7 +5,7 @@ import { assertNever } from "../../shared/explicit-state";
 import { voiceActionLabel, type VoiceState } from "./voice-state";
 import { validateSession, validateStreamSnapshot } from "../../shared/state-validation";
 import { appPath, appStorageKey } from "./app-path";
-import type { GovernorProvider, InlineImageSnapshot, StreamEvent, QuestionsResource } from "../../server/protocol";
+import type { InlineImageSnapshot, StreamEvent, QuestionsResource } from "../../server/protocol";
 import { ClientCache } from "./client-cache";
 import { ClientCacheContext } from "./cached-media";
 import { api, ApiError, piFetch, ensureUnlocked, registerUnlockHandler } from "./client";
@@ -1117,7 +1117,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     finally { kick(); }
   };
   const toggleAction = async (id: string) => { setPendingAction(id); try { await api(API.actionToggle.method, API.actionToggle.path({ id }), {}); } finally { setPendingAction(null); kick(); } };
-  const toggleGovernor = async (provider: GovernorProvider) => { setPendingAction(provider); try { await api(API.governorToggle.method, API.governorToggle.path({ provider }), {}); } finally { setPendingAction(null); kick(); } };
 
   const dashboard = state.dashboard;
   const threadStarts = useMemo(() => state.bootstrap?.threadStarts ?? [], [state.bootstrap]);
@@ -1253,7 +1252,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     switch (route.tab) {
       case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
       case "attention": return <Suspense fallback={<Loading label="Loading attention…" />}><AttentionScreen version={notificationVersion} /></Suspense>;
-      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
+      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
       case "chats": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
     }
