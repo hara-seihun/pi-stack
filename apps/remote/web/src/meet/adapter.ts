@@ -4,7 +4,7 @@ import { meetPath, type MeetJoined, type MeetSnapshot, type MeetVoiceControl, ty
 import { pendingWork, VoiceDemand } from "./voice-demand";
 import { avatarStream, MeetMedia, type MeetMediaSource } from "./media";
 import { MeetBrowser } from "./browser";
-import { MeetRoom, post } from "./room";
+import { ExternalMeetRoom, post } from "./external-room";
 import { MeetTranscription } from "./transcription";
 import { meetJson, type MeetRequest } from "./transport";
 import { MeetVoicePlayout } from "./voice-playout";
@@ -61,7 +61,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
   const input = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false,
   });
-  let room: MeetRoom | null = null;
+  let room: ExternalMeetRoom | null = null;
   let media: MeetMedia | null = null;
   let transcription: MeetTranscription | null = null;
   let browser: MeetBrowser | null = null;
@@ -149,7 +149,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
     voice?.suspend();
     input.getTracks().forEach((track) => track.stop());
     for (const track of avatar?.stream.getAudioTracks() || []) { track.enabled = false; track.stop(); }
-    room?.close(false);
+    room?.close();
     update({ status: "suspended", voice: "Voice suspended", playback: "stopped" });
     voiceStopping ??= voice?.stop() ?? Promise.resolve();
     void voiceStopping!.catch(notice);
@@ -195,9 +195,7 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
     const joined = await meetJson<MeetJoined>(options.request, meetPath("external"), post({
       namespace: options.namespace, eventKey: options.eventKey, name: options.name,
     }));
-    room = new MeetRoom(joined, "", reconcile, accept, (id) => {
-      media?.detach(id); transcription?.detach(id);
-    }, (message) => {
+    room = new ExternalMeetRoom(joined, reconcile, (message) => {
       roomFailure = message;
       update({ status: "error", notice: message });
       void suspend().catch(notice);
@@ -215,13 +213,11 @@ export async function startMeetAdapter(options: MeetAdapterOptions): Promise<Mee
     transcription = new MeetTranscription(room, notice);
     await transcription.flushPending();
     browser = new MeetBrowser(room, (stream) => options.onBrowserStream?.(stream), notice);
-    room.publish("camera", input);
-    accept({ participant: joined.participant, kind: "camera", stream: input });
+    accept({ participant: joined.participant, stream: input });
     avatar = await avatarStream(__MEET_AVATAR__, () => ({
       voice: state.voice, playback: state.playback, muted: room!.snapshot.voiceMuted, threads: room!.snapshot.threads,
     }));
     for (const track of playout.stream.getAudioTracks()) avatar.stream.addTrack(track.clone());
-    room.publish("pi-camera", avatar.stream);
     video.srcObject = avatar.stream;
     options.container.append(stage);
     await video.play();

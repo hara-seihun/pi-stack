@@ -13,7 +13,7 @@ Pi Stack ships code, reference units and examples. A deployment supplies its own
 | Android private/public bootstrap router URLs and local SDK path | ignored `apps/kenan/android/local.properties`, starting from [the example](../apps/kenan/android/local.properties.example) |
 | Model-provider credentials | the host's Orchestrator account store and broker configuration |
 | Voice API credential | host-provisioned systemd credential, described in [deployment](deployment.md) |
-| Router sign-in, tunnel identities, local model endpoints and TURN settings | host-owned service configuration |
+| Router sign-in, tunnel identities and local model endpoints | host-owned service configuration |
 
 Never commit the filled-in files, private session recordings, signing keys or built APKs containing local endpoints. Public examples use fictional identities. Product names and package IDs are not deployment account names.
 

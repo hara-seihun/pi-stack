@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connectRuntime, meetSocket, runtimeCall, runtimeRevision, runtimeStatus } from "./runtime";
-import type { RuntimeRelease, RuntimeRequest, RuntimeStatus } from "./runtime";
+import type { RuntimeRelease, RuntimeStatus } from "./runtime";
 
 async function status(socket: string): Promise<RuntimeStatus> {
   const result = await runtimeStatus(socket);
@@ -21,7 +21,7 @@ async function until<T>(read: () => Promise<T>, accepts: (value: T) => boolean):
   }
 }
 
-test("person-owned worker retains live room, signals and transcript through actual supervisor process replacement; rotation is idle-only", async () => {
+test("person-owned external meeting retains camera, Voice and platform transcript through supervisor replacement; rotation is idle-only", async () => {
   const data = mkdtempSync(join(tmpdir(), "meet-runtime-"));
   const socket = meetSocket(data);
   const config = join(data, "config.json");
@@ -42,30 +42,30 @@ test("person-owned worker retains live room, signals and transcript through actu
   process.env.PI_REMOTE_CONFIG = config;
   try {
     const id = crypto.randomUUID();
-    const seeded = await supervisor({ mode: "seed", id, signalId: crypto.randomUUID() });
+    const seeded = await supervisor({ mode: "seed", id });
     current = await status(socket);
     expect(current.pid).toBe(seeded.workerPid);
     expect(current.pid).not.toBe(seeded.supervisorPid);
     expect(current.rooms).toEqual([{ id, sessionId: "thread" }]);
     expect(statSync(socket).mode & 0o777).toBe(0o600);
-    const inspected = await supervisor({ mode: "inspect", id, hostId: seeded.result.host.participant.id,
-      guestId: seeded.result.guest.participant.id, signalBody: seeded.result.signalBody });
+    const inspected = await supervisor({ mode: "inspect", id, hostId: seeded.result.host.participant.id });
     expect(inspected.supervisorPid).not.toBe(seeded.supervisorPid);
     expect(inspected.workerPid).toBe(seeded.workerPid);
     expect(inspected.instance).toBe(seeded.instance);
     expect(inspected.result.room.apiUrl).toBe(`http://person.example/v1/meet/${id}`);
-    expect(inspected.result.room.participants).toEqual([seeded.result.host.participant, seeded.result.guest.participant]);
+    expect(inspected.result.room.participants).toEqual([seeded.result.host.participant, seeded.result.camera.participant]);
+    expect(inspected.result.room.platformTranscript).toBe(true);
     expect(inspected.result.room.voiceMuted).toBe(false);
     expect(inspected.result.room.voiceRevision).toBe(3);
     expect(inspected.result.room.threads[0].name).toBe("inspect");
-    expect(inspected.result.poll.messages).toHaveLength(1);
-    expect(inspected.result.poll.messages[0].signal).toEqual(seeded.result.signalBody.signal);
-    expect(inspected.result.repeated.messages).toEqual(inspected.result.poll.messages);
-    expect(inspected.result.duplicateCreate.participant).toEqual(seeded.result.host.participant);
-    expect(inspected.result.mismatchStatus).toBe(400);
+    expect(inspected.result.poll.voiceWake).toMatchObject({ speaker: "Sara", text: "Kenan, keep the browser open." });
+    expect(inspected.result.duplicateOpen.participant).toEqual(seeded.result.host.participant);
+    expect(inspected.result.capture.images).toHaveLength(1);
+    expect(inspected.result.capture.note).toContain("Sara");
     expect(inspected.result.live).toBe(true);
     expect(inspected.result.meetings[0].endedAt).toBeNull();
     expect(inspected.result.turns[0].text).toBe("Meetings survive the front door.");
+    expect(inspected.result.turns[1]).toMatchObject({ speakerId: "recall:42", speaker: "Sara", text: "Kenan, keep the browser open." });
 
     const pinned = await connectRuntime(data, "new-source-revision");
     expect(pinned.ok).toBe(true);
@@ -88,22 +88,21 @@ test("person-owned worker retains live room, signals and transcript through actu
     expect((await status(socket)).pid).toBe(idle.pid);
     await supervisor({ mode: "leave", id: racingId, hostId: racing.result.participant.id });
 
-    // An admitted create request with its body still arriving also prevents release before it becomes a room.
+    // An admitted external start also holds the worker while its body is arriving.
     let writer!: ReadableStreamDefaultController<Uint8Array>;
-    const stream = new ReadableStream<Uint8Array>({ start(controller) { writer = controller; controller.enqueue(new TextEncoder().encode('{"url":')); } });
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { writer = controller; controller.enqueue(new TextEncoder().encode('{"id":')); } });
     const arrivingId = crypto.randomUUID();
-    const input: RuntimeRequest = { url: "http://person.example/v1/meet", method: "POST", headers: [["content-type", "application/json"]],
-      body: Buffer.from(JSON.stringify({ sessionId: "thread", requestId: arrivingId, name: "Arriving" })).toString("base64"), agentMeetingId: null,
+    const input = { id: arrivingId, sessionId: "thread", apiUrl: `http://person.example/v1/meet/${arrivingId}`, platformTranscript: true,
       context: { sessions: ["thread"], activity: [{ meetingId: arrivingId, sessionId: "thread", threads: [] }] } };
-    streamFinish = () => { writer.enqueue(new TextEncoder().encode(JSON.stringify(input).slice('{"url":'.length))); writer.close(); streamFinish = null; };
-    const arriving = fetch("http://meet-runtime/runtime/request", { unix: socket, method: "POST", body: stream });
+    streamFinish = () => { writer.enqueue(new TextEncoder().encode(JSON.stringify(input).slice('{"id":'.length))); writer.close(); streamFinish = null; };
+    const arriving = fetch("http://meet-runtime/runtime/open-external", { unix: socket, method: "POST", body: stream });
     await until(() => status(socket), value => value.requestsInFlight === 1);
     expect(await runtimeCall(socket, "/runtime/release", { instance: idle.instance }))
       .toEqual({ ok: true, value: { released: false, reason: "requests-in-flight" } });
     streamFinish();
     const arrived = await (await arriving).json();
     expect(arrived.ok).toBe(true);
-    const arrivingHost = JSON.parse(Buffer.from(arrived.value.body, "base64").toString()).participant;
+    const arrivingHost = arrived.value.participant;
     expect((await status(socket)).rooms[0]!.id).toBe(arrivingId);
     await supervisor({ mode: "leave", id: arrivingId, hostId: arrivingHost.id });
 

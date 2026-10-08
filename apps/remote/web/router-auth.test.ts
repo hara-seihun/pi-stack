@@ -41,7 +41,7 @@ test("headers carry the session and reject person impersonation", () => {
 test("download tokens stay on router APIs, never external URLs or ordinary page links", () => {
   const origin = "https://remote.example/";
   expect(sessionUrl("/v1/files?path=a&user=owner&session=stale", origin, "token")).toBe("/v1/files?path=a&session=token");
-  for (const external of ["https://outside.example/v1/files", "//outside.example/v1/files", "/meet.html"]) {
+  for (const external of ["https://outside.example/v1/files", "//outside.example/v1/files", "/voice.html"]) {
     expect(sessionUrl(external, origin, "token")).toBe(external);
   }
   expect(sessionUrl("https://router.test/v1/remotes/cloud/v1/files", "https://router.test/", "token", ["/v1/remotes/cloud"])).toBe("https://router.test/v1/remotes/cloud/v1/files?session=token");

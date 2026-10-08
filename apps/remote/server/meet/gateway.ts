@@ -46,18 +46,8 @@ export class MeetGateway {
 
   private async proxy(req: Request, agentMeetingId: string | null): Promise<Response> {
     try {
-      let sessions: string[] = [];
-      let extra: { meetingId: string; sessionId: string } | undefined;
-      if (req.method === "POST" && new URL(req.url).pathname === "/v1/meet") {
-        let body: any;
-        try { body = await req.clone().json(); } catch { return Response.json({ error: "Invalid meeting creation request" }, { status: 400, headers: API_CORS_HEADERS }); }
-        if (typeof body?.sessionId === "string") {
-          sessions = [body.sessionId];
-          if (typeof body.requestId === "string") extra = { meetingId: body.requestId, sessionId: body.sessionId };
-        }
-      }
       const input: RuntimeRequest = { url: req.url, method: req.method, headers: [...req.headers],
-        body: req.body === null ? null : Buffer.from(await req.arrayBuffer()).toString("base64"), agentMeetingId, context: this.context(sessions, extra) };
+        body: req.body === null ? null : Buffer.from(await req.arrayBuffer()).toString("base64"), agentMeetingId, context: this.context() };
       const result = await runtimeCall<RuntimeResponse>(this.socket, "/runtime/request", input, 120_000);
       if (!result.ok) return unavailable(result.error);
       const output = result.value;

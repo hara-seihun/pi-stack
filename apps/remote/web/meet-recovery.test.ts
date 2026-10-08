@@ -99,7 +99,7 @@ test("failed startup stops capture and retains its unfinished PCM until recovery
   let captures = 0;
   provide("navigator", { mediaDevices: { getUserMedia: async () => { captures++; return input; } } });
   const participant = { id: "external-host", host: true, name: "Mixed meeting audio" };
-  const room = { id: "room", sessionId: "thread", apiUrl: "", iceServers: [], participants: [participant],
+  const room = { id: "room", sessionId: "thread", apiUrl: "", participants: [participant],
     browser: null, threads: [], voiceMuted: true, voiceRevision: 0, voiceWake: null, transcriptFlushRevision: 0, platformTranscript: false };
   let connected = true;
   provide("document", { createElement: (tag: string) => {
@@ -115,7 +115,7 @@ test("failed startup stops capture and retains its unfinished PCM until recovery
     if (path === "/v1/voice") connected = false;
     if (!connected) throw new Error("relay disconnected");
     if (path === "/v1/meet/external") { opens++; return Response.json({ room, participant }); }
-    if (path.includes("/poll")) return Response.json({ ...room, messages: [] });
+    if (path.includes("/poll")) return Response.json(room);
     if (path.endsWith("/stop")) stops++;
     return Response.json({ saved: true });
   };
@@ -199,14 +199,14 @@ test("Voice stop silences local capture and playback before remote settlement", 
 test("a muted platform room starts without Voice and a mention opens it and reaches Pi", async () => {
   provide("navigator", { mediaDevices: { getUserMedia: async () => new Stream([new Track()]) } });
   const participant = { id: "external-host", host: true, name: "Mixed meeting audio" };
-  const room = { id: "room", sessionId: "thread", apiUrl: "", iceServers: [], participants: [participant],
+  const room = { id: "room", sessionId: "thread", apiUrl: "", participants: [participant],
     browser: null, threads: [], voiceMuted: true, voiceRevision: 0, voiceWake: null as any, transcriptFlushRevision: 0, platformTranscript: true };
   const calls: string[] = [];
   const prompts: Array<{ text: string; delivery: string }> = [];
   const request = async (path: string, init: RequestInit) => {
     calls.push(path);
     if (path === "/v1/meet/external") return Response.json({ room, participant });
-    if (path.includes("/poll")) return Response.json({ ...room, messages: [] });
+    if (path.includes("/poll")) return Response.json(room);
     if (path === "/v1/voice") return Response.json({ enabled: false, error: "Voice disabled in this test" });
     if (path === "/v1/sessions/thread/prompt") { prompts.push(JSON.parse(String(init.body))); return Response.json({ accepted: true }); }
     return Response.json({ ok: true });

@@ -1,9 +1,8 @@
-import type { MeetParticipant, MeetThreadState, MeetTrackKind } from "../../../server/meet/protocol";
+import type { MeetParticipant, MeetThreadState } from "../../../server/meet/protocol";
 import { threadStatus, type ThreadStatus } from "../features/status/thread-status";
 
 export interface MeetMediaSource {
   participant: MeetParticipant;
-  kind: MeetTrackKind;
   stream: MediaStream;
 }
 
@@ -17,7 +16,7 @@ export class MeetMedia {
 
   attach(source: MeetMediaSource) {
     const key = `${source.participant.id}:${source.stream.id}`;
-    if (source.kind !== "camera" || !source.stream.getAudioTracks().length || this.inputs.has(key)) return;
+    if (!source.stream.getAudioTracks().length || this.inputs.has(key)) return;
     this.detach(source.participant.id);
     const input = this.audio.createMediaStreamSource(source.stream);
     input.connect(this.compressor);
