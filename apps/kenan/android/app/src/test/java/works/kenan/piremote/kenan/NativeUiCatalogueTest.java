@@ -37,6 +37,8 @@ public class NativeUiCatalogueTest {
         POINT, RECTANGLE, TAP, SWIPE, DRAG, DISMISS, PANEL_EMPTY, PANEL_TRANSCRIPT, PANEL_DRAFT, PANEL_LIMIT,
         PANEL_LARGE_FONT, CAPTURE_HIDDEN, ACTION_ONLY, CLOSED
     }
+    enum EditorCase { OPENING, READY, HANDOFF_ENDED, ACCESS_ENDED, HTTP_ERROR, CONNECTION_FAILED, VIEW_STOPPED, SESSION_UNAVAILABLE, CLOSE, IDENTITY_CHANGED, SCREEN_OFF, STOPPED, REPLAY }
+    private final org.json.JSONArray editorLifecycle = new org.json.JSONArray();
     private final Map<String, org.json.JSONObject> rendered = new LinkedHashMap<>();
     private File output;
 
@@ -133,6 +135,137 @@ public class NativeUiCatalogueTest {
         service.getResources().getDisplayMetrics().scaledDensity = 1;
     }
 
+    private android.webkit.WebResourceRequest editorRequest(String url, boolean mainFrame) {
+        return new android.webkit.WebResourceRequest() {
+            public android.net.Uri getUrl() { return android.net.Uri.parse(url); }
+            public boolean isForMainFrame() { return mainFrame; }
+            public boolean isRedirect() { return false; }
+            public boolean hasGesture() { return false; }
+            public String getMethod() { return "GET"; }
+            public Map<String, String> getRequestHeaders() { return Map.of(); }
+        };
+    }
+
+    private void editors() throws Exception {
+        var server = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
+        var status = new java.util.concurrent.atomic.AtomicInteger(200);
+        var fixtureErrors = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Thread fixture = new Thread(() -> {
+            while (!server.isClosed()) {
+                try (var socket = server.accept()) {
+                    socket.setSoTimeout(5000);
+                    var input = new java.io.BufferedReader(new java.io.InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.US_ASCII));
+                    assertEquals("GET /v1/lock-status HTTP/1.1", input.readLine());
+                    String header;
+                    while ((header = input.readLine()) != null && !header.isEmpty()) { }
+                    byte[] body = "{\"user\":\"native-fixture\",\"unlocked\":true}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    socket.getOutputStream().write(("HTTP/1.1 " + status.get() + " Synthetic fixture\r\nContent-Type: application/json\r\nContent-Length: " + body.length + "\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                    socket.getOutputStream().write(body);
+                } catch (Throwable error) {
+                    if (!server.isClosed()) fixtureErrors.set(error);
+                    return;
+                }
+            }
+        }, "synthetic-native-editor-router");
+        fixture.start();
+        android.content.SharedPreferences previous = ReflectionHelpers.getStaticField(RouterConnection.class, "preferences");
+        var preferences = org.robolectric.RuntimeEnvironment.getApplication().getSharedPreferences("editor-fixture-router", 0);
+        String origin = "http://127.0.0.1:" + server.getLocalPort();
+        preferences.edit().putString("router", origin).commit();
+        ReflectionHelpers.setStaticField(RouterConnection.class, "preferences", preferences);
+        try {
+            for (EditorCase state : EditorCase.values()) {
+                status.set(state == EditorCase.SESSION_UNAVAILABLE ? 503 : 200);
+                Windows owner = new Windows();
+                RemoteSession session = new RemoteSession();
+                session.replace("native-fixture", "synthetic-not-authenticated");
+                var target = ((EditorHandoff.Accepted) EditorHandoff.validate(origin + "/editor/open", "s".repeat(43), origin,
+                    "http://127.0.0.1:1")).target();
+                EditorActivity.launch(owner.activity, target, session, session.current(), android.os.SystemClock.elapsedRealtime());
+                android.content.Intent intent = Shadows.shadowOf(owner.activity).getNextStartedActivity();
+                assertEquals(EditorActivity.class.getName(), intent.getComponent().getClassName());
+                assertEquals(1, intent.getExtras().size());
+                assertFalse(intent.toUri(0).contains(target.ticket()));
+                if (state == EditorCase.HANDOFF_ENDED) Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(30));
+                var controller = Robolectric.buildActivity(EditorActivity.class, intent).create().start().resume();
+                EditorActivity activity = controller.get();
+                NativeShells.Editor shell = ReflectionHelpers.getField(activity, "shell");
+                android.webkit.WebView web = shell.web();
+                var shadow = Shadows.shadowOf(web);
+                var client = shadow.getWebViewClient();
+                assertNull(ReflectionHelpers.getStaticField(EditorActivity.class, "pending"));
+                assertFalse(activity.getIntent().hasExtra("handoff"));
+                assertTrue((activity.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                if (state != EditorCase.HANDOFF_ENDED) {
+                    Object launch = ReflectionHelpers.getField(activity, "launch");
+                    EditorHandoff.Target consumed = ReflectionHelpers.callInstanceMethod(launch, "target");
+                    assertEquals("", consumed.ticket());
+                    assertFalse(web.getSettings().getAllowFileAccess());
+                    assertFalse(web.getSettings().getAllowContentAccess());
+                    assertTrue(client.shouldOverrideUrlLoading(web, editorRequest("http://127.0.0.1:1/private", true)));
+                }
+                switch (state) {
+                    case OPENING, HANDOFF_ENDED -> { }
+                    case READY -> client.onPageCommitVisible(web, origin + "/workspace");
+                    case ACCESS_ENDED, HTTP_ERROR -> client.onReceivedHttpError(web, editorRequest(origin + "/editor/open", true),
+                        new android.webkit.WebResourceResponse("text/plain", "UTF-8", state == EditorCase.ACCESS_ENDED ? 403 : 503,
+                            "Synthetic failure", Map.of(), new java.io.ByteArrayInputStream(new byte[0])));
+                    case CONNECTION_FAILED -> client.onReceivedError(web, editorRequest(origin + "/editor/open", true), null);
+                    case VIEW_STOPPED -> assertTrue(client.onRenderProcessGone(web, null));
+                    case SESSION_UNAVAILABLE -> {
+                        Shadows.shadowOf(Looper.getMainLooper()).idle();
+                        java.util.concurrent.ExecutorService checks = ReflectionHelpers.getField(activity, "checks");
+                        checks.submit(() -> {}).get(5, java.util.concurrent.TimeUnit.SECONDS);
+                        Shadows.shadowOf(Looper.getMainLooper()).idle();
+                    }
+                    case CLOSE -> assertTrue(shell.close().performClick());
+                    case IDENTITY_CHANGED -> session.replace("", "");
+                    case SCREEN_OFF -> {
+                        android.content.BroadcastReceiver receiver = ReflectionHelpers.getField(activity, "screenOff");
+                        receiver.onReceive(activity, new android.content.Intent(android.content.Intent.ACTION_SCREEN_OFF));
+                    }
+                    case STOPPED -> controller.pause().stop();
+                    case REPLAY -> {
+                        assertTrue(shell.close().performClick());
+                        controller.pause().stop().destroy();
+                        controller = Robolectric.buildActivity(EditorActivity.class, intent).create().start().resume();
+                        activity = controller.get();
+                        shell = ReflectionHelpers.getField(activity, "shell");
+                        web = shell.web(); shadow = Shadows.shadowOf(web);
+                    }
+                }
+                String id = "editor-" + state.name().toLowerCase(java.util.Locale.ROOT);
+                boolean noWindow = switch (state) { case CLOSE, IDENTITY_CHANGED, SCREEN_OFF, STOPPED -> true; default -> false; };
+                if (noWindow) {
+                    assertTrue(activity.isFinishing());
+                    assertNull(ReflectionHelpers.getField(activity, "launch"));
+                    assertNull(web.getParent());
+                    assertTrue(shadow.wasDestroyCalled());
+                    editorLifecycle.put(new org.json.JSONObject().put("id", id).put("result", "Activity finished; no editor-owned window; WebView destroyed; identity/ticket released"));
+                } else {
+                    NativeShells.EditorState expected = state == EditorCase.REPLAY ? NativeShells.EditorState.HANDOFF_ENDED : NativeShells.EditorState.valueOf(state.name());
+                    assertEquals(expected.title, shell.title().getText().toString());
+                    assertEquals(state == EditorCase.READY || state == EditorCase.OPENING ? View.VISIBLE : View.GONE, web.getVisibility());
+                    assertEquals(state == EditorCase.READY ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS, web.getImportantForAccessibility());
+                    if (state != EditorCase.OPENING && state != EditorCase.READY) {
+                        assertTrue(shadow.wasDestroyCalled());
+                        assertNull(web.getParent());
+                        assertNull(ReflectionHelpers.getField(activity, "launch"));
+                    }
+                    image(id, shell.root(), "Actual EditorActivity launch/Activity + WebView callbacks and NativeShells Views; synthetic loopback origin/identity, no authenticated service. READY HTML is external and not rendered by Robolectric.");
+                }
+                if (state != EditorCase.STOPPED) controller.pause().stop();
+                controller.destroy(); owner.close();
+            }
+        } finally {
+            ReflectionHelpers.setStaticField(RouterConnection.class, "preferences", previous);
+            server.close();
+            fixture.join(5000);
+            assertFalse("Synthetic router must release its thread", fixture.isAlive());
+            assertNull("Synthetic router protocol failed", fixtureErrors.get());
+        }
+    }
+
     @Test public void renderActualNativeViews() throws Exception {
         String path = System.getProperty("pi.native.catalogue.output");
         org.junit.Assume.assumeTrue("Run apps/kenan/native-ui/render with an explicit artifact directory", path != null);
@@ -146,10 +279,7 @@ public class NativeUiCatalogueTest {
         overlay(OverlayCase.BUBBLE_LIMIT, "-landscape");
         org.robolectric.RuntimeEnvironment.setQualifiers("w360dp-h800dp-mdpi");
         Windows windows = new Windows();
-        NativeShells.Editor editor = NativeShells.editor(windows.activity, () -> {});
-        windows.root.addView(editor.root(), new FrameLayout.LayoutParams(-1, -1));
-        image("editor-shell", windows.root, "Actual NativeShells.editor; WebView viewport blank because Robolectric does not render remote editor HTML");
-        editor.web().destroy(); windows.root.removeAllViews();
+        editors();
         for (NativeShells.SignInState state : NativeShells.SignInState.values()) {
             NativeShells.SignIn signIn = NativeShells.signIn(windows.activity); signIn.state(state);
             windows.root.addView(signIn.root(), new FrameLayout.LayoutParams(-1, -1));
@@ -160,7 +290,7 @@ public class NativeUiCatalogueTest {
         org.json.JSONArray states = new org.json.JSONArray();
         for (var entry : rendered.entrySet()) states.put(entry.getValue());
         try (FileOutputStream stream = new FileOutputStream(new File(output, "manifest.json"))) {
-            stream.write(new org.json.JSONObject().put("renderer", "Robolectric 4.16 native Android Skia, API 28").put("widthDp", 360).put("heightDp", 800).put("states", states).toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            stream.write(new org.json.JSONObject().put("renderer", "Robolectric 4.16 native Android Skia, API 28").put("widthDp", 360).put("heightDp", 800).put("states", states).put("editorLifecycle", editorLifecycle).toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
 }

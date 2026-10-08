@@ -21,7 +21,6 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.LinearLayout;
 import android.widget.Toast;
 import java.io.ByteArrayInputStream;
 import java.lang.ref.WeakReference;
@@ -61,6 +60,7 @@ public final class EditorActivity extends Activity {
     private final ExecutorService checks = Executors.newSingleThreadExecutor();
     private final Runnable checkLock = this::checkRemoteSession;
     private WebView editor;
+    private NativeShells.Editor shell;
     private volatile Launch launch;
     private Runnable unobserve;
     private boolean receiverRegistered;
@@ -72,6 +72,14 @@ public final class EditorActivity extends Activity {
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        shell = NativeShells.editor(this, () -> closeEditor(null));
+        setContentView(shell.root());
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(shell.root(), (view, insets) -> {
+            androidx.core.graphics.Insets bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars()
+                | androidx.core.view.WindowInsetsCompat.Type.displayCutout() | androidx.core.view.WindowInsetsCompat.Type.ime());
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return insets;
+        });
         Launch candidate = pending;
         String handoff = getIntent().getStringExtra("handoff");
         getIntent().removeExtra("handoff");
@@ -83,18 +91,18 @@ public final class EditorActivity extends Activity {
         // Restored Activities cannot replay a consumed secret or display restored WebView state.
         if (savedInstanceState != null || candidate == null || !candidate.id.equals(handoff) || !candidate.state.isCurrent(candidate.identity)
             || SystemClock.elapsedRealtime() - candidate.issuedAt >= 30_000 || locked()) {
-            closeEditor("Open the editor again from Files");
+            failEditor(NativeShells.EditorState.HANDOFF_ENDED);
             return;
         }
         launch = candidate;
         visible = new WeakReference<>(this);
-        unobserve = candidate.state.observe(() -> runOnUiThread(() -> {
-            if (!candidate.state.isCurrent(candidate.identity)) closeEditor(null);
+        RemoteSession ownerState = candidate.state;
+        RemoteSession.Identity ownerIdentity = candidate.identity;
+        unobserve = ownerState.observe(() -> runOnUiThread(() -> {
+            if (!ownerState.isCurrent(ownerIdentity)) closeEditor(null);
         }));
         registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED);
         receiverRegistered = true;
-        NativeShells.Editor shell = NativeShells.editor(this, () -> closeEditor(null));
-        LinearLayout root = shell.root();
         editor = shell.web();
         WebSettings settings = editor.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -131,25 +139,24 @@ public final class EditorActivity extends Activity {
                 return new WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden", java.util.Map.of(),
                     new ByteArrayInputStream(new byte[0]));
             }
+            @Override public void onPageCommitVisible(WebView view, String url) {
+                Launch snapshot = launch;
+                if (!current()) { if (snapshot != null) closeEditor(null); return; }
+                if (snapshot.target.permits(url)) shell.state(NativeShells.EditorState.READY);
+            }
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                if (!current()) return;
                 int status = response.getStatusCode();
-                if (status == 401 || status == 403 || status == 423) closeEditor("Editor access ended; reopen it from Files");
-                else if (request.isForMainFrame() && status >= 400) closeEditor("Editor returned HTTP " + status + "; reopen it from Files");
+                if (status == 401 || status == 403 || status == 423) failEditor(NativeShells.EditorState.ACCESS_ENDED);
+                else if (request.isForMainFrame() && status >= 400) failEditor(NativeShells.EditorState.HTTP_ERROR);
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) closeEditor("Editor connection failed; reopen it from Files");
+                if (current() && request.isForMainFrame()) failEditor(NativeShells.EditorState.CONNECTION_FAILED);
             }
             @Override public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
-                closeEditor("Editor view stopped; reopen it from Files");
+                if (current()) failEditor(NativeShells.EditorState.VIEW_STOPPED);
                 return true;
             }
-        });
-        setContentView(root);
-        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) -> {
-            androidx.core.graphics.Insets bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars()
-                | androidx.core.view.WindowInsetsCompat.Type.displayCutout() | androidx.core.view.WindowInsetsCompat.Type.ime());
-            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-            return insets;
         });
         if (!current()) { closeEditor(null); return; }
         editor.postUrl(launch.target.url(), launch.target.postBody());
@@ -169,32 +176,45 @@ public final class EditorActivity extends Activity {
         if (!current()) { closeEditor(null); return; }
         Launch captured = launch;
         checks.execute(() -> {
-            String failure = null;
+            NativeShells.EditorState failure = null;
             try {
                 org.json.JSONObject status = RemoteTransport.get(RouterConnection.routerUrl() + "/v1/lock-status", captured.identity);
                 if (!captured.identity.user.equals(status.optString("user")) || !Boolean.TRUE.equals(status.opt("unlocked"))) {
-                    failure = "Your folder is locked";
+                    failure = NativeShells.EditorState.ACCESS_ENDED;
                 }
             } catch (RemoteTransport.AccessDenied denied) {
                 synchronized (captured.state) {
                     if (captured.state.isCurrent(captured.identity)) NotificationIdentity.replace(this, "", "");
                 }
-                failure = "Your folder session ended";
+                failure = NativeShells.EditorState.ACCESS_ENDED;
             } catch (java.io.IOException unavailable) {
-                failure = "Editor session could not be checked; reopen it from Files";
+                failure = NativeShells.EditorState.SESSION_UNAVAILABLE;
             }
-            String message = failure;
+            NativeShells.EditorState outcome = failure;
             events.post(() -> {
-                if (closed) return;
-                if (message != null || !current()) closeEditor(message);
+                if (closed || launch == null) return;
+                if (!current()) closeEditor(null);
+                else if (outcome != null) failEditor(outcome);
                 else events.postDelayed(checkLock, 5_000);
             });
         });
     }
 
+    private void failEditor(NativeShells.EditorState failure) {
+        if (closed) return;
+        releaseEditor();
+        shell.state(failure);
+    }
+
     private void closeEditor(String message) {
         if (closed) return;
         closed = true;
+        releaseEditor();
+        if (message != null) Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        finish();
+    }
+
+    private void releaseEditor() {
         events.removeCallbacksAndMessages(null);
         checks.shutdownNow();
         if (unobserve != null) { unobserve.run(); unobserve = null; }
@@ -212,14 +232,16 @@ public final class EditorActivity extends Activity {
             owned.destroy();
         }
         launch = null;
-        if (message != null) Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-        finish();
+        if (shell != null && editor == null && shell.web().getParent() instanceof ViewGroup parent) {
+            parent.removeView(shell.web());
+            shell.web().destroy();
+        }
     }
 
     @Override public void onBackPressed() { closeEditor(null); }
     @Override protected void onResume() {
         super.onResume();
-        if (!current() || locked()) closeEditor(null);
+        if (locked() || launch != null && !current()) closeEditor(null);
     }
     @Override protected void onStop() { closeEditor(null); super.onStop(); }
     @Override protected void onDestroy() { closeEditor(null); super.onDestroy(); }

@@ -33,10 +33,15 @@
     },
     {
       "source": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/NativeShells.java",
-      "domain": "Editor",
-      "representativeCases": 1,
-      "consumer": "EditorActivity.onCreate",
-      "content": "native-close-control-and-WebView-viewport-only"
+      "domain": "EditorState",
+      "representativeCases": 8,
+      "consumer": "EditorActivity handoff and Activity/WebView callbacks",
+      "content": "native-opening-ready-failure-explanations-and-accessible-close",
+      "lifecycleDomain": "EditorCase",
+      "lifecycleCases": 13,
+      "replay": "consumed-ticket-cannot-reopen",
+      "closed": "no-editor-owned-window-and-destroyed-WebView",
+      "identity": "synthetic-loopback-fixture-only"
     }
   ],
   "viewportProfiles": [
@@ -46,17 +51,17 @@
     {"widthDp": 320, "heightDp": 480, "fontScale": 1.6, "coverage": "overlay-panel-large-font"},
     {"widthDp": 640, "heightDp": 360, "fontScale": 1, "coverage": "overlay-panel-transcript-and-long-bubble"}
   ],
-  "renderedCaptures": 29,
+  "renderedCaptures": 37,
   "renderer": {"engine": "Robolectric 4.16 native Android Skia", "androidApi": 28, "windowOwner": "synthetic WindowManager adapter"},
   "reviewReceipts": {
-    "directory": "/home/kenan/data/pi-ui-review-20261009/native",
+    "directory": "/home/kenan/data/pi-ui-review-20261009/native-editor",
     "renderManifest": "manifest.json",
     "judgments": "review.json",
     "gallery": "index.html"
   },
   "notYetViewed": [
     {"scope": "system-window-compositor", "states": ["Android 36 status-navigation-cutout insets", "keyboard visibility and resize", "accessibility token and elevation", "Dialog system insets"]},
-    {"scope": "remote-WebView-content", "states": ["actual editor HTML and loaded documents", "editor permission navigation lock/revocation closure", "third-party Access email and code pages"]},
+    {"scope": "remote-WebView-content", "states": ["actual Chromium editor POST redirect HTML and loaded documents", "FLAG_SECURE system compositor enforcement", "visual return into shared React Files", "third-party Access email and code pages"]},
     {"scope": "Android-update", "states": ["package installer approval/cancellation", "allow-from-this-source settings"]},
     {"scope": "notifications", "states": ["idle/question/attention collapsed-expanded-private", "phone-control Show/Hide/Disable", "monitoring/error ongoing notices", "heads-up and lockscreen"]},
     {"scope": "Android-owned-controls", "states": ["native Toast compositor", "runtime permission prompts", "special-access setup", "launcher and launch splash"]}
