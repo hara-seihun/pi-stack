@@ -91,22 +91,53 @@ it.each([
   { remote: false, raw: false },
   { remote: true, raw: false },
   { remote: true, raw: true },
-])("reads current native context only on demand: $remote / raw=$raw", async ({ remote, raw }) => {
+])("previews current model context only on demand: $remote / raw=$raw", async ({ remote, raw }) => {
   const f = await fixture(undefined, undefined, remote
     ? { PI_REMOTE_SESSION_ID: "mirror-owner", PI_REMOTE_SERVER_URL: "http://127.0.0.1:1" }
     : { PI_REMOTE_SESSION_ID: "", PI_REMOTE_SERVER_URL: "" }, raw);
   const answer = f.message([{ type: "text", text: "done" }], "stop");
   answer.usage = { ...answer.usage, input: 12_000, output: 37, cacheRead: 2_000, cacheWrite: 300, totalTokens: 14_337 };
-  f.native.agent.streamFunction = () => f.reply(answer);
+  let sent: any[] = [];
+  f.native.agent.streamFunction = (_model, context) => { sent = JSON.parse(JSON.stringify(context.messages)); return f.reply(answer); };
   expect(await f.command("prompt", { workId: "capture", message: "capture" })).toMatchObject({ success: true });
   await f.waitFor(event => event.type === "agent_settled");
   expect(f.events.some(event => event.type === "context_update")).toBe(false);
+  const beforeInspection = readFileSync(f.native.sessionFile!, "utf8");
   const context = (await f.command("get_context")).data as any;
   expect(context).toMatchObject({ source: "runtime", tools: expect.any(Array), contextModel: answer.model,
     contextUsage: { tokens: 14_337, contextWindow: f.native.model!.contextWindow, percent: 14_337 / f.native.model!.contextWindow * 100 } });
-  expect(context.messages).toEqual(f.native.messages);
+  expect(JSON.parse(JSON.stringify(context.messages.filter((message: any) => message.role === "user")))).toEqual(sent.filter(message => message.role === "user"));
   expect(context.messages.at(-1)).toEqual(answer);
-  if (raw) expect(context).toMatchObject({ systemPrompt: "", tools: [] });
+  expect(readFileSync(f.native.sessionFile!, "utf8")).toBe(beforeInspection);
+  if (raw) {
+    expect(context.tools).toEqual([]);
+    expect(context.systemPrompt).toMatch(/^\[Model delivery:[^\n]*\]\n$/);
+    expect(JSON.parse(JSON.stringify(context.messages.slice(0, -1)))).toEqual(sent);
+  }
+}, 3000);
+
+it("previews an active forced system request without reentering admission or starting another provider call", async () => {
+  const f = await fixture(undefined, `export default pi => {
+    pi.on("before_agent_start", () => ({systemPrompt:"active approved instructions"}));
+    pi.on("context_with_system", event => ({messages:event.messages.map(message => message.role === "user" ? {...message,content:[{type:"text",text:"projected input"}]} : message)}));
+  }`);
+  const stream = createAssistantMessageEventStream(), started = deferred();
+  cleanups.push(async () => stream.end(f.message([], "aborted")));
+  let sent: any[] = [];
+  const provider = vi.fn((_model: unknown, context: { messages: any[] }) => { sent = JSON.parse(JSON.stringify(context.messages)); started.resolve(); return stream; });
+  f.native.agent.streamFunction = provider;
+  await f.command("prompt", { workId: "active-preview", message: "raw input" });
+  await started.promise;
+  const before = readFileSync(f.native.sessionFile!, "utf8"), leaf = f.native.sessionManager.getLeafId();
+  const current = await f.command("get_context");
+  expect(current).toMatchObject({ success: true, data: { systemPrompt: expect.stringContaining("active approved instructions") } });
+  expect(JSON.parse(JSON.stringify((current.data as any).messages))).toEqual(sent);
+  expect(readFileSync(f.native.sessionFile!, "utf8")).toBe(before);
+  expect(f.native.sessionManager.getLeafId()).toBe(leaf);
+  expect(provider).toHaveBeenCalledOnce();
+  expect(f.events.filter(event => event.type === "agent_start")).toHaveLength(1);
+  stream.push({ type: "done", reason: "stop", message: f.message([], "stop") }); stream.end();
+  await f.waitFor(event => event.type === "agent_settled");
 }, 3000);
 
 it("rejects oversized current context before emitting the payload", async () => {
@@ -304,7 +335,7 @@ it("sandbox exposes exactly four tools without instructions, discovered extensio
   expect(await f.command("prompt", { workId: "sandbox-context", message: "hello" })).toMatchObject({ success: true });
   await f.waitFor(event => event.type === "agent_settled");
   const context = (await f.command("get_context")).data as { systemPrompt: string; tools: { name: string; description: string }[] };
-  expect(context.systemPrompt).toBe("");
+  expect(context.systemPrompt).toMatch(/^\[Model delivery:[^\n]*\]\n$/);
   expect(context.tools.map(tool => tool.name).sort()).toEqual(["bash", "edit", "read", "write"]);
   expect(context.tools.every(tool => tool.description.includes("Confined test implementation."))).toBe(true);
   expect(await f.command("bash", { command: "id" })).toMatchObject({ success: false });
@@ -336,7 +367,12 @@ it("reads native tool results without duplicating messages or emitting context s
   expect(requests).toBe(2);
   expect(f.events.some(event => event.type === "context_update")).toBe(false);
   const context = (await f.command("get_context")).data as any;
-  expect(context.messages.filter((message: any) => message.role !== "system")).toMatchObject([user, call, result, answer]);
+  expect(f.native.messages.filter((message: any) => message.role !== "system")).toMatchObject([user, call, result, answer]);
+  const projected = context.messages.filter((message: any) => message.role !== "system");
+  expect(projected.map((message: any) => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+  expect(projected[2]).toMatchObject({ toolCallId: "result", toolName: "fixture_result", isError: false });
+  expect(projected[2].content.at(-1)).toEqual({ type: "text", text: "tool output" });
+  expect(projected[3]).toEqual(answer);
   expect(nextRequestUsage?.tokens).toBeGreaterThanOrEqual(10_020);
   expect(context.contextUsage.tokens).toBe(11_030);
 }, 3000);

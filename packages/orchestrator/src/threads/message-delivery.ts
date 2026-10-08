@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentSession, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -11,6 +12,11 @@ export type MessageDeliveryReceipt = { key: string; originalTimestamp: number; d
 type DeliveryManager = Pick<SessionManager, "getBranch" | "appendCustomEntry">;
 const stamped = Symbol("model-message-delivery");
 type StampedMessage = AgentMessage & { [stamped]?: true };
+const deliveryScope = new AsyncLocalStorage<"preview">();
+
+export function previewMessageDelivery<T>(operation: () => Promise<T>): Promise<T> {
+  return deliveryScope.run("preview", operation);
+}
 
 export function deliveryPrefix(at: number, timezone: DeliveryTimezone): DeliveryResult<string> {
   if (!Number.isFinite(at) || Number.isNaN(new Date(at).getTime())) return { ok: false, error: { code: "invalid", message: "Invalid model delivery time" } };
@@ -76,12 +82,16 @@ export function createMessageDeliveryProjection(manager: DeliveryManager, env: N
       }
       for (const receipt of data.receipts) receipts.set(receipt.key, receipt);
     }
-    const settingsData = env.PI_PERSON_SETTINGS_DATA ?? env.PI_REMOTE_DATA;
-    const timezone = settingsData ? readPersonTimezone(settingsData) : { ok: true as const, value: null };
-    if (!timezone.ok) return { ok: false, error: { code: "unavailable", message: `Cannot resolve owner timezone: ${timezone.error.message}` } };
-    const at = now();
-    const prefix = deliveryPrefix(at, timezone.value ? { state: "configured", zone: timezone.value.zone } : { state: "unconfigured" });
-    if (!prefix.ok) return prefix;
+    let delivery: { at: number; timezone: PersonTimezone | null; prefix: string } | null = null;
+    if (deliveryScope.getStore() !== "preview") {
+      const settingsData = env.PI_PERSON_SETTINGS_DATA ?? env.PI_REMOTE_DATA;
+      const timezone = settingsData ? readPersonTimezone(settingsData) : { ok: true as const, value: null };
+      if (!timezone.ok) return { ok: false, error: { code: "unavailable", message: `Cannot resolve owner timezone: ${timezone.error.message}` } };
+      const at = now();
+      const prefix = deliveryPrefix(at, timezone.value ? { state: "configured", zone: timezone.value.zone } : { state: "unconfigured" });
+      if (!prefix.ok) return prefix;
+      delivery = { at, timezone: timezone.value, prefix: prefix.value };
+    }
     const sources = sourceKeys(branch), occurrences = new Map<string, number>();
     const pending: MessageDeliveryReceipt[] = [], projected: AgentMessage[] = [];
     for (const message of messages) {
@@ -92,10 +102,14 @@ export function createMessageDeliveryProjection(manager: DeliveryManager, env: N
       const sourceId = sources.get(provenance)?.[occurrence];
       const key = sourceId ? `entry:${sourceId}:${message.role}` : `generated:${provenance}:${occurrence}`;
       if (!Number.isFinite(message.timestamp)) return { ok: false, error: { code: "invalid", message: "Incoming model message is missing timestamp provenance" } };
-      const receipt = receipts.get(key) ?? { key, originalTimestamp: message.timestamp, deliveredAt: at, timezone: timezone.value, prefix: prefix.value };
+      let receipt = receipts.get(key);
+      if (!receipt) {
+        if (delivery === null) { projected.push(message); continue; }
+        receipt = { key, originalTimestamp: message.timestamp, deliveredAt: delivery.at, timezone: delivery.timezone, prefix: delivery.prefix };
+        pending.push(receipt);
+      }
       const result = prefixMessage(message, receipt.prefix);
       if (!result.ok) return result;
-      if (!receipts.has(key)) pending.push(receipt);
       projected.push(result.value);
     }
     if (pending.length) {

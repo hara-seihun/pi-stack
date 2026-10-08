@@ -20,6 +20,7 @@ import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
 import { installMessageDelivery } from "./message-delivery.js";
+import { previewCurrentContext } from "./pi-current-context.js";
 import { inputReceipts } from "./pi-input-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
@@ -351,10 +352,13 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             response(false, "Sandbox sessions use only their confined tools and workspace"); return;
           }
           if (command.type === "get_context") {
-            const data = { source: "runtime", systemPrompt: raw ? "" : runtime.session.systemPrompt, messages: runtime.session.messages,
-              tools: runtime.session.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })),
-              contextUsage: runtime.session.getContextUsage(), contextModel: runtime.session.model?.id };
-            const event = { type: "response", id: command.id, command: command.type, success: true, data };
+            const context = await previewCurrentContext(runtime.session);
+            if (!context.ok) {
+              output({ type: "response", id: command.id, command: command.type, success: false,
+                error: context.error.message, errorCode: context.error.code });
+              return;
+            }
+            const event = { type: "response", id: command.id, command: command.type, success: true, data: context.value };
             const measured = measureJsonBytes(event, CONTEXT_WINDOW_MAX_BYTES);
             output(measured.ok ? event : { type: "response", id: command.id, command: command.type, success: false,
               error: measured.error.message, errorCode: measured.error.code });
