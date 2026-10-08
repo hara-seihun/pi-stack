@@ -82,8 +82,9 @@ function RouteName({ end }: { end: RouteEnd }) {
   if (end.kind === "self") return <span className="agent-route-name self">{known ?? AGENT_NAME}</span>;
   const name = known ?? end.name ?? shortThreadName(end.threadId);
   const title = directory?.name(end.threadId) ?? undefined;
+  const error = directory?.lookupError(end.threadId);
   return directory
-    ? <button type="button" className="agent-route-name" title={title ? `${name}: ${title}` : `Open ${name}`} onClick={event => { event.stopPropagation(); directory.open(end.threadId); }}>{name}</button>
+    ? <button type="button" className="agent-route-name" title={error ? `Name unavailable: ${error}. Open ${name}` : title ? `${name}: ${title}` : `Open ${name}`} onClick={event => { event.stopPropagation(); directory.open(end.threadId); }}>{name}</button>
     : <span className="agent-route-name">{name}</span>;
 }
 

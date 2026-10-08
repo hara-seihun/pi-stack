@@ -22,6 +22,7 @@ test("known threads show their name and running threads are marked", () => {
     busy: id => id === first,
     open: () => {},
     discover: ids => asked.push(ids),
+    lookupError: id => id === second ? "Thread not found" : null,
   };
   const html = renderToStaticMarkup(<ThreadDirectoryProvider value={directory}>
     <ThreadChips ids={[first, second]} />
@@ -29,5 +30,6 @@ test("known threads show their name and running threads are marked", () => {
   expect(html).toContain("Toy2 Optimality");
   expect(html).toContain("thread-chip busy");
   expect(html).toContain(`Thread ${second.slice(0, 8)}`);
+  expect(html).toContain("Name unavailable: Thread not found. Open Thread");
   expect(renderToStaticMarkup(<ThreadChips ids={[first]} />)).toBe("");
 });

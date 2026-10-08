@@ -57,6 +57,7 @@ import { ConversationHeader, ConversationScreen, type Delivery } from "./feature
 import { ItemBodies, ItemBodiesContext } from "./features/conversation/item-bodies";
 import { createLiveText, type LiveTextStore } from "./features/conversation/live-text";
 import { ThreadDirectoryProvider, type ThreadDirectory } from "./features/conversation/thread-chips";
+import { ThreadDiscovery } from "./thread-discovery";
 import { entriesFromHeads, WAITING_ENTRY } from "./features/conversation/transcript-entries";
 import { applyTranscriptEvent, hasEarlier, hasNewer, loadEarlier, loadNewer, loadLatest, type VisibleTranscriptRange, type TranscriptWindow } from "./features/conversation/transcript-store";
 import type { QueueAction } from "./features/queue/delivery";
@@ -1169,33 +1170,38 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     notifications: { count: attentionCount, attention: attentionCount > 0 },
     machine: { count: state.ownerErrors.length + (state.offline ? 1 : 0), attention: true },
   };
-  // A thread tool call names threads by id. The transcript shows what they are
-  // called, so an id the client has never seen is fetched once and kept with
-  // the other threads it knows.
-  const askedForThread = useRef(new Set<string>());
-  const discoverThreads = useCallback((ids: string[]) => {
-    for (const id of ids) {
-      if (askedForThread.current.has(id)) continue;
+  const [discoveryRevision, setDiscoveryRevision] = useState(0);
+  const discovery = useMemo(() => new ThreadDiscovery<Session>({
+    known: id => {
       const current = stateRef.current;
-      if ([...current.sessions, ...current.discovered].some(session => session.id === id)) continue;
-      askedForThread.current.add(id);
-      void api(API.session.method, API.session.path({ sessionId: id }))
-        .then((result: { session?: Session }) => {
-          const session = result?.session;
-          validateSession(session);
-          patch(state => [...state.sessions, ...state.discovered].some(item => item.id === session.id)
-            ? {} : { discovered: [...state.discovered, session] });
-        })
-        .catch(error => toast.error(`Could not load thread ${id}: ${error instanceof Error ? error.message : String(error)}`));
-    }
-  }, [patch, stateRef]);
+      return [...current.sessions, ...current.fleet, ...current.discovered].some(session => session.id === id);
+    },
+    load: async id => {
+      try {
+        const result = await api(API.session.method, API.session.path({ sessionId: id }));
+        const session = result?.session;
+        validateSession(session);
+        if (session.id !== id) return { ok: false, error: { code: "invalid_response", message: "Thread lookup returned a different thread" } };
+        return { ok: true, value: session };
+      } catch (cause) {
+        return { ok: false, error: { code: cause instanceof ApiError && cause.code ? cause.code : "request_failed",
+          message: cause instanceof Error ? cause.message : String(cause) } };
+      }
+    },
+    accept: session => patch(state => [...state.sessions, ...state.fleet, ...state.discovered].some(item => item.id === session.id)
+      ? {} : { discovered: [...state.discovered, session] }),
+    changed: () => setDiscoveryRevision(value => value + 1),
+    now: Date.now,
+  }), [patch, stateRef]);
+  const discoverThreads = useCallback((ids: string[]) => discovery.discover(ids), [discovery]);
   const threadDirectory = useMemo<ThreadDirectory>(() => ({
     name: id => knownSessions.find(session => session.id === id)?.name || null,
     agentName: id => { const session = knownSessions.find(item => item.id === id); return session ? agentName(session) : null; },
     busy: id => { const session = knownSessions.find(item => item.id === id); return session ? working(session) : false; },
     open: id => openThreadId(id),
     discover: discoverThreads,
-  }), [knownSessions, openThreadId, discoverThreads]);
+    lookupError: id => knownSessions.some(session => session.id === id) ? null : discovery.error(id),
+  }), [knownSessions, openThreadId, discoverThreads, discovery, discoveryRevision]);
 
   const panel = "panel" in route ? route.panel : null;
   const showDetail = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;
