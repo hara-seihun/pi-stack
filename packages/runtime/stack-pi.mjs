@@ -5,29 +5,24 @@ import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { nativeExitCode, nativeManagerEnvironment, nativeOrigin, recoverTerminalOwner } from "./native-recovery.mjs";
 
-export function terminalLaunch(args, env, directory, interactive) {
+export function terminalLaunch(args, directory) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const id = randomUUID(), unit = `pi-native-${id}.service`;
-  const manifest = join(directory, `${id}.launch.json`), environment = join(directory, `${id}.env`);
-  writeFileSync(manifest, JSON.stringify({ args, unit }), { mode: 0o600 });
-  writeFileSync(environment, Object.entries(env).filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${key}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`).join("\n") + "\n", { mode: 0o600 });
-  const recovery = ["/usr/bin/systemd-run", "--user", "--collect", "--quiet", `--unit=pi-native-recover-${id}.service`,
-    `--property=After=${unit}`, "--property=Restart=on-failure", "--property=RestartSec=5s", "--property=StartLimitIntervalSec=0",
-    `--property=EnvironmentFile=${environment}`, process.execPath, fileURLToPath(new URL("./native-recovery.mjs", import.meta.url)), environment, unit]
-    .map(arg => `"${arg.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`).join(" ");
-  return { unit, manifest, environment, args: ["--user", interactive ? "--pty" : "--pipe", "--wait", "--collect", "--quiet", `--unit=${unit}`,
-    "--service-type=exec", "--property=KillMode=control-group", `--property=WorkingDirectory=${process.cwd()}`,
-    `--property=EnvironmentFile=${environment}`, `--property=ExecStopPost=${recovery}`,
-    process.execPath, fileURLToPath(new URL("./native-host.mjs", import.meta.url)), manifest],
-    cleanup(removeEnvironment = false) { rmSync(manifest, { force: true }); if (removeEnvironment) rmSync(environment, { force: true }); } };
+  const id = randomUUID(), unit = `pi-native-${id}.scope`, guardian = `pi-native-watch-${id}.scope`;
+  const manifest = join(directory, `${id}.launch.json`);
+  writeFileSync(manifest, JSON.stringify({ args, unit, guardian, origin: nativeOrigin() }), { mode: 0o600 });
+  return { unit, guardian, manifest, args: ["--user", "--scope", "--collect", "--quiet", `--unit=${guardian}`,
+    "--property=KillMode=control-group", "--property=KillSignal=SIGKILL", "--property=TimeoutStopSec=3s",
+    process.execPath, fileURLToPath(new URL("./native-guardian.mjs", import.meta.url)), manifest],
+    cleanup() { rmSync(manifest, { force: true }); } };
 }
 
-export async function runTerminal(args, env = process.env) {
+export async function runTerminal(args, inputEnv = process.env) {
+  const env = nativeManagerEnvironment(inputEnv);
   const cli = fileURLToPath(new URL("./node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js", import.meta.url));
   if (args.length === 1 && ["--help", "-h", "--version", "-v"].includes(args[0])) {
-    const result = spawnSync(process.execPath, [cli, ...args], { stdio: "inherit" });
+    const result = spawnSync(process.execPath, [cli, ...args], { stdio: "inherit", env });
     if (result.error) throw result.error;
     return result.status ?? 1;
   }
@@ -35,24 +30,31 @@ export async function runTerminal(args, env = process.env) {
   const directory = join(env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "managed");
   const recovered = await recoverNativeSessionOwners(directory);
   if (!recovered.ok) throw Object.assign(new Error(recovered.error.message), { code: recovered.error.code });
-  const oneShot = args.includes("--print") || args.includes("-p") || args.some((arg, index) => arg === "--mode" && ["json", "rpc"].includes(args[index + 1]));
-  const launch = terminalLaunch(args, env, directory, !!(process.stdin.isTTY && process.stdout.isTTY && !oneShot));
+  const launch = terminalLaunch(args, directory);
   const handlers = ["SIGINT", "SIGTERM", "SIGHUP"].map(signal => {
     const handler = () => {
-      const result = spawnSync("systemctl", ["--user", "kill", "--kill-whom=main", `--signal=${signal}`, launch.unit], { env, encoding: "utf8", timeout: 5000 });
+      // Foreground scopes share the terminal's process group. SIGINT already
+      // reaches native Pi; forwarding it would turn one Ctrl-C into several.
+      if (signal === "SIGINT") return;
+      const result = spawnSync("systemctl", ["--user", "kill", "--kill-whom=all", `--signal=${signal}`, launch.unit], { env, encoding: "utf8", timeout: 5000 });
       if (result.error || result.status !== 0) console.error(`Managed terminal cancellation failed: ${result.error?.message ?? result.stderr?.trim()}`);
     };
     process.on(signal, handler);
     return [signal, handler];
   });
   try {
+    // --scope executes here, not in the manager's mount namespace. The real TTY,
+    // pipes, account, private mounts, cwd and application confinement are inherited.
     const child = spawn("systemd-run", launch.args, { stdio: "inherit", env });
     return await new Promise((resolve, reject) => {
       child.once("error", error => reject(Object.assign(new Error(`Managed terminal owner is unavailable: ${error.message}`), { code: "native_owner_unavailable" })));
-      child.once("close", (code, signal) => resolve(code ?? (signal === "SIGINT" ? 130 : 143)));
+      child.once("close", (code, signal) => { try { resolve(nativeExitCode(code, signal)); } catch (error) { reject(error); } });
     });
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
+    // Covers a watcher crash too; BindsTo stops its native scope. Unknown owner
+    // absence retains custody and the next same-owner launch retries recovery.
+    await recoverTerminalOwner(directory, launch.unit, env);
     launch.cleanup();
   }
 }

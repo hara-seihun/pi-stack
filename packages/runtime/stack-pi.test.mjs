@@ -4,30 +4,52 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { terminalLaunch } from "./stack-pi.mjs";
+import { nativeHostLaunch } from "./native-guardian.mjs";
+import { assertNativeOrigin, nativeExitCode, nativeManagerEnvironment, nativeOrigin } from "./native-recovery.mjs";
 import { managedCliSource } from "./patch-managed-cli.mjs";
 
-test("terminal launcher only attaches IO to an owned native host and keeps secrets out of argv", t => {
+test("terminal scopes inherit real IO/namespace and keep credentials out of manager arguments", t => {
   const dir = mkdtempSync(join(tmpdir(), "pi-terminal-launch-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const args = ["--mode", "rpc", "--api-key", "fixture-secret"], env = { HOME: dir, TOKEN: 'private "fixture"\\token' };
-  const pipe = terminalLaunch(args, env, dir, false);
-  assert.ok(pipe.args.includes("--pipe"));
-  assert.ok(pipe.args.includes("--wait"));
-  assert.ok(pipe.args.includes("--property=KillMode=control-group"));
-  const stop = pipe.args.find(arg => arg.startsWith("--property=ExecStopPost="));
-  assert.ok(stop.includes("native-recovery.mjs"));
-  assert.ok(stop.includes(`--property=After=${pipe.unit}`));
-  assert.ok(stop.includes("--property=Restart=on-failure"));
-  assert.equal(pipe.args.join(" ").includes("fixture-secret"), false);
-  assert.equal(pipe.args.join(" ").includes("private"), false);
-  assert.deepEqual(JSON.parse(readFileSync(pipe.manifest, "utf8")).args, args);
-  assert.equal(statSync(pipe.manifest).mode & 0o777, 0o600);
-  assert.equal(statSync(pipe.environment).mode & 0o777, 0o600);
-  assert.match(readFileSync(pipe.environment, "utf8"), /TOKEN="private \\"fixture\\"\\\\token"/);
-  pipe.cleanup(true);
-  const tty = terminalLaunch([], env, dir, true);
-  assert.ok(tty.args.includes("--pty"));
-  tty.cleanup(true);
+  const args = ["--mode", "rpc", "--api-key", "fixture-secret"];
+  const launch = terminalLaunch(args, dir);
+  assert.ok(launch.args.includes("--scope"));
+  assert.equal(launch.args.some(arg => ["--pty", "--pipe", "--wait"].includes(arg)), false);
+  assert.ok(launch.args.includes("--property=KillMode=control-group"));
+  assert.equal(launch.args.some(arg => /EnvironmentFile|WorkingDirectory|ExecStopPost/.test(arg)), false);
+  assert.equal(launch.args.join(" ").includes("fixture-secret"), false);
+  const manifest = JSON.parse(readFileSync(launch.manifest, "utf8"));
+  assert.deepEqual(manifest.args, args);
+  assert.deepEqual(manifest.origin, nativeOrigin());
+  assert.equal(statSync(launch.manifest).mode & 0o777, 0o600);
+  const native = nativeHostLaunch(manifest, launch.manifest);
+  assert.ok(native.includes("--scope"));
+  assert.ok(native.includes(`--property=BindsTo=${launch.guardian}`));
+  assert.ok(native.includes(`--property=After=${launch.guardian}`));
+  assert.ok(native.includes(`--unit=${launch.unit}`));
+  assert.equal(native.join(" ").includes("fixture-secret"), false);
+  assert.throws(() => nativeHostLaunch({ ...manifest, guardian: "another-owner.scope" }, launch.manifest), /Invalid managed terminal scope/);
+  launch.cleanup();
+});
+
+test("only the kernel UID selects the manager bus, preserving other application environment", () => {
+  const env = nativeManagerEnvironment({ XDG_RUNTIME_DIR: "/run/user/0", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/0/bus", HOME: "/private/app/home", TOKEN: "fixture" }, 1234);
+  assert.deepEqual(env, { XDG_RUNTIME_DIR: "/run/user/1234", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1234/bus", HOME: "/private/app/home", TOKEN: "fixture" });
+});
+
+test("namespace or account changes fail before native execution", () => {
+  const origin = nativeOrigin();
+  assert.doesNotThrow(() => assertNativeOrigin(origin));
+  for (const key of ["uid", "gid", "mount", "user", "cwd"]) {
+    assert.throws(() => assertNativeOrigin({ ...origin, [key]: typeof origin[key] === "number" ? origin[key] + 1 : "different" }), { code: "native_boundary_changed" });
+  }
+});
+
+test("native exit status preserves signal identity and rejects an unknown outcome", () => {
+  assert.equal(nativeExitCode(7, null), 7);
+  assert.equal(nativeExitCode(null, "SIGKILL"), 137);
+  assert.equal(nativeExitCode(null, "SIGINT"), 130);
+  assert.throws(() => nativeExitCode(null, null), { code: "native_exit_unknown" });
 });
 
 test("managed CLI factory patch owns initial and replacement sessions, fails changed upstream anchors", () => {

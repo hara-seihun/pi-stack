@@ -42,8 +42,8 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
   const ownerRecord = (() => {
     if (!unit) return undefined;
     const cgroup = readFileSync("/proc/self/cgroup", "utf8").trim().split("\n").find(line => line.startsWith("0::"))?.slice(3);
-    if (!/^pi-native-[a-f0-9-]+\.service$/.test(unit) || !databasePath.endsWith(".sqlite3") || !cgroup?.endsWith(`/${unit}`)) throw new Error("Native session host is not inside its declared managed unit");
-    return { threadId, databasePath, unit, cgroup, bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() };
+    if (!/^pi-native-[a-f0-9-]+\.scope$/.test(unit) || !databasePath.endsWith(".sqlite3") || !cgroup?.endsWith(`/${unit}`)) throw new Error("Native session host is not inside its declared managed scope");
+    return { threadId, databasePath, unit, cgroup, uid: process.getuid!(), bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() };
   })();
   const scope = new AsyncLocalStorage<Operation>();
   const callbacks = new Map<string, () => Promise<unknown>>();

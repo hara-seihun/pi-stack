@@ -1,6 +1,8 @@
 import { readFileSync, unlinkSync } from "node:fs";
+import { assertNativeOrigin } from "./native-recovery.mjs";
 const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
-if (!Array.isArray(manifest.args) || manifest.args.some(arg => typeof arg !== "string") || !/^pi-native-[a-f0-9-]+\.service$/.test(manifest.unit)) throw new Error("Invalid managed terminal launch manifest");
+if (!Array.isArray(manifest.args) || manifest.args.some(arg => typeof arg !== "string") || !/^pi-native-[a-f0-9-]+\.scope$/.test(manifest.unit)) throw new Error("Invalid managed terminal launch manifest");
+assertNativeOrigin(manifest.origin);
 process.env.PI_STACK_NATIVE_OWNER_UNIT = manifest.unit;
 unlinkSync(process.argv[2]);
 const main = new URL("./node_modules/@earendil-works/pi-coding-agent/dist/main.js", import.meta.url);

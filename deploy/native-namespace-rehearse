@@ -123,7 +123,7 @@ if (mode === "outside") {
     launch.args[index] = join(root, "guardian.mjs");
     const launched = spawnSync("systemd-run", launch.args, { env, encoding: "utf8", timeout: 4500 });
     assert.ifError(launched.error);
-    assert.equal(launched.status, scenario === "normal" ? 0 : 143, launched.stderr);
+    assert.equal(launched.status, scenario === "normal" ? 0 : 137, launched.stderr);
     const host = read(join(root, `${scenario}-host.json`));
     const reclaimed = read(join(root, `${scenario}-recovery.json`));
     assert.equal(reclaimed.stopped, true);
