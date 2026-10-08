@@ -39,6 +39,8 @@ export async function projectThreadNotifications(db: Database, owner: string, ap
   let cursor = Number((db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null)?.value ?? 0);
   const saved = (db.query("SELECT value FROM metadata WHERE key=?").get(pendingKey) as { value: string } | null)?.value;
   const pending = new Map<string, Completion>((saved ? JSON.parse(saved) as Completion[] : []).map(item => [item.threadId, item]));
+  const initialCursor = cursor;
+  const initialPending = JSON.stringify([...pending.values()]);
   const ready: Array<{ item: Completion; thread: Thread }> = [];
   while (true) {
     const result = await api.settlements(cursor, 100);
@@ -69,10 +71,14 @@ export async function projectThreadNotifications(db: Database, owner: string, ap
     ready.push({ item, thread });
     pending.delete(item.threadId);
   }
+  const nextPending = JSON.stringify([...pending.values()]);
+  const cursorChanged = cursor !== initialCursor;
+  const pendingChanged = nextPending !== initialPending;
+  if (!ready.length && !cursorChanged && !pendingChanged) return;
   db.transaction(() => {
     for (const { item, thread } of ready) recordIdleNotification(db, `${owner}:${item.executionId}`, thread, item.time);
-    db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(key, String(cursor));
-    db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(pendingKey, JSON.stringify([...pending.values()]));
+    if (cursorChanged) db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(key, String(cursor));
+    if (pendingChanged) db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(pendingKey, nextPending);
   })();
 }
 
