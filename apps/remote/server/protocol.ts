@@ -23,14 +23,6 @@ export interface EnvironmentEndpoint {
   baseUrl: string;
 }
 
-export type ContextSplice = {
-  baseHash: string;
-  targetHash: string;
-  prefixBytes: number;
-  deleteBytes: number;
-  insertBase64: string;
-};
-
 export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string }

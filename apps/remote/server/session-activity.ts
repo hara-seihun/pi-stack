@@ -1,7 +1,7 @@
 // What a thread is doing right now, for the features that watch rather than
 // read: Voice narrating the agent's work, and the meeting panel's per-thread
 // activity. It is a bounded window in memory, not a conversation store — the
-// native transcript and the captured context own history, and a supervisor
+// native transcript owns history, and a supervisor
 // restart simply starts the window again.
 
 export interface ActivityEvent {

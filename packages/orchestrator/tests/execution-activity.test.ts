@@ -91,7 +91,7 @@ it("enumerates known non-progress events without moving the clock and observes s
   const state = createExecutionActivity();
   observeExecutionActivity(state, { type: "model_request_start" }, 10);
   const waiting = executionActivitySnapshot(state);
-  for (const type of ["queue_update", "entry_appended", "session_info_changed", "thinking_level_changed", "context_update", "runner_attached"]) {
+  for (const type of ["queue_update", "entry_appended", "session_info_changed", "thinking_level_changed", "runner_attached"]) {
     expect(observeExecutionActivity(state, { type }, 20)).toBe(false);
     expect(executionActivitySnapshot(state)).toEqual(waiting);
   }

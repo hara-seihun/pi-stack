@@ -122,8 +122,8 @@ export class Fleet {
       case "summarization_retry_attempt_start": case "summarization_retry_finished":
       case "entry_appended": case "session_info_changed": case "thinking_level_changed": case "bash_execution_update":
       case "response": case "extension_ui_request": case "extension_error": case "user_bash":
-      case "owner_execution_phase": case "model_request_start": case "context_update": case "session_changed":
-      case "conversation_replaced": case "command_settled": case "runner_attached": case "thread_error": case "thread_message_inserted": return;
+      case "owner_execution_phase": case "model_request_start": case "session_changed":
+      case "command_settled": case "runner_attached": case "thread_error": case "thread_message_inserted": return;
     }
     assertNever(event);
   }

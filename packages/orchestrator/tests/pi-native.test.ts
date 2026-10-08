@@ -185,12 +185,10 @@ it.each([undefined, { callId: "4208e41f-cafe-4bc5-991f-02dcb8f0f723", instructio
     { role: "system", content: telephone?.instructions ?? "", timestamp: expect.any(Number) },
     { role: "user", content: [{ type: "text", text: message }], timestamp: expect.any(Number) },
   ] });
-  const update = output.find(event => event.type === "context_update") as { contextOwner: string; context: { systemPrompt: string; tools: unknown[]; messages: { role: string; content: unknown }[] } } | undefined;
-  expect(update).toBeDefined();
-  expect(update!.contextOwner).toBe("runner");
-  expect(update!.context.systemPrompt).toBe(telephone?.instructions ?? "");
-  expect(update!.context.tools).toEqual([]);
-  expect(update!.context.messages).toEqual([{ role: "user", content: [{ type: "text", text: message }], timestamp: expect.any(Number) }]);
+  expect(output.some(event => event.type === "context_update")).toBe(false);
+  const current = (await request({ type: "get_context" })).data as any;
+  expect(current).toMatchObject({ source: "runtime", systemPrompt: telephone?.instructions ?? "", tools: [] });
+  expect(current.messages).toEqual(native.messages);
   await expect(openPiSession({ ...options, threadId: "raw-isolated", sessionFile: join(cwd, "raw-isolated.jsonl"), args: ["--raw", "--orchestrator-context", JSON.stringify({ tools: [] })] }, () => {}, () => {}))
     .rejects.toThrow("Raw Pi sessions cannot carry an isolated application context");
 }, 3000);

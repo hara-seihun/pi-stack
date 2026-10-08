@@ -8,11 +8,11 @@ Pi Remote imports Pi Orchestrator's public API through the `pi-orchestrator` wor
 
 The runtime package owns the exact Pi development dependency. Root npm overrides keep every workspace on the same Pi and TypeBox versions. `package-lock.json` is the only JavaScript lockfile.
 
-## Pi package order
+## Pi packages
 
-Pi applies extensions in package order. Pi Remote's `context-mirror.ts` records the context after every other extension has transformed it, so it must load last.
+[`../config/packages.json`](../config/packages.json) names the common package list. Every account loads that list plus its host's packages. Repository packages name their deployed path. External npm and Git packages use Pi's pinned source syntax directly. `scripts/check-manifests.mjs` checks package identities and paths.
 
-[`../config/packages.json`](../config/packages.json) names the package order. Every account on every host loads the same list, plus whatever the host file adds ahead of the observer. Repository packages name their deployed path. External npm and Git packages use Pi's pinned source syntax directly. `scripts/check-manifests.mjs` checks the ordering rule, and Pi Remote checks the effective settings file at startup.
+Native Pi JSONL owns durable conversation history, including branches and history before compaction. Remote reads bounded native records for reopened chats and exports. Effective runtime context is inspected only on demand.
 
 ## Environments
 

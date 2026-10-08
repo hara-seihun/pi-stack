@@ -19,9 +19,7 @@ export class SupervisorRelease {
   get releasing(): boolean { return this.state !== "accepting"; }
 
   accepts(method: string, pathname: string): boolean {
-    return !this.releasing || API.patchSessionContext.match(method, pathname) !== null
-      || API.replaceSessionContext.match(method, pathname) !== null
-      || /^\/v1\/meet\/[0-9a-f-]{36}(?:\/|$)/i.test(pathname)
+    return !this.releasing || /^\/v1\/meet\/[0-9a-f-]{36}(?:\/|$)/i.test(pathname)
       || (method === "GET" && pathname === "/v1/meet/external/transcript")
       || (method === "POST" && /^\/v1\/meet\/external\/[0-9a-f-]{36}\/stop$/i.test(pathname))
       || [API.sessionMeeting, API.sessionMeetingVoice, API.sessionMeetingShare, API.sessionMeetingStop, API.sessionMeetingFrame]
@@ -42,8 +40,6 @@ export class SupervisorRelease {
       const detached = await this.resources.detach();
       if (!detached.ok) { this.state = "failed"; return detached; }
       await this.resources.closeImages();
-      // Idle Pi sessions upload their final context during detach. Their HTTP
-      // listener and database must outlive that shutdown hook.
       this.resources.stopServer();
       this.resources.closeDatabase();
       this.state = "closed";

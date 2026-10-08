@@ -52,7 +52,7 @@ Defaults come from Orchestrator. Remote's model picker restricts which configure
 - `message_facts` retains what the supervisor measured about a finished assistant message: the thinking it streamed and its response timing, joined to the message each finalizes.
 - Message annotations retain meeting-transcript attachment receipts, with the thread they were attached for.
 
-What a thread is doing right now lives in memory, in `server/session-activity.ts`: a bounded window per thread that Voice narrates from and the meeting panel shows. It is not history. A supervisor restart starts the window again, and the native transcript and captured context still hold the conversation. `GET /v1/sessions/:id/events` and the stream's `events` frame serve that window.
+What a thread is doing right now lives in memory, in `server/session-activity.ts`: a bounded window per thread that Voice narrates from and the meeting panel shows. It is not history. A supervisor restart starts the window again, and the native transcript still holds the conversation. `GET /v1/sessions/:id/events` and the stream's `events` frame serve that window.
 - Upload, inline-image and request records retain those Remote features' own custody.
 - Notification rows and per-owner cursors deliver durable owner settlement receipts to clients.
 
@@ -88,17 +88,17 @@ WebSocket upgrades under `/v1/` take the same identity-router path as HTTP reque
 
 Peer listings and inspections are derived caches. They are not another registry or execution owner. Local thread snapshots come directly from the person-owned service.
 
-## Context and live output
+## Native history and live output
 
-Pi's model context is the interactive view. The context mirror publishes durable message boundaries; live deltas take an in-memory path. Final live text remains until the matching context replacement acknowledges it. Compaction must acknowledge its replacement, otherwise Remote clears the stale document rather than displaying removed messages.
+The interactive view is Pi's durable native conversation history. It preserves thinking, tools, exact message identities and earlier exchanges across compaction. Live deltas are disposable; a persisted native message refreshes transcript heads and clears live output.
 
-The display projection strips provider continuation metadata and replaces inline image bytes with thread-scoped content-addressed URLs. Canonical context remains unchanged. Tool-result images load when expanded. The context mirror still writes verified byte splices into the journal, which checkpoints before its configured entry and byte limits; that is storage between the runtime and the supervisor, not what clients receive.
+The per-record display projection strips provider continuation metadata and replaces image bytes with thread-scoped content-addressed URLs. Native entries remain unchanged. Tool-result images load when expanded.
 
-Clients receive transcript items. `server/transcript-items.ts` derives an ordered list from the display projection: the system prompt, each tool schema, each user message, each assistant text and thinking block, and each tool call paired with its result. An item's id is the SHA-256 of its body, so a landing result changes exactly one item. Heads are small — inline text for what is visible, a preview for what opens on expansion, bounded arguments for a tool call — and bodies come from `GET /v1/sessions/:sessionId/items/:itemId`, which is immutable and cacheable forever. The list keeps its generation while every earlier item's identity survives; compaction, a failed compaction that clears the document, a fork and tree navigation mint a new generation and the client reloads its window. `GET /v1/sessions/:sessionId/transcript` pages older heads and answers 409 with the current generation when the client's is stale. `GET /v1/sessions/:sessionId/context` still returns the canonical document for tooling.
+`server/transcript-items.ts` derives each requested user message, assistant text/thinking block and tool call paired with its result. An item's ID is the SHA-256 of its body. Small heads contain visible text or bounded previews; exact bodies come from `GET /v1/sessions/:sessionId/items/:itemId` with immutable caching. The generation survives append and compaction while earlier item identities remain; changing branches replaces the generation. `GET /v1/sessions/:sessionId/transcript` pages older heads and answers 409 when the client's generation is stale.
 
-Live text and thinking travel as appends measured against what that stream already wrote, and as a reset when the runtime shortens or clears its buffer, which happens when a captured context acknowledges the message or the thread settles. Thinking travels only to clients that opened the thinking card.
+`GET /v1/sessions/:sessionId/context` streams native entries in bounded revision-pinned pages; `?leafId=ID` selects a branch. `?view=current` inspects an active runtime's effective context on demand. Reopening or exporting an inactive thread does not start execution.
 
-`server/live-projection.ts` and `server/tool-progress.ts` preserve current tool cards until canonical context contains their results. `server/context-journal.ts`, `server/context-display.ts`, `server/transcript-items.ts` and `server/sync.ts` own document storage, derivation and transport details.
+`server/live-projection.ts` and `server/tool-progress.ts` preserve bounded live tool previews until native results arrive. `server/thread-transcript-source.ts`, `server/context-display.ts` and `server/source-transcripts.ts` own native-window display, projection and lazy source access. Voice reads recent native messages through the same owner inspection boundary.
 
 ## New/Open Chat picker
 

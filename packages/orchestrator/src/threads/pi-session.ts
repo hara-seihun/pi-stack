@@ -6,11 +6,13 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, createBashTool,
-  buildSessionContext, convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { OpenPiSession, PiCommand, PiEvent, PiSession } from "./contracts.js";
+  getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
+import { CONTEXT_WINDOW_MAX_BYTES, type OpenPiSession, type PiCommand, type PiEvent, type PiSession } from "./contracts.js";
+import { measureJsonBytes } from "./json-size.js";
+import { retainNativeThinking } from "./pi-native-thinking.js";
 import { threadTools } from "./pi-tools.js";
 import { convergeTools } from "./converge.js";
-import { argument, assertPiSessionFile, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
+import { argument, assertPiSessionFile, checkpointPiBranch, checkpointPiSession, preparePiSession, seedPiSession } from "./pi-session-file.js";
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
 import { scopedBashOperations } from "./pi-bash-resources.js";
@@ -122,6 +124,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       cwd = requirePiCwd(admission, cwd, "runtime.cwd");
       if (sandbox && cwd !== options.cwd) throw new Error("Sandbox sessions cannot switch workspaces");
       preparePiSession(sessionManager);
+      env.PI_SESSION_FILE = sessionManager.getSessionFile();
       const memoryFactories = memoryEligible ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
         const api = options.threads ?? createThreadClient(env.PI_THREAD_API_URL!, fetch, { token: env.PI_THREAD_TOKEN });
         const result = await api.ask({ threadId: options.threadId, requestId: `${options.threadId}:${id}`, questions: [{ question, suggestions }] });
@@ -129,54 +132,22 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         return result.value;
       } })] : [];
       const isolated = await isolatedPiContext({ ...options, cwd, sessionFile: sessionManager.getSessionFile()! }, env);
-      // Pi Remote's context-mirror extension owns context capture when it is loaded; a raw session loads no packages, so the runner reports.
-      const contextOwner = !room && !raw && env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
-      // Like the mirror, the runner also reports each finished reply. The `context` event fires only before a
-      // model call, so without this a raw thread's context never held its final answer: the transcript kept it
-      // as live text and the supervisor's response metrics, keyed to that message, had nothing to attach to.
-      const threadContext = { name: "thread-context", factory: (pi: Parameters<typeof threadSpeed>[0]) => {
-        let reported: { systemPrompt: string; tools: unknown[]; messages: ReturnType<typeof convertToLlm>;
-          contextUsage?: ReturnType<ExtensionContext["getContextUsage"]>; contextModel?: string } | null = null;
-        const usage = (ctx: ExtensionContext) => ({ contextUsage: ctx.getContextUsage(), contextModel: ctx.model?.id });
-        pi.on("context", (event, ctx) => {
-          const active = new Set(pi.getActiveTools());
-          reported = { systemPrompt: ctx.getSystemPrompt(),
-            tools: pi.getAllTools().filter(tool => active.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters })),
-            messages: convertToLlm(event.messages), ...usage(ctx) };
-          output({ type: "context_update", contextOwner, context: reported });
-        });
-        pi.on("message_end", event => {
-          if (!reported || (event.message.role !== "assistant" && event.message.role !== "toolResult")) return;
-          reported = { ...reported, messages: [...reported.messages, ...convertToLlm([event.message])] };
-          output({ type: "context_update", contextOwner, context: reported });
-        });
-        pi.on("turn_end", (_event, ctx) => {
-          if (!reported) return;
-          reported = { ...reported, ...usage(ctx) };
-          output({ type: "context_update", contextOwner, context: reported });
-        });
-        pi.on("session_compact", (_event, ctx) => {
-          if (!reported) return;
-          reported = { ...reported, messages: convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages), ...usage(ctx) };
-          output({ type: "context_update", contextOwner, context: reported });
-        });
-      } };
       const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
         settingsManager: isolated?.settingsManager,
         resourceLoaderOptions: room ? {
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
-          extensionFactories: [routing, usageLogger, threadSpeed, threadContext, ...memoryFactories, roomSessionInstructions(env)],
+          extensionFactories: [routing, usageLogger, threadSpeed, ...memoryFactories, roomSessionInstructions(env)],
         } : isolated ? {
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           extensionsOverride: () => isolated.resourceLoader.getExtensions(),
         } : raw ? {
           // Raw: no packages, skills, prompt templates, AGENTS files or SYSTEM.md; only account routing,
-          // usage evidence, service tier, the empty system prompt and context reporting for the owning controller.
+          // usage evidence, service tier and the empty system prompt.
           noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
           systemPromptOverride: () => undefined, appendSystemPromptOverride: () => [],
-          extensionFactories: [routing, usageLogger, threadSpeed, telephone ? telephoneModelContext(telephone) : rawModelContext, threadContext],
-        } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, threadContext, modeTools(env), ...memoryFactories] } });
+          extensionFactories: [routing, usageLogger, threadSpeed, telephone ? telephoneModelContext(telephone) : rawModelContext],
+        } : { additionalExtensionPaths: extensions, extensionFactories: [threadSpeed, modeTools(env), ...memoryFactories] } });
       if (isolated) { services.resourceLoader = isolated.resourceLoader; acceptedContext = JSON.parse(argument(options.args, "--orchestrator-context")!); }
       const errors = services.resourceLoader.getExtensions().errors;
       if (errors.length) throw new Error(`Session extensions failed: ${JSON.stringify(errors)}`);
@@ -186,7 +157,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       const selection = provider && modelId ? await resolveSessionModel(services.modelRuntime.getModels(), provider, modelId, env) : undefined;
       if (selection && !selection.ok) throw new Error(selection.error);
       const bash = createBashTool(cwd, { operations: scopedBashOperations(env), spawnHook: context => ({ ...context, env: { ...context.env, ...env,
-        PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
+        PI_SESSION_FILE: sessionManager.getSessionFile() } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
         tools: room ? ROOM_TOOLS : sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined),
@@ -194,9 +165,15 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
           : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
       if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
       if (telephone && created.session.agent.state.tools.length !== 0) throw new RunnerStartupError("Telephone sessions cannot expose host tools");
+      retainNativeThinking(created.session);
       observeProviderRequests(created.session, output);
       execution.bind(created.session);
       const session = created.session, agent = session.agent;
+      const navigateTree = session.navigateTree.bind(session);
+      session.navigateTree = async (...args) => {
+        try { return await navigateTree(...args); }
+        finally { checkpointPiBranch(session.sessionManager); }
+      };
       const prompt = session.prompt.bind(session);
       const promptWork = new WeakMap<object, string>();
       session.prompt = (text, options) => {
@@ -298,7 +275,6 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         checkpointPiSession(runtime.session.sessionManager);
         commands.attach(runtime.session.sessionManager);
         output({ type: "session_changed", sessionFile: runtime.session.sessionFile, sessionId: runtime.session.sessionId, cwd: runtime.cwd });
-        output({ type: "conversation_replaced", messages: runtime.session.messages });
         return result;
       } finally { replacing = false; }
     }
@@ -343,7 +319,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             }
           }
           if (event.command === "get_state" && event.success) event = { ...event, data: { ...event.data as object, ...receipts(),
-            lastAssistantMessage: lastAssistant(), context: acceptedContext, localTools: execution.activeTools, pendingCommandCount: backgroundCommands.size,
+            lastAssistantMessage: lastAssistant(), context: acceptedContext, historySource: "native-jsonl-v1", localTools: execution.activeTools, pendingCommandCount: backgroundCommands.size,
             isStreaming: !runtime.session.isIdle || execution.active || executionStart !== undefined || pendingInputs.size > 0,
             cancellationFailed: execution.blocked } };
         }
@@ -370,8 +346,13 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             response(false, "Sandbox sessions use only their confined tools and workspace"); return;
           }
           if (command.type === "get_context") {
-            response(true, undefined, { systemPrompt: raw ? "" : runtime.session.systemPrompt, messages: runtime.session.messages,
-              tools: runtime.session.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })) });
+            const data = { source: "runtime", systemPrompt: raw ? "" : runtime.session.systemPrompt, messages: runtime.session.messages,
+              tools: runtime.session.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })),
+              contextUsage: runtime.session.getContextUsage(), contextModel: runtime.session.model?.id };
+            const event = { type: "response", id: command.id, command: command.type, success: true, data };
+            const measured = measureJsonBytes(event, CONTEXT_WINDOW_MAX_BYTES);
+            output(measured.ok ? event : { type: "response", id: command.id, command: command.type, success: false,
+              error: measured.error.message, errorCode: measured.error.code });
             return;
           }
           if (command.type === "set_model") {

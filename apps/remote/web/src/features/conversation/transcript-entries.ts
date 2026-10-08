@@ -67,7 +67,7 @@ export function entriesFromHeads(heads: readonly TranscriptItemHead[], bodyLoade
   return heads.map(head => entryFromHead(head, bodyLoaded?.(head.id) ?? false));
 }
 
-/** Shown when a thread has no captured context yet. */
+/** Shown when a thread has no finalized native history yet. */
 export const WAITING_ENTRY: ContextEntry = {
   key: "waiting", signature: "waiting", kind: "notice", label: "Context",
   text: "Context will appear when Pi makes its next model request.",

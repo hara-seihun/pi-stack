@@ -7,7 +7,6 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
-import { capturedContextUsage } from "./context-usage";
 import { startThreadRefresh } from "./thread-refresh";
 import { readLivePeers, readPeerAncestors, readPeerSession } from "./peer-directory";
 import {
@@ -57,18 +56,14 @@ import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
-import { displayAssistantMessage } from "./context-display";
-import { readRecentContextMessages } from "./recent-context-messages";
-import { CapturedTranscriptSource } from "./captured-transcript-source";
+import { readRecentHistoryMessages } from "./recent-history-messages";
 import { ThreadTranscriptSource } from "./thread-transcript-source";
 import { contextResponse } from "./context-response";
 import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { ResponseTiming, type ResponseMetrics } from "./response-metrics";
-import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
-import { questionAnswerContext } from "./question-answer-context";
+import { messageFinalizationKey, sha256 } from "./sync";
 import { QuestionFeed } from "./question-feed";
-import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { lifeClient } from "kenan-memory/life-client";
@@ -115,7 +110,6 @@ import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
-import { ResourceCache } from "../shared/resource-cache";
 import { SourceTranscripts, type SourceResult } from "./source-transcripts";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService } from "./messaging";
@@ -161,36 +155,6 @@ function bashTimeoutSeconds(value: unknown): BashTimeoutSeconds {
     ? seconds as BashTimeoutSeconds
     : DEFAULT_BASH_TIMEOUT_SECONDS;
 }
-
-function configuredPackageSource(entry: unknown): string | null {
-  if (typeof entry === "string") return entry;
-  if (!entry || typeof entry !== "object" || !("source" in entry)) return null;
-  return typeof entry.source === "string" ? entry.source : null;
-}
-
-function assertContextMirrorLoadsLast() {
-  const settingsPath = join(AGENT_DIR, "settings.json");
-  let settings: { packages?: unknown[] };
-  try {
-    settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  } catch (error) {
-    throw new Error(`Pi Remote requires its context capture package to be installed last. Could not read ${settingsPath}: ${error instanceof Error ? error.message : error}`);
-  }
-  const source = configuredPackageSource(settings.packages?.at(-1));
-  let configuredRoot: string | null = null;
-  if (source && !source.startsWith("npm:") && !source.startsWith("git:") && !source.includes("://")) {
-    try {
-      configuredRoot = realpathSync(isAbsolute(source) ? source : resolve(AGENT_DIR, source));
-    } catch {
-      configuredRoot = null;
-    }
-  }
-  if (configuredRoot !== PACKAGE_ROOT) {
-    throw new Error(`Pi Remote's package must be the final entry in ${settingsPath} so context-mirror.ts observes every context transformation. Run: pi remove ${PACKAGE_ROOT}; pi install ${PACKAGE_ROOT}`);
-  }
-}
-
-if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
@@ -293,9 +257,7 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
-const capturedTranscripts = new CapturedTranscriptSource(db, id => threads.questionAnswerSource(id),
-  (id, entryId) => threads.questionAnswerSourceMessage(id, entryId));
-const transcriptSource = new ThreadTranscriptSource(db, capturedTranscripts, (id, options) => directory.inspect(id, options),
+const transcriptSource = new ThreadTranscriptSource(db, (id, options) => directory.inspect(id, options),
   id => liveProjections.get(id)?.toolProgress, identity => piReactions.list(identity));
 const transcripts = new SourceTranscripts(db, transcriptSource.read, transcriptSource.project,
   (sessionId, hash) => API.sessionImage.path({ sessionId, hash }), id => {
@@ -312,7 +274,6 @@ const liveProjections = new Map<string, LiveProjection>();
 /** Live timing of the response each session is streaming right now. */
 const responseTiming = new ResponseTiming();
 const activity = new SessionActivity(() => now());
-const contextFinalizedMessages = new Map<string, string>();
 const forkingSessions = new Set<string>();
 let shuttingDown = false;
 const runner = createSharedPiSessionOpener({ dataDir: DATA });
@@ -470,7 +431,6 @@ async function refreshThreadInspection(id: string, fresh = false) {
   const pending = inspectingThreads.get(id);
   if (pending) return pending;
   const local = threads.get(id);
-  if (local && !peerInspections.has(id) && hasCapturedContext(id)) return;
   const known = peerInspections.get(id);
   const listed = peerThreads.get(id);
   if (!fresh && !local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
@@ -678,133 +638,13 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-type StoredContext = { capturedAt: number; document: string; hash: string };
-const contextCacheLimits = { entries: 32, bytes: 64 * 1024 * 1024 };
-const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheLimits);
-
-/** The newest user and assistant messages of this thread, from the context the
- * agent actually holds. Voice reads the conversation from the captured context,
- * which is where the conversation is. */
-function recentContextMessages(sessionId: string, limit: number): Array<{ role: "user" | "assistant"; text: string }> {
-  const read = readRecentContextMessages(db, sessionId, limit, contentText);
-  if (!read.ok) throw new Error(`${read.error.code}: ${read.error.detail}`);
-  return read.value;
-}
-
-function hasCapturedContext(sessionId: string): boolean {
-  return Boolean(db.query("SELECT 1 FROM session_contexts WHERE session_id=?").get(sessionId));
-}
-
-function boundedContextUsage(sessionId: string, model: string) {
-  const row = db.query("SELECT captured_at,document FROM captured_context_usage WHERE session_id=?").get(sessionId) as { captured_at: number; document: string } | null;
-  return capturedContextUsage(row ? { document: row.document } : null, model);
-}
-
 function sourceValue<T>(result: SourceResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
   return result.value;
 }
 
-function cacheStoredContext(sessionId: string, stored: { capturedAt: number; document: string; hash: string } | null, captured?: any) {
-  if (stored && threads.get(sessionId)) peerInspections.delete(sessionId);
-  const known = storedContextCache.get(sessionId) ?? null;
-  const context = stored ? captured ?? JSON.parse(stored.document) : null;
-  if (stored) {
-    db.query("DELETE FROM captured_context_unavailable WHERE session_id=?").run(sessionId);
-    db.query("INSERT OR REPLACE INTO captured_context_usage VALUES(?,?,?)")
-      .run(sessionId, stored.capturedAt, JSON.stringify({ contextUsage: context.contextUsage, contextModel: context.contextModel }));
-  } else db.query("DELETE FROM captured_context_usage WHERE session_id=?").run(sessionId);
-  const progress = liveProjections.get(sessionId)?.toolProgress;
-  if (progress?.size && stored && known?.hash !== stored.hash) {
-    for (const message of context.messages ?? []) {
-      if (message?.role === "toolResult") progress.delete(message.toolCallId);
-    }
-  }
-  storedContextCache.set(sessionId, stored, stored ? stored.document.length * 2 : 4);
-  if (known?.hash !== stored?.hash) signalTranscript(sessionId);
-}
-
 function invalidateDisplayContext(sessionId: string) {
   signalTranscript(sessionId);
-}
-
-function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
-  return questionAnswerContext(threads, sessionId, baseStoredContext(sessionId));
-}
-
-function baseStoredContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
-  const cached = storedContextCache.get(sessionId);
-  if (cached !== undefined) return cached;
-  const stored = readContext(db, sessionId);
-  cacheStoredContext(sessionId, stored);
-  return stored;
-}
-
-function clearStoredContext(sessionId: string) {
-  db.transaction(() => {
-    db.query("DELETE FROM session_context_patches WHERE session_id=?").run(sessionId);
-    db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
-    db.query("INSERT OR REPLACE INTO captured_context_unavailable VALUES(?,?)")
-      .run(sessionId, "The current model context is unavailable because compaction did not acknowledge its replacement");
-  })();
-  cacheStoredContext(sessionId, null);
-  transcripts.forget(sessionId);
-  invalidateDisplayContext(sessionId);
-  signalSync();
-}
-
-function storeContextCapture(id: string, body: any) {
-  const capturedAt = Number(body.capturedAt);
-  const context = body.context;
-  if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0) throw new Error("Valid context capture time required");
-  if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
-    || !Array.isArray(context.tools) || !Array.isArray(context.messages)) throw new Error("Valid context required");
-  const document = JSON.stringify(context);
-  const runtime = liveProjections.get(id);
-  const compactionReplacement = body.replacement === "compaction" && runtime?.compacting === true;
-  let changed = false;
-  let hash = sha256(document);
-  let time = capturedAt;
-  db.transaction(() => {
-    const current = storedContext(id);
-    if (current && capturedAt <= current.capturedAt) {
-      if (!compactionReplacement) { hash = current.hash; time = current.capturedAt; return; }
-      time = current.capturedAt + 1;
-    }
-    db.query(`INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
-      ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context`).run(id, time, document);
-    db.query("DELETE FROM session_context_patches WHERE session_id=?").run(id);
-    inlineImages.acceptContext(id, document);
-    changed = true;
-  })();
-  if (changed) {
-    cacheStoredContext(id, { capturedAt: time, document, hash }, context);
-    if (compactionReplacement && runtime) runtime.compactionContextHash = hash;
-    signalSync();
-  }
-  if (hash === sha256(document)) acknowledgeMessageContext(id, body.finalizesMessage);
-  return { ok: true, capturedAt: time, hash };
-}
-
-function requireCompactionContext(sessionId: string, rt: LiveProjection) {
-  const stored = storedContext(sessionId);
-  if (!rt.compactionContextHash || stored?.hash !== rt.compactionContextHash) clearStoredContext(sessionId);
-  rt.compactionContextHash = null;
-}
-
-function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown) {
-  if (typeof finalizesMessage !== "string" || !finalizesMessage) return;
-  contextFinalizedMessages.set(sessionId, finalizesMessage);
-  const rt = liveProjections.get(sessionId);
-  if (!rt || rt.pendingContextFinalization !== finalizesMessage) return;
-  rt.pendingContextFinalization = null;
-  rt.liveText = rt.liveText.slice(Math.min(rt.pendingContextTextLength, rt.liveText.length));
-  const removedThinkingLength = Math.min(rt.pendingContextThinkingLength, rt.liveThinking.length);
-  rt.liveThinking = rt.liveThinking.slice(removedThinkingLength);
-  rt.thinkingBlockStart = Math.max(0, rt.thinkingBlockStart - removedThinkingLength);
-  rt.pendingContextTextLength = 0;
-  rt.pendingContextThinkingLength = 0;
-  signalLiveSync();
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
@@ -852,8 +692,8 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
   ].filter(Boolean).join("\n\n");
 }
 
-function voiceInstructions(row: any): string {
-  const history = recentContextMessages(row.id, 8)
+async function voiceInstructions(row: any): Promise<string> {
+  const history = sourceValue(await readRecentHistoryMessages(directory.inspect, row.id, 8, contentText))
     .map((message) => `${message.role === "user" ? "User" : "Agent"}: ${message.text.slice(0, 1_500)}`)
     .join("\n");
   const policy = readFileSync(new URL("./voice/delegation-policy.md", import.meta.url), "utf8").trim();
@@ -959,8 +799,7 @@ function ownsSupervisorLease(): boolean {
 }
 
 // One step of visible work. Voice and the meeting panel watch this window;
-// nothing here is conversation history, which the native transcript and the
-// captured context own.
+// Conversation history belongs to the native transcript.
 function emit(sessionId: string, type: string, payload: Record<string, unknown> = {}, receiptId: string | null = null): number {
   if (!ownsSupervisorLease()) return 0;
   const seq = activity.add(sessionId, type, payload, receiptId);
@@ -972,18 +811,11 @@ function emit(sessionId: string, type: string, payload: Record<string, unknown> 
   return seq;
 }
 
-function recordMessageFact(sessionId: string, finalizesMessage: string, column: "thinking" | "metrics", value: string) {
+function recordMessageFact(sessionId: string, finalizesMessage: string, column: "metrics", value: string) {
   ensureThreadView(db, sessionId);
   db.query(`INSERT INTO message_facts(session_id,finalizes_message,${column}) VALUES(?,?,?)
     ON CONFLICT(session_id,finalizes_message) DO UPDATE SET ${column}=excluded.${column}`)
     .run(sessionId, finalizesMessage, value);
-}
-
-function recordThinkingEvent(sessionId: string, text: string, finalizesMessage: string) {
-  if (!ownsSupervisorLease() || !text) return;
-  invalidateDisplayContext(sessionId);
-  recordMessageFact(sessionId, finalizesMessage, "thinking", text);
-  signalSync();
 }
 
 function recordResponseMetrics(sessionId: string, metrics: ResponseMetrics | null, finalizesMessage: string) {
@@ -1103,7 +935,6 @@ function publicSession(row: any,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
-    ...(queued ? { contextUsage: boundedContextUsage(row.id, (row.effectiveSettings ?? row.settings).model) } : {}),
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
     ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held)),
@@ -1120,7 +951,7 @@ function publicSession(row: any,
 // The event stream
 //
 // Shared work happens once: the inbox projection is built and encoded per
-// version, the dashboard once per refresh, the transcript once per capture.
+// version, the dashboard once per refresh, the transcript at native message boundaries.
 // Each stream then sends its client only what that client does not already
 // hold, which it remembers on the ClientStream.
 
@@ -1170,7 +1001,7 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected), contextUsage: boundedContextUsage(selected, session.model) } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
@@ -1256,8 +1087,6 @@ async function sendTranscript(stream: ClientStream): Promise<void> {
   if (!sessionId) return;
   const revision = stream.revision;
   const loaded = await transcripts.page(sessionId, undefined, 60);
-  if (!loaded.ok && loaded.error.code === "captured_context_unavailable" && !stream.closed && stream.revision === revision)
-    stream.publish({ type: "transcript", sessionId, generation: `unavailable:${sessionId}`, total: 0, items: [] });
   let page = sourceValue(loaded);
   const from = stream.subscription.transcriptFrom;
   const limit = from == null ? 60 : Math.min(600, Math.max(60, page.total - from));
@@ -1320,14 +1149,6 @@ function contentText(content: unknown): string {
 
 function textFromMessage(message: any): string {
   return message?.role === "assistant" ? contentText(message.content) : "";
-}
-
-function thinkingFromMessage(message: any): string {
-  if (message?.role !== "assistant" || !Array.isArray(message.content)) return "";
-  return message.content
-    .filter((block: any) => block?.type === "thinking")
-    .map((block: any) => String(block.thinking ?? ""))
-    .join("");
 }
 
 function activeSessionEntries(entries: any[], leafId: unknown): any[] {
@@ -1402,6 +1223,7 @@ function handlePiEvent(sessionId: string, event: any) {
     signalSync();
     signalLiveSync();
   }
+  if (event.type === "entry_appended" || event.type === "session_changed" || event.type === "command_settled") signalTranscript(sessionId);
   if (event.type === "agent_end" || event.type === "agent_settled") settleLiveProjection(rt);
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
     restoreLiveProjection(rt, event.data.live);
@@ -1412,15 +1234,6 @@ function handlePiEvent(sessionId: string, event: any) {
   }
   if (event.type === "thread_error") {
     emit(sessionId, "notice", { text: String(event.error) });
-    return;
-  }
-  if (event.type === "context_update") {
-    if (event.contextOwner === "remote-mirror") return;
-    const last = event.context?.messages?.findLast((message: any) => message.role === "assistant");
-    storeContextCapture(sessionId, { context: event.context,
-      capturedAt: Math.max(Date.now(), (storedContext(sessionId)?.capturedAt ?? 0) + 1),
-      replacement: rt.compacting ? "compaction" : undefined,
-      finalizesMessage: event.finalizesMessage ?? messageFinalizationKey(last) });
     return;
   }
   if (event.type === "thread_message_inserted") {
@@ -1474,33 +1287,16 @@ function handlePiEvent(sessionId: string, event: any) {
     if (block && rt.liveThinking.length === rt.thinkingBlockStart) rt.liveThinking += block;
     touchSession(sessionId);
   } else if (event.type === "message_end") {
+    signalTranscript(sessionId);
     if (rt.thinkingActive) { rt.thinkingActive = false; touchSession(sessionId); }
     const text = textFromMessage(event.message);
     if (event.message?.role === "assistant") {
       inlineImages.accept(sessionId, sha256(text), text);
-      const textPrefix = rt.liveText.slice(0, Math.min(rt.pendingContextTextLength, rt.liveText.length));
-      const displayText = textFromMessage(displayAssistantMessage(event.message));
-      if (displayText) rt.liveText = textPrefix + displayText;
-      const thinkingPrefix = rt.liveThinking.slice(0, Math.min(rt.pendingContextThinkingLength, rt.liveThinking.length));
-      const streamedThinking = rt.liveThinking.slice(thinkingPrefix.length);
-      const completedThinking = thinkingFromMessage(event.message) || streamedThinking;
-      if (completedThinking) rt.liveThinking = thinkingPrefix + completedThinking;
-      const finalization = messageFinalizationKey(event.message);
-      recordThinkingEvent(sessionId, completedThinking, finalization);
-      recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), finalization);
-      if (contextFinalizedMessages.get(sessionId) === finalization) {
-        rt.pendingContextFinalization = null;
-        rt.liveText = "";
-        rt.liveThinking = "";
-        rt.thinkingBlockStart = 0;
-        rt.pendingContextTextLength = 0;
-        rt.pendingContextThinkingLength = 0;
-      } else {
-        rt.pendingContextFinalization = finalization;
-        rt.pendingContextTextLength = rt.liveText.length;
-        rt.pendingContextThinkingLength = rt.liveThinking.length;
-        rt.thinkingBlockStart = rt.liveThinking.length;
-      }
+      recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), messageFinalizationKey(event.message));
+      rt.liveText = "";
+      rt.liveThinking = "";
+      rt.thinkingBlockStart = 0;
+      signalTranscript(sessionId);
       signalLiveSync();
     }
     if (text && event.message?.role === "assistant") {
@@ -1554,15 +1350,11 @@ function handlePiEvent(sessionId: string, event: any) {
     if (!event.success && event.finalError) emit(sessionId, "notice", { text: `Retry failed: ${String(event.finalError)}` });
   } else if (event.type === "compaction_start") {
     rt.compacting = true;
-    rt.compactionContextHash = null;
     touchSession(sessionId);
     emit(sessionId, "notice", { text: "Compacting context…" });
   } else if (event.type === "compaction_end") {
     rt.compacting = false;
-    if (event.result) requireCompactionContext(sessionId, rt);
-    else {
-      rt.compactionContextHash = null;
-    }
+    signalTranscript(sessionId);
     touchSession(sessionId);
     const text = event.aborted
       ? "Context compaction cancelled"
@@ -1592,7 +1384,7 @@ function threadEnvironment(thread: Thread) {
     PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
     ...(ROOMS_ENABLED && roomMetadata(thread.metadata?.room) ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
-    PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
+    PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""),
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
     PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`, PI_CODING_AGENT_DIR: AGENT_DIR,
   };
@@ -1695,21 +1487,27 @@ function saveRequest(requestId: string, sessionId: string, kind: string, status:
     .run(requestId, sessionId, kind, status, JSON.stringify(response), now());
 }
 
-// A turn counts as delivered when this thread's own context contains it. The
-// annotations say what was attached; the context says what arrived.
 const handoffHistory: HandoffHistory = {
-  receipts(sessionId) {
-    return (db.query("SELECT meeting_transcript,created_at FROM message_annotations WHERE session_id=? ORDER BY created_at")
-      .all(sessionId) as Array<{ meeting_transcript: string; created_at: string | null }>)
-      .map(row => ({ transcript: row.meeting_transcript, time: row.created_at ?? "" }));
-  },
-  messages(sessionId) {
-    const stored = storedContext(sessionId);
-    if (!stored) return [];
-    let messages: any[];
-    try { messages = JSON.parse(stored.document).messages ?? []; } catch { return []; }
-    return messages.filter((message: any) => message?.role === "user")
-      .map((message: any) => ({ text: contentText(message.content), time: Number(message.timestamp) || stored.capturedAt }));
+  async *receipts(sessionId) {
+    let after = 0;
+    while (true) {
+      const rows = db.query("SELECT rowid,work_id,octet_length(meeting_transcript) AS bytes FROM message_annotations WHERE session_id=? AND rowid>? ORDER BY rowid LIMIT 64")
+        .all(sessionId, after) as Array<{ rowid: number; work_id: string; bytes: number }>;
+      if (!rows.length) return;
+      const inspected = await directory.inspect(sessionId, { inputReceipts: { workIds: rows.map(row => row.work_id) } });
+      if (!inspected.ok) throw new Error(`${inspected.error.code}: ${inspected.error.message}`);
+      if (!inspected.value.inputReceipts) throw new Error("Native handoff delivery receipts are unavailable");
+      const landed = new Set(inspected.value.inputReceipts.filter(receipt => receipt.landedAt !== null).map(receipt => receipt.workId));
+      for (const row of rows) {
+        if (row.bytes > 8 * 1024 * 1024) throw new Error("oversized: Meeting handoff receipt exceeds the 8 MiB record limit");
+        if (!landed.has(row.work_id)) continue;
+        const receipt = db.query("SELECT meeting_transcript FROM message_annotations WHERE rowid=? AND session_id=?")
+          .get(row.rowid, sessionId) as { meeting_transcript: string } | null;
+        if (!receipt) throw new Error("stale_source: Meeting handoff annotation disappeared");
+        yield { transcript: receipt.meeting_transcript, delivered: true };
+      }
+      after = rows.at(-1)!.rowid;
+    }
   },
 };
 
@@ -1725,7 +1523,7 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
     await meet.flushTranscript(meetingId);
-    const transcript = await prepareMeetingHandoff(db, meet.transcripts, meetingId, thread.id, handoffHistory);
+    const transcript = await prepareMeetingHandoff(meet.transcripts, meetingId, thread.id, handoffHistory);
     db.query("INSERT OR REPLACE INTO message_annotations(work_id,session_id,created_at,meeting_transcript) VALUES(?,?,?,?)")
       .run(message.id, thread.id, now(), JSON.stringify(transcript));
     const handoff = meetingHandoffText(transcript);
@@ -2181,7 +1979,7 @@ const server = Bun.serve<SocketData>({
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
       if (row.archived_at) return error("Thread is archived", 409);
-      const result = await voice.negotiate(row.id, await req.text(), voiceInstructions(row));
+      const result = await voice.negotiate(row.id, await req.text(), await voiceInstructions(row));
       if (result.ok) trackFeature("voice", humanCaller() ? "human" : "agent");
       return result.ok ? json(result.value, 201) : error(result.error, result.status);
     }
@@ -2508,8 +2306,7 @@ const server = Bun.serve<SocketData>({
     const sessionRoutes: Array<[string | undefined, (typeof API)[keyof typeof API]]> = [
       [undefined, API.session], [undefined, API.archiveSession], [undefined, API.rejectSessionEdit],
       ["unarchive", API.unarchiveSession], ["placement", API.sessionPlacement], ["color", API.sessionColor], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort], ["resume", API.sessionResume],
-      ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
-      ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
+      ["events", API.sessionEvents], ["context", API.sessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
       ["commands", API.sessionCommands], ["command", API.sessionCommand], ["admission", API.sessionAdmission],
     ];
     const sessionMatch = sessionRoutes.map(([action, route]) => ({ action, params: route.match(req.method, url.pathname) }))
@@ -2586,42 +2383,23 @@ const server = Bun.serve<SocketData>({
     if (action === "admission" && req.method === "PUT") return error("Admission belongs to Orchestrator", 405);
 
     if (action === "context" && req.method === "GET") {
-      return contextResponse(db, id, publicSession(sessionRow.get(id)), req, async (after, limit, revision) => {
-        const inspected = await directory.inspect(id, { contextRecords: { ...(after === undefined ? {} : { after }), limit,
-          ...(revision === undefined ? {} : { revision }) } });
+      const view = url.searchParams.get("view");
+      if (view !== null && view !== "current") return error("Unknown context view", 400);
+      if (view === "current") {
+        if (url.searchParams.has("leafId")) return error("Current runtime context cannot select a historical branch", 400);
+        if (row.state !== "running") return error("Current context requires an active runtime", 409);
+        const inspected = await directory.inspect(id, { context: "full" });
+        if (!inspected.ok) return threadError(inspected.error);
+        return json({ context: inspected.value.context, session: publicSession(sessionRow.get(id)) });
+      }
+      return contextResponse(publicSession(sessionRow.get(id)), req, async (after, limit, revision) => {
+        const inspected = await directory.inspect(id, { contextRecords: { ...(after === undefined ? {} : { after }), limit, includeEntries: true,
+          ...(revision === undefined ? {} : { revision }),
+          ...(url.searchParams.has("leafId") ? { leafId: url.searchParams.get("leafId")! } : {}) } });
         if (!inspected.ok) return inspected;
         return inspected.value.contextRecords ? { ok: true, value: inspected.value.contextRecords }
           : { ok: false, error: { code: "invalid_source", message: "The thread owner did not return native records" } };
       }, API_CORS_HEADERS);
-    }
-    if (action === "context" && req.method === "PATCH") {
-      try {
-        const body = await readBody(req);
-        const capturedAt = Number(body.capturedAt);
-        const splice = body.splice as ContextSplice;
-        if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0 || !splice) return error("Valid context patch required");
-        const current = storedContext(id);
-        if (!current) return error("Context base is missing", 409);
-        if (capturedAt <= current.capturedAt || current.hash === splice.targetHash) {
-          if (current.hash === splice.targetHash) acknowledgeMessageContext(id, body.finalizesMessage);
-          return json({ ok: true, capturedAt: current.capturedAt, hash: current.hash });
-        }
-        const appended = db.transaction(() => {
-          const result = appendContextPatch(db, id, current, capturedAt, splice);
-          if (result.ok) inlineImages.acceptContext(id, result.value.document);
-          return result;
-        })();
-        if (!appended.ok) return error(appended.error, 409);
-        cacheStoredContext(id, appended.value);
-        acknowledgeMessageContext(id, body.finalizesMessage);
-        signalSync();
-        return json({ ok: true, capturedAt, hash: splice.targetHash });
-      } catch (cause: any) { return error(cause?.message ?? "Could not patch model context", 409); }
-    }
-    if (action === "context" && req.method === "PUT") {
-      try {
-        return json(storeContextCapture(id, await readBody(req)));
-      } catch (cause: any) { return error(cause?.message ?? "Could not store model context", 400); }
     }
     if (action === "events" && req.method === "GET") {
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
@@ -2697,9 +2475,6 @@ const server = Bun.serve<SocketData>({
           rt.liveText = "";
           rt.liveThinking = "";
           rt.thinkingBlockStart = 0;
-          rt.pendingContextTextLength = 0;
-          rt.pendingContextThinkingLength = 0;
-          rt.pendingContextFinalization = null;
           rt.activeTools.clear();
           rt.thinkingActive = false;
           rt.toolProgress.clear();
@@ -2856,7 +2631,7 @@ const supervisorRelease = new SupervisorRelease({
 });
 async function releaseSupervisor(exitCode: number) {
   const result = await supervisorRelease.release(exitCode);
-  if (!result.ok) console.error("Supervisor handoff failed; context ingestion remains available for recovery:", result.error);
+  if (!result.ok) console.error("Supervisor handoff failed:", result.error);
 }
 
 process.on("SIGTERM", () => void releaseSupervisor(0));

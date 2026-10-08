@@ -17,7 +17,7 @@ function value<T>(result: SourceResult<T>): T {
   return result.value;
 }
 const imageUrl = (sessionId: string, hash: string) => `/v1/sessions/${sessionId}/context/images/${hash}`;
-const project = (_sessionId: string, message: any, image: any) => displayContextMessage(message, undefined, image);
+const project = (_sessionId: string, message: any, image: any) => displayContextMessage(message, image);
 function fixture(records: SourceRecord[]) {
   const calls: { before: number | undefined; limit: number; loaded: string[] }[] = [];
   let source = { revision: "r1", generation: "g1", context: "native" };

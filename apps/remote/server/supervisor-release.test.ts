@@ -1,116 +1,35 @@
 import { expect, test } from "bun:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Result } from "pi-orchestrator/api";
-import contextMirror from "./context-mirror";
 import { SupervisorRelease } from "./supervisor-release";
-import { sha256 } from "./sync";
 
 const ok: Result<void> = { ok: true, value: undefined };
 
-test("handoff accepts the real Pi shutdown context while refusing new work", async () => {
-  const environment = { ...process.env };
-  const handlers = new Map<string, (...args: any[]) => any>();
-  const stored: unknown[] = [];
+test("release closes resources after native runner detachment without a context upload handshake", async () => {
   const events: string[] = [];
-  let databaseOpen = true;
-  const server = Bun.serve({
-    port: 0,
-    async fetch(request) {
-      if (!release.accepts(request.method, new URL(request.url).pathname)) return new Response("Draining", { status: 503 });
-      expect(databaseOpen).toBe(true);
-      const body = await request.json();
-      stored.push(body.context);
-      events.push("context");
-      return Response.json({ hash: sha256(JSON.stringify(body.context)) });
-    },
-  });
-  const ctx = {
-    mode: "rpc", getSystemPrompt: () => "Final context",
-    sessionManager: { getBranch: () => [{ type: "message", id: "user", parentId: null, timestamp: "2026-09-15T00:00:00Z",
-      message: { role: "user", content: "Retain this context", timestamp: 1 } }] },
-  };
-  const release = new SupervisorRelease({
-    suspend() { events.push("suspend"); },
-    async detach() {
-      expect((await fetch(`${server.url}v1/threads`, { method: "POST" })).status).toBe(503);
-      await handlers.get("session_shutdown")!({}, ctx);
-      events.push("detached");
-      return ok;
-    },
-    async closeImages() { events.push("images"); },
-    stopServer() { events.push("listener"); server.stop(true); },
-    closeDatabase() { events.push("database"); databaseOpen = false; },
-    exit(code) { events.push(`exit:${code}`); },
-  });
-  try {
-    process.env.PI_REMOTE_SESSION_ID = "00000000-0000-0000-0000-000000000001";
-    process.env.PI_REMOTE_SERVER_URL = server.url.origin;
-    process.env.PI_REMOTE_SENDER_ID = "release-user";
-    process.env.PI_REMOTE_SENDER_NAME = "Release user";
-    delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
-    contextMirror({ on(type: string, handler: (...args: any[]) => any) { handlers.set(type, handler); }, getActiveTools: () => [], getAllTools: () => [] } as unknown as ExtensionAPI);
-    const pending = release.release(75);
-    expect(release.release(75)).toBe(pending);
-    expect(await pending).toEqual(ok);
-    expect(stored).toEqual([{
-      systemPrompt: "Final context", tools: [],
-      messages: [{
-        role: "user", content: "Retain this context", timestamp: 1,
-        identity: {
-          id: "pi/00000000-0000-0000-0000-000000000001/user",
-          timestamp: 1,
-          sender: { id: "release-user", name: "Release user" },
-        },
-      }],
-    }]);
-    expect(events).toEqual(["suspend", "context", "detached", "images", "listener", "database", "exit:75"]);
-    expect(await release.release(75)).toEqual(ok);
-    expect(events.filter(event => event.startsWith("exit"))).toHaveLength(1);
-  } finally {
-    server.stop(true);
-    for (const key of ["PI_REMOTE_SESSION_ID", "PI_REMOTE_SERVER_URL", "PI_REMOTE_CONTEXT_OWNER_PID", "PI_REMOTE_SENDER_ID", "PI_REMOTE_SENDER_NAME"]) {
-      if (environment[key] === undefined) delete process.env[key]; else process.env[key] = environment[key];
-    }
-  }
-});
-
-test("ongoing room traffic stays available while a supervisor drains, without admitting new meeting roots", async () => {
   let finish!: (value: Result<void>) => void;
   const detached = new Promise<Result<void>>(resolve => { finish = resolve; });
-  const release = new SupervisorRelease({ suspend() {}, detach: () => detached, closeImages: async () => {}, stopServer() {}, closeDatabase() {}, exit() {} });
+  const release = new SupervisorRelease({ suspend() { events.push("suspend"); }, detach: () => detached,
+    closeImages: async () => { events.push("images"); }, stopServer() { events.push("server"); },
+    closeDatabase() { events.push("database"); }, exit(code) { events.push(`exit:${code}`); } });
   const pending = release.release(75);
-  const room = "00000000-0000-0000-0000-000000000001";
-  for (const [method, path] of [
-    ["GET", `/v1/meet/${room}/poll`], ["POST", `/v1/meet/${room}/signal`],
-    ["POST", `/v1/meet/${room}/transcript/turn`], ["POST", `/v1/meet/${room}/voice`],
-    ["GET", "/v1/sessions/root/meeting"], ["POST", "/v1/sessions/root/meeting/browser"],
-    ["GET", "/v1/meet/external/transcript"], ["POST", `/v1/meet/external/${room}/stop`],
-  ]) expect(release.accepts(method!, path!)).toBe(true);
-  for (const [method, path] of [["POST", "/v1/meet"], ["POST", "/v1/meet/external"], ["POST", "/v1/threads"], ["POST", "/v1/sessions/root/prompt"]]) {
-    expect(release.accepts(method!, path!)).toBe(false);
-  }
+  expect(release.release(75)).toBe(pending);
+  for (const method of ["POST", "PUT", "PATCH"]) expect(release.accepts(method, "/v1/sessions/thread/context")).toBe(false);
   finish(ok);
   expect(await pending).toEqual(ok);
+  expect(events).toEqual(["suspend", "images", "server", "database", "exit:75"]);
+  expect(await release.release(75)).toEqual(ok);
+  expect(events.filter(event => event.startsWith("exit"))).toHaveLength(1);
 });
 
-test.each(["detach", "images"])("failed %s keeps ingestion alive and permits an explicit handoff retry", async failure => {
+test("failed detach preserves resources for an explicit retry", async () => {
   let failed = true;
   const events: string[] = [];
-  const release = new SupervisorRelease({
-    suspend() { events.push("suspend"); },
-    async detach() { return failure === "detach" && failed ? { ok: false, error: { code: "unavailable", message: "Runner close failed" } } : ok; },
-    async closeImages() { if (failure === "images" && failed) throw new Error("Image close failed"); },
-    stopServer() { events.push("listener"); },
-    closeDatabase() { events.push("database"); },
-    exit(code) { events.push(`exit:${code}`); },
-  });
+  const release = new SupervisorRelease({ suspend() { events.push("suspend"); },
+    async detach() { return failed ? { ok: false, error: { code: "unavailable", message: "Runner close failed" } } : ok; },
+    async closeImages() {}, stopServer() { events.push("server"); }, closeDatabase() { events.push("database"); }, exit() {} });
   expect((await release.release(75)).ok).toBe(false);
   expect(events).toEqual(["suspend"]);
-  expect(release.accepts("PUT", "/v1/sessions/thread/context")).toBe(true);
-  expect(release.accepts("PATCH", "/v1/sessions/thread/context")).toBe(true);
-  expect(release.accepts("POST", "/v1/sessions/thread/prompt")).toBe(false);
-  expect(release.accepts("GET", "/v1/health")).toBe(false);
   failed = false;
   expect(await release.release(75)).toEqual(ok);
-  expect(events).toEqual(["suspend", "listener", "database", "exit:75"]);
+  expect(events).toEqual(["suspend", "server", "database"]);
 });

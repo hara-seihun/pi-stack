@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reconcile one account's Pi settings: the ordered package list from
-# config/packages.json with the host's own packages folded in ahead of the
-# context observer and the custom model catalog. Reviewed npm packages resolve
+# config/packages.json with the host's own packages and custom model catalog.
+# Reviewed npm packages resolve
 # to their exact pins in the shared runtime; onboarding needs no package install.
 #
 #   deploy/settings [USER]      defaults to the invoking account
@@ -76,10 +76,8 @@ const deployedPath = (entry) => {
   return entry.deployed;
 };
 const reviewed = manifest.packages.map((entry) => ({ id: entry.id, path: deployedPath(entry) }));
-const observer = reviewed.pop();
-if (observer.id !== manifest.contextObserver) throw new Error(`${manifest.contextObserver} must be the last reviewed package`);
 const hostPackages = JSON.parse(process.env.PI_STACK_HOST_PACKAGES);
-const packages = [...reviewed.map((entry) => entry.path), ...hostPackages, observer.path];
+const packages = [...reviewed.map((entry) => entry.path), ...hostPackages];
 for (const path of packages) {
   if (!isExternalPackage(path) && !existsSync(path)) throw new Error(`package does not exist at ${path}`);
 }
