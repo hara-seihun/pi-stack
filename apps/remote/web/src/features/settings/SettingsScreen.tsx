@@ -222,7 +222,7 @@ export function SettingsScreen({ sessions, update, autoCollapse, onAutoCollapseC
       {sectionOwner("person.threads")}
     </Section>
     <Section title="App update"><p className="settings-value">Web revision <code>{__PI_REMOTE_REVISION__}</code></p>
-      {nativePlatform ? remote.checkAppUpdate && remote.installAppUpdate ? <><button type="button" disabled={update.busy} onClick={update.onClick}>{update.busy ? "Updating…" : update.approval ? "Update" : "Check for updates"}</button>{update.status && <p role="status">{update.status}</p>}{update.error && <p role="alert">{update.error}</p>}</> : <p>App updates are unavailable in this Android shell.</p> : <p className="settings-detail">The browser loads the current web app when you reload.</p>}
+      {nativePlatform ? remote.checkAppUpdate && remote.installAppUpdate ? <><button type="button" disabled={update.busy} onClick={update.onClick}>{update.busy ? "Updating…" : update.approval || update.error ? "Update" : "Check for updates"}</button>{update.status && <p role="status">{update.status}</p>}{update.error && <p role="alert">{update.error}</p>}</> : <p>App updates are unavailable in this Android shell.</p> : <p className="settings-detail">The browser loads the current web app when you reload.</p>}
       {sectionOwner("device.updates")}
     </Section>
     <Section title="Environment and account"><EnvironmentControl /><dl className="settings-account"><div><dt>Account</dt><dd>{identity.user || "No person selected"}</dd></div><div><dt>Session</dt><dd>{identity.session ? "Signed in · folder unlocked" : "Not signed in or folder locked"}</dd></div></dl>{sectionOwner("person.connection")}</Section>
