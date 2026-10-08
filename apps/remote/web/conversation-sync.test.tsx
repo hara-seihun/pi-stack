@@ -115,3 +115,19 @@ test("offline status and reconnect take precedence even while a refresh is pendi
   expect(header(offline)).not.toContain("Updating…");
   expect(offline).toContain("Cached conversation text");
 });
+
+
+test("conversation headers use only the mutable topic title, leaving stable agent identity unchanged", () => {
+  for (const [name, agentName] of [["Thread titles", "Saihiramei Teheitain"], ["Nebulani reference", "Nozanoshinei Lomekein"]]) {
+    const named = { ...session, name, agentName };
+    const before = JSON.stringify(named);
+    const html = header(render({ session: named }));
+    expect(html).toContain(`class="conversation-title-text">${name}</span>`);
+    expect(html).not.toContain(agentName.split(" ")[0]!);
+    expect(html).not.toContain('class="conversation-subtitle"');
+    expect(JSON.stringify(named)).toBe(before);
+    const renamed = header(render({ session: { ...named, name: "Changed topic" } }));
+    expect(renamed).toContain('class="conversation-title-text">Changed topic</span>');
+    expect(renamed).not.toContain(agentName.split(" ")[0]!);
+  }
+});

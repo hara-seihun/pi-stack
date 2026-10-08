@@ -34,12 +34,11 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
   useEffect(() => setColor(session?.color ?? null), [session?.color]);
   const colour = useThreadColor({ id: session?.id, name: chat.title, color: session?.color, onPreview: setColor });
   const titleOnly = selected && compactSelected;
-  const name = chat.kind === "ai" ? chat.name : null;
-  const subtitle = name ? chat.title : room ? room.members.map(member => member.displayName).join(", ") : "";
+  const subtitle = room ? room.members.map(member => member.displayName).join(", ") : "";
   const queued = session && session.queuedMessages.length > 0 && !session.held ? session.queuedMessages.length : 0;
   const quietable = Boolean(status?.busy && status.lastActivityAt);
   const showMetaLine = !titleOnly && Boolean(unread || place || queued || quietable);
-  const closeTitle = chat.kind === "ai" ? `Close ${name ?? chat.title}: stops only this agent, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
+  const closeTitle = chat.kind === "ai" ? `Close ${chat.title}: stops only this agent, keeps history` : `Close ${chat.title}: keeps history, returns on a new message`;
   return <div className={`inbox-row${selected ? " selected" : ""}${titleOnly ? " title-only" : ""}`} data-section={row.section} style={threadColorStyle(color)}>
     {/* The press starts before the tap lands: that is when this thread's
         newest window is worth asking for. */}
@@ -47,7 +46,7 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
       <span className="inbox-glyph"><ChatAvatar avatar={chat.kind === "human" ? chat.avatar : undefined} icon={chat.icon} color={color ? "var(--thread-color)" : undefined} />{status && <StatusIcon status={status} className="inbox-status" />}</span>
       <span className="inbox-main">
         <span className="inbox-title-line">
-          <span className="inbox-title">{name ?? chat.title}</span>
+          <span className="inbox-title">{chat.title}</span>
           {session?.idleUnread && status && statusGlyph(status) !== "unread" && <span className="inbox-unread-dot" aria-label="Unread" title="Unread" />}
           {!titleOnly && session && <span className="inbox-model" title={session.model}>{modelShortName(session.model)}</span>}
           {!titleOnly && <time className="inbox-time">{relativeTime(row.updatedAt)}</time>}

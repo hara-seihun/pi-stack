@@ -97,7 +97,6 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onDraw(): void;
   onDismissControlError(): void;
 }) {
-  const name = agentName(session);
   const status = offline ? { ...OFFLINE_STATUS, label: offline, title: offline } : threadStatus(session);
   const running = session.state === "running";
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
@@ -119,7 +118,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   return <div className="conversation-screen">
-    <ConversationHeader title={name ?? (session.name || "Agent")} subtitle={name ? session.name || undefined : undefined} status={syncing && !offline ? <span className="conversation-syncing" role="status" aria-label="Updating" title="Updating"><span className="conversation-syncing-spinner" aria-hidden="true" /></span> : <StatusIcon status={status} />} meta={<ConversationModelMeta session={session} />} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
+    <ConversationHeader title={session.name || "Agent"} status={syncing && !offline ? <span className="conversation-syncing" role="status" aria-label="Updating" title="Updating"><span className="conversation-syncing-spinner" aria-hidden="true" /></span> : <StatusIcon status={status} />} meta={<ConversationModelMeta session={session} />} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={onOpenInspector}
       trailing={<>{questions.length > 0 && composerAction(session, "") === "stop" && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Cancel work</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{agentName(ancestor) ?? (ancestor.name || ancestor.id)}</button>)}</nav>}
     <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
