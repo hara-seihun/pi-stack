@@ -1919,7 +1919,7 @@ const server = Bun.serve<SocketData>({
         const result = await dismissNeedsYou(target, {
           client, now: new Date().toISOString(),
           findQuestion: async questionId => {
-            const pending = await readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room));
+            const pending = await readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room), []);
             const question = pending.questions.find(question => question.id === questionId);
             if (question) return { ok: true, threadId: question.threadId };
             return pending.errors.length ? { ok: false, message: pending.errors.join("; ") } : { ok: true, threadId: null };
@@ -1943,9 +1943,11 @@ const server = Bun.serve<SocketData>({
         const status = result.ok ? 200 : result.error === "conflict" ? 409 : result.error === "not-found" ? 404 : result.error === "invalid-request" || result.error === "invalid-state" ? 400 : 503;
         return json(result, status);
       }
+      const lifeRead = client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } });
       const [life, pending, watch, policy] = await Promise.all([
-        client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } }),
-        readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room)),
+        lifeRead,
+        lifeRead.then(life => readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room),
+          life.ok ? [...new Set(life.value.entities.filter(entity => entity.status === "current" && entity.threadId !== null).map(entity => entity.threadId!))] : [])),
         watchList.watch({ action: "list", threadId: "needs-you-projection" }).catch(cause => ({ ok: false as const, error: { code: "unavailable" as const, message: cause instanceof Error ? cause.message : String(cause) } })),
         client.request<LifePolicyView>({ operation: "policy-read", target: { scope: "self" }, includeHistory: false }),
       ]);

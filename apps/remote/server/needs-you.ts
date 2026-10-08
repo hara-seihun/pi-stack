@@ -1,43 +1,26 @@
 import type { LifeResult, LifeSnapshot, LifePolicyView } from "kenan-memory/life-contract";
-import type { ThreadApi, Thread, ThreadQuestion, WatchItem, WatchResponse, Result } from "pi-orchestrator/api";
+import type { ThreadApi, QuestionThread, ThreadQuestion, WatchItem, WatchResponse, Result } from "pi-orchestrator/api";
 import type { NeedsYouItem, NeedsYouProjection } from "../shared/needs-you";
 import { commitmentReminderDismissed } from "./needs-you-dismissal";
 
 export type NeedsYouQuestions = { questions: ThreadQuestion[]; threadIds: Set<string>; errors: string[] };
 
-export async function readNeedsYouQuestions(owners: readonly { id: string; api: Pick<ThreadApi, "list" | "questions" | "questionEvents"> }[], include: (thread: Thread) => boolean): Promise<NeedsYouQuestions> {
+export async function readNeedsYouQuestions(owners: readonly { id: string; api: Pick<ThreadApi, "pendingQuestions"> }[], include: (thread: QuestionThread) => boolean, locationThreadIds: string[]): Promise<NeedsYouQuestions> {
   const questions: ThreadQuestion[] = [];
   const threadIds = new Set<string>();
   const errors: string[] = [];
   await Promise.all(owners.map(async owner => {
     try {
-      const questionThreads = new Set<string>();
-      let after = 0;
-      for (;;) {
-        const events = await owner.api.questionEvents(after, 1000);
-        if (!events.ok) { errors.push(`${owner.id}: ${events.error.message}`); return; }
-        for (const event of events.value.items) questionThreads.add(event.threadId);
-        if (events.value.cursor === after) break;
-        after = events.value.cursor;
+      const result = await owner.api.pendingQuestions({ locationThreadIds });
+      if (!result.ok) { errors.push(`${owner.id}: ${result.error.message}`); return; }
+      const visible = new Map(result.value.threads.filter(include).map(thread => [thread.id, thread]));
+      for (const id of visible.keys()) threadIds.add(id);
+      questions.push(...result.value.questions.filter(question => visible.has(question.threadId)));
+      for (const failure of result.value.errors) {
+        const thread = visible.get(failure.threadId);
+        if (thread) errors.push(`${thread.title ?? thread.id}: ${failure.message}`);
+        else if (!result.value.threads.some(thread => thread.id === failure.threadId)) errors.push(`${owner.id}: ${failure.message}`);
       }
-      let cursor: string | undefined;
-      do {
-        const page = await owner.api.list({ limit: 100, cursor });
-        if (!page.ok) { errors.push(`${owner.id}: ${page.error.message}`); return; }
-        const visible = page.value.threads.filter(include);
-        for (const thread of visible) threadIds.add(thread.id);
-        const pending = visible.filter(thread => questionThreads.has(thread.id));
-        await Promise.all(Array.from({ length: Math.min(8, pending.length) }, async () => {
-          for (let thread = pending.shift(); thread; thread = pending.shift()) {
-            try {
-              const result = await owner.api.questions(thread.id);
-              if (result.ok) questions.push(...result.value);
-              else errors.push(`${thread.title ?? thread.id}: ${result.error.message}`);
-            } catch (cause) { errors.push(`${thread.title ?? thread.id}: ${cause instanceof Error ? cause.message : String(cause)}`); }
-          }
-        }));
-        cursor = page.value.nextCursor ?? undefined;
-      } while (cursor);
     } catch (cause) { errors.push(`${owner.id}: ${cause instanceof Error ? cause.message : String(cause)}`); }
   }));
   return { questions, threadIds, errors };

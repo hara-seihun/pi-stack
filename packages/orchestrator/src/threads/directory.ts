@@ -53,6 +53,17 @@ export class ThreadDirectory implements ThreadApi {
     const owner = await this.owner(threadId);
     return owner.ok ? owner.value.api.questions(threadId) : owner;
   }
+  async pendingQuestions(input: import("./contracts.js").PendingQuestionsQuery): Promise<Result<import("./contracts.js").PendingQuestions>> {
+    const results = await Promise.all(this.owners.map(owner => owner.api.pendingQuestions(input)));
+    const value: import("./contracts.js").PendingQuestions = { questions: [], threads: [], errors: [] };
+    for (const result of results) {
+      if (!result.ok) return result;
+      value.questions.push(...result.value.questions);
+      value.threads.push(...result.value.threads);
+      value.errors.push(...result.value.errors);
+    }
+    return { ok: true, value };
+  }
   async questionState(threadId: string, questionId: string): Promise<Result<QuestionState>> {
     const owner = await this.owner(threadId);
     return owner.ok ? owner.value.api.questionState(threadId, questionId) : owner;

@@ -44,14 +44,31 @@ test("reading a projection preserves reconciliation receipts and represents miss
   expect(failed.watch).toEqual({ state: "failed", error: "Watch unavailable" });
 });
 
-test("question scan includes archived owners and reports failed reads instead of empty success", async () => {
+test("current pending query includes archives and life locations, excludes rooms and preserves partial failures", async () => {
   const requests: unknown[] = [];
   const result = await readNeedsYouQuestions([{ id: "person", api: {
-    questionEvents: (after = 0) => ({ ok: true, value: { cursor: 2, items: after === 0 ? [{ seq: 1, questionId: "q1", threadId: "thread-a", question: "Which address?", time: 10 }, { seq: 2, questionId: "q2", threadId: "unavailable", question: "Another question", time: 10 }] : [] } }),
-    list: async input => { requests.push(input); return { ok: true, value: { threads: [{ id: "thread-a", title: "Archived", archived: true }, { id: "unavailable", title: "Unavailable" }] as any } }; },
-    questions: async id => id === "thread-a" ? { ok: true, value: [question] } : { ok: false, error: { code: "unavailable", message: "Owner unavailable" } },
-  } }], () => true);
-  expect(requests).toEqual([{ limit: 100, cursor: undefined }]);
+    pendingQuestions: async input => { requests.push(input); return { ok: true, value: {
+      questions: [question, { ...question, id: "room-question", threadId: "room" }],
+      threads: [{ id: "thread-a", title: "Archived", metadata: { archived: true } }, { id: "life-owner", title: "Life owner" }, { id: "unavailable", title: "Unavailable" }, { id: "room", title: "Room", metadata: { room: true } }],
+      errors: [{ threadId: "unavailable", message: "Owner unavailable" }, { threadId: "room", message: "Room read failed" }],
+    } }; },
+  } }], thread => !thread.metadata?.room, ["life-owner", "room", "missing"]);
+  expect(requests).toEqual([{ locationThreadIds: ["life-owner", "room", "missing"] }]);
   expect(result.questions).toEqual([question]);
+  expect([...result.threadIds].sort()).toEqual(["life-owner", "thread-a", "unavailable"]);
   expect(result.errors).toEqual(["Unavailable: Owner unavailable"]);
+  const view = projectNeedsYou({ ok: true, value: { subject: "person-a", coverage: [], entities: [{ ...entity("mine", commitment("person-a")), threadId: "life-owner" }] } }, result, watch, policy, now);
+  expect(view.items.find(item => item.id === "life:mine")?.location).toEqual({ threadId: "life-owner", questionId: null });
+});
+
+test("query failure is partial without hiding successful owners or unresolved linked life decisions", async () => {
+  const result = await readNeedsYouQuestions([
+    { id: "healthy", api: { pendingQuestions: async () => ({ ok: true, value: { questions: [question], threads: [{ id: question.threadId, title: "Question owner" }], errors: [] } }) } },
+    { id: "offline", api: { pendingQuestions: async () => ({ ok: false, error: { code: "unavailable", message: "Owner unavailable" } }) } },
+    { id: "broken", api: { pendingQuestions: async () => { throw new Error("Connection failed"); } } },
+  ], () => true, []);
+  expect(result.questions).toEqual([question]);
+  expect(result.errors.sort()).toEqual(["broken: Connection failed", "offline: Owner unavailable"]);
+  const snapshot: LifeSnapshot = { subject: "person-a", coverage: [], entities: [entity("unresolved", { kind: "needs-you", title: "Still unresolved", state: "open", reason: "decision", consequence: null, recommendation: null, requiredBy: null, commitmentId: null, questionId: "offline-question", provenance })] };
+  expect(projectNeedsYou({ ok: true, value: snapshot }, result, watch, policy, now).items.map(item => item.id)).toContain("life:unresolved");
 });
