@@ -6,7 +6,7 @@ Publication invokes the frozen candidate before selecting app/web or runtime art
 
 ## Old-generation maintenance
 
-The coordinator stages small entry wrappers pointing to the **immutable selected** Remote and Orchestrator releases. Their commit markers and all decoder/runtime dependencies remain those of the selected source. These wrappers are a transient maintenance generation, not the candidate application. HUP replaces the supervisor child through its existing launcher; the launcher and its mounted encrypted folder remain alive. Before adopting the fleet controller, an owner-local ledger fence refuses new completion rows and waits for accepted tool-free provider requests to finish: the old daemon's ordinary shutdown would abort them. The fleet then uses its native detach/recovery boundary. Its maintenance generation pauses future lane/manifest admission and also requires the old completion pool/reconcile operation to settle before closure. Rooms use the same old Remote decoder through `rooms-main.ts`.
+The coordinator stages small entry wrappers pointing to the **immutable selected** Remote and Orchestrator releases. Their commit markers and all decoder/runtime dependencies remain those of the selected source. These wrappers are a transient maintenance generation, not the candidate application. HUP replaces the supervisor child through its existing launcher; the launcher and its mounted encrypted folder remain alive. Inventory includes every registered active `pi-orchestrator@USER`, deduplicating the administrator fleet. Ledger authority comes from the running namespace's `PI_ORCHESTRATOR_LEDGER`, then the owning registry's exact ledger field, then the inspected old CLI's HOME path. Every owning ledger is fenced even while another owner's provider remains busy. Before adopting a fleet controller, its owner-local ledger fence refuses new completion rows and waits for accepted tool-free provider requests to finish: the old daemon's ordinary shutdown would abort them. The fleet then uses its native detach/recovery boundary. Its maintenance generation pauses future lane/manifest admission and also requires the old completion pool/reconcile operation to settle before closure. Rooms use the same old Remote decoder through `rooms-main.ts`.
 
 Inside each owning UID and namespace, the bridge loads the selected source's `ThreadService` and transport. Its durable SQLite fence closes admission of new external roots. Already accepted work, child assignments, collaborator completion receipts, and answers to admitted questions continue through the old owner. Future scheduled wakes stay in their existing schedule rows until the candidate resumes them. Cross-ledger children/completion replies resolve bounded public parent ancestry through the owning directory; recorded request retries stay with the old receipt/hash validator. A restored pre-migration attempt removes only its own fence.
 
@@ -26,6 +26,8 @@ The new launcher runs the owner-local gate after mounting the folder and before 
 
 If an old producer is still present, the gate can select only the source-bound `legacy.json` recorded by this publication. The owning bootstrap runs that selected old decoder with the same admission fence. Its service-owned maintenance check lets accepted work settle, closes old native owners, and migrates before advancing the existing launcher to the candidate. Missing/corrupt mapped sources remain preserving errors; they do not select another history.
 
+The Orchestrator's [`cli.ts`](../packages/orchestrator/src/cli.ts) has its own first-start gate before daemon/native initialization, including inactive registered fleets. [`native-history-startup.ts`](../packages/orchestrator/src/native-history-startup.ts) inspects native protocol identities and retained output sizes without decoding frames. Current native custody passes normally. Old producers/output require the same candidate-bound immutable old source bridge, run under the actual owning UID; absent/unavailable source leaves queued work intact and returns a retryable startup error. Fleet maintenance acknowledges old daemon resource closure, then advances through the existing unit's restart boundary. Remote supervisor facts still belong to the separate owner-local migration.
+
 ## Interruption and restoration
 
 State lives outside the model session. A pre-migration terminal failure/cancellation may `--restore` the owned admission fences and transient selected pointers. Candidate pointers are never reverted by this operation. Once migration has crossed the schema boundary, the old capture source cannot be restarted; the publication retains repair custody until a candidate/descendant acquires serving custody. A checked serving native candidate allows the earlier boundary to release its custody without reenabling an old decoder.
@@ -37,5 +39,6 @@ Focused contracts:
 ```sh
 node --test scripts/native-history-boundary.test.mjs \
   apps/remote/server/native-history-startup.test.mjs \
-  scripts/migrate-native-history.test.mjs
+  scripts/migrate-native-history.test.mjs \
+  scripts/native-history-fleet-startup.test.mjs
 ```

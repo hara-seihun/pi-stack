@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { request } from 'node:http';
 import { once } from 'node:events';
 import { installFence, removeFence, serviceBusy, bridgeSocket, legacyFleetLedger } from '../deploy/native-history-bridge.mjs';
-import { allOwnersReady, stageRemote, stageFleet, selectPointer } from '../deploy/native-history-coordinator.mjs';
+import { allOwnersReady, stageRemote, stageFleet, selectPointer, fleetInventory, fleetCompletionBarrier } from '../deploy/native-history-coordinator.mjs';
 const old = 'a'.repeat(40), candidate = 'b'.repeat(40);
 function directory(t) { const path = mkdtempSync(join(tmpdir(), 'history-boundary-')); t.after(() => rmSync(path, { recursive: true, force: true })); return path; }
 function database(path) {
@@ -60,6 +60,33 @@ test('transient wrappers pin old modules and source identity without rewriting t
   assert.equal(allOwnersReady([{ available: true, value: { phase: 'draining', ready: false } }]), false);
   assert.equal(allOwnersReady([{ available: true, value: { phase: 'draining', ready: true } }]), true);
   assert.equal(allOwnersReady([{ available: true, value: { phase: 'migrated' } }]), true);
+});
+test('every registered active fleet joins the owner inventory and a non-admin completion holds the whole boundary', async t => {
+  const root = directory(t), adminLedger = join(root, 'admin.sqlite3'), ordinaryLedger = join(root, 'ordinary.sqlite3');
+  const persons = [{ user: 'ordinary', environment: { PI_REMOTE_ORCHESTRATOR_DB: ordinaryLedger } }, { user: 'admin', environment: { PI_REMOTE_ORCHESTRATOR_DB: '/registry/older.sqlite3' } }, { user: 'sleeping', environment: { PI_REMOTE_ORCHESTRATOR_DB: '/inactive/ledger.sqlite3' } }];
+  const seen = [];
+  const platform = {
+    owner: (user, dataDir, unit, mode) => ({ user, dataDir, unit, mode }),
+    inspect: unit => {
+      seen.push(unit);
+      return unit.includes('sleeping') ? null : { pid: '123', environment: unit.includes('admin') ? [`PI_ORCHESTRATOR_LEDGER=${adminLedger}`] : [] };
+    },
+  };
+  const owners = fleetInventory({ fleetUser: 'admin' }, persons, platform);
+  assert.deepEqual(owners.map(item => [item.user, item.ledgerPath]), [['ordinary', ordinaryLedger], ['admin', adminLedger]]);
+  assert.equal(seen.filter(unit => unit === 'pi-orchestrator@admin.service').length, 1);
+  assert.throws(() => fleetInventory({ fleetUser: 'admin' }, [], { ...platform, inspect: () => ({ pid: '0', environment: [] }) }), /owning namespace/);
+  for (const path of [ordinaryLedger, adminLedger]) {
+    const db = new DatabaseSync(path); db.exec('CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE run(id TEXT PRIMARY KEY,state TEXT,worker_unit TEXT);');
+    if (path === ordinaryLedger) db.exec("INSERT INTO run VALUES('ordinary-provider','running','completion:ordinary-provider')"); db.close();
+  }
+  const receipts = new Map();
+  for (const item of owners) receipts.set(item.user, await legacyFleetLedger(item.ledgerPath, { candidate, legacySource: old }));
+  const checked = [];
+  const barrier = fleetCompletionBarrier(owners, item => { checked.push(item.user); return receipts.get(item.user); });
+  assert.equal(barrier.ready, false); assert.equal(barrier.waiting[0].user, 'ordinary'); assert.deepEqual(checked, ['ordinary', 'admin']);
+  const admin = new DatabaseSync(adminLedger);
+  assert.throws(() => admin.exec("INSERT INTO run VALUES('fresh-admin','queued',NULL)"), /admission is closed/); admin.close();
 });
 function control(socketPath, method, path) {
   return new Promise((resolve, reject) => { const req = request({ socketPath, method, path }, res => { let body = ''; res.on('data', chunk => body += chunk); res.on('end', () => { try { resolve(JSON.parse(body)); } catch (error) { reject(error); } }); }); req.on('error', reject); req.end(); });

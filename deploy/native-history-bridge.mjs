@@ -132,7 +132,7 @@ export async function installLegacyMaintenance(options) {
       try { return await start.apply(this, args); }
       finally {
         if (receipt.phase === 'owners-closed') {
-          try { releaseFleetLedger(); delete receipt.error; save('migrated'); }
+          try { releaseFleetLedger(); delete receipt.error; save('migrated'); if (options.autoAdvance === true) originalExit(75); }
           catch (error) { receipt.error = String(error); save('migration-pending'); originalExit(1); }
         }
       }
