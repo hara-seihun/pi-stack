@@ -29,9 +29,10 @@ function ErrorFeedback({ message, className = "", dismissLabel = "Dismiss error"
     else setFailure(`Could not dismiss error: ${result.error}`);
   };
   if (dismissed) return null;
-  return <div className={`dismissible-error ${className}`}>
+  return <div className={`dismissible-error ${className}`} aria-busy={pending}>
     <div className="dismissible-error-message" role={role}>{message}</div>
-    {failure && <div role="alert">{failure}</div>}
+    {pending && <div className="dismissible-error-followup" role="status">Dismissing…</div>}
+    {failure && <div className="dismissible-error-followup" role="alert">{failure}</div>}
     <button className="dismissible-error-dismiss" type="button" aria-label={dismissLabel} title={dismissLabel} disabled={pending} onClick={() => void dismiss()}>
       <span aria-hidden="true">×</span>
     </button>

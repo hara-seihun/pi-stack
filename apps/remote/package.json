@@ -16,6 +16,9 @@
   "scripts": {
     "start": "bun server/main.ts",
     "dev": "vite",
+    "ui:inventory": "node web/ui-catalogue-inventory.mjs",
+    "preui:catalogue": "npm run ui:inventory",
+    "ui:catalogue": "vite --config ui-catalogue.config.ts",
     "build": "vite build && npm run build:meet-adapter && npm run build:phone-media && node compress-dist.mjs",
     "build:meet-adapter": "vite build --config vite.meet-adapter.config.ts",
     "build:phone-media": "vite build --config vite.phone-media.config.ts",

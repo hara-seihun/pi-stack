@@ -83,7 +83,7 @@
 }
 .drawing-error button {
   flex: none;
-  min-height: 34px;
+  min-height: 44px;
   padding: 0 12px;
   border: 1px solid #d1d5db;
   border-radius: 18px;

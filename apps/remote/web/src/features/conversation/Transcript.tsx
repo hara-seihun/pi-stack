@@ -399,7 +399,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
           : item.kind === "outgoing"
             ? <OutgoingEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} />
             : <MessageEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} onEdit={onEdit} onReply={onReply} />} />
-      {newerAvailable && <button type="button" className="context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
+      {newerAvailable && <button type="button" className="context-earlier context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
     </div>
   </InlineImagesContext.Provider>;
 }

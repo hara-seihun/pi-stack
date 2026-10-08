@@ -1,0 +1,53 @@
+{
+  "scope": "Remaining representative variants/compositions in this slice, not an exhaustive product-state census. The 50 registered cases and 150 judged dark viewport cells cover the states named in rooms-questions-media.tsx.",
+  "queue": [
+    {
+      "component": "RoomConversation",
+      "boundary": "finite-variant",
+      "states": ["waiting dependency", "running with draft and separate Stop thread action", "multiple pending questions", "showBack=false", "showIdentity=false"],
+      "next": "Register these compositions using validated RoomSnapshot observations. Existing generic thread-status matrix coverage does not establish room-header composition coverage."
+    },
+    {
+      "component": "RoomConversation",
+      "boundary": "composition",
+      "states": ["send pending and successful acknowledgement", "send failure retaining receipt", "stop pending/failure", "add-member pending/failure/success", "unread read-marker acknowledgement"],
+      "next": "Extend synthetic transport with typed mutable responses so successful controls change the snapshot rather than only returning an acknowledgement."
+    },
+    {
+      "component": "RoomConversation",
+      "boundary": "finite-variant",
+      "states": ["404 resource missing", "revision feed disconnected/reconnected", "invalid reconcile frame", "older-page request failure", "history revision changed during paging", "corrupt saved room draft", "over-100000-character draft rejection"],
+      "next": "Drive each rejection through the production transport/storage boundary and review its explicit error/recovery surface. HTTP403 was reviewed; it does not prove these differing recovery paths."
+    },
+    {
+      "component": "RoomCreator MemberPicker",
+      "boundary": "composition",
+      "states": ["successful creation and receipt removal", "creation acknowledged but directory refresh failed", "request receipt conflict409", "large64-person roster and120-character room title"],
+      "next": "Review successful/replayed receipt transitions and large directory composition; existing retry/pending/failure captures are not end-to-end creation proof."
+    },
+    {
+      "component": "RoomQuestion QuestionsComposer QuestionContent",
+      "boundary": "composition",
+      "states": ["successful answer/dismiss advances the active question", "draft restore across remount", "very large suggestion set", "nested code/table/link content in a narrow option", "storage unavailable while answer is edited"],
+      "next": "Review transition and persistence outcomes with production components. Blank queue, free-text, selected, multiple, markdown, long, pending and failed states were already viewed."
+    },
+    {
+      "component": "Markdown InlineImagesContext",
+      "boundary": "composition",
+      "states": ["completed inline image inside ConversationView: pointer/keyboard preview", "image editing/download/original-file navigation", "adjacent inline images and nested list/quote placements", "image definition/source escaping"],
+      "next": "Mount image slots in the owning gesture/navigation container. The reviewed standalone slots establish rendering and native404 error presentation, not the surrounding preview/edit lifecycle."
+    },
+    {
+      "component": "CachedImage",
+      "boundary": "composition",
+      "states": ["failed source changes to a successful source", "lease release and remount from memory/disk", "cache disabled or absent in avatar/header compositions"],
+      "next": "Review source replacement and owning avatar/header behavior. Standalone cache loading, ready, HTTP failure and decode failure were viewed; the caller intentionally supplies one common loading/unavailable fallback."
+    },
+    {
+      "component": "AgentDisclosure AgentRoute ThreadChips",
+      "boundary": "composition",
+      "states": ["route destination discovered after mount", "directory absent", "delivery sending/delivered/failed transcript compositions", "large chip set within a tool summary alongside durations and outcomes"],
+      "next": "Use the actual transcript composition to review discovery/delivery layout. Reviewed chips establish busy/known/unknown/lookup-error rendering and exact-ID click behavior; they do not cover every tool-summary neighbour."
+    }
+  ]
+}

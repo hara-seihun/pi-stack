@@ -159,10 +159,16 @@ export function SettingsScreen({ sessions, update, autoCollapse, onAutoCollapseC
   const [resource, setResource] = useState<Resource<SettingsSnapshot>>({ state: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [identity, setIdentity] = useState(() => ({ user: window.PiRemotePerson.get(), session: window.PiRemotePerson.session() }));
+  const identityRef = useRef(identity);
   const [threadId, setThreadId] = useState(initialThreadId ?? "");
   useEffect(() => { if (initialThreadId) setThreadId(initialThreadId); }, [initialThreadId]);
   useEffect(() => {
-    const refresh = () => { setIdentity({ user: window.PiRemotePerson.get(), session: window.PiRemotePerson.session() }); setThreadId(""); };
+    const refresh = () => {
+      const next = { user: window.PiRemotePerson.get(), session: window.PiRemotePerson.session() };
+      if (next.user === identityRef.current.user && next.session === identityRef.current.session) return;
+      identityRef.current = next;
+      setIdentity(next); setThreadId("");
+    };
     const changed = () => setAttempt(value => value + 1);
     window.addEventListener("pi-auth", refresh); window.addEventListener("pi-person", refresh); window.addEventListener("pi-settings-changed", changed);
     return () => { window.removeEventListener("pi-auth", refresh); window.removeEventListener("pi-person", refresh); window.removeEventListener("pi-settings-changed", changed); };
@@ -192,15 +198,16 @@ export function SettingsScreen({ sessions, update, autoCollapse, onAutoCollapseC
   const autoCollapseEntry = entries.find(entry => entry.definition.id === "person.autoCollapse");
   const administrator = resource.state === "ready" && resource.value.administrator === true;
   const selected = sessions.find(session => session.id === threadId);
+  const CollapseRow = autoCollapseEntry?.value.state === "set" ? "label" : "div";
   const scopeKey = `${identity.user}:${identity.session}`;
   return <main className="settings-screen" aria-labelledby="settings-title"><div className="settings-content">
     <header className="settings-page-heading"><h1 id="settings-title">Settings</h1><p>Personal preferences, this device and your threads.</p></header>
     {resource.state === "loading" && <p role="status">Loading settings…</p>}
     {resource.state === "error" && <div className="settings-load-error"><p role="alert">{resource.message}</p><button type="button" onClick={() => setAttempt(value => value + 1)}>Retry settings</button></div>}
     <Section title="Personal"><div className="settings-registry">{personal.map(entry => <RegistryField key={`${scopeKey}:${entry.definition.id}`} entry={entry} onSaved={saved} />)}</div>
-      <div className="settings-switch-row"><div><strong>{autoCollapseEntry?.definition.label ?? "Auto-collapse work and thoughts"}</strong><p>{autoCollapseEntry?.definition.description}</p>{autoCollapseEntry?.value.state === "unset" && <p>Not set</p>}{autoCollapseEntry?.value.state === "unavailable" && <p>{autoCollapseEntry.value.message}</p>}</div>
+      <CollapseRow className="settings-switch-row"><span><strong>{autoCollapseEntry?.definition.label ?? "Auto-collapse work and thoughts"}</strong><span className="settings-switch-detail">{autoCollapseEntry?.definition.description}</span>{autoCollapseEntry?.value.state === "unset" && <span className="settings-switch-detail">Not set</span>}{autoCollapseEntry?.value.state === "unavailable" && <span className="settings-switch-detail">{autoCollapseEntry.value.message}</span>}</span>
         {autoCollapseEntry?.value.state === "set" && <input type="checkbox" aria-label="Auto-collapse work and thoughts" checked={autoCollapse} disabled={!autoCollapseEntry.editable} onChange={event => onAutoCollapseChange(event.target.checked)} />}
-      </div>
+      </CollapseRow>
       {autoCollapseEntry?.value.state === "unset" && autoCollapseEntry.editable && <div className="settings-unset-actions"><button type="button" onClick={() => onAutoCollapseChange(true)}>Enable automatic collapse</button><button type="button" onClick={() => onAutoCollapseChange(false)}>Disable automatic collapse</button></div>}
       {autoCollapseEntry && <Owner entry={autoCollapseEntry} />}
     </Section>
@@ -215,7 +222,7 @@ export function SettingsScreen({ sessions, update, autoCollapse, onAutoCollapseC
       {sectionOwner("person.threads")}
     </Section>
     <Section title="App update"><p className="settings-value">Web revision <code>{__PI_REMOTE_REVISION__}</code></p>
-      {nativePlatform ? remote.checkAppUpdate && remote.installAppUpdate ? <><button type="button" disabled={update.busy} onClick={update.onClick}>{update.busy ? "Updating…" : "Check for updates"}</button>{update.status && <p role="status">{update.status}</p>}{update.error && <p role="alert">{update.error}</p>}</> : <p>App updates are unavailable in this Android shell.</p> : <p className="settings-detail">The browser loads the current web app when you reload.</p>}
+      {nativePlatform ? remote.checkAppUpdate && remote.installAppUpdate ? <><button type="button" disabled={update.busy} onClick={update.onClick}>{update.busy ? "Updating…" : update.approval ? "Update" : "Check for updates"}</button>{update.status && <p role="status">{update.status}</p>}{update.error && <p role="alert">{update.error}</p>}</> : <p>App updates are unavailable in this Android shell.</p> : <p className="settings-detail">The browser loads the current web app when you reload.</p>}
       {sectionOwner("device.updates")}
     </Section>
     <Section title="Environment and account"><EnvironmentControl /><dl className="settings-account"><div><dt>Account</dt><dd>{identity.user || "No person selected"}</dd></div><div><dt>Session</dt><dd>{identity.session ? "Signed in · folder unlocked" : "Not signed in or folder locked"}</dd></div></dl>{sectionOwner("person.connection")}</Section>

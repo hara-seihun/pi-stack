@@ -30,7 +30,7 @@ The application retains the most recent uncaught Java stack in its private `file
 
 Revoked overlay tokens and detached windows reset the overlay instead of escaping into Android's process crash handler. Service teardown cannot create a replacement window.
 
-Native resource ownership and bounded background work are documented in [native resources](native-resources.md).
+Native resource ownership and bounded background work are documented in [native resources](native-resources.md). The [native UI catalogue](native-ui/README.md) inventories finite native visual states and renders actual Android Views with a bounded, offline Skia fixture; its manifest distinguishes viewed shell/overlay states from unviewed WebView and Android-owned surfaces.
 
 ## Unattended phone control
 

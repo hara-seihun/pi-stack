@@ -11,12 +11,12 @@ const blank = (zone: string) => {
   const now = Temporal.Now.zonedDateTimeISO(zone).round({ smallestUnit: "hour", roundingMode: "ceil" });
   return { title: "", start: now.toPlainDateTime().toString().slice(0, 16), end: now.add({ hours: 1 }).toPlainDateTime().toString().slice(0, 16), zone, allDay: false, location: "", notes: "" };
 };
-type Draft = ReturnType<typeof blank> & { id?: string; instantStart?: string; instantEnd?: string; repeat?: CalendarEvent["repeat"]; repeatUntil?: string | null; scope?: "occurrence" | "series" };
-function EventEditor({ draft, onClose, onSave }: { draft: Draft; onClose(): void; onSave(draft: Draft): Promise<void> }) {
+export type CalendarDraft = ReturnType<typeof blank> & { id?: string; instantStart?: string; instantEnd?: string; repeat?: CalendarEvent["repeat"]; repeatUntil?: string | null; scope?: "occurrence" | "series" };
+export function EventEditor({ draft, onClose, onSave }: { draft: CalendarDraft; onClose(): void; onSave(draft: CalendarDraft): Promise<void> }) {
   const [value, setValue] = useState(draft), [error, setError] = useState(""), [saving, setSaving] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
-  return <dialog ref={dialog} className="calendar-dialog" onCancel={onClose}><form onSubmit={async e => { e.preventDefault(); setSaving(true); setError(""); try { await onSave(value); onClose(); } catch (cause) { setError(String(cause)); } finally { setSaving(false); } }}>
+  return <dialog ref={dialog} className="calendar-dialog" onCancel={onClose}><form aria-busy={saving} onSubmit={async e => { e.preventDefault(); setSaving(true); setError(""); try { await onSave(value); onClose(); } catch (cause) { setError(String(cause)); } finally { setSaving(false); } }}>
     <h2>{value.scope === "occurrence" ? "Edit this occurrence" : value.scope === "series" ? "Edit whole series" : value.id ? "Edit event" : "New event"}</h2>
     {value.scope && <p>{value.scope === "occurrence" ? "Only this occurrence changes. The other repeats stay unchanged." : "Changes apply to the whole series, including past occurrences."}</p>}
     <label>Title<input required maxLength={500} value={value.title} onChange={e => setValue({ ...value, title: e.target.value })} /></label>
@@ -27,7 +27,7 @@ function EventEditor({ draft, onClose, onSave }: { draft: Draft; onClose(): void
     {value.scope !== "occurrence" && <><label>Repeat<select value={value.repeat ?? "none"} onChange={e => setValue({ ...value, repeat: e.target.value === "none" ? null : e.target.value as "daily" | "weekly" })}><option value="none">Does not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly on the start weekday</option></select></label>{value.repeat && <><label>Repeat until (optional)<input type="date" min={value.start.slice(0, 10)} value={value.repeatUntil ?? ""} onChange={e => setValue({ ...value, repeatUntil: e.target.value || null })} /></label><p>Repeats at this local time in the event zone, including after daylight-saving changes. Leave the end blank to repeat indefinitely.</p></>}</>}
     <label>Location<input value={value.location} onChange={e => setValue({ ...value, location: e.target.value })} /></label>
     <label>Notes<textarea rows={3} value={value.notes} onChange={e => setValue({ ...value, notes: e.target.value })} /></label>
-    {error && <p role="alert">{error}</p>}<div className="calendar-actions"><button type="button" onClick={onClose}>Cancel</button><button className="accent" disabled={saving}>Save</button></div>
+    {error && <p role="alert">{error}</p>}<div className="calendar-actions"><button type="button" onClick={onClose}>Cancel</button><button className="accent" disabled={saving}>{saving ? "Saving…" : "Save"}</button></div>
   </form></dialog>;
 }
 export type CalendarAgenda = {
@@ -38,7 +38,7 @@ export type CalendarAgenda = {
 
 export function CalendarScreen({ renderAgenda, refreshVersion }: { renderAgenda?: (agenda: CalendarAgenda) => ReactNode; refreshVersion?: string } = {}) {
   const [snapshot, setSnapshot] = useState<CalendarSnapshot | null>(null), [zone, setZone] = useState(localZone), [error, setError] = useState("");
-  const [draft, setDraft] = useState<Draft | null>(null), [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<CalendarDraft | null>(null), [busy, setBusy] = useState(false);
   const [month, setMonth] = useState("");
   const reload = useCallback(async () => {
     const from = month ? Temporal.PlainDate.from(month + "-01").toZonedDateTime(zone).toInstant().toString() : new Date().toISOString();

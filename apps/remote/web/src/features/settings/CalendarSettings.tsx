@@ -54,6 +54,7 @@ export function CalendarSettings({ refreshVersion }: { refreshVersion: string })
   const snapshot = resource.state === "ready" ? resource.value : null;
   const zone = snapshot?.zone;
   const zoneAvailable = typeof zone === "string" && zone !== "";
+  const timezoneInstruction = resource.state === "loading" ? "Loading your calendar timezone…" : resource.state === "error" ? "Retry subscriptions to load your calendar timezone." : zoneAvailable ? `Floating times use your timezone: ${zone}.` : "Set your timezone above before subscribing.";
   return <div className="settings-calendar">
     <p className="settings-detail">ICS subscriptions are read-only. Imported events refresh every 15 minutes.</p>
     {resource.state === "loading" && <p role="status">Loading calendar subscriptions…</p>}
@@ -75,7 +76,7 @@ export function CalendarSettings({ refreshVersion }: { refreshVersion: string })
         setName(""); setUrl(""); await reload();
       });
     }}><h3>Add an ICS subscription</h3><label>Name<input required maxLength={200} value={name} disabled={busy !== null} onChange={event => setName(event.target.value)} /></label><label>ICS URL<input required type="url" value={url} disabled={busy !== null} onChange={event => setUrl(event.target.value)} placeholder="https://…" /></label>
-      <p className="settings-detail">{zoneAvailable ? `Floating times use your timezone: ${zone}.` : "Set your timezone above before subscribing."}</p><button disabled={busy !== null || !zoneAvailable || !name.trim() || !url.trim()}>{busy === "subscribe" ? "Subscribing…" : "Subscribe"}</button>
+      <p className="settings-detail">{timezoneInstruction}</p><button disabled={busy !== null || !zoneAvailable || !name.trim() || !url.trim()}>{busy === "subscribe" ? "Subscribing…" : "Subscribe"}</button>
     </form>
     <div className="settings-calendar-feed"><h3>Private calendar feed</h3><p className="settings-detail">Subscribe from another calendar application. Anyone with the link can read your events while your folder is unlocked.</p>
       <button type="button" disabled={busy !== null} onClick={() => void action("feed", () => showFeed(false))}>{busy === "feed" ? "Loading link…" : "Show subscription link"}</button>

@@ -203,7 +203,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
           {category.kind === "agents" && agentOptions.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><StatusIcon status={threadStatus(item)} /><span>{agentName(item) ?? item.name}<small>{[agentName(item) && item.name, item.foreground ? "Foreground" : "Background"].filter(Boolean).join(" · ")}</small></span></button>)}
           {category.kind === "models" && modelGroups.map(group => <section className="chat-picker-model-group" key={group.id} aria-label={[group.title, group.description].filter(Boolean).join(" · ")}>
             <h3>{group.title}{group.description && <small>{group.description}</small>}</h3>
-            <div className="chat-picker-identities">{group.models.map(choice => {
+            <div className="chat-picker-identities chat-picker-model-identities">{group.models.map(choice => {
               const icon = modelDisplayIcon(choice.id, choice.label, choice.icon);
               return <button className="chat-picker-identity" type="button" key={choice.id} aria-label={choice.label} title={choice.label} disabled={busy || state.kind === "failed"} onClick={() => choose(choice.id)}>{showModelIcon(icon) ? <ChatIcon icon={icon} /> : <span className="chat-picker-identity-label">{choice.label}</span>}</button>;
             })}</div>

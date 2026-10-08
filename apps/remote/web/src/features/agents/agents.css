@@ -24,7 +24,7 @@
 .agent-group-chevron { flex: 0 0 20px; color: var(--muted); text-align: center; font-size: 24px; }
 .agent-group[open] .agent-group-chevron { transform: rotate(90deg); }
 .agent-group-heading { flex: 1; min-width: 0; display: grid; gap: 3px; }
-.agent-group-name { font-size: var(--text-md); font-weight: 650; }
+.agent-group-name { font-size: var(--text-md); font-weight: 650; overflow-wrap: anywhere; }
 .agent-group-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); color: var(--muted); }
 .agent-group-counts { color: var(--muted); font-size: var(--text-xs); }
 .agent-group-total { flex: 0 0 auto; color: var(--muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; padding-right: var(--space-2); }
@@ -37,7 +37,7 @@
 .agent-open > .status-quiet:empty { display: none; }
 .agent-row-task { font-size: var(--text-md); font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
 .agent-row-description { font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; }
-.agent-row-activity { color: var(--muted); font-size: var(--text-sm); line-height: 1.4; }
+.agent-row-activity { color: var(--muted); font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; }
 .agent-row-detail, .agent-row-attention { color: var(--muted); font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; }
 .agent-row-identity { display: flex; gap: var(--space-2); align-items: baseline; color: var(--muted); font-size: var(--text-xs); margin-top: 3px; }
 .agent-row-name { overflow-wrap: anywhere; }
