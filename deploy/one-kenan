@@ -239,14 +239,16 @@ def install():
       (shared/'bin',0,0,0o755),(rooms_home,room_uid,room_gid,0o700)]:
         directory.mkdir(parents=True,exist_ok=True,mode=mode); directory.chmod(mode)
         if not fixture: os.chown(directory,uid,gid)
+    if not fixture:
+        run(['python3', str(repo/'apps/remote/server/pi-timezone-provision'), *[argument for user in [*[p['user'] for p in people], room_user] for argument in ('--user', user)]], capture_output=True)
     memory={'supervisors':[],'uidPersons':{}}
     for person in people:
         token=secrets.token_urlsafe(32); cap=shared/'supervisor-capabilities'/person['user']; fresh(cap,token+'\n',0o600)
-        memory['supervisors'].append({'person':person['user'],'displayName':person['displayName'],'token':token}); memory['uidPersons'][str(person_uid(person))]=person['user']
+        memory['supervisors'].append({'person':person['user'],'displayName':person['displayName'],'token':token,'timezoneFile':str(target('/var/lib/pi-timezones')/person['user']/'timezone.json')}); memory['uidPersons'][str(person_uid(person))]=person['user']
         fresh(target(f'/etc/systemd/system/pi-remote@{person["user"]}.service.d/one-kenan.conf'),
           f'[Service]\nLoadCredential=kenan-memory-supervisor:{cap}\nEnvironment=PI_KENAN_MEMORY_URL=http://127.0.0.1:{ports["memoryPort"]}\nEnvironment=PI_KENAN_ROOT_URL=http://127.0.0.1:{ports["rootPort"]}\n')
     room_token=secrets.token_urlsafe(32); fresh(shared/'supervisor-capabilities/pi-rooms',room_token+'\n',0o600)
-    memory['supervisors'].append({'person':'pi-rooms','token':room_token}); memory['uidPersons'][str(room_uid)]='pi-rooms'
+    memory['supervisors'].append({'person':'pi-rooms','token':room_token,'timezoneFile':str(target('/var/lib/pi-timezones')/room_user/'timezone.json')}); memory['uidPersons'][str(room_uid)]='pi-rooms'
     for field,name in [('publisherToken','publisher-token'),('rootToken','root-memory-token')]:
         memory[field]=secrets.token_urlsafe(32); fresh(shared/name,memory[field]+'\n',0o600)
     fresh(shared/'root-admin-capability',secrets.token_hex(32)+'\n',0o600)
@@ -254,7 +256,7 @@ def install():
     fresh(target('/etc/pi-stack/kenan-memory-auth.json'),json.dumps(memory)+'\n',0o600)
     one={**config,**ports,'executionUser':execution,'roomsUser':room_user,'custodySocket':str(target('/run/pi-kenan/custody.sock')),
          'rootAdminCapabilityFile':str(shared/'root-admin-capability'),'rootConsentCapabilityFile':str(consent_capability),
-         'routerPort':router_port,'brokerUser':operator}
+         'routerPort':router_port,'brokerUser':operator,'memoryTimezoneGroup':'pi-timezones-readers'}
     fresh(target('/etc/pi-stack/one-kenan.json'),json.dumps(one,indent=2)+'\n')
     root={**root_config,'version':1,'cwd':str(shared/'private'),'agentDir':str(shared/'private/.pi/agent'),
           'sessionsDir':str(shared/'private/root-sessions'),'brokerUrl':f'http://127.0.0.1:{ports["rootBrokerPort"]}',
@@ -271,6 +273,7 @@ def install():
     env=f'PI_STACK_HOST_FILE={host}\nPI_STACK_HOST_CONFIG={host}\nPI_KENAN_CONFIG={target("/etc/pi-stack/one-kenan.json")}\nPI_REMOTE_PERSONS_DIR={persons_dir}\nPI_KENAN_KEY_STORE={shared}/custody/keys.json\nPI_KENAN_PRIVATE_DIR={shared}/private\nPI_KENAN_SHARED_CIPHER={shared}/.private.crypt\nPI_KENAN_MEMORY_STORE={shared}/private/memory/memory.sqlite3\nPI_KENAN_MEMORY_PORT={ports["memoryPort"]}\nPI_KENAN_MEMORY_URL=http://127.0.0.1:{ports["memoryPort"]}\nPI_KENAN_ROOT_PORT={ports["rootPort"]}\nPI_KENAN_ROOT_URL=http://127.0.0.1:{ports["rootPort"]}\nPI_KENAN_ROOT_CONFIG={target("/etc/pi-stack/kenan-root.json")}\nPI_KENAN_ACTION_JOURNAL_DIR={shared}/private/action-journal\nPI_KENAN_ROOM_AUDIENCE_MODULE={config.get("remoteRoot","/srv/pi/pi-remote")}/server/room-audience.mjs\nPI_REMOTE_ROOMS_DB={target("/var/lib/pi-remote/one-kenan/rooms.sqlite3")}\n'
     fresh(target('/etc/pi-stack/one-kenan.env'),env)
     room_environment={'PI_REMOTE_HOST':'127.0.0.1','PI_REMOTE_PORT':ports['roomsPort'],'PI_REMOTE_DATA':str(rooms_home),
+      'PI_PERSON_TIMEZONE_FILE':str(target('/var/lib/pi-timezones')/room_user/'timezone.json'),
       'PI_AGENT_DIR':str(rooms_home/'agent'),'PI_MODEL_BROKER_URL':f'http://127.0.0.1:{ports["roomsBrokerPort"]}',
       'PI_KENAN_ROOT_URL':f'http://127.0.0.1:{ports["rootPort"]}','PI_KENAN_MEMORY_URL':f'http://127.0.0.1:{ports["memoryPort"]}',
       'PI_STACK_HOST_CONFIG':str(host),**config.get('roomsEnvironment',{})}

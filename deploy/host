@@ -254,6 +254,11 @@ if [[ ! -f $runtime/.pi-stack-commit || $(<"$runtime/.pi-stack-commit") != "$exp
 fi
 (( preparation_failed == 0 )) || exit 1
 "$root/deploy/orchestrator"
+if (( services )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+  timezone_users=()
+  for user in "${users[@]}"; do timezone_users+=(--user "$user"); done
+  pi_stack_as_root python3 "$root/apps/remote/server/pi-timezone-provision" --configure "${timezone_users[@]}"
+fi
 # Once Orchestrator is selected, Remote, the tools and the accounts touch
 # disjoint state: separate release directories, ~/.local/bin, and ~/.pi/agent.
 # The shared skills release is published once, serially; each account's
@@ -349,11 +354,11 @@ activate_remote() {
   printf 'supervisors did not activate Pi Remote %s within their start/stop budget: %s\n' "$target_commit" "${pending[*]}" >&2
   return 1
 }
-# A daemon's graceful stop can consume its full systemd stop budget. Remote
-# handoff does not depend on it; join both jobs before smoke instead of spending
-# that budget before the supervisors even receive their reload (PUB-bf877cd4).
-(
-  failed=0
+# Remote owns canonical settings and publishes its narrow timezone projection
+# before fleet admissions start. Locked owners retain explicit unavailable state.
+activate_daemons() {
+  local failed=0 broker_units
+  local -a brokers=()
   if (( ${#daemons[@]} )); then
     pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1
   fi
@@ -362,9 +367,8 @@ activate_remote() {
   if (( ${#brokers[@]} )); then
     pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
   fi
-  exit "$failed"
-) &
-daemon_activation_pid=$!
+  return "$failed"
+}
 activation_failed=0
 if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
   if (( recognition )); then
@@ -382,6 +386,14 @@ elif ! remote_matches_release "$expected"; then
   activate_remote "$expected" || activation_failed=1
 fi
 
+if (( activation_failed == 0 )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+  "$root/deploy/timezone-ready" "$router_base" || activation_failed=1
+fi
+if (( activation_failed == 0 )); then
+  activate_daemons &
+  daemon_activation_pid=$!
+fi
+
 # Refresh the additive gates before rolling the shared-room supervisor. Root,
 # memory and encrypted custody remain untouched by the ordinary host release.
 if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
@@ -392,7 +404,7 @@ fi
 if (( recognition )); then
   wait "$recognition_pid" || activation_failed=1
 fi
-wait "$daemon_activation_pid" || activation_failed=1
+if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || activation_failed=1; fi
 
 fi
 # Then walk the front door the way the clients do. A release that locks a

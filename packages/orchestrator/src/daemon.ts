@@ -346,6 +346,7 @@ export class Daemon {
   }
   private threadEnvironment(thread:Thread):Record<string,string|undefined>{
     const shared={HOME:process.env.HOME??homedir(),PI_CODING_AGENT_DIR:this.config.agentDir,PI_ORCHESTRATOR_LEDGER:this.ledgerPath,
+      PI_PERSON_TIMEZONE_FILE:process.env.PI_PERSON_TIMEZONE_FILE,
       PI_BASH_TIMEOUT_MAX_SECONDS:"55",PI_ORCHESTRATOR_EXECUTION:String(thread.metadata?.execution??"user"),
       PI_THREAD_API_URL:`http://127.0.0.1:${this.port}/v1/threads`,PI_THREAD_ADMISSION:thread.admission};
     return this.config.modelBrokerUrl?{...shared,PI_MODEL_BROKER_URL:this.config.modelBrokerUrl,PI_ORCHESTRATOR_ASSIGNED:"0"}

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { nativeExitCode, nativeManagerEnvironment, nativeOrigin, recoverTerminalOwner } from "./native-recovery.mjs";
@@ -18,8 +18,16 @@ export function terminalLaunch(args, directory) {
     cleanup() { rmSync(manifest, { force: true }); } };
 }
 
+export function terminalTimezoneEnvironment(input, user = userInfo().username, configured = existsSync) {
+  const env = { ...input }, directory = `/var/lib/pi-timezones/${user}`;
+  // A terminal owns its kernel account, not an inherited person's projection.
+  delete env.PI_PERSON_TIMEZONE_FILE;
+  if (configured(directory)) env.PI_PERSON_TIMEZONE_FILE = `${directory}/timezone.json`;
+  return env;
+}
+
 export async function runTerminal(args, inputEnv = process.env) {
-  const env = nativeManagerEnvironment(inputEnv);
+  const env = terminalTimezoneEnvironment(nativeManagerEnvironment(inputEnv));
   const cli = fileURLToPath(new URL("./node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js", import.meta.url));
   if (args.length === 1 && ["--help", "-h", "--version", "-v"].includes(args[0])) {
     const result = spawnSync(process.execPath, [cli, ...args], { stdio: "inherit", env });

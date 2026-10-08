@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 && $1 =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || { echo 'usage: timezone-ready ROUTER_LOOPBACK_ORIGIN' >&2; exit 64; }
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+people=$(curl -fsS --max-time 2 "$1/v1/router-health")
+jq -e '.people | type == "array"' <<< "$people" >/dev/null
+mapfile -t users < <(jq -r '.people[] | select(.unlocked) | .user' <<< "$people")
+for user in "${users[@]}"; do
+  pi_stack_as_root python3 "$root/apps/remote/server/pi-timezone-provision" --verify --user "$user"
+done
