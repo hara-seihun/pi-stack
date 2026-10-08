@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import type { PersonTimezone, SettingsResult } from "pi-orchestrator/person-timezone";
+import type { RootAdmission } from "./contract.js";
 import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
 import { MemoryStore } from "./store.js";
 import { validateRequest } from "./validation.js";
@@ -9,7 +11,7 @@ import { LifeStore } from "./life-store.js";
 import { LIFE_ROOT_SUBJECT } from "./life-contract.js";
 import { validateLifeRequest } from "./life-validation.js";
 export interface MemoryAuth {
-  supervisors: { person: string; token: string; displayName?: string }[];
+  supervisors: { person: string; token: string; displayName?: string; timezoneFile?: string }[];
   publisherToken?: string;
   rootToken?: string;
   uidPersons?: Record<string, string>;
@@ -29,9 +31,15 @@ export function loopbackUid(request: IncomingMessage): number | undefined {
     if (f[1] === client && f[2] === server) return Number(f[7]);
   }
 }
-export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; enabled: () => boolean; peerUid?: (request: IncomingMessage) => number | undefined; roomAudience?: RoomAudienceResolver; releaseCommit?: string }) {
+export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; enabled: () => boolean; peerUid?: (request: IncomingMessage) => number | undefined; roomAudience?: RoomAudienceResolver; timezone?: (person: string) => SettingsResult<PersonTimezone | null>; releaseCommit?: string }) {
   const { store, auth } = options;
   const life = new LifeStore(store.db);
+  const withTimezone = (admission: RootAdmission): MemoryResult<RootAdmission> => {
+    if (!options.timezone) return { ok: true, value: admission };
+    const timezone = options.timezone(admission.person);
+    return timezone.ok ? { ok: true, value: { ...admission, timezone: timezone.value } }
+      : { ok: false, error: "unavailable", message: `Authenticated asking-person timezone unavailable: ${timezone.error.message}` };
+  };
   const principal = (request: IncomingMessage): Principal | undefined => {
     const supplied = request.headers[MEMORY_TOKEN_HEADER];
     if (typeof supplied === "string") {
@@ -84,7 +92,8 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
           if (admitted.roomId || current || admitted.person === "pi-rooms") {
             if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0")) return denied("The original room audience changed");
           }
-          return send(200, { ok: true, value: admitted });
+          const resolved = withTimezone(admitted);
+          return send(resolved.ok ? 200 : 503, resolved);
         }
         if (request.url === "/v1/root/log-request-status") {
           if (!fields(input, ["rootSessionId", "requestId", "status"]) || typeof input.rootSessionId !== "string" || typeof input.requestId !== "string" || !new RegExp(KENAN_REQUEST_ID_PATTERN).test(input.requestId) || !["failed", "interrupted"].includes(input.status)) return invalid("Invalid root request status");
@@ -120,7 +129,14 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
             if (!current || current.roomId !== admitted.roomId || [...current.people].sort().join("\0") !== [...admitted.recipients].sort().join("\0"))
               return denied("The original room audience changed; ask again");
           }
-          const result = resume ? store.resumeConsent(input as RootResumeConsent) : store.logConsent(input as RootLogConsent);
+          if (resume) {
+            const timezone = admitted && options.timezone?.(admitted.person);
+            if (timezone && !timezone.ok) return send(503, { ok: false, error: "unavailable", message: `Authenticated asking-person timezone unavailable: ${timezone.error.message}` });
+            const result = store.resumeConsent(input as RootResumeConsent);
+            const resolved = result.ok && timezone?.ok ? { ok: true as const, value: { ...result.value, timezone: timezone.value } } : result;
+            return send(resolved.ok ? 200 : resolved.error === "unauthenticated" ? 403 : 400, resolved);
+          }
+          const result = store.logConsent(input as RootLogConsent);
           return send(result.ok ? 200 : result.error === "unauthenticated" ? 403 : 400, result);
         }
         if (request.url === "/v1/root/admit") {
@@ -131,10 +147,12 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
           const audience = await options.roomAudience?.(session.person, session.threadId);
           if (session.person === "pi-rooms" && !audience) return denied("A room request requires its current authenticated audience");
           if (audience && (!strings(audience.people) || !audience.people.length)) return denied("The room audience is unavailable");
+          const timezone = options.timezone?.(session.person);
+          if (timezone && !timezone.ok) return send(503, { ok: false, error: "unavailable", message: `Authenticated asking-person timezone unavailable: ${timezone.error.message}` });
           const normalized = input.request.toLocaleLowerCase();
           const subjects = auth.supervisors.filter(entry => [entry.person, entry.displayName].filter(Boolean).some(name => normalized.includes(name!.toLocaleLowerCase()))).map(entry => entry.person);
           const admission = store.admitRoot(session.person, session.threadId, audience?.people ?? [session.person], subjects, audience?.roomId, input.rootSessionId);
-          return send(200, { ok: true, value: admission });
+          return send(200, { ok: true, value: timezone?.ok ? { ...admission, timezone: timezone.value } : admission });
         }
         if (request.url !== "/v1/root/finalize-reply") return invalid("Unknown root operation");
         if (!fields(input, ["rootSessionId", "reply", "recipients", "subjects"]) || typeof input.rootSessionId !== "string" || typeof input.reply !== "string" || input.reply.length > 100_000

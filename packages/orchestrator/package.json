@@ -30,6 +30,11 @@
       "bun": "./src/threads/question-policy.ts",
       "default": "./dist/threads/question-policy.js"
     },
+    "./person-timezone": {
+      "types": "./src/person-timezone.ts",
+      "bun": "./src/person-timezone.ts",
+      "default": "./dist/person-timezone.js"
+    },
     "./message-format": {
       "types": "./src/threads/message-format.ts",
       "browser": "./src/threads/message-format.ts",

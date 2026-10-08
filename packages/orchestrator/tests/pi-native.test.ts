@@ -28,7 +28,7 @@ function directory() {
 
 it("does not inherit another thread's restore flag, but still refuses lost required history", async () => {
   const cwd = directory();
-  const options: PiSessionOptions = { cwd, args: [], env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1" }, threadId: "fresh", sessionFile: join(cwd, "fresh.jsonl") };
+  const options: PiSessionOptions = { cwd, args: [], env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", PI_MODEL_DELIVERY_TIMEZONE: "null" }, threadId: "fresh", sessionFile: join(cwd, "fresh.jsonl") };
   vi.stubEnv("PI_THREAD_REQUIRE_SESSION", "1");
   writeFileSync(join(cwd, "settings.json"), JSON.stringify({ version: 1, timezone: { zone: "Asia/Tokyo", source: "configured", observedAt: "2026-10-08T00:00:00Z" }, autoCollapse: null }));
   vi.stubEnv("PI_PERSON_SETTINGS_DATA", cwd);

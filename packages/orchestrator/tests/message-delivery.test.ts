@@ -73,7 +73,7 @@ it("preview replays only real delivery stamps without clock/metadata writes or a
   const delivered: AgentMessage = { role: "user", content: "already sent", timestamp: 1 };
   const pending: AgentMessage = { role: "user", content: "not yet sent", timestamp: 2 };
   manager.appendMessage(delivered);
-  const project = createMessageDeliveryProjection(manager, {}, () => 1000);
+  const project = createMessageDeliveryProjection(manager, { PI_MODEL_DELIVERY_TIMEZONE: "null" }, () => 1000);
   const original = value(project([delivered]));
   manager.appendMessage(pending);
   const before = JSON.stringify(manager.getBranch()), leaf = manager.getLeafId();
@@ -96,7 +96,7 @@ it("preview replays only real delivery stamps without clock/metadata writes or a
 it("unknown zones are labeled honestly and invalid/unavailable settings refuse delivery without storing a receipt", () => {
   const manager = SessionManager.inMemory();
   const message: AgentMessage = { role: "user", content: "input", timestamp: 1 }; manager.appendMessage(message);
-  expect(text(value(createMessageDeliveryProjection(manager, { TZ: "Europe/London" }, () => 1000)([message]))[0])).toContain("UTC +00:00; timezone-unconfigured");
+  expect(text(value(createMessageDeliveryProjection(manager, { TZ: "Europe/London", PI_MODEL_DELIVERY_TIMEZONE: "null" }, () => 1000)([message]))[0])).toContain("UTC +00:00; timezone-unconfigured");
   const path = data("Europe/London"); writeFileSync(join(path, "settings.json"), "corrupt");
   const initial = manager.getBranch().length;
   expect(createMessageDeliveryProjection(manager, { PI_PERSON_SETTINGS_DATA: path }, () => 2000)([message])).toMatchObject({ ok: false, error: { code: "unavailable" } });
@@ -112,7 +112,7 @@ it("common final adapter prefixes converted compaction/custom/bash before native
   ];
   let conversions = 0;
   const session = { sessionManager: manager, agent: { convertToLlm: (input: AgentMessage[]) => { conversions++; return convertToLlm(input); } } } as unknown as Pick<AgentSession, "agent" | "sessionManager">;
-  installMessageDelivery(session, {}); installMessageDelivery(session, {});
+  installMessageDelivery(session, { PI_MODEL_DELIVERY_TIMEZONE: "null" }); installMessageDelivery(session, { PI_MODEL_DELIVERY_TIMEZONE: "null" });
   const result = await session.agent.convertToLlm(messages);
   expect(conversions).toBe(1);
   for (const message of result) expect(text(message)).toMatch(/^\[Model delivery:/);

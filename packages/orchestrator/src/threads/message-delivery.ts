@@ -2,7 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentSession, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
-import { readPersonTimezone, type PersonTimezone } from "../person-settings.js";
+import { readPersonTimezone, type PersonTimezone, type SettingsResult } from "../person-settings.js";
+import { deliveryTimezone } from "../person-timezone.js";
 
 export const MESSAGE_DELIVERY_RECEIPT = "model_message_delivery_v1";
 export type DeliveryTimezone = { state: "configured"; zone: string } | { state: "unconfigured" };
@@ -70,6 +71,12 @@ function sourceKeys(branch: SessionEntry[]): Map<string, string[]> {
   return sources;
 }
 
+export function readMessageDeliveryTimezone(env: NodeJS.ProcessEnv): SettingsResult<PersonTimezone | null> {
+  const settingsData = env.PI_PERSON_SETTINGS_DATA ?? env.PI_REMOTE_DATA;
+  return env.PI_MODEL_DELIVERY_TIMEZONE !== undefined || env.PI_PERSON_TIMEZONE_FILE !== undefined || !settingsData
+    ? deliveryTimezone(env) : readPersonTimezone(settingsData);
+}
+
 export function createMessageDeliveryProjection(manager: DeliveryManager, env: NodeJS.ProcessEnv,
   now: () => number = Date.now): (messages: AgentMessage[]) => DeliveryResult<AgentMessage[]> {
   return messages => {
@@ -84,9 +91,8 @@ export function createMessageDeliveryProjection(manager: DeliveryManager, env: N
     }
     let delivery: { at: number; timezone: PersonTimezone | null; prefix: string } | null = null;
     if (deliveryScope.getStore() !== "preview") {
-      const settingsData = env.PI_PERSON_SETTINGS_DATA ?? env.PI_REMOTE_DATA;
-      const timezone = settingsData ? readPersonTimezone(settingsData) : { ok: true as const, value: null };
-      if (!timezone.ok) return { ok: false, error: { code: "unavailable", message: `Cannot resolve owner timezone: ${timezone.error.message}` } };
+      const timezone = readMessageDeliveryTimezone(env);
+      if (!timezone.ok) return { ok: false, error: { code: timezone.error.code === "invalid" ? "invalid" : "unavailable", message: `Cannot resolve owner timezone: ${timezone.error.message}` } };
       const at = now();
       const prefix = deliveryPrefix(at, timezone.value ? { state: "configured", zone: timezone.value.zone } : { state: "unconfigured" });
       if (!prefix.ok) return prefix;

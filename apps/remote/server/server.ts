@@ -81,7 +81,7 @@ import { VoiceClient } from "./voice/client";
 import { MeetGateway } from "./meet/gateway";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
-import { observeExecutionActivity } from "pi-orchestrator/api";
+import { observeExecutionActivity, reconcilePersonTimezoneProjection } from "pi-orchestrator/api";
 import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "./meet/handoff";
 import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
@@ -137,6 +137,7 @@ const HOME = homedir();
 const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
 const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
+process.env.PI_PERSON_SETTINGS_DATA = DATA;
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const AUTO_ARCHIVE_AFTER_MS = autoArchiveDelay(process.env.PI_REMOTE_AUTO_ARCHIVE_AFTER_MS);
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
@@ -1633,6 +1634,11 @@ const meet = meetingRuntime.value;
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, () => { trackFeature("signal", "agent"); });
 const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
+if (process.env.PI_PERSON_TIMEZONE_FILE) {
+  if (!calendar.timezoneMigration.ok) throw new Error(`Owner timezone migration unavailable: ${calendar.timezoneMigration.error.message}`);
+  const timezone = reconcilePersonTimezoneProjection(DATA, process.env.PI_PERSON_TIMEZONE_FILE);
+  if (!timezone.ok) throw new Error(`Owner timezone projection unavailable: ${timezone.error.message}`);
+}
 observeError(db, "settings-migration", calendar.timezoneMigration.ok ? null : calendar.timezoneMigration.error.message);
 calendar.start();
 type SocketData = PhoneSocketData;

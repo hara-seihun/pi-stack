@@ -326,13 +326,30 @@ context snapshot. Subsequent requests, resume and retained compaction history
 reuse that delivery record, without another prefix or receipt. Newly generated
 compaction/branch messages receive their own delivery records.
 
-The trusted owner launcher supplies `PI_PERSON_SETTINGS_DATA`, or its explicit
-`PI_REMOTE_DATA`, to the authoritative person-settings reader at delivery time.
-Remote passes its resolved own data directory; shared runners discard another
-session's inherited path. Missing configuration is explicitly rendered as
-`UTC +00:00; timezone-unconfigured`, not a guessed user timezone. Invalid or
-unavailable settings reject the request. No sender-claimed user ID, server TZ or
-another person's settings are consulted.
+The trusted owner launcher declares `PI_PERSON_TIMEZONE_FILE` as
+`/var/lib/pi-timezones/USER/timezone.json`. The owning Remote publishes this
+narrow projection from its canonical `settings.json` after CalendarStore migration,
+then fences every timezone setting write with `state: "updating"` before publishing
+`state: "ready"`. Projection files are own-UID, reader-group mode0640 even under
+UMask0077; directories inherit the host-owned `pi-timezones-readers` group. Host
+provisioning creates directories, never timezone values. Fleet/terminal sessions
+read this projection without acquiring the encrypted personal settings directory.
+
+Ready projection schema is exactly `{version:1,state:"ready",timezone:null|{zone,
+source,observedAt}}`; source is `configured` or `client-observed`. A declared null
+means genuinely unobserved/unset and renders `UTC +00:00; timezone-unconfigured`.
+Missing, updating, unreadable or malformed authority rejects delivery. A queued
+receipt waits before capacity/native custody and remains queued until authority
+recovers; it is not failed or replayed. Owner Remote may also explicitly supply
+its resolved `PI_PERSON_SETTINGS_DATA`/`PI_REMOTE_DATA` when no projection is
+installed. Shared runners discard another session's inherited paths and metadata.
+
+Root admission/resumption receives only authenticated asking-person timezone
+metadata from the memory broker's host-declared `supervisors[].timezoneFile`.
+Only the memory service has reader-group access; Root clears settings/projection
+paths and consumes `PI_MODEL_DELIVERY_TIMEZONE`, not personal files. Subject names
+in the request and caller-supplied metadata never select timezone authority.
+Server TZ and another person's settings are never consulted.
 
 ## Cutover
 
