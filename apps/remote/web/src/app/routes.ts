@@ -43,7 +43,7 @@ export function parseRoute(hash: string): Route {
     case "chats": {
       const kind = rest[0];
       const id = rest[1];
-      if (kind !== undefined) requireState(kind, { ai: true, human: true, room: true }, "Chat route kind");
+      if (kind !== undefined) requireState(kind, { ai: true, room: true }, "Chat route kind");
       if (kind !== undefined && !id) throw new Error("Chat route requires an id");
       const chat = kind && id ? `${kind}:${id}` as ChatId : null;
       if (questionId !== null && kind !== "ai") throw new Error("Question links require an agent chat");

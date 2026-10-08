@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ClientStream, inboxMessaging, INBOX_CONVERSATION_WINDOW_MS, mergeSubscription, readSubscription } from "./stream";
+import { ClientStream, mergeSubscription, readSubscription } from "./stream";
 import { ReconcilePublisher, ReconcileReplica, type ReconcileFrame } from "../shared/reconcile";
-import type { MessagingConversation, MessagingSnapshot } from "./messaging/protocol";
 
 function recordingStream(publisher = new ReconcilePublisher()) {
   const chunks: string[] = [];
@@ -49,23 +48,6 @@ describe("resource subscriptions", () => {
     expect(readSubscription({ have: { "live:a": "r1" }, want: ["live:a", "live:a"] })).toEqual({ have: { "live:a": "r1" }, want: ["live:a"] });
     expect(readSubscription({ want: Array(129).fill("state"), have: { a: 5 } })).toEqual({});
     expect(mergeSubscription({ session: "a", thinking: true }, { session: "b" })).toEqual({ session: "b", thinking: true });
-  });
-});
-
-describe("the messaging inbox", () => {
-  const conversation = (id: string, extra: Partial<MessagingConversation>): MessagingConversation => ({
-    id, backendId: "signal", externalId: id, title: id, kind: "direct", updatedAt: 0, unread: 0, current: false, avatar: null, revision: 0, ...extra,
-  });
-  test("keeps open conversations that are recent or unread", () => {
-    const now = Date.UTC(2026, 8, 18);
-    const snapshot: MessagingSnapshot = { version: 3, backends: [], calls: [], conversations: [
-      conversation("recent", { updatedAt: now - 1_000, current: true }),
-      conversation("old", { updatedAt: now - INBOX_CONVERSATION_WINDOW_MS - 1, current: true }),
-      conversation("unread", { updatedAt: 0, unread: 2, current: true }),
-      conversation("closed-recent", { updatedAt: now - 1_000 }),
-      conversation("closed-unread", { updatedAt: 0, unread: 2 }),
-    ] };
-    expect(inboxMessaging(snapshot, now).conversations.map(item => item.id)).toEqual(["recent", "unread"]);
   });
 });
 

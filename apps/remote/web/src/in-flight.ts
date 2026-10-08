@@ -22,8 +22,8 @@ let nextId = 1;
 let activation: Activation | null = null;
 
 const WRITES = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-const TOP_LEVEL_READ = /^\/v1\/(?:sessions(?:\/archived)?|workspaces|messaging|files|environments|actions)$/;
-const BACKGROUND_WRITE = /^\/v1\/(?:reconcile|stream(?:\/[^/]+)?|messaging\/conversations\/[^/]+\/read|speech\/utterances)$/;
+const TOP_LEVEL_READ = /^\/v1\/(?:sessions(?:\/archived)?|workspaces|files|environments|actions)$/;
+const BACKGROUND_WRITE = /^\/v1\/(?:reconcile|stream(?:\/[^/]+)?|speech\/utterances)$/;
 const NATIVE_ACTION = /^native:(?:installAppUpdate|checkAppUpdate|notifications)$/;
 
 /** Native bridge calls are not API reads; only explicit native actions can show progress. */

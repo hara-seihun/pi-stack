@@ -1,18 +1,7 @@
 import type { StreamSnapshot, StreamSubscription, StreamWireEvent } from "./protocol";
-import type { MessagingSnapshot } from "./messaging/protocol";
 import { ReconcilePublisher, readReconcileHave } from "../shared/reconcile";
 
 export const PING_INTERVAL_MS = 10_000;
-export const INBOX_CONVERSATION_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
-
-export function inboxMessaging(snapshot: MessagingSnapshot, now = Date.now()): MessagingSnapshot {
-  return {
-    ...snapshot,
-    conversations: snapshot.conversations.filter(conversation =>
-      conversation.current && (conversation.unread > 0 || conversation.updatedAt >= now - INBOX_CONVERSATION_WINDOW_MS)),
-  };
-}
-
 function optionalString(value: unknown): string | null | undefined {
   if (value === null) return null;
   return typeof value === "string" && value && value.length <= 256 ? value : undefined;

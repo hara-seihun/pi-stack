@@ -168,8 +168,8 @@ const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId, autoCollap
   const created = message.tool === "spawn" ? spawnedThread(body.body) : null;
   const to = message.tool === "send" ? { kind: "peer" as const, threadId: message.recipientId, name: null }
     : created ? { kind: "peer" as const, threadId: created.id, name: created.name } : { kind: "new" as const, title: message.title };
-  const status = message.delivery.state === "sending" ? { status: "sending", canCheck: false, canRetry: false }
-    : message.delivery.state === "failed" ? { status: "failed", error: message.delivery.error, canCheck: false, canRetry: false } : undefined;
+  const status = message.delivery.state === "sending" ? { status: "sending" }
+    : message.delivery.state === "failed" ? { status: "failed", error: message.delivery.error } : undefined;
   const route = <AgentRoute direction="outgoing" from={{ kind: "self", threadId: sessionId }} to={to} />;
   return <div data-transcript-seq={entry.seq}><AgentDisclosure route={route} open={open} onOpen={setOpen}><ChatMessage
     kind="assistant agent-outgoing"

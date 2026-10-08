@@ -2,23 +2,14 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { isAbsolute, join, relative } from "node:path";
 import { API } from "../api";
 import { API_CORS_HEADERS } from "../cors";
-import { MessagingService, messagingConfig, type CallAudioSocket } from "./service";
+import { MessagingService, messagingConfig } from "./service";
 import type { MessagingResult, MessagingSnapshot } from "./protocol";
 import type { MessageReaction } from "../message-protocol";
-import { SIGNAL_ICON } from "./signal";
-
-export type { CallAudioSocket } from "./service";
-
-let activeService: MessagingService | null = null;
-
-export function openCallAudio(callId: string): CallAudioSocket | null {
-  return activeService?.openCallAudio(callId) ?? null;
-}
 
 export interface MessagingEndpoint {
-  snapshot(): MessagingSnapshot;
+  snapshot(): MessagingResult<MessagingSnapshot>;
   handle(req: Request): Promise<Response | null>;
-  react(messageId: string, emoji: string, remove: boolean): Promise<MessagingResult<MessageReaction[]>>;
+  react(messageId: string, emoji: string, remove: boolean, requestId: string): Promise<MessagingResult<MessageReaction[]>>;
   close(): Promise<void>;
 }
 
@@ -31,47 +22,46 @@ export function messagingRoot(data: string, privateDir: string, encrypted: boole
   const root = join(dataPath, "messaging");
   if (existsSync(root) && !within(realpathSync(root))) throw new Error("Messaging profiles cannot point outside this account's encrypted folder");
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  for (const child of ["profiles.json", "messages.sqlite3", "messages.sqlite3-wal", "messages.sqlite3-shm", "backends", "attachments", "preview-images"]) {
+  for (const child of ["profiles.json", "messages.sqlite3", "messages.sqlite3-wal", "messages.sqlite3-shm", "backends", "attachments", "action-journal"]) {
     const path = join(root, child);
     if (existsSync(path) && !within(realpathSync(path))) throw new Error(`Messaging ${child} cannot point outside this account's encrypted folder`);
   }
   return root;
 }
 
-export function createMessagingService(data: string, privateDir: string, encrypted: boolean, onChange?: () => void): MessagingEndpoint {
+export function createMessagingService(data: string, privateDir: string, encrypted: boolean, onToolUse?: (operation: string) => void): MessagingEndpoint {
   try {
     const root = messagingRoot(data, privateDir, encrypted);
     const configPath = join(root, "profiles.json");
     if (!existsSync(configPath)) writeFileSync(configPath, JSON.stringify({ version: 1, profiles: messagingConfig(undefined) }, null, 2) + "\n", { mode: 0o600 });
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     if (config?.version !== 1 || !Array.isArray(config.profiles)) throw new Error("Messaging profiles.json must contain version 1 and a profiles array");
-    const service = new MessagingService(root, messagingConfig(JSON.stringify(config.profiles)), undefined, onChange);
-    activeService = service;
+    const service = new MessagingService(root, messagingConfig(JSON.stringify(config.profiles)));
     void service.start();
     return {
-      snapshot: () => service.snapshot(),
-      handle: req => service.handle(req),
-      react: (messageId, emoji, remove) => service.react(messageId, emoji, remove),
-      close: async () => {
-        if (activeService === service) activeService = null;
-        await service.close();
+      snapshot: () => ({ ok: true, value: service.snapshot() }),
+      handle: async req => {
+        const response = await service.handle(req);
+        if (response?.ok && onToolUse) {
+          const path = new URL(req.url).pathname;
+          const operation = Object.entries(API).find(([key, route]) => key.startsWith("messaging") && route.match(req.method, path));
+          if (operation) onToolUse(operation[0]);
+        }
+        return response;
       },
+      react: (messageId, emoji, remove, requestId) => service.react(messageId, emoji, remove, requestId),
+      close: () => service.close(),
     };
   } catch (cause) {
-    activeService = null;
     const detail = cause instanceof Error ? cause.message : String(cause);
     return {
-      snapshot() {
-        return { version: 1, backends: [{ id: "signal", plugin: "signal", icon: SIGNAL_ICON, label: "Signal", capabilities: { attachments: true, groups: true, calls: false }, status: "unconfigured", detail, linkable: false, link: null }], conversations: [], calls: [] };
-      },
+      snapshot() { return { ok: false, error: { code: "signal_unavailable", message: detail } }; },
       async handle(req) {
         const path = new URL(req.url).pathname;
-        if (!path.startsWith("/v1/messaging")) return null;
-        return Response.json(API.messaging.match(req.method, path)
-          ? this.snapshot()
-          : { error: detail }, { status: API.messaging.match(req.method, path) ? 200 : 503, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
+        if (path !== "/v1/agent-signal" && !path.startsWith("/v1/agent-signal/")) return null;
+        return Response.json({ error: detail, code: "signal_unavailable" }, { status: 503, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
       },
-      async react() { return { ok: false, error: { code: "messaging_unavailable", message: detail } }; },
+      async react() { return { ok: false, error: { code: "signal_unavailable", message: detail } }; },
       async close() {},
     };
   }

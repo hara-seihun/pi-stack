@@ -30,12 +30,12 @@ The browser and Android client call `POST /v1/messages/reactions`. The AI tool c
 
 Pi reactions live in `supervisor.sqlite3`'s `message_reactions` table, keyed by message, emoji and sender. Repeating an add is idempotent, and removing a reaction never removes another sender's reaction. The server validates the native target, pushes updated transcript heads to connected clients, and includes stored reactions in the next turn's context. Body hashes and stored message text do not change.
 
-[Signal](messaging.md#reactions) sends and receives through the messaging plugin reaction contract. The service stores incoming events, including events that precede their target message, and publishes the same reaction data to the common renderer. Its linked account is the external reaction author, whether the request came from the UI or the AI.
+[Signal](signal-tool.md) sends and receives reactions through the account-scoped `pi-signal` agent tool. A durable request ID binds outgoing reactions and prevents ambiguous retries from redispatching. Stored history includes incoming events, including events that precede their target. The linked account is the external reaction author.
 
 [Slack](slack-reactions.md) delegates to the Work host's existing Converge command and preserves its permission and audience checks. That command currently supports adding reactions only. Its result confirms the requested reaction, not a complete Slack reaction history. Incoming Slack topics and their reaction history remain with Converge's Slack integration; this does not add a second Slack client or inbox to Remote.
 
-The common message renderer shows reaction badges and actor names. React in its long-press/right-click menu opens the emoji picker, where choosing an owned reaction removes it. It is shared by AI messages and Signal message groups.
+The common message renderer shows reaction badges and actor names. React in its long-press/right-click menu opens the emoji picker, where choosing an owned reaction removes it. It is shared by AI conversations and rooms.
 
 ## Focused checks
 
-Run `bun test apps/remote/server/reactions.test.ts apps/remote/server/message-context.test.ts apps/remote/server/reaction-tools.test.ts apps/remote/server/context-mirror.test.ts apps/remote/server/messaging/service.test.ts apps/remote/server/messaging/signal.test.ts apps/remote/server/slack-reactions.test.ts apps/remote/web/chat-message.test.tsx apps/remote/web/messaging-chat.test.tsx`. These use local fixtures, not real Slack or Signal recipients.
+Run `bun test apps/remote/server/reactions.test.ts apps/remote/server/message-context.test.ts apps/remote/server/reaction-tools.test.ts apps/remote/server/context-mirror.test.ts apps/remote/server/messaging/service.test.ts apps/remote/server/messaging/signal.test.ts apps/remote/server/slack-reactions.test.ts apps/remote/web/chat-message.test.tsx`. These use local fixtures, not real Slack or Signal recipients.

@@ -549,7 +549,7 @@ import { holdLiveMedia } from "./live-media";
           case "live": this.liveTextValue = event.text; this.observeLiveText(this.liveTextValue); return;
           case "events": this.consumeEvents(event.events); this.stream?.remember({ eventsAfter: this.cursor }); return;
           case "error": this.onNotice(event.message); return;
-          case "hello": case "bootstrap": case "state": case "messaging": case "dashboard": case "workers": case "transcript": case "images": case "questions": case "notifications": return;
+          case "hello": case "bootstrap": case "state": case "dashboard": case "workers": case "transcript": case "images": case "questions": case "notifications": return;
           case "reconcile": case "selection-ready": throw new Error(`Unprocessed stream control frame reached Voice: ${event.type}`);
         }
         assertNever(event, "Voice stream event");

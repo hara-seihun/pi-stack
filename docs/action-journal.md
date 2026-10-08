@@ -4,7 +4,7 @@ Owner: `packages/kenan-memory/src/journal.ts`. This is part of the [one-Kenan bu
 
 ## Captured boundaries
 
-- `MessagingService.dispatch`: Signal and every Remote messaging backend, text/attachment sends, reactions, and outgoing call initiation, with confirmed/failed/uncertain outcomes. Existing receipt replay never sends or journals twice.
+- `MessagingService.dispatch`: authorized Signal agent-tool text/attachment sends and reactions, with confirmed/failed/uncertain outcomes. Durable request receipt replay never sends or journals twice.
 - `PhoneBroker.execute`: `sms.send`, `call.dial`, `calendar.insert`, and `notifications.reply`. A successful Android response means command acceptance, **not** carrier delivery or a connected call.
 - `CalendarStore.handle`: owned event create/update/delete, occurrence changes/deletions, and undo restoration, after the SQLite mutation commits. Subscription refreshes and settings are not outward event writes.
 - Telephone service: physical SIM and Vonage dial dispatch after Voice preparation. A provider accepting the dial is not evidence somebody answered. Only the approved call purpose is summarized, not recordings/private history.

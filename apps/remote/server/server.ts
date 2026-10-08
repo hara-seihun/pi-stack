@@ -111,13 +111,13 @@ import { governorControls, isGovernorProvider, toggleGovernor } from "./governor
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
-import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
+import { ClientStream, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
 import { ResourceCache } from "../shared/resource-cache";
 import { SourceTranscripts, type SourceResult } from "./source-transcripts";
 import { MachineActions } from "./machine-actions";
-import { createMessagingService, openCallAudio } from "./messaging";
+import { createMessagingService } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
 import { parseMessageReference } from "./message-protocol";
 import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
@@ -1147,7 +1147,6 @@ function refreshState(): void {
   }
   projectState();
   for (const stream of streams.values()) sendState(stream);
-  pushMessaging();
   pushBootstrap();
   for (const stream of streams.values()) { sendImages(stream); void sendQuestions(stream); }
 }
@@ -1169,15 +1168,6 @@ function sendState(stream: ClientStream): void {
     ? { ...session, queuedMessages: queuedMessagesFor(selected), contextUsage: boundedContextUsage(selected, session.model) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
-}
-
-let messagingVersion = -1;
-function pushMessaging(target?: ClientStream): void {
-  const snapshot = inboxMessaging(messaging.snapshot());
-  if (target) { target.publish({ type: "messaging", snapshot }); return; }
-  if (snapshot.version === messagingVersion) return;
-  messagingVersion = snapshot.version;
-  for (const stream of streams.values()) stream.publish({ type: "messaging", snapshot });
 }
 
 function sendImages(stream: ClientStream): void {
@@ -1303,7 +1293,6 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     projectState();
     sendState(stream);
   }
-  pushMessaging(stream);
   stream.publish({ type: "bootstrap", bootstrap: bootstrap() });
   if (patch.notificationsAfter !== undefined) pushNotifications(stream);
   if (stream.subscription.dashboard) {
@@ -1800,12 +1789,10 @@ if (!meetingRuntime.ok) throw new Error(`Meeting runtime unavailable: ${meetingR
 const meet = meetingRuntime.value;
 
 
-const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
+const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK);
 const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
 calendar.start();
-const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
-type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
-type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
+type SocketData = WriteSocketData | PhoneSocketData;
 const phones = new PhoneBroker({
   overlayMessage: (device, message) => phoneOverlay!.message(device, message),
   ready: device => phoneOverlay?.ready(device),
@@ -1997,17 +1984,6 @@ const server = Bun.serve<SocketData>({
       const dictionary = writeDictionary.undo(body.undoId);
       return dictionary ? json({ dictionary }) : error("Write undo receipt not found", 404);
     }
-    const callAudio = req.method === "GET" && req.headers.get("upgrade")?.toLowerCase() === "websocket"
-      ? /^\/v1\/messaging\/calls\/([^/]+)\/audio$/.exec(url.pathname)
-      : null;
-    if (callAudio) {
-      let callId: string;
-      try { callId = decodeURIComponent(callAudio[1]!); }
-      catch { return error("Invalid call id", 400); }
-      return httpServer.upgrade(req, { data: { kind: "call", callId } })
-        ? undefined
-        : error("WebSocket upgrade failed", 400);
-    }
     const agentReaction = API.sessionReaction.match(req.method, url.pathname);
     if (agentReaction || API.messageReaction.match(req.method, url.pathname)) {
       httpServer.timeout(req, 60);
@@ -2025,13 +2001,17 @@ const server = Bun.serve<SocketData>({
           invalidateDisplayContext(target.sessionId);
           return { ok: true, value: reactions };
         },
-        messaging: (id, emoji, remove) => messaging.react(id, emoji, remove),
+        messaging: async () => ({ ok: false, error: { code: "agent_signal_required", message: "Use pi-signal react with a durable request ID" } }),
         slack: (target, emoji, remove) => slackReactions.react(target, emoji, remove),
       });
       return result.ok ? json({ ok: true, reactions: result.value }) : json(result, ["not_found", "message_not_found"].includes(result.error.code) ? 404 : 400);
     }
-    const messagingResponse = await messaging.handle(req);
-    if (messagingResponse) return messagingResponse;
+    if (/^\/v1\/agent-signal(?:\/|$)/.test(url.pathname)) {
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Signal tools require this person's authorized local caller", 403);
+      httpServer.timeout(req, 65);
+      return await messaging.handle(req) ?? error("Unknown Signal tool operation", 404);
+    }
     const speechResponse = speech ? await speech.handle(req) : null;
     if (speechResponse) return speechResponse;
     const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner", admissionFor(callers, caller));
@@ -2749,21 +2729,7 @@ const server = Bun.serve<SocketData>({
     open(socket) {
       if (socket.data.kind === "phone") { socket.data.connection = phones.open({ send: frame => socket.send(frame), close: (code, reason) => socket.close(code, reason) }); return; }
       if (socket.data.kind === "write") { socket.data.receive = connectWrite(socket as Bun.ServerWebSocket<WriteSocketData>, writeEndpoint, writeDictionary); return; }
-      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
-      const audio = openCallAudio(socket.data.callId);
-      if (!audio) {
-        socket.close(1008, "Call is unavailable");
-        return;
-      }
-      socket.data.audio = audio;
-      if (!audio.attach((frame: Uint8Array) => {
-        if (socket.readyState !== WebSocket.OPEN || socket.getBufferedAmount() >= AUDIO_SOCKET_BACKPRESSURE_BYTES) return;
-        socket.sendBinary(frame, false);
-      }, () => socket.close(1000))) {
-        socket.data.audio = undefined;
-        audio.detach();
-        socket.close(1008, "Call is unavailable");
-      }
+      socket.close(1008, "Unsupported WebSocket kind");
     },
     message(socket, message) {
       if (socket.data.kind === "phone") { if (socket.data.connection) phones.receive(socket.data.connection, message); return; }
@@ -2772,10 +2738,7 @@ const server = Bun.serve<SocketData>({
         write.data.receive?.(message);
         return;
       }
-      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
-      if (typeof message === "string") { socket.close(1008, "Call audio must be binary"); return; }
-      const frame = message instanceof Uint8Array ? message : new Uint8Array(message);
-      socket.data.audio?.receive(frame);
+      socket.close(1008, "Unsupported WebSocket kind");
     },
     close(socket) {
       if (socket.data.kind === "phone") { if (socket.data.connection) phones.disconnected(socket.data.connection); return; }
@@ -2785,9 +2748,7 @@ const server = Bun.serve<SocketData>({
         write.data.upstream?.close();
         return;
       }
-      if (socket.data.kind !== "call") throw new Error("Unsupported WebSocket kind at close");
-      socket.data.audio?.detach();
-      socket.data.audio = undefined;
+      throw new Error("Unsupported WebSocket kind at close");
     },
   },
 });

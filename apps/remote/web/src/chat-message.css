@@ -19,8 +19,7 @@ p.message-text { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .attachment-placeholder { animation: none; } }
 .message-metrics, .message-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
 .message-metrics { font-variant-numeric: tabular-nums; }
-.message-status.failed, .message-status.unknown { color: var(--danger); }
-.message-delivery-action { margin-top: 8px; }
+.message-status.failed { color: var(--danger); }
 .message-reactions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 6px; font-size: 13px; }
 .message-reaction-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 32px; min-height: 28px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); line-height: 1; }
 .message-reaction-chip[data-own="true"], .message-reaction-picker button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
