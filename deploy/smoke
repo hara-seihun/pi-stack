@@ -24,7 +24,7 @@ headers=$scratch/auth
 trap 'rm -rf "$scratch"' EXIT
 
 # The web client, served to anyone: it is what asks for a name and a key.
-for page in / /meet.html /voice.html; do
+for page in / /voice.html; do
   code=$(get "$page" "$body")
   [[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET $page returned $code without the web client"
   # The client is built for a browser mount path, so its assets are relative

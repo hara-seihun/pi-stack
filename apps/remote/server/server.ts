@@ -90,7 +90,7 @@ import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "
 import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
-import { ensureExternalMeetingThread, MEETING_MODE, MEETING_SETTINGS } from "./meet/threads";
+import { ensureExternalMeetingThread } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
@@ -2459,17 +2459,17 @@ const server = Bun.serve<SocketData>({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? "home"));
         if (!destination) return error("Unknown destination");
-        const meetingSettings = body.meetingId ? MEETING_SETTINGS : undefined;
-        const model = String(body.model ?? meetingSettings?.model ?? destination.defaultModel);
+        if (body.meetingId !== undefined) return error("Use external meeting participation to create a meeting thread");
+        const model = String(body.model ?? destination.defaultModel);
         if (!destination.models.includes(model)) return error("Model not available at this destination");
         const id = String(body.sessionId ?? requestId);
         const contextFiles = selectContextFiles(destinationContextSources(destination), body.contextFiles);
         if (!contextFiles.ok) return error(contextFiles.error);
         const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
         if (!creator.ok) return error(creator.message, creator.status);
-        const thread = await insertThread(id, creationName(requestId), destination, model, body.meetingId ?? null, body.message, body.parentId,
-          { thinkingLevel: body.thinkingLevel ?? meetingSettings?.thinkingLevel, speed: body.speedMode ?? meetingSettings?.speed },
-          contextFiles.value, creator.input.createdBy, meetingSettings ? MEETING_MODE : undefined);
+        const thread = await insertThread(id, creationName(requestId), destination, model, null, body.message, body.parentId,
+          { thinkingLevel: body.thinkingLevel, speed: body.speedMode },
+          contextFiles.value, creator.input.createdBy);
         const response = { session: publicSession(threadRow(thread)) };
         saveRequest(requestId, id, "create", 201, response);
         return json(response, 201);

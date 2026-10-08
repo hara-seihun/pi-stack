@@ -1,18 +1,19 @@
 import type { MeetSnapshot } from "../../../server/meet/protocol";
 import { drawContainedImage } from "./media";
-import type { MeetRoom } from "./room";
+import type { ExternalMeetRoom } from "./external-room";
 
 export class MeetBrowser {
   private canvas: HTMLCanvasElement | null = null;
+  private media: MediaStream | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private abort: AbortController | null = null;
   constructor(
-    private readonly room: MeetRoom,
+    private readonly room: ExternalMeetRoom,
     private readonly onStream: (stream: MediaStream | null) => void,
     private readonly onError: (message: string) => void,
   ) {}
 
-  get stream() { return this.room.published.get("pi-screen") ?? null; }
+  get stream() { return this.media; }
 
   reconcile(snapshot: MeetSnapshot) {
     if (!snapshot.browser) { this.close(); return; }
@@ -22,7 +23,7 @@ export class MeetBrowser {
     this.canvas = canvas;
     this.abort = new AbortController();
     const stream = canvas.captureStream(5);
-    this.room.publish("pi-screen", stream);
+    this.media = stream;
     this.onStream(stream);
     void this.draw(canvas, this.abort.signal);
   }
@@ -62,7 +63,8 @@ export class MeetBrowser {
     this.abort?.abort(); this.abort = null;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.room.unpublish("pi-screen");
+    this.media?.getTracks().forEach(track => track.stop());
+    this.media = null;
     this.onStream(null);
   }
 }

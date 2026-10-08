@@ -28,7 +28,7 @@ export const remoteResources = [
   { source: "apps/remote/skills", destination: "skills", kind: "tree", dereference: true, required: ["livedev/SKILL.md"] },
   {
     source: "apps/remote/web/dist", destination: "web/dist", kind: "tree", generated: true,
-    required: ["index.html", "meet.html", "meet-adapter.js", "voice.html", "kenan.png"],
+    required: ["index.html", "meet-adapter.js", "voice.html", "kenan.png"],
   },
   { source: "packages/kenan-root/src", destination: "kenan-root/src", kind: "tree", entrypoints: ["main.ts"] },
   { source: "packages/kenan-root/dist", destination: "kenan-root/dist", kind: "tree", generated: true },

@@ -1212,7 +1212,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const debugTools = <div className="inspector-debug">
     <button type="button" className={voiceState === "idle" ? "" : voiceState} disabled={voiceState === "closing"} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceActionLabel(voiceState)}</button>
     {voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}
-    <a href={`${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}>Open PiStack Meet</a>
     {voiceDetail && <p className="muted">{voiceDetail}</p>}
   </div>;
 

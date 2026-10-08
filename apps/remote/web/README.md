@@ -28,7 +28,7 @@ An OAuth-enabled router advertises `environment.authentication` in the public ch
 
 Before using a saved session or asking for a key, browser bootstrap calls `GET /v1/auth/session` directly through `browserFetch` with `credentials: "same-origin"`. A successful `{ ok: true, user, session }` response replaces the selected person and enters the existing router-session and endpoint-discovery flow. A 423 opens account sign-in; a 404 means key-based authentication only when the public chooser did not advertise OAuth. Network errors, malformed sessions and unexpected statuses stay visible and can be retried. OAuth hosts never try saved keys or empty-key unlocks.
 
-The main app, Meet and Voice share the account sign-in dialog. Its button navigates the whole page to the bootstrap mount plus `/v1/auth/login`. The callback sets an HttpOnly cookie and returns to the app; no token passes through the callback URL. A lost router session attempts cookie restoration again. API headers and authenticated download URLs keep the existing router-session protocol.
+The main app and standalone Voice share the account sign-in dialog. Its button navigates the whole page to the bootstrap mount plus `/v1/auth/login`. The callback sets an HttpOnly cookie and returns to the app; no token passes through the callback URL. A lost router session attempts cookie restoration again. API headers and authenticated download URLs keep the existing router-session protocol.
 
 On these hosts the environment picker contains only authorized environments. The client also rejects direct person changes, including stale person choices saved by a key-based deployment. Android key-based hosts keep their existing unlock flow without a browser-cookie probe.
 
