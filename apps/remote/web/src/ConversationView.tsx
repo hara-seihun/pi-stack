@@ -39,7 +39,7 @@ export function ConversationView({ active, label, drawing, editImages = true, tr
   }, [active]);
   useLayoutEffect(() => {
     const scroller = scrollback.current;
-    if (!scroller || !anchor.current?.needsFallback) return;
+    if (!scroller) return;
     const observer = new ResizeObserver(() => anchor.current?.afterResize(scroller));
     observer.observe(scroller.querySelector(".scroll-content")!);
     return () => observer.disconnect();

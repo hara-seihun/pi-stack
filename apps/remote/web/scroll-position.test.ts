@@ -14,6 +14,7 @@ function fixture() {
   let present = true;
   const anchor = {
     closest: () => anchor,
+    hasAttribute: () => false,
     getBoundingClientRect: () => ({ top: anchorTop - scroller.scrollTop }),
   };
   const scroller = {
@@ -31,10 +32,9 @@ function fixture() {
   };
 }
 
-test("a reader's viewport stays put as live text grows without native scroll anchoring", () => {
+test("a reader's viewport stays put as live text grows", () => {
   const page = fixture();
   const reading = new ReadingAnchor();
-  expect(reading.needsFallback).toBe(true);
   reading.setReading(page.scroller, true);
   page.growBelow(300);
   reading.afterResize(page.scroller);
@@ -55,6 +55,54 @@ test("completion preserves the reading offset when the live anchor is replaced",
   expect(page.scroller.scrollTop).toBe(-100);
   reading.afterResize(page.scroller);
   expect(page.scroller.scrollTop).toBe(-100);
+});
+
+test("CSS scroll-anchor support does not disable compensation for replaced or virtualized content", () => {
+  const prior = globalThis.CSS;
+  Object.defineProperty(globalThis, "CSS", { configurable: true, value: { supports: () => true } });
+  try {
+    const page = fixture();
+    const reading = new ReadingAnchor();
+    reading.setReading(page.scroller, true);
+    page.growBelow(300);
+    reading.afterResize(page.scroller);
+    expect(page.scroller.scrollTop).toBe(-420);
+  } finally {
+    if (prior === undefined) Reflect.deleteProperty(globalThis, "CSS");
+    else Object.defineProperty(globalThis, "CSS", { configurable: true, value: prior });
+  }
+});
+
+test("a replaced message is recovered by identity even when total height changes above it", () => {
+  let scrollTop = -300;
+  let height = 1200;
+  let replaced = false;
+  let y = 40;
+  const makeAnchor = () => ({
+    closest() { return this; },
+    hasAttribute: (name: string) => name === "data-message-id",
+    getAttribute: () => "held-message",
+    getBoundingClientRect: () => ({ top: y - scrollTop }),
+  });
+  const original = makeAnchor(), replacement = makeAnchor();
+  const scroller = {
+    get scrollTop() { return scrollTop; }, set scrollTop(value: number) { scrollTop = value; },
+    get scrollHeight() { return height; },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 300, height: 200 }),
+    ownerDocument: { elementFromPoint: () => replaced ? replacement : original },
+    contains: (node: unknown) => node === (replaced ? replacement : original),
+    querySelectorAll: () => [replacement],
+  } as unknown as HTMLElement;
+  const reading = new ReadingAnchor();
+  reading.setReading(scroller, true);
+  const before = reading.beforeUpdate(scroller);
+  replaced = true;
+  height += 200;
+  reading.afterUpdate(scroller, before);
+  expect(scrollTop).toBe(-300);
+  y -= 80;
+  reading.afterResize(scroller);
+  expect(scrollTop).toBe(-380);
 });
 
 test("following latest leaves scroll position to reverse flex layout", () => {

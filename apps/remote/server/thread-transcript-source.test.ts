@@ -6,6 +6,7 @@ import { ThreadTranscriptSource } from "./thread-transcript-source";
 import { SourceTranscripts } from "./source-transcripts";
 import { messageFinalizationKey } from "./sync";
 import type { ToolProgress } from "./tool-progress";
+import { ClientStream } from "./stream";
 
 let db: Database;
 beforeEach(() => { db = new Database(":memory:"); ensureSupervisorSchema(db); db.query("INSERT INTO thread_views(id) VALUES('s')").run(); });
@@ -20,6 +21,39 @@ function pipeline(progress: Map<string, ToolProgress>, inspect: any = async () =
   return { source, items: new SourceTranscripts(db, source.read, source.project, (id, hash) => `/image/${id}/${hash}`) };
 }
 const tool = (id: string): ToolProgress => ({ id, name: "bash", args: { command: "work" }, startedAt: 2, output: "Partial output" });
+
+test("an unstarted source produces a real empty transcript and acknowledges the selected fresh thread", async () => {
+  const { items } = pipeline(new Map(), async () => ({ ok: true, value: { contextWindow: {
+    source: { kind: "unstarted", context: "native-history", path: "/sessions/s.jsonl", generation: "fresh", revision: "fresh", size: 0, leafId: null },
+    total: 0, records: [], knownToolCallIds: [],
+  } } }));
+  const events: any[] = [];
+  const stream = new ClientStream({ write: chunk => events.push(JSON.parse(chunk.split("data: ")[1])), close() {} });
+  stream.declare({ session: "s", viewing: true, selectionId: "opening" });
+  await stream.synchronizeSelection(async () => {}, async () => {
+    stream.publish({ type: "transcript", ...value(await items.page("s", undefined, 60)) });
+    stream.publish({ type: "live", sessionId: "s", text: "" });
+    stream.publish({ type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] });
+  });
+  expect(events[0]).toMatchObject({ type: "reconcile", resource: "transcript:s", kind: "full", value: { total: 0, items: [], generation: "fresh" } });
+  expect(events.at(-1)).toMatchObject({ type: "selection-ready", sessionId: "s", selectionId: "opening" });
+  expect(Object.keys(events.at(-1).have).sort()).toEqual(["live:s", "state", "transcript:s"]);
+});
+
+test("a native source failure remains a failed selection, never an empty acknowledged transcript", async () => {
+  const failure = { ok: false as const, error: { code: "unavailable", message: "Required native history is missing" } };
+  const { items } = pipeline(new Map(), async () => failure);
+  expect(await items.page("s", undefined, 60)).toEqual(failure);
+  const events: any[] = [];
+  const stream = new ClientStream({ write: chunk => events.push(JSON.parse(chunk.split("data: ")[1])), close() {} });
+  stream.declare({ session: "s", viewing: true, selectionId: "opening" });
+  await stream.synchronizeSelection(async () => {}, async () => {
+    stream.publish({ type: "transcript", ...value(await items.page("s", undefined, 60)) });
+  });
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({ type: "error" });
+  expect(events[0].message).toContain("Required native history is missing");
+});
 
 test("new tools appear before a capture and their body is source-owned until canonical replacement", async () => {
   capture([{ role: "user", timestamp: 1, content: "Run it" }]);
