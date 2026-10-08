@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { policy, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
+import { policy, canResumeRebootedIntegration, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
 import { rollForwardHosts } from "./publication-hosts.mjs";
 import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
@@ -49,6 +49,7 @@ const ownerSourceRef = "refs/pi-stack-publication/owner-source";
 let activeRequest;
 let activeLog;
 let trackingCommand = false;
+const workerBootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
 
 // A shared master may belong to a thread scope that exits during publication.
 const publicationSshOptions = ["-o", "ControlPath=none", "-o", "ControlMaster=no", "-o", "ControlPersist=no"];
@@ -1818,12 +1819,19 @@ function deliverHost(request, target, logPath, previous) {
 }
 
 export function processRequest(request) {
-  if (["live-meeting", "native-source", "hosts"].includes(request.waiting?.kind)) {
+  const resumeAfterReboot = canResumeRebootedIntegration(request, workerBootId);
+  if (resumeAfterReboot) {
+    request.workerRestarts = [...(request.workerRestarts ?? []), {
+      at: new Date().toISOString(), fromBootId: request.workerBootId, toBootId: workerBootId,
+      attempt: request.attempt, step: request.step, progress: request.progress,
+    }];
+  } else if (["live-meeting", "native-source", "hosts"].includes(request.waiting?.kind)) {
     request[request.waiting.kind === "live-meeting" ? "meetingWait" : request.waiting.kind === "native-source" ? "nativeWait" : "hostWait"] = { ...request.waiting, resumedAt: new Date().toISOString() };
     delete request.waiting;
     delete request.nextAttemptAt;
   } else request.attempt = (request.attempt ?? 0) + 1;
   activeRequest = request;
+  request.workerBootId = workerBootId;
   request.status = "running";
   request.startedAt ??= new Date().toISOString();
   request.step = "starting";
@@ -1845,6 +1853,10 @@ export function processRequest(request) {
     if (!result.ok) throw new Error(result.stderr.trim() || `checkout preparation exited ${result.status}`);
 
     const remoteMain = runCapture("git", ["-C", checkout, "rev-parse", "refs/remotes/origin/main^{commit}"]);
+    if (resumeAfterReboot && remoteMain !== request.integrationSha && remoteMain !== request.baseSha) {
+      requeueMovedIntegration(request, remoteMain, logPath);
+      return;
+    }
     const reusableIntegration = request.integrationSha && request.checks?.status === "passed"
       && (request.integratedAt || remoteMain === request.integrationSha || remoteMain === request.baseSha)
       && commandResult("git", ["-C", checkout, "cat-file", "-e", `${request.integrationSha}^{commit}`]).ok;
@@ -2042,7 +2054,7 @@ function watchdog() {
   ensureState();
   const activatedAt = existsSync(repairPolicyPath) ? JSON.parse(readFileSync(repairPolicyPath, "utf8")).activatedAt : new Date().toISOString();
   for (const request of allRequests()) {
-    const reason = stallReason(request);
+    const reason = canResumeRebootedIntegration(request, workerBootId) ? null : stallReason(request);
     if (reason) {
       checked("systemctl", ["--user", "stop", "pi-stack-publication.service"], { timeoutSeconds: 20 });
       locked("worker", "fail-stalled", [request.requestId, reason]);
@@ -2350,7 +2362,8 @@ function drain() {
     const request = allRequests().find(candidate => runnable(candidate) || candidate.status === "running");
     if (!request) return;
     if (request.status === "running") {
-      failStalled(request.requestId, "Publication worker interrupted; retained host custody has been recovered. Repair required before retry.");
+      if (canResumeRebootedIntegration(request, workerBootId)) processRequest(request);
+      else failStalled(request.requestId, "Publication worker interrupted; retained host custody has been recovered. Repair required before retry.");
       continue;
     }
     if (["live-meeting", "native-source", "host-lock", "hosts"].includes(request.waiting?.kind) && !refreshHostWaits(request)) continue;

@@ -5,7 +5,10 @@ id=${PI_THREAD_RESOURCE_BOUNDARY:-}
 [[ ${PI_STACK_BROWSER_EXECUTABLE:-} = /* && -x $PI_STACK_BROWSER_EXECUTABLE ]] || { printf 'Missing pinned browser executable\n' >&2; exit 125; }
 manager=()
 [[ ${PI_ORCHESTRATOR_EXECUTION:-user} == root-repair ]] || manager=(--user)
-runner="pi-thread-runner-$id.service"
+# Each runner launch has its own unit name. Runners from releases before that
+# change were named by their boundary alone and set no PI_THREAD_RUNNER_UNIT.
+runner=${PI_THREAD_RUNNER_UNIT:-pi-thread-runner-$id.service}
+[[ $runner =~ ^pi-thread-runner-$id(-[a-f0-9]{12})?\.service$ ]] || { printf 'Invalid browser runner unit\n' >&2; exit 125; }
 exec systemd-run "${manager[@]}" --scope --collect --quiet \
   "--unit=pi-thread-browser-$(< /proc/sys/kernel/random/uuid).scope" \
   "--slice=pi-thread-$id-tools.slice" \
