@@ -24,7 +24,12 @@ pi_stack_prepare_builds() {
 }
 pi_stack_as_root() { "$@"; }
 pi_stack_run_as() { shift; "$@"; }`);
-  for (const name of ['phone', 'native-prerequisites', 'one-kenan-access-release', 'runtime-doctors', 'smoke']) put(name, name === 'smoke' ? 'exit "${SMOKE_EXIT:-0}"' : ':');
+  for (const name of ['phone', 'native-prerequisites', 'native-history-boundary', 'one-kenan-access-release', 'runtime-doctors', 'smoke']) put(name, name === 'smoke' ? 'exit "${SMOKE_EXIT:-0}"' : ':');
+  put('native-history-boundary', `[[ $1 == /* && $2 == /* && $3 =~ ^[a-f0-9]{40}$ ]] || exit 64
+if [[ \${HISTORY_BOUNDARY_BUSY:-0} == 1 ]]; then
+  echo 'native history boundary waiting: fixture admitted errands' >&2
+  exit 75
+fi`);
   put('voice', `[[ $1 != --activate ]] || {
   for i in {1..100}; do
     if [[ -f "$WARM_STARTED" ]]; then : > "$VOICE_ACTIVATED"; exit 0; fi
@@ -88,6 +93,17 @@ exit 0
   env.PI_STACK_RECOGNITION_TRANSITION_FILE = join(dir, 'speech-transition.json');
   return { env, run: extra => spawnSync('bash', [join(repo, 'deploy/host'), join(dir, 'host.json')], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 4000 }) };
 }
+
+test('native history wait precedes every host source selection and service mutation', t => {
+  const f = fixture(t);
+  const result = f.run({ HISTORY_BOUNDARY_BUSY: '1' });
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /native history boundary waiting:/);
+  assert.equal(realpathSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), f.env.OLD_RECOGNITION);
+  for (const path of [f.env.RECOGNITION_SELECTED, f.env.WARM_STARTED, f.env.VOICE_ACTIVATED, f.env.TRACE, f.env.PI_STACK_RECOGNITION_TRANSITION_FILE]) {
+    assert.equal(existsSync(path), false, path);
+  }
+});
 
 for (const failure of [{}, { RECOGNITION_EXIT: '1' }, { SMOKE_EXIT: '1' }, { RUNTIME_FAILURE: 'exit' }, { RUNTIME_FAILURE: 'TERM' }]) test(`Recognition selection and concurrent activation restore on ${JSON.stringify(failure)}`, t => {
   const f = fixture(t);

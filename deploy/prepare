@@ -21,6 +21,10 @@ if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain)
   exit 65
 fi
 
+if [[ -z ${PI_STACK_REMOTE_DEST:-}${PI_STACK_ORCHESTRATOR_DEST:-}${PI_STACK_RUNTIME_DEST:-} || ${PI_STACK_SERVICES:-0} == 1 ]]; then
+  "$root/deploy/native-history-boundary" "${PI_STACK_HOST_FILE:-$(pi_stack_host_file)}" "$root" "$(git -C "$root" rev-parse HEAD)"
+fi
+
 started=$SECONDS
 # Bound the release store before this release adds to it. Retention is not
 # part of this release's correctness, so its failure is loud but not fatal.
