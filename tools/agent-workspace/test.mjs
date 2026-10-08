@@ -772,11 +772,18 @@ test("budgeted source creation shares existing objects and records immutable who
     assert.equal(existsSync(path.join(created.path, "excluded.bin")), false);
     assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
     assert.equal(existsSync(path.join(created.path, ".git", "objects", "info", "alternates")), true);
-    assert.equal(existsSync(path.join(f.root, "state", "mirrors")), false);
+    const alternate = readFileSync(path.join(created.path, ".git", "objects", "info", "alternates"), "utf8").trim();
+    assert.equal(alternate.startsWith(path.join(f.root, "state", "mirrors")), true);
+    assert.equal(existsSync(path.join(alternate, "info", "alternates")), false);
+    assert.equal(created.capacity.sourceImportBytes > 0, true);
     assert.equal(git(created.path, "for-each-ref", "--format=%(refname)", "refs/remotes"), "");
     assert.equal(git(created.path, "rev-list", "--all", "--not", selectedSource), "");
     assert.equal(git(f.source, "rev-parse", "HEAD"), sourceHead);
     assert.deepEqual(JSON.parse(run(args, f.env)).capacity, created.capacity);
+    const shared = JSON.parse(run(args.map(arg => arg === "priced" ? "priced-peer" : arg), f.env));
+    assert.equal(shared.capacity.sourceImportBytes, 0);
+    assert.equal(readFileSync(path.join(shared.path, ".git", "objects", "info", "alternates"), "utf8").trim(), alternate);
+    run(["release", "--id", shared.id], f.env);
     assert.throws(() => run(args.map(arg => arg === "8" ? "9" : arg), f.env), /different creation request/);
     const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
     const device = String(statSync(f.workspaces).dev);
@@ -805,12 +812,89 @@ test("budgeted source creation shares existing objects and records immutable who
   } finally { f.close(); }
 });
 
+for (const custody of ["creation", "registration", "maintenance"]) test(`${custody} preserves fetched branch objects across transitive source repack and release`, () => {
+  const f = fixture();
+  try {
+    const base = git(f.source, "rev-parse", "HEAD");
+    git(f.source, "checkout", "-b", "feature");
+    writeFileSync(path.join(f.source, "feature.txt"), "fetched feature\n");
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "feature");
+    const feature = git(f.source, "rev-parse", "HEAD");
+    git(f.source, "push", "origin", "feature");
+    git(f.source, "checkout", "main");
+    mkdirSync(f.workspaces, { recursive: true });
+    const intermediate = path.join(f.workspaces, "intermediate");
+    execFileSync("git", ["clone", "--reference", f.source, "--single-branch", "--branch", "main", f.remote, intermediate]);
+    const borrower = path.join(f.workspaces, "child");
+    if (custody === "creation") {
+      run(["create", "--root", f.workspaces, "--name", "child", "--repo", intermediate,
+        "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env);
+    } else {
+      execFileSync("git", ["clone", "--shared", "--single-branch", "--branch", "main", intermediate, borrower]);
+      git(borrower, "remote", "set-url", "origin", f.remote);
+      if (custody === "maintenance") {
+        run(["register", "--path", borrower], f.env);
+        // Model a pre-repair registered checkout's mutable transitive alternate.
+        writeFileSync(path.join(borrower, ".git", "objects", "info", "alternates"), `${intermediate}/.git/objects\n`);
+      }
+    }
+    git(borrower, "fetch", "origin", "feature");
+    git(borrower, "checkout", "-B", "feature", "FETCH_HEAD");
+    if (custody === "registration") run(["register", "--path", borrower], f.env);
+    if (custody === "maintenance") {
+      const alternateFile = path.join(borrower, ".git", "objects", "info", "alternates");
+      const previous = readFileSync(alternateFile, "utf8");
+      const [plan] = JSON.parse(run(["maintain", "--path", borrower, "--json"], f.env));
+      assert.equal(plan.objectCustody, "would-import-durable-mirror");
+      assert.equal(readFileSync(alternateFile, "utf8"), previous);
+      const [applied] = JSON.parse(run(["maintain", "--path", borrower, "--execute", "--json"], f.env));
+      assert.equal(applied.objectCustody, "imported-durable-mirror");
+      const mirror = path.dirname(readFileSync(alternateFile, "utf8").trim());
+      git(mirror, "repack", "-a", "-d");
+      git(mirror, "prune", "--expire=now");
+    }
+    git(intermediate, "repack", "-a", "-d");
+    rmSync(path.join(intermediate, ".git", "objects", "info", "alternates"));
+    assert.equal(git(borrower, "rev-parse", "HEAD"), feature);
+    assert.equal(git(borrower, "show", "HEAD:feature.txt"), "fetched feature");
+    const sourceRecord = JSON.parse(run(["register", "--path", intermediate, "--json"], f.env));
+    assert.equal(JSON.parse(run(["release", "--id", sourceRecord.id, "--json"], f.env)).action, "released");
+    assert.equal(existsSync(intermediate), false);
+    assert.equal(git(borrower, "show", `${base}:file.txt`), "source");
+    assert.equal(git(borrower, "show", "HEAD:feature.txt"), "fetched feature");
+    git(borrower, "fetch", "origin", "feature");
+    git(borrower, "fsck", "--connectivity-only", "--no-dangling");
+  } finally { f.close(); }
+});
+
+test("failed mutable-custody import retains the alternate and imported refs", () => {
+  const f = fixture();
+  try {
+    const borrower = path.join(f.workspaces, "missing-object");
+    mkdirSync(f.workspaces);
+    execFileSync("git", ["clone", "--shared", f.source, borrower]);
+    run(["register", "--path", borrower], f.env);
+    const alternates = path.join(borrower, ".git", "objects", "info", "alternates");
+    const original = `${f.source}/.git/objects\n`;
+    writeFileSync(alternates, original);
+    git(f.source, "commit", "--allow-empty", "-m", "later borrowed object");
+    const object = git(f.source, "rev-parse", "HEAD");
+    git(borrower, "update-ref", "refs/heads/imported", object);
+    rmSync(path.join(f.source, ".git", "objects", object.slice(0, 2), object.slice(2)));
+    assert.throws(() => run(["maintain", "--path", borrower, "--execute", "--json"], f.env));
+    assert.equal(readFileSync(alternates, "utf8"), original);
+    assert.equal(git(borrower, "rev-parse", "refs/heads/imported"), object);
+    assert.equal(readFileSync(path.join(borrower, "file.txt"), "utf8"), "source\n");
+  } finally { f.close(); }
+});
+
 test("budgeted shared-source creation resumes an interrupted initialization with the same reservation", () => {
   const f = fixture();
   try {
     const args = ["create", "--root", f.workspaces, "--name", "partial-shared", "--repo", f.source,
       "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"];
-    assert.throws(() => run(args, interruptCreation(f, "config")));
+    assert.throws(() => run(args, interruptCreation(f, "update-ref")));
     const pending = JSON.parse(run(["status", "--json"], f.env)).records[0];
     assert.equal(pending.state, "creating");
     const resumed = JSON.parse(run(args, f.env));
@@ -2115,7 +2199,7 @@ test("keeps every repository in a group until all are recoverable", () => {
   }
 });
 
-test("keeps an object source until registered alternate borrowers are released", () => {
+test("adoption imports mutable object borrowers before releasing their source", () => {
   const f = fixture();
   try {
     mkdirSync(f.workspaces, { recursive: true });
@@ -2130,14 +2214,12 @@ test("keeps an object source until registered alternate borrowers are released",
     const borrowerRecord = records.find((record) => record.path === borrower);
 
     const held = JSON.parse(run(["release", "--id", sourceRecord.id, "--json"], f.env));
-    assert.equal(held.inspection.classification, "referenced");
-    assert.match(held.inspection.reason, /borrow this checkout's objects/);
-    assert.equal(existsSync(source), true);
+    assert.equal(held.action, "released");
+    assert.equal(existsSync(source), false);
+    assert.equal(git(borrower, "show", "HEAD:file.txt"), "source");
 
     const borrowerRelease = JSON.parse(run(["release", "--id", borrowerRecord.id, "--json"], f.env));
     assert.equal(borrowerRelease.action, "released");
-    const sourceRelease = JSON.parse(run(["release", "--id", sourceRecord.id, "--json"], f.env));
-    assert.equal(sourceRelease.action, "released");
   } finally {
     f.close();
   }
