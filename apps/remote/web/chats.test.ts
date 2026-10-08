@@ -81,7 +81,7 @@ test("running and dependency-waiting launched agents do not make an idle launche
   expect(threadStatus(parent)).toMatchObject({ key: "idle", busy: false });
   expect(parent.waitingOnAgents).toBeUndefined();
   expect(threadStatus(local)).toMatchObject({ key: "thinking", busy: true });
-  expect(threadStatus(fleet)).toMatchObject({ key: "waiting_for_message", busy: true });
+  expect(threadStatus(fleet)).toMatchObject({ key: "waiting", busy: true });
   const row = inboxRows([parent, local, fleet], []).find(row => row.chat.id === "ai:parent")!;
   expect(row.section).toBe("quiet");
   expect(row.chat.id).toBe("ai:parent");
@@ -105,7 +105,7 @@ test("status vocabulary covers every lifecycle and flag", () => {
   expect(threadStatus(session("a", { held: true, queuedMessages: [queued] }))).toMatchObject({ key: "idle", label: "Idle", attention: false });
   expect(threadStatus(session("a", { idleUnread: true }))).toMatchObject({ key: "idle", label: "Idle", attention: true });
   expect(threadStatus(session("a", { archivedAt: "2026" })).key).toBe("archived");
-  expect(threadStatus(session("a", { activity: "awaiting", waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }))).toMatchObject({ key: "awaiting", busy: true });
+  expect(threadStatus(session("a", { activity: "awaiting", waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }))).toMatchObject({ key: "waiting", busy: true });
   expect(selectedAiId({ selectedChatId: "room:same-id" })).toBeNull();
   expect(selectedAiId({ selectedChatId: "ai:same-id" })).toBe("same-id");
 });

@@ -23,15 +23,15 @@ test("open-ended context preserves unsupported payloads as notices, never tool o
   expect(items[2]!.body).toContain("preserved message");
 });
 
-test("each wait kind has its own label; missing or unknown kinds are reporting errors", () => {
-  for (const [dependency, label] of [
-    [{ kind: "agents", threadIds: ["child"], after: {} }, "Waiting on agents"],
-    [{ kind: "job", jobId: "job" }, "Waiting for job"],
-    [{ kind: "deployment", publicationId: "pub" }, "Waiting for deployment"],
-    [{ kind: "message", fromThreadId: "collaborator" }, "Waiting for message"],
+test("wait kinds retain their reason in one activity; missing or unknown kinds are reporting errors", () => {
+  for (const dependency of [
+    { kind: "agents", threadIds: ["child"], after: {} },
+    { kind: "job", jobId: "job" },
+    { kind: "deployment", publicationId: "pub" },
+    { kind: "message", fromThreadId: "collaborator" },
   ] as const) {
     const projected = projectThreadActivity("idle", undefined, undefined, { agentWait: { ...dependency, reason: "Reason", since: 10 } });
-    expect(projected).toMatchObject({ activity: "awaiting", activitySince: 10, activityDetail: `${label} · Reason` });
+    expect(projected).toMatchObject({ activity: "awaiting", activitySince: 10, activityDetail: "Reason" });
   }
   for (const dependency of [{ threadIds: [], after: {} }, { kind: "other" },
     { kind: "agents", threadIds: [], after: {} }, { kind: "job", jobId: "" },

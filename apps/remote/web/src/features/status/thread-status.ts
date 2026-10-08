@@ -5,7 +5,7 @@ import { validateThreadObservation } from "../../../../shared/state-validation";
 
 export type StatusKey =
   | "queued" | "admitting" | "starting" | "preparing" | "finishing" | "cancelling" | "recovering" | "reporting_error" | "thinking" | "responding" | "preparing_tool" | "waiting_for_model" | "waiting_for_capacity" | "waiting_to_retry"
-  | "tool" | "compacting" | "retrying" | "awaiting" | "waiting_for_job" | "waiting_for_deployment" | "waiting_for_message" | "stopping" | "error"
+  | "tool" | "compacting" | "retrying" | "waiting" | "stopping" | "error"
   | "archived" | "idle" | "offline";
 
 export interface ThreadStatus {
@@ -51,7 +51,7 @@ function executionStatus(session: Pick<Session, "activity" | "activeTools">): Th
     case "waiting_for_model": return { key: "waiting_for_model", label: "Waiting for model", short: "Waiting for model", busy: true, attention: false };
     case "waiting_for_capacity": return { key: "waiting_for_capacity", label: "Waiting for capacity", short: "Waiting for capacity", busy: true, attention: false };
     case "waiting_to_retry": return { key: "waiting_to_retry", label: "Waiting to retry", short: "Waiting to retry", busy: true, attention: false };
-    case "waiting_on_agents": return { key: "awaiting", label: "Waiting on agents", short: "Waiting on agents", busy: true, attention: false };
+    case "waiting_on_agents": return { key: "waiting", label: "Waiting", short: "Waiting", busy: true, attention: false };
     case "waiting_on_tool": return toolStatus(session.activeTools);
     case "compacting": return { key: "compacting", label: "Compacting context", short: "Compacting", busy: true, attention: false };
     case "retrying": return { key: "retrying", label: "Retrying model request", short: "Retrying", busy: true, attention: false };
@@ -82,10 +82,9 @@ export function threadStatus(session: StatusSession): ThreadStatus {
       ...(session.activityDetail ? { title: [status.title, session.activityDetail].filter(Boolean).join(" · ") } : {}),
     };
   }
-  if (session.state === "waiting" && session.waitingOnAgents) return dependencyStatus(session);
-  if (session.state === "waiting") return { key: "awaiting", label: "Waiting on agents", short: "Waiting", busy: true, attention: session.idleUnread };
+  if (session.state === "waiting") return waitingStatus(session);
   switch (session.activity) {
-    case "awaiting": return dependencyStatus(session);
+    case "awaiting": return waitingStatus(session);
     case "status_error": return { ...STATUS_REPORTING_ERROR, busy: false, title: session.activityDetail || STATUS_REPORTING_ERROR.title };
     case "idle": return { key: "idle", label: "Idle", short: "Idle", busy: false, attention: session.idleUnread };
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering":
@@ -96,18 +95,17 @@ export function threadStatus(session: StatusSession): ThreadStatus {
   return assertNever(session.activity, "Idle activity");
 }
 
-function dependencyStatus(session: StatusSession): ThreadStatus {
+function waitingStatus(session: StatusSession): ThreadStatus {
   const wait = session.waitingOnAgents;
-  if (!wait) {
-    return { ...STATUS_REPORTING_ERROR, busy: false, title: "Awaiting thread has no typed dependency." };
-  }
+  if (!wait && session.state !== "waiting") return {
+    ...STATUS_REPORTING_ERROR, busy: false, title: "Awaiting thread has no owned waiting state.",
+  };
+  const status: ThreadStatus = { key: "waiting", label: "Waiting", short: "Waiting", busy: true, attention: false,
+    since: session.activitySince ?? wait?.since, title: session.activityDetail ?? wait?.reason };
+  if (!wait) return status;
   if (!Object.hasOwn(wait, "kind")) return { ...STATUS_REPORTING_ERROR, label: "Wait type missing", short: "Wait type missing", busy: false, title: "The stored wait has no dependency type. Set an explicitly typed wait to repair it." };
-  const status = (key: StatusKey, label: string): ThreadStatus => ({ key, label, short: label, busy: true, attention: false, since: wait.since, title: wait.reason });
   switch (wait.kind) {
-    case "agents": return status("awaiting", "Waiting on agents");
-    case "job": return status("waiting_for_job", "Waiting for job");
-    case "deployment": return status("waiting_for_deployment", "Waiting for deployment");
-    case "message": return status("waiting_for_message", "Waiting for message");
+    case "agents": case "job": case "deployment": case "message": return status;
   }
   return assertNever(wait, "Dependency wait");
 }
@@ -131,7 +129,7 @@ export function attentionRank(status: ThreadStatus): number {
   if (status.key === "idle" && status.attention) return 2;
   switch (status.key) {
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "cancelling": case "recovering": case "tool": case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "waiting_for_capacity": case "waiting_to_retry": case "compacting": case "retrying": case "stopping": return 10;
-    case "awaiting": case "waiting_for_job": case "waiting_for_deployment": case "waiting_for_message": return 11;
+    case "waiting": return 11;
     case "idle": return 21;
     case "archived": return 30;
     case "offline": return 40;
@@ -139,15 +137,12 @@ export function attentionRank(status: ThreadStatus): number {
   return assertNever(status.key, "Status attention rank");
 }
 
-export type StatusGlyph = "working" | "agents" | "job" | "deployment" | "message" | "held" | "stopping" | "done" | "unread" | "error" | "archived" | "offline";
+export type StatusGlyph = "working" | "waiting" | "held" | "stopping" | "done" | "unread" | "error" | "archived" | "offline";
 
 export function statusGlyph(status: ThreadStatus): StatusGlyph {
   switch (status.key) {
     case "queued": case "admitting": case "starting": case "preparing": case "finishing": case "recovering": case "thinking": case "responding": case "preparing_tool": case "waiting_for_model": case "tool": case "compacting": case "retrying": return "working";
-    case "awaiting": return "agents";
-    case "waiting_for_job": return "job";
-    case "waiting_for_deployment": return "deployment";
-    case "waiting_for_message": return "message";
+    case "waiting": return "waiting";
     case "waiting_for_capacity": case "waiting_to_retry": return "held";
     case "cancelling": case "stopping": return "stopping";
     case "idle": return status.attention ? "unread" : "done";
@@ -170,7 +165,7 @@ export function activityTiming(status: ThreadStatus, now: number): { elapsed?: s
   if (!status.busy) return {};
   return {
     ...(status.since ? { elapsed: elapsed(status.since, now) } : {}),
-    ...(!["awaiting", "waiting_for_job", "waiting_for_deployment", "waiting_for_message"].includes(status.key) && status.lastActivityAt && now - status.lastActivityAt >= 15_000
+    ...(status.key !== "waiting" && status.lastActivityAt && now - status.lastActivityAt >= 15_000
       ? { quiet: elapsed(status.lastActivityAt, now) } : {}),
   };
 }
