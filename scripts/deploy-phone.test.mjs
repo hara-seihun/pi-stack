@@ -24,7 +24,9 @@ case "$1" in
       *) exit 99;;
     esac;;
   restart) exit "$TEST_RESTART_STATUS";;
-  stop|reset-failed|is-active) exit 0;;
+  stop) touch "$TEST_TRACE.unloaded"; exit 0;;
+  reset-failed) [ ! -e "$TEST_TRACE.unloaded" ] || { echo 'Unit pi-stack-phone.service not loaded.' >&2; exit 1; }; exit 0;;
+  is-active) exit 0;;
   *) exit 99;;
 esac
 `, { mode: 0o755 });
@@ -41,11 +43,10 @@ esac
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
-test("locked owner stays stopped without attempting to start its encrypted supervisor", () => {
+test("locked owner clears failed state before stop can unload the phone unit", () => {
   const result = activate("inactive");
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.trace, /^stop pi-stack-phone.service$/m);
-  assert.match(result.trace, /^reset-failed pi-stack-phone.service$/m);
+  assert.match(result.trace, /reset-failed pi-stack-phone.service\nstop pi-stack-phone.service/);
   assert.doesNotMatch(result.trace, /^(start|restart) /m);
 });
 
