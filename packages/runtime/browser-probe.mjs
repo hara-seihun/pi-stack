@@ -114,6 +114,24 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
     } });
     await checkDates("semantic", "2031-02-03", "2031-02-03T12:45", []);
 
+    for (const command of [
+      ["find", "label", "Rejected datetime", "fill", "2030-01-01T11:00"],
+      ["fill", "#readonly-date", "2030-01-01"],
+    ]) {
+      const rejected = await execute("controlled-date-rejection", {
+        args: [...ownerArgs, "batch", "--bail"], stdin: JSON.stringify([["get", "url"], command]),
+      }, "failure");
+      assert.equal(rejected.data.length, 2, "invalid temporal fill must yield an explicit native failure");
+      assert.equal(rejected.data[0].success, true);
+      assert.equal(rejected.data[1].success, false, "application rejection/readonly cannot report fill success");
+      if (command[0] === "find") assert.match(rejected.data[1].error, /fill_value_not_retained/);
+    }
+    const retained = await batch("controlled-date-rejected-values", ownerArgs, [
+      ["get", "value", "#rejected-datetime"], ["get", "value", "#readonly-date"],
+    ]);
+    assert.equal(retained.data[0].result.value, "2026-10-02T23:00", "application rejection must retain its original controlled value");
+    assert.equal(retained.data[1].result.value, "2026-10-02", "readonly rejection must not mutate the input");
+
     const frames = await batch("download-and-frames", ownerArgs, [
       ["download", `@${downloadRef}`, downloadPath],
       ...frameSteps("iframe[title='Secure payment input frame']"),

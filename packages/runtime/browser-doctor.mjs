@@ -54,11 +54,14 @@ function controlledDateProbe() {
   const React = require('react'), { createRoot } = require('react-dom/client');
   function Probe() {
     const [value, setValue] = React.useState({ date: '2026-10-02', datetime: '2026-10-02T23:00', timezone: 'UTC' });
+    const [rejected, setRejected] = React.useState('2026-10-02T23:00');
     return React.createElement('section', null,
       React.createElement('label', null, 'Controlled date', React.createElement('input', { id: 'controlled-date', type: 'date', value: value.date, onChange: e => setValue({ ...value, date: e.target.value }) })),
       React.createElement('label', null, 'Controlled datetime', React.createElement('input', { id: 'controlled-datetime', type: 'datetime-local', value: value.datetime, onChange: e => setValue({ ...value, datetime: e.target.value }) })),
       React.createElement('label', null, 'Event time zone', React.createElement('input', { id: 'controlled-timezone', value: value.timezone, onChange: e => setValue({ ...value, timezone: e.target.value }) })),
-      React.createElement('output', { id: 'controlled-state' }, JSON.stringify({ date: value.date, datetime: value.datetime })));
+      React.createElement('output', { id: 'controlled-state' }, JSON.stringify({ date: value.date, datetime: value.datetime })),
+      React.createElement('label', null, 'Rejected datetime', React.createElement('input', { id: 'rejected-datetime', type: 'datetime-local', value: rejected, onChange: e => { const previous = rejected; setRejected(e.target.value); setTimeout(() => setRejected(previous), 0); } })),
+      React.createElement('label', null, 'Readonly date', React.createElement('input', { id: 'readonly-date', type: 'date', value: '2026-10-02', readOnly: true })));
   }
   createRoot(document.getElementById('date-probe')).render(React.createElement(Probe));
 })();</script>`;
