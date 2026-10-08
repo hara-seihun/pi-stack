@@ -31,8 +31,8 @@ case ${1:---activate} in
         systemctl is-active --quiet pi-stack-phone.service
         ;;
       inactive)
-        pi_stack_as_root systemctl stop pi-stack-phone.service
         pi_stack_as_root systemctl reset-failed pi-stack-phone.service
+        pi_stack_as_root systemctl stop pi-stack-phone.service
         echo "Phone remains stopped with $supervisor"
         ;;
       failed)
