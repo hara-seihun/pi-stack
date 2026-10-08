@@ -109,7 +109,6 @@ import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webResponse } from "./files";
 import { fileEditResponse } from "./file-edit";
-import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
@@ -614,7 +613,6 @@ async function buildDashboard(): Promise<Dashboard> {
   const [agents, actions] = await Promise.all([activeAgents(), machineActions.refresh()]);
   return {
     plans: planCards(planUsage, ownUsage),
-    governors: governorControls(orchestrator),
     actions,
     machine: readMachineUsage(),
     modelCounts: agents.models,
@@ -810,8 +808,8 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
-function threadError(failure: { code: string; message: string; dependencies?: Array<{ threadId: string; dependsOn: string; ownerId?: string }> }) {
-  return json({ error: failure.message, code: failure.code, ...(failure.dependencies ? { dependencies: failure.dependencies } : {}) }, failure.code === "not_found" ? 404
+function threadError(failure: { code: string; message: string }) {
+  return json({ error: failure.message, code: failure.code }, failure.code === "not_found" ? 404
     : failure.code === "invalid_request" ? 400 : failure.code === "unavailable" ? 503 : 409);
 }
 
@@ -2206,14 +2204,6 @@ const server = Bun.serve<SocketData>({
       }
       const result = await voice.close(sessionId, voiceId);
       return result.ok ? json(result.value) : error(result.error, result.status);
-    }
-    const governorToggle = API.governorToggle.match(req.method, url.pathname);
-    if (governorToggle && isGovernorProvider(governorToggle.provider)) {
-      try {
-        const governors = toggleGovernor(orchestrator, governorToggle.provider);
-        await refreshDashboard();
-        return json({ governors });
-      } catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
     }
     const modelAvailabilityUpdate = API.setModelAvailability.match(req.method, url.pathname);
     if (modelAvailabilityUpdate) {

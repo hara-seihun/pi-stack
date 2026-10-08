@@ -36,9 +36,9 @@ it.each([
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it("reports protected dependency refusal rather than claiming closure",async()=>{
+it("reports unconfirmed cancellation rather than claiming closure",async()=>{
   const log=vi.spyOn(console,"log").mockImplementation(()=>{});
-  const failure={ok:false,error:{code:"dependency_conflict",message:"A depends on B",dependencies:[{threadId:"A",dependsOn:"B"}]}};
+  const failure={ok:false,error:{code:"cancellation_failed",message:"Native cancellation unconfirmed"}};
   vi.spyOn(globalThis,"fetch").mockResolvedValue(Response.json(failure));
   await dispatch(["close","B"]);
   expect(process.exitCode).toBe(1);

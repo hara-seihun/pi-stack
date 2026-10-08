@@ -168,16 +168,6 @@
 .machine-person-bar { cursor: default; }
 .machine-person-bar::before { content: none; }
 
-.machine-governor {
-  min-width: 0;
-  min-height: var(--touch);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-1) 0;
-}
-.machine-governor button,
 .machine-action,
 .machine-app-detail button,
 .machine-errors button {
@@ -189,11 +179,6 @@
   color: var(--text);
   font-weight: 600;
 }
-.machine-governor button {
-  min-width: 140px;
-  font-variant-numeric: tabular-nums;
-}
-
 .machine-actions { display: grid; gap: var(--space-1); }
 .machine-models { margin-top: var(--space-3); }
 .machine-models .machine-action > span { min-width: 0; overflow-wrap: anywhere; }

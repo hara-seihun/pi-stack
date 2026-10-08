@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { OrchestratorConfig } from "./domain.js";
-import { assign, commitMeterAdmission } from "./policy.js";
+import { assign } from "./policy.js";
 import { isCredentialError, isRateLimitError, providerAccepted, rateLimitCooldownMs } from "./provider-errors.js";
 import type { Store } from "./store.js";
 import type { PiEvent, Result, Thread, ThreadSettings } from "./threads/contracts.js";
@@ -60,7 +60,6 @@ export class Fleet {
       const assignment = selected.assignment;
       this.store.createLease(leaseId, assignment.accountId, "fleet", thread.id);
       if (rootRepair) this.store.setControl("repair-owner", thread.id);
-      if (!recovering) commitMeterAdmission(this.store, assignment);
       const timer = setInterval(() => this.store.heartbeatLease(leaseId), 15_000); timer.unref();
       this.leases.set(thread.id, { leaseId, accountId: assignment.accountId, timer });
       return { ok: true, value: {

@@ -5,7 +5,7 @@ import { assertNever } from "../../shared/explicit-state";
 import { voiceActionLabel, type VoiceState } from "./voice-state";
 import { validateSession, validateStreamSnapshot } from "../../shared/state-validation";
 import { appPath, appStorageKey } from "./app-path";
-import type { GovernorProvider, InlineImageSnapshot, StreamEvent, QuestionsResource } from "../../server/protocol";
+import type { InlineImageSnapshot, StreamEvent, QuestionsResource } from "../../server/protocol";
 import { ClientCache } from "./client-cache";
 import { ClientCacheContext } from "./cached-media";
 import { api, ApiError, piFetch, ensureUnlocked, registerUnlockHandler } from "./client";
@@ -284,7 +284,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [closeDependencies, setCloseDependencies] = useState<Array<{ threadId: string; dependsOn: string; ownerId?: string }>>([]);
   const [notificationVersion, setNotificationVersion] = useState(0);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
   const [pendingQuestions, setPendingQuestions] = useState<({ sessionId: string } & QuestionsResource) | null>(null);
@@ -875,13 +874,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [openChat, patch, roomDirectory.refresh]);
   const closeChat = useCallback(async (chat: Chat) => {
     if (undoCloses.isBusy(chat.id)) return;
-    setCloseDependencies([]);
     setClosing(current => withClose(current, chat.id));
     const result = await undoCloses.close(chat, () => chat.kind === "ai"
-      ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id })).catch(cause => {
-          if (cause instanceof ApiError && cause.code === "dependency_conflict") setCloseDependencies(cause.dependencies ?? []);
-          throw cause;
-        })
+      ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id }))
       : api("POST", `/v1/rooms/${chat.room.id}/close`, {}));
     if (result?.ok) {
       if (chat.kind === "ai") { interruptPrompts(chat.session.id, false); cache.forgetThread(chat.session.id); }
@@ -1077,7 +1072,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     finally { kick(); }
   };
   const toggleAction = async (id: string) => { setPendingAction(id); try { await api(API.actionToggle.method, API.actionToggle.path({ id }), {}); } finally { setPendingAction(null); kick(); } };
-  const toggleGovernor = async (provider: GovernorProvider) => { setPendingAction(provider); try { await api(API.governorToggle.method, API.governorToggle.path({ provider }), {}); } finally { setPendingAction(null); kick(); } };
 
   const dashboard = state.dashboard;
   const threadStarts = useMemo(() => state.bootstrap?.threadStarts ?? [], [state.bootstrap]);
@@ -1208,7 +1202,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     switch (route.tab) {
       case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
       case "attention": return <Suspense fallback={<Loading label="Loading attention…" />}><AttentionScreen version={notificationVersion} /></Suspense>;
-      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
+      case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
       case "chats": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
     }
@@ -1223,7 +1217,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         <SpeechBar />
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
-        {closeDependencies.length > 0 && <div className="dependency-close-error" role="alert"><strong>Close is protected by an explicit dependency.</strong>{closeDependencies.map((dependency, index) => <button key={index} type="button" onClick={() => { setCloseDependencies([]); openThreadId(dependency.threadId); }}>Open dependency owner · {knownSessions.find(item => item.id === dependency.threadId)?.name ?? dependency.threadId}</button>)}<button type="button" onClick={() => setCloseDependencies([])}>Dismiss</button></div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
         {selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {

@@ -41,16 +41,17 @@ change does not publish private agent histories into them.
 
 ## Dependencies and work
 
-An agent may declare that it depends on any accessible peer. Both endpoints are
-protected against closing while the edge exists. If A depends on B, neither A nor
-B can close; a refusal names the edge and directs the person to A to resolve or
-release it. Agent control can change only its own outgoing dependencies, not
-clear another agent's protection. Provenance and room membership do not establish
-these edges.
+An agent may subscribe to the result of any accessible peer. The subscription
+persists until terminal delivery or explicit release. Explicit Close wins on either
+endpoint: closing the producer delivers cancellation, and closing the subscriber
+releases its subscriptions without closing peers. Agent control changes only its
+own outgoing subscriptions. Provenance and room membership do not establish them.
 
 Dependencies persist independently of a native model turn. Discussing work or
-receiving an unrelated message does not erase them. Waiting releases execution
-capacity and shows **Waiting**, never Idle. A settled native turn is not a
+receiving an unrelated message does not erase them. Without local execution,
+explicit waits and unresolved outgoing subscriptions show one **Waiting** state,
+never Idle. Active execution wins over waiting reasons. Waiting holds no execution
+capacity. A settled native turn is not a
 completed assignment while dependent work or unanswered questions remain.
 Schedules and watches must use the shared outstanding-work predicate rather than
 infer completion from an empty input queue.
@@ -61,7 +62,8 @@ Close means cancel the selected agent's execution and archive its conversation.
 There is no persistent Stopped state and no cascading close based on who launched
 whom. Failed cancellation is a visible failure; it never authorizes concurrent
 replacement work or a false archived state. Pending input is not silently revived
-on reopening.
+on reopening. Result subscribers receive a durable cancelled terminal settlement,
+including when the selected agent was waiting rather than executing.
 
 Reopening restores the conversation, not interrupted work. Only a new explicit
 assignment starts work again. Cancel-current-work is a transient operation, not

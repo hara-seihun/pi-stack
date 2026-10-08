@@ -4,7 +4,7 @@
 
 The repository contains several packages because they run in different processes and have different release artifacts. One Git commit still identifies the whole deployed stack.
 
-Pi Remote imports Pi Orchestrator's public API through the `pi-orchestrator` workspace. One catalog owns model identities, labels, default thinking levels, and plan-meter definitions. `OrchestratorClient` owns account, quota, governor, run, and transcript reads, so Pi Remote does not know the ledger schema. Host deployment publishes the compiled orchestrator before starting Pi Remote.
+Pi Remote imports Pi Orchestrator's public API through the `pi-orchestrator` workspace. One catalog owns model identities, labels, default thinking levels, and plan-meter definitions. `OrchestratorClient` owns account, quota, run, and transcript reads, so Pi Remote does not know the ledger schema. Host deployment publishes the compiled orchestrator before starting Pi Remote.
 
 The runtime package owns the exact Pi development dependency. Root npm overrides keep every workspace on the same Pi and TypeBox versions. `package-lock.json` is the only JavaScript lockfile.
 

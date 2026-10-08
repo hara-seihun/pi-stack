@@ -30,22 +30,22 @@ test("placement and provenance never override unread, unseen or live retention",
   expect(calls.at(-1)).toEqual({ threadId: "read", action: "archiveInactive", inactiveBefore: 9000 });
 });
 
-test("live dependencies and waits protect both endpoints, while independent agents and inert edges can archive", async () => {
+test("automatic retention keeps outstanding subscribers, not their settled producers", async () => {
   const calls: unknown[] = [];
   const rows = [row("dependent", { dependencies: ["dependency"] }), row("dependency", { state: "running" }), row("waiting", { waitingOnAgents: { kind: "message", fromThreadId: "sender", since: 1, reason: "Need answer" } }), row("sender"), row("independent")];
-  expect(await archiveInactiveThreads(apiFor(rows, calls), 1000, 10000)).toBe(1);
+  expect(await archiveInactiveThreads(apiFor(rows, calls), 1000, 10000)).toBe(2);
   expect(calls.at(-1)).toEqual({ threadId: "independent", action: "archiveInactive", inactiveBefore: 9000 });
 });
 
-test("an inert dependency (settled target, dependent not waiting) does not protect either endpoint", async () => {
+test("automatic retention keeps an unreceived subscription while allowing the producer to archive", async () => {
   const calls: unknown[] = [];
-  expect(await archiveInactiveThreads(apiFor([row("dependent", { dependencies: ["settled"] }), row("settled")], calls), 1000, 10000)).toBe(2);
+  expect(await archiveInactiveThreads(apiFor([row("dependent", { dependencies: ["settled"] }), row("settled")], calls), 1000, 10000)).toBe(1);
 });
 
-test("a racing owner dependency refusal is retained without aborting the sweep", async () => {
+test("a racing owner preserves its newly accepted work without aborting the sweep", async () => {
   const calls: unknown[] = [];
   const api = apiFor([row("racing"), row("safe")], calls);
   const control = api.control;
-  api.control = async input => input.threadId === "racing" ? { ok: false, error: { code: "dependency_conflict", message: "New dependency" } } : control(input);
+  api.control = async input => input.threadId === "racing" ? { ok: true, value: row("racing", { dependencies: ["new-work"] }) } : control(input);
   expect(await archiveInactiveThreads(api, 1000, 10000)).toBe(1);
 });

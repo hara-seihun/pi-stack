@@ -3,8 +3,7 @@ import type { ThreadCreator } from "./caller.js";
 import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export interface ThreadDependency { threadId: string; dependsOn: string; ownerId?: string }
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "dependency_conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; dependencies?: ThreadDependency[]; retryable?: boolean; retryAt?: number; requestId?: string };
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
@@ -31,7 +30,7 @@ export interface Thread {
   role?: "agent" | "conversation" | "worker";
   /** Immutable generated identity; historical threads may not have one. */
   agentName?: string;
-  /** Persistent outgoing peer dependencies, independent of scheduling waits. */
+  /** Authoritative unresolved result subscriptions; terminal acceptance removes the peer. */
   dependencies?: string[];
   title: string;
   cwd: string;
@@ -267,10 +266,8 @@ export type ThreadControl =
   | { threadId: string; action: "close" | "reopen" | "open" | "cancel" }
   | { threadId: string; action: "placement"; foreground: boolean }
   | { threadId: string; action: "dependencies"; threadIds: string[] }
-  /** Owner-to-owner durable endpoint reservation, never a model operation. */
-  | { threadId: string; action: "dependencyClaim"; dependentId: string; active: boolean }
-  /** Owner-to-owner release of an inert edge threadId → dependsOn while closing dependsOn; refused while threadId waits on it. */
-  | { threadId: string; action: "dependencyRelease"; dependsOn: string }
+  /** Owner-to-owner durable result subscription, never an execution or closure lock. */
+  | { threadId: string; action: "resultSubscribe"; dependentId: string; active: boolean; after?: number }
   /** Retained callers' stop/restore act on the selected agent only; no recursive control or replay. */
   | { threadId: string; action: "stop"; descendants: boolean; reason?: "archive" }
   | { threadId: string; action: "resume" }

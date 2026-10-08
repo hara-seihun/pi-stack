@@ -1,4 +1,4 @@
-import type { Activity, GovernorState, Session, StreamSnapshot, TranscriptItemKind } from "../server/protocol.js";
+import type { Activity, Session, StreamSnapshot, TranscriptItemKind } from "../server/protocol.js";
 import { assertNever, requireState } from "./explicit-state.js";
 
 export const ACTIVITIES = {
@@ -9,7 +9,6 @@ export const ACTIVITIES = {
 } satisfies Record<Activity, true>;
 const THREAD_STATES = { idle: true, running: true, waiting: true } satisfies Record<Session["state"], true>;
 export const TRANSCRIPT_KINDS = { system: true, tool: true, user: true, assistant: true, thinking: true, toolCall: true, notice: true } satisfies Record<TranscriptItemKind, true>;
-export const GOVERNOR_STATES = { off: true, green: true, blue: true, red: true } satisfies Record<GovernorState, true>;
 const SNAPSHOT_TYPES = { bootstrap: true, state: true, dashboard: true, workers: true, transcript: true, live: true, images: true, questions: true } satisfies Record<StreamSnapshot["type"], true>;
 
 export function stateObject(value: unknown, owner: string): Record<string, unknown> {
@@ -101,10 +100,6 @@ export function validateStreamSnapshot(resource: string, value: unknown): assert
     case "bootstrap": stateObject(snapshot.bootstrap, "Bootstrap"); return;
     case "dashboard": {
       const dashboard = stateObject(snapshot.dashboard, "Dashboard");
-      if (dashboard.governors) {
-        const governors = stateObject(dashboard.governors, "Governors");
-        for (const provider of ["openai", "anthropic"]) requireState(stateObject(governors[provider], "Governor").state, GOVERNOR_STATES, "Governor mode");
-      }
       stateArray(dashboard.plans, "Plans").forEach(value => {
         const plan = stateObject(value, "Plan");
         stateArray(plan.metrics, "Plan metrics").forEach(value => {

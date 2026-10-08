@@ -459,7 +459,8 @@ export class Daemon {
       }
       if(method==="POST"&&url.pathname==="/v1/accounts"){
         const input=await body(req);
-        this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true,concurrency:Number(input.concurrency??this.config.defaultAccountConcurrency)});
+        if(Object.keys(input).some(key=>!["id","provider","label"].includes(key)))return json(res,400,{error:"account import accepts only id, provider and label"});
+        this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true});
         return json(res,201,{ok:true});
       }
       // Suspending an account keeps its credential and its usage history: a
@@ -514,7 +515,11 @@ export class Daemon {
         }
         return json(res,201,{threads});
       }
-      if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
+      if(method==="POST"&&url.pathname==="/v1/control"){
+        const input=await body(req);
+        if(!["launches","ordinary-launches"].includes(input.key)||!["paused","enabled"].includes(input.value))return json(res,400,{error:"control requires launches or ordinary-launches and paused or enabled"});
+        this.store.setControl(input.key,input.value);return json(res,200,{ok:true});
+      }
       json(res,404,{error:"not found"});
     }catch(error){json(res,500,{error:String(error)});}
   }
