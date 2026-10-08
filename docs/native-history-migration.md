@@ -2,7 +2,7 @@
 
 Owner: release maintenance and the owner-local unlock gate, before Remote or Orchestrator runtime startup.
 Implementation: [`scripts/migrate-native-history.mjs`](../scripts/migrate-native-history.mjs).
-Requires Node 24 with `node:sqlite`. Run separately for each person's owning Unix user and database pair.
+Requires Node 24 with `node:sqlite`. The [publication boundary](native-history-boundary.md) invokes it separately for each person's owning Unix user and database pair after the old decoder has acknowledged output and closed writers. The explicit invocation below is also available for maintenance recovery.
 
 ## Invocation
 

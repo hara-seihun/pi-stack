@@ -4,7 +4,7 @@ Pi Stack separates reviewed source from host-owned accounts, credentials, networ
 
 ## Native history migration
 
-Before activating native-history source on an existing host, run the [explicit history maintenance migration](native-history-migration.md) for each owning user's supervisor/thread database pair. Stop and drain its writers first, preserve the migration's private snapshots/preimages in backup coverage, and resume only after its durable success receipt. New databases use native history directly.
+Publication runs the [native history boundary](native-history-boundary.md) before selecting new artifacts: accepted errands settle under the old decoder, idle writers close, and each owner migrates inside their retained private namespace. Locked owners use the first-unlock gate. Preserve the [migration](native-history-migration.md)'s private snapshots/preimages in backup coverage. New databases use native history directly.
 
 ## Host platforms
 
