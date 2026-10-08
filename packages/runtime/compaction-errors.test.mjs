@@ -1,16 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchCompactionErrors, patchContextErrors, patchCompactionErrorCopies } from "./patch-compaction-errors.mjs";
 
 const base = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-const chunks = join(base, "bundle/chunks");
-const paths = [join(base, "core/agent-session.js"), ...readdirSync(chunks).filter(name => name.endsWith(".js")).map(name => join(chunks, name)).filter(path => readFileSync(path, "utf8").includes("async _runAutoCompaction("))];
-assert.equal(paths.length, 2);
-for (const path of paths) test(`native failures reach Pi lifecycle and stop continuation in ${path.includes("chunks") ? "bundled CLI" : "SDK"}`, async () => {
+const paths = [join(base, "core/agent-session.js")];
+for (const path of paths) test("native failures reach Pi lifecycle and stop continuation in SDK", async () => {
   const source = patchCompactionErrors(readFileSync(path, "utf8"));
   assert.equal(patchCompactionErrors(source), source);
   const start = source.indexOf("async _runAutoCompaction(");
@@ -42,8 +40,7 @@ for (const path of paths) test(`native failures reach Pi lifecycle and stop cont
   assert.equal(events.at(-1).aborted, true, "operator cancellation stays cancellation");
 });
 
-const runnerPaths = [join(base, "core/extensions/runner.js"), ...readdirSync(chunks).filter(name => name.endsWith(".js")).map(name => join(chunks, name)).filter(path => readFileSync(path, "utf8").includes("async emitContext(messages)"))];
-assert.equal(runnerPaths.length, 2);
+const runnerPaths = [join(base, "core/extensions/runner.js")];
 test("deployment patches both consumers and declares context rejection without mutating installed dependencies", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-compaction-patch-"));
   const target = join(root, "@earendil-works/pi-coding-agent/dist");
@@ -60,7 +57,7 @@ test("deployment patches both consumers and declares context rejection without m
     assert.match(readFileSync(join(target, "core/extensions/types.d.ts"), "utf8"), /interface ContextEventResult \{\n    error\?: string;/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
-for (const path of runnerPaths) test(`context rejection stops the request without swallowing its cause in ${path.includes("chunks") ? "bundled CLI" : "SDK"}`, async () => {
+for (const path of runnerPaths) test("context rejection stops the request without swallowing its cause in SDK", async () => {
   const source = patchContextErrors(readFileSync(path, "utf8"));
   assert.equal(patchContextErrors(source), source);
   const start = source.indexOf("async emitContext(messages) {");

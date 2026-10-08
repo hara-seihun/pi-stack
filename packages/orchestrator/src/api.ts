@@ -27,6 +27,8 @@ export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, Th
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
 export { ThreadService } from "./threads/service.js";
+export { createManagedAgentSession, type NativeSessionOptions, type ManagedSession } from "./threads/native-session.js";
+export { recoverNativeSessionOwners, nativeOwnerAbsent, type NativeOwnerRecord, type NativeOwnerAbsence } from "./threads/native-owner-recovery.js";
 export { validateWaitDependency } from "./threads/contracts.js";
 export type { AgentWait, AgentWaitRequest, WaitDependency, WaitKind, ThreadWakeSchedule, ThreadWakeRequest, ThreadAttentionRequest, ThreadAttentionReceipt, ThreadAttentionEvents } from "./threads/contracts.js";
 export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";

@@ -1,18 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchAnthropicErrorContent } from "./patch-anthropic-error-content.mjs";
 
 const modules = process.env.PI_TEST_NODE_MODULES;
 const sdk = modules ? join(modules, "@earendil-works/pi-ai/dist/api/anthropic-messages.js")
   : fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/api/anthropic-messages"));
-const chunks = modules ? join(modules, "@earendil-works/pi-coding-agent/dist/bundle/chunks")
-  : join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "bundle/chunks");
-const bundle = join(chunks, readdirSync(chunks).find(name => /^anthropic-messages-[^.]+\.js$/u.test(name)));
-
-for (const path of [sdk, bundle]) test(`Anthropic error image conversion in ${path.includes("chunks") ? "bundled CLI" : "SDK"}`, () => {
+for (const path of [sdk]) test("Anthropic error image conversion in SDK", () => {
   const source = patchAnthropicErrorContent(readFileSync(path, "utf8"));
   assert.equal(patchAnthropicErrorContent(source), source);
   const contentStart = source.indexOf("function convertContentBlocks(");

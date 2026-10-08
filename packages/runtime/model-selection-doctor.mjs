@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { requireStandaloneAgent, settleStandaloneAgent, standaloneRecordPath } from "./standalone-agent.mjs";
 import { execFile } from "node:child_process";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -11,8 +9,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export async function modelSelectionDoctor(runtimeEntry = process.env.PI_TEST_RUNTIME_ENTRY ?? import.meta.resolve("@earendil-works/pi-coding-agent")) {
   const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import(runtimeEntry);
-  const executionId = randomUUID();
-  const capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `model-doctor:${executionId}`, executionId });
   const sessions = new Set();
   const dir = await mkdtemp(join(tmpdir(), "pi-model-selection-"));
   let requests = 0;
@@ -135,10 +131,9 @@ export async function modelSelectionDoctor(runtimeEntry = process.env.PI_TEST_RU
   } finally {
     for (const session of sessions) {
       await session.abort();
-      assert.ok(session.isIdle && !session.isStreaming && !session.isCompacting && !session.isRetrying, "Doctor session did not settle; global custody retained");
+      assert.ok(session.isIdle && !session.isStreaming && !session.isCompacting && !session.isRetrying, "Doctor fixture session did not settle");
       session.dispose();
     }
-    await settleStandaloneAgent(capacity);
     await new Promise(resolve => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }

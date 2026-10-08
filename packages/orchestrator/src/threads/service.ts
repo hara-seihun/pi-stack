@@ -108,7 +108,7 @@ function inputCommandReceipt(value: unknown): [string, string] | undefined {
 }
 interface Runtime {
   session?: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings; environmentKey?: string; parked?: boolean;
-  finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
+  finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> | undefined }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
 const bad = <T = never>(code: ThreadError["code"], message: string): Result<T> => ({ ok: false, error: { code, message } });
@@ -1852,7 +1852,7 @@ export class ThreadService implements ThreadApi {
     if (!this.get(id)) return bad("not_found", "Thread not found");
     if (this.get(id)?.metadata?.archived) return bad("unavailable", "Restore this archived thread before using its native session");
     if (["prompt", "steer", "follow_up", "abort", "abort_bash", "abort_retry", "clear_queue", "set_model", "set_thinking_level", "set_speed", "set_session_name", "cycle_model", "cycle_thinking_level"].includes(command.type)) return bad("invalid_request", "Use thread messaging or control(settings/update) so the durable owner records this change");
-    const durable = ["fork", "clone", "compact", "new_session", "switch_session", "navigate_tree", "bash", "cycle_model", "cycle_thinking_level", "export_html"].includes(command.type);
+    const durable = ["native_operation", "fork", "clone", "compact", "new_session", "switch_session", "navigate_tree", "bash", "cycle_model", "cycle_thinking_level", "export_html"].includes(command.type);
     const observing = ["get_state", "get_context", "get_messages", "get_session_stats", "get_available_models", "get_available_thinking_levels", "get_commands", "get_fork_messages", "set_session_name", "extension_ui_response"].includes(command.type);
     if (!observing && !command.id) return bad("invalid_request", "Executing commands require a stable command.id for capacity custody");
     const commandExecution = `command:${id}:${command.id}`;
@@ -2035,7 +2035,7 @@ export class ThreadService implements ThreadApi {
     if (!session) return Promise.reject(new Error("Pi session is not initialized"));
     const id = command.id ?? `${runtime.epoch}:${++runtime.commandNumber}`;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { runtime.waiters.delete(id); reject(new AcknowledgementTimeout(`Pi ${command.type} acknowledgement timed out; accepted work remains in custody`)); }, command.type === "compact" ? 240_000 : 30_000);
+      const timer = command.type === "native_operation" ? undefined : setTimeout(() => { runtime.waiters.delete(id); reject(new AcknowledgementTimeout(`Pi ${command.type} acknowledgement timed out; accepted work remains in custody`)); }, command.type === "compact" ? 240_000 : 30_000);
       runtime.waiters.set(id, { resolve, reject, timer });
       void session.command({ ...command, id }).catch(error => { const waiter = runtime.waiters.get(id); if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(id); reject(error); } });
     });

@@ -24,9 +24,8 @@ export function validateBarrier(plan, host, receipt, owners) {
   requireValue(receipt?.version === 1 && receipt.barrierId === plan.barrierId && receipt.host === host.id && receipt.releaseCommit === plan.releaseCommit, `${host.id}: barrier identity/release mismatch`);
   requireValue(Array.isArray(receipt.oldControllers) && receipt.oldControllers.length === 0, `${host.id}: old controllers can still admit work`);
   const direct = receipt.directIngress;
-  requireValue(direct?.cli === "gated" && direct.sdk === "gated" && direct.root === "idle-gated"
-    && Array.isArray(direct.oldProcesses) && direct.oldProcesses.length === 0, `${host.id}: direct/root ingress or old doctor/repair custody is not sealed`);
-  requireValue(direct.evidence?.releaseCommit === plan.releaseCommit && Array.isArray(direct.evidence?.processCensus?.retainedProcesses), `${host.id}: retained direct-process census evidence missing`);
+  requireValue(direct?.cli === "managed" && direct.sdk === "managed" && direct.root === "idle-managed", `${host.id}: agent launchers/root have not selected managed execution`);
+  requireValue(direct.evidence?.releaseCommit === plan.releaseCommit, `${host.id}: managed ingress release evidence missing`);
   const expected = owners.filter(owner => owner.host === host.id).map(owner => owner.id);
   requireValue(Array.isArray(receipt.owners) && receipt.owners.length === expected.length && names(receipt.owners.map(owner => owner.ownerId)) === names(expected), `${host.id}: barrier does not cover every configured owner`);
   for (const owner of receipt.owners) {
@@ -35,7 +34,7 @@ export function validateBarrier(plan, host, receipt, owners) {
   }
   return receipt;
 }
-function validateCensuses(plan, censuses, owners, gates) {
+function validateCensuses(plan, censuses, owners) {
   const entries = [], covered = [];
   for (const host of plan.hosts) {
     const census = censuses[host.id];
@@ -45,9 +44,6 @@ function validateCensuses(plan, censuses, owners, gates) {
     requireValue(Array.isArray(census.entries), `${host.id}: missing execution census`);
     for (const entry of census.entries) requireValue(typeof entry.agentId === "string" && entry.agentId && typeof entry.executionId === "string" && entry.executionId
       && typeof entry.source === "string" && typeof entry.uncertain === "boolean" && owners.some(owner => owner.host === host.id && owner.id === entry.ownerId), `${host.id}: invalid execution custody`);
-    const retainedDirect = gates[host.id].directIngress.evidence.processCensus.retainedProcesses;
-    for (const process of retainedDirect) requireValue(census.entries.some(entry => entry.ownerId === process.ownerId && entry.agentId === process.agentId && entry.executionId === process.executionId), `${host.id}: retained direct process ${process.pid} missing from capacity custody census`);
-    requireValue(retainedDirect.length === 0, `${host.id}: pre-gate standalone execution needs positive owning-producer settlement before this first-cutover initializer; do not create orphan leases`);
     entries.push(...census.entries); covered.push(...census.hosts);
   }
   requireValue(new Set(entries.map(entry => entry.agentId)).size === entries.length && new Set(entries.map(entry => entry.executionId)).size === entries.length, "Overlapping native execution custody; cutover remains closed");
@@ -76,12 +72,12 @@ export async function advanceBootstrap(plan, ledger, dependencies) {
       requireValue(!snapshot().initialized, "Authority initialized before the all-owner census");
       await verify();
       for (const host of plan.hosts) { ledger.censuses[host.id] = await run(host.census); save(ledger); }
-      ledger.census = validateCensuses(plan, ledger.censuses, owners, ledger.gates);
+      ledger.census = validateCensuses(plan, ledger.censuses, owners);
       ledger.phase = "censused"; break;
     case "censused":
     case "initializing": {
       await verify();
-      validateCensuses(plan, ledger.censuses, owners, ledger.gates);
+      validateCensuses(plan, ledger.censuses, owners);
       if (snapshot().initialized) {
         requireValue(ledger.phase === "initializing" && ledger.initializationIntent === digest(ledger.census), "Unexpected authority initialization; cutover remains sealed");
         requireValue(reconcile(ledger.census.entries), "Authority cannot reconcile the seeded execution identities");

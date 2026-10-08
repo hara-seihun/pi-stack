@@ -8,11 +8,12 @@ import { candidateCommand, runCandidate } from "./capacity-bootstrap-candidate.m
 
 function fixture() {
   const plan = { version: 1, host: "alpha", barrierId: "test", releaseCommit: "a".repeat(40), checkout: "/checkout", hostFile: "/host.json",
-    preparedClientConfig: "/prepared.json", activeClientConfig: "/active.json", directCustodyReceipt: "/direct.json", orchestrator: "/srv/pi/pi-orchestrator", stateDir: "/state",
+    preparedClientConfig: "/prepared.json", activeClientConfig: "/active.json", orchestrator: "/srv/pi/pi-orchestrator", stateDir: "/state",
     capacityServices: [], owners: [{ ownerId: "alpha/person", controllers: [{ unit: "pi-remote@person.service", healthUrl: "http://127.0.0.1:18790/v1/health", kind: "remote" },
       { unit: "pi-orchestrator@person.service", healthUrl: "http://127.0.0.1:2460/v1/health", kind: "daemon" }],
       sources: [{ kind: "threadDatabase", path: "/public/threads.sqlite3", namespaceUnit: null },
-        { kind: "threadDatabase", path: "/private/threads.sqlite3", namespaceUnit: "pi-remote@person.service" }] }] };
+        { kind: "threadDatabase", path: "/private/threads.sqlite3", namespaceUnit: "pi-remote@person.service" },
+        { kind: "threadDatabaseDirectory", path: "/private/root-sessions", namespaceUnit: "pi-remote@person.service" }] }] };
   const calls = [], manifest = { owners: [{ uid: 1000, ownerId: "alpha/person" }] };
   let busyRoot = false, oldDaemon = false, locked = false;
   const system = { run: (exe, args, env, input) => {
@@ -24,7 +25,7 @@ function fixture() {
     }
     if (exe === "/usr/bin/getent") return "person:x:1000:1000::/home/person:/bin/bash";
     if (exe === "/usr/bin/systemctl" && args[0] === "show") return args[3] === "ActiveState" ? "active" : args[3] === "User" ? "person" : "123";
-    if (exe.endsWith("direct-agent-ingress")) return JSON.stringify({ cli: "gated", sdk: "gated", root: "idle-gated", oldProcesses: [], evidence: { releaseCommit: plan.releaseCommit, processCensus: { retainedProcesses: [] } } });
+    if (exe.endsWith("direct-agent-ingress")) return JSON.stringify({ cli: "managed", sdk: "managed", root: "idle-managed", evidence: { releaseCommit: plan.releaseCommit } });
     if (exe === "/usr/bin/python3" && busyRoot) throw new Error("Root has active native work");
     if (exe === "/usr/sbin/runuser" || exe === "/usr/bin/nsenter") {
       assert.ok(args.includes("person"));
@@ -32,7 +33,7 @@ function fixture() {
       if (args.includes("census")) {
         assert.equal(args.at(-1), "-");
         const own = JSON.parse(input).owners[0]; assert.equal(own.ownerId, "alpha/person");
-        return JSON.stringify({ version: 1, barrierId: "test", entries: own.threadDatabases.map(path => ({ ownerId: own.ownerId,
+        return JSON.stringify({ version: 1, barrierId: "test", entries: [...own.threadDatabases, ...own.threadDatabaseDirectories.map(path => `${path}/request-uuid/threads.sqlite3`)].map(path => ({ ownerId: own.ownerId,
           agentId: path, executionId: `execution:${path}`, source: path, uncertain: true })) });
       }
     }
@@ -59,12 +60,14 @@ test("busy root does not become a fabricated successful host gate", async () => 
 
 test("namespace readability and census run as owning UID and pass JSON stdin, not root0600 temporary files", async () => {
   const f = fixture(); const census = await f.ops.census();
-  assert.equal(census.entries.length, 2);
+  assert.equal(census.entries.length, 3);
   const calls = f.calls.filter(call => call.args.includes("census"));
   assert.equal(calls.length, 2);
   const privateCall = calls.find(call => call.exe === "/usr/bin/nsenter");
   assert.deepEqual(privateCall.args.slice(0, 8), ["--target", "123", "--mount", "--", "/usr/sbin/runuser", "-u", "person", "--"]);
   assert.equal(JSON.parse(privateCall.input).owners[0].threadDatabases[0], "/private/threads.sqlite3");
+  assert.deepEqual(JSON.parse(privateCall.input).owners[0].threadDatabaseDirectories, ["/private/root-sessions"]);
+  assert.ok(census.entries.some(entry => entry.source === "/private/root-sessions/request-uuid/threads.sqlite3"));
 });
 
 test("old daemon health and locked namespaces are explicit unavailable custody, never empty census", async () => {

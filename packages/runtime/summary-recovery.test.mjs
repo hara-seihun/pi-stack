@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -9,11 +9,8 @@ import { patchSummaryRecovery, patchSummaryFailureFence, patchSummaryRecoveryCop
 import { patchCompactionErrors } from "./patch-compaction-errors.mjs";
 
 const base = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-const bundled = readdirSync(join(base, "bundle/chunks")).filter(name => name.endsWith(".js")).map(name => join(base, "bundle/chunks", name));
-const summaries = [join(base, "core/compaction/compaction.js"), ...bundled.filter(path => readFileSync(path, "utf8").includes("async function completeSummarization("))];
-const sessions = [join(base, "core/agent-session.js"), ...bundled.filter(path => readFileSync(path, "utf8").includes("async _runAutoCompaction("))];
-assert.equal(summaries.length, 2);
-assert.equal(sessions.length, 2);
+const summaries = [join(base, "core/compaction/compaction.js")];
+const sessions = [join(base, "core/agent-session.js")];
 const model = { api: "anthropic-messages", id: "fixture-opus", contextWindow: 32768, maxTokens: 4096 };
 const response = (stopReason = "stop", extra = {}) => ({ stopReason, content: [{ type: "text", text: "checkpoint" }], usage: { input: 10, output: 2, totalTokens: 12, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, ...extra });
 const combine = (a, b) => ({ ...a, input: a.input + b.input, output: a.output + b.output, totalTokens: a.totalTokens + b.totalTokens });
@@ -22,7 +19,7 @@ const prompt = text => `<conversation>\n${text}\n</conversation>\n\nUse the chec
 
 for (const path of summaries) {
   const source = patchSummaryRecovery(readFileSync(path, "utf8"));
-  const name = path.includes("chunks") ? "bundled CLI" : "SDK";
+  const name = "SDK";
   const start = source.indexOf("/* Pi Stack bounded summary recovery */");
   const end = source.indexOf("async function completeSummarizationOnce(", start);
   const wrapper = source.slice(start, end).replace(/export /g, "");
@@ -167,7 +164,7 @@ for (const path of summaries) {
   });
 }
 
-for (const path of sessions) test(`${path.includes("chunks") ? "bundled CLI" : "SDK"}: failed automatic prose compaction fences requests across reload/aliases until its retry time`, async () => {
+for (const path of sessions) test("SDK: failed automatic prose compaction fences requests across reload/aliases until its retry time", async () => {
   const source = patchSummaryFailureFence(patchCompactionErrors(readFileSync(path, "utf8")));
   assert.equal(patchSummaryFailureFence(source), source);
   const start = source.indexOf("/* Pi Stack durable summary failure fence */");
@@ -252,7 +249,7 @@ test("actual SDK summarizes a giant prior checkpoint completely before incorpora
   assert.ok(calls > 2);
 });
 
-test("deployment patches both source forms idempotently and preserves valid syntax", () => {
+test("deployment patches managed SDK sources idempotently and preserves valid syntax", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-summary-patch-"));
   const target = join(root, "@earendil-works/pi-coding-agent/dist");
   try {

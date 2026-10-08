@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripTypeScriptTypes } from "node:module";
@@ -25,27 +25,13 @@ export function patchSharedCustody(source) {
     if (source.includes("export class FileAuthStorageBackend")) {
       source = replace(source, "lockfile.lock(this.authPath, {", "lockfile.lock(this.authPath, {\n                    fs: custodyLockFs,");
     }
-  } else if (source.includes("var SessionManager=class _SessionManager")) {
-    if (!source.includes("function writeSessionFileDurably")) throw new Error("Apply session durability before shared custody");
-    source = replace(source, "writeFileSync4(path14,next,\"utf-8\")", "custodyReplaceFileSync(path14,next)");
-    for (const name of ["mkdirSync2", "mkdirSync4", "mkdirSync5", "openSync", "writeFileSync2", "writeFileSync5"]) {
-      if (!source.includes(`${name}(`)) throw new Error(`Pinned Pi shared custody filesystem binding changed: ${name}`);
-      const replacement = name.startsWith("mkdir") ? "custodyMkdirSync" : name.startsWith("write") ? "custodyWriteFileSync" : "custodyOpenSync";
-      source = source.replace(new RegExp(`\\b${name}\\(`, "g"), `${replacement}(`);
-    }
-    source = replace(source, ".lockSync(path14,{realpath:!1})", ".lockSync(path14,{realpath:!1,fs:custodyLockFs})", 2);
-    source = replace(source, ".lock(this.authPath,{realpath:!1,retries:0", ".lock(this.authPath,{realpath:!1,fs:custodyLockFs,retries:0");
   } else throw new Error("Pinned Pi shared custody storage source not found");
   return marker + helpers + "\n" + source;
 }
 
 export function patchSharedCustodyCopies(nodeModules) {
   const base = join(nodeModules, "@earendil-works/pi-coding-agent/dist");
-  const chunks = join(base, "bundle/chunks");
   const paths = ["session-manager", "settings-manager", "auth-storage"].map(name => join(base, `core/${name}.js`));
-  paths.push(...readdirSync(chunks).filter(name => name.endsWith(".js")).map(name => join(chunks, name))
-    .filter(path => readFileSync(path, "utf8").includes("var SessionManager=class _SessionManager")));
-  if (paths.length !== 4) throw new Error("Pinned Pi bundled storage owners changed");
   for (const path of paths) {
     const source = readFileSync(path, "utf8");
     const patched = patchSharedCustody(source);

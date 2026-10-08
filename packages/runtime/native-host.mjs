@@ -1,0 +1,9 @@
+import { readFileSync, unlinkSync } from "node:fs";
+const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
+if (!Array.isArray(manifest.args) || manifest.args.some(arg => typeof arg !== "string") || !/^pi-native-[a-f0-9-]+\.service$/.test(manifest.unit)) throw new Error("Invalid managed terminal launch manifest");
+process.env.PI_STACK_NATIVE_OWNER_UNIT = manifest.unit;
+unlinkSync(process.argv[2]);
+const main = new URL("./node_modules/@earendil-works/pi-coding-agent/dist/main.js", import.meta.url);
+if (!readFileSync(main, "utf8").includes("PiStack native ThreadService owner")) throw new Error("Selected Pi CLI lacks its ThreadService owner; publish the runtime release");
+const { main: run } = await import(main.href);
+await run(manifest.args);
