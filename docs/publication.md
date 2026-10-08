@@ -45,6 +45,23 @@ unchanged. A transport failure remains an explicit failure of that target's deli
 with its command log and repair/retry custody; it does not undo another host's
 proved delivery or prevent ready targets from advancing.
 
+## Worker reboot recovery
+
+The worker records the kernel boot identity when an attempt starts. A different
+boot may resume an interrupted `integrate-main` or `confirm-integrated-main`
+within that attempt, only with passed integration checks and no host custody.
+The watchdog leaves that recovery to the worker rather than treating deadlines
+from the previous boot as command stalls. The receipt retains each interrupted
+command and both boot identities; at most three such recoveries are admitted.
+
+Recovery fetches main before acting. If the push already reached main it is not
+repeated; if main is still the checked base the immutable integration can be
+pushed. Changed main retains the previous integration and its evidence under a
+source ref and requires fresh integration checks. Incomplete checks, absent boot
+identity, same-boot interruptions, exhausted reboot recovery and host-stage
+interruptions keep their existing failure and repair custody. Reboot recovery
+never revives a failed or cancelled publication.
+
 ## Public history
 
 The public history begins with a source snapshot. Private development transcripts, household configuration and GitHub job logs are not included. The source owner retains prior development provenance privately, including the original commit and the snapshot's tree identity. Do not merge pre-publication branches into this repository. Reapply an outstanding change onto current public `main`, then review it as an ordinary source change.
