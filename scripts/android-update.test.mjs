@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,7 @@ test("web bundle preserves client bytes and ignores extraction metadata, file or
   }
   assert.deepEqual(bundled[0], bundled[1]);
   assert.deepEqual(bundled[0], bundled[2]);
+  assert.deepEqual(bundled[0], webBundleBytes(join(root, "assets/public"), "directory"));
   const output = join(root, "0.zip");
   assert.deepEqual(run("unzip", ["-Z1", output]).trim().split("\n"), Object.keys(client).sort());
   for (const [name, content] of Object.entries(client)) {
@@ -97,4 +98,94 @@ for (const bundled of [false, true]) test(`${bundled ? "standalone bundled" : "s
   assert.match(result.stderr, /Published web bundle bytes cannot change for an existing revision/);
   assert.deepEqual(JSON.parse(readFileSync(join(destination, "current/web-manifest.json"))), web);
   assert.equal(hash(readFileSync(join(destination, "current", web.fileName))), web.sha256);
+});
+
+test("web-only generations retain the native APK and reject compatibility, rollback and mutation errors", t => {
+  const root = scratch(t);
+  const destination = join(root, "installed");
+  const source = join(root, "source");
+  mkdirSync(source);
+  const nativeBytes = Buffer.from("immutable native APK");
+  const native = { revision: "a".repeat(40), versionCode: 10001, applicationId: "works.kenan.piremote.kenan", shellId: "b".repeat(16),
+    sha256: hash(nativeBytes), size: nativeBytes.length, fileName: `${"a".repeat(40)}.apk` };
+  writeFileSync(join(source, native.fileName), nativeBytes);
+  writeFileSync(join(source, "manifest.json"), JSON.stringify(native));
+  const install = () => spawnSync("bun", [installer, "install", source], { encoding: "utf8", timeout: 5_000,
+    env: { ...process.env, PI_REMOTE_APP_UPDATES_DIR: destination } });
+  let web;
+  for (let index = 1; index < 8; index++) {
+    const revision = index.toString(16).repeat(40);
+    const bytes = Buffer.from(`web client ${index}`);
+    web = { ...native, revision, versionCode: native.versionCode + index, sha256: hash(bytes), size: bytes.length, fileName: `${revision}.web.zip` };
+    writeFileSync(join(source, web.fileName), bytes);
+    writeFileSync(join(source, "web-manifest.json"), JSON.stringify(web));
+    const result = install();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { ...native, web });
+    assert.deepEqual(JSON.parse(readFileSync(join(destination, "current/web-manifest.json"))), web);
+    assert.equal(hash(readFileSync(join(destination, "releases", native.revision, native.fileName))), native.sha256);
+  }
+  assert.equal(existsSync(join(destination, "releases", "1".repeat(40))), false, "old web client collected");
+  const selected = JSON.parse(readFileSync(join(destination, "current/web-manifest.json")));
+  writeFileSync(join(source, "web-manifest.json"), JSON.stringify({ ...web, shellId: "c".repeat(16) }));
+  assert.match(install().stderr, /Web bundle does not belong/);
+  writeFileSync(join(source, "web-manifest.json"), JSON.stringify({ ...web, versionCode: web.versionCode - 1 }));
+  assert.match(install().stderr, /newer or conflicting/);
+  writeFileSync(join(source, web.fileName), "mutated");
+  writeFileSync(join(source, "web-manifest.json"), JSON.stringify({ ...web, size: 7, sha256: hash(Buffer.from("mutated")) }));
+  assert.match(install().stderr, /Published web bundle bytes cannot change/);
+  assert.deepEqual(JSON.parse(readFileSync(join(destination, "current/web-manifest.json"))), selected);
+});
+
+test("a committed web change reuses the checked shared web build without Gradle or another Vite build", t => {
+  const root = scratch(t);
+  const repository = join(root, "repository");
+  const destination = join(root, "installed");
+  mkdirSync(join(repository, "deploy"), { recursive: true });
+  mkdirSync(join(repository, "apps/kenan/android"), { recursive: true });
+  copyFileSync(fileURLToPath(new URL("../apps/kenan/release-info.mjs", import.meta.url)), join(repository, "apps/kenan/release-info.mjs"));
+  writeFileSync(join(repository, "apps/kenan/capacitor.config.json"), JSON.stringify({ appId: "works.kenan.piremote.kenan" }));
+  writeFileSync(join(repository, "apps/kenan/android/shell.java"), "native source");
+  writeFileSync(join(repository, "package-lock.json"), JSON.stringify({ packages: { "apps/kenan": {} } }));
+  writeFileSync(join(repository, ".gitignore"), "dist/\n");
+  const git = (...args) => run("git", ["-C", repository, ...args]);
+  git("init", "-q");
+  git("config", "user.email", "fixture@example.test");
+  git("config", "user.name", "Fixture");
+  const commit = () => { git("add", "."); git("commit", "-qm", "fixture"); return JSON.parse(run("node", [join(repository, "apps/kenan/release-info.mjs")])); };
+  const identity = commit();
+  const source = join(root, "source");
+  mkdirSync(source);
+  const bytes = Buffer.from("previously checked native APK");
+  const native = { ...identity, sha256: hash(bytes), size: bytes.length, fileName: `${identity.revision}.apk` };
+  writeFileSync(join(source, native.fileName), bytes);
+  writeFileSync(join(source, "manifest.json"), JSON.stringify(native));
+  run("bun", [installer, "install", source], { env: { ...process.env, PI_REMOTE_APP_UPDATES_DIR: destination } });
+  const entry = join(repository, "deploy/android-update.js");
+  run("bun", [installer, "bundle", entry]);
+  const invoke = (...args) => run("bun", [entry, ...args], { env: { ...process.env, PI_REMOTE_APP_UPDATES_DIR: destination } });
+  writeFileSync(join(repository, "web.ts"), "new shared web source");
+  const current = commit();
+  assert.equal(current.shellId, identity.shellId);
+  const plan = JSON.parse(invoke("plan"));
+  assert.equal(plan.kind, "web");
+  assert.deepEqual(plan.release, native);
+  mkdirSync(join(repository, "apps/remote/web/dist"), { recursive: true });
+  writeFileSync(join(repository, "apps/remote/web/dist/index.html"), "new shared client");
+  const output = join(root, "prepared");
+  invoke("prepare-web", output, plan.nativeDirectory);
+  assert.deepEqual(JSON.parse(readFileSync(join(output, "manifest.json"))), native);
+  const web = JSON.parse(readFileSync(join(output, "web-manifest.json")));
+  assert.equal(web.revision, current.revision);
+  assert.equal(web.versionCode, current.versionCode);
+  assert.equal(web.shellId, native.shellId);
+  assert.equal(run("unzip", ["-p", join(output, web.fileName), "index.html"]), "new shared client");
+  assert.equal(existsSync(join(repository, "apps/kenan/android/app/build")), false);
+  mkdirSync(join(repository, "apps/kenan/android/app/src/test"), { recursive: true });
+  writeFileSync(join(repository, "apps/kenan/android/app/src/test/Test.java"), "new native test");
+  commit();
+  assert.equal(JSON.parse(invoke("plan")).kind, "native", "changed native tests still run the full native gate");
+  writeFileSync(join(repository, "apps/kenan/android/shell.java"), "different native source");
+  commit();
+  assert.equal(JSON.parse(invoke("plan")).kind, "native");
 });
