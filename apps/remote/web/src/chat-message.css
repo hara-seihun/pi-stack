@@ -14,20 +14,20 @@ p.message-text { margin: 0; }
 .attachment-playback.audio { min-height: 54px; }
 .attachment-placeholder { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(105deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%); background-size: 200% 100%; animation: attachment-loading 1.5s ease-in-out infinite; }
 .attachment-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 54px; padding: 12px; color: var(--muted); }
-.attachment-error button { color: var(--accent); text-decoration: underline; }
+.attachment-error button { min-height: 44px; padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-2); color: var(--accent); background: var(--surface-3); font: inherit; }
 @keyframes attachment-loading { to { background-position-x: -200%; } }
 @media (prefers-reduced-motion: reduce) { .attachment-placeholder { animation: none; } }
 .message-metrics, .message-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
 .message-metrics { font-variant-numeric: tabular-nums; }
 .message-status.failed { color: var(--danger); }
 .message-reactions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 6px; font-size: 13px; }
-.message-reaction-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 32px; min-height: 28px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); line-height: 1; }
+.message-reaction-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 44px; min-height: 44px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); line-height: 1; }
 .message-reaction-chip[data-own="true"], .message-reaction-picker button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .message[data-message-id]:focus-visible, .message-reaction-picker button:focus-visible, .message-reaction-picker input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .message-reaction-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-2); background: var(--surface-2); }
-.message-reaction-picker > button { min-width: 36px; min-height: 36px; border-radius: var(--radius-1); font-size: 20px; }
+.message-reaction-picker > button { min-width: 44px; min-height: 44px; border-radius: var(--radius-1); font-size: 20px; }
 .message-reaction-picker > button:hover { background: var(--surface-3); }
 .message-reaction-picker form { display: flex; gap: 4px; flex: 1 1 150px; }
 .message-reaction-picker input { min-width: 80px; max-width: 180px; flex: 1 1 80px; padding: 5px; border: 1px solid var(--border); border-radius: var(--radius-1); background: var(--surface-3); color: var(--text); }
-.message-reaction-picker form button { min-height: 36px; padding: 0 8px; color: var(--accent); }
+.message-reaction-picker form button { min-height: 44px; padding: 0 8px; color: var(--accent); }
 .message-reaction-error { flex-basis: 100%; }

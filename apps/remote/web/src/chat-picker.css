@@ -16,10 +16,11 @@
 .chat-picker-model-group h3 small { font-size: inherit; font-weight: 400; }
 .chat-picker-list button { display: flex; width: 100%; min-width: 0; gap: 10px; align-items: center; text-align: left; }
 .chat-picker-identities { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: var(--space-2); }
+.chat-picker-model-identities { grid-template-columns: repeat(auto-fill, minmax(min(160px, 100%), 1fr)); }
 .chat-picker-panel .chat-picker-identity { min-height: 64px; display: grid; place-items: center; padding: var(--space-3); }
 .chat-picker-identity .thread-provider, .chat-picker-identity .chat-picker-archive-icon { width: 30px; height: 30px; }
 .chat-picker-identity > span:not(.chat-picker-identity-label) { font-size: 25px; }
-.chat-picker-identity-label { overflow: hidden; font-size: var(--text-sm); font-weight: 700; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.chat-picker-identity-label { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-width: 0; max-width: 100%; overflow: hidden; overflow-wrap: anywhere; font-size: var(--text-sm); font-weight: 700; text-align: center; }
 .chat-picker-list small { display: block; color: var(--muted); overflow-wrap: anywhere; }
 .chat-picker-list span { min-width: 0; overflow-wrap: anywhere; }
 .chat-picker-list button > span:nth-child(2) { flex: 1; }

@@ -35,19 +35,28 @@ export function SpeechBar() {
   }, []);
   const open = state.status !== "idle";
   useEffect(() => { if (open) void speech.loadVoices(); }, [open, state.engine]);
-  if (!open) return null;
-  const nextRate = () => {
+  return <SpeechBarControls state={state} onToggle={() => speech.toggle()} onVoice={voice => speech.setVoice(voice)} onRate={() => {
     const index = SPEECH_RATES.indexOf(state.rate as typeof SPEECH_RATES[number]);
     speech.setRate(SPEECH_RATES[(index + 1) % SPEECH_RATES.length]);
-  };
+  }} onStop={() => speech.stop()} />;
+}
+
+export function SpeechBarControls({ state, onToggle, onVoice, onRate, onStop }: {
+  state: SpeechState;
+  onToggle(): void;
+  onVoice(voice: string): void;
+  onRate(): void;
+  onStop(): void;
+}) {
+  if (state.status === "idle") return null;
   const label = speechLabel(state);
   return <div className={`speech-bar ${state.status}`} role="region" aria-label={state.title ? `Reader: ${state.title}` : "Reader"}>
-    <button type="button" className="speech-control" aria-label={state.status === "playing" ? "Pause" : "Play"} disabled={state.status === "error"} onClick={() => speech.toggle()}>{state.status === "playing" ? <PauseIcon /> : <PlayIcon />}</button>
+    <button type="button" className="speech-control" aria-label={state.status === "playing" ? "Pause" : "Play"} disabled={state.status === "error"} onClick={onToggle}>{state.status === "playing" ? <PauseIcon /> : <PlayIcon />}</button>
     <div className="speech-text">
       <span className="speech-status" title={state.status === "error" ? label : undefined}>{label}</span>
-      {state.voices.length > 0 && state.status !== "error" && <select className="speech-voice" aria-label="Voice" value={state.voice ?? ""} disabled={Boolean(state.voicesError)} onChange={event => speech.setVoice(event.target.value)}>{state.voice === null && <option value="" disabled>Not set</option>}{state.voice !== null && !state.voices.some(voice => voice.id === state.voice) && <option value={state.voice} disabled>{state.voice} · Unavailable</option>}{state.voices.map(voice => <option key={voice.id} value={voice.id} title={voice.description}>{voice.name}</option>)}</select>}
+      {state.voices.length > 0 && state.status !== "error" && <select className="speech-voice" aria-label="Voice" value={state.voice ?? ""} disabled={Boolean(state.voicesError)} onChange={event => onVoice(event.target.value)}>{state.voice === null && <option value="" disabled>Not set</option>}{state.voice !== null && !state.voices.some(voice => voice.id === state.voice) && <option value={state.voice} disabled>{state.voice} · Unavailable</option>}{state.voices.map(voice => <option key={voice.id} value={voice.id} title={voice.description}>{voice.name}</option>)}</select>}
     </div>
-    <button type="button" className="speech-rate" aria-label={`Speed ${state.rate}×. Change`} onClick={nextRate}>{state.rate}×</button>
-    <button type="button" className="speech-control" aria-label="Stop reading" onClick={() => speech.stop()}><StopIcon /></button>
+    <button type="button" className="speech-rate" aria-label={`Speed ${state.rate}×. Change`} onClick={onRate}>{state.rate}×</button>
+    <button type="button" className="speech-control" aria-label="Stop reading" onClick={onStop}><StopIcon /></button>
   </div>;
 }
