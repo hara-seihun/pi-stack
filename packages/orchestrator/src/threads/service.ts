@@ -871,17 +871,25 @@ export class ThreadService implements ThreadApi {
     });
   }
 
-  private async dependencyGraph(): Promise<Result<Thread[]>> {
-    if (!this.directory) return good(this.snapshot());
-    const threads: Thread[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await this.directory.list({ cursor, limit: 100 });
-      if (!page.ok) return page;
-      threads.push(...page.value.threads);
-      cursor = page.value.nextCursor;
-    } while (cursor);
-    return good(threads);
+  private async dependencyGraph(roots: string[]): Promise<Result<Thread[]>> {
+    const peers = new Map<string, Thread>();
+    const queue = [...roots];
+    for (const id of queue) {
+      if (peers.has(id)) continue;
+      const local = this.get(id);
+      let thread = local;
+      if (!thread && this.directory) {
+        const page = await this.directory.list({ id, limit: 1 });
+        if (!page.ok) return page;
+        thread = page.value.threads.find(peer => peer.id === id) ?? null;
+      }
+      if (!thread) return bad("not_found", `Dependency ${id} is not accessible`);
+      peers.set(id, thread);
+      queue.push(...(thread.dependencies ?? []), ...((thread.metadata?.peerDependents as string[] | undefined) ?? []));
+      const incoming = this.sql("SELECT t.id FROM thread t,json_each(COALESCE(json_extract(t.metadata,'$.peerDependencies'),'[]')) d WHERE d.value=?").all(id) as Array<{ id: string }>;
+      queue.push(...incoming.map(peer => peer.id));
+    }
+    return good([...peers.values()]);
   }
   private dependencyEdges(threads: Thread[], id: string): import("./contracts.js").ThreadDependency[] {
     return threads.flatMap(thread => (thread.dependencies ?? []).filter(target => thread.id === id || target === id)
@@ -890,7 +898,7 @@ export class ThreadService implements ThreadApi {
   private async validateDependencies(id: string, ids: string[]): Promise<Result<void>> {
     if (!Array.isArray(ids) || ids.length > 100 || ids.some(target => typeof target !== "string" || !target.trim() || target === id) || new Set(ids).size !== ids.length)
       return bad("invalid_request", "Dependencies require up to 100 unique accessible peers, excluding self");
-    const graph = await this.dependencyGraph(); if (!graph.ok) return graph;
+    const graph = await this.dependencyGraph(ids); if (!graph.ok) return graph;
     const peers = new Map(graph.value.map(thread => [thread.id, thread]));
     for (const target of ids) {
       const peer = peers.get(target);
@@ -913,7 +921,7 @@ export class ThreadService implements ThreadApi {
   }
   /** Authoritative across owners. On success returns the graph it checked, for releasing the inert edges. */
   private async closeProtection(id: string): Promise<Result<Thread[]>> {
-    const graph = await this.dependencyGraph(); if (!graph.ok) return graph;
+    const graph = await this.dependencyGraph([id]); if (!graph.ok) return graph;
     const dependencies = this.liveEdges(graph.value, id);
     return dependencies.length ? { ok: false, error: { code: "dependency_conflict", message: "This agent is part of an unresolved dependency. Ask the dependent agent to resolve or release it before closing either endpoint.", dependencies } } : good(graph.value);
   }
@@ -1002,7 +1010,7 @@ export class ThreadService implements ThreadApi {
   private async pruneSettledDependencies(id: string): Promise<void> {
     const thread = this.get(id);
     if (!thread?.dependencies?.length || thread.metadata?.dependencyUpdate || this.dependencyOperations.has(id) || this.dependencyRegistering.has(id)) return;
-    const graph = await this.dependencyGraph(); if (!graph.ok || this.suspended || this.closed) return;
+    const graph = await this.dependencyGraph([id]); if (!graph.ok || this.suspended || this.closed) return;
     const byId = new Map(graph.value.map(peer => [peer.id, peer]));
     const current = this.get(id); if (!current) return;
     const settled = (current.dependencies ?? []).filter(target => !liveDependency(current, target, byId.get(target)));
