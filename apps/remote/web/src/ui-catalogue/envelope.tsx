@@ -10,11 +10,24 @@ import { SETTINGS, parseTimezone, type SettingsSnapshot } from "../../../shared/
 import type { Bootstrap, Session, StreamSnapshot, StreamWireEvent } from "../../../server/protocol";
 import { stateObject, validateSession } from "../../../shared/state-validation";
 import type { UiCase } from "./contract";
-import { configureFixtureTransport } from "./transport";
+import { configureFixtureTransport, type FixtureRoute } from "./transport";
 
 const long = "Synthetic delivery failed — 日本語 العربية 🌿. ".repeat(12);
-const bootstrap: Bootstrap = { environmentId: "synthetic", home: "/synthetic", threadStarts: [{ id: "personal", label: "Personal", icon: "personal", models: [{ id: "openai/gpt-6.1-sol", label: "Sol", icon: "openai" }] }], speech: null };
-const settings: SettingsSnapshot = { administrator: false, entries: SETTINGS.filter(definition => definition.scope === "person").map(definition => ({ definition, editable: definition.kind !== "owner", value: definition.id === "person.autoCollapse" ? { state: "set", value: true } : { state: "unset" } })) };
+export const appFixtureBootstrap: Bootstrap = { environmentId: "synthetic", home: "/synthetic", threadStarts: [{ id: "personal", label: "Personal", icon: "personal", models: [{ id: "openai/gpt-6.1-sol", label: "Sol", icon: "openai" }] }], speech: null };
+export const appFixtureSettings: SettingsSnapshot = { administrator: false, entries: SETTINGS.filter(definition => definition.scope === "person").map(definition => ({ definition, editable: definition.kind !== "owner", value: definition.id === "person.autoCollapse" ? { state: "set", value: true } : { state: "unset" } })) };
+const bootstrap = appFixtureBootstrap;
+export const appFixtureSettingsRoutes: readonly FixtureRoute[] = [
+  { method: "GET", path: "/v1/settings", reply: () => Response.json(appFixtureSettings) },
+  { method: "PUT", path: "/v1/settings/person.timezone", reply: async request => {
+    const definition = SETTINGS.find(entry => entry.id === "person.timezone");
+    if (!definition) throw new Error("Catalogue timezone definition is missing");
+    const body: unknown = await request.json();
+    if (!body || typeof body !== "object" || !("value" in body)) return Response.json({ error: "ui_fixture_invalid_timezone_request" }, { status: 400 });
+    const parsed = parseTimezone(body.value, "2026-10-09T00:00:00Z");
+    if (!parsed.ok) return Response.json(parsed, { status: 400 });
+    return Response.json({ entry: { definition, editable: true, value: { state: "set", value: parsed.value } } });
+  } },
+];
 function full(resource: string, value: StreamSnapshot): StreamWireEvent {
   return { type: "reconcile", resource, revision: revisionOf(value), kind: "full", base: null, value };
 }
@@ -51,17 +64,8 @@ function AppFixture({ state }: { state: AppCaseState }) {
       return Response.json({ events });
     } },
     { method: "POST", path: "/v1/stream", reply: () => new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "hello", epoch: "synthetic-epoch", streamId: "synthetic-stream", bootstrap } satisfies StreamWireEvent)}\n\n`)); } }), { headers: { "content-type": "text/event-stream" } }) },
-    { method: "GET", path: "/v1/settings", reply: () => Response.json(settings) },
+    ...appFixtureSettingsRoutes,
     { method: "GET", path: "/v1/sessions?allAgents=1", reply: () => Response.json({ sessions: rows }) },
-    { method: "PUT", path: "/v1/settings/person.timezone", reply: async request => {
-      const definition = SETTINGS.find(entry => entry.id === "person.timezone");
-      if (!definition) throw new Error("Catalogue timezone definition is missing");
-      const body: unknown = await request.json();
-      if (!body || typeof body !== "object" || !("value" in body)) return Response.json({ error: "ui_fixture_invalid_timezone_request" }, { status: 400 });
-      const parsed = parseTimezone(body.value, "2026-10-09T00:00:00Z");
-      if (!parsed.ok) return Response.json(parsed, { status: 400 });
-      return Response.json({ entry: { definition, editable: true, value: { state: "set", value: parsed.value } } });
-    } },
     { method: "GET", path: "/v1/notifications", reply: () => Response.json({ cursor: 0, notifications: [] }) },
     { method: "GET", match: url => /^\/v1\/sessions\/ui-(root|worker)\/questions$/.test(url.pathname), reply: () => Response.json({ state: "ready", questions: [] }) },
     { method: "DELETE", path: "/v1/sessions/ui-root", reply: () => {

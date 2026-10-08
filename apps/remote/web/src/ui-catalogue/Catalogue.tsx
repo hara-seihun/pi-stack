@@ -1,12 +1,12 @@
 import { Component, useState, type ReactNode } from "react";
-import type { UiCase, UiReview } from "./contract";
+import type { UiCase, UiReview, UiFixtureActionResult } from "./contract";
 import { fixtureRequests } from "./transport";
 import sourceInventory from "./source-inventory.json";
 import nativeCatalogue from "../../../../kenan/native-ui/catalogue.json";
 import "./catalogue.css";
 
-const caseModules = import.meta.glob<{ shellCases?: UiCase[]; conversationCases?: UiCase[]; screenCases?: UiCase[]; roomsQuestionsMediaCases?: UiCase[]; envelopeCases?: UiCase[] }>(["./shell.tsx", "./conversation.tsx", "./screens.tsx", "./rooms-questions-media.tsx", "./envelope.tsx"], { eager: true });
-const cases = Object.values(caseModules).flatMap(module => module.shellCases ?? module.conversationCases ?? module.screenCases ?? module.roomsQuestionsMediaCases ?? module.envelopeCases ?? []);
+const caseModules = import.meta.glob<{ shellCases?: UiCase[]; conversationCases?: UiCase[]; screenCases?: UiCase[]; roomsQuestionsMediaCases?: UiCase[]; envelopeCases?: UiCase[]; appCompositionCases?: UiCase[] }>(["./shell.tsx", "./conversation.tsx", "./screens.tsx", "./rooms-questions-media.tsx", "./envelope.tsx", "./app-compositions.tsx"], { eager: true });
+const cases = Object.values(caseModules).flatMap(module => module.shellCases ?? module.conversationCases ?? module.screenCases ?? module.roomsQuestionsMediaCases ?? module.envelopeCases ?? module.appCompositionCases ?? []);
 const reviewModules = import.meta.glob<{ default: unknown }>("./*-reviews.json", { eager: true });
 const remainingModules = import.meta.glob<{ default: unknown }>("./*-remaining.json", { eager: true });
 function remainingQueue() {
@@ -80,10 +80,17 @@ function report() {
   };
 }
 
-declare global {
-  interface Window { PiUiCatalogue: { report: typeof report; cases: Omit<UiCase, "render">[] } }
+function invokeAction(caseId: string, actionId: string): UiFixtureActionResult {
+  const entry = cases.find(entry => entry.id === caseId);
+  if (!entry) return { ok: false, code: "unknown-case", error: `Unknown case: ${caseId}` };
+  if (new URLSearchParams(location.search).get("case") !== caseId) return { ok: false, code: "not-mounted", error: "Open this case before invoking its fixture action" };
+  const action = entry.actions?.find(action => action.id === actionId);
+  return action ? action.run() : { ok: false, code: "unknown-action", error: `Unknown fixture action: ${actionId}` };
 }
-window.PiUiCatalogue = { report, cases: cases.map(({ render: _render, ...entry }) => entry) };
+declare global {
+  interface Window { PiUiCatalogue: { report: typeof report; cases: Omit<UiCase, "render">[]; invokeAction: typeof invokeAction } }
+}
+window.PiUiCatalogue = { report, invokeAction, cases: cases.map(({ render: _render, ...entry }) => entry) };
 
 class RenderBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };

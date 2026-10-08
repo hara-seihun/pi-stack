@@ -1422,7 +1422,7 @@
     }
   ],
   "fingerprints": {
-    "App.tsx": "a6c1739eb1a7a5e05d716e5daf9940402964b1e6bcc3876b194b1de56f3debda",
+    "App.tsx": "47fad81c5a2b92b083dff7f05e1d102def1623b03305fcde36aa88b7a5c9983d",
     "Composer.tsx": "363750842edfcefbe5a384419cf5ac177238589cd38a4dbbc18a9804489d8097",
     "ConversationView.tsx": "7f248b3ff17eeafc99a9550eb57191397993c694075f9b88e0016922eb05edc4",
     "DrawingCanvas.tsx": "c291c97dea3c6210609da78f1d4cebafc7555243952534fead1d738c30e1b2a2",
@@ -1472,7 +1472,7 @@
     "features/chats/Inbox.tsx": "17892cb1fa4d9d1e91278917d806ffecb65516e5c3c8667d76b9d6211a3ebc7a",
     "features/chats/use-thread-color.tsx": "bbf9f6d31368a1060f998391ee7fea7e70cbb091f710d52e15bce9e4f5f30f5d",
     "features/conversation/ContextTokens.tsx": "626065ccbc879ee13e18da0c9a90c1a1b34641a67ffd5b764c2284b5f50c3238",
-    "features/conversation/ConversationScreen.tsx": "368ce42650a7480cc973aa8ad83efb5e1ab0620e07d4348d4bc0064b790d9178",
+    "features/conversation/ConversationScreen.tsx": "022f0abbeb26d87bc4e92ff0ffa4e195f51da9a04a5557c43ce11f1d1707e1db",
     "features/conversation/Transcript.tsx": "982950dd9bf9bdb8813f96d1bdcc2f23ead3cbf0edc8c950f15d44be3e2754f6",
     "features/conversation/VirtualTranscript.tsx": "a7d7b54290e07bf0fd53a6ff047c1c369bdc0822c2c6d757332e51733fd9942e",
     "features/conversation/agent-message.tsx": "ed3f5df199721bfaa378fdf107f07bebecb8948b5913b7f0d3da835829102e05",
@@ -1500,7 +1500,7 @@
     "features/queue/QueueSheet.tsx": "489dd60a9531c926aa9f9b29a4675ef7b03eb1a17d73d0afa9eb208c3d43a132",
     "features/queue/delivery.ts": "1681176d7cc8cb13934acd38ee2bc27f4c6bd81e702a5fec79329495abaa3468",
     "features/settings/CalendarSettings.tsx": "987437ea2c40403d1a5b51378f9801b6407f06e8d0b47df82f27501326345308",
-    "features/settings/SettingsScreen.tsx": "e74ad10966f3b1a32e32daff2ac690d4b3e071658703748a00b0da3b32130712",
+    "features/settings/SettingsScreen.tsx": "9d04c4cc66a4b6b2b823f3e7baa1e42778d339d95533d228a85819547d00b641",
     "features/settings/SpeechSettings.tsx": "2448837ce541eb35ba634fde86190e910e95f185f3c99ba897565167ca3e37e4",
     "features/settings/client-timezone.ts": "f5bd1f48c248b9148700b7e2b89803076c5023e28501e951845c0ea557297c03",
     "features/status/StatusIcon.tsx": "c24ea6370cae1ad67a7422e58d00d33a38f332b6d3bef7297efa84d2643c295a",
@@ -1573,5 +1573,5 @@
     "voice.ts": "6fa96af26120c8e8e63da57dc7c33a0d60f45cabcbabec3251a58a1c75c9bdc7",
     "websocket.ts": "dd03584b7a8a295b481c7b0426abcb245f88a2d6ff60b3f55cf7f117b7e126a2"
   },
-  "styleFingerprint": "3985e245fd98ca03a00b2095b2cf2b3385655d908b741b8c324c2671449b7407"
+  "styleFingerprint": "ab76c0bf7a357b238b58330ef201a1a8b57f1f819b5fe421705174c85bc4fad9"
 }

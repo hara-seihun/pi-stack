@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+export type UiFixtureActionResult = { ok: true } | { ok: false; code: "unknown-case" | "unknown-action" | "not-mounted"; error: string };
+
 export type UiCase = {
   id: string;
   title: string;
@@ -7,6 +9,7 @@ export type UiCase = {
   contract: string;
   boundary: "finite-variant" | "content-boundary" | "composition";
   render(): ReactNode;
+  actions?: ReadonlyArray<{ id: string; label: string; run(): UiFixtureActionResult }>;
 };
 
 export type UiReview = {

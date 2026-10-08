@@ -1084,7 +1084,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [selected, knownSessions]);
   const visibleAttachments = state.attachments.filter((file) => file.sessionId === aiId);
   const contextEntries = useMemo(() => {
-    const heads = state.transcript?.items ?? [];
+    if (state.transcript === null) return [];
+    const heads = state.transcript.items;
     return heads.length ? entriesFromHeads(heads) : [WAITING_ENTRY];
   }, [state.transcript]);
   const bodies = useMemo(() => aiId ? new ItemBodies(aiId, undefined, cache) : null, [aiId, cache]);

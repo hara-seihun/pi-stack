@@ -1,12 +1,6 @@
 {
-  "scope": "Remaining representative variants/compositions in this slice, not an exhaustive product-state census. The 50 registered cases and 150 judged dark viewport cells cover the states named in rooms-questions-media.tsx.",
+  "scope": "Remaining representative variants/compositions in this slice, not an exhaustive product-state census. The 56 registered cases and 168 judged dark viewport cells cover the states named in rooms-questions-media.tsx.",
   "queue": [
-    {
-      "component": "RoomConversation",
-      "boundary": "finite-variant",
-      "states": ["waiting dependency", "running with draft and separate Stop thread action", "multiple pending questions", "showBack=false", "showIdentity=false"],
-      "next": "Register these compositions using validated RoomSnapshot observations. Existing generic thread-status matrix coverage does not establish room-header composition coverage."
-    },
     {
       "component": "RoomConversation",
       "boundary": "composition",
@@ -22,8 +16,8 @@
     {
       "component": "RoomCreator MemberPicker",
       "boundary": "composition",
-      "states": ["successful creation and receipt removal", "creation acknowledged but directory refresh failed", "request receipt conflict409", "large64-person roster and120-character room title"],
-      "next": "Review successful/replayed receipt transitions and large directory composition; existing retry/pending/failure captures are not end-to-end creation proof."
+      "states": ["successful creation and receipt removal", "creation acknowledged but directory refresh failed", "request receipt conflict409"],
+      "next": "Review successful/replayed receipt transitions; existing retry/pending/failure and large-directory/title captures are not end-to-end creation proof."
     },
     {
       "component": "RoomQuestion QuestionsComposer QuestionContent",
