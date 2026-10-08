@@ -1,7 +1,5 @@
-import { messageFinalizationKey } from "./sync";
 import { projectMessageReply } from "./message-replies";
 import type { ResponseMetrics } from "./protocol";
-import { withToolProgress, type ToolProgress } from "./tool-progress";
 
 type JsonObject = Record<string, unknown>;
 export interface ContextImage { data: string; mimeType: string }
@@ -9,18 +7,6 @@ export type ImageReference = (image: ContextImage) => string;
 
 function object(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
-}
-
-function restoreStreamedThinking(message: JsonObject, fallback: string | undefined): JsonObject {
-  if (!fallback || !Array.isArray(message.content)) return message;
-  const content = [...message.content];
-  const thinkingIndex = content.findIndex((value) => object(value)?.type === "thinking");
-  if (thinkingIndex < 0) content.unshift({ type: "thinking", thinking: fallback });
-  else {
-    const thinking = object(content[thinkingIndex]);
-    if (thinking && !String(thinking.thinking ?? "")) content[thinkingIndex] = { ...thinking, thinking: fallback };
-  }
-  return { ...message, content };
 }
 
 export function displayAssistantMessage(message: JsonObject): JsonObject {
@@ -38,10 +24,10 @@ export function displayAssistantMessage(message: JsonObject): JsonObject {
 }
 
 /** The page and full-download paths use the same per-record projection. */
-export function displayContextMessage(value: unknown, thinking?: string, imageReference?: ImageReference, metrics?: ResponseMetrics): unknown {
+export function displayContextMessage(value: unknown, imageReference?: ImageReference, metrics?: ResponseMetrics): unknown {
   const source = object(value);
   if (!source) return value;
-  const original = source.role === "assistant" ? restoreStreamedThinking(displayAssistantMessage(source), thinking) : source;
+  const original = source.role === "assistant" ? displayAssistantMessage(source) : source;
   const message = { ...projectMessageReply(original) };
   if (message.role === "assistant") {
     for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"]) delete message[key];
@@ -64,14 +50,4 @@ export function displayContextMessage(value: unknown, thinking?: string, imageRe
     return { type: "image", mimeType: block.mimeType, src: imageReference({ data: block.data, mimeType: block.mimeType }) };
   });
   return message;
-}
-
-export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map(), imageReference?: ImageReference, tools: Iterable<ToolProgress> = [], responseMetrics: ReadonlyMap<string, ResponseMetrics> = new Map()): string {
-  const context = JSON.parse(document) as JsonObject;
-  const messages = withToolProgress(Array.isArray(context.messages) ? context.messages : [], tools).map(value => {
-    const source = object(value);
-    const finalization = source?.role === "assistant" ? messageFinalizationKey(source) : "";
-    return displayContextMessage(value, streamedThinking.get(finalization), imageReference, responseMetrics.get(finalization));
-  });
-  return JSON.stringify({ ...context, messages });
 }

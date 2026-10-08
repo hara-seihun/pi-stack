@@ -2288,7 +2288,7 @@ export class ThreadService implements ThreadApi {
     }
   }
   private output(id: string, runtime: Runtime, event: PiEvent): void {
-    if (this.runtimes.get(id) !== runtime || this.closed || this.suspended || event.type === "context_update") return;
+    if (this.runtimes.get(id) !== runtime || this.closed || this.suspended) return;
     const parsed = parseRuntimeEvent(event);
     if (!parsed.ok) {
       this.sql("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(parsed.error, id);

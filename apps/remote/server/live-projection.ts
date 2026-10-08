@@ -44,34 +44,29 @@ export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
 export interface LiveProjection extends ExecutionActivity {
   sessionId: string;
   compacting: boolean;
-  compactionContextHash: string | null;
   retrying: boolean;
   liveText: string;
   liveThinking: string;
   thinkingBlockStart: number;
   thinkingActive: boolean;
   toolProgress: Map<string, ToolProgress>;
-  pendingContextTextLength: number;
-  pendingContextThinkingLength: number;
-  pendingContextFinalization: string | null;
   activeTools: Map<string, string>;
 }
 
 export function createLiveProjection(sessionId: string): LiveProjection {
-  return { ...createExecutionActivity(), sessionId, compacting: false, compactionContextHash: null, retrying: false,
+  return { ...createExecutionActivity(), sessionId, compacting: false, retrying: false,
     liveText: "", liveThinking: "", thinkingBlockStart: 0, thinkingActive: false,
-    toolProgress: new Map(), pendingContextTextLength: 0, pendingContextThinkingLength: 0,
-    pendingContextFinalization: null, activeTools: new Map() };
+    toolProgress: new Map(), activeTools: new Map() };
 }
 
 export function restoreLiveProjection(live: LiveProjection, snapshot: Record<string, any>): void {
   restoreExecutionActivity(live, snapshot);
   live.compacting = live.activity === "compacting";
   live.retrying = live.activity === "retrying";
-  if (typeof snapshot.text === "string") live.liveText = live.liveText.slice(0, live.pendingContextTextLength) + snapshot.text;
-  if (typeof snapshot.thinking === "string") live.liveThinking = live.liveThinking.slice(0, live.pendingContextThinkingLength) + snapshot.thinking;
+  if (typeof snapshot.text === "string") live.liveText = snapshot.text;
+  if (typeof snapshot.thinking === "string") live.liveThinking = snapshot.thinking;
   live.thinkingActive = live.activity === "thinking";
-  live.thinkingBlockStart = live.pendingContextThinkingLength;
+  live.thinkingBlockStart = 0;
   const tools = Array.isArray(snapshot.tools) ? snapshot.tools : [];
   live.activeTools = new Map(tools.map(tool => [String(tool.toolCallId), String(tool.toolName)]));
   for (const [id, tool] of live.toolProgress) if (!tool.result && !live.activeTools.has(id)) live.toolProgress.delete(id);
@@ -90,11 +85,7 @@ export function settleLiveProjection(live: LiveProjection): void {
   live.thinkingActive = false;
   live.activeTools.clear();
   for (const [id, tool] of live.toolProgress) if (!tool.result) live.toolProgress.delete(id);
-  if (!live.pendingContextFinalization) {
-    live.liveText = "";
-    live.liveThinking = "";
-    live.thinkingBlockStart = 0;
-    live.pendingContextTextLength = 0;
-    live.pendingContextThinkingLength = 0;
-  }
+  live.liveText = "";
+  live.liveThinking = "";
+  live.thinkingBlockStart = 0;
 }

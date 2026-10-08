@@ -2760,7 +2760,6 @@ describe("thread inspection", () => {
     value(await service.start());
     const thread = value(await service.spawn({ requestId: "omit", cwd: directory, message: "work" }));
     await waitFor(() => sessions.length === 1);
-    sessions[0]!.emit({ type: "context_update", context: { systemPrompt: "discarded snapshot", messages: [{ role: "user", content: "full" }], tools: [] } });
     sessions[0]!.currentContext = { source: "runtime", systemPrompt: "current runtime", messages: [{ role: "user", content: "current" }], tools: [] };
     expect(sessions[0]!.commands.filter(command => command.type === "get_context")).toHaveLength(0);
     expect(value(await service.inspect(thread.id, { context: "full" })).context!.systemPrompt).toBe("current runtime");

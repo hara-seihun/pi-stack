@@ -2,6 +2,10 @@
 
 Pi Stack separates reviewed source from host-owned accounts, credentials, network routes and release paths. This guide describes the shared deployment contract. A host handbook owns its actual values and acceptance receipts.
 
+## Native history migration
+
+Before activating native-history source on an existing host, run the [explicit history maintenance migration](native-history-migration.md) for each owning user's supervisor/thread database pair. Stop and drain its writers first, preserve the migration's private snapshots/preimages in backup coverage, and resume only after its durable success receipt. New databases use native history directly.
+
 ## Host platforms
 
 The maintained publication owner runs on an Ubuntu 26.04 local server and releases the same integration to that server and a Debian 12 remote VM. Both currently run Write's ONNX INT8 CPU recognizer; neither is a GPU deployment. The former NixOS Radeon host is no longer the publishing or Write GPU host. Its [GPU measurements](../apps/write/engine/GPU_REPORT.md) remain historical evidence, not current service status.

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { decodeMessageReply, encodeMessageReply, projectMessageReply, replyFromNativeEntry } from "./message-replies";
-import { displayContextDocument } from "./context-display";
+import { displayContextMessage } from "./context-display";
 import { deriveTranscriptItems } from "./transcript-items";
 
 const user = { id: "person", name: "Person" };
@@ -12,7 +12,7 @@ test("reply survives native storage and projects to a quote without changing att
   const image = { type: "image", data: "abc", mimeType: "image/png" };
   const identity = { id: "pi/thread/response", timestamp: 124, sender: user };
   const raw = JSON.stringify({ messages: [{ role: "user", identity, timestamp: 124, content: [{ type: "text", text }, image] }] });
-  const document = JSON.parse(displayContextDocument(raw));
+  const document = { messages: JSON.parse(raw).messages.map((message: any) => displayContextMessage(message)) };
   expect(document.messages[0].content).toEqual([{ type: "text", text: "My response" }, image]);
   const head = deriveTranscriptItems(document).find(item => item.head.kind === "user")!.head;
   expect(head).toMatchObject({ text: expect.stringContaining("My response"), identity, reply: quote });

@@ -323,6 +323,8 @@ async function migrate(options) {
           (SELECT 1 FROM migration_receipt.matched m WHERE m.session_id=events.session_id AND m.finalizes_message=json_extract(events.payload,'$.finalizesMessage') AND m.new_key!=m.finalizes_message)`);
       }
       for (const name of remaining) live.exec(`DROP TABLE "${name}"`);
+      live.exec("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL)");
+      live.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES('native_history_contract','native-history-v1')").run();
       live.exec("COMMIT");
     } catch (error) { live.exec("ROLLBACK"); throw error; }
     journal.prepare("UPDATE migration SET state='complete' WHERE id=1").run();

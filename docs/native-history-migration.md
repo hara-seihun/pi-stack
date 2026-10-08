@@ -45,7 +45,9 @@ Each staged native replacement is fsynced and hashed. Its prepared receipt commi
 2. Rekey existing `message_facts.finalizes_message` to the promoted native content hash so response metrics still join. Rekey matching surviving thinking/metrics event payloads too, so a subsequent startup migration cannot recreate stale metric joins. A conflicting destination fact key is an explicit error, not a lossy merge.
 3. Drop `message_facts.thinking`, retaining response metrics and other columns.
 4. Drop only the retired captured-context tables present in the original backup.
-5. Commit these supervisor changes together, then commit the completion receipt.
+5. Record `metadata.native_history_contract = "native-history-v1"`, commit these supervisor changes together, then commit the completion receipt.
+
+New supervisors refuse startup with `migration_required` while retired capture tables, old `message_facts.thinking`, or unpreserved thinking events remain. This also protects locked people at their next unlock. New native runners identify their protocol through successful `get_state` response `data.historySource = "native-jsonl-v1"`. Drain existing generations through their current controllers and close idle resident sessions/runners before replacing that source; their old capture frames are not part of the new runtime protocol.
 
 A session absent from the original thread mapping is a legitimate preserved orphan: its captures/facts stay in the snapshot, it is not fabricated into a native thread, and its name/counts are recorded in `receipt.sqlite.preserved_orphans`. The JSON success result reports orphan totals, the first 20 session names, unmatched fact count and artifact paths. Inspect the receipt for the full list. Unmatched keys in readable native files likewise stay preserved, not discarded. A mapped missing/corrupt native file is a typed error and prevents schema retirement, including capture-only sessions.
 

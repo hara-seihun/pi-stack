@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { displayContextDocument } from "./context-display";
-import { updateToolProgress, type ToolProgress } from "./tool-progress";
+import { displayContextMessage } from "./context-display";
+import { withToolProgress, updateToolProgress, type ToolProgress } from "./tool-progress";
 
 const canonical = { systemPrompt: "", tools: [], messages: [] as any[] };
-const project = (tools: ToolProgress[], context = canonical) => JSON.parse(displayContextDocument(JSON.stringify(context), new Map(), undefined, tools));
+const project = (tools: ToolProgress[], context = canonical) => ({ ...context, messages: withToolProgress(context.messages, tools).map(message => displayContextMessage(message) as any) });
 
 test("restores live Pi tool output and removes its overlay when canonical context catches up", () => {
   let tool: ToolProgress = { id: "tool", name: "bash", args: { command: "pwd" }, startedAt: 1, output: "" };

@@ -120,6 +120,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       cwd = requirePiCwd(admission, cwd, "runtime.cwd");
       if (sandbox && cwd !== options.cwd) throw new Error("Sandbox sessions cannot switch workspaces");
       preparePiSession(sessionManager);
+      env.PI_SESSION_FILE = sessionManager.getSessionFile();
       const memoryFactories = memoryEligible ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
         const api = options.threads ?? createThreadClient(env.PI_THREAD_API_URL!, fetch, { token: env.PI_THREAD_TOKEN });
         const result = await api.ask({ threadId: options.threadId, requestId: `${options.threadId}:${id}`, questions: [{ question, suggestions }] });
@@ -152,7 +153,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       const selection = provider && modelId ? await resolveSessionModel(services.modelRuntime.getModels(), provider, modelId, env) : undefined;
       if (selection && !selection.ok) throw new Error(selection.error);
       const bash = createBashTool(cwd, { operations: scopedBashOperations(env), spawnHook: context => ({ ...context, env: { ...context.env, ...env,
-        PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
+        PI_SESSION_FILE: sessionManager.getSessionFile() } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
         tools: room ? ROOM_TOOLS : sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined),
@@ -313,7 +314,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             }
           }
           if (event.command === "get_state" && event.success) event = { ...event, data: { ...event.data as object, ...receipts(),
-            lastAssistantMessage: lastAssistant(), context: acceptedContext, localTools: execution.activeTools, pendingCommandCount: backgroundCommands.size,
+            lastAssistantMessage: lastAssistant(), context: acceptedContext, historySource: "native-jsonl-v1", localTools: execution.activeTools, pendingCommandCount: backgroundCommands.size,
             isStreaming: !runtime.session.isIdle || execution.active || executionStart !== undefined || pendingInputs.size > 0,
             cancellationFailed: execution.blocked } };
         }

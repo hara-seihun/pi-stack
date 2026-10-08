@@ -64,15 +64,13 @@ test("known waits carry evidence, suppress recovering startup errors but preserv
   expect(projectThreadActivity("idle", undefined, undefined, { executionError: "actual failure" }).executionError).toBe("actual failure");
 });
 
-test("settlement keeps final output until canonical context acknowledges it", () => {
+test("settlement clears disposable output and tools; native history owns final messages", () => {
   const live = createLiveProjection("thread");
   live.liveText = "Final output";
-  live.pendingContextFinalization = "message-id";
+  live.liveThinking = "Thinking";
   live.activeTools.set("tool", "bash");
   settleLiveProjection(live);
-  expect(live.liveText).toBe("Final output");
-  expect(live.activeTools.size).toBe(0);
-  live.pendingContextFinalization = null;
-  settleLiveProjection(live);
   expect(live.liveText).toBe("");
+  expect(live.liveThinking).toBe("");
+  expect(live.activeTools.size).toBe(0);
 });

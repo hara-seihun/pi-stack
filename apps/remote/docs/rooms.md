@@ -115,15 +115,14 @@ this stream, cancel snapshot reads/retries, and resume from their cursor. These 
 requests, not another person's event stream; intentional Meet/voice resources are unaffected. Member additions and sends serialize per room at the router. Turning the flag off preserves
 the directory, outbox and native histories. Snapshot history comes from the native branch, including
 pre-compaction messages, not only the current model context. Opening a room reads the newest
-32 native visible records through the indexed source, never the entire history or captured context.
+32 native visible records through the bounded indexed source.
 `paging` supplies the exact source revision, total, start/end indexes (end exclusive), `hasOlder`
 and `nextBefore`. Older page replaces the displayed window; Latest page restores the tail. A selected
 older page stays visible when new work arrives, but further paging requires returning to the latest
 revision. Revision conflicts return 409 instead of stitching different branches. Chat, thinking,
 tool results and notices retain native identities; input receipts are transparent work, while
 materialized user records are chat, including when those records fall on separate pages.
-The inspector identifies the selected page's scope and source revision; it does not serialize a
-full captured context.
+The inspector identifies the selected page's scope and source revision.
 
 Closing a room is a per-person inbox choice, not a stop, archive, membership removal or change of
 custody. The directory retains both open and closed rooms so the picker can reopen them. `current`
