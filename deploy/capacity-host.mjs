@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const need = (condition, message) => { if (!condition) throw new Error(message); };
-const sourceKinds = ["threadDatabase", "standaloneDirectory", "standaloneRecord", "inactivePersonal"];
+const sourceKinds = ["threadDatabase", "threadDatabaseDirectory", "inactivePersonal"];
 export function inactivePersonalProof(procRoot, source) {
   need(isAbsolute(source.dataDir ?? "") && Number.isSafeInteger(source.uid) && source.uid >= 0, "Inactive-person lifecycle needs actual UID and configured data directory");
   const absolute = resolve(source.dataDir);
@@ -26,7 +26,7 @@ export function inactivePersonalProof(procRoot, source) {
 export function validateHostPlan(plan) {
   need(plan?.version === 1 && typeof plan.host === "string" && plan.host && typeof plan.barrierId === "string" && plan.barrierId
     && /^[a-f0-9]{40}$/.test(plan.releaseCommit), "Host/barrier/release identity required");
-  for (const field of ["checkout", "hostFile", "preparedClientConfig", "activeClientConfig", "directCustodyReceipt", "orchestrator", "stateDir"]) need(isAbsolute(plan[field] ?? ""), `Absolute ${field} required`);
+  for (const field of ["checkout", "hostFile", "preparedClientConfig", "activeClientConfig", "orchestrator", "stateDir"]) need(isAbsolute(plan[field] ?? ""), `Absolute ${field} required`);
   need(Array.isArray(plan.capacityServices) && plan.capacityServices.every(unit => /^[a-zA-Z0-9@_.-]+\.service$/.test(unit)), "Explicit capacity service/tunnel units required");
   need(Array.isArray(plan.owners) && plan.owners.length && new Set(plan.owners.map(owner => owner.ownerId)).size === plan.owners.length, "Every distinct configured host owner required");
   for (const owner of plan.owners) {
@@ -36,7 +36,7 @@ export function validateHostPlan(plan) {
     for (const source of owner.sources) need(sourceKinds.includes(source.kind) && isAbsolute(source.path ?? "")
       && (source.namespaceUnit === null || /^[a-zA-Z0-9@_.-]+\.service$/.test(source.namespaceUnit))
       && (source.kind !== "inactivePersonal" || source.namespaceUnit !== null && isAbsolute(source.dataDir ?? "") && Number.isSafeInteger(source.uid) && source.uid >= 0), "Explicit source path and namespace unit/null required");
-    for (const controller of owner.controllers.filter(controller => controller.kind === "remote")) need(owner.sources.some(source => source.namespaceUnit === controller.unit && ["threadDatabase", "inactivePersonal"].includes(source.kind)), `${owner.ownerId}: person source/lifecycle inventory missing for ${controller.unit}`);
+    for (const controller of owner.controllers.filter(controller => controller.kind === "remote")) need(owner.sources.some(source => source.namespaceUnit === controller.unit && ["threadDatabase", "threadDatabaseDirectory", "inactivePersonal"].includes(source.kind)), `${owner.ownerId}: person source/lifecycle inventory missing for ${controller.unit}`);
   }
 }
 export function hostOperations(plan, system) {
@@ -138,7 +138,7 @@ export function hostOperations(plan, system) {
         }
         owners.push({ ownerId: owner.ownerId, state: active ? "gated" : "inactive", coverage: unavailableSources.length ? "unavailable" : "complete", unavailableSources });
       }
-      const directIngress = JSON.parse(command(join(plan.checkout, "deploy/direct-agent-ingress"), [plan.releaseCommit, plan.hostFile], { PI_CAPACITY_DIRECT_CUSTODY_RECEIPT: plan.directCustodyReceipt }));
+      const directIngress = JSON.parse(command(join(plan.checkout, "deploy/direct-agent-ingress"), [plan.releaseCommit, plan.hostFile]));
       return { version: 1, host: plan.host, barrierId: plan.barrierId, releaseCommit: plan.releaseCommit, oldControllers, owners, directIngress, inactivePersonalSources };
     },
     async census() {
@@ -151,8 +151,7 @@ export function hostOperations(plan, system) {
           for (const sources of groups.values()) {
             const censusPlan = { host: plan.host, barrierId: plan.barrierId, owners: [{ ownerId: owner.ownerId,
               threadDatabases: sources.filter(source => source.kind === "threadDatabase").map(source => source.path),
-              standaloneDirectories: sources.filter(source => source.kind === "standaloneDirectory").map(source => source.path),
-              standaloneRecords: sources.filter(source => source.kind === "standaloneRecord").map(source => source.path) }] };
+              threadDatabaseDirectories: sources.filter(source => source.kind === "threadDatabaseDirectory").map(source => source.path) }] };
             const census = JSON.parse(inNamespace(owner.ownerId, sources[0], "/usr/local/bin/node", [join(plan.orchestrator, "dist/agent-capacity-cli.js"), "census", "-"], JSON.stringify(censusPlan)));
             need(census.version === 1 && census.barrierId === plan.barrierId && Array.isArray(census.entries), "Owner omitted valid census receipt");
             for (const entry of census.entries) {

@@ -92,8 +92,9 @@ handoff and uncertain cancellation cannot free a slot by assumption. Initial
 activation requires a coordinated census of existing execution, not an empty
 counter while old agents continue. An unreachable authority cannot authorize new
 execution. [Capacity operations](../packages/orchestrator/docs/agent-capacity.md)
-own the authority, census and managed admission; [direct executions](standalone-agent-capacity.md)
-own privileged SDK requests, CLI agents and publication doctors outside ThreadService.
+own the authority, census and managed admission. Privileged requests, CLI agents
+and publication doctors execute through ThreadService too. Tool-free inference
+creates no agent execution.
 
 ## Integration
 
