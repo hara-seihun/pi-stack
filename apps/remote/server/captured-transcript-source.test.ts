@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { ensureSupervisorSchema } from "./database";
 import { CapturedTranscriptSource } from "./captured-transcript-source";
 import { displayContextMessage } from "./context-display";
-import { forgetIndexedContext, openIndexedContext } from "./indexed-context";
+import { forgetIndexedContext, openIndexedContext, type IndexedContext } from "./indexed-context";
 import { SourceTranscripts, type SourceResult, type SourceWindow } from "./source-transcripts";
 import { messageFinalizationKey } from "./sync";
 import type { ToolCallItem } from "./protocol";
@@ -44,6 +44,18 @@ function read(before: number | undefined = undefined, limit = 60): SourceWindow 
   const window = value(source.read("s", before, limit));
   if (!window) throw new Error("Captured source is missing");
   return window;
+}
+function observeReads(index: IndexedContext): number[] {
+  const calls: number[] = [];
+  const original = index.withMessageReader;
+  index.readMessage = () => { throw new Error("Unscoped transcript read"); };
+  index.withMessageReader = (action, revision) => original(reader => action({
+    readMessage(number, requestedRevision) {
+      calls.push(number);
+      return reader.readMessage(number, requestedRevision);
+    },
+  }), revision);
+  return calls;
 }
 function transcripts() {
   return new SourceTranscripts(db, async (id, before, limit) => {
@@ -138,9 +150,7 @@ test("a tail page hydrates only its owning message, and a large exact body is re
   capture([{ role: "user", timestamp: 1, content: "Earlier" }, { role: "user", timestamp: 2, content: text }]);
   const opened = openIndexedContext(db, "s");
   if (!opened.ok || !opened.value) throw new Error("Index missing");
-  const index = opened.value, originalRead = index.readMessage;
-  const calls: number[] = [];
-  index.readMessage = (number, revision) => { calls.push(number); return originalRead(number, revision); };
+  const calls = observeReads(opened.value);
   const items = transcripts();
   const page = value(await items.page("s", undefined, 1));
   expect(calls).toEqual([1]);
@@ -182,9 +192,7 @@ test("one selected call hydrates one output even when the assistant owns more th
   ]);
   const opened = openIndexedContext(db, "s");
   if (!opened.ok || !opened.value) throw new Error("Index missing");
-  const index = opened.value, originalRead = index.readMessage;
-  const reads: number[] = [];
-  index.readMessage = (number, revision) => { reads.push(number); return originalRead(number, revision); };
+  const reads = observeReads(opened.value);
   const items = transcripts();
   const page = value(await items.page("s", 53, 1));
   expect(page.items).toHaveLength(1);

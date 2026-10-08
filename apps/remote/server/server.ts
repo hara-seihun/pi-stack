@@ -57,7 +57,7 @@ import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
 import { displayAssistantMessage } from "./context-display";
-import { openIndexedContext } from "./indexed-context";
+import { readRecentContextMessages } from "./recent-context-messages";
 import { CapturedTranscriptSource } from "./captured-transcript-source";
 import { ThreadTranscriptSource } from "./thread-transcript-source";
 import { contextResponse } from "./context-response";
@@ -677,20 +677,9 @@ const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheL
  * agent actually holds. Voice reads the conversation from the captured context,
  * which is where the conversation is. */
 function recentContextMessages(sessionId: string, limit: number): Array<{ role: "user" | "assistant"; text: string }> {
-  const opened = openIndexedContext(db, sessionId);
-  if (!opened.ok) throw new Error(`${opened.error.code}: ${opened.error.detail}`);
-  if (!opened.value) return [];
-  const context = opened.value;
-  const found: Array<{ role: "user" | "assistant"; text: string }> = [];
-  for (let index = context.messages.length - 1; index >= 0 && found.length < limit; index--) {
-    const descriptor = context.messages[index];
-    if (descriptor.role !== "user" && descriptor.role !== "assistant") continue;
-    const read = context.readMessage(descriptor.index);
-    if (!read.ok) throw new Error(`${read.error.code}: ${read.error.detail}`);
-    const text = contentText(read.value.content).trim();
-    if (text) found.push({ role: descriptor.role, text });
-  }
-  return found.reverse();
+  const read = readRecentContextMessages(db, sessionId, limit, contentText);
+  if (!read.ok) throw new Error(`${read.error.code}: ${read.error.detail}`);
+  return read.value;
 }
 
 function hasCapturedContext(sessionId: string): boolean {
@@ -1930,7 +1919,7 @@ const server = Bun.serve<SocketData>({
         const result = await dismissNeedsYou(target, {
           client, now: new Date().toISOString(),
           findQuestion: async questionId => {
-            const pending = await readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room));
+            const pending = await readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room), []);
             const question = pending.questions.find(question => question.id === questionId);
             if (question) return { ok: true, threadId: question.threadId };
             return pending.errors.length ? { ok: false, message: pending.errors.join("; ") } : { ok: true, threadId: null };
@@ -1954,9 +1943,11 @@ const server = Bun.serve<SocketData>({
         const status = result.ok ? 200 : result.error === "conflict" ? 409 : result.error === "not-found" ? 404 : result.error === "invalid-request" || result.error === "invalid-state" ? 400 : 503;
         return json(result, status);
       }
+      const lifeRead = client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } });
       const [life, pending, watch, policy] = await Promise.all([
-        client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } }),
-        readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room)),
+        lifeRead,
+        lifeRead.then(life => readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room),
+          life.ok ? [...new Set(life.value.entities.filter(entity => entity.status === "current" && entity.threadId !== null).map(entity => entity.threadId!))] : [])),
         watchList.watch({ action: "list", threadId: "needs-you-projection" }).catch(cause => ({ ok: false as const, error: { code: "unavailable" as const, message: cause instanceof Error ? cause.message : String(cause) } })),
         client.request<LifePolicyView>({ operation: "policy-read", target: { scope: "self" }, includeHistory: false }),
       ]);

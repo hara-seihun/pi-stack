@@ -121,39 +121,42 @@ export class CapturedTranscriptSource {
       const entry = layout.entries[middle];
       if (entry.seq + entry.count <= from) low = middle + 1; else high = middle;
     }
-    for (let position = low; position < layout.entries.length; position++) {
-      const entry = layout.entries[position];
-      if (entry.seq >= end) break;
-      const descriptor = entry.synthetic ? null : context.messages[entry.index];
-      bytes += descriptor?.bytes ?? 0;
-      if (bytes > 8 * 1024 * 1024) return bad("oversized", "Requested context records exceed the 8 MiB transport limit; request a smaller page");
-      const source = entry.synthetic ? this.readReceipt(sessionId, entry.synthetic.entryId) : context.readMessage(entry.index);
-      if (!source.ok) return bad(source.error.code, "detail" in source.error ? source.error.detail : source.error.message);
-      if (entry.synthetic) bytes += Buffer.byteLength(JSON.stringify(source.value));
-      const requestedCalls = new Set<string>();
-      if (descriptor) {
-        const firstThinking = descriptor.blocks.find(block => block.type === "thinking");
-        let ordinal = entry.restoredThinking && !firstThinking ? 1 : 0;
-        for (const block of descriptor.blocks) {
-          const displayed = block.type !== "thinking" || block.thinkingNonempty || entry.restoredThinking && block === firstThinking;
-          if (!displayed) continue;
-          if (block.type === "toolCall" && block.id && entry.seq + ordinal >= from && entry.seq + ordinal < end) requestedCalls.add(block.id);
-          ordinal++;
-        }
-      }
-      const results: any[] = [];
-      for (const index of entry.resultIndices) {
-        const result = context.messages[index];
-        if (!result.toolCallId || !requestedCalls.has(result.toolCallId)) continue;
-        bytes += result.bytes;
+    const window = context.withMessageReader(reader => {
+      for (let position = low; position < layout.entries.length; position++) {
+        const entry = layout.entries[position];
+        if (entry.seq >= end) break;
+        const descriptor = entry.synthetic ? null : context.messages[entry.index];
+        bytes += descriptor?.bytes ?? 0;
         if (bytes > 8 * 1024 * 1024) return bad("oversized", "Requested context records exceed the 8 MiB transport limit; request a smaller page");
-        const read = context.readMessage(index);
-        if (!read.ok) return bad(read.error.code, read.error.detail);
-        results.push(read.value);
+        const source = entry.synthetic ? this.readReceipt(sessionId, entry.synthetic.entryId) : reader.readMessage(entry.index);
+        if (!source.ok) return bad(source.error.code, "detail" in source.error ? source.error.detail : source.error.message);
+        if (entry.synthetic) bytes += Buffer.byteLength(JSON.stringify(source.value));
+        const requestedCalls = new Set<string>();
+        if (descriptor) {
+          const firstThinking = descriptor.blocks.find(block => block.type === "thinking");
+          let ordinal = entry.restoredThinking && !firstThinking ? 1 : 0;
+          for (const block of descriptor.blocks) {
+            const displayed = block.type !== "thinking" || block.thinkingNonempty || entry.restoredThinking && block === firstThinking;
+            if (!displayed) continue;
+            if (block.type === "toolCall" && block.id && entry.seq + ordinal >= from && entry.seq + ordinal < end) requestedCalls.add(block.id);
+            ordinal++;
+          }
+        }
+        const results: any[] = [];
+        for (const index of entry.resultIndices) {
+          const result = context.messages[index];
+          if (!result.toolCallId || !requestedCalls.has(result.toolCallId)) continue;
+          bytes += result.bytes;
+          if (bytes > 8 * 1024 * 1024) return bad("oversized", "Requested context records exceed the 8 MiB transport limit; request a smaller page");
+          const read = reader.readMessage(index);
+          if (!read.ok) return bad(read.error.code, read.error.detail);
+          results.push(read.value);
+        }
+        if (bytes > 8 * 1024 * 1024) return bad("oversized", "Requested context records exceed the 8 MiB transport limit; request a smaller page");
+        records.push({ seq: entry.seq, count: entry.count, entryId: entry.synthetic?.entryId ?? `context:${entry.index}`, message: source.value, results });
       }
-      if (bytes > 8 * 1024 * 1024) return bad("oversized", "Requested context records exceed the 8 MiB transport limit; request a smaller page");
-      records.push({ seq: entry.seq, count: entry.count, entryId: entry.synthetic?.entryId ?? `context:${entry.index}`, message: source.value, results });
-    }
-    return good({ source: { revision: layout.revision, generation: layout.generation, context: "captured-model-context" }, total: layout.total, records });
+      return good({ source: { revision: layout.revision, generation: layout.generation, context: "captured-model-context" }, total: layout.total, records });
+    });
+    return window.ok ? window.value : bad(window.error.code, window.error.detail);
   }
 }

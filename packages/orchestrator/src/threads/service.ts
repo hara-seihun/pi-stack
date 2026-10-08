@@ -33,6 +33,8 @@ import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
+import type { PendingQuestions, PendingQuestionsQuery } from "./contracts.js";
+
 type Json = Record<string, any>;
 type NativeContextRecord<D extends RecordDescriptor = MessageRecordDescriptor> = { kind: "native"; descriptor: D } | { kind: "receipt"; entry: Json };
 type QuestionAnswerDescriptor = { questionId: string; timestamp: number; entryId: string };
@@ -1331,6 +1333,36 @@ export class ThreadService implements ThreadApi {
     const rows = this.sql(`SELECT e.seq,q.id AS questionId,q.thread_id AS threadId,q.question,q.created_at AS time,q.accepted_at
       FROM thread_question_event e JOIN thread_question q ON q.id=e.question_id WHERE e.seq>? ORDER BY e.seq LIMIT ?`).all(after, limit) as Json[];
     return good({ cursor: rows.at(-1)?.seq ?? after, items: rows.filter(row => row.accepted_at === null).map(({ accepted_at, ...row }) => row) as QuestionEvents["items"] });
+  }
+  pendingQuestions(input: PendingQuestionsQuery): Result<PendingQuestions> {
+    if (!input || !Array.isArray(input.locationThreadIds)
+      || input.locationThreadIds.some(id => typeof id !== "string" || !id.trim())
+      || Object.keys(input).some(key => key !== "locationThreadIds"))
+      return bad("invalid_request", "Pending questions requires explicit nonblank location thread IDs");
+    try {
+      const rows = this.sql(`SELECT q.* FROM thread_question q JOIN thread t ON t.id=q.thread_id
+        WHERE q.accepted_at IS NULL ORDER BY q.thread_id,q.created_at,q.rowid`).all() as Json[];
+      const ids = [...new Set([...input.locationThreadIds, ...rows.map(row => row.thread_id as string)])];
+      const owners = this.sql(`SELECT id,title,metadata FROM thread WHERE id IN (SELECT value FROM json_each(?))`)
+        .all(JSON.stringify(ids)) as Json[];
+      const value: PendingQuestions = { questions: [], threads: [], errors: [] };
+      const failed = new Set<string>();
+      for (const row of owners) {
+        try { value.threads.push({ id: row.id, title: row.title, metadata: JSON.parse(row.metadata) }); }
+        catch (cause) { failed.add(row.id); value.errors.push({ threadId: row.id, message: errorText(cause) }); }
+      }
+      const questions = new Map<string, ThreadQuestion[]>();
+      for (const row of rows) {
+        if (failed.has(row.thread_id)) continue;
+        try {
+          const pending = questions.get(row.thread_id) ?? [];
+          pending.push(this.question(row));
+          questions.set(row.thread_id, pending);
+        } catch (cause) { failed.add(row.thread_id); questions.delete(row.thread_id); value.errors.push({ threadId: row.thread_id, message: errorText(cause) }); }
+      }
+      value.questions = [...questions.values()].flat();
+      return good(value);
+    } catch (cause) { return bad("unavailable", errorText(cause)); }
   }
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     if (!this.get(threadId)) return bad("not_found", "Thread not found");

@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONTEXT_CHUNK_BYTES, CONTEXT_RECORD_BYTES, forgetIndexedContext, openIndexedContext, probeIndexedContext, type IndexedContext } from "./indexed-context";
+import { CONTEXT_CHUNK_BYTES, CONTEXT_RECORD_BYTES, forgetIndexedContext, openIndexedContext, probeIndexedContext, type IndexedContext, type ContextMessageReader } from "./indexed-context";
 import { contextSplice, messageFinalizationKey, sha256 } from "./sync";
 
 let db: Database;
@@ -189,6 +189,72 @@ test("cached opens only probe metadata and native readers release their snapshot
   const newer = indexed();
   expect(newer).not.toBe(index);
   expect(newer.readMessage(0)).toEqual({ ok: true, value: { role: "user", content: "second" } });
+});
+
+test("a message window owns one source connection and closes it on success, returned error and exception", () => {
+  const messages = [{ role: "user", content: "first" }, { role: "user", content: "second" }];
+  put(document(messages));
+  const index = indexed();
+  const writer = new Database(db.filename);
+  const connections = () => readdirSync("/proc/self/fd").filter(name => {
+    const path = `/proc/self/fd/${name}`;
+    return existsSync(path) && readlinkSync(path) === db.filename;
+  }).length;
+  const baseline = connections();
+  let escaped: ContextMessageReader | undefined;
+  try {
+    const window = index.withMessageReader(reader => {
+      escaped = reader;
+      expect(reader.readMessage(0)).toEqual({ ok: true, value: messages[0] });
+      expect(connections()).toBe(baseline + 1);
+      expect(reader.readMessage(1)).toEqual({ ok: true, value: messages[1] });
+      expect(connections()).toBe(baseline + 1);
+      expect(index.readMessage(0)).toEqual({ ok: true, value: messages[0] });
+      expect(reader.readMessage(1)).toEqual({ ok: true, value: messages[1] });
+      return "complete";
+    });
+    expect(window).toEqual({ ok: true, value: "complete" });
+    expect(connections()).toBe(baseline);
+    expect(escaped!.readMessage(0)).toMatchObject({ ok: false, error: { code: "invalid" } });
+    writer.exec("BEGIN IMMEDIATE; UPDATE session_contexts SET captured_at=2; ROLLBACK");
+    expect(index.withMessageReader(reader => {
+      expect(reader.readMessage(0).ok).toBe(true);
+      return reader.readMessage(-1);
+    }))
+      .toMatchObject({ ok: true, value: { ok: false, error: { code: "invalid" } } });
+    expect(connections()).toBe(baseline);
+    expect(index.withMessageReader(reader => {
+      expect(reader.readMessage(0).ok).toBe(true);
+      throw new Error("Consumer interrupted");
+    })).toEqual({ ok: false, error: { code: "storage", detail: "Consumer interrupted" } });
+    expect(connections()).toBe(baseline);
+    writer.exec("BEGIN IMMEDIATE; UPDATE session_contexts SET captured_at=2; ROLLBACK");
+    expect(index.readMessage(1)).toEqual({ ok: true, value: messages[1] });
+    expect(index.withMessageReader(() => { throw new Error("Must not execute"); }, "wrong"))
+      .toMatchObject({ ok: false, error: { code: "stale" } });
+  } finally { writer.close(); }
+});
+
+test("message windows reject concurrent WAL revisions and same-metadata record corruption", () => {
+  db.exec("PRAGMA journal_mode=WAL");
+  const messages = [{ role: "user", content: "first" }, { role: "user", content: "second" }];
+  put(document(messages));
+  const index = indexed();
+  const writer = new Database(db.filename);
+  try {
+    const window = index.withMessageReader(reader => {
+      expect(reader.readMessage(0)).toEqual({ ok: true, value: messages[0] });
+      writer.exec("UPDATE session_contexts SET captured_at=2");
+      expect(reader.readMessage(1)).toMatchObject({ ok: false, error: { code: "stale" } });
+      return "cannot publish this window";
+    });
+    expect(window).toMatchObject({ ok: false, error: { code: "stale" } });
+    const newer = indexed();
+    writer.query("UPDATE session_contexts SET context=?").run(document([{ ...messages[0], content: "other" }, messages[1]]));
+    expect(newer.withMessageReader(reader => reader.readMessage(0)))
+      .toMatchObject({ ok: true, value: { ok: false, error: { code: "stale" } } });
+    expect(indexed().readMessage(1)).toEqual({ ok: true, value: messages[1] });
+  } finally { writer.close(); }
 });
 
 test("exact raw chunk reads stream patched JSON without a complete document allocation", () => {
