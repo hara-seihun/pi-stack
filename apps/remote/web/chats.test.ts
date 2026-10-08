@@ -140,12 +140,13 @@ test("status vocabulary covers every lifecycle and flag", () => {
   expect(selectedAiId({ selectedChatId: "ai:same-id" })).toBe("same-id");
 });
 
-test("inbox rows lead with the agent's first name, keep the task beneath and show state as a labelled glyph", () => {
+test("inbox rows show only the mutable topic title while preserving agent identity and state glyphs", () => {
   const named = inboxRows([session("named", { agentName: "Tainetaimu Sizhukein", name: "Fix the inbox" })], [], { ...messaging, conversations: [] })[0]!;
   expect(named.chat).toMatchObject({ kind: "ai", name: "Tainetaimu", title: "Fix the inbox" });
   const markup = renderToStaticMarkup(createElement(InboxRowView, { row: named, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
-  expect(markup).toContain('class="inbox-title">Tainetaimu</span>');
-  expect(markup).toContain('class="inbox-subtitle">Fix the inbox</span>');
+  expect(markup).toContain('class="inbox-title">Fix the inbox</span>');
+  expect(markup).not.toContain("Tainetaimu");
+  expect(markup).not.toContain('class="inbox-subtitle"');
   expect(markup).not.toContain("Sizhukein");
   expect(markup).toMatch(/class="status-icon inbox-status"[^>]*role="img" aria-label="Idle"/);
 });
@@ -194,4 +195,20 @@ test("sync clears chats closed on another device but incoming reopen never takes
   const rooms = [{ id: "shared", title: "Shared", members: [], current: true }];
   expect(selectionAfterSync("room:shared", { ...before, rooms }, { ...before, rooms: [{ ...rooms[0]!, current: false }] })).toBeNull();
   expect(selectionAfterSync(null, { ...before, rooms: [] }, { ...before, rooms })).toBeNull();
+});
+
+
+test("chosen titles remain title-only in both ordinary and compact selected lists", () => {
+  for (const [name, agentName] of [["Thread titles", "Saihiramei Teheitain"], ["Nebulani reference", "Nozanoshinei Lomekein"]]) {
+    const original = session("named", { name, agentName });
+    const before = JSON.stringify(original);
+    const row = inboxRows([original], [], { ...messaging, conversations: [] })[0]!;
+    for (const compactSelected of [false, true]) {
+      const html = renderToStaticMarkup(createElement(InboxRowView, { row, selected: true, compactSelected, place: "", onOpen() {}, onClose() {} }));
+      expect(html).toContain(`class="inbox-title">${name}</span>`);
+      expect(html).not.toContain(agentName.split(" ")[0]!);
+      expect(html).not.toContain('class="inbox-subtitle"');
+    }
+    expect(JSON.stringify(original)).toBe(before);
+  }
 });
