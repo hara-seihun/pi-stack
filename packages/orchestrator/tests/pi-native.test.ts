@@ -185,12 +185,10 @@ it("gives a raw session no tools, no resources and an empty system prompt", asyn
     { role: "system", content: "", timestamp: expect.any(Number) },
     { role: "user", content: [{ type: "text", text: "hello" }], timestamp: expect.any(Number) },
   ] });
-  const update = output.find(event => event.type === "context_update") as { contextOwner: string; context: { systemPrompt: string; tools: unknown[]; messages: { role: string; content: unknown }[] } } | undefined;
-  expect(update).toBeDefined();
-  expect(update!.contextOwner).toBe("runner");
-  expect(update!.context.systemPrompt).toBe("");
-  expect(update!.context.tools).toEqual([]);
-  expect(update!.context.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: expect.any(Number) }]);
+  expect(output.some(event => event.type === "context_update")).toBe(false);
+  const current = (await request({ type: "get_context" })).data as any;
+  expect(current).toMatchObject({ source: "runtime", systemPrompt: "", tools: [] });
+  expect(current.messages).toEqual(native.messages);
   await expect(openPiSession({ ...options, threadId: "raw-isolated", sessionFile: join(cwd, "raw-isolated.jsonl"), args: ["--raw", "--orchestrator-context", JSON.stringify({ tools: [] })] }, () => {}, () => {}))
     .rejects.toThrow("Raw Pi sessions cannot carry an isolated application context");
 }, 3000);

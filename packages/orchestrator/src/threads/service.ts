@@ -94,7 +94,9 @@ export interface ImportMessage {
   state?: "queued" | "dispatched" | "done"; insertedAt?: number; outcome?: WorkOutcome;
   executionId?: string; finalMessage?: Record<string, unknown> | null; settings?: ThreadSettings;
 }
-class NativeRejection extends Error {}
+class NativeRejection extends Error {
+  constructor(message: string, readonly code: ThreadError["code"] = "unavailable") { super(message); }
+}
 class AcknowledgementTimeout extends Error {}
 class AdmissionWait extends Error {}
 function inputCommandReceipt(value: unknown): [string, string] | undefined {
@@ -167,7 +169,7 @@ export class ThreadService implements ThreadApi {
   private workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined;
   private routing = false;
   private transactionDepth = 0;
-  private readonly projections = new Map<string, { context?: Json; live: Json; activity: ExecutionActivity }>();
+  private readonly projections = new Map<string, { live: Json; activity: ExecutionActivity }>();
   private readonly nativeContexts = new MetadataCache<NativeContextMetadata>(32, 64 * 1024 * 1024);
   // Compiling SQL is the expensive half of a small query, and the supervisor
   // reads threads thousands of times a second while projecting its inbox. The
@@ -382,6 +384,13 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
     const projection = this.projections.get(id);
     const state = { thread, pending: this.pending(id), ...(projection ? { live: projection.live } : {}) };
+    if (options.inputReceipts) {
+      const ids = options.inputReceipts.workIds;
+      const rows = this.sql(`SELECT id,landed_at FROM thread_work WHERE thread_id=? AND id IN (${ids.map(() => "?").join(",")})`).all(id, ...ids) as Array<{ id: string; landed_at: number | null }>;
+      const receipts = new Map(rows.map(row => [row.id, { workId: row.id, landedAt: row.landed_at }]));
+      if (ids.some(id => !receipts.has(id))) return bad("not_found", "Requested input receipt does not belong to this thread");
+      return this.boundedInspection({ ...state, inputReceipts: ids.map(id => receipts.get(id)!) });
+    }
     if (options.context === "omit") return good(state);
     if (options.contextWindow) {
       const window = this.nativeContextWindow(thread, options.contextWindow);
@@ -394,8 +403,41 @@ export class ThreadService implements ThreadApi {
       return this.boundedInspection({ ...state, contextRecords: page.value });
     }
     if (options.context !== "full") return good(state);
-    if (!this.execution(id) && options.contextRevision === thread.revision) return good(state);
-    return this.fullInspection(thread, state, this.execution(id) && projection?.context ? projection.context : undefined);
+    const active = !!this.execution(id) || thread.state === "running";
+    if (!active && options.contextRevision === thread.revision) return good(state);
+    if (!active) return this.fullInspection(thread, state);
+    return this.serial(id, async () => {
+      if (this.suspended || this.closed) return bad("unavailable", "Thread controller is suspended");
+      try {
+        const runtime = this.runtimes.get(id) ?? (thread.metadata?.runnerReference ? await this.attach(id) : undefined);
+        if (!runtime?.session) return bad("unavailable", "Current context requires a reachable native runtime");
+        const current = await this.rpc(runtime, { type: "get_context" });
+        if (!current || typeof current !== "object" || !Array.isArray(current.messages)
+          || typeof current.systemPrompt !== "string" || !Array.isArray(current.tools)) return bad("unavailable", "Runtime returned an invalid current context");
+        return this.fullInspection(thread, state, current);
+      } catch (error) { return bad(error instanceof NativeRejection ? error.code : "unavailable", errorText(error)); }
+    });
+  }
+  private nativeMessageIdentity(thread: Thread, entry: Json, message: Json): Json {
+    if (message.role !== "user" && message.role !== "assistant") return message;
+    const metadata = entry.type === "message" ? entry.message : entry.details;
+    const identity = metadata?.identity;
+    const senderValue = (value: unknown): Json | undefined => {
+      if (!value || typeof value !== "object") return;
+      const sender = value as Json;
+      if (typeof sender.id !== "string" || !sender.id.trim()) return;
+      return { id: sender.id, ...(typeof sender.name === "string" && sender.name ? { name: sender.name } : {}) };
+    };
+    const recorded = senderValue(identity?.sender);
+    if (recorded && typeof identity.id === "string" && /^(pi\/[^/]+\/[^/]+|messaging\/[^/]+|slack\/[^/]+\/[^/]+\/[^/]+)$/.test(identity.id)
+      && Number.isFinite(identity.timestamp)) return { ...message, identity: { id: identity.id, timestamp: identity.timestamp, sender: recorded } };
+    const env = { ...process.env, ...this.options.environment?.(thread) };
+    const owner = env.PI_REMOTE_SENDER_ID ?? thread.ownerId;
+    const sender = recorded ?? senderValue(metadata?.sender) ?? (message.role === "assistant" ? { id: "assistant", name: "Kenan" }
+      : env.PI_REMOTE_ROOM_ID || !owner ? undefined : { id: owner, ...(env.PI_REMOTE_SENDER_NAME ? { name: env.PI_REMOTE_SENDER_NAME } : {}) });
+    const timestamp = timestampMs(message.timestamp) ?? timestampMs(entry.timestamp);
+    if (!sender || timestamp === null || timestamp === undefined) return message;
+    return { ...message, identity: { id: ["pi", thread.id, entry.id].map(encodeURIComponent).join("/"), timestamp, sender } };
   }
   private boundedInspection(inspection: ThreadInspection): Result<ThreadInspection> {
     const measured = measureJsonBytes(good(inspection), CONTEXT_WINDOW_MAX_BYTES);
@@ -514,9 +556,9 @@ export class ThreadService implements ThreadApi {
       generation, revision: generation, size: 0, leafId: null };
   }
   private nativeContextRecords(thread: Thread, request: NonNullable<InspectOptions["contextRecords"]>): Result<ThreadContextRecords> {
-    const indexed = indexedThreadHistory(thread.sessionFile);
+    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId);
     if (!indexed.ok) {
-      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true) return historyFailure(indexed.error);
+      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
       const source = this.unstartedContextSource(thread);
       if (request.revision !== undefined && request.revision !== source.revision) return bad("conflict", "Native context source revision changed; restart the context export");
       return good({ source, total: 0, records: [] });
@@ -530,7 +572,7 @@ export class ThreadService implements ThreadApi {
       this.nativeContexts.set(thread.id, metadata.key, metadata, metadata.bytes);
     }
     const projected = includeEntries ? metadata.entries! : metadata.messages;
-    const revision = digest({ native: history.source.revision, receipts: metadata.receiptHash, includeEntries });
+    const revision = digest({ native: history.source.revision, leafId: history.source.leafId, receipts: metadata.receiptHash, includeEntries });
     if (request.revision !== undefined && request.revision !== revision) return bad("conflict", "Native context source revision changed; restart the context export");
     const records: ThreadContextRecords["records"] = [];
     const end = request.before === undefined ? Math.min(projected.length, (request.after ?? -1) + 1 + request.limit) : Math.min(projected.length, request.before);
@@ -551,7 +593,7 @@ export class ThreadService implements ThreadApi {
       const message = entry.type === "message" ? entry.message
         : entry.type === "custom_message" ? { role: "custom", content: entry.content, customType: entry.customType, details: entry.details }
         : { role: "notice", content: entry, timestamp: timestampMs(entry.timestamp) };
-      const record = { index, entryId: entry.id, message };
+      const record = { index, entryId: entry.id, message: this.nativeMessageIdentity(thread, entry, message), ...(includeEntries ? { entry } : {}) };
       const measured = measureJsonBytes(record, CONTEXT_WINDOW_MAX_BYTES - bytes);
       if (!measured.ok) return measured;
       bytes += measured.value + 1;
@@ -579,7 +621,7 @@ export class ThreadService implements ThreadApi {
     const codes = new Int32Array(metadata.messages.length);
     const seqs = new Float64Array(metadata.messages.length);
     const counts = new Uint32Array(metadata.messages.length);
-    let total = 1, length = 0;
+    let total = 0, length = 0;
     for (const code of metadata.messages) {
       const count = code < 0 ? 1 : paired.has(code) ? 0 : history.messages[code]!.displayedItemCount;
       if (!count) continue;
@@ -588,14 +630,13 @@ export class ThreadService implements ThreadApi {
     const previous = this.sql("SELECT generation,key_count,key_hash FROM thread_context_generation WHERE thread_id=?").get(thread.id) as { generation: string; key_count: number; key_hash: string } | undefined;
     const keys = createHash("sha256");
     let keyCount = 0;
-    let prefixHash: string | undefined;
+    let prefixHash: string | undefined = previous?.key_count === 0 ? keys.copy().digest("hex") : undefined;
     const key = (parts: unknown[]) => {
       const encoded = JSON.stringify(parts);
       keys.update(String(Buffer.byteLength(encoded))).update(":").update(encoded);
       keyCount++;
       if (previous && keyCount === previous.key_count) prefixHash = keys.copy().digest("hex");
     };
-    key(["system"]);
     for (let index = 0; index < length; index++) {
       const code = codes[index]!, count = counts[index]!;
       if (code < 0) { key([metadata.receipts[-code - 1]!.entryId, "user"]); continue; }
@@ -624,12 +665,12 @@ export class ThreadService implements ThreadApi {
     return window;
   }
   private nativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>): Result<ThreadContextWindow> {
-    const indexed = indexedThreadHistory(thread.sessionFile);
+    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId);
     if (!indexed.ok) {
-      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true) return historyFailure(indexed.error);
+      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
       const source = this.unstartedContextSource(thread);
       if (request.generation !== undefined && request.generation !== source.generation) return bad("conflict", "Context source generation changed; reopen the transcript window");
-      return good({ source, total: 0, records: [], knownToolCallIds: [] });
+      return good({ source, total: 0, records: [], knownToolCallIds: [], completedToolCallIds: [] });
     }
     const history = indexed.value;
     const metadata = this.nativeContextMetadata(thread, history);
@@ -639,7 +680,6 @@ export class ThreadService implements ThreadApi {
     const before = Math.min(request.before ?? total, total);
     const start = Math.max(0, before - request.limit);
     const records: ThreadContextWindow["records"] = [];
-    if (start === 0 && before > 0) records.push({ seq: 0, count: 1, entryId: "system", message: { role: "system", content: "" }, results: [] });
     let bytes = Buffer.byteLength(JSON.stringify(records));
     const message = (entry: Json): Json => entry.type === "message" ? entry.message : { role: "custom", content: entry.content, customType: entry.customType, details: entry.details };
     let low = 0, high = window.length;
@@ -662,7 +702,7 @@ export class ThreadService implements ThreadApi {
         const descriptor = history.messages[code]!;
         const entry = history.read(descriptor);
         if (!entry.ok) return historyFailure(entry.error);
-        sourceMessage = message(entry.value);
+        sourceMessage = this.nativeMessageIdentity(thread, entry.value, message(entry.value));
         entryId = descriptor.id;
         const selectedCalls = new Set<string>();
         let ordinal = 0;
@@ -690,7 +730,8 @@ export class ThreadService implements ThreadApi {
       records.push(selected);
     }
     return good({ source: { ...window.source }, total, records,
-      knownToolCallIds: (request.toolCallIds ?? []).filter(id => calls.has(id)) });
+      knownToolCallIds: (request.toolCallIds ?? []).filter(id => calls.has(id)),
+      completedToolCallIds: (request.toolCallIds ?? []).filter(id => { const call = calls.get(id); return call !== undefined && results.get(call)?.some(index => history.messages[index]!.toolResultId === id); }) });
   }
   private message(row: Json): ThreadMessage { return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, ...(row.sender_name || row.sender_id && this.get(row.sender_id)?.agentName ? { senderName: row.sender_name ?? this.get(row.sender_id)!.agentName } : {}), text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
   pending(id: string): PendingMessage[] {
@@ -1961,7 +2002,7 @@ export class ThreadService implements ThreadApi {
       } catch (error) {
         if (!observing && error instanceof RunnerStartupError && !this.get(id)?.metadata?.runnerReference) await this.releaseCapacity(id, commandExecution);
         const uncertain = /uncertain|indeterminate|unconfirmed.outcome/i.test(errorText(error));
-        const failure = bad(uncertain ? "conflict" : "unavailable", `${command.id ?? command.type}: ${errorText(error)}`);
+        const failure = bad(error instanceof NativeRejection ? error.code : uncertain ? "conflict" : "unavailable", `${command.id ?? command.type}: ${errorText(error)}`);
         if (!this.suspended && !this.closed) {
           if (receipt && error instanceof NativeRejection) this.sql("UPDATE thread_request SET response=? WHERE id=?").run(JSON.stringify(failure), command.id!);
           this.sql("UPDATE thread SET metadata=json_set(metadata,'$.commandError',?) WHERE id=?").run(failure.ok ? "" : failure.error.message, id); this.changed(id);
@@ -2247,7 +2288,7 @@ export class ThreadService implements ThreadApi {
     }
   }
   private output(id: string, runtime: Runtime, event: PiEvent): void {
-    if (this.runtimes.get(id) !== runtime || this.closed || this.suspended) return;
+    if (this.runtimes.get(id) !== runtime || this.closed || this.suspended || event.type === "context_update") return;
     const parsed = parseRuntimeEvent(event);
     if (!parsed.ok) {
       this.sql("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(parsed.error, id);
@@ -2260,12 +2301,6 @@ export class ThreadService implements ThreadApi {
     const projection = this.projections.get(id) ?? { live: { text: "", thinking: "", isThinking: false, tools: [] }, activity: createExecutionActivity() };
     this.projections.set(id, projection);
     observeExecutionActivity(projection.activity, event);
-    if (event.type === "context_update" && event.context) {
-      projection.context = event.context as Json;
-      const text = (message: Json) => (message.content ?? []).filter((part: Json) => part.type === "text").map((part: Json) => part.text).join("");
-      const final = runtime.finalMessage, finalText = final && text(final);
-      if (finalText && projection.context.messages?.some((message: Json) => message.role === "assistant" && text(message) === finalText)) { projection.live.text = ""; projection.live.thinking = ""; }
-    }
     if (event.type === "message_start" && (event.message as Json)?.role === "assistant") { projection.live.text = ""; projection.live.thinking = ""; }
     if (event.type === "message_update") {
       const update = event.assistantMessageEvent as Json;
@@ -2294,7 +2329,7 @@ export class ThreadService implements ThreadApi {
     }
     if (event.type === "response") {
       const waiter = runtime.waiters.get(String(event.id)), inputReceipt = inputCommandReceipt(event.id);
-      if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); event.success === false ? waiter.reject(new NativeRejection(String(event.error ?? "Pi command rejected"))) : waiter.resolve(event.data ?? {}); }
+      if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); event.success === false ? waiter.reject(new NativeRejection(String(event.error ?? "Pi command rejected"), event.errorCode === "oversized" || event.errorCode === "invalid_request" ? event.errorCode : "unavailable")) : waiter.resolve(event.data ?? {}); }
       else if (inputReceipt) {
         const [executionId, workId] = inputReceipt;
         if (this.execution(id)?.id === executionId && !this.row(id)?.held && !this.halts.has(id)) {

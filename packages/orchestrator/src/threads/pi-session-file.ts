@@ -28,6 +28,12 @@ export function preparePiSession(manager: SessionManager): void {
   }
 }
 
+export function checkpointPiBranch(manager: SessionManager): void {
+  const leafId = manager.getLeafId();
+  if (manager.getEntries().at(-1)?.id !== leafId) manager.appendCustomEntry("thread_branch", { selectedLeafId: leafId });
+  checkpointPiSession(manager);
+}
+
 export function checkpointPiSession(manager: SessionManager): void {
   const path = manager.getSessionFile();
   if (!path) throw new Error("Thread sessions must be durable");

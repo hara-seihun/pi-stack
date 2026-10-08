@@ -199,9 +199,10 @@ export function validateThreadAwait(input: AwaitThreads): Result<void> {
 export const CONTEXT_WINDOW_MAX_BYTES = 8 * 1024 * 1024;
 export interface InspectOptions {
   contextRevision?: number;
+  inputReceipts?: { workIds: string[] };
   context?: "omit" | "full";
-  contextWindow?: { before?: number; limit: number; generation?: string; toolCallIds?: string[] };
-  contextRecords?: { after?: number; before?: number; limit: number; revision?: string; includeEntries?: boolean };
+  contextWindow?: { before?: number; limit: number; generation?: string; toolCallIds?: string[]; leafId?: string };
+  contextRecords?: { after?: number; before?: number; limit: number; revision?: string; includeEntries?: boolean; leafId?: string };
 }
 export type ThreadContextSource = {
   context: "native-history";
@@ -215,43 +216,53 @@ export interface ThreadContextWindow {
   total: number;
   records: Array<{ seq: number; count: number; entryId: string; message: Record<string, any>; results: Record<string, any>[] }>;
   knownToolCallIds: string[];
+  completedToolCallIds: string[];
 }
 export interface ThreadContextRecords {
   source: ThreadContextWindow["source"];
   total: number;
-  records: Array<{ index: number; entryId: string; message: Record<string, any> }>;
+  records: Array<{ index: number; entryId: string; message: Record<string, any>; entry?: Record<string, any> }>;
 }
 export function validateInspectOptions(input: unknown): Result<InspectOptions> {
   const invalid = (message: string): Result<never> => ({ ok: false, error: { code: "invalid_request", message } });
   if (input === undefined) return { ok: true, value: {} };
   if (!input || typeof input !== "object" || Array.isArray(input)) return invalid("Inspection options must be an object");
   const options = input as InspectOptions;
-  if (Object.keys(options).some(key => !["context", "contextRevision", "contextWindow", "contextRecords"].includes(key))) return invalid("Unknown inspection option");
-  if ([options.context, options.contextWindow, options.contextRecords].filter(value => value !== undefined).length > 1) return invalid("Context, contextWindow and contextRecords are mutually exclusive");
+  if (Object.keys(options).some(key => !["context", "contextRevision", "contextWindow", "contextRecords", "inputReceipts"].includes(key))) return invalid("Unknown inspection option");
+  if ([options.context, options.contextWindow, options.contextRecords, options.inputReceipts].filter(value => value !== undefined).length > 1) return invalid("Context, contextWindow, contextRecords and inputReceipts are mutually exclusive");
+  if (options.inputReceipts !== undefined) {
+    const receipts = options.inputReceipts;
+    if (!receipts || typeof receipts !== "object" || Array.isArray(receipts) || Object.keys(receipts).some(key => key !== "workIds")
+      || !Array.isArray(receipts.workIds) || receipts.workIds.length < 1 || receipts.workIds.length > 64
+      || receipts.workIds.some(id => typeof id !== "string" || !id.trim() || id.length > 4096)
+      || new Set(receipts.workIds).size !== receipts.workIds.length) return invalid("Input receipts require 1..64 unique work IDs (1..4096 characters)");
+  }
   if (options.context !== undefined && options.context !== "omit" && options.context !== "full") return invalid("Inspection context must be omit or full when specified");
   if (options.contextRevision !== undefined && options.context !== "full") return invalid("Context revision requires explicit context full");
   if (options.contextRevision !== undefined && (!Number.isSafeInteger(options.contextRevision) || options.contextRevision < 0)) return invalid("Context revision must be a nonnegative safe integer");
   if (options.contextWindow !== undefined) {
     const window = options.contextWindow;
     if (!window || typeof window !== "object" || Array.isArray(window)
-      || Object.keys(window).some(key => !["before", "limit", "generation", "toolCallIds"].includes(key))
+      || Object.keys(window).some(key => !["before", "limit", "generation", "toolCallIds", "leafId"].includes(key))
       || !Number.isInteger(window.limit) || window.limit < 1 || window.limit > 1000
       || window.before !== undefined && (!Number.isSafeInteger(window.before) || window.before < 0)
       || window.generation !== undefined && (typeof window.generation !== "string" || !window.generation.trim())
+      || window.leafId !== undefined && (typeof window.leafId !== "string" || !window.leafId.trim())
       || window.toolCallIds !== undefined && (!Array.isArray(window.toolCallIds) || window.toolCallIds.length > 64
         || window.toolCallIds.some(id => typeof id !== "string" || !id.trim() || id.length > 4096)
-        || new Set(window.toolCallIds).size !== window.toolCallIds.length)) return invalid("Context window requires limit 1..1000, optional nonnegative safe before, optional nonempty generation, and optional 0..64 unique tool call IDs (1..4096 characters)");
+        || new Set(window.toolCallIds).size !== window.toolCallIds.length)) return invalid("Context window requires limit 1..1000, optional nonnegative safe before, nonempty generation/leafId, and optional 0..64 unique tool call IDs (1..4096 characters)");
   }
   if (options.contextRecords !== undefined) {
     const records = options.contextRecords;
     if (!records || typeof records !== "object" || Array.isArray(records)
-      || Object.keys(records).some(key => !["after", "before", "limit", "revision", "includeEntries"].includes(key))
+      || Object.keys(records).some(key => !["after", "before", "limit", "revision", "includeEntries", "leafId"].includes(key))
       || !Number.isInteger(records.limit) || records.limit < 1 || records.limit > 32
       || records.after !== undefined && (!Number.isSafeInteger(records.after) || records.after < -1)
       || records.before !== undefined && (!Number.isSafeInteger(records.before) || records.before < 0)
       || records.after !== undefined && records.before !== undefined
       || records.includeEntries !== undefined && typeof records.includeEntries !== "boolean"
-      || records.revision !== undefined && (typeof records.revision !== "string" || !records.revision.trim())) return invalid("Context records require limit 1..32, optional exclusive safe after >= -1 or before >= 0, and an optional nonempty revision");
+      || records.leafId !== undefined && (typeof records.leafId !== "string" || !records.leafId.trim())
+      || records.revision !== undefined && (typeof records.revision !== "string" || !records.revision.trim())) return invalid("Context records require limit 1..32, optional exclusive safe after >= -1 or before >= 0, optional nonempty revision/leafId, and optional boolean includeEntries");
   }
   return { ok: true, value: options };
 }
@@ -261,6 +272,7 @@ export interface ThreadInspection {
   context?: Record<string, unknown>;
   contextWindow?: ThreadContextWindow;
   contextRecords?: ThreadContextRecords;
+  inputReceipts?: Array<{ workId: string; landedAt: number | null }>;
   live?: Record<string, unknown>;
 }
 export type ThreadControl =
