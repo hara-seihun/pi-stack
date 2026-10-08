@@ -33,7 +33,7 @@ public class PhoneAccessibilityServiceTest {
         shadowOf(service).setWindows(List.of(window(1, AccessibilityWindowInfo.TYPE_APPLICATION),
             window(2, AccessibilityWindowInfo.TYPE_INPUT_METHOD), window(3, AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY)));
         KenanOverlay overlay = new KenanOverlay(service, new KenanOverlayTest.Windows().manager());
-        KenanOverlayTest.bindSharedOverlay(service, service, null, overlay);
+        KenanOverlayTest.bindSharedOverlay(service, overlay);
         SharedOverlay.requestRefresh(false);
         shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(80));
         Map<String, AccessibilityNodeInfo> nodes = ReflectionHelpers.getField(service, "nodes");
@@ -49,6 +49,24 @@ public class PhoneAccessibilityServiceTest {
         service.onAccessibilityEvent(event(1, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, "example.editor"));
         assertTrue(nodes.isEmpty());
         service.onDestroy();
+    }
+    @Test public void disabledCommandsDoNotConstructChatAndExplicitShowHideWork() throws Exception {
+        PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();
+        KenanOverlayTest.Windows windows = new KenanOverlayTest.Windows();
+        shadowOf(service.getApplication()).setSystemService(android.content.Context.WINDOW_SERVICE, windows.manager());
+        PhoneControlService.settings(service).edit().putBoolean("overlayVisible", false).apply();
+        SharedOverlay.phone(service);
+        java.util.concurrent.atomic.AtomicReference<PhoneResult> result = new java.util.concurrent.atomic.AtomicReference<>();
+        service.dispatch("overlay.say", new org.json.JSONObject().put("text", "late"), Long.MAX_VALUE, () -> true, result::set);
+        assertEquals("disabled", result.get().code);
+        service.dispatch("ui.tree", new org.json.JSONObject(), Long.MAX_VALUE, () -> true, result::set);
+        assertEquals("unavailable", result.get().code);
+        assertNull(SharedOverlay.current()); assertEquals(0, windows.adds);
+        service.dispatch("overlay.show", new org.json.JSONObject(), Long.MAX_VALUE, () -> true, result::set);
+        assertTrue(result.get().ok); assertNotNull(SharedOverlay.current()); assertEquals(2, windows.adds);
+        service.dispatch("overlay.hide", new org.json.JSONObject(), Long.MAX_VALUE, () -> true, result::set);
+        assertTrue(result.get().ok); assertNull(SharedOverlay.current()); assertTrue(windows.attached.isEmpty());
+        assertFalse(PhoneControlService.capabilities(service).getBoolean("overlayEnabled"));
     }
     @After public void cleanup() throws Exception { KenanOverlayTest.clearSharedOverlay(); }
 }

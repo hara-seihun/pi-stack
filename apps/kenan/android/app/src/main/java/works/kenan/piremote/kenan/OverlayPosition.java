@@ -1,7 +1,7 @@
 package works.kenan.piremote.kenan;
 
 /** Pixel geometry shared by touch handling, edge snapping and saved positions. */
-final class WriteBubblePosition {
+final class OverlayPosition {
     record Bounds(int left, int top, int right, int bottom) {
         int width() { return right - left; }
         int height() { return bottom - top; }

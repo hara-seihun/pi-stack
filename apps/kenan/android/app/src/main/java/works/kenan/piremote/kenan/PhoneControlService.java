@@ -133,6 +133,7 @@ public final class PhoneControlService extends Service {
                 .put("notifications", NativeAccess.notifications(context))
                 .put("battery", ((PowerManager) context.getSystemService(POWER_SERVICE)).isIgnoringBatteryOptimizations(context.getPackageName()))
                 .put("overlay", android.provider.Settings.canDrawOverlays(context))
+                .put("overlayEnabled", KenanOverlay.isVisible(context))
                 .put("installPackages", Build.VERSION.SDK_INT < 26 || context.getPackageManager().canRequestPackageInstalls())
                 .put("camera", ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("microphone", ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
