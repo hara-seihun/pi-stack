@@ -27,6 +27,11 @@
 
         </activity>
 
+        <activity android:name=".EditorActivity" android:exported="false" android:noHistory="true"
+            android:excludeFromRecents="true" android:theme="@style/AppTheme.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|density"
+            android:windowSoftInputMode="adjustResize" />
+
         <service android:name=".IdleNotificationService" android:exported="false" android:foregroundServiceType="remoteMessaging" />
         <service android:name=".WriteAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
