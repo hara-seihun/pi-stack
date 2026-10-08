@@ -104,7 +104,8 @@ export function useRoute(): Route {
     if (!location.hash) history.replaceState(null, "", formatRoute(route));
     const update = () => {
       const next = currentRoute();
-      startTransition(() => setRoute(next));
+      if (next.tab === "chats") setRoute(next);
+      else startTransition(() => setRoute(next));
     };
     window.addEventListener("hashchange", update);
     window.addEventListener("popstate", update);
