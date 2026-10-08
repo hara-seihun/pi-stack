@@ -1,3 +1,5 @@
+import { archivedAcrossOwners } from "./archived.js";
+import type { ArchivedThreadsQuery, ArchivedThreadsResult } from "./contracts.js";
 import { validateInspectOptions, validateThreadAwait } from "./contracts.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
@@ -143,9 +145,12 @@ export class ThreadDirectory implements ThreadApi {
   async settlements(after = 0, limit = 100): Promise<Result<ThreadSettlements>> {
     return this.owners[0]!.api.settlements(after, limit);
   }
+  archived(input: ArchivedThreadsQuery): Promise<Result<ArchivedThreadsResult>> {
+    return archivedAcrossOwners(this.owners.map(owner => owner.api), input);
+  }
   async list(input: ThreadList = {}): Promise<Result<ThreadPage>> {
     const limit = input.limit ?? 100;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return error("invalid_request", "List limit must be 1..100");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) return error("invalid_request", "List limit must be 1..1000");
     const query = JSON.stringify({ id: input.id, parentId: input.parentId, state: input.state, archived: input.archived, owners: this.owners.map(owner => owner.id) });
     let position: { owner: number; cursor?: string; query: string } = { owner: 0, query };
     if (input.cursor) {

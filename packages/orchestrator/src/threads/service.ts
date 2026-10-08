@@ -1,3 +1,5 @@
+import { validateArchivedQuery } from "./archived.js";
+import type { ArchivedThreadsQuery, ArchivedThreadsResult } from "./contracts.js";
 import { isRunnerCapacityFailure } from "./runner-capacity.js";
 import { RunnerStartupError, isPooledStartupWait } from "./runner-startup.js";
 import { parseRuntimeEvent, requireAssistantStopReason, assertNever } from "./runtime-events.js";
@@ -188,6 +190,8 @@ export class ThreadService implements ThreadApi {
         revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT NOT NULL DEFAULT '{}');
       CREATE INDEX IF NOT EXISTS thread_parent ON thread(parent_id,updated_at);
       CREATE INDEX IF NOT EXISTS thread_created ON thread(created_at,id);
+      CREATE INDEX IF NOT EXISTS thread_live_created ON thread(created_at,id) WHERE json_extract(metadata,'$.archived') IS NOT 1;
+      CREATE INDEX IF NOT EXISTS thread_archived ON thread(id) WHERE json_extract(metadata,'$.archived')=1;
       CREATE INDEX IF NOT EXISTS thread_running ON thread(id,json_extract(metadata,'$.laneId'),json_extract(metadata,'$.execution')) WHERE state='running';
       CREATE INDEX IF NOT EXISTS thread_native_custody ON thread(id) WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL;
       CREATE TABLE IF NOT EXISTS thread_work (
@@ -261,10 +265,10 @@ export class ThreadService implements ThreadApi {
       catch (error) { this.db.exec(depth ? `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}` : "ROLLBACK"); throw error; }
     } finally { this.transactionDepth--; }
   }
-  private static readonly THREAD_COLUMNS = "t.*,(SELECT MAX(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.sender_id IS NULL AND w.source='explicit') last_user_message_at,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT w.landed_at FROM thread_wake s JOIN thread_work w ON w.id=json_extract(s.data,'$.lastMessageId') WHERE s.thread_id=t.id) wake_landed_at,(SELECT count(*) FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
+  private static readonly THREAD_COLUMNS = "t.*,(SELECT MAX(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.sender_id IS NULL AND w.source='explicit') last_user_message_at,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT w.landed_at FROM thread_wake s JOIN thread_work w ON w.id=json_extract(s.data,'$.lastMessageId') WHERE s.thread_id=t.id) wake_landed_at,(SELECT count(*) FROM thread_work w INDEXED BY thread_work_unfinished WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
   private row(id: string): Json | undefined { return this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t WHERE id=?`).get(id) as Json | undefined; }
   private project(row: Json): Thread {
-    const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
+    const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work INDEXED BY thread_work_unfinished WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
     const projection = this.projections.get(row.id);
     const metadata = JSON.parse(row.metadata);
     if (metadata.foreground === undefined) metadata.foreground = !(this.options.workersOnly || row.parent_id || metadata.watchList || metadata.laneId);
@@ -1457,6 +1461,24 @@ export class ThreadService implements ThreadApi {
       if (input.delivery === "hardSteer" && (runtime || this.opening.has(thread.id) || this.execution(thread.id) || thread.metadata?.runnerReference)) void this.halt(thread.id).then(() => this.wake(thread.id));
       this.wake(thread.id); return good(message);
     } catch (error) { return bad("unavailable", errorText(error)); }
+  }
+  async archived(input: ArchivedThreadsQuery): Promise<Result<ArchivedThreadsResult>> {
+    const valid = validateArchivedQuery(input);
+    if (!valid.ok) return valid;
+    if (input.kind === "count") return good({ kind: "count", total: this.archivedCount() });
+    const rows = this.sql(`SELECT id,parent_id,title,updated_at,revision,json_extract(metadata,'$.archivedAt') archived_at
+      FROM thread WHERE json_extract(metadata,'$.archived')=1`).all() as Array<{
+      id: string; parent_id: string | null; title: string; updated_at: number; revision: number; archived_at: string | null;
+    }>;
+    const query = input.query?.trim().toLowerCase();
+    const matches = rows.filter(row => (!input.conversationsOnly || !row.parent_id) && (!query || row.title.toLowerCase().includes(query)));
+    matches.sort((left, right) => (input.order === "activity" ? right.updated_at - left.updated_at
+      : (right.archived_at ?? new Date(right.updated_at).toISOString()).localeCompare(left.archived_at ?? new Date(left.updated_at).toISOString()))
+      || left.id.localeCompare(right.id));
+    const revision = createHash("sha256").update(JSON.stringify(matches)).digest("hex");
+    if (input.revision !== undefined && input.revision !== revision) return bad("conflict", "Archived threads changed; retry the query");
+    const threads = matches.slice(input.offset, input.offset + input.limit).map(row => this.get(row.id)!);
+    return good({ kind: "page", total: matches.length, revision, threads });
   }
   async list(input: ThreadList = {}): Promise<Result<ThreadPage>> {
     const limit = input.limit ?? 100;

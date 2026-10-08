@@ -142,6 +142,10 @@ export interface ThreadList {
   cursor?: string;
 }
 export interface ThreadPage { threads: Thread[]; nextCursor?: string }
+export type ArchivedThreadsQuery = { kind: "count" } | {
+  kind: "page"; offset: number; limit: number; query?: string; conversationsOnly: boolean; order: "activity" | "archived"; revision?: string;
+};
+export type ArchivedThreadsResult = { kind: "count"; total: number } | { kind: "page"; total: number; revision: string; threads: Thread[] };
 export interface ThreadRead { threadId: string; cursor?: string; limit?: number; entryId?: string; offset?: number }
 export interface ThreadHistory { entries: Record<string, unknown>[]; nextCursor?: string }
 export interface ThreadSettlement {
@@ -360,6 +364,7 @@ export interface ThreadApi {
   spawn(input: SpawnThread): Promise<Result<Thread>>;
   send(input: SendThread): Promise<Result<ThreadMessage>>;
   list(input?: ThreadList): Promise<Result<ThreadPage>>;
+  archived(input: ArchivedThreadsQuery): Promise<Result<ArchivedThreadsResult>>;
   read(input: ThreadRead): Promise<Result<ThreadHistory>>;
   control(input: ThreadControl): Promise<Result<Thread>>;
   /** `contextRevision`: the thread revision whose context the caller already holds; an idle thread at that revision omits `context`. */

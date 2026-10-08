@@ -1,3 +1,14 @@
+import type { ArchivedThreadsQuery } from "pi-orchestrator/api";
+
+export function archivedSessionQuery(params: URLSearchParams): Extract<ArchivedThreadsQuery, { kind: "page" }> {
+  const offset = Math.max(0, Math.floor(Number(params.get("offset") ?? 0) || 0));
+  const requested = Math.floor(Number(params.get("limit") ?? PAGE_SIZE) || PAGE_SIZE);
+  const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, requested));
+  const conversationsOnly = params.get("conversationsOnly") === "true";
+  const query = params.get("query")?.trim().toLowerCase();
+  return { kind: "page", offset, limit, conversationsOnly, order: params.has("query") || conversationsOnly ? "activity" : "archived", ...(query ? { query } : {}) };
+}
+
 interface ArchivedSessionRow {
   id: string;
   name: string;
@@ -14,11 +25,7 @@ export function archivedSessions<T extends ArchivedSessionRow>(
   params: URLSearchParams,
   isPersonThread: (id: string) => boolean,
 ) {
-  const offset = Math.max(0, Math.floor(Number(params.get("offset") ?? 0) || 0));
-  const requested = Math.floor(Number(params.get("limit") ?? PAGE_SIZE) || PAGE_SIZE);
-  const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, requested));
-  const query = params.get("query")?.trim().toLowerCase();
-  const conversationsOnly = params.get("conversationsOnly") === "true";
+  const { offset, limit, query, conversationsOnly } = archivedSessionQuery(params);
   const matches = rows.filter(row => row.archived_at
     && (!conversationsOnly || (!row.parentId && isPersonThread(row.id)))
     && (!query || row.name.toLowerCase().includes(query)));
