@@ -128,7 +128,7 @@ test("sends and spawns read as this agent's own messages, routed to their recipi
   const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} onEdit={() => {}} onReply={() => {}} />);
   expect(html.match(/class="message assistant agent-outgoing"/g)).toHaveLength(3);
   expect(entries.filter(entry => entry.kind === "toolCall").map(entry => outgoingAgentMessage(entry)?.text)).toEqual([words.slice(0, 120) + "…", words.slice(0, 120) + "…", "Closed?"]);
-  expect(html.match(/Load full message/g)).toHaveLength(2);
+  expect(html.match(/<footer class="message-expansion"><button type="button" class="message-expand-action">Load more<\/button><button[^>]*aria-label="Copy full message"/g)).toHaveLength(2);
   expect(html).toMatch(/<span class="agent-route outgoing"><span class="agent-route-name self">Kenan<\/span><svg[^>]*><path[^>]*><\/path><\/svg><span class="agent-route-name">Thread 7c925d87<\/span>/);
   expect(html).toContain('class="agent-route-name new" title="Review">New agent</span>');
   expect(html).toContain('class="message-status failed">failed · Thread is closed</footer>');
@@ -156,7 +156,7 @@ test("truncated outgoing words stay a preview until opened and copy resolves the
     };
     const bodies = new ItemBodies(recipient, async () => { loads++; return full; }, cache);
     const html = renderToStaticMarkup(<ItemBodiesContext.Provider value={bodies}><Transcript entries={[outgoing]} sessionId={recipient} home="/" images={null} onEdit={() => {}} onReply={() => {}} /></ItemBodiesContext.Provider>);
-    expect(html).toContain("Load full message");
+    expect(html).toContain('class="message-expand-action">Load more</button>');
     expect(html).toContain('aria-label="Copy full message"');
     expect(html).not.toContain(words);
     expect(loads).toBe(0);

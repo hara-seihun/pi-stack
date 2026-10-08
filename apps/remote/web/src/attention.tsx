@@ -62,11 +62,11 @@ function useNotifications(version: number, attempt: number) {
   }
   return { resource, earlier };
 }
-function ResourceStatus({ label, resource }: { label: string; resource: Resource<unknown> }) {
+function ResourceStatus({ label, resource, retry }: { label: string; resource: Resource<unknown>; retry(): void }) {
   switch (resource.state) {
     case "ready": return null;
-    case "loading": return <p className="attention-muted" role="status">{resource.value === null ? `Loading ${label}…` : `Refreshing ${label}…`}</p>;
-    case "failed": return <p className="attention-error" role="alert">Could not load {label}: {resource.error}.{resource.value !== null && " Last loaded items are still shown."}</p>;
+    case "loading": return resource.value === null ? <p className="attention-muted" role="status">Loading {label}…</p> : null;
+    case "failed": return <p className="attention-error" role="alert">Could not load {label}: {resource.error}.{resource.value !== null && " Last loaded items are still shown."} <button type="button" onClick={retry}>Retry</button></p>;
   }
   return assertNever(resource, "Attention resource");
 }
@@ -109,8 +109,7 @@ export function AttentionScreen({ version }: { version: number }) {
     </>;
   }
   return <section className="attention-screen" aria-label="Attention">
-    <header className="attention-header"><div><h1>Attention</h1><p>What needs you, what changed, and what's coming up.</p></div><button type="button" disabled={needs.state === "loading" || notifications.resource.state === "loading"} onClick={() => refresh(value => value + 1)}>Refresh</button></header>
-    <ResourceStatus label="decisions and questions" resource={needs} /><ResourceStatus label="updates" resource={notifications.resource} />
+    <ResourceStatus label="decisions and questions" resource={needs} retry={() => refresh(value => value + 1)} /><ResourceStatus label="updates" resource={notifications.resource} retry={() => refresh(value => value + 1)} />
     {Object.entries(dismissals).map(([id, status]) => status.state === "failed" && <p key={id} className="attention-error" role="alert">Could not dismiss “{status.title}”: {status.message}</p>)}
     {view?.life.state === "failed" && <p className="attention-error" role="alert">Life model unavailable: {view.life.error}. Questions still come from their original owners.</p>}
     {view?.questions.state === "partial" && <details className="attention-error"><summary>Some question sources are unavailable</summary><ul>{view.questions.errors.map((error, index) => <li key={index}>{error}</li>)}</ul></details>}
