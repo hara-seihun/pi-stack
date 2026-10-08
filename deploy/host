@@ -73,12 +73,59 @@ recognition_was_active=0
 recognition_was_enabled=0
 recognition_started=0
 recognition_pid=""
+old_write_loaded=not-found
+old_write_active=inactive
+old_write_enabled=disabled
+recognition_transition=${PI_STACK_RECOGNITION_TRANSITION_FILE:-$(dirname "$recognition_base")/.pi-meet-recognition/host-transition.json}
+recognition_journal_owner=0
 if (( recognition )); then
   systemctl is-active --quiet pi-stack-meet-recognition.service && recognition_was_active=1
   systemctl is-enabled --quiet pi-stack-meet-recognition.service && recognition_was_enabled=1
+  old_write_loaded=$(systemctl show pi-stack-write.service -p LoadState --value)
+  case $old_write_loaded in
+    not-found) ;;
+    loaded)
+      old_write_active=$(systemctl show pi-stack-write.service -p ActiveState --value)
+      old_write_enabled=$(systemctl show pi-stack-write.service -p UnitFileState --value)
+      case $old_write_active in active|inactive) ;; *) echo 'Previous speech unit has an unsettled lifecycle' >&2; exit 75;; esac
+      case $old_write_enabled in enabled|disabled|static) ;; *) echo 'Previous speech unit has unknown enablement' >&2; exit 66;; esac
+      ;;
+    *) echo 'Previous speech unit declaration state is unknown' >&2; exit 66;;
+  esac
+fi
+recognition_journal() {
+  pi_stack_as_root python3 - "$recognition_transition" "$1" "$(git -C "$root" rev-parse HEAD)" "$previous_recognition" "$recognition_was_active" "$recognition_was_enabled" "$old_write_loaded" "$old_write_active" "$old_write_enabled" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+path, phase, commit, previous, active, enabled, old_loaded, old_active, old_enabled = sys.argv[1:]
+path = Path(path)
+path.parent.mkdir(parents=True, exist_ok=True)
+if phase == 'pending' and path.is_file():
+    record = json.loads(path.read_text())
+    if record['version'] != 1 or record['phase'] not in ('accepted', 'rolled_back'):
+        raise SystemExit('Unresolved speech host transition; reconcile its saved assets/lifecycle before another release')
+record = {'version': 1, 'phase': phase, 'commit': commit, 'previousRecognition': previous,
+          'recognitionWasActive': active == '1', 'recognitionWasEnabled': enabled == '1',
+          'oldWrite': {'loaded': old_loaded, 'active': old_active, 'enabled': old_enabled,
+                       'selection': str(Path('/srv/pi/write-engine').resolve())}}
+fd, temporary = tempfile.mkstemp(prefix='.speech-transition-', dir=path.parent)
+with os.fdopen(fd, 'w') as stream:
+    os.fchmod(stream.fileno(), 0o600)
+    json.dump(record, stream)
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(temporary, path)
+fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+os.fsync(fd)
+os.close(fd)
+PY
+}
+if (( recognition )) && [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
+  recognition_journal pending
+  recognition_journal_owner=1
 fi
 restore_recognition() {
-  local status=$? candidate="$recognition_base.rollback.$$"
+  local status=$? candidate="$recognition_base.rollback.$$" restore_failed=0
   trap - EXIT TERM INT HUP
   if (( status != 0 && recognition_started )); then
     if [[ -n $recognition_pid ]]; then
@@ -88,18 +135,36 @@ restore_recognition() {
     echo 'release failed; restoring previous Meet recognition selection and service state' >&2
     if [[ -n $previous_recognition && -d $previous_recognition ]]; then
       pi_stack_as_root ln -s "$previous_recognition" "$candidate" &&
-        pi_stack_as_root mv -Tf "$candidate" "$recognition_base" || echo 'Meet recognition selection rollback failed' >&2
+        pi_stack_as_root mv -Tf "$candidate" "$recognition_base" || { echo 'Meet recognition selection rollback failed' >&2; restore_failed=1; }
     else
-      pi_stack_as_root rm -f "$recognition_base"
+      pi_stack_as_root rm -f "$recognition_base" || restore_failed=1
     fi
     if (( recognition_was_active )); then
       pi_stack_as_root systemctl reset-failed pi-stack-meet-recognition.service || true
-      pi_stack_as_root systemctl restart --no-block pi-stack-meet-recognition.service || echo 'Meet recognition rollback restart failed' >&2
+      pi_stack_as_root systemctl restart pi-stack-meet-recognition.service || { echo 'Meet recognition rollback restart failed' >&2; restore_failed=1; }
     else
-      pi_stack_as_root systemctl stop --no-block pi-stack-meet-recognition.service || echo 'Meet recognition rollback stop failed' >&2
+      # The old same-port listener cannot resume until candidate shutdown completes.
+      pi_stack_as_root systemctl stop pi-stack-meet-recognition.service || { echo 'Meet recognition rollback stop failed' >&2; restore_failed=1; }
     fi
-    (( recognition_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-meet-recognition.service || true
+    (( recognition_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-meet-recognition.service || restore_failed=1
+    if [[ $old_write_loaded == loaded ]]; then
+      case $old_write_enabled in
+        enabled) pi_stack_as_root systemctl enable pi-stack-write.service || restore_failed=1 ;;
+        disabled) pi_stack_as_root systemctl disable pi-stack-write.service || restore_failed=1 ;;
+        static) ;;
+      esac
+      if [[ $old_write_active == active ]]; then
+        if (( restore_failed == 0 )); then
+          pi_stack_as_root systemctl start pi-stack-write.service || { echo 'Previous speech service rollback failed' >&2; restore_failed=1; }
+        fi
+      fi
+    fi
     pi_stack_as_root rm -f "$candidate"
+  fi
+  if (( recognition_journal_owner )); then
+    if (( status == 0 )); then recognition_journal accepted || status=1
+    elif (( restore_failed )); then recognition_journal rollback_failed || status=1
+    else recognition_journal rolled_back || status=1; fi
   fi
   # Join bounded proof jobs before releasing deployment custody.
   if [[ -n ${doctor_pid:-} ]]; then
