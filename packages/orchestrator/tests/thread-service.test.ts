@@ -78,8 +78,7 @@ class FakePiSession implements PiSession {
 
   settleMessage(message: Record<string, unknown>): void {
     this.lastAssistantMessage = message;
-    const workId = [...this.acceptedWorkIds].at(-1);
-    if (workId) this.completedWorkIds.add(workId);
+    for (const workId of this.acceptedWorkIds) this.completedWorkIds.add(workId);
     this.isStreaming = false;
     this.pendingMessageCount = 0;
     this.output({ type: "message_end", message });
@@ -1651,6 +1650,87 @@ async function settle(session: FakePiSession, service: ThreadService, threadId: 
 }
 
 describe("ThreadService", () => {
+  it.each([null, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "" }] }])("retains an ephemeral owner after an incomplete native result: %j", async finalMessage => {
+    const f = fixture();
+    const { directory } = f;
+    let { service, sessions } = f;
+    const root = value(await service.spawn({ requestId: "root", cwd: directory }));
+    const child = value(await service.spawn({ requestId: "empty-child", parentId: root.id, cwd: directory, message: "Finish the work", ephemeral: true }));
+    value(await service.control({ threadId: root.id, action: "stop", descendants: false }));
+    value(await service.start());
+    await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.isStreaming));
+    const native = sessions.find(session => session.options.threadId === child.id)!;
+    native.completedWorkIds.add("empty-child");
+    native.isStreaming = false;
+    native.emit({ type: "agent_settled", workIds: ["empty-child"], outcome: "complete", lastAssistantMessage: finalMessage });
+    await waitFor(() => !!service.latestSettlement(child.id));
+    expect(service.latestSettlement(child.id)).toMatchObject({ outcome: "failed", error: "Native turn ended without a final result or a durable dependency wait" });
+    await turn();
+    expect(service.get(child.id)?.metadata).toMatchObject({ incompleteResult: { error: expect.any(String) } });
+    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    service.reconcile();
+    await turn();
+    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    await service.close();
+    ({ service, sessions } = fixture(directory));
+    value(await service.start());
+    await turn();
+    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    value(await service.send({ requestId: "repair-result", threadId: child.id, text: "Return the finished result" }));
+    await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.commands.some(command => command.workId === "repair-result")));
+    [...sessions].reverse().find(session => session.options.threadId === child.id)!.settle("Finished result");
+    await waitFor(() => service.get(child.id)?.metadata?.archived === true);
+    expect(service.get(child.id)?.metadata?.incompleteResult).toBeUndefined();
+    expect(service.latestSettlement(child.id)?.outcome).toBe("complete");
+  });
+
+  it("ignores a previous native settlement while the current work has no completion receipt", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "current-work", cwd: directory, message: "Current assignment" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
+    value(await service.start());
+    await waitFor(() => sessions.some(session => session.isStreaming));
+    const native = sessions[0]!;
+    native.isStreaming = false;
+    native.completedWorkIds.add("previous-work");
+    native.emit({ type: "agent_settled", workIds: ["previous-work"], outcome: "complete", lastAssistantMessage: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Old result" }] } });
+    await turn(); await turn();
+    expect(service.latestSettlement(thread.id)).toBeNull();
+    expect(service.get(thread.id)?.state).toBe("running");
+    native.emit({ type: "agent_settled" });
+    await turn(); await turn();
+    expect(service.latestSettlement(thread.id)).toBeNull();
+    native.settle("Current result");
+    await waitFor(() => !!service.latestSettlement(thread.id));
+    expect(service.latestSettlement(thread.id)?.finalMessage).toMatchObject({ content: [{ text: "Current result" }] });
+  });
+
+  it("rechecks native activity before committing a completion after asynchronous reconciliation", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "activity-race", cwd: directory, message: "Work" }));
+    value(await service.control({ threadId: thread.id, action: "placement", foreground: true }));
+    value(await service.start());
+    await waitFor(() => sessions.some(session => session.isStreaming));
+    const native = sessions[0]!;
+    const command = native.command.bind(native);
+    let observations = 0;
+    native.command = async input => {
+      if (input.type === "get_state" && ++observations === 2) {
+        native.isStreaming = true;
+        native.emit({ type: "agent_start" });
+      }
+      await command(input);
+    };
+    native.settle("First native boundary");
+    await waitFor(() => observations === 2);
+    await turn(); await turn();
+    expect(service.latestSettlement(thread.id)).toBeNull();
+    expect(service.get(thread.id)?.state).toBe("running");
+    native.settle("Actually finished");
+    await waitFor(() => !!service.latestSettlement(thread.id));
+    expect(service.latestSettlement(thread.id)?.finalMessage).toMatchObject({ content: [{ text: "Actually finished" }] });
+  });
+
   it("archives an ephemeral worker only after its final queued assignment, retaining its result even when both settlements share a millisecond", async () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.now());
     const { service, directory, sessions } = fixture();

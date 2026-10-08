@@ -62,11 +62,12 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_wait", label: "Wait for a named dependency",
-      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Messages and wakes may resume scheduling but do not release dependency protection. Both endpoints remain protected against close until you explicitly resolve/release with clear. Clear removes your wait and outgoing dependencies without creating work.",
+      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Messages and wakes may resume scheduling but do not release dependency protection. Both endpoints remain protected against close until you explicitly resolve/release with clear. Clear removes your wait and outgoing dependencies without creating work. The returned waitRegistration distinguishes registered (durable wait), already_arrived (current assignment result), resumed (new input IDs; continue with that input), and cleared. Only a still-active registered wait ends the turn.",
       parameters: threadWaitParameters,
       execute: async (id, input, signal) => {
         const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
-        return { ...result(waited), ...(waited.ok && input.action === "set" && waited.value.metadata?.agentWait ? { terminate: true } : {}) };
+        return { ...result(waited), ...(waited.ok && waited.value.waitRegistration.status === "registered"
+          && JSON.stringify(waited.value.metadata?.agentWait) === JSON.stringify(waited.value.waitRegistration.wait) ? { terminate: true } : {}) };
       },
     }),
     defineTool({

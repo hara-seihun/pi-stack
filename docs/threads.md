@@ -40,6 +40,10 @@ including after their bounded retry budget settles an assignment as failed: losi
 native startup is not proof that external resources have been released. Automatic
 archive sweeps preserve that owner across restarts. Successful startup clears the
 failure; explicit Stop/close still takes effect and never resumes failed work.
+A native turn without nonempty final assistant text or a retained dependency/question
+returns a failed settlement with `Native turn ended without a final result or a durable
+dependency wait`. Its `metadata.incompleteResult` keeps the owner open across archive
+sweeps and restart; a subsequent settled result clears it. Explicit close remains available.
 
 `lastUserMessageAt` records accepted explicit input without an agent sender.
 Automatic notices, agent messages, tool activity, titles and settlements do not
@@ -72,7 +76,9 @@ A native turn ending does not finish an assignment that still has a dependency o
 unanswered question. Settlements with `assignmentPending` are not completion
 results for peer awaiting. The synchronous `threadHasOutstandingWork` predicate
 covers execution, queued input, waits, dependencies and recovery wakes; callers
-also inspect durable questions before declaring completion.
+also inspect durable questions before declaring completion. Native settlement is correlated
+with the current execution and completed work receipt, not an earlier turn's event. The
+owner rechecks native idleness after dependency reconciliation before committing completion.
 
 ## Dependencies
 
@@ -110,9 +116,27 @@ closing.
 The other variants identify `jobId`, `publicationId`, or a collaborator
 `fromThreadId`. Every variant has a concrete reason and dependency identity;
 there is no available-for-assignment or generic external wait. Peer waits use
-optional owner settlement cursors in `after`. `clear` releases the caller's wait
-and outgoing dependency protection. Explicit dependencies can also be managed
-without suspending current execution.
+optional owner settlement cursors in `after`. Registration probes the current
+assignment: an older settlement or its parked notification cannot satisfy a peer
+that has newer queued/running work or an unfinished dependency wait. Delayed
+result notifications retain their execution identity; only a matching current
+assignment result clears an agent wait. Cross-owner delivery obtains bounded
+owner evidence, and an unavailable owner leaves the wait protected with a typed
+error. Historical notifications are still delivered, without releasing the wait.
+Bounded
+`thread_await` still reads historical results according to its explicit cursors.
+
+Every successful request returns the current thread snapshot plus a durable
+`waitRegistration` outcome: `registered` contains the accepted wait;
+`already_arrived` contains the current assignment settlement; `resumed` identifies
+new input by `messageIds`; `cleared` confirms release. A retry returns the same
+registration outcome even if subsequent input has already removed the active wait.
+Only a still-active `registered` wait terminates the native turn. An already-arrived
+result or resuming input remains available for the agent to handle; success without
+an explanation for an absent wait is not a valid registration outcome.
+
+`clear` releases the caller's wait and outgoing dependency protection. Explicit
+dependencies can also be managed without suspending current execution.
 
 `thread_await` is a bounded wait of at most 25 seconds on accessible peers. It
 returns the first completed assignment, cursors and remaining agent IDs. Timeout
