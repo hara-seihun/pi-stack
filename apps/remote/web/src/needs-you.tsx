@@ -1,12 +1,8 @@
-import { useEffect, useState } from "react";
 import type { LifeCoverage } from "kenan-memory/life-contract";
-import { API } from "../../server/api";
 import type { NeedsYouItem, NeedsYouProjection } from "../../shared/needs-you";
-import { piFetch } from "./client";
 import { formatRoute } from "./app/routes";
 import "./needs-you.css";
 
-type Resource = { state: "loading" } | { state: "ready"; value: NeedsYouProjection } | { state: "failed"; error: string };
 const labels: Record<NeedsYouItem["kind"], string> = { question: "Question", decision: "Decision", "missing-fact": "Only you know", "person-only-action": "Only you can do", commitment: "Your commitment" };
 
 function timestamp(value: string, zone: string): string {
@@ -24,34 +20,8 @@ function coverageStatus(coverage: LifeCoverage, now: number): string {
   return value.state === "partial" ? "Partial" : "Current";
 }
 
-export function NeedsYouScreen({ version }: { version: number }) {
-  const [resource, setResource] = useState<Resource>({ state: "loading" });
-  const [attempt, retry] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    setResource({ state: "loading" });
-    void piFetch(API.needsYou.path(), { method: API.needsYou.method, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]), cache: "no-store" }).then(async response => {
-      if (!response.ok) throw new Error(`Needs you returned HTTP ${response.status}`);
-      return await response.json() as NeedsYouProjection;
-    }).then((value: NeedsYouProjection) => {
-      if (!controller.signal.aborted) setResource({ state: "ready", value });
-    }, cause => {
-      if (!controller.signal.aborted) setResource({ state: "failed", error: cause instanceof Error ? cause.message : String(cause) });
-    });
-    return () => controller.abort();
-  }, [version, attempt]);
-  const view = resource.state === "ready" ? resource.value : null;
-  return <section className="needs-you-screen" aria-label="Needs you">
-    <header><div><h1>Needs you</h1><p>Decisions, missing facts and actions that need you. Kenan keeps the rest.</p></div>
-      <button type="button" disabled={resource.state === "loading"} onClick={() => retry(value => value + 1)}>Refresh view</button>
-    </header>
-    {resource.state === "loading" && <p role="status">Loading your sources…</p>}
-    {resource.state === "failed" && <p className="needs-you-error" role="alert">Could not load Needs you. {resource.error}</p>}
-    {view && <>
-      {view.life.state === "failed" && <p className="needs-you-error" role="alert">Life model unavailable: {view.life.error}. Questions below are still from their original owners.</p>}
-      {view.questions.state === "partial" && <details className="needs-you-error"><summary>Question coverage is incomplete</summary><ul>{view.questions.errors.map((error, i) => <li key={i}>{error}</li>)}</ul></details>}
-      {view.items.length === 0 && <p className="needs-you-empty">No items in the available sources need you. Coverage below shows what has and hasn't been checked.</p>}
-      <ol className="needs-you-items">{view.items.map(item => <li key={item.id}>
+export function NeedsYouCard({ item }: { item: NeedsYouItem }) {
+  return <article className="attention-decision">
         <span className="needs-you-kind">{labels[item.kind]}</span><h2>{item.title}</h2>
         <dl><div><dt>Consequence</dt><dd>{item.consequence === null ? "Unknown — not recorded" : item.consequence}</dd></div>
           <div><dt>Required by</dt><dd>{item.deadline === null ? "Unknown — no deadline recorded" : <time dateTime={item.deadline.at}>{timestamp(item.deadline.at, item.deadline.timeZone)}</time>}</dd></div>
@@ -60,7 +30,11 @@ export function NeedsYouScreen({ version }: { version: number }) {
         </dl>
         {item.location !== null ? <a className="needs-you-open" href={formatRoute({ tab: "chats", chat: `ai:${item.location.threadId}`, panel: null, ...(item.location.questionId === null ? {} : { questionId: item.location.questionId }) })}>{item.location.questionId !== null ? "Answer in original conversation" : "Open source conversation"}</a>
           : <p className="needs-you-muted">Original conversation location not available</p>}
-      </li>)}</ol>
+  </article>;
+}
+
+export function NeedsYouDetails({ view }: { view: NeedsYouProjection }) {
+  return <div className="attention-details">
       <section className="needs-you-coverage" aria-label="Coverage"><h2>What Kenan is carrying</h2>
         <p className="needs-you-muted">View read {timestamp(view.readAt, "UTC")}. Refreshing this view does not reconcile your life.</p>
         <h3>Life sources</h3>
@@ -90,6 +64,5 @@ export function NeedsYouScreen({ version }: { version: number }) {
             </dl><p className="needs-you-muted">Ask Kenan in your own conversation to correct or revoke this policy. This view cannot grant authority.</p>
           </>}
       </details>
-    </>}
-  </section>;
+  </div>;
 }

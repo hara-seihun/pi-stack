@@ -17,7 +17,7 @@ export function routeHasDetail(route: Route): boolean {
   switch (route.tab) {
     case "chats": return route.chat !== null;
     case "files": return route.path !== null;
-    case "agents": case "calendar": case "machine": case "notifications": case "needs-you": return false;
+    case "agents": case "machine": case "attention": return false;
   }
   return assertNever(route, "Back route");
 }

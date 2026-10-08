@@ -1,6 +1,6 @@
 # Life model — slice 1
 
-The life owner carries a person's goals, commitments, decisions and preferences. **Needs you is a projection, not another task queue:** work Kenan can do stays with Kenan. Financial forecasting, automatic source learning and protected-skill/coaching options are later slices.
+The life owner carries a person's goals, commitments, decisions and preferences. **Personal needs in Attention are a projection, not another task queue:** work Kenan can do stays with Kenan. Financial forecasting, automatic source learning and protected-skill/coaching options are later slices.
 
 ## Custody and authority
 
@@ -25,9 +25,11 @@ Provenance separates stated, revealed, derived and hypothesis claims, nullable c
 
 A reconciliation records which sources were actually inspected, their checked/reconciled time, freshness boundary and complete/partial/inaccessible/excluded state. Reading the aggregate, scheduling a watch or ending a turn does not advance reconciliation. If supporting evidence is removed or stopped, dependent projections must not present it as current authority.
 
-## Needs you
+## Attention projection
 
-Open **Needs you** from Remote's main navigation. It combines open person-only life items and waiting personal commitments with still-pending questions from the existing question owner. Questions link back to their original thread; answers remain there, not in a duplicate store. Watch state is coverage, not a list of human tasks. The screen presents consequence, deadline and timezone, recommendation and honest unknowns; errors/staleness and last recorded reconciliation remain visible even when there are no items.
+Open [**Attention**](../apps/remote/docs/attention.md) from Remote's main navigation (`#/attention`). Its [personal projection](../apps/remote/docs/needs-you.md) combines open person-only life items and waiting personal commitments with pending questions from the existing question owner. Undated/due items appear in Now; future deadlines interleave with calendar events in Upcoming. Active updates join Now and resolved notifications remain in History. Linked question notifications appear once; answers stay in the original question owner's conversation and store.
+
+Personal items show consequence, deadline and timezone, recommendation and honest unknowns. Sources load independently and retain last data with visible errors/staleness. Coverage and delegation expands source reconciliation receipts, watch coverage and the read-only standing policy; watch state is not a list of human tasks. Refreshing the surface does not reconcile sources or grant authority. `#/needs-you`, `#/notifications` and `#/calendar` resolve to Attention.
 
 The projection is local to the authenticated account/host. It does not merge a work account and a personal account merely because the Unix names match. Source owners still decide when work is complete; a draft, a scheduled check and an accepted decision are different things.
 
