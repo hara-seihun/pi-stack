@@ -40,7 +40,10 @@ else echo retained >> "$TRACE"; fi`);
   put('meet-recognition-service', `[[ $1 != --check ]] || exit 0
 : > "$WARM_STARTED"
 for i in {1..100}; do
-  if [[ -f "$VOICE_ACTIVATED" ]]; then exit "\${RECOGNITION_EXIT:-0}"; fi
+  if [[ -f "$VOICE_ACTIVATED" ]]; then
+    [[ \${RECOGNITION_EXIT:-0} != 0 ]] || echo 'takeover accepted' >> "$TRACE"
+    exit "\${RECOGNITION_EXIT:-0}"
+  fi
   sleep 0.01
 done
 exit 91`);
@@ -59,7 +62,17 @@ git -C "$(dirname "$0")/.." rev-parse HEAD > "$destination/.pi-stack-commit"`;
   writeFileSync(join(repo, 'packages/runtime/browser-doctor.mjs'), 'process.exit(0);');
   writeFileSync(join(dir, 'bin/systemctl'), `#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE"
-case $1 in is-active|is-enabled) exit "\${PRIOR_STATE:-0}";; list-units) exit 0;; esac
+case $1 in
+  is-active|is-enabled) exit "\${PRIOR_STATE:-0}";;
+  list-units) exit 0;;
+  show)
+    case $4 in
+      LoadState) echo "\${OLD_WRITE_LOADED:-not-found}";;
+      ActiveState) echo "\${OLD_WRITE_ACTIVE:-active}";;
+      UnitFileState) echo "\${OLD_WRITE_ENABLED:-enabled}";;
+    esac
+    ;;
+esac
 exit 0
 `, { mode: 0o755 });
   writeFileSync(join(dir, 'bin/curl'), '#!/bin/sh\necho \'{"people":[]}\'\n', { mode: 0o755 });
@@ -72,6 +85,7 @@ exit 0
   writeFileSync(join(doctor, 'pi-model-selection-doctor'), 'process.exit(0);');
   writeFileSync(join(dir, 'host.json'), '{"version":1}');
   for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture']]) assert.equal(spawnSync('git', ['-C', repo, ...args]).status, 0);
+  env.PI_STACK_RECOGNITION_TRANSITION_FILE = join(dir, 'speech-transition.json');
   return { env, run: extra => spawnSync('bash', [join(repo, 'deploy/host'), join(dir, 'host.json')], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 4000 }) };
 }
 
@@ -86,7 +100,7 @@ for (const failure of [{}, { RECOGNITION_EXIT: '1' }, { SMOKE_EXIT: '1' }, { RUN
   assert.equal(existsSync(f.env.VOICE_ACTIVATED), !failure.RUNTIME_FAILURE);
   const trace = readFileSync(f.env.TRACE, 'utf8');
   if (failed) {
-    assert.match(trace, /restart --no-block pi-stack-meet-recognition.service/);
+    assert.match(trace, /restart pi-stack-meet-recognition.service/);
     assert.doesNotMatch(trace, /retained/);
   } else {
     assert.match(trace, /retained/);
@@ -101,7 +115,40 @@ test('failed first activation restores an inactive, disabled recognition unit wi
   assert.equal(result.status, 1, result.stderr);
   assert.equal(existsSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), false);
   const trace = readFileSync(f.env.TRACE, 'utf8');
-  assert.match(trace, /stop --no-block pi-stack-meet-recognition.service/);
+  assert.match(trace, /stop pi-stack-meet-recognition.service/);
   assert.match(trace, /disable pi-stack-meet-recognition.service/);
-  assert.doesNotMatch(trace, /restart --no-block/);
+  assert.doesNotMatch(trace, /restart pi-stack-meet-recognition.service/);
+});
+
+test('later host smoke failure restores old same-port unit after accepted recognition, with durable rollback state', t => {
+  const f = fixture(t);
+  const result = f.run({ SMOKE_EXIT: '1', PRIOR_STATE: '1', OLD_WRITE_LOADED: 'loaded' });
+  assert.equal(result.status, 1, result.stderr);
+  const trace = readFileSync(f.env.TRACE, 'utf8');
+  assert.match(trace, /takeover accepted/);
+  assert.match(trace, /enable pi-stack-write.service/);
+  assert.match(trace, /start pi-stack-write.service/);
+  assert.ok(trace.indexOf('stop pi-stack-meet-recognition.service') < trace.indexOf('start pi-stack-write.service'));
+  assert.equal(realpathSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), f.env.OLD_RECOGNITION);
+  const journal = JSON.parse(readFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, 'utf8'));
+  assert.equal(journal.phase, 'rolled_back');
+  assert.equal(journal.oldWrite.loaded, 'loaded');
+  assert.equal(journal.oldWrite.active, 'active');
+  assert.equal(journal.oldWrite.enabled, 'enabled');
+  assert.equal(typeof journal.oldWrite.selection, 'string');
+});
+
+test('outer host success closes durable speech transition only after all release phases pass', t => {
+  const f = fixture(t);
+  assert.equal(f.run({ OLD_WRITE_LOADED: 'loaded' }).status, 0);
+  assert.equal(JSON.parse(readFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, 'utf8')).phase, 'accepted');
+});
+
+test('unresolved interrupted transition refuses another host selection', t => {
+  const f = fixture(t);
+  writeFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, JSON.stringify({ version: 1, phase: 'pending' }));
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unresolved speech host transition/);
+  assert.equal(existsSync(f.env.RECOGNITION_SELECTED), false);
 });
