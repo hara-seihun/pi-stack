@@ -83,14 +83,31 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
     cdpUrl = page.data[5].result.cdpUrl;
     assert.ok(cdpUrl, "the owner must expose its CDP endpoint");
 
-    const dates = await batch("controlled-date-inputs", ownerArgs, [
+    const checkDates = async (route, date, datetime, fills) => {
+      const dates = await batch(`controlled-date-inputs-${route}`, ownerArgs, [
+        ...fills,
+        ["get", "value", "#controlled-date"], ["get", "value", "#controlled-datetime"],
+        ["eval", "JSON.parse(document.querySelector('#controlled-state').textContent)"],
+      ]);
+      const observed = dates.data.slice(fills.length);
+      assert.equal(observed[0].result.value, date, `${route} date fill must retain the DOM value`);
+      assert.equal(observed[1].result.value, datetime, `${route} datetime-local fill must retain the DOM value`);
+      assert.deepEqual(observed[2].result.result, { date, datetime }, `${route} temporal fill must update React state, not only the DOM`);
+    };
+    await checkDates("direct", "2026-10-28", "2026-10-28T19:30", [
       ["fill", "#controlled-date", "2026-10-28"], ["fill", "#controlled-datetime", "2026-10-28T19:30"],
-      ["get", "value", "#controlled-date"], ["get", "value", "#controlled-datetime"],
-      ["eval", "JSON.parse(document.querySelector('#controlled-state').textContent)"],
     ]);
-    assert.equal(dates.data[2].result.value, "2026-10-28", "date fill must change the DOM value");
-    assert.equal(dates.data[3].result.value, "2026-10-28T19:30", "datetime-local fill must change the DOM value");
-    assert.deepEqual(dates.data[4].result.result, { date: "2026-10-28", datetime: "2026-10-28T19:30" }, "date fill must update React state, not only the DOM");
+    await checkDates("find-label", "2030-01-01", "2030-01-01T11:00", [
+      ["find", "label", "Controlled date", "fill", "2030-01-01"],
+      ["find", "label", "Controlled datetime", "fill", "2030-01-01T11:00"],
+    ]);
+    await execute("controlled-date-semantic", { semanticAction: {
+      action: "fill", locator: "label", value: "Controlled date", text: "2031-02-03", session: ownerName,
+    } });
+    await execute("controlled-datetime-semantic", { semanticAction: {
+      action: "fill", locator: "label", value: "Controlled datetime", text: "2031-02-03T12:45", session: ownerName,
+    } });
+    await checkDates("semantic", "2031-02-03", "2031-02-03T12:45", []);
 
     const frames = await batch("download-and-frames", ownerArgs, [
       ["download", `@${downloadRef}`, downloadPath],

@@ -10,6 +10,7 @@ import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { probeBrowser } from "./browser-probe.mjs";
+import { probeTabRestoration } from "./browser-tab-restore-probe.mjs";
 import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, standaloneRecordPath } from "./standalone-agent.mjs";
 
 const { values } = parseArgs({ options: { help: { type: "boolean", short: "h" }, "worker-release": { type: "string" }, "session-file": { type: "string" } } });
@@ -52,11 +53,11 @@ function controlledDateProbe() {
   function require(id) { if (!loaded[id]) { const module = loaded[id] = { exports: {} }; new Function('module', 'exports', 'require', sources[id])(module, module.exports, require); } return loaded[id].exports; }
   const React = require('react'), { createRoot } = require('react-dom/client');
   function Probe() {
-    const [date, setDate] = React.useState('2026-10-02'), [datetime, setDatetime] = React.useState('2026-10-02T23:00');
+    const [value, setValue] = React.useState({ date: '2026-10-02', datetime: '2026-10-02T23:00' });
     return React.createElement('section', null,
-      React.createElement('label', null, 'Controlled date', React.createElement('input', { id: 'controlled-date', type: 'date', value: date, onChange: e => setDate(e.target.value) })),
-      React.createElement('label', null, 'Controlled datetime', React.createElement('input', { id: 'controlled-datetime', type: 'datetime-local', value: datetime, onChange: e => setDatetime(e.target.value) })),
-      React.createElement('output', { id: 'controlled-state' }, JSON.stringify({ date, datetime })));
+      React.createElement('label', null, 'Controlled date', React.createElement('input', { id: 'controlled-date', type: 'date', value: value.date, onChange: e => setValue({ ...value, date: e.target.value }) })),
+      React.createElement('label', null, 'Controlled datetime', React.createElement('input', { id: 'controlled-datetime', type: 'datetime-local', value: value.datetime, onChange: e => setValue({ ...value, datetime: e.target.value }) })),
+      React.createElement('output', { id: 'controlled-state' }, JSON.stringify(value)));
   }
   createRoot(document.getElementById('date-probe')).render(React.createElement(Probe));
 })();</script>`;
@@ -72,6 +73,10 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { "content-type": "text/html" });
+  if (req.url === "/tab-auth") {
+    res.end(`<title>Tab startup probe</title><output id="tab-startup"></output><script>document.querySelector('#tab-startup').textContent = sessionStorage.getItem('fixture-tab-auth') === 'fixture-tab-token' ? 'authorized-at-startup' : 'unauthorized-at-startup';</script>`);
+    return;
+  }
   if (req.url === "/sensitive") {
     res.end(`<title>Sensitive input probe</title><iframe title="Sensitive input frame" src="http://localhost:${server.address().port}/sensitive-frame"></iframe>`);
     return;
@@ -140,8 +145,12 @@ try {
       writeFileSync(join(directory, "browser-proof.json"), JSON.stringify(phases, null, 2));
     },
   });
+  await probeTabRestoration(tools[0], {
+    url, statePath: join(directory, "authorized-tab-state.json"),
+    record: phase => { phases.push(phase); writeFileSync(join(directory, "browser-proof.json"), JSON.stringify(phases, null, 2)); },
+  });
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, controlledFindFill: true, controlledSemanticFill: true, authorizedTabRestoration: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
