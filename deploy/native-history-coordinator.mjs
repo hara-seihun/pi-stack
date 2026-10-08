@@ -47,9 +47,13 @@ export function stageFleet(legacy, target, manifest) {
   links(legacy, target, ['dist']); links(join(legacy, 'dist'), join(target, 'dist'), ['cli.js']);
   writeFileSync(join(target, 'dist/cli.js'), `import {readFileSync} from 'node:fs'; import {pathToFileURL} from 'node:url'; import {dirname,join} from 'node:path';
 const m=JSON.parse(readFileSync(${JSON.stringify(manifest)},'utf8'));
-const dataDir=dirname(process.env.PI_ORCHESTRATOR_LEDGER??join(process.env.HOME,'.local/share/pi-orchestrator/ledger.sqlite3'));
+const {userInfo}=await import('node:os');
+const ledgerPath=process.env.PI_ORCHESTRATOR_LEDGER??m.fleetLedgers?.[userInfo().username];
+if(typeof ledgerPath!=='string'||!ledgerPath.startsWith('/')) throw new Error('Fleet maintenance has no exact owner ledger');
+process.env.PI_ORCHESTRATOR_LEDGER=ledgerPath;
+const dataDir=dirname(ledgerPath);
 const {installLegacyMaintenance}=await import(pathToFileURL(m.bridgeModule).href);
-if(await installLegacyMaintenance({...m,dataDir,mode:'fleet',ledgerPath:process.env.PI_ORCHESTRATOR_LEDGER??join(process.env.HOME,'.local/share/pi-orchestrator/ledger.sqlite3'),oldApi:m.legacyOrchestrator+'/dist/api.js'})) await import(pathToFileURL(m.legacyOrchestrator+'/dist/cli.js').href);
+if(await installLegacyMaintenance({...m,dataDir,mode:'fleet',ledgerPath,oldApi:m.legacyOrchestrator+'/dist/api.js'})) await import(pathToFileURL(m.legacyOrchestrator+'/dist/cli.js').href);
 `, { mode: 0o644 });
 }
 function owner(user, dataDir, unit, mode) {
@@ -77,6 +81,38 @@ function fleetAdmission(item, root, identity, action = 'prepare') {
   const value = JSON.parse(result);
   if (action === 'restore' && value.ready !== true) throw new Error('Fleet admission fence restoration remains pending');
   return value;
+}
+export function fleetInventory(host, persons, platform) {
+  const declared = new Map(persons.map(person => [person.user, person]));
+  if (host.fleetUser !== undefined && !declared.has(host.fleetUser)) declared.set(host.fleetUser, undefined);
+  const result = [];
+  for (const [user, person] of declared) {
+    if (typeof user !== 'string' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) throw new Error('Invalid declared fleet owner');
+    const unit = `pi-orchestrator@${user}.service`, instance = platform.inspect(unit);
+    if (instance === null) continue; // Explicitly inactive; never infer absence from a failed inspection.
+    if (!/^[1-9][0-9]*$/.test(instance.pid)) throw new Error(`Active fleet ${unit} has no owning namespace`);
+    const environment = instance.environment;
+    const get = name => environment.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);
+    let ledgerPath = get('PI_ORCHESTRATOR_LEDGER') ?? person?.environment?.PI_REMOTE_ORCHESTRATOR_DB;
+    if (ledgerPath === undefined) {
+      // This is the inspected old CLI's HOME-based path, not a candidate default.
+      const home = get('HOME');
+      if (typeof home !== 'string' || !home.startsWith('/')) throw new Error(`Fleet ${unit} has no exact ledger or legacy HOME custody`);
+      ledgerPath = join(home, '.local/share/pi-orchestrator/ledger.sqlite3');
+    }
+    if (typeof ledgerPath !== 'string' || !ledgerPath.startsWith('/') || resolve(ledgerPath) !== ledgerPath) throw new Error(`Fleet ${unit} has an invalid exact ledger path`);
+    result.push({ ...platform.owner(user, dirname(ledgerPath), unit, 'fleet'), ledgerPath });
+  }
+  return result;
+}
+export function fleetCompletionBarrier(owners, inspect) {
+  const waiting = [];
+  // Fence/census EVERY owner even when an earlier owner's provider is still busy.
+  for (const item of owners) {
+    const receipt = inspect(item);
+    if (receipt.ready !== true) waiting.push({ user: item.user, pendingCompletions: receipt.pendingCompletions, reason: receipt.reason });
+  }
+  return { ready: waiting.length === 0, waiting };
 }
 export function allOwnersReady(owners) { return owners.every(item => item.available && (item.value.phase === 'migrated' || item.value.ready === true)); }
 
@@ -109,8 +145,8 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     const host = JSON.parse(readFileSync(hostFile, 'utf8'));
     const legacyOrchestrator = realpathSync(orchestratorPointer), legacySource = marker(selected);
     const owners = [];
-    if (existsSync(personsDir)) for (const file of readdirSync(personsDir).filter(name => name.endsWith('.json'))) {
-      const person = JSON.parse(readFileSync(join(personsDir, file), 'utf8'));
+    const persons = existsSync(personsDir) ? readdirSync(personsDir).filter(name => name.endsWith('.json')).map(file => JSON.parse(readFileSync(join(personsDir, file), 'utf8'))) : [];
+    for (const person of persons) {
       const unit = `pi-remote@${person.user}.service`;
       const active = spawnSync('systemctl', ['is-active', '--quiet', unit]).status === 0;
       if (active) owners.push(owner(person.user, person.environment.PI_REMOTE_DATA, unit, 'remote'));
@@ -121,21 +157,21 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
       const config = JSON.parse(readFileSync('/etc/pi-stack/rooms.json', 'utf8'));
       owners.push(owner(user, config.environment.PI_REMOTE_DATA, 'pi-rooms.service', 'rooms'));
     }
-    if (host.fleetUser) {
-      const unit = `pi-orchestrator@${host.fleetUser}.service`;
-      if (spawnSync('systemctl', ['is-active', '--quiet', unit]).status === 0) {
+    owners.push(...fleetInventory(host, persons, {
+      owner,
+      inspect: unit => {
+        const active = command('systemctl', ['show', unit, '-p', 'ActiveState', '--value']);
+        if (active === 'inactive' || active === 'failed') return null;
+        if (active !== 'active') throw new Error(`Fleet ${unit} lifecycle is unsettled: ${active}`);
         const pid = command('systemctl', ['show', unit, '-p', 'MainPID', '--value']);
-        const environment = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
-        const get = name => environment.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);
-        const home = get('HOME'); if (!home) throw new Error('Fleet owner has no HOME custody');
-        const ledgerPath = get('PI_ORCHESTRATOR_LEDGER') ?? join(home, '.local/share/pi-orchestrator/ledger.sqlite3');
-        owners.push({ ...owner(host.fleetUser, dirname(ledgerPath), unit, 'fleet'), ledgerPath });
-      }
-    }
+        if (!/^[1-9][0-9]*$/.test(pid)) throw new Error(`Active fleet ${unit} has no owning namespace`);
+        return { pid, environment: readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0') };
+      },
+    }));
     mkdirSync(stateDir, { recursive: true, mode: 0o755 }); chmodSync(stateDir, 0o755);
     const manifestPath = join(stateDir, 'legacy.json');
     if (marker(legacyOrchestrator) !== legacySource) throw new Error('Selected Remote and Orchestrator source identities differ before maintenance');
-    const manifest = { version: 1, candidate, legacySource, legacyRemote: selected, legacyOrchestrator, bridgeModule: join(root, 'deploy/native-history-bridge.mjs'), migrator: join(root, 'scripts/migrate-native-history.mjs'), node: '/usr/local/bin/node' };
+    const manifest = { version: 1, candidate, legacySource, legacyRemote: selected, legacyOrchestrator, fleetLedgers: Object.fromEntries(owners.filter(item => item.mode === 'fleet').map(item => [item.user, item.ledgerPath])), bridgeModule: join(root, 'deploy/native-history-bridge.mjs'), migrator: join(root, 'scripts/migrate-native-history.mjs'), node: '/usr/local/bin/node' };
     atomicJson(manifestPath, manifest); command('chmod', ['644', manifestPath]);
     state = { version: 1, protocol: BRIDGE_PROTOCOL, candidate, legacySource, legacyRemote: selected, legacyOrchestrator, remotePointer, orchestratorPointer, remoteStage: join(stateDir, 'remote'), fleetStage: join(stateDir, 'orchestrator'), manifestPath, owners, prerequisites: host.nativeHistoryPrerequisites, phase: 'planned', adopted: [], createdAt: new Date().toISOString() };
     atomicJson(statePath, state);
@@ -173,20 +209,16 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
   }
   if (state.phase === 'ready' || state.phase === 'released') return { ready: true, state: state.phase };
   if (mode === 'probe' && state.phase === 'planned') {
-    for (const item of state.owners) if (item.mode === 'fleet') {
-      const admission = fleetAdmission(item, root, { candidate, legacySource: state.legacySource }, 'probe');
-      if (admission.ready !== true) return { ready: false, state: 'fleet-completions', reason: 'Accepted old fleet completions are still running', pendingCompletions: admission.pendingCompletions };
-    }
+    const admission = fleetCompletionBarrier(state.owners.filter(item => item.mode === 'fleet'), item => fleetAdmission(item, root, { candidate, legacySource: state.legacySource }, 'probe'));
+    if (!admission.ready) return { ...admission, state: 'fleet-completions', reason: 'Accepted old fleet completions are still running' };
     return { ready: true, state: 'awaiting-adoption', reason: 'The publication can adopt the preserved old native owners' };
   }
   if (mode !== 'probe') {
     if (state.phase === 'restored') throw new Error('Restored native history attempt needs a new publication identity');
     // The old daemon aborts tool-free providers on restart. Fence fresh ledger
     // admission first, then let every already accepted completion finish naturally.
-    for (const item of state.owners) if (item.mode === 'fleet' && !state.adopted.includes(item.unit)) {
-      const admission = fleetAdmission(item, root, { candidate, legacySource: state.legacySource });
-      if (admission.ready !== true) return { ready: false, state: 'fleet-completions', reason: 'Accepted old fleet completions must settle before controller adoption', pendingCompletions: admission.pendingCompletions };
-    }
+    const admission = fleetCompletionBarrier(state.owners.filter(item => item.mode === 'fleet' && !state.adopted.includes(item.unit)), item => fleetAdmission(item, root, { candidate, legacySource: state.legacySource }));
+    if (!admission.ready) return { ...admission, state: 'fleet-completions', reason: 'Accepted old fleet completions must settle before controller adoption' };
     stageRemote(state.legacyRemote, state.remoteStage, state.manifestPath);
     stageFleet(state.legacyOrchestrator, state.fleetStage, state.manifestPath);
     if (state.phase === 'planned') {
