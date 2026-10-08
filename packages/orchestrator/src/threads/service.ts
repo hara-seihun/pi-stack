@@ -24,6 +24,7 @@ import { inputReceipts } from "./pi-input-receipts.js";
 import { measureJsonBytes } from "./json-size.js";
 import { MetadataCache } from "./metadata-cache.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
+import { readMessageDeliveryTimezone } from "./message-delivery.js";
 import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
@@ -2350,6 +2351,14 @@ export class ThreadService implements ThreadApi {
   private async drain(id: string): Promise<void> {
     if (this.suspended || this.closed) return;
     const thread = this.get(id); if (!thread || thread.metadata?.archived || this.row(id)?.held || this.halts.has(id) || this.closed) return;
+    const env = this.options.environment?.(thread);
+    if (env && [env.PI_MODEL_DELIVERY_TIMEZONE, env.PI_PERSON_TIMEZONE_FILE, env.PI_PERSON_SETTINGS_DATA, env.PI_REMOTE_DATA].some(value => value !== undefined)) {
+      const timezone = readMessageDeliveryTimezone(env);
+      if (!timezone.ok) {
+        this.admissionWait(id, { code: timezone.error.code === "invalid" ? "invalid_request" : "unavailable", message: `Owner timezone authority is not ready: ${timezone.error.message}` });
+        return;
+      }
+    }
     if (!await this.recoverUnassignedCapacity(id)) return;
     const admissionWait = thread.metadata?.admissionWait as Json | undefined;
     if (Number(admissionWait?.retryAt) > Date.now()) return;

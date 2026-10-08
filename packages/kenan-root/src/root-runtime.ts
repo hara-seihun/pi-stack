@@ -61,7 +61,10 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
         if (prior.person !== admission.person || prior.threadId !== admission.threadId || JSON.stringify(prior.recipients) !== JSON.stringify(admission.recipients)) throw new Error("Root admission changed during recovery");
         if (existsSync(join(directory, "reply.json"))) return { ok: true, value: JSON.parse(readFileSync(join(directory, "reply.json"), "utf8")) };
       } else mkdirSync(directory, { recursive: false, mode: 0o700 });
-      const env = { ...baseEnv, PI_MODEL_BROKER_URL: config.brokerUrl, PI_CODING_AGENT_DIR: config.agentDir, PI_THREAD_ID: admission.rootSessionId,
+      const env = { ...baseEnv,
+        PI_PERSON_SETTINGS_DATA: undefined, PI_REMOTE_DATA: undefined, PI_PERSON_TIMEZONE_FILE: undefined,
+        PI_MODEL_DELIVERY_TIMEZONE: Object.hasOwn(admission, "timezone") ? JSON.stringify(admission.timezone) : undefined,
+        PI_MODEL_BROKER_URL: config.brokerUrl, PI_CODING_AGENT_DIR: config.agentDir, PI_THREAD_ID: admission.rootSessionId,
         PI_REMOTE_SENDER_ID: admission.person, PI_KENAN_MEMORY_PERSON: admission.person,
         PI_KENAN_MEMORY_TOKEN: admission.memoryToken, PI_KENAN_MEMORY_ROLE: "root",
         PI_KENAN_MEMORY_ROOM_ID: admission.roomId ?? "" };
