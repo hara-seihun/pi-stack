@@ -23,7 +23,7 @@ export interface RootConfig {
   brokerUrl: string;
   people?: { person: string; displayName: string }[];
 }
-export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; sessionFile?: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest; onExecution?: () => void }
+export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; sessionFile: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest; onExecution?: () => void }
 export interface RootSession { prompt(text: string): Promise<void>; reply(): string | undefined; subjects?(): string[]; observe?(listener: (event: PiEvent) => void): () => void; abort?(): Promise<void>; dispose(): void | Promise<void> }
 export type RootSessionFactory = (spec: RootSessionSpec) => Promise<RootSession>;
 export type RootExecution = { reply: string; subjects: string[] };
@@ -95,7 +95,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
   };
 }
 
-export async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
+async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
   const { createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager, createBashTool, defineTool } = await import("@earendil-works/pi-coding-agent");
   const { Type } = await import("typebox");
   const { memoryExtension } = await import("kenan-memory/tools");
@@ -105,7 +105,6 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
   return scope.run(spec.env, async () => {
     let native: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
     try {
-    if (!spec.sessionFile) throw new Error("Root native construction requires a private managed thread");
     const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 }, compaction: { enabled: true } });
     const routing = new URL("./extension/routing.ts", import.meta.resolve("pi-orchestrator/api")).pathname;
     const services = await createAgentSessionServices({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,
@@ -131,8 +130,8 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} }; } });
     const { session } = await createAgentSessionFromServices({ services,
       sessionManager: (() => {
-        if (!existsSync(spec.sessionFile!)) writeFileSync(spec.sessionFile!, JSON.stringify(SessionManager.inMemory(spec.config.cwd).getHeader()) + "\n", { mode: 0o600 });
-        return SessionManager.open(spec.sessionFile!, undefined, spec.config.cwd);
+        if (!existsSync(spec.sessionFile)) writeFileSync(spec.sessionFile, JSON.stringify(SessionManager.inMemory(spec.config.cwd).getHeader()) + "\n", { mode: 0o600 });
+        return SessionManager.open(spec.sessionFile, undefined, spec.config.cwd);
       })(), model,
       thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, consentTool, notificationTool, replyTool] });
     native = session;

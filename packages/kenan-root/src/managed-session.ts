@@ -27,7 +27,7 @@ export class RootCapacityUnavailable extends Error {
 }
 
 /** This owner is private: it is never registered with a person or application thread directory. */
-export function managedRootSession(spec: RootSessionSpec, factory: RootSessionFactory,
+export function managedRootSession(spec: Omit<RootSessionSpec, "sessionFile">, factory: RootSessionFactory,
   capacity?: AgentCapacity | { mode: "unmanaged" }): RootSession {
   let native: RootSession | undefined, factoryFailure: unknown, turnFailure: unknown, entered = false, settled = false;
   const enteredPath = join(spec.directory, "execution.json");
