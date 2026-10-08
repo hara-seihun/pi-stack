@@ -10,6 +10,7 @@ import { threadMode } from "./modes.js";
 import { SPEEDS } from "./speed.js";
 import { threadWaitParameters } from "./wait-contract.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
+import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION, QUESTION_SUGGESTION_DESCRIPTION } from "./question-policy.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
@@ -111,8 +112,8 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "request_user_input_async", label: "Ask the user asynchronously",
-      description: "Post an array of questions for the human and continue working immediately. Put each independently answerable question in its own array item, with its own suggestions; use a one-item array for a single question. Each stays pending after this turn ends and across restarts. Suggestions are optional and may be any number; optionally recommend one by its zero-based index. The human can answer each question separately, choose any number of suggestions and add free text. Each answer arrives as a correlated ordinary user message at a safe turn boundary, without cancelling current work.",
-      parameters: Type.Object({ questions: Type.Array(Type.Object({ question: Type.String({ minLength: 1, description: "One independently answerable question." }), suggestions: Type.Optional(Type.Array(Type.String({ minLength: 1 }))), recommendedSuggestionIndex: Type.Optional(Type.Integer({ minimum: 0 })) }), { minItems: 1 }) }),
+      description: `Post an array of questions for the human and continue working immediately. ${QUESTION_AUTHORING_POLICY} Put each independently answerable question in its own array item, with its own suggestions; use a one-item array for a single question. Each stays pending after this turn ends and across restarts. Suggestions are optional and may be any number; optionally recommend one by its zero-based index. The human can answer each question separately, choose any number of suggestions and add free text. Each answer arrives as a correlated ordinary user message at a safe turn boundary, without cancelling current work.`,
+      parameters: Type.Object({ questions: Type.Array(Type.Object({ question: Type.String({ minLength: 1, description: QUESTION_TEXT_DESCRIPTION }), suggestions: Type.Optional(Type.Array(Type.String({ minLength: 1, description: QUESTION_SUGGESTION_DESCRIPTION }))), recommendedSuggestionIndex: Type.Optional(Type.Integer({ minimum: 0 })) }), { minItems: 1 }) }),
       execute: async (id, input, signal) => {
         const asked = await api(signal).ask({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
         return asked.ok ? { content: [{ type: "text" as const, text: JSON.stringify(asked.value) }], details: asked } : result(asked);

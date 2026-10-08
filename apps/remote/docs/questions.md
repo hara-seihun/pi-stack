@@ -21,6 +21,32 @@ A thread can ask for decisions without pausing its work. The `request_user_input
 
 Each item has its own optional `suggestions` with no fixed count. Its optional `recommendedSuggestionIndex` identifies one of that item's suggestions, using a zero-based index. Recommendation is presentation, not a selection or authorization. An invalid item rejects the entire batch without leaving partial questions. Retrying the same tool call returns the same ordered IDs, including questions already answered.
 
+## Authoring
+
+Renia-reduce every ask-user question, including personal and room `request_user_input_async` calls, watch checks and root-routed permission requests:
+
+- Ask the decision or person-only fact first.
+- Retain only context that could change the person's answer. Cut process narration, repeated status and details they will not use.
+- Preserve material uncertainty, consequences, scope and deadlines when they affect the choice. Do not shorten away a distinction that changes the answer.
+- Keep suggestions concise and independently meaningful; do not bundle separate decisions into one choice.
+- Questions and suggestions may use Markdown for readable structure, emphasis and links.
+
+The author supplies the final text. Storage and routing preserve that text and its Markdown without automatic lossy truncation or an additional model rewrite. Invalid input is rejected, not shortened into an accepted question. Root consent adds authenticated requester/audience and private-return/non-authorization context after the authored question, so the actual decision stays first.
+
+The shared [question authoring policy](../../../packages/orchestrator/src/threads/question-policy.ts) supplies the ordinary tool, watch prompt and root consent tool contract. [Root instructions](../../../packages/kenan-root/instructions.md) apply the same rule to permission requests.
+
+For example:
+
+```json
+{
+  "questions": [{
+    "question": "**Publish to production now?**\n\nThis restarts the service. Staging passed; production migration time is still unknown.",
+    "suggestions": ["Publish now", "Keep staging only"],
+    "recommendedSuggestionIndex": 1
+  }]
+}
+```
+
 ## Answering
 
 Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with the remaining count, suggestion chips, a free-text answer and **Dismiss question**. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Cancel work** remains available in the header while the agent is running.

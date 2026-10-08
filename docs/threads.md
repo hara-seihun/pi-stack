@@ -195,7 +195,12 @@ explicit dependency protection.
 `request_user_input_async` stores independently answerable questions with stable
 IDs, suggestions and optional recommendation. Answers arrive as correlated human
 messages at a safe boundary. Dismissal explicitly skips the question; it does not
-authorize a suggestion. Questions survive turn settlement and restart.
+authorize a suggestion. Questions survive turn settlement and restart. Authors
+Renia-reduce them: ask the decision or person-only fact first, retain only
+answer-changing context, preserve material uncertainty and consequences, and
+keep suggestions concise. Questions and suggestions support Markdown; routing
+preserves the authored text without truncation or a model rewrite. The
+[question contract](../apps/remote/docs/questions.md#authoring) owns this rule.
 
 Root permission questions retain their separate receipt-only answer path for
 RootConsentManager; answering them neither resumes unrelated work nor restores

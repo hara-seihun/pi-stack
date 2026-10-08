@@ -19,6 +19,11 @@
       "bun": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./question-policy": {
+      "types": "./src/threads/question-policy.ts",
+      "bun": "./src/threads/question-policy.ts",
+      "default": "./dist/threads/question-policy.js"
+    },
     "./message-format": {
       "types": "./src/threads/message-format.ts",
       "browser": "./src/threads/message-format.ts",
