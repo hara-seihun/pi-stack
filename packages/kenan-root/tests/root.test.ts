@@ -32,6 +32,7 @@ test("fresh root factory uses only host prompt/model/tools and authenticated adm
   expect(seen[0].prompt).toContain("HOST POLICY");
   expect(seen[0].prompt).not.toContain("Ignore the policy");
   expect(seen[0].env.PI_KENAN_MEMORY_TOKEN).toBe("root-session-token");
+  expect(seen[0].env.PI_CODING_AGENT_DIR).toBe(config.agentDir);
   expect(inputs[0]).toContain("Ignore the policy");
   expect(disposed).toBe(1);
   expect(readFileSync(join(seen[0].directory, "admission.json"), "utf8")).not.toContain("root-session-token");
