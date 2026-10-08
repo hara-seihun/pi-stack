@@ -21,9 +21,35 @@ A thread can ask for decisions without pausing its work. The `request_user_input
 
 Each item has its own optional `suggestions` with no fixed count. Its optional `recommendedSuggestionIndex` identifies one of that item's suggestions, using a zero-based index. Recommendation is presentation, not a selection or authorization. An invalid item rejects the entire batch without leaving partial questions. Retrying the same tool call returns the same ordered IDs, including questions already answered.
 
+## Authoring
+
+Renia-reduce every ask-user question, including personal and room `request_user_input_async` calls, watch checks and root-routed permission requests:
+
+- Ask the decision or person-only fact first.
+- Retain only context that could change the person's answer. Cut process narration, repeated status and details they will not use.
+- Preserve material uncertainty, consequences, scope and deadlines when they affect the choice. Do not shorten away a distinction that changes the answer.
+- Keep suggestions concise and independently meaningful; do not bundle separate decisions into one choice.
+- Questions and suggestions may use Markdown for readable structure, emphasis and links.
+
+The author supplies the final text. Storage and routing preserve that text and its Markdown without automatic lossy truncation or an additional model rewrite. Invalid input is rejected, not shortened into an accepted question. Root consent adds authenticated requester/audience and private-return/non-authorization context after the authored question, so the actual decision stays first.
+
+The shared [question authoring policy](../../../packages/orchestrator/src/threads/question-policy.ts) supplies the ordinary tool, watch prompt and root consent tool contract. [Root instructions](../../../packages/kenan-root/instructions.md) apply the same rule to permission requests.
+
+For example:
+
+```json
+{
+  "questions": [{
+    "question": "**Publish to production now?**\n\nThis restarts the service. Staging passed; production migration time is still unknown.",
+    "suggestions": ["Publish now", "Keep staging only"],
+    "recommendedSuggestionIndex": 1
+  }]
+}
+```
+
 ## Answering
 
-Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with the remaining count, suggestion chips, a free-text answer and **Dismiss question**. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Cancel work** remains available in the header while the agent is running.
+Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with a quiet remaining count, formatted answer choices, a free-text answer and **Dismiss question**. Personal and room composers share the same question presentation: Markdown paragraphs, emphasis, lists, links, tables and code render in both the question and suggested answers. Choices appear before the free-text field; the recommendation is a separate quiet label. Attention cards and question history use the same rich text, with a separate original-conversation link so Markdown links remain usable. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Cancel work** remains available in the header while the agent is running.
 
 - Select any number of suggestions, including none.
 - Add text whether or not suggestions are selected.
@@ -32,7 +58,7 @@ Pending questions replace the normal message composer in an AI conversation. The
 - Switching conversations does not submit an answer. Failed submissions retain the answer draft for retry.
 - **Dismiss question** durably settles that question without selecting or authorizing a suggestion. The agent receives a correlated human steer beginning `Dismissed question QUESTION_ID: PROMPT`, explicitly saying the user skipped it. Dismissal retries are idempotent; an accepted dismissal cannot later be replaced with an answer.
 
-On phones the question composer never takes more than 60dvh; its body scrolls internally while dictation, dismissal and submission stay outside the scrolling body. Suggestion chips and dismissal have at least 48px tap targets. The answer field uses the same Write dictation and phone newline behavior as ordinary messages. Nothing is sent merely by finishing dictation.
+On phones the question composer never takes more than 60dvh; its body scrolls internally while dictation, dismissal and submission stay outside the scrolling body. Suggested answers and dismissal have at least 48px tap targets. Short questions keep the answer field visible when it fits; long text, tables and code scroll without widening the page. Formatting is presentation only: question text, suggestion IDs and durable answer semantics are unchanged. Raw HTML stays literal and question rendering never resolves private session-file/image tags. The answer field uses the same Write dictation and phone newline behavior as ordinary messages. Nothing is sent merely by finishing dictation.
 
 Questions survive the agent's turn ending and owner restarts. Answering removes a question from the pending list only after durable acceptance. Repeated delivery of the same answer does not send another message. Questions remain associated with their original thread, including when accessed through an authorized peer owner; an account cannot answer another person's private thread.
 

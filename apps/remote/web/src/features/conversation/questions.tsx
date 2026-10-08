@@ -4,6 +4,7 @@ import { API } from "../../../../server/api";
 import { Composer } from "../../Composer";
 import { api } from "../../client";
 import { answerIsValid, QuestionDrafts, toggleSuggestion, type QuestionDraft } from "./question-drafts";
+import { QuestionContent } from "./question-content";
 import "./questions.css";
 
 function QuestionForm({ sessionId, question, drafts, onAccepted }: { sessionId: string; question: ThreadQuestion; drafts: QuestionDrafts; onAccepted(id: string): void }) {
@@ -28,13 +29,9 @@ function QuestionForm({ sessionId, question, drafts, onAccepted }: { sessionId: 
       placeholder="Your answer or additional context" sendLabel="Submit answer" layoutKey={question.id}
       disabled={submitting || !answerIsValid(draft)} readOnly={submitting} hideAttachments
       attachments={[]} onRemove={() => {}} onUpload={() => {}} onPaste={() => {}} onDraw={() => {}}
-      before={<><h3>{question.question}</h3>{error && <p role="alert" className="question-error">{error}</p>}</>}
-      afterPrompt={question.suggestions.length > 0 && <fieldset disabled={submitting}><legend>Suggested answers (choose any)</legend>
-          {question.suggestions.map(suggestion => <label key={suggestion.id} className="question-option">
-            <input type="checkbox" checked={draft.selectedSuggestionIds.includes(suggestion.id)} onChange={() => change(toggleSuggestion(draft, suggestion.id))} />
-            <span>{suggestion.text}{question.recommendedSuggestionId === suggestion.id && <span className="question-recommended">Recommended</span>}</span>
-          </label>)}
-        </fieldset>}
+      before={<><QuestionContent question={question} selected={draft.selectedSuggestionIds} disabled={submitting}
+        onToggle={id => change(toggleSuggestion(draft, id))} />
+        {error && <p role="alert" className="question-error">{error}</p>}</>}
       actions={<button type="button" className="question-dismiss" disabled={submitting} onClick={() => void submit(true)}>{submitting ? "Sending…" : "Dismiss question"}</button>} />
   </div>;
 }
@@ -48,7 +45,7 @@ export function QuestionsComposer({ sessionId, questions, onAccepted }: {
   const question = questions[0];
   if (!question) return null;
   return <section className="questions-composer" aria-label="Questions to answer">
-    <div className="questions-heading" role="status">{questions.length === 1 ? "Question to answer" : `${questions.length} questions to answer`}<span>Answer or dismiss to return to messaging</span></div>
+    <div className="questions-heading" role="status">{questions.length === 1 ? "Your answer" : `${questions.length} questions`}</div>
     <QuestionForm key={`${sessionId}:${question.id}`} sessionId={sessionId} question={question} drafts={drafts} onAccepted={onAccepted} />
   </section>;
 }

@@ -162,7 +162,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
       parameters: Type.Object({ ids: strings, mode: Type.Optional(Type.Union([Type.Literal("delete"), Type.Literal("stop-using")])) }),
       execute: async (id, input) => {
         if (!input.mode) {
-          const question = "When you say forget, do you mean delete the stored memory, or keep it but stop using it?";
+          const question = "Delete the stored memory, or keep it but stop using it?";
           const asked = await options.ask(id, question, ["Delete it", "Stop using it"]);
           return { content: [{ type: "text" as const, text: JSON.stringify({ clarificationRequired: true, question, asked }) }], details: { clarificationRequired: true } };
         }

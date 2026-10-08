@@ -66,7 +66,7 @@ export class RootConsentManager {
   async request(admission: RootAdmission, request: string, input: ConsentInput): Promise<ConsentResult<{ delivered: true; consentId: string }>> {
     if (!this.options.enabled()) return { ok: false, message: "Root consent is disabled; nobody was asked" };
     if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(input.subject) || !input.question.trim() || Buffer.byteLength(input.question) > 16_000) return { ok: false, message: "Consent needs a registered subject and a concrete, narrow question" };
-    const question = `From Kenan — permission request\nAuthenticated requester: ${admission.person}\nChosen answer would go to: ${admission.recipients.join(", ")}\n\n${input.question}\n\nYour answer returns privately to Kenan, who will decide what to share for this request. Skipping is not permission.`;
+    const question = `${input.question}\n\nAuthenticated requester: ${admission.person}\n\nChosen answer would go to: ${admission.recipients.join(", ")}\n\nYour answer returns privately to Kenan, who decides what to share for this request. Skipping is not permission.`;
     const existing = (this.db.query("SELECT data FROM root_consent WHERE json_extract(data,'$.original.rootSessionId')=? AND json_extract(data,'$.subject')=? AND json_extract(data,'$.question')=? LIMIT 1").get(admission.rootSessionId, input.subject, question) as { data: string } | null);
     const { memoryToken: _token, ...original } = admission;
     const row: PendingConsent = existing ? JSON.parse(existing.data) : { id: randomUUID(), original, request, subject: input.subject, question, state: "queued" };

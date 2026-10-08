@@ -141,6 +141,32 @@ it("reopens a closed thread for an explicit answer without replaying cancelled m
   expect(service.get("thread")?.metadata?.archived).toBeUndefined();
 });
 
+it("preserves authored Markdown questions and choices through HTTP routing and restart", async () => {
+  const { root, service } = await setup();
+  const client = createThreadClient("http://localhost/v1/threads", async (url, init) => {
+    const response = await threadHttp(service, new Request(String(url), init));
+    if (!response) throw Error("unmatched route");
+    return response;
+  });
+  const input = {
+    question: "**Publish to production now?**\n\nThis restarts the service. Staging passed; production migration time is still unknown.\n\nSee [migration details](https://example.com/migration).",
+    suggestions: ["**Publish now** — accept downtime", "Keep `staging` only"],
+    recommendedSuggestionIndex: 1,
+  };
+  const asked = await client.ask({ requestId: "markdown", threadId: "thread", questions: [input] });
+  if (!asked.ok) throw Error(asked.error.message);
+  const questionId = asked.value.questionIds[0]!;
+  const expected = { id: questionId, question: input.question, suggestions: input.suggestions.map((text, index) => ({ id: `${questionId}:${index}`, text })) };
+  expect(await client.questions("thread")).toMatchObject({ ok: true, value: [expected] });
+  expect(await client.questionEvents(0)).toMatchObject({ ok: true, value: { items: [{ questionId, question: input.question }] } });
+  await service.close();
+  const restored = owner(root);
+  expect(await restored.questionState("thread", questionId)).toMatchObject({ ok: true, value: { question: expected } });
+  expect(await restored.answer({ threadId: "thread", questionId, selectedSuggestionIds: [`${questionId}:1`], text: "Wait for the measurement." })).toMatchObject({ ok: true });
+  expect(restored.pending("thread")[0]?.text).toContain(input.question);
+  expect(restored.pending("thread")[0]?.text).toContain(input.suggestions[1]);
+});
+
 it("routes owner HTTP requests and deduplicates a lost ask acknowledgement", async () => {
   const { service } = await setup();
   let dropped = false;
