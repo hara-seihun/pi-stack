@@ -19,6 +19,7 @@ import { modelBrokerUrl } from "../model-broker-contract.js";
 import { resolveSpawnSettings, resolveThreadSettings, validateThreadSettings } from "./settings.js";
 import { getRandomName } from "../nebulani-names.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
+import { isTelephoneContext, TELEPHONE_CONTEXT_ARGUMENT } from "./telephone-context.js";
 import { inputReceipts } from "./pi-input-receipts.js";
 import { measureJsonBytes } from "./json-size.js";
 import { MetadataCache } from "./metadata-cache.js";
@@ -320,6 +321,10 @@ export class ThreadService implements ThreadApi {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid settlement cursor or limit");
     const rows = this.sql("SELECT * FROM thread_execution WHERE settlement_seq>? ORDER BY settlement_seq LIMIT ?").all(after, limit) as Json[];
     return good({ items: rows.map(row => ({ seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) })), cursor: rows.at(-1)?.settlement_seq ?? after });
+  }
+  settlementFor(threadId: string, workId: string): Result<ThreadSettlement | null> {
+    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND work_id=? AND settlement_seq IS NOT NULL ORDER BY settlement_seq DESC LIMIT 1").get(threadId, workId) as Json | undefined;
+    return good(row ? { seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null);
   }
   async await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>> {
     const valid = validateThreadAwait(input); if (!valid.ok) return valid;
@@ -1144,6 +1149,7 @@ export class ThreadService implements ThreadApi {
       if (!validSandboxBoundary(metadata)) return bad("invalid_request", "Sandbox threads require raw context and cannot carry an execution override or mode");
       if (metadata.raw !== undefined && metadata.raw !== true) return bad("invalid_request", "Thread metadata raw must be true when present");
       if (metadata.raw === true && (metadata.context !== undefined || metadata.execution === "root-repair")) return bad("invalid_request", "Raw threads carry no isolated context and cannot perform root repair");
+      if (metadata.telephoneContext !== undefined && (!isTelephoneContext(metadata.telephoneContext) || metadata.raw !== true || metadata.sandbox !== undefined || metadata.meetingId != null || metadata.room !== undefined)) return bad("invalid_request", "Telephone threads require a valid fixed raw boundary");
       if (input.admission !== undefined && !["force", "background"].includes(input.admission)) return bad("invalid_request", "Invalid admission policy");
       const admission = threadMode(metadata.mode)?.admission ?? (input.parentId ? "force" : input.admission ?? "force");
       const id = input.id ?? randomUUID();
@@ -1495,7 +1501,7 @@ export class ThreadService implements ThreadApi {
     if (patch.metadata && "autoArchiveViewedAt" in patch.metadata && patch.metadata.autoArchiveViewedAt !== thread.metadata?.autoArchiveViewedAt) return bad("conflict", "Use view control instead of changing metadata.autoArchiveViewedAt");
     if (patch.title !== undefined && options.titleSource === "agent" && thread.metadata?.titleSource === "manual") return bad("conflict", "The person named this thread; their title stays until they rename it again");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["agentWait", "peerDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["agentWait", "peerDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "telephoneContext", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "taskDescription" in patch.metadata && (typeof patch.metadata.taskDescription !== "string" || !patch.metadata.taskDescription.trim() || patch.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
@@ -2028,7 +2034,7 @@ export class ThreadService implements ThreadApi {
     } catch (error) { this.runtimes.delete(id); throw error; }
   }
   private environmentKey(thread: Thread, extraEnv: Record<string, string | undefined>): string {
-    return digest([import.meta.url, thread.cwd, thread.metadata?.context, thread.metadata?.raw, thread.metadata?.sandbox,
+    return digest([import.meta.url, thread.cwd, thread.metadata?.context, thread.metadata?.raw, thread.metadata?.telephoneContext, thread.metadata?.sandbox,
       thread.metadata?.execution, sandboxPolicy(thread.metadata ?? {}), thread.role, thread.metadata?.watchList, thread.metadata?.mode,
       this.options.environment?.(thread), extraEnv]);
   }
@@ -2089,6 +2095,8 @@ export class ThreadService implements ThreadApi {
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
     const raw = thread.metadata?.raw === true;
+    const telephone = thread.metadata?.telephoneContext;
+    if (telephone !== undefined && (!raw || !isTelephoneContext(telephone))) throw new Error("Invalid recorded telephone boundary");
     const sandbox = thread.metadata?.sandbox === true;
     if (!validSandboxBoundary(thread.metadata ?? {})) throw new Error("Invalid recorded sandbox boundary");
     if (sandbox && thread.cwd !== join(this.options.sessionsDir, "sandboxes", id)) throw new Error("Sandbox workspace does not match its thread owner");
@@ -2111,7 +2119,7 @@ export class ThreadService implements ThreadApi {
       this.phase(id, recovering ? "recovering" : "starting", recovering ? "Reopening retained native session" : "Starting native session");
       if (recoveredExecution) this.capacityLedger?.entered(id, recoveredExecution.id);
       runtime.session = await this.options.openSession({ threadId: id, cwd: thread.cwd, sessionFile: thread.sessionFile,
-        args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(sandbox ? [SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, JSON.stringify(sandboxPolicy(thread.metadata ?? {}))] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
+        args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(telephone ? [TELEPHONE_CONTEXT_ARGUMENT, JSON.stringify(telephone)] : []), ...(sandbox ? [SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, JSON.stringify(sandboxPolicy(thread.metadata ?? {}))] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
       const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
       if (env.PI_THREAD_RUNNER_REFERENCE && state.threadSessionKey !== env.PI_THREAD_SESSION_KEY) runtime.environmentKey = undefined;

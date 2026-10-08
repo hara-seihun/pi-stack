@@ -16,8 +16,9 @@
   "scripts": {
     "start": "bun server/main.ts",
     "dev": "vite",
-    "build": "vite build && npm run build:meet-adapter && node compress-dist.mjs",
+    "build": "vite build && npm run build:meet-adapter && npm run build:phone-media && node compress-dist.mjs",
     "build:meet-adapter": "vite build --config vite.meet-adapter.config.ts",
+    "build:phone-media": "vite build --config vite.phone-media.config.ts",
     "pretypecheck": "node prepare-check.mjs",
     "typecheck": "tsc -p tsconfig.web.json && tsc -p tsconfig.json",
     "test": "npm run build && node check.mjs"
@@ -40,6 +41,8 @@
     "playwright-core": "^1.58.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "retell-client-js-sdk": "3.0.2",
+    "livekit-client": "2.22.3",
     "sonner": "^2.0.8",
     "timezones-ical-library": "^2.3.2",
     "typebox": "^1.3.16"

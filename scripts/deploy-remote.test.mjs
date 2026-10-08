@@ -26,9 +26,10 @@ function fixture(resources) {
     mkdirSync(dirname(join(repo, file)), { recursive: true });
     cpSync(join(root, file), join(repo, file));
   }
-  put(join(bin, "npm"), '#!/bin/sh\nif [ "$3" = --workspace=kenan-root ]; then mkdir -p packages/kenan-root/dist; printf "export {};\\n" > packages/kenan-root/dist/main.js; else mkdir -p apps/remote/web/dist; cp "$BUILD_ASSETS"/* apps/remote/web/dist/; fi\n', 0o755);
+  put(join(bin, "npm"), '#!/bin/sh\nif [ "$3" = --workspace=kenan-root ]; then mkdir -p packages/kenan-root/dist; printf "export {};\\n" > packages/kenan-root/dist/main.js; else mkdir -p apps/remote/web/dist apps/remote/server/phone/dist; cp "$BUILD_ASSETS"/* apps/remote/web/dist/; cp "$BUILD_PHONE_SDK" apps/remote/server/phone/dist/retell-sdk.js; fi\n', 0o755);
   put(join(repo, "apps/remote/package.json"), JSON.stringify({type: "module", dependencies: {"pi-orchestrator": "1.0.0", "playwright-core": "1.0.0"}}));
   cpSync(join(repo, "apps/remote/web/dist"), join(dir, "build-assets"), { recursive: true });
+  cpSync(join(repo, "apps/remote/server/phone/dist/retell-sdk.js"), join(dir, "build-phone-sdk.js"));
   for (const entrypoint of remoteEntrypoints) {
     const source = entrypoint.startsWith("server/") ? join(repo, "apps/remote", entrypoint) : join(repo, "packages", entrypoint);
     put(source, "export {};");
@@ -53,7 +54,7 @@ function fixture(resources) {
   const commit = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], {encoding: "utf8"}).trim();
   put(join(orchestrator, ".pi-stack-commit"), commit + "\n");
   const run = () => spawnSync("bash", [join(repo, "deploy/remote")], {encoding: "utf8", env: {
-    ...process.env, PATH: `${bin}:${process.env.PATH}`, BUILD_ASSETS: join(dir, "build-assets"), PI_STACK_DEPLOY_NO_SUDO: "1",
+    ...process.env, PATH: `${bin}:${process.env.PATH}`, BUILD_ASSETS: join(dir, "build-assets"), BUILD_PHONE_SDK: join(dir, "build-phone-sdk.js"), PI_STACK_DEPLOY_NO_SUDO: "1",
     PI_STACK_HOST_LOCK_PATH: join(dir, "host.lock"),
     PI_STACK_ALLOW_DIRTY: "1", PI_STACK_REMOTE_DEST: dest, PI_STACK_ORCHESTRATOR_DEST: orchestrator,
   }});

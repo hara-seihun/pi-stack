@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { telephoneDispatcher } from "./phone/dispatcher";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -1863,6 +1864,14 @@ const server = Bun.serve<SocketData>({
       if (!parsed.ok) return json(parsed, 400);
       const result = featureUsage.record(parsed.value, resolved.kind === "person" ? "human" : "agent");
       return json(result, result.ok ? 200 : 503);
+    }
+    if (url.pathname.startsWith("/v1/telephone/")) {
+      const destination = meetingDestination();
+      const admitted = workspaceAdmission.resolve(destination.workspaceId);
+      if (!admitted.ok) return error(admitted.error.message, 503);
+      return telephoneDispatcher(req, { threads, owner: MESSAGE_OWNER.id, cwd: admitted.value.cwd,
+        model: destination.defaultModel, loopback: peer?.address === "127.0.0.1" || peer?.address === "::1",
+        onApproved: callId => { trackFeature("telephone", "agent", callId); } });
     }
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);

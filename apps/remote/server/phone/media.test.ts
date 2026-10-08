@@ -4,163 +4,155 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const page = readFileSync(new URL('./media.html', import.meta.url), 'utf8');
-const worklet = page.match(/<script id="telephone-worklet" type="text\/plain">([\s\S]*?)<\/script>/)![1];
-const client = page.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
+const client = page.match(/<script type="module">([\s\S]*?)<\/script>/)![1].replace(/^import .*;$/m, '');
+const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function processor() {
-  const packets: { pcm: ArrayBuffer; time: number }[] = [];
+async function browser(options: { takeoverFails?: boolean; deferTakeover?: boolean } = {}) {
+  const sends: any[] = [], liveSends: any[] = [], requests: { url: string; body: any }[] = [];
+  const clones: { stopped: boolean }[] = [];
+  let releaseTakeover: () => void = () => {};
+  const takeover = options.deferTakeover ? new Promise<void>(resolve => { releaseTakeover = resolve; }) : Promise.resolve();
+  const originalTrack = { kind: 'audio', readyState: 'live', stopped: false, stop() { this.stopped = true; }, clone() { const track = { kind: 'audio', readyState: 'live', stopped: false, stop() { this.stopped = true; } }; clones.push(track); return track; } };
+  const nativeCapture = async (_constraints: unknown): Promise<any> => { throw new Error('Hardware microphone must not be requested'); };
+  const devices = { getUserMedia: nativeCapture };
+  const room = { remoteParticipants: new Map([['caller', { trackPublications: new Map([['caller', { trackName: 'user_audio', track: { sid: 'caller', kind: 'audio', mediaStreamTrack: originalTrack, setVolume() {} } }]]) }]]), on() {}, off() {} };
   const context = vm.createContext({
-    sampleRate: 48000, currentFrame: 0,
-    AudioWorkletProcessor: class {
-      port = { onmessage: null, postMessage: (packet: { pcm: ArrayBuffer; time: number }) => packets.push(packet) };
-    },
-    registerProcessor: () => {},
-  });
-  vm.runInContext(worklet + ';globalThis.processor = new TelephoneAudio()', context);
-  return { context, node: context.processor, packets };
-}
-
-function render(frequency: number, seconds = 1) {
-  const state = processor();
-  const rendered: number[] = [];
-  for (let frame = 0; frame < 48000 * seconds; frame += 128) {
-    state.context.currentFrame = frame;
-    const input = Float32Array.from({ length: 128 }, (_, i) => 0.5 * Math.sin(2 * Math.PI * frequency * (frame + i) / 48000));
-    const output = new Float32Array(128);
-    state.node.process([[input]], [[output]]);
-    rendered.push(...output);
-  }
-  const pcm = state.packets.flatMap(({ pcm }) => {
-    assert.equal(pcm.byteLength, 640);
-    const view = new DataView(pcm);
-    return Array.from({ length: 320 }, (_, i) => view.getInt16(i * 2, true) / 32768);
-  });
-  return { ...state, rendered, pcm };
-}
-
-function rms(values: number[]) {
-  return Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length);
-}
-
-test('remote audio is 16 kHz PCM in 20 ms frames, without looping into the outgoing track', () => {
-  const { packets, pcm, rendered } = render(1000);
-  assert.equal(packets.length, 50);
-  assert.equal(pcm.length, 16000);
-  assert.ok(Math.abs(rms(pcm.slice(100)) - Math.SQRT1_2 / 2) < 0.002);
-  const crossings = pcm.slice(100).filter((sample, i) => sample > 0 && pcm[i + 99] <= 0).length;
-  assert.ok(Math.abs(crossings - 994) <= 2);
-  assert.equal(rms(rendered), 0);
-  for (let i = 1; i < packets.length; i++) assert.ok(Math.abs(packets[i].time - packets[i - 1].time - 0.02) < 128 / 48000);
-});
-
-test('decimation removes frequencies above the telephone Nyquist frequency', () => {
-  assert.ok(rms(render(12000).pcm.slice(100)) < 0.001);
-});
-
-test('telephone input is little-endian, interpolated at 48 kHz, and queue-bounded', () => {
-  const { node } = processor();
-  const packet = new ArrayBuffer(640);
-  const view = new DataView(packet);
-  for (let i = 0; i < 320; i++) view.setInt16(i * 2, 8192, true);
-  for (let i = 0; i < 20; i++) node.port.onmessage({ data: packet });
-  assert.equal(node.count, 3200);
-  const output = new Float32Array(128);
-  node.process([[]], [[output]]);
-  assert.ok(output.every(value => value === 0.25));
-  for (let i = 0; i < 100; i++) node.process([[]], [[output]]);
-  assert.ok(output.every(value => value === 0));
-  assert.ok(node.count < 2);
-});
-
-async function browser() {
-  const sends: (string | ArrayBuffer)[] = [];
-  const requests: { url: string; options: any }[] = [];
-  const intervals: (() => void)[] = [];
-  const tracks = [{ stop() {}, contentHint: '' }];
-  const stream = { getTracks: () => tracks, getAudioTracks: () => tracks };
-  const context = vm.createContext({
-    document: { getElementById: (id: string) => id === 'status' ? {} : { textContent: worklet } },
-    location: { hash: '#test-token', pathname: '/media', search: '', href: 'http://localhost:8799/media#test-token', protocol: 'http:' },
-    history: { replaceState() {} }, window: { addEventListener() {} },
-    URL, Blob, AbortController, crypto: { randomUUID: () => 'test-event' },
-    setInterval: (callback: () => void) => { intervals.push(callback); return intervals.length; },
-    clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
-    fetch: async (url: string, options: any) => {
-      requests.push({ url, options });
-      return { ok: true, json: async () => ({ session: { id: 'live-session' }, transport: { sdp: 'answer' } }) };
+    document: { getElementById: () => ({ textContent: '' }) },
+    location: { origin: 'http://localhost:8799', hash: '#test-token', pathname: '/media', search: '', href: 'http://localhost:8799/media#test-token', protocol: 'http:' },
+    history: { replaceState() {} }, window: { addEventListener() {} }, navigator: { mediaDevices: devices },
+    URL, Response, AbortController, crypto: { randomUUID: () => 'test-event' },
+    setTimeout: () => 1, clearTimeout() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+    fetch: async (url: string, init: any) => {
+      assert.equal(init.headers.Authorization, 'Bearer test-token');
+      requests.push({ url, body: JSON.parse(init.body) });
+      if (url === '/media/offer') return Response.json({ session: { id: 'voice' }, transport: { sdp: 'answer' } });
+      if (url === '/media/transport') return Response.json({ callId: 'call-1', accessToken: 'join-token', participantId: 'monitor-1', url: 'wss://test.livekit.cloud', transport: 'livekit' });
+      if (url === '/media/takeover') {
+        await takeover;
+        return options.takeoverFails ? new Response('denied', { status: 409 }) : Response.json({ takenOver: true });
+      }
+      throw new Error('Unexpected request ' + url);
     },
     AudioContext: class {
-      state = 'running'; currentTime = 0;
-      audioWorklet = { addModule: async () => {} };
-      destination = {};
-      createMediaStreamDestination() { return { stream }; }
+      state = 'running'; destination = {};
+      createMediaStreamDestination() { return { stream: { getTracks: () => [{ stop() {} }], getAudioTracks: () => [{ contentHint: '', stop() {} }] } }; }
       createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; }
       createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createAnalyser() { return { fftSize: 8, connect() {}, disconnect() {}, getFloatTimeDomainData(data: Float32Array) { data.fill(0.1); } }; }
       async resume() {}
       async close() { this.state = 'closed'; }
     },
     Audio: class { volume = 1; srcObject = null; async play() {} pause() {} },
-    MediaStream: class { constructor(_tracks: any[]) {} },
-    AudioWorkletNode: class { port = { onmessage: null, postMessage() {}, close() {} }; connect() {} disconnect() {} },
+    MediaStream: class {
+      constructor(public tracks: any[]) {}
+      getAudioTracks() { return this.tracks; }
+      getTracks() { return this.tracks; }
+    },
     RTCPeerConnection: class {
-      iceGatheringState = 'complete'; localDescription = { sdp: 'offer' }; connectionState = 'connected';
+      iceGatheringState = 'complete'; localDescription = { sdp: 'offer' }; connectionState = 'connected'; ontrack?: (event: any) => void;
       addTrack() {}
       createDataChannel(name: string) {
         assert.equal(name, 'oai-events');
-        return { readyState: 'open', send: (value: string) => { context.liveSends.push(JSON.parse(value)); }, close() {} };
+        return { readyState: 'open', send: (value: string) => liveSends.push(JSON.parse(value)), close() {} };
       }
       async createOffer() { return { type: 'offer', sdp: 'offer' }; }
       async setLocalDescription() {}
-      async setRemoteDescription(value: any) { assert.equal(value.sdp, 'answer'); }
+      async setRemoteDescription() { this.ontrack?.({ track: originalTrack }); }
       close() {}
     },
     WebSocket: class {
-      static OPEN = 1;
-      readyState = 1; bufferedAmount = 0;
+      static OPEN = 1; readyState = 1;
       constructor(url: URL) { assert.equal(url.href, 'ws://localhost:8799/browser-media'); }
-      send(value: string | ArrayBuffer) { sends.push(value); }
+      send(value: string) { assert.equal(typeof value, 'string'); sends.push(JSON.parse(value)); }
       close() { this.readyState = 3; }
     },
-    liveSends: [],
+    RoomEvent: { TrackSubscribed: 'subscribed', TrackUnsubscribed: 'unsubscribed' }, Track: { Kind: { Audio: 'audio' } },
+    RetellClient: class {
+      constructor(public config: any) { assert.equal(config.key, 'test-token'); }
+      monitorCall(config: any) {
+        assert.equal(config.transcript, false);
+        const api = this.config.fetch;
+        const monitor = {
+          ready: Promise.resolve(), status: 'monitoring', transport: { room },
+          async listen() { const response = await api('http://localhost:8799/v2/listen-live-call/call-1', { method: 'POST', body: '{}' }); assert.equal((await response.json()).access_token, 'join-token'); this.status = 'listening'; },
+          async takeOver() {
+            const probe = await devices.getUserMedia({ audio: true } as never) as any;
+            try {
+              await api('http://localhost:8799/v2/take-over-live-call/call-1', { method: 'POST', body: '{"participant_id":"monitor-1"}' });
+              const stream = await devices.getUserMedia({ audio: true } as never) as any;
+              (this as any).publication = stream.getAudioTracks()[0];
+              this.status = 'taken_over';
+            } finally { probe.getTracks().forEach((track: any) => track.stop()); }
+          },
+          disconnect() { (this as any).publication?.stop(); this.status = 'ended'; },
+        };
+        return monitor;
+      }
+    },
   });
   vm.runInContext(client, context);
-  await new Promise(resolve => setImmediate(resolve));
+  await tick();
   vm.runInContext('socket.onopen()', context);
-  await new Promise(resolve => setImmediate(resolve));
-  return { context, sends, requests, intervals };
+  await tick();
+  vm.runInContext(`channel.onmessage({data:'{"type":"session.started"}'})`, context);
+  await tick();
+  const control = (value: unknown) => { context.controlPayload = JSON.stringify(value); vm.runInContext('socket.onmessage({data:controlPayload})', context); };
+  return { context, sends, liveSends, requests, clones, devices, nativeCapture, originalTrack, releaseTakeover, control };
 }
 
-test('browser authenticates first, negotiates locally, forwards transcripts and waits for session.started', async () => {
-  const { context, sends, requests } = await browser();
-  assert.deepEqual(JSON.parse(sends[0] as string), { type: 'authenticate', token: 'test-token' });
-  assert.equal(requests[0].url, '/media/offer');
-  assert.equal(requests[0].options.headers.Authorization, 'Bearer test-token');
-  assert.deepEqual(JSON.parse(requests[0].options.body), { sdp: 'offer' });
-  vm.runInContext(`socket.onmessage({data:JSON.stringify({type:'context',text:'Context before ready'})})`, context);
-  assert.equal(context.liveSends.length, 0);
-  vm.runInContext(`channel.onmessage({data:JSON.stringify({type:'session.started'})});
-    channel.onmessage({data:JSON.stringify({type:'session.input_transcript.delta',delta:'Hello',start_ms:0,end_ms:100})})`, context);
-  const messages = sends.map(value => JSON.parse(value as string));
-  assert.equal(messages.filter(message => message.type === 'ready').length, 1);
-  assert.equal(messages.at(-1).event.delta, 'Hello');
-  assert.equal(context.liveSends[0].type, 'session.commentary.append');
-  assert.equal(context.liveSends[0].content, 'Context before ready');
-  vm.runInContext(`socket.onmessage({data:'{"type":"close"}'})`, context);
-  assert.equal(vm.runInContext('closed && audio.state === "closed"', context), true);
+test('voice ready precedes dial, opening is gated by successful permanent takeover, capture is restored', async () => {
+  const state = await browser({ deferTakeover: true });
+  assert.deepEqual(state.sends[0], { type: 'authenticate', token: 'test-token' });
+  assert.equal(state.sends.filter(value => value.type === 'ready').length, 1);
+  assert.deepEqual(state.requests.map(value => value.url), ['/media/offer']);
+  state.control({ type: 'context', text: 'Approved opening' });
+  state.control({ type: 'transport', callId: 'call-1' });
+  await tick();
+  assert.equal(state.liveSends.length, 0);
+  assert.equal(state.sends.some(value => value.type === 'transport-ready'), false);
+  assert.notEqual(state.devices.getUserMedia, state.nativeCapture);
+  state.releaseTakeover();
+  await tick();
+  assert.deepEqual(state.requests.at(-1), { url: '/media/takeover', body: { callId: 'call-1', participantId: 'monitor-1' } });
+  assert.deepEqual(state.sends.at(-1), { type: 'transport-ready', callId: 'call-1', participantId: 'monitor-1' });
+  assert.equal(state.liveSends[0].content, 'Approved opening');
+  assert.equal(state.devices.getUserMedia, state.nativeCapture);
+  assert.equal(state.clones.length, 2);
+  assert.equal(state.clones[0].stopped, true);
+  assert.equal(state.clones[1].stopped, false);
+  assert.equal(state.originalTrack.stopped, false);
+  vm.runInContext('observeOutput()', state.context);
+  assert.equal(state.sends.at(-1).type, 'audio-proof');
+  state.control({ type: 'close' });
+  assert.equal(state.clones[1].stopped, true);
+  assert.equal(state.originalTrack.stopped, false);
+  assert.equal(vm.runInContext('closed && audio.state === "closed"', state.context), true);
 });
 
-test('output is paced, queue-bounded, stale audio discarded, websocket backpressure is fatal', async () => {
-  const { context, sends, intervals } = await browser();
-  vm.runInContext(`channel.onmessage({data:'{"type":"session.started"}'});
-    for(let i=0;i<20;i++) bridge.port.onmessage({data:{pcm:new ArrayBuffer(640),time:0}})`, context);
-  assert.equal(vm.runInContext('outgoing.length', context), 5);
-  intervals[0]();
-  assert.equal(sends.filter(value => typeof value !== 'string').length, 1);
-  vm.runInContext('audio.currentTime = 1', context);
-  intervals[0]();
-  assert.equal(sends.filter(value => typeof value !== 'string').length, 1);
-  vm.runInContext('bridge.port.onmessage({data:{pcm:new ArrayBuffer(640),time:1}});socket.bufferedAmount=10000', context);
-  intervals[0]();
-  assert.equal(JSON.parse(sends.at(-1) as string).type, 'error');
-  assert.equal(vm.runInContext('closed', context), true);
+test('failed takeover does not release the opening or leave a capture override', async () => {
+  const state = await browser({ takeoverFails: true });
+  state.control({ type: 'context', text: 'Do not speak this before takeover' });
+  state.control({ type: 'transport', callId: 'call-1' });
+  await tick();
+  assert.equal(state.devices.getUserMedia, state.nativeCapture);
+  assert.equal(state.sends.some(value => value.type === 'transport-ready'), false);
+  assert.equal(state.liveSends.some(value => value.type === 'session.commentary.append'), false);
+  assert.equal(state.sends.at(-1).type, 'error');
+  assert.match(state.sends.at(-1).error, /takeover failed/);
+  assert.equal(vm.runInContext('closed', state.context), true);
+});
+
+test('audio-only preflight measures native output without obtaining any PSTN grant', async () => {
+  const state = await browser();
+  state.control({ type: 'preflight', text: 'Audio-only preflight: speak the approved opening.' });
+  vm.runInContext('observeOutput()', state.context);
+  assert.equal(state.liveSends[0].type, 'session.commentary.append');
+  assert.equal(state.sends.at(-1).type, 'audio-proof');
+  assert.ok(state.sends.at(-1).bytes > 0);
+  assert.deepEqual(state.requests.map(value => value.url), ['/media/offer']);
+  assert.equal(state.devices.getUserMedia, state.nativeCapture);
+  state.control({ type: 'transport', callId: 'call-1' });
+  await tick();
+  assert.equal(state.sends.at(-1).type, 'error');
+  assert.equal(vm.runInContext('closed', state.context), true);
 });
