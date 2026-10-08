@@ -32,6 +32,8 @@ export type { AgentWait, AgentWaitRequest, WaitDependency, WaitKind, ThreadWakeS
 export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";
 export { parseRuntimeEvent, requireRuntimeEvent, requireAssistantStopReason, assertNever, RUNTIME_EVENT_TYPES, type RuntimeEvent, type RuntimeEventType } from "./threads/runtime-events.js";
 export { ModelAvailabilityStore, modelAvailabilityPath, modelAvailabilityKey } from "./threads/model-availability.js";
+export { readPersonSettings, readPersonTimezone, writePersonSetting, personSettingsPath } from "./person-settings.js";
+export type { PersonTimezone, PersonSettings, SettingsResult } from "./person-settings-contract.js";
 export { threadSettingsMetadata } from "./threads/settings-metadata.js";
 export { THREAD_MODES, threadMode, conversationModeSpeed, type ThreadMode, type ThreadModeName } from "./threads/modes.js";
 export { loadThreadModelCatalog, type ThreadModelCatalog, type ThreadModelMetadata } from "./threads/model-catalog.js";

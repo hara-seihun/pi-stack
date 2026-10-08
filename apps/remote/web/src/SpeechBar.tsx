@@ -38,7 +38,7 @@ export function SpeechBar() {
     <button type="button" className="speech-control" aria-label={state.status === "playing" ? "Pause" : "Play"} disabled={state.status === "error"} onClick={() => speech.toggle()}>{state.status === "playing" ? <PauseIcon /> : <PlayIcon />}</button>
     <div className="speech-text">
       <span className="speech-status" title={state.status === "error" ? label : undefined}>{label}</span>
-      {state.voices.length > 0 && state.status !== "error" && <select className="speech-voice" aria-label="Voice" value={state.voice ?? ""} onChange={event => speech.setVoice(event.target.value)}>{state.voices.map(voice => <option key={voice.id} value={voice.id} title={voice.description}>{voice.name}</option>)}</select>}
+      {state.voices.length > 0 && state.status !== "error" && <select className="speech-voice" aria-label="Voice" value={state.voice ?? ""} disabled={Boolean(state.voicesError)} onChange={event => speech.setVoice(event.target.value)}>{state.voice === null && <option value="" disabled>Not set</option>}{state.voice !== null && !state.voices.some(voice => voice.id === state.voice) && <option value={state.voice} disabled>{state.voice} · Unavailable</option>}{state.voices.map(voice => <option key={voice.id} value={voice.id} title={voice.description}>{voice.name}</option>)}</select>}
     </div>
     <button type="button" className="speech-rate" aria-label={`Speed ${state.rate}×. Change`} onClick={nextRate}>{state.rate}×</button>
     <button type="button" className="speech-control" aria-label="Stop reading" onClick={() => speech.stop()}><StopIcon /></button>

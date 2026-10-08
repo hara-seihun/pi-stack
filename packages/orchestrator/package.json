@@ -19,6 +19,12 @@
       "bun": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./person-settings-contract": {
+      "types": "./src/person-settings-contract.ts",
+      "browser": "./src/person-settings-contract.ts",
+      "bun": "./src/person-settings-contract.ts",
+      "default": "./dist/person-settings-contract.js"
+    },
     "./message-format": {
       "types": "./src/threads/message-format.ts",
       "browser": "./src/threads/message-format.ts",

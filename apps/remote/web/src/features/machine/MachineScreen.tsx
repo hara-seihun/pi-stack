@@ -1,12 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { Dashboard, Governor, GovernorProvider, GovernorState, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
+import type { Dashboard, GovernorProvider, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
 import { Sheet } from "../../app/Sheet";
-import { Models } from "./Models";
 import { iconUrl } from "../../chat-row";
 import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens, formatWeekReset } from "./format";
 import "./machine.css";
-import { assertNever, requireState } from "../../../../shared/explicit-state";
-import { GOVERNOR_STATES } from "../../../../shared/state-validation";
 
 export type MachineScreenProps = {
   dashboard: Dashboard | null;
@@ -23,27 +20,6 @@ export type MachineScreenProps = {
   permissions: ReactNode;
   clientRevision: string;
 };
-
-function governorModeLabel(mode: GovernorState, governor: Governor): string {
-  requireState(mode, GOVERNOR_STATES, "Governor label");
-  switch (mode) {
-    case "off": return "Normal";
-    case "green": return "3×";
-    case "blue": return `${governor.boostedMultiplier}×`;
-    case "red": return "Halted";
-  }
-  return assertNever(mode, "Governor label");
-}
-
-function nextGovernorMode(governor: Governor): GovernorState {
-  switch (governor.state) {
-    case "off": return "green";
-    case "green": return "blue";
-    case "blue": return "red";
-    case "red": return "off";
-  }
-  return assertNever(governor.state, "Governor cycle");
-}
 
 function percentage(text: string): number | null {
   const match = text.match(/(\d+(?:\.\d+)?)\s*%/);
@@ -214,31 +190,9 @@ export function MachineScreen(props: MachineScreenProps) {
         <p className="machine-secondary">Subscription quota used, valued in dollars. Plan cards below show each provider separately.</p>
       </Card>}
       {dashboard?.plans.map((plan) => <Plan key={plan.id} plan={plan} modelCounts={props.modelCounts} />)}
-      {dashboard?.modelAvailability && <Card title="Models"><Models models={dashboard.modelAvailability} canManage={dashboard.canManageModels ?? false} /></Card>}
       {dashboard?.allowance && <Allowance allowance={dashboard.allowance} />}
       {dashboard?.people && <People usage={dashboard.people} />}
-      {dashboard?.governors && <Card title="Background launch pace">
-        {(["openai", "anthropic"] as const).map((provider) => {
-          const governor = dashboard.governors![provider];
-          const pending = props.pendingAction === provider;
-          const current = governorModeLabel(governor.state, governor);
-          const next = governorModeLabel(nextGovernorMode(governor), governor);
-          const providerLabel = provider === "openai" ? "OpenAI" : "Anthropic";
-          return <div className="machine-governor" key={provider}>
-            <strong>{providerLabel}</strong>
-            <button type="button" disabled={pending} aria-label={`${providerLabel} background launch pace is ${current}. Change to ${next}.`} title={`Change ${providerLabel} from ${current} to ${next}`} onClick={() => props.onToggleGovernor(provider)}>{pending ? "Changing…" : `${current} → ${next}`}</button>
-          </div>;
-        })}
-      </Card>}
-      {dashboard && dashboard.actions.length > 0 && <Card title="Actions"><div className="machine-actions">
-        {dashboard.actions.map((action) => {
-          const pending = props.pendingAction === action.id;
-          return <button className="machine-action" type="button" role="switch" aria-checked={action.active} disabled={pending} onClick={() => props.onToggleAction(action.id)} key={action.id}><span>{action.label}</span><strong>{pending ? "Saving…" : action.active ? "On" : "Off"}</strong></button>;
-        })}
-      </div></Card>}
       <Host machine={dashboard?.machine ?? null} />
-      <Card title="Environment">{props.environment}</Card>
-      <Card title="Permissions">{props.permissions}</Card>
       <Card title="App"><dl className="machine-app-detail"><dt>Revision</dt><dd title={props.clientRevision}>{props.clientRevision.slice(0, 12)}</dd><dt>Connection</dt><dd>{props.offline ? <><span>{props.offline}</span><button type="button" onClick={props.onReconnect}>Reconnect</button></> : props.syncing ? "Syncing" : "Connected"}</dd></dl></Card>
       {props.ownerErrors.length > 0 && <Card title="Owner errors"><ul className="machine-errors">{props.ownerErrors.map((error) => <li key={error.id}><span><strong>{error.owner}</strong>{error.message}</span><button type="button" onClick={() => props.onDismissOwnerError(error.id)}>Dismiss</button></li>)}</ul></Card>}
     </div>
