@@ -414,6 +414,10 @@ exit 0
 for arg; do
   case $arg in
     http://127.0.0.1:18798/v1/meet|http://127.0.0.1:18799/v1/meet)
+      if [ "\${PI_STACK_HOST_PHASE:-}" = activation ] && [ "\${ACTIVATION_CENSUS_FAIL:-0}" != 0 ]; then
+        echo 'fixture census timeout' >&2
+        exit "$ACTIVATION_CENSUS_FAIL"
+      fi
       printf '%s\\n' "$MEETING_ROOMS"
       exit 0;;
     http://127.0.0.1:8788/v1/router-health)
@@ -506,6 +510,18 @@ exit 64
     assert.equal(stagingFailure.status, 23, stagingFailure.stderr);
     for (const doctor of ["BROWSER", "MODEL"]) assert.equal(existsSync(join(doctorSettlement, `${doctor}.settled`)), false, "doctors require successful publication of the runtime");
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "staging failure cannot activate services");
+    const beforeDeferral = readFileSync(activationTrace, "utf8");
+    for (const doctorFailure of [false, true]) {
+      for (const doctor of ["BROWSER", "MODEL"]) rmSync(join(doctorSettlement, `${doctor}.settled`), { force: true });
+      const deferred = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env,
+        ACTIVATION_CENSUS_FAIL: "28", DOCTOR_SETTLEMENT_DIR: doctorSettlement,
+        BROWSER_SMOKE_EXIT: doctorFailure ? "1" : "0" } });
+      assert.equal(deferred.status, doctorFailure ? 1 : 75, deferred.stderr);
+      assert.match(deferred.stderr, /meeting census unavailable on this host/);
+      assert.match(deferred.stdout, /release phase=activation completed status=75/);
+      for (const doctor of ["BROWSER", "MODEL"]) assert.ok(existsSync(join(doctorSettlement, `${doctor}.settled`)), "deferral must join both proof jobs");
+      assert.equal(readFileSync(activationTrace, "utf8"), beforeDeferral, "unknown meetings cannot activate or rollback Remote");
+    }
     const activationFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, DAEMON_RESTART_EXIT: "1", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });
     assert.equal(activationFailure.status, 1, activationFailure.stderr);
     for (const doctor of ["BROWSER", "MODEL"]) assert.ok(existsSync(join(doctorSettlement, `${doctor}.settled`)), "failed activation must join both proof jobs before releasing custody");
