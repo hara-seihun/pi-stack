@@ -105,8 +105,7 @@ import { idleNotifications, notificationHistory, resolveNotificationQuestions } 
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
-import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webResponse } from "./files";
-import { fileEditResponse } from "./file-edit";
+import { fileBrowserError, inspectPath, localFileResponse, webResponse } from "./files";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
@@ -2157,8 +2156,6 @@ const server = Bun.serve<SocketData>({
     if (API.loopLag.match(req.method, url.pathname)) return json(await measureLoopLag(Math.min(60, Math.max(1, Number(url.searchParams.get("seconds")) || 5)) * 1000));
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
     if (API.environments.match(req.method, url.pathname)) return json({ environments: [ownEnvironment()] });
-    if (API.fileEdit.match(req.method, url.pathname) || API.fileSave.match(req.method, url.pathname))
-      return fileEditResponse(req, join(DATA, "file-edit-backups"));
     if (API.fileInfo.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute path required");
@@ -2166,15 +2163,6 @@ const server = Bun.serve<SocketData>({
       catch (cause) {
         const failure = fileBrowserError(cause);
         return error(failure.status === 404 ? "Path not found" : failure.message, failure.status);
-      }
-    }
-    if (API.files.match(req.method, url.pathname)) {
-      const requested = url.searchParams.get("path") ?? "";
-      if (!isAbsolute(requested)) return error("Valid absolute folder path required");
-      try { return json({ directory: listDirectory(requested) }); }
-      catch (cause: any) {
-        const failure = fileBrowserError(cause);
-        return error(failure.message, failure.status);
       }
     }
     if (API.voice.match(req.method, url.pathname)) {

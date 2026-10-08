@@ -29,6 +29,7 @@ export interface PhoneStatus {
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
+  openEditor?(options: { url: string; ticket: string }): Promise<void>;
   writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean; overlayEnabled?: boolean }>;
   writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean } | { step: "enabled"; enabled: boolean }): Promise<void>;
   writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
@@ -98,6 +99,7 @@ export const remote: RemoteBridge = !nativePlatform
     : {
         getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
         syncSession: (options) => capacitor.nativePromise("KenanRemote", "syncSession", options),
+        openEditor: (options) => capacitor.nativePromise("KenanRemote", "openEditor", options),
         writeStatus: () => capacitor.nativePromise("KenanRemote", "writeStatus", {}),
         writeSetup: (options) => capacitor.nativePromise("KenanRemote", "writeSetup", options),
         writeEnvironment: (options) => capacitor.nativePromise("KenanRemote", "writeEnvironment", options),
@@ -157,6 +159,21 @@ let selecting: Promise<EnvironmentState> | null = null;
 let selectionRevision = 0;
 let generation = 0;
 let personRequests = new AbortController();
+
+let editorIdentity = { user: auth.user, session: auth.session };
+function closePreviousEditor() {
+  const previous = editorIdentity;
+  editorIdentity = { user: auth.user, session: auth.session };
+  if (!previous.session || (previous.user === editorIdentity.user && previous.session === editorIdentity.session)) return;
+  const close = async () => {
+    const root = await bootstrapUrl();
+    const response = await browserFetch(`${root}/v1/editor/close`, { method: "POST", keepalive: true, cache: "no-store", redirect: "error", headers: { "x-pi-remote-user": previous.user, "x-pi-remote-session": previous.session }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok && response.status !== 423) throw new Error(`Editor session close returned HTTP ${response.status}`);
+  };
+  void close().catch(error => window.dispatchEvent(new CustomEvent("pi-editor-error", { detail: String(error) })));
+}
+window.addEventListener("pi-auth", closePreviousEditor);
+window.addEventListener("pi-person", closePreviousEditor);
 
 function resetEndpoints() {
   generation++;
@@ -357,7 +374,7 @@ window.fetch = async (input, init) => {
     const pathname = new URL(operation, location.href).pathname;
     const publicRoute = (pathname === API.environment.path() && !auth.session) || pathname === API.unlock.path()
       || pathname === API.network.path() || pathname === "/v1/app-update" || pathname.startsWith("/v1/app-update/");
-    const rootRoute = publicRoute || pathname === API.environments.path() || pathname === "/v1/lock" || pathname === "/v1/lock-status";
+    const rootRoute = publicRoute || pathname === API.environments.path() || pathname === "/v1/lock" || pathname === "/v1/lock-status" || pathname === "/v1/editor" || pathname === "/v1/editor/close";
     const selected = rootRoute || !auth.session ? null : await getState();
     const target = rootRoute ? `${root}${operation}` : explicitTarget(path, root) ?? `${selected?.baseUrl ?? root}${operation}`;
     combined.throwIfAborted();
@@ -392,6 +409,11 @@ function resolveApiUrl(path: string) {
 window.KenanRemote = {
   enabled: true,
   getState,
+  ...(nativePlatform ? { openEditor: async (options: { url: string; ticket: string }) => {
+    if (!remote.openEditor) throw new Error("This Android shell cannot open the isolated editor; update the app");
+    await nativeSessionReady();
+    await remote.openEditor(options);
+  } } : {}),
   select: async ({ id, user }) => {
     if (user !== auth.user) throw new Error("Choose and unlock this person before selecting an environment");
     const endpoints = await loadEnvironments();

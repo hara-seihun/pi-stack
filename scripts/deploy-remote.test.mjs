@@ -106,7 +106,7 @@ test("Remote rejects an incomplete release even on unchanged redeploy", () => {
 
 test("one new owner declaration extends fixture construction, staging and unchanged-release rejection", () => {
   const resource = {
-    source: "apps/remote/server/file-edit.py", destination: "server/additional-editor.py", kind: "file",
+    source: "apps/remote/server/pi-editor-launch", destination: "server/additional-launcher", kind: "file",
   };
   const f = fixture([...remoteResources, resource]);
   try {
@@ -116,7 +116,7 @@ test("one new owner declaration extends fixture construction, staging and unchan
     rmSync(join(f.dest, resource.destination));
     const incomplete = f.run();
     assert.notEqual(incomplete.status, 0);
-    assert.match(incomplete.stderr, /Missing Pi Remote release resource: server\/additional-editor.py/);
+    assert.match(incomplete.stderr, /Missing Pi Remote release resource: server\/additional-launcher/);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
@@ -132,7 +132,7 @@ test("Remote prefers workspace-local dependencies", () => {
 });
 
 test("Remote rejects missing source and generated resources before publication", () => {
-  for (const source of ["repo/apps/remote/server/file-edit.py", "build-assets/meet-adapter.js"]) {
+  for (const source of ["repo/apps/remote/server/pi-editor-launch", "build-assets/meet-adapter.js"]) {
     const f = fixture(remoteResources);
     try {
       rmSync(join(f.dir, source));

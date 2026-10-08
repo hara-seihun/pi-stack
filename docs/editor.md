@@ -37,7 +37,7 @@ The resulting nonsecret registry `/var/lib/pi-remote/persons/USER.json` contains
 }
 ```
 
-This is a fragment of an existing Person, not a complete registry file. Omit `editor` to leave editing unavailable. Use canonical absolute paths and an HTTP(S) origin without a trailing slash. Registry changes are picked up by the router; installing an updated launcher does not restart an already open editor. Stop that person's editor after updating it if the new launcher must take effect immediately.
+This is a fragment of an existing Person, not a complete registry file. Omit `editor` to leave editing unavailable. Use canonical absolute paths and an HTTP(S) origin without a trailing slash. Restart `pi-remote-router.service` after registry changes to load the editor host map. Installing an updated launcher does not restart an already open editor. Stop that person's editor after updating it if the new launcher must take effect immediately.
 
 `install` copies the launcher to root-owned `/usr/local/libexec/pi-editor-launch`, renders `/etc/systemd/system/pi-editor@.service` with that fixed path and reloads systemd. Publication packs the launcher with the Remote server; installation remains an explicit host provisioning step. No editor unit is enabled at boot.
 
@@ -61,11 +61,11 @@ server {
 }
 ```
 
-Keep the gateway private to the home's trusted network. DNS alone does not grant editor access. Router/session authorization is mandatory: code-server deliberately has no independent login page.
+Use the host's authorized ingress: private household origins stay private; a work host with an existing protected public HTTPS gateway may reuse that gateway for its isolated editor origins. Do not add TLS infrastructure to private HTTP routing. DNS alone does not grant editor access. Router/session authorization is mandatory: code-server deliberately has no independent login page.
 
 ## Open and shutdown
 
-An authenticated, explicit editor open starts `pi-editor@USER.service`. `/v1/editor` returns `{url: "http://USER-editor.private.example/editor/open", ticket}`. The client submits the short-lived, one-use ticket as a **POST body** on that editor origin. The router consumes it, sets an editor-origin-scoped HttpOnly session cookie and redirects to the selected workspace/file. Tickets are not embedded in URLs. Only that editor session may reach its root HTTP/WebSocket routes.
+Authenticated `GET /v1/editor` returns `{ok:true, origin, environmentId}` for the configured local person, or `503 editor_unconfigured`. `POST /v1/editor` takes `{path:null|"/absolute/path", kind:"file"|"directory"}`; null opens the configured workspace. An explicit open starts `pi-editor@USER.service` and returns `{ok:true, url: "http://USER-editor.private.example/editor/open", ticket}`. The client submits the short-lived, one-use ticket as a **POST body** on that editor origin. The router consumes it, sets an editor-origin-scoped HttpOnly session cookie and redirects to the selected workspace/file. Tickets are not embedded in URLs. Only that editor session may reach its root HTTP/WebSocket routes. Editor origins reject all Pi Stack `/v1/` APIs. Mutation and WebSocket requests require that editor's Origin; app/router/upstream credentials are stripped before proxying. All editor HTTP responses are `no-store`. Grants expire after eight hours, are bound to the issuing router session and abort HTTP/WebSockets on revocation. `POST /v1/editor/close` invalidates that app session's grants and pending tickets on identity/session changes. Browser launch closes its popup on the same transition; Android uses a separate non-Capacitor Activity without the app bridge. Separate origins keep editor storage isolated across persons. The local editor refuses a path selected on another remote environment; open that environment's own router instead.
 
 The router proxies `/run/pi-editor/USER/http.sock`. The runtime directory is person-owned `0700`; the socket is `0600`. There is no code-server TCP listener, and `--disable-proxy` removes code-server's ambient host/port proxy routes.
 
@@ -92,4 +92,5 @@ Focused source checks:
 
 ```sh
 python3 deploy/editor_test.py
+bun test apps/remote/server/editor-access.test.ts apps/remote/server/editor-proxy.test.ts apps/remote/server/files.test.ts apps/remote/server/path-info.test.ts
 ```

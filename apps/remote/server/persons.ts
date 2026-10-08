@@ -4,7 +4,7 @@
 // launcher (to know which folder to mount), and by the supervisor itself (as
 // its PI_REMOTE_CONFIG, so the same file is the whole per-person configuration).
 import { closeSync, existsSync, fchmodSync, fchownSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 export const PERSONS_DIR = process.env.PI_REMOTE_PERSONS_DIR ?? "/var/lib/pi-remote/persons";
 
@@ -18,6 +18,7 @@ export type Person = {
   auth?: "oidc";
   /** Present when the person's folder is a gocryptfs directory that needs her key. */
   unlock?: { cipherDir: string; mountpoint: string };
+  editor?: { workspace: string; origin: string };
   environment: Record<string, string | number | boolean | object>;
 };
 
@@ -40,6 +41,13 @@ export function parsePerson(source: string, path: string): Person {
   if (person.auth !== undefined && person.auth !== "oidc") throw new Error(`${path}: unsupported authentication method`);
   if (person.auth === "oidc" && !person.unlock) throw new Error(`${path}: OAuth persons require an encrypted folder`);
   if (person.unlock && (!person.unlock.cipherDir || !person.unlock.mountpoint)) throw new Error(`${path}: unlock needs cipherDir and mountpoint`);
+  if (person.editor !== undefined) {
+    if (!person.unlock || !isAbsolute(person.unlock.mountpoint) || resolve(person.unlock.mountpoint) === "/" || typeof person.editor.workspace !== "string" || !isAbsolute(person.editor.workspace)) throw new Error(`${path}: editor needs an encrypted mounted workspace`);
+    const within = relative(resolve(person.unlock.mountpoint), resolve(person.editor.workspace));
+    if (within === ".." || within.startsWith("../") || isAbsolute(within)) throw new Error(`${path}: editor workspace must be inside the encrypted mount`);
+    const origin = new URL(person.editor.origin);
+    if (!["http:", "https:"].includes(origin.protocol) || origin.origin !== person.editor.origin || origin.username || origin.password) throw new Error(`${path}: editor origin must be an HTTP(S) origin with no path or credentials`);
+  }
   return person;
 }
 

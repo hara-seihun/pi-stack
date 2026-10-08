@@ -8,7 +8,6 @@ import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
-export type FileEditSnapshot = { path: string; content: string; revision: string };
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
 
