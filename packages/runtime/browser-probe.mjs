@@ -96,16 +96,21 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
     };
     await checkDates("direct", "2026-10-28", "2026-10-28T19:30", [
       ["fill", "#controlled-date", "2026-10-28"], ["fill", "#controlled-datetime", "2026-10-28T19:30"],
+      ["fill", "#controlled-timezone", "Etc/UTC"],
     ]);
     await checkDates("find-label", "2030-01-01", "2030-01-01T11:00", [
       ["find", "label", "Controlled date", "fill", "2030-01-01"],
       ["find", "label", "Controlled datetime", "fill", "2030-01-01T11:00"],
+      ["find", "label", "Event time zone", "fill", "UTC"],
     ]);
     await execute("controlled-date-semantic", { semanticAction: {
       action: "fill", locator: "label", value: "Controlled date", text: "2031-02-03", session: ownerName,
     } });
     await execute("controlled-datetime-semantic", { semanticAction: {
       action: "fill", locator: "label", value: "Controlled datetime", text: "2031-02-03T12:45", session: ownerName,
+    } });
+    await execute("controlled-timezone-semantic", { semanticAction: {
+      action: "fill", locator: "label", value: "Event time zone", text: "Etc/UTC", session: ownerName,
     } });
     await checkDates("semantic", "2031-02-03", "2031-02-03T12:45", []);
 

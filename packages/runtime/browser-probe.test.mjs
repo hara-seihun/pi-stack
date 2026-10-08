@@ -26,7 +26,7 @@ function fixture(t, defect) {
       assert.ok(state, "semantic fill reuses the owned live session");
       assert.equal(input.semanticAction.action, "fill");
       assert.equal(input.semanticAction.locator, "label");
-      const target = input.semanticAction.value === "Controlled date" ? "#controlled-date" : "#controlled-datetime";
+      const target = input.semanticAction.value === "Controlled date" ? "#controlled-date" : input.semanticAction.value === "Controlled datetime" ? "#controlled-datetime" : "#controlled-timezone";
       if (defect !== "semantic-date-value") state.values.set(`main:${target}`, input.semanticAction.text);
       state.dateRoute = "semantic";
       return { details: { resultCategory: "success" } };
@@ -60,7 +60,7 @@ function fixture(t, defect) {
       if (command[0] === "fill") { state.values.set(`${state.frame}:${command[1]}`, command[2]); state.dateRoute = "direct"; }
       if (command[0] === "find") {
         assert.equal(command[1], "label"); assert.equal(command[3], "fill");
-        const target = command[2] === "Controlled date" ? "#controlled-date" : "#controlled-datetime";
+        const target = command[2] === "Controlled date" ? "#controlled-date" : command[2] === "Controlled datetime" ? "#controlled-datetime" : "#controlled-timezone";
         if (defect !== "find-date-value") state.values.set(`${state.frame}:${target}`, command[4]);
         state.dateRoute = "find-label";
       }

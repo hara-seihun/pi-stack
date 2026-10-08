@@ -53,11 +53,12 @@ function controlledDateProbe() {
   function require(id) { if (!loaded[id]) { const module = loaded[id] = { exports: {} }; new Function('module', 'exports', 'require', sources[id])(module, module.exports, require); } return loaded[id].exports; }
   const React = require('react'), { createRoot } = require('react-dom/client');
   function Probe() {
-    const [value, setValue] = React.useState({ date: '2026-10-02', datetime: '2026-10-02T23:00' });
+    const [value, setValue] = React.useState({ date: '2026-10-02', datetime: '2026-10-02T23:00', timezone: 'UTC' });
     return React.createElement('section', null,
       React.createElement('label', null, 'Controlled date', React.createElement('input', { id: 'controlled-date', type: 'date', value: value.date, onChange: e => setValue({ ...value, date: e.target.value }) })),
       React.createElement('label', null, 'Controlled datetime', React.createElement('input', { id: 'controlled-datetime', type: 'datetime-local', value: value.datetime, onChange: e => setValue({ ...value, datetime: e.target.value }) })),
-      React.createElement('output', { id: 'controlled-state' }, JSON.stringify(value)));
+      React.createElement('label', null, 'Event time zone', React.createElement('input', { id: 'controlled-timezone', value: value.timezone, onChange: e => setValue({ ...value, timezone: e.target.value }) })),
+      React.createElement('output', { id: 'controlled-state' }, JSON.stringify({ date: value.date, datetime: value.datetime })));
   }
   createRoot(document.getElementById('date-probe')).render(React.createElement(Probe));
 })();</script>`;
