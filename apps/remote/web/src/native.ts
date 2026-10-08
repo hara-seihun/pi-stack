@@ -153,6 +153,8 @@ let bootstrapPromise: Promise<string> | null = null;
 let environments: Endpoint[] | null = null;
 let discovery: Promise<Endpoint[]> | null = null;
 let current: EnvironmentState | null = null;
+let selecting: Promise<EnvironmentState> | null = null;
+let selectionRevision = 0;
 let generation = 0;
 let personRequests = new AbortController();
 
@@ -161,6 +163,8 @@ function resetEndpoints() {
   environments = null;
   discovery = null;
   current = null;
+  selecting = null;
+  selectionRevision++;
 }
 window.addEventListener("pi-auth", resetEndpoints);
 window.addEventListener("pi-person", () => {
@@ -263,7 +267,7 @@ export async function loadEnvironments(retry = true): Promise<Endpoint[]> {
   try { return await operation; } finally { if (discovery === operation) discovery = null; }
 }
 
-async function verifiedState(selected: Endpoint, endpoints: Endpoint[]): Promise<EnvironmentState> {
+async function verifiedState(selected: Endpoint, endpoints: Endpoint[], selection: number): Promise<EnvironmentState> {
   const revision = generation;
   const token = auth.session;
   const response = await browserFetch(`${selected.baseUrl}${API.health.path()}`, { cache: "no-store", redirect: "error", headers: auth.headers(), signal: personRequests.signal });
@@ -273,9 +277,11 @@ async function verifiedState(selected: Endpoint, endpoints: Endpoint[]): Promise
   const health = await response.json();
   if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
   if (health.environmentId !== selected.id) throw new Error(`${selected.name} environment identity mismatch`);
+  if (selection !== selectionRevision) throw new DOMException("Endpoint selection superseded", "AbortError");
   if (nativePlatform && remote.writeEnvironment) {
     await nativeSessionReady();
     if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
+    if (selection !== selectionRevision) throw new DOMException("Endpoint selection superseded", "AbortError");
     await remote.writeEnvironment({ user: auth.user, environment: selected.id });
   }
   if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
@@ -285,13 +291,19 @@ async function verifiedState(selected: Endpoint, endpoints: Endpoint[]): Promise
 async function getState(): Promise<EnvironmentState> {
   const endpoints = await loadEnvironments();
   if (current) return current;
+  if (selecting) return selecting;
   const selectedId = sessionStorage.getItem(appStorageKey(`pi-remote-environment:${auth.user}`));
   const selected = endpoints.find(endpoint => endpoint.id === selectedId) ?? endpoints[0]!;
   const revision = generation;
-  const verified = await verifiedState(selected, endpoints);
-  if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
-  current = verified;
-  return current;
+  const selection = ++selectionRevision;
+  const operation = verifiedState(selected, endpoints, selection).then(verified => {
+    if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
+    if (selection !== selectionRevision) throw new DOMException("Endpoint selection superseded", "AbortError");
+    current = verified;
+    return verified;
+  });
+  selecting = operation;
+  try { return await operation; } finally { if (selecting === operation) selecting = null; }
 }
 
 export async function pinnedFetch(endpoint: Endpoint, user: string, path: string, init: RequestInit): Promise<Response> {
@@ -386,11 +398,16 @@ window.KenanRemote = {
     const selected = endpoints.find(endpoint => endpoint.id === id);
     if (!selected) throw new Error(`Environment is not allowed: ${id}`);
     const revision = generation;
-    const verified = await verifiedState(selected, endpoints);
-    if (revision !== generation || user !== auth.user) throw new DOMException("Identity changed during endpoint selection", "AbortError");
-    sessionStorage.setItem(appStorageKey(`pi-remote-environment:${user}`), id);
-    current = verified;
-    return current;
+    const selection = ++selectionRevision;
+    const operation = verifiedState(selected, endpoints, selection).then(verified => {
+      if (revision !== generation || user !== auth.user) throw new DOMException("Identity changed during endpoint selection", "AbortError");
+      if (selection !== selectionRevision) throw new DOMException("Endpoint selection superseded", "AbortError");
+      sessionStorage.setItem(appStorageKey(`pi-remote-environment:${user}`), id);
+      current = verified;
+      return current;
+    });
+    selecting = operation;
+    try { return await operation; } finally { if (selecting === operation) selecting = null; }
   },
   resolveApiUrl,
 };

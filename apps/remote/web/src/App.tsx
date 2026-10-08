@@ -30,11 +30,12 @@ import { createStreamClient, type StreamClient } from "./stream";
 import { useRooms, RoomConversation } from "./rooms";
 import { conversationTab, working } from "./thread-state";
 import { requestStop, submitThreadControl } from "./thread-controls";
-import { LazyChatPicker } from "./chat-picker-lazy";
+import { LazyChatPicker, prepareChatPicker } from "./chat-picker-lazy";
 import type { ChatPickerHandle } from "./thread-start-menu";
 import type { Attachment, Bootstrap, ContextEntry, Dashboard, QueuedMessage, Session, SlashCommand } from "./types";
 import { Shell, TabNav } from "./app/Shell";
 import { useLayout } from "./app/layout";
+import { preloadView } from "./app/preload-view";
 import { messagingAvatarUrl } from "./messaging-avatar";
 import { messagingClient } from "./messaging-client";
 import { MessagingHistoryCache } from "./messaging-history";
@@ -63,18 +64,30 @@ import { threadStatus } from "./features/status/thread-status";
 import { speech } from "./speech";
 import { SpeechBar } from "./SpeechBar";
 
-// What the first paint does not need waits for the screen that shows it. Each
-// import below is one chunk: a screen or a feature, never a component at a
-// time, so opening Files or the inspector is one request rather than six.
+// Screen code warms after bootstrap, without mounting views or fetching data.
+// A ready view never enters Suspense's cold retry throttle.
 const PasteTextDialog = lazy(() => import("./PasteTextDialog").then(module => ({ default: module.PasteTextDialog })));
-const InspectorSheet = lazy(() => import("./features/inspector/InspectorSheet").then(module => ({ default: module.InspectorSheet })));
-const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
-const AgentsScreen = lazy(() => import("./features/agents/AgentsScreen").then(module => ({ default: module.AgentsScreen })));
-const NotificationsScreen = lazy(() => import("./features/notifications/NotificationsScreen").then(module => ({ default: module.NotificationsScreen })));
-const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
-const NeedsYouScreen = lazy(() => import("./needs-you").then(module => ({ default: module.NeedsYouScreen })));
-const CalendarScreen = lazy(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
-const MachineTab = lazy(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
+const InspectorSheet = preloadView(() => import("./features/inspector/InspectorSheet").then(module => ({ default: module.InspectorSheet })));
+const QueueSheet = preloadView(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
+const AgentsScreen = preloadView(() => import("./features/agents/AgentsScreen").then(module => ({ default: module.AgentsScreen })));
+const NotificationsScreen = preloadView(() => import("./features/notifications/NotificationsScreen").then(module => ({ default: module.NotificationsScreen })));
+const FilesScreen = preloadView(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
+const NeedsYouScreen = preloadView(() => import("./needs-you").then(module => ({ default: module.NeedsYouScreen })));
+const CalendarScreen = preloadView(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
+const MachineTab = preloadView(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
+
+function prepareTab(tab: Tab) {
+  switch (tab) {
+    case "chats": return;
+    case "agents": void AgentsScreen.preload(); return;
+    case "notifications": void NotificationsScreen.preload(); return;
+    case "files": void FilesScreen.preload(); return;
+    case "needs-you": void NeedsYouScreen.preload(); return;
+    case "calendar": void CalendarScreen.preload(); return;
+    case "machine": void MachineTab.preload(); return;
+  }
+  return assertNever(tab, "Prepare tab");
+}
 
 function Loading({ label }: { label: string }) {
   useEffect(() => beginSectionLoad(`screen:${label}`), [label]);
@@ -139,6 +152,7 @@ function UnlockDialog() {
   const [people, setPeople] = useState<Array<{ user: string; displayName?: string; requiresUnlock?: boolean }>>([]);
   const [selectedUser, setSelectedUser] = useState("");
   const [key, setKey] = useState("");
+  const [active, setActive] = useState(false);
   const [message, setMessage] = useState("");
   const [custody, setCustody] = useState<{ locked: boolean; message: string } | null>(null);
   useEffect(() => {
@@ -157,20 +171,22 @@ function UnlockDialog() {
         setSelectedUser(nextUser);
         window.PiRemotePerson?.set(nextUser);
       } catch (error) { setMessage(`Could not load people: ${String(error)}`); }
-      dialog.current?.showModal();
-      return new Promise<string>((resolve) => { resolver.current = resolve; });
+      return new Promise<string>((resolve) => { resolver.current = resolve; setActive(true); });
     });
   }, []);
+  useLayoutEffect(() => { if (active) dialog.current?.showModal(); }, [active]);
   const requiresKey = people.find(person => person.user === selectedUser)?.requiresUnlock !== false;
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if ((requiresKey && !key) || !selectedUser) return;
     resolver.current?.(key);
     resolver.current = null;
+    setKey("");
+    setActive(false);
     dialog.current?.close();
   };
-  return <dialog ref={dialog} className="unlock-dialog" aria-labelledby="unlock-title" onCancel={event => event.preventDefault()}>
-    <form className="unlock-form" onSubmit={submit}>
+  return <dialog ref={dialog} className="unlock-dialog" aria-labelledby={active ? "unlock-title" : undefined} onCancel={event => event.preventDefault()}>
+    {active && <form className="unlock-form" onSubmit={submit}>
       <h2 id="unlock-title">Pi Remote</h2>
       {requiresKey && <p>{custody ? "Your key proves who you are to Kenan; he retains folder custody." : "Your folder key stays on this device."}</p>}
       {custody?.locked && <p role="status">Kenan's custody is locked after a restart. {custody.message}</p>}
@@ -178,7 +194,7 @@ function UnlockDialog() {
       {requiresKey && <div className="unlock-field"><label htmlFor="unlock-key">Folder key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>}
       <DismissibleError className="unlock-error" message={message} />
       <div className="unlock-actions"><button className="accent" type="submit">{requiresKey ? "Unlock" : "Continue"}</button></div>
-    </form>
+    </form>}
   </dialog>;
 }
 
@@ -221,6 +237,31 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [autoCollapseKey]);
   const { state, stateRef, patch } = useStableState();
   const roomDirectory = useRooms(state.bootstrap?.rooms === true);
+  const bootstrapped = state.bootstrap !== null;
+  useEffect(() => {
+    if (!bootstrapped) return;
+    const views = [{ preload: prepareChatPicker }, AgentsScreen, NotificationsScreen, NeedsYouScreen, FilesScreen, MachineTab, InspectorSheet, QueueSheet, CalendarScreen];
+    let cancelled = false;
+    let next = 0;
+    let cancelScheduled: (() => void) | null = null;
+    const schedule = () => {
+      if (cancelled || next === views.length) return;
+      const load = () => {
+        cancelScheduled = null;
+        if (cancelled) return;
+        void views[next++].preload().then(schedule);
+      };
+      if (typeof window.requestIdleCallback === "function") {
+        const id = window.requestIdleCallback(load);
+        cancelScheduled = () => window.cancelIdleCallback(id);
+      } else {
+        const id = window.setTimeout(load, 0);
+        cancelScheduled = () => window.clearTimeout(id);
+      }
+    };
+    schedule();
+    return () => { cancelled = true; cancelScheduled?.(); };
+  }, [bootstrapped]);
   const layout = useLayout();
   const route = useRoute();
   const routeChat = routeChatId(route);
@@ -352,6 +393,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [openChat]);
   const openPanel = useCallback((panel: Panel) => {
     if (!("panel" in route)) return;
+    if (panel === "queue") void QueueSheet.preload();
+    else void InspectorSheet.preload();
     panelPushed.current = true;
     navigate({ ...route, panel });
   }, [route]);
@@ -365,6 +408,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [route]);
   useSystemBack({ closePanel, closeDetail });
   const selectTab = useCallback((tab: Tab) => {
+    prepareTab(tab);
     if (tab === route.tab) navigate(routeHome(route));
     else if (tab === "chats") navigate({ tab, chat: null, panel: null });
     else if (tab === "files") navigate({ tab, path: null });
@@ -1213,7 +1257,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   const showTabs = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "notifications" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
-    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
+    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} onPrepare={prepareTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
         <AppUpdateStatus update={update} />
         <SpeechBar />

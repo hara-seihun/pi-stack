@@ -2,7 +2,7 @@
 // carries the view in the fragment: the ingress and the router never see it.
 // Every user-visible navigation pushes a history entry so back always returns
 // to the previous screen, on the phone and in the browser.
-import { useEffect, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 import type { ChatId } from "../chats";
 import { assertNever, requireState } from "../../../shared/explicit-state";
 
@@ -104,7 +104,10 @@ export function useRoute(): Route {
   const [route, setRoute] = useState(currentRoute);
   useEffect(() => {
     if (!location.hash) history.replaceState(null, "", formatRoute(route));
-    const update = () => setRoute(currentRoute());
+    const update = () => {
+      const next = currentRoute();
+      startTransition(() => setRoute(next));
+    };
     window.addEventListener("hashchange", update);
     window.addEventListener("popstate", update);
     return () => { window.removeEventListener("hashchange", update); window.removeEventListener("popstate", update); };
