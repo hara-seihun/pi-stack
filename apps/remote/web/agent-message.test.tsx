@@ -35,7 +35,6 @@ test("new incoming agent words retain immutable sender routes in toggle-controll
     const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
     expect(html).toMatch(/<span class="agent-route incoming"><span class="agent-route-name">Kelana<\/span><svg[^>]*aria-label="to".*?<span class="agent-route-name self">Kenan<\/span>/);
     expect(html).toContain('class="message-label">KENAN</span>');
-    expect(html).toContain("Agent message");
     const disclosures = html.match(/<details class="conversation-step agent-message-step"[^>]*>/g) ?? [];
     expect(disclosures).toHaveLength(1);
     expect(disclosures[0]!.includes('open=""')).toBe(!autoCollapse);

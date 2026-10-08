@@ -102,7 +102,7 @@ export function AgentDisclosure({ route, open, onOpen, children }: {
   route: ReactNode; open: boolean; onOpen(open: boolean): void; children: ReactNode;
 }) {
   return <details className="conversation-step agent-message-step" open={open} onToggle={event => onOpen(event.currentTarget.open)}>
-    <summary><span className="agent-message-chevron" aria-hidden="true">›</span><strong>Agent message</strong>{route}</summary>
+    <summary><span className="agent-message-chevron" aria-hidden="true">›</span>{route}</summary>
     <div className="agent-message-detail">{children}</div>
   </details>;
 }
