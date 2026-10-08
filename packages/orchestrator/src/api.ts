@@ -22,7 +22,7 @@ export { createWorkspaceAdmission, createCwdAdmission,
   type WorkspaceAdmissionErrorCode, type ConfiguredWorkspace, type AdmittedWorkspace, type CwdAdmission,
 } from "./workspace-admission.js";
 export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, ThreadState, WorkOutcome,
-  ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, SpawnThread, SendThread, ThreadList, ThreadPage,
+  ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, SpawnThread, SendThread, ThreadList, ThreadPage, ArchivedThreadsQuery, ArchivedThreadsResult,
   ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
@@ -42,6 +42,7 @@ export { loopbackPeer } from "./threads/caller.js";
 export { openPiSession } from "./threads/pi-session.js";
 export { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 export { WatchList, watchInterval, watchSettings, DEFAULT_WATCH_INTERVAL_MS, type WatchRequest, type WatchResponse, type WatchItem } from "./threads/watch-list.js";
+export { archivedAcrossOwners } from "./threads/archived.js";
 export { ThreadDirectory, type ThreadOwner } from "./threads/directory.js";
 export { importRemoteThreads } from "./threads/import.js";
 export type { LaneManifest, LaneSpec, LaneReadiness, Run } from "./domain.js";

@@ -28,6 +28,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
   let issued = 0;
   let wrongCloud = false;
   let healthFailure = true;
+  let healthProbeGate: ((path: string) => Promise<void>) | null = null;
   let writeEnvironmentGate: (() => Promise<void>) | null = null;
   const synced: Array<{ user: string; session: string }> = [];
   const publicIngress = process.env.PI_ROUTER_TEST_CASE === "android-public";
@@ -76,6 +77,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     if (!user) return json({ locked: true, persons: [] }, 423);
     if (hint !== user) return json({ error: "Conflicting person" }, 403);
     if (path.endsWith("/health")) {
+      await healthProbeGate?.(path);
       if (healthFailure) { healthFailure = false; return json({ error: "Startup health unavailable" }, 503); }
       return json({ environmentId: path.startsWith("/v1/remotes/cloud/") && !wrongCloud ? "cloud" : "local" });
     }
@@ -102,8 +104,11 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     expect(calls[0]!.path).toBe("/v1/network");
     expect(calls[0]!.headers.has("x-pi-remote-session")).toBe(false);
     expect(prompts).toBe(0);
-    await expect(client.piFetch("/v1/stream", { method: "POST", body: "{}" })).rejects.toThrow("health returned HTTP 503");
-    await client.piFetch("/v1/stream", { method: "POST", body: "{}" });
+    const rejected = await Promise.allSettled(Array.from({ length: 4 }, () => client.piFetch("/v1/stream", { method: "POST", body: "{}" })));
+    expect(rejected.every(result => result.status === "rejected" && result.reason.message.includes("health returned HTTP 503"))).toBe(true);
+    expect(calls.filter(call => call.path === "/v1/health")).toHaveLength(1);
+    await Promise.all(Array.from({ length: 4 }, () => client.piFetch("/v1/stream", { method: "POST", body: "{}" })));
+    expect(calls.filter(call => call.path === "/v1/health")).toHaveLength(2);
     expect(prompts).toBe(1);
     expect(calls.some(call => call.path === "/v1/auth/session")).toBe(!nativePlatform);
     const unlock = calls.findIndex(call => call.path === "/v1/unlock");
@@ -115,6 +120,40 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     await expect(window.KenanRemote!.select({ id: "cloud", user: "sybil" })).rejects.toThrow("identity mismatch");
     const localEndpoint = await window.KenanRemote!.getState();
     expect(localEndpoint.id).toBe("local");
+    {
+      let began!: () => void;
+      let release!: () => void;
+      const probing = new Promise<void>(resolve => { began = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      healthProbeGate = async path => { if (path === "/v1/health") { began(); await gate; } };
+      wrongCloud = false;
+      window.dispatchEvent(new Event("pi-auth"));
+      const stale = window.KenanRemote!.getState();
+      await probing;
+      await window.KenanRemote!.select({ id: "cloud", user: "sybil" });
+      release();
+      await expect(stale).rejects.toThrow("Endpoint selection superseded");
+      expect((await window.KenanRemote!.getState()).id).toBe("cloud");
+      healthProbeGate = null;
+      await window.KenanRemote!.select({ id: "local", user: "sybil" });
+      window.dispatchEvent(new Event("pi-auth"));
+      let selectedBegan!: () => void;
+      let selectedRelease!: () => void;
+      const selecting = new Promise<void>(resolve => { selectedBegan = resolve; });
+      const selectedGate = new Promise<void>(resolve => { selectedRelease = resolve; });
+      const probesBefore = calls.filter(call => call.path.endsWith("/health")).length;
+      healthProbeGate = async path => { if (path.startsWith("/v1/remotes/cloud/")) { selectedBegan(); await selectedGate; } };
+      const explicit = window.KenanRemote!.select({ id: "cloud", user: "sybil" });
+      await selecting;
+      const concurrent = window.KenanRemote!.getState();
+      selectedRelease();
+      expect((await explicit).id).toBe("cloud");
+      expect((await concurrent).id).toBe("cloud");
+      expect(calls.filter(call => call.path.endsWith("/health"))).toHaveLength(probesBefore + 1);
+      healthProbeGate = null;
+      await window.KenanRemote!.select({ id: "local", user: "sybil" });
+      wrongCloud = true;
+    }
     if (nativePlatform) {
       let began!: () => void;
       let release!: () => void;

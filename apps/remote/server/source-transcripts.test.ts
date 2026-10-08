@@ -119,6 +119,39 @@ test("generation replacement rejects saved body, image and page locators explici
   expect(await transcripts.image("s", sha256(`${image.mimeType}\0${image.data}`))).toMatchObject({ ok: false, error: { code: "stale_source" } });
 });
 
+test("unchanged pages and lazy bodies do not rewrite durable locators", async () => {
+  const source = fixture([user(0, "before", "Before"), {
+    seq: 1, count: 1, entryId: "image", results: [],
+    message: { role: "user", timestamp: 9, content: [{ type: "image", mimeType: "image/png", data: "source" }] },
+  }]);
+  const db = database();
+  const transcripts = new SourceTranscripts(db, source.read, project, imageUrl);
+  const changes = () => (db.query("SELECT total_changes() AS n").get() as { n: number }).n;
+  const first = value(await transcripts.page("s", undefined, 2));
+  const written = changes();
+  expect(written).toBe(3);
+  expect(value(await transcripts.page("s", undefined, 2))).toEqual(first);
+  expect(value(await transcripts.body("s", first.items[1]!.id))).toBeDefined();
+  expect(changes()).toBe(written);
+  source.replace();
+  const replaced = value(await transcripts.page("s", undefined, 2));
+  expect(replaced.generation).toBe("g2");
+  expect(changes()).toBe(written + 3);
+});
+
+test("a failed page leaves the prior generation intact without partially committing new locators", async () => {
+  const db = database();
+  const source = fixture([user(0, "saved", "Original")]);
+  const transcripts = new SourceTranscripts(db, source.read, project, imageUrl);
+  value(await transcripts.page("s", undefined, 1));
+  const original = db.query("SELECT * FROM transcript_locators").all();
+  const invalid = fixture([user(0, "new", "Changed"), { ...user(1, "bad", "Malformed"), count: 2 }]);
+  invalid.replace();
+  const failed = new SourceTranscripts(db, invalid.read, project, imageUrl);
+  expect(await failed.page("s", undefined, 3)).toMatchObject({ ok: false, error: { code: "invalid_record" } });
+  expect(db.query("SELECT * FROM transcript_locators").all()).toEqual(original);
+});
+
 test("successful empty assistant projection agrees with source counts including collapsed blank text", async () => {
   const source = fixture([
     { seq: 0, count: 1, entryId: "empty", message: { role: "assistant", stopReason: "stop", content: [] }, results: [] },

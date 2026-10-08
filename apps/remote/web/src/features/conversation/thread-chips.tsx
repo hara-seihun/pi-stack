@@ -15,6 +15,7 @@ export interface ThreadDirectory {
   open(id: string): void;
   /** Ask for names this client does not hold. Safe to call on every render. */
   discover(ids: string[]): void;
+  lookupError(id: string): string | null;
 }
 
 export const ThreadDirectoryContext = createContext<ThreadDirectory | null>(null);
@@ -56,8 +57,9 @@ export function ThreadChips({ ids, label }: { ids: string[]; label?: string }) {
   return <span className="thread-chips" aria-label={label ?? "Threads this step is about"}>
     {ids.map(id => {
       const name = directory.name(id) || shortThreadName(id);
+      const error = directory.lookupError(id);
       return <button key={id} type="button" className={`thread-chip${directory.busy(id) ? " busy" : ""}`}
-        title={`Open ${name}`}
+        title={error ? `Name unavailable: ${error}. Open ${name}` : `Open ${name}`}
         onClick={event => { event.preventDefault(); event.stopPropagation(); directory.open(id); }}>
         {name}
       </button>;

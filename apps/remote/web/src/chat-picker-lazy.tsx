@@ -2,11 +2,13 @@
 // does not. Archived search, the messaging directory, account linking and its
 // QR code are a screen of their own, and most inbox visits never open it.
 
-import { forwardRef, lazy, Suspense, useCallback, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, Suspense, useCallback, useImperativeHandle, useRef, useState } from "react";
+import { preloadView } from "./app/preload-view";
 import type { ChatPickerEntry, ChatPickerHandle, ChatPickerProps } from "./thread-start-menu";
 import "./chat-picker-trigger.css";
 
-const RealChatPicker = lazy(() => import("./thread-start-menu").then(module => ({ default: module.ChatPicker })));
+const RealChatPicker = preloadView(() => import("./thread-start-menu").then(module => ({ default: module.ChatPicker })));
+export const prepareChatPicker = RealChatPicker.preload;
 
 export const LazyChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function LazyChatPicker(props, ref) {
   const [wanted, setWanted] = useState(false);
@@ -24,6 +26,6 @@ export const LazyChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(func
 
 function Placeholder({ busy = false, onWant }: { busy?: boolean; onWant?(): void }) {
   return <div className="chat-picker">
-    <button type="button" className="icon-button chat-picker-trigger" aria-label="New or open chat" title="New or open chat" aria-expanded={false} aria-haspopup="dialog" aria-busy={busy || undefined} onClick={onWant}>+</button>
+    <button type="button" className="icon-button chat-picker-trigger" aria-label="New or open chat" title="New or open chat" aria-expanded={false} aria-haspopup="dialog" aria-busy={busy || undefined} onPointerDown={() => { void prepareChatPicker(); }} onFocus={() => { void prepareChatPicker(); }} onClick={onWant}>+</button>
   </div>;
 }

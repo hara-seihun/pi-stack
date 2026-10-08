@@ -65,10 +65,14 @@ export class SourceTranscripts {
         item.head.textTruncated = true;
       }
       if (item.head.seq < from || item.head.seq >= end) continue;
-      this.db.query(`INSERT OR REPLACE INTO transcript_locators VALUES(?,?,?,?)`)
+      this.db.query(`INSERT INTO transcript_locators VALUES(?,?,?,?)
+        ON CONFLICT(session_id,item_id) DO UPDATE SET generation=excluded.generation,seq=excluded.seq
+        WHERE generation!=excluded.generation OR seq!=excluded.seq`)
         .run(sessionId, item.head.id, window.source.generation, item.head.seq);
       for (const [hash, encodedUrl] of images) if (item.body.includes(encodedUrl)) {
-        this.db.query(`INSERT OR REPLACE INTO transcript_image_locators VALUES(?,?,?,?)`)
+        this.db.query(`INSERT INTO transcript_image_locators VALUES(?,?,?,?)
+          ON CONFLICT(session_id,image_hash) DO UPDATE SET generation=excluded.generation,seq=excluded.seq
+          WHERE generation!=excluded.generation OR seq!=excluded.seq`)
           .run(sessionId, hash, window.source.generation, item.head.seq);
       }
     }
@@ -83,20 +87,22 @@ export class SourceTranscripts {
     const window = loaded.value;
     if (generation && generation !== window.source.generation) return bad("stale_source", "The transcript generation has been replaced");
     try {
-      const end = before === undefined ? window.total : Math.min(before, window.total);
-      const from = Math.max(0, end - limit);
-      const items: TranscriptItemHead[] = [];
-      for (const record of window.records) {
-        for (const item of this.derive(sessionId, window, record, from, end)) {
-          if (item.head.seq < from || item.head.seq >= end) continue;
-          const head = item.head;
-          items.push(before === undefined && head.seq === window.total - 1 && head.size <= INLINE_BODY_LIMIT
-            ? { ...head, body: JSON.parse(item.body) } as TranscriptItemHead : head);
+      return this.db.transaction(() => {
+        const end = before === undefined ? window.total : Math.min(before, window.total);
+        const from = Math.max(0, end - limit);
+        const items: TranscriptItemHead[] = [];
+        for (const record of window.records) {
+          for (const item of this.derive(sessionId, window, record, from, end)) {
+            if (item.head.seq < from || item.head.seq >= end) continue;
+            const head = item.head;
+            items.push(before === undefined && head.seq === window.total - 1 && head.size <= INLINE_BODY_LIMIT
+              ? { ...head, body: JSON.parse(item.body) } as TranscriptItemHead : head);
+          }
         }
-      }
-      this.db.query("DELETE FROM transcript_locators WHERE session_id=? AND generation!=?").run(sessionId, window.source.generation);
-      this.db.query("DELETE FROM transcript_image_locators WHERE session_id=? AND generation!=?").run(sessionId, window.source.generation);
-      return good({ sessionId, generation: window.source.generation, total: window.total, items });
+        this.db.query("DELETE FROM transcript_locators WHERE session_id=? AND generation!=?").run(sessionId, window.source.generation);
+        this.db.query("DELETE FROM transcript_image_locators WHERE session_id=? AND generation!=?").run(sessionId, window.source.generation);
+        return good({ sessionId, generation: window.source.generation, total: window.total, items });
+      })();
     } catch (cause) { return bad("invalid_record", cause instanceof Error ? cause.message : String(cause)); }
   }
 
@@ -108,11 +114,13 @@ export class SourceTranscripts {
     if (!loaded.ok) return loaded;
     if (loaded.value.source.generation !== locator.generation) return bad("stale_source", "The transcript generation has been replaced");
     try {
-      for (const record of loaded.value.records) {
-        const item = this.derive(sessionId, loaded.value, record, locator.seq, locator.seq + 1).find(item => item.head.id === itemId);
-        if (item) return good(item.body);
-      }
-      return good(undefined);
+      return this.db.transaction(() => {
+        for (const record of loaded.value.records) {
+          const item = this.derive(sessionId, loaded.value, record, locator.seq, locator.seq + 1).find(item => item.head.id === itemId);
+          if (item) return good(item.body);
+        }
+        return good(undefined);
+      })();
     } catch (cause) { return bad("invalid_record", cause instanceof Error ? cause.message : String(cause)); }
   }
 
