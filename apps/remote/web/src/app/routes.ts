@@ -6,7 +6,7 @@ import { startTransition, useEffect, useState } from "react";
 import type { ChatId } from "../chats";
 import { assertNever, requireState } from "../../../shared/explicit-state";
 
-export type Tab = "chats" | "attention" | "agents" | "files" | "machine";
+export type Tab = "chats" | "attention" | "agents" | "files" | "machine" | "settings";
 export type Panel = "inspector" | "queue" | "settings";
 
 export type Route =
@@ -14,9 +14,10 @@ export type Route =
   | { tab: "attention" }
   | { tab: "agents" }
   | { tab: "files"; path: string | null }
-  | { tab: "machine" };
+  | { tab: "machine" }
+  | { tab: "settings" };
 
-export const TABS: Tab[] = ["chats", "attention", "agents", "files", "machine"];
+export const TABS: Tab[] = ["chats", "attention", "agents", "files", "machine", "settings"];
 
 export function parseRoute(hash: string): Route {
   const [path, query] = hash.replace(/^#\/?/, "").split("?");
@@ -35,11 +36,11 @@ export function parseRoute(hash: string): Route {
     if (rest.length || questionId !== null) throw new Error("Invalid attention route");
     return { tab: "attention" };
   }
-  const tab = requireState(name, { chats: true, attention: true, agents: true, files: true, machine: true } satisfies Record<Tab, true>, "Route tab");
+  const tab = requireState(name, { chats: true, attention: true, agents: true, files: true, machine: true, settings: true } satisfies Record<Tab, true>, "Route tab");
   if (questionId !== null && tab !== "chats") throw new Error("Question links require a chat");
   switch (tab) {
     case "files": return { tab, path: rest.length ? `/${rest.filter(Boolean).join("/")}` : null };
-    case "agents": case "machine": case "attention": return { tab };
+    case "agents": case "machine": case "attention": case "settings": return { tab };
     case "chats": {
       const kind = rest[0];
       const id = rest[1];
@@ -65,6 +66,7 @@ export function formatRoute(route: Route): string {
     case "files": return route.path ? `#/files/${route.path.split("/").filter(Boolean).map(segment).join("/")}` : "#/files";
     case "attention": return "#/attention";
     case "machine": return "#/machine";
+    case "settings": return "#/settings";
   }
   return assertNever(route, "Route formatting");
 }
@@ -90,6 +92,7 @@ export function routeHome(route: Route): Route {
     case "files": return { tab: "files", path: null };
     case "attention": return { tab: "attention" };
     case "machine": return { tab: "machine" };
+    case "settings": return { tab: "settings" };
   }
   return assertNever(route, "Route home");
 }
@@ -118,7 +121,7 @@ export function useRoute(): Route {
 export function routeThreadId(route: Route): string | null {
   switch (route.tab) {
     case "chats": return route.chat?.startsWith("ai:") ? route.chat.slice(3) : null;
-    case "agents": case "files": case "machine": case "attention": return null;
+    case "agents": case "files": case "machine": case "attention": case "settings": return null;
   }
   return assertNever(route, "Route thread");
 }
@@ -126,7 +129,7 @@ export function routeThreadId(route: Route): string | null {
 export function routeChatId(route: Route): ChatId | null {
   switch (route.tab) {
     case "chats": return route.chat;
-    case "agents": case "files": case "machine": case "attention": return null;
+    case "agents": case "files": case "machine": case "attention": case "settings": return null;
   }
   return assertNever(route, "Route chat");
 }

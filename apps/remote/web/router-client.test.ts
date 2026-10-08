@@ -235,6 +235,13 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     window.PiRemotePerson.clearSession();
     await native.nativeSessionReady();
     if (nativePlatform) expect(synced.at(-1)).toEqual({ user: "", session: "" });
+    window.PiRemotePerson.set("sybil");
+    peopleStorage.removeItem(`${!nativePlatform && prefix ? `${prefix}:` : ""}pi-remote-key:sybil`);
+    sessions.clear();
+    client.registerUnlockHandler(async () => { window.PiRemotePerson.set("guest"); return ""; });
+    const beforeSettings = calls.filter(call => call.path.endsWith("/settings/person.autoCollapse")).length;
+    await expect(client.api("PUT", "/v1/settings/person.autoCollapse", { value: false })).rejects.toThrow("selected person changed");
+    expect(calls.filter(call => call.path.endsWith("/settings/person.autoCollapse"))).toHaveLength(beforeSettings + 1);
   } finally {
     for (const name of names) {
       const descriptor = descriptors.get(name);

@@ -91,6 +91,9 @@ import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
+import { SettingsService, type OwnedSettingAdapter } from "./settings-store";
+import { machineActionDefinition, modelAvailabilityDefinition } from "../shared/settings";
+import { settingsError } from "pi-orchestrator/person-settings-contract";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
 import { CalendarStore } from "./calendar";
 import { PhoneOverlay } from "./phone-overlay";
@@ -474,6 +477,43 @@ const now = () => new Date().toISOString();
 let planUsage: PlanUsageSnapshot | null = null;
 /** Everyone's relative usage, computed only for the host's administrator. */
 const HOST_ADMINISTRATOR = isHostAdministrator();
+const settingsService = new SettingsService(DATA, HOST_ADMINISTRATOR, () => {
+  if (!HOST_ADMINISTRATOR) return [];
+  const adapters: OwnedSettingAdapter[] = availableThreadModels().map(option => ({
+    definition: modelAvailabilityDefinition(option.id, option.label, modelAvailability.path),
+    read: async () => {
+      const policy = modelAvailability.disabled();
+      const model = THREAD_MODELS.get(option.id);
+      if (!policy.ok) return settingsError("unavailable", policy.error.message);
+      if (!model) return settingsError("unknown-setting", "Model no longer configured");
+      return { ok: true, value: !policy.value.has(modelAvailabilityKey(`${model.provider}/${model.modelId}`)) };
+    },
+    write: async value => {
+      if (typeof value !== "boolean") return settingsError("invalid", "Model availability requires a boolean");
+      const model = THREAD_MODELS.get(option.id);
+      if (!model) return settingsError("unknown-setting", "Model no longer configured");
+      const saved = modelAvailability.set(`${model.provider}/${model.modelId}`, value);
+      if (!saved.ok) return settingsError("unavailable", saved.error.message);
+      signalSync(); pushBootstrap(); await refreshDashboard();
+      return { ok: true, value };
+    },
+  }));
+  for (const action of machineActions.actions) adapters.push({
+    definition: machineActionDefinition(action.id, action.label),
+    read: async () => {
+      try { return { ok: true, value: (await machineActions.status(action)).active }; }
+      catch (cause) { return settingsError("unavailable", String(cause)); }
+    },
+    write: async value => {
+      if (typeof value !== "boolean") return settingsError("invalid", "Machine action requires a boolean");
+      try {
+        const state = await machineActions.set(action, value);
+        await refreshDashboard(); return { ok: true, value: state.active };
+      } catch (cause) { return settingsError("unavailable", String(cause)); }
+    },
+  });
+  return adapters;
+});
 let peopleUsage: PeopleUsage | null = null;
 /** The viewer's own spending per plan; null when nothing attributes usage to her. */
 let ownUsage: PersonalUsage | null = null;
@@ -573,11 +613,10 @@ async function buildDashboard(): Promise<Dashboard> {
   const [agents, actions] = await Promise.all([activeAgents(), machineActions.refresh()]);
   return {
     plans: planCards(planUsage, ownUsage),
-    actions,
+    actions: HOST_ADMINISTRATOR ? actions : [],
     machine: readMachineUsage(),
     modelCounts: agents.models,
-    modelAvailability: availableThreadModels(),
-    canManageModels: HOST_ADMINISTRATOR,
+    ...(HOST_ADMINISTRATOR ? { modelAvailability: availableThreadModels(), canManageModels: true } : {}),
     people: peopleUsage,
     allowance,
   };
@@ -1594,6 +1633,7 @@ const meet = meetingRuntime.value;
 
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, () => { trackFeature("signal", "agent"); });
 const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
+observeError(db, "settings-migration", calendar.timezoneMigration.ok ? null : calendar.timezoneMigration.error.message);
 calendar.start();
 type SocketData = PhoneSocketData;
 const phones = new PhoneBroker({
@@ -1670,6 +1710,16 @@ const server = Bun.serve<SocketData>({
       return telephoneDispatcher(req, { threads, owner: MESSAGE_OWNER.id, cwd: admitted.value.cwd,
         model: destination.defaultModel, loopback: peer?.address === "127.0.0.1" || peer?.address === "::1",
         onApproved: callId => { trackFeature("telephone", "agent", callId); } });
+    }
+    if (API.settings.match(req.method, url.pathname)) return json(await settingsService.snapshot());
+    const settingUpdate = API.updateSetting.match(req.method, url.pathname);
+    if (settingUpdate) {
+      let body: unknown;
+      try { body = await readBody(req); } catch { return json({ error: "Expected JSON setting value", code: "invalid" }, 400); }
+      const saved = await settingsService.update(settingUpdate.id, body);
+      if (saved.ok) return json({ entry: saved.value });
+      const status = saved.error.code === "forbidden" ? 403 : saved.error.code === "unknown-setting" ? 404 : saved.error.code === "unavailable" ? 503 : 400;
+      return json({ error: saved.error.message, code: saved.error.code }, status);
     }
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);
@@ -2003,25 +2053,22 @@ const server = Bun.serve<SocketData>({
     const modelAvailabilityUpdate = API.setModelAvailability.match(req.method, url.pathname);
     if (modelAvailabilityUpdate) {
       if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change global model availability", 403);
-      const model = THREAD_MODELS.get(modelAvailabilityUpdate.id);
-      if (!model || !availableThreadModels().some(option => option.id === model.id)) return error("Unknown offered model", 404);
       let body: unknown;
       try { body = await readBody(req); }
       catch { return error("Expected JSON with an enabled boolean", 400); }
       if (!body || typeof body !== "object" || !("enabled" in body) || typeof body.enabled !== "boolean") return error("enabled must be a boolean", 400);
-      const saved = modelAvailability.set(`${model.provider}/${model.modelId}`, body.enabled);
-      if (!saved.ok) return threadError(saved.error);
-      signalSync();
-      pushBootstrap();
-      await refreshDashboard();
+      const saved = await settingsService.update(`model.available:${modelAvailabilityUpdate.id}`, { value: body.enabled });
+      if (!saved.ok) return error(saved.error.message, saved.error.code === "unavailable" ? 503 : saved.error.code === "unknown-setting" ? 404 : 400);
       return json({ models: availableThreadModels() });
     }
     if (API.actions.match(req.method, url.pathname)) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can read system actions", 403);
       try { return json({ actions: await machineActions.refresh() }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read machine actions", 503); }
     }
     const actionToggle = API.actionToggle.match(req.method, url.pathname);
     if (actionToggle) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change system actions", 403);
       const action = machineActions.find(actionToggle.id);
       if (!action) return error("Unknown machine action", 404);
       try {

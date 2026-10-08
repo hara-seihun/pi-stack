@@ -22,34 +22,33 @@ export const phoneGrants: readonly { step: PhoneSetupStep; label: string; help: 
   { step: "installPackages", label: "App updates", help: "Allow app installs from Kenan so it can offer Android updates. Setup does not install an app." },
 ];
 
-export function allPermissionsGranted(status: PhoneStatus): boolean {
-  return phoneGrants.every(grant => status.capabilities[grant.step] === true);
-}
-
-export interface PhoneAccessDriver {
+export interface PhoneGrantDriver {
   status(): Promise<PhoneStatus>;
   request(step: PhoneSetupStep): Promise<unknown>;
   active(): boolean;
-  progress(step: PhoneSetupStep, index: number): void;
 }
 
-/** A settings request settles only after Android returns, never merely after opening it. */
-export async function requestPhoneAccess(driver: PhoneAccessDriver) {
-  const failures: Partial<Record<PhoneSetupStep, string>> = {};
-  let status = await driver.status();
-  for (const [index, grant] of phoneGrants.entries()) {
-    if (!driver.active()) return { status, failures, completed: false, granted: false };
-    if (status.capabilities[grant.step] === true) continue;
-    if (grant.step === "backgroundLocation" && status.capabilities.location !== true) {
-      failures[grant.step] = "Location must be granted first";
-      continue;
-    }
-    driver.progress(grant.step, index);
-    try { await driver.request(grant.step); }
-    catch (failure) { failures[grant.step] = String(failure); }
-    if (!driver.active()) return { status, failures, completed: false, granted: false };
-    status = await driver.status();
+export type PhoneGrantResult =
+  | { state: "granted" | "denied"; status: PhoneStatus }
+  | { state: "cancelled" }
+  | { state: "error"; message: string };
+
+export async function requestPhoneGrant(driver: PhoneGrantDriver, step: PhoneSetupStep): Promise<PhoneGrantResult> {
+  try {
+    if (!driver.active()) return { state: "cancelled" };
+    const before = await driver.status();
+    if (!driver.active()) return { state: "cancelled" };
+    if (!phoneGrants.some(grant => grant.step === step)) return { state: "error", message: "Unknown phone-control grant" };
+    if (typeof before.capabilities[step] !== "boolean") return { state: "error", message: "This grant is unavailable in this Android shell" };
+    if (before.capabilities[step] === true) return { state: "granted", status: before };
+    if (step === "backgroundLocation" && before.capabilities.location !== true) return { state: "error", message: "Location must be granted first" };
+    await driver.request(step);
+    if (!driver.active()) return { state: "cancelled" };
+    const status = await driver.status();
+    if (!driver.active()) return { state: "cancelled" };
+    if (typeof status.capabilities[step] !== "boolean") return { state: "error", message: "Android did not report the resulting grant" };
+    return { state: status.capabilities[step] === true ? "granted" : "denied", status };
+  } catch (failure) {
+    return driver.active() ? { state: "error", message: failure instanceof Error ? failure.message : String(failure) } : { state: "cancelled" };
   }
-  const completed = driver.active();
-  return { status, failures, completed, granted: completed && allPermissionsGranted(status) };
 }

@@ -1,85 +1,67 @@
 import { expect, test } from "bun:test";
-import { allPermissionsGranted, phoneGrants, requestPhoneAccess } from "./src/phone-access";
+import { phoneGrants, requestPhoneGrant } from "./src/phone-access";
 import type { PhoneSetupStep, PhoneStatus } from "./src/native";
 
-function fixture(missing: PhoneSetupStep[]) {
-  const status: PhoneStatus = { enabled: false, connected: false, deviceId: "test", name: "Emulator", environment: "test",
-    capabilities: Object.fromEntries(phoneGrants.map(({ step }) => [step, !missing.includes(step)])) };
+function fixture() {
+  const status: PhoneStatus = { enabled: false, connected: false, deviceId: "test", name: "Emulator", environment: "test", capabilities: Object.fromEntries(phoneGrants.map(({ step }) => [step, false])) };
   const requests: PhoneSetupStep[] = [];
   let active = true;
-  const driver = { status: async () => structuredClone(status), active: () => active, progress: () => {},
+  const driver = { status: async () => structuredClone(status), active: () => active,
     request: async (step: PhoneSetupStep) => { requests.push(step); status.capabilities[step] = true; } };
   return { status, requests, driver, stop: () => { active = false; } };
 }
 
-test("one setup chains missing access only, waits for return, then rechecks actual grants", async () => {
-  const f = fixture(["accessibility", "sms", "overlay"]);
+test("one grant waits for Android return, rechecks actual capability and does not request other access", async () => {
+  const f = fixture();
   let returned!: () => void;
-  let waiting = true;
-  f.driver.request = async step => {
-    f.requests.push(step);
-    if (step === "accessibility" && waiting) {
-      waiting = false;
-      await new Promise<void>(resolve => { returned = resolve; });
-    } else if (step !== "accessibility") f.status.capabilities[step] = true;
-  };
-  const result = requestPhoneAccess(f.driver);
+  f.driver.request = async step => { f.requests.push(step); await new Promise<void>(resolve => { returned = resolve; }); };
+  const pending = requestPhoneGrant(f.driver, "sms");
   await Promise.resolve(); await Promise.resolve();
-  expect(f.requests).toEqual(["accessibility"]);
+  expect(f.requests).toEqual(["sms"]);
   returned();
-  expect((await result).completed).toBe(true);
-  expect(f.requests).toEqual(["accessibility", "sms", "overlay"]);
-  expect((await result).status.capabilities.accessibility).toBe(false);
-  f.requests.length = 0;
-  await requestPhoneAccess(f.driver);
-  expect(f.requests).toEqual(["accessibility"]);
+  const result = await pending;
+  expect(result.state).toBe("denied");
+  expect(f.status.enabled).toBe(false);
+  expect(f.requests).toEqual(["sms"]);
 });
 
-test("denial and unavailable system screens do not stop remaining requests or claim success", async () => {
-  const f = fixture(["sms", "contacts", "calendar"]);
-  f.driver.request = async step => {
-    f.requests.push(step);
-    if (step === "sms") throw new Error("Restricted by Android");
-    if (step === "calendar") f.status.capabilities[step] = true;
-  };
-  const result = await requestPhoneAccess(f.driver);
-  expect(f.requests).toEqual(["sms", "contacts", "calendar"]);
-  expect(result.granted).toBe(false);
-  expect(result.failures.sms).toContain("Restricted by Android");
-  expect(result.status.capabilities.contacts).toBe(false);
-  expect(result.status.capabilities.calendar).toBe(true);
+test("granting one capability does not require all permissions or enable phone control", async () => {
+  const f = fixture();
+  expect((await requestPhoneGrant(f.driver, "contacts")).state).toBe("granted");
+  expect(f.status.capabilities.sms).toBe(false);
+  expect(f.status.enabled).toBe(false);
+  expect(f.requests).toEqual(["contacts"]);
+  await requestPhoneGrant(f.driver, "contacts");
+  expect(f.requests).toEqual(["contacts"]);
 });
 
-test("background location is a separate request and depends on foreground location", async () => {
-  const f = fixture(["location", "backgroundLocation", "overlay"]);
-  f.driver.request = async step => { f.requests.push(step); };
-  const result = await requestPhoneAccess(f.driver);
-  expect(f.requests).toEqual(["location", "overlay"]);
-  expect(result.failures.backgroundLocation).toContain("Location must be granted first");
-  f.status.capabilities.location = true;
-  f.requests.length = 0;
-  await requestPhoneAccess(f.driver);
-  expect(f.requests).toEqual(["backgroundLocation", "overlay"]);
-});
-
-test("unmount, stop or identity change while settings is open prevents any further requests", async () => {
-  const f = fixture(["accessibility", "sms"]);
-  f.driver.request = async step => { f.requests.push(step); f.stop(); };
-  expect((await requestPhoneAccess(f.driver)).completed).toBe(false);
-  expect(f.requests).toEqual(["accessibility"]);
-});
-
-test("readiness requires every phone grant including app-control accessibility", async () => {
-  const f = fixture([]);
-  expect(allPermissionsGranted(f.status)).toBe(true);
-  for (const { step } of phoneGrants) {
-    f.status.capabilities[step] = false;
-    expect(allPermissionsGranted(f.status)).toBe(false);
-    f.status.capabilities[step] = true;
-  }
-  delete f.status.capabilities.accessibility;
-  expect(allPermissionsGranted(f.status)).toBe(false);
-  f.status.capabilities.accessibility = true;
-  expect((await requestPhoneAccess(f.driver)).granted).toBe(true);
+test("unavailable and retired grants never request Android access", async () => {
+  const f = fixture();
+  delete f.status.capabilities.camera;
+  expect((await requestPhoneGrant(f.driver, "camera")).state).toBe("error");
+  f.status.capabilities.writeAccessibility = false;
+  expect((await requestPhoneGrant(f.driver, "writeAccessibility")).state).toBe("error");
   expect(f.requests).toEqual([]);
+});
+
+test("background location requires the actual foreground grant first", async () => {
+  const f = fixture();
+  expect((await requestPhoneGrant(f.driver, "backgroundLocation")).state).toBe("error");
+  expect(f.requests).toEqual([]);
+  f.status.capabilities.location = true;
+  expect((await requestPhoneGrant(f.driver, "backgroundLocation")).state).toBe("granted");
+  expect(f.requests).toEqual(["backgroundLocation"]);
+});
+
+test("identity change while Android settings is open prevents accepting the result", async () => {
+  const f = fixture();
+  f.driver.request = async step => { f.requests.push(step); f.stop(); };
+  expect((await requestPhoneGrant(f.driver, "sms")).state).toBe("cancelled");
+  expect(f.requests).toEqual(["sms"]);
+});
+
+test("Android failures remain errors rather than permission success", async () => {
+  const f = fixture();
+  f.driver.request = async () => { throw new Error("Restricted by Android"); };
+  expect(await requestPhoneGrant(f.driver, "sms")).toEqual({ state: "error", message: "Restricted by Android" });
 });

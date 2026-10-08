@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { API } from "../../../../server/api";
 import type { SessionEvent } from "../../../../server/protocol";
 import { api } from "../../client";
 import { DismissibleError } from "../../dismissible-error";
-import { optimisticThreadSettings, SettingsFields } from "../../thread-settings";
-import type { Session, ThreadSettings } from "../../types";
+import type { Session } from "../../types";
+import { navigate } from "../../app/routes";
 import { Sheet } from "../../app/Sheet";
 import { StatusPill } from "../status/StatusPill";
 import { StatusIcon } from "../status/StatusIcon";
@@ -36,13 +36,11 @@ function WaitReference({ wait, sessions, onOpen }: { wait: NonNullable<Session["
   return assertNever(wait, "Inspector dependency");
 }
 
-export function InspectorSheet({ session, sessions, open, pending, autoCollapse, onAutoCollapseChange, onClose, onOpenThread, onOpenThreadId, onArchive, onRestore, onBackground, debug }: {
+export function InspectorSheet({ session, sessions, open, pending, onClose, onOpenThread, onOpenThreadId, onArchive, onRestore, onBackground, debug }: {
   session: Session;
   sessions: Session[];
   open: boolean;
   pending: boolean;
-  autoCollapse: boolean;
-  onAutoCollapseChange(enabled: boolean): void;
   onClose(): void;
   onOpenThread(session: Session): void;
   onOpenThreadId(id: string): void;
@@ -54,49 +52,12 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
 }) {
   const [tab, setTab] = useState<InspectorTab>("thread");
   const childrenVersion = sessions.filter(child => child.parentId === session.id).map(child => `${child.id}:${child.revision}`).join(",");
-  const [settingsSnapshot, setSettingsSnapshot] = useState<{ sessionId: string; value: ThreadSettings } | null>(null);
-  const authoritativeSettings = useRef<{ sessionId: string; value: ThreadSettings } | null>(null);
-  const settingsRequest = useRef(0);
-  const settingsSaving = useRef(false);
-  const currentSessionId = useRef(session.id);
-  currentSessionId.current = session.id;
-  const settings = settingsSnapshot?.sessionId === session.id ? settingsSnapshot.value : null;
   const [children, setChildren] = useState<Session[]>([]);
   const [childrenLoading, setChildrenLoading] = useState(false);
   const [childrenFailure, setChildrenFailure] = useState("");
-  const [saving, setSaving] = useState("");
-  const [loadFailure, setLoadFailure] = useState("");
-  const [saveFailure, setSaveFailure] = useState("");
   const [events, setEvents] = useState<SessionEvent[] | null>(null);
   const [eventsFailure, setEventsFailure] = useState("");
   const [attempt, retry] = useState(0);
-  useEffect(() => {
-    settingsRequest.current += 1;
-    settingsSaving.current = false;
-    authoritativeSettings.current = null;
-    setSettingsSnapshot(null);
-    setSaving("");
-    setLoadFailure("");
-    setSaveFailure("");
-  }, [session.id]);
-  useEffect(() => {
-    if (!open || tab !== "settings" || settingsSaving.current) return;
-    let active = true;
-    const sessionId = session.id;
-    const request = ++settingsRequest.current;
-    setLoadFailure("");
-    api(API.sessionSettings.method, API.sessionSettings.path({ sessionId }))
-      .then(result => {
-        if (!active || request !== settingsRequest.current || settingsSaving.current || currentSessionId.current !== sessionId) return;
-        const snapshot = { sessionId, value: result.settings };
-        authoritativeSettings.current = snapshot;
-        setSettingsSnapshot(snapshot);
-      })
-      .catch(error => {
-        if (active && request === settingsRequest.current && !settingsSaving.current && currentSessionId.current === sessionId) setLoadFailure(error?.message || String(error));
-      });
-    return () => { active = false; };
-  }, [open, tab, session.id, session.revision, attempt]);
   useEffect(() => {
     if (!open || tab !== "thread") return;
     let active = true;
@@ -121,33 +82,6 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
       .catch(error => { if (active) setEventsFailure(error?.message || String(error)); });
     return () => { active = false; };
   }, [open, tab, session.id, session.revision, attempt]);
-  const update = async (field: string, body: Record<string, string | number>) => {
-    const previous = authoritativeSettings.current;
-    if (settingsSaving.current || !previous || previous.sessionId !== session.id) return;
-    const sessionId = session.id;
-    const request = ++settingsRequest.current;
-    settingsSaving.current = true;
-    setSaving(field);
-    setSaveFailure("");
-    setSettingsSnapshot({ sessionId, value: optimisticThreadSettings(previous.value, body) });
-    try {
-      const result = await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId }), body);
-      if (request !== settingsRequest.current || currentSessionId.current !== sessionId) return;
-      const snapshot = { sessionId, value: result.settings };
-      authoritativeSettings.current = snapshot;
-      setSettingsSnapshot(snapshot);
-    } catch (error: any) {
-      if (request !== settingsRequest.current || currentSessionId.current !== sessionId) return;
-      setSettingsSnapshot(previous);
-      setSaveFailure(error?.message || String(error));
-      retry(value => value + 1);
-    } finally {
-      if (request === settingsRequest.current && currentSessionId.current === sessionId) {
-        settingsSaving.current = false;
-        setSaving("");
-      }
-    }
-  };
   const status = threadStatus(session);
   const name = agentName(session);
   const parent = session.parentId ? sessions.find(item => item.id === session.parentId) ?? null : null;
@@ -201,18 +135,7 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
       </section>
       {debug && <section className="inspector-section"><h3>Debug</h3>{debug}</section>}
     </div>}
-    {tab === "settings" && <div className="inspector-panel">
-      <section className="inspector-section">
-        <h3>Display</h3>
-        <label className="inspector-display-toggle"><input type="checkbox" checked={autoCollapse} onChange={event => onAutoCollapseChange(event.currentTarget.checked)} /> Auto-collapse work and thoughts</label>
-        <p className="muted inspector-hint">Turn off to stream every thought and tool step openly, without grouping them into work cards. Applies to all chats on this device.</p>
-      </section>
-      <DismissibleError message={loadFailure} resetKey={attempt} />
-      {loadFailure && <button type="button" disabled={Boolean(saving)} onClick={() => retry(value => value + 1)}>Retry loading settings</button>}
-      <DismissibleError message={saveFailure} />
-      {settings ? <SettingsFields session={session} settings={settings} saving={saving} onUpdate={(field, body) => void update(field, body)} />
-        : !loadFailure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div>}
-    </div>}
+    {tab === "settings" && <div className="inspector-panel"><button type="button" onClick={() => { onClose(); navigate({ tab: "settings" }); }}>Open Settings</button><p>Model, execution and display choices live in the central Settings area.</p></div>}
     {tab === "timeline" && <div className="inspector-panel">
       <p className="muted inspector-hint">Execution events recorded by the supervisor. This is operational metadata, not part of what the agent sees.</p>
       <DismissibleError message={eventsFailure} resetKey={attempt} />

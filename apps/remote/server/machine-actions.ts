@@ -56,6 +56,20 @@ export class MachineActions {
     return Promise.all(this.actions.map((action) => this.toggles.get(action.id) ?? this.status(action)));
   }
 
+  set(action: MachineAction, active: boolean): Promise<MachineActionState> {
+    const previous = this.toggles.get(action.id);
+    const operation = (async () => {
+      if (previous) await previous;
+      const current = await this.status(action);
+      if (current.active !== active) await run(active ? action.on : action.off);
+      const confirmed = await this.status(action);
+      if (confirmed.active !== active) throw new Error(`${action.label} did not reach its requested state`);
+      return confirmed;
+    })().finally(() => { if (this.toggles.get(action.id) === operation) this.toggles.delete(action.id); });
+    this.toggles.set(action.id, operation);
+    return operation;
+  }
+
   toggle(action: MachineAction): Promise<MachineActionState> {
     const pending = this.toggles.get(action.id);
     if (pending) return pending;

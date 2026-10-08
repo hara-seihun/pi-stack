@@ -1,7 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Dashboard, MachineUsage, PeopleUsage, PeopleUsagePeriod, PlanAccountRow, PlanCard, PlanMetricRow } from "../../../../server/protocol";
 import { Sheet } from "../../app/Sheet";
-import { Models } from "./Models";
 import { iconUrl } from "../../chat-row";
 import { formatBytes, formatDollars, formatLocalDateTime, formatResetDistance, formatShare, formatTokens, formatWeekReset } from "./format";
 import "./machine.css";
@@ -16,9 +15,7 @@ export type MachineScreenProps = {
   onToggleAction(id: string): void;
   onDismissOwnerError(id: string): void;
   onReconnect(): void;
-  environment: ReactNode;
   features: ReactNode;
-  permissions: ReactNode;
   clientRevision: string;
 };
 
@@ -191,19 +188,10 @@ export function MachineScreen(props: MachineScreenProps) {
         <p className="machine-secondary">Subscription quota used, valued in dollars. Plan cards below show each provider separately.</p>
       </Card>}
       {dashboard?.plans.map((plan) => <Plan key={plan.id} plan={plan} modelCounts={props.modelCounts} />)}
-      {dashboard?.modelAvailability && <Card title="Models"><Models models={dashboard.modelAvailability} canManage={dashboard.canManageModels ?? false} /></Card>}
       {dashboard?.allowance && <Allowance allowance={dashboard.allowance} />}
       {dashboard?.people && <People usage={dashboard.people} />}
-      {dashboard && dashboard.actions.length > 0 && <Card title="Actions"><div className="machine-actions">
-        {dashboard.actions.map((action) => {
-          const pending = props.pendingAction === action.id;
-          return <button className="machine-action" type="button" role="switch" aria-checked={action.active} disabled={pending} onClick={() => props.onToggleAction(action.id)} key={action.id}><span>{action.label}</span><strong>{pending ? "Saving…" : action.active ? "On" : "Off"}</strong></button>;
-        })}
-      </div></Card>}
       <Host machine={dashboard?.machine ?? null} />
       {props.features}
-      <Card title="Environment">{props.environment}</Card>
-      <Card title="Permissions">{props.permissions}</Card>
       <Card title="App"><dl className="machine-app-detail"><dt>Revision</dt><dd title={props.clientRevision}>{props.clientRevision.slice(0, 12)}</dd><dt>Connection</dt><dd>{props.offline ? <><span>{props.offline}</span><button type="button" onClick={props.onReconnect}>Reconnect</button></> : props.syncing ? "Syncing" : "Connected"}</dd></dl></Card>
       {props.ownerErrors.length > 0 && <Card title="Owner errors"><ul className="machine-errors">{props.ownerErrors.map((error) => <li key={error.id}><span><strong>{error.owner}</strong>{error.message}</span><button type="button" onClick={() => props.onDismissOwnerError(error.id)}>Dismiss</button></li>)}</ul></Card>}
     </div>

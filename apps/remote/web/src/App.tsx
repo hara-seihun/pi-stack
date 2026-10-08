@@ -59,6 +59,8 @@ import type { QueueAction } from "./features/queue/delivery";
 import { threadStatus } from "./features/status/thread-status";
 import { speech } from "./speech";
 import { SpeechBar } from "./SpeechBar";
+import { parseSettingsEntry, parseSettingsSnapshot } from "../../shared/settings-wire";
+import { observeClientTimezone } from "./features/settings/client-timezone";
 
 // Screen code warms after bootstrap, without mounting views or fetching data.
 // A ready view never enters Suspense's cold retry throttle.
@@ -69,6 +71,7 @@ const AgentsScreen = preloadView(() => import("./features/agents/AgentsScreen").
 const AttentionScreen = preloadView(() => import("./attention").then(module => ({ default: module.AttentionScreen })));
 const FilesScreen = preloadView(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
 const MachineTab = preloadView(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
+const SettingsScreen = preloadView(() => import("./features/settings/SettingsScreen").then(module => ({ default: module.SettingsScreen })));
 
 function prepareTab(tab: Tab) {
   switch (tab) {
@@ -77,6 +80,7 @@ function prepareTab(tab: Tab) {
     case "attention": void AttentionScreen.preload(); return;
     case "files": void FilesScreen.preload(); return;
     case "machine": void MachineTab.preload(); return;
+    case "settings": void SettingsScreen.preload(); return;
   }
   return assertNever(tab, "Prepare tab");
 }
@@ -217,21 +221,52 @@ const LiveConversation = memo(function LiveConversation({ live, ...props }: { li
 function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const person = useRef(window.PiRemotePerson.get()).current;
   const autoCollapseKey = appStorageKey(`pi-remote-auto-collapse:${person}`);
-  const [autoCollapse, setAutoCollapse] = useState(() => localStorage.getItem(autoCollapseKey) !== "false");
+  const [autoCollapse, setAutoCollapse] = useState(true);
   const updateAutoCollapse = useCallback((enabled: boolean) => {
-    try {
-      localStorage.setItem(autoCollapseKey, String(enabled));
-      setAutoCollapse(enabled);
-    } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : "Could not save auto-collapse preference");
-    }
-  }, [autoCollapseKey]);
+    void api(API.updateSetting.method, API.updateSetting.path({ id: "person.autoCollapse" }), { value: enabled }).then(result => {
+      const parsed = parseSettingsEntry(result.entry);
+      if (!parsed.ok) { toast.error(parsed.error); return; }
+      if (parsed.value.value.state !== "set" || typeof parsed.value.value.value !== "boolean") { toast.error("Auto-collapse owner returned an invalid state"); return; }
+      setAutoCollapse(parsed.value.value.value);
+      window.dispatchEvent(new Event("pi-settings-changed"));
+    }, cause => toast.error(cause instanceof Error ? cause.message : "Could not save auto-collapse preference"));
+  }, []);
   const { state, stateRef, patch } = useStableState();
   const roomDirectory = useRooms(state.bootstrap?.rooms === true);
   const bootstrapped = state.bootstrap !== null;
   useEffect(() => {
     if (!bootstrapped) return;
-    const views = [{ preload: prepareChatPicker }, AgentsScreen, FilesScreen, MachineTab, InspectorSheet, QueueSheet, AttentionScreen];
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await api(API.settings.method, API.settings.path());
+        if (!active || person !== window.PiRemotePerson.get()) return;
+        const parsed = parseSettingsSnapshot(response);
+        if (!parsed.ok) { toast.error(parsed.error); return; }
+        const preference = parsed.value.entries.find(entry => entry.definition.id === "person.autoCollapse");
+        if (!preference || preference.value.state === "unavailable") { if (active) toast.error(preference?.value.state === "unavailable" ? preference.value.message : "Display preference is not registered"); return; }
+        if (preference.value.state === "set") {
+          if (typeof preference.value.value !== "boolean") { if (active) toast.error("Invalid display preference"); return; }
+          if (active) setAutoCollapse(preference.value.value);
+          localStorage.removeItem(autoCollapseKey);
+        } else {
+          const saved = localStorage.getItem(autoCollapseKey);
+          if (saved === "true" || saved === "false") {
+            await api(API.updateSetting.method, API.updateSetting.path({ id: "person.autoCollapse" }), { value: saved === "true" });
+            localStorage.removeItem(autoCollapseKey);
+            if (active) setAutoCollapse(saved === "true");
+          }
+        }
+      } catch (cause) { if (active) toast.error(String(cause)); }
+    };
+    void load();
+    void observeClientTimezone().then(result => { if (active && !result.ok) toast.error(result.error); });
+    window.addEventListener("pi-settings-changed", load);
+    return () => { active = false; window.removeEventListener("pi-settings-changed", load); };
+  }, [bootstrapped, autoCollapseKey, person]);
+  useEffect(() => {
+    if (!bootstrapped) return;
+    const views = [{ preload: prepareChatPicker }, AgentsScreen, FilesScreen, MachineTab, SettingsScreen, InspectorSheet, QueueSheet, AttentionScreen];
     let cancelled = false;
     let next = 0;
     let cancelScheduled: (() => void) | null = null;
@@ -1158,7 +1193,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }), [knownSessions, openThreadId, discoverThreads, discoveryRevision]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || route.tab === "files" || !!routeChat;
+  const showDetail = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || route.tab === "settings" || route.tab === "files" || !!routeChat;
 
   const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
     [threadStarts, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
@@ -1183,7 +1218,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const list = (() => {
     switch (route.tab) {
       case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
-      case "agents": case "attention": case "machine": case "files": return null;
+      case "agents": case "attention": case "machine": case "settings": case "files": return null;
     }
     return assertNever(route, "App list route");
   })();
@@ -1203,13 +1238,14 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
       case "attention": return <Suspense fallback={<Loading label="Loading attention…" />}><AttentionScreen version={notificationVersion} /></Suspense>;
       case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
+      case "settings": return <Suspense fallback={<Loading label="Loading settings…" />}><SettingsScreen sessions={knownSessions} initialThreadId={selectedAiId(stateRef.current)} update={update} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onOpenThread={openThreadId} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
       case "chats": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
     }
     return assertNever(route, "App detail route");
   })();
 
-  const showTabs = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
+  const showTabs = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || route.tab === "settings" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} onPrepare={prepareTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
@@ -1219,7 +1255,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         {fileDrag && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
+        {selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
           void api(API.sessionPlacement.method, API.sessionPlacement.path({ sessionId: selected.id }), { foreground: false }).then(() => { panelPushed.current = false; navigate({ tab: "chats", chat: null, panel: null }); kick(); }, cause => setControlError({ sessionId: selected.id, message: String(cause) }));
         }} debug={debugTools} /></Suspense>}
         {selected && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}

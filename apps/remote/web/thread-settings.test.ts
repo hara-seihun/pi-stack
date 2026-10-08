@@ -134,3 +134,14 @@ test("picker selects its saved model and submits the chosen model, thinking, spe
     { field: "bash-timeout", body: { bashTimeoutSeconds: 60 } },
   ]);
 });
+
+test("unset and unavailable models have explicit selected options instead of displaying the first catalog choice", () => {
+  for (const model of [null, { provider: "custom", id: "missing" }]) {
+    const nodes = elements(SettingsFields({ session: {} as Session, settings: { ...settings, model }, saving: "", onUpdate: () => {} }));
+    const select = nodes.find(node => node.props["aria-label"] === "Model")!;
+    const selected = elements(select.props.children).filter(node => node.type === "option" && node.props.value === select.props.value);
+    expect(selected).toHaveLength(1);
+    expect(selected[0].props.disabled).toBe(true);
+    expect(select.props.value).toBe(model ? "custom\0missing" : "");
+  }
+});
