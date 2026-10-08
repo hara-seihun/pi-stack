@@ -8,7 +8,7 @@ import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
-import { AgentRoute, copyOutgoingMessage, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
+import { AgentDisclosure, AgentRoute, copyOutgoingMessage, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { completeMessageEntry, loadMessageEntry } from "./message-body";
@@ -94,15 +94,19 @@ function useElapsed<T extends HTMLElement>(startedAt: number | undefined, runnin
   return { ref, elapsed: startedAt ? Math.max(0, now - startedAt) : undefined };
 }
 
-const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onReply }: {
+const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse, onEdit, onReply }: {
   entry: ContextEntry;
   sessionId: string;
+  autoCollapse: boolean;
   onEdit(entry: ContextEntry): void;
   onReply(target: ReplyTarget): void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const body = useItemBody(entry.itemId, expanded, entry.size);
+  const [open, setOpen] = useState(!autoCollapse);
+  useEffect(() => setOpen(!autoCollapse), [autoCollapse]);
+  const incoming = presentAgentMessage(entry).agentSender;
+  const body = useItemBody(entry.itemId, expanded || !!incoming && open, entry.size);
   const loaded = body.body ? completeMessageEntry(entry, body.body) : null;
   const presented = presentAgentMessage(loaded?.ok ? loaded.value : entry);
   const text = presented.text || "";
@@ -119,10 +123,11 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
     if (!full.ok) { setActionError(full.error.message); return; }
     onEdit(full.value);
   };
-  return <div data-transcript-seq={entry.seq}><ChatMessage
+  const route = sender ? <AgentRoute direction="incoming" from={{ kind: "peer", threadId: sender.threadId, name: presented.label ?? null }} to={{ kind: "self", threadId: sessionId }} /> : undefined;
+  const content = <><ChatMessage
     kind={entry.kind}
     label={entry.kind === "assistant" ? AGENT_NAME : presented.label || entry.kind}
-    heading={sender ? <AgentRoute direction="incoming" from={{ kind: "peer", threadId: sender.threadId, name: presented.label ?? null }} to={{ kind: "self", threadId: sessionId }} /> : undefined}
+    heading={route}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
     text={text}
     resolveCopyText={copy}
@@ -143,13 +148,18 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onRe
       <CopyButton text={copy} label="Copy full message" />
     </div>}
     {(body.error || loaded && !loaded.ok || actionError) && <p className="step-loading step-failed" role="status">{actionError || body.error || loaded && !loaded.ok && loaded.error.message}</p>}
-  </div>;
-}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
+  </>;
+  return <div data-transcript-seq={entry.seq}>{sender
+    ? <AgentDisclosure route={route} open={open} onOpen={setOpen}>{content}</AgentDisclosure>
+    : content}</div>;
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
-const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId }: { entry: ContextEntry; sessionId: string }) {
+const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId, autoCollapse }: { entry: ContextEntry; sessionId: string; autoCollapse: boolean }) {
   const preview = outgoingAgentMessage(entry);
   const [expanded, setExpanded] = useState(false);
-  const body = useItemBody(entry.itemId, expanded, entry.size);
+  const [open, setOpen] = useState(!autoCollapse);
+  useEffect(() => setOpen(!autoCollapse), [autoCollapse]);
+  const body = useItemBody(entry.itemId, expanded || open, entry.size);
   const complete = body.body?.kind === "toolCall" ? outgoingAgentMessage(entry, body.body) : null;
   const message = complete ?? preview;
   if (!message) return null;
@@ -160,10 +170,11 @@ const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId }: { entry:
     : created ? { kind: "peer" as const, threadId: created.id, name: created.name } : { kind: "new" as const, title: message.title };
   const status = message.delivery.state === "sending" ? { status: "sending", canCheck: false, canRetry: false }
     : message.delivery.state === "failed" ? { status: "failed", error: message.delivery.error, canCheck: false, canRetry: false } : undefined;
-  return <div data-transcript-seq={entry.seq}><ChatMessage
+  const route = <AgentRoute direction="outgoing" from={{ kind: "self", threadId: sessionId }} to={to} />;
+  return <div data-transcript-seq={entry.seq}><AgentDisclosure route={route} open={open} onOpen={setOpen}><ChatMessage
     kind="assistant agent-outgoing"
     label={AGENT_NAME}
-    heading={<AgentRoute direction="outgoing" from={{ kind: "self", threadId: sessionId }} to={to} />}
+    heading={route}
     avatar={agentAvatar()}
     text={message.text}
     resolveCopyText={copy}
@@ -179,9 +190,9 @@ const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId }: { entry:
       <CopyButton text={copy} label="Copy full message" />
     </div>}
     {body.error && <p className="step-loading step-failed" role="status">{body.error}</p>}
-    {expanded && body.body && !complete && <p className="step-loading step-failed" role="status">The full outgoing message is invalid.</p>}
-  </div>;
-}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId);
+    {(expanded || open) && body.body && !complete && <p className="step-loading step-failed" role="status">The full outgoing message is invalid.</p>}
+  </AgentDisclosure></div>;
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse);
 
 function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; label: string } {
   switch (entry.kind) {
@@ -386,8 +397,8 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
         : item.kind === "step"
           ? <Step entry={item.entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />
           : item.kind === "outgoing"
-            ? <OutgoingEntry entry={item.entry} sessionId={sessionId} />
-            : <MessageEntry entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />} />
+            ? <OutgoingEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} />
+            : <MessageEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} onEdit={onEdit} onReply={onReply} />} />
       {newerAvailable && <button type="button" className="context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
     </div>
   </InlineImagesContext.Provider>;

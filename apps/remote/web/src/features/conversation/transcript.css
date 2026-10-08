@@ -63,3 +63,14 @@ button.agent-route-name:hover, button.agent-route-name:focus-visible { text-deco
 .agent-route-name.new { font-style: italic; font-weight: 600; }
 .agent-route-arrow { flex: 0 0 auto; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .message.agent-outgoing .message-status.sending { font-style: italic; }
+
+/* Agent disclosures are independent of Work/thought grouping. Their routes
+ * remain visible while closed; opening loads the complete native body. */
+.agent-message-step { margin: var(--space-3) 0; }
+.agent-message-step > summary { gap: var(--space-2); color: var(--muted); }
+.agent-message-step > summary > strong { flex: 0 0 auto; font-size: var(--text-sm); }
+.agent-message-step > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.agent-message-chevron { flex: 0 0 auto; width: 18px; font-size: 22px; line-height: 1; text-align: center; }
+.agent-message-step[open] > summary > .agent-message-chevron { transform: rotate(90deg); }
+.agent-message-detail { padding-left: calc(18px + var(--space-2)); }
+@media (max-width: 420px) { .agent-message-detail { padding-left: 0; } }

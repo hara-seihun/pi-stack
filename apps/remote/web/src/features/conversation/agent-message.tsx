@@ -1,4 +1,4 @@
-import { useContext, useEffect } from "react";
+import { useContext, useEffect, type ReactNode } from "react";
 import { agentFirstName, agentMessagePresentation, agentSenderLabel } from "pi-orchestrator/message-format";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import type { ContextEntry, TranscriptItemBody } from "../../types";
@@ -94,4 +94,15 @@ export function AgentRoute({ from, to, direction }: { from: RouteEnd; to: RouteE
     <svg className="agent-route-arrow" viewBox="0 0 24 24" role="img" aria-label="to"><path d="M4 12h15m-5-5 5 5-5 5" /></svg>
     <RouteName end={to} />
   </span>;
+}
+
+/** The native disclosure keeps pointer, touch and keyboard semantics identical.
+ * Toggle state is owned by the message, not its delivery/streaming state. */
+export function AgentDisclosure({ route, open, onOpen, children }: {
+  route: ReactNode; open: boolean; onOpen(open: boolean): void; children: ReactNode;
+}) {
+  return <details className="conversation-step agent-message-step" open={open} onToggle={event => onOpen(event.currentTarget.open)}>
+    <summary><span className="agent-message-chevron" aria-hidden="true">›</span><strong>Agent message</strong>{route}</summary>
+    <div className="agent-message-detail">{children}</div>
+  </details>;
 }
