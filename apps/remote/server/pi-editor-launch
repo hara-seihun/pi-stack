@@ -1,0 +1,232 @@
+#!/usr/bin/python3
+import http.client
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import socket
+import stat
+import subprocess
+import sys
+import time
+
+
+class EditorError(Exception):
+    def __init__(self, code, detail):
+        self.code = code
+        super().__init__(detail)
+
+
+def require(condition, code, detail):
+    if not condition:
+        raise EditorError(code, detail)
+
+
+def absolute_path(value, name):
+    require(isinstance(value, str) and value.startswith("/") and "\x00" not in value,
+            "invalid_config", f"{name} must be an absolute path")
+    require(value == os.path.normpath(value) and not value.startswith("//"),
+            "invalid_config", f"{name} must be normalized")
+    return Path(value)
+
+
+def read_config(user):
+    require(re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user) is not None,
+            "invalid_user", "invalid Unix person name")
+    path = Path("/var/lib/pi-remote/persons") / f"{user}.json"
+    person = json.loads(path.read_text())
+    require(isinstance(person, dict) and person.get("version") == 1 and person.get("user") == user,
+            "invalid_config", "person identity/version mismatch")
+    unlock, editor = person.get("unlock"), person.get("editor")
+    require(isinstance(unlock, dict) and isinstance(editor, dict),
+            "not_configured", "editor requires an encrypted person folder and editor configuration")
+    mount = absolute_path(unlock.get("mountpoint"), "unlock.mountpoint")
+    absolute_path(unlock.get("cipherDir"), "unlock.cipherDir")
+    workspace = absolute_path(editor.get("workspace"), "editor.workspace")
+    require(mount != Path("/") and workspace.is_relative_to(mount),
+            "outside_encrypted_mount", "workspace must be within the encrypted mount")
+    account = pwd.getpwnam(user)
+    require(account.pw_uid != 0, "invalid_user", "editor cannot run as root")
+    absolute_path(account.pw_dir, "Unix HOME")
+    return account, mount, workspace
+
+
+def socket_path(user):
+    return Path("/run/pi-editor") / user / "http.sock"
+
+
+def clean_environment(account):
+    return {"HOME": account.pw_dir, "USER": account.pw_name, "LOGNAME": account.pw_name,
+            "SHELL": account.pw_shell, "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+
+def drop_command(account, *arguments):
+    return ["/usr/bin/setpriv", f"--reuid={account.pw_uid}", f"--regid={account.pw_gid}",
+            "--init-groups", "--no-new-privs", "--bounding-set=-all", "--inh-caps=-all",
+            "--ambient-caps=-all", "/usr/bin/python3", str(Path(__file__).resolve()), *arguments]
+
+
+def prepare_socket(account):
+    directory = socket_path(account.pw_name).parent
+    parent = directory.parent.lstat()
+    require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and not parent.st_mode & 0o022,
+            "unsafe_socket_directory", "/run/pi-editor must be a root-owned, non-writable directory")
+    entry = directory.lstat()
+    require(stat.S_ISDIR(entry.st_mode) and entry.st_uid in (0, account.pw_uid),
+            "unsafe_socket_directory", "editor runtime directory has wrong type or owner")
+    os.chown(directory, account.pw_uid, account.pw_gid)
+    os.chmod(directory, 0o700)
+    path = socket_path(account.pw_name)
+    if path.exists() or path.is_symlink():
+        entry = path.lstat()
+        require(stat.S_ISSOCK(entry.st_mode) and entry.st_uid == account.pw_uid,
+                "unsafe_socket", "stale editor socket has wrong type or owner")
+        path.unlink()
+
+
+def main_pid(user):
+    process = subprocess.run(["/usr/bin/systemctl", "show", f"pi-remote@{user}.service",
+                              "--property=MainPID", "--value"], check=True,
+                             capture_output=True, text=True, timeout=3, env={"PATH": "/usr/bin:/bin"})
+    value = process.stdout.strip()
+    require(value.isdigit() and int(value) > 1, "person_locked", "person supervisor is not running")
+    return int(value)
+
+
+def enter_person(user, ready):
+    require(os.geteuid() == 0, "root_required", "launcher must be started by the root service")
+    account, _, _ = read_config(user)
+    environment = clean_environment(account)
+    if ready:
+        os.execve("/usr/bin/setpriv", drop_command(account, "--inside-ready", user), environment)
+    prepare_socket(account)
+    pid = main_pid(user)
+    descriptor = os.open(f"/proc/{pid}/ns/mnt", os.O_RDONLY)
+    status = Path(f"/proc/{pid}/status").read_text()
+    uid = next((line.split()[1:] for line in status.splitlines() if line.startswith("Uid:")), [])
+    require(uid == [str(account.pw_uid)] * 4 and main_pid(user) == pid,
+            "person_changed", "supervisor identity changed while opening its namespace")
+    os.set_inheritable(descriptor, True)
+    command = ["/usr/bin/nsenter", f"--mount=/proc/self/fd/{descriptor}", "--"]
+    command.extend(drop_command(account, "--inside", user))
+    os.execve(command[0], command, environment)
+
+
+def mount_entries(source):
+    for line in source.splitlines():
+        before, after = line.split(" - ", 1)
+        fields, filesystem = before.split(), after.split()[0]
+        path = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
+        yield Path(path), filesystem
+
+
+def require_encrypted_mount(mount, entries):
+    require(mount.resolve(strict=True) == mount, "outside_encrypted_mount", "mountpoint resolves elsewhere")
+    require(any(path == mount and filesystem == "fuse.gocryptfs" for path, filesystem in entries),
+            "person_locked", "registered folder is not an unlocked gocryptfs mount in this namespace")
+
+
+def confined_directory(path, mount, create=False):
+    resolved = path.resolve(strict=not create)
+    require(resolved.is_relative_to(mount), "outside_encrypted_mount", f"{path} resolves outside encrypted mount")
+    if create:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    resolved = path.resolve(strict=True)
+    require(resolved.is_relative_to(mount) and resolved.is_dir() and resolved.stat().st_dev == mount.stat().st_dev,
+            "outside_encrypted_mount", f"{path} is not a directory on the encrypted filesystem")
+    return resolved
+
+
+def launch_inside(user):
+    account, mount, workspace = read_config(user)
+    require(os.getuid() == account.pw_uid and os.getgid() == account.pw_gid,
+            "wrong_identity", "namespace entry did not drop to the registered Unix account")
+    require_encrypted_mount(mount, list(mount_entries(Path("/proc/self/mountinfo").read_text())))
+    workspace = confined_directory(workspace, mount)
+    state = confined_directory(mount / ".pi-editor", mount, create=True)
+    os.chmod(state, 0o700)
+    directories = {name: confined_directory(state / name, mount, create=True)
+                   for name in ("config", "data", "extensions", "cache", "tmp")}
+    config = directories["config"] / "code-server.yaml"
+    descriptor = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        stream.write("{}\n")
+    environment = clean_environment(account)
+    environment.update({"XDG_CONFIG_HOME": str(directories["config"]),
+                        "XDG_DATA_HOME": str(directories["data"]),
+                        "XDG_CACHE_HOME": str(directories["cache"]),
+                        "TMPDIR": str(directories["tmp"])})
+    os.chdir(workspace)
+    os.umask(0o077)
+    for descriptor in os.listdir("/proc/self/fd"):
+        if descriptor.isdigit() and int(descriptor) > 2:
+            try:
+                os.close(int(descriptor))
+            except OSError:
+                pass
+    command = ["/usr/bin/code-server", "--config", str(config), "--auth", "none",
+               "--socket", str(socket_path(user)), "--socket-mode", "0600", "--disable-proxy",
+               "--disable-telemetry", "--disable-update-check", "--user-data-dir", str(directories["data"]),
+               "--extensions-dir", str(directories["extensions"]), str(workspace)]
+    os.execve(command[0], command, environment)
+
+
+class UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("localhost", timeout=0.5)
+        self.path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self.path))
+
+
+def await_ready(user):
+    account, _, _ = read_config(user)
+    require(os.getuid() == account.pw_uid, "wrong_identity", "readiness must run as the person")
+    path = socket_path(user)
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        connection = UnixConnection(path)
+        try:
+            entry = path.lstat()
+            require(stat.S_ISSOCK(entry.st_mode) and entry.st_uid == account.pw_uid
+                    and stat.S_IMODE(entry.st_mode) == 0o600,
+                    "unsafe_socket", "editor socket must be person-owned with mode 0600")
+            connection.request("GET", "/healthz")
+            response = connection.getresponse()
+            health = json.loads(response.read(4096))
+            if response.status == 200 and isinstance(health, dict) and health.get("status") == "alive":
+                return
+        except (OSError, http.client.HTTPException, ValueError):
+            pass
+        finally:
+            connection.close()
+        time.sleep(0.1)
+    raise EditorError("start_timeout", "editor /healthz did not become alive within 12 seconds")
+
+
+def main(arguments):
+    if len(arguments) == 1:
+        enter_person(arguments[0], False)
+    elif len(arguments) == 2 and arguments[0] == "--ready":
+        enter_person(arguments[1], True)
+    elif len(arguments) == 2 and arguments[0] == "--inside":
+        launch_inside(arguments[1])
+    elif len(arguments) == 2 and arguments[0] == "--inside-ready":
+        await_ready(arguments[1])
+    else:
+        raise EditorError("usage", "pi-editor-launch [--ready] USER")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except EditorError as error:
+        print(json.dumps({"error": error.code, "detail": str(error)}), file=sys.stderr)
+        sys.exit(78)
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError) as error:
+        print(json.dumps({"error": "launch_failed", "detail": str(error)}), file=sys.stderr)
+        sys.exit(70)

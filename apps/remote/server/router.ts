@@ -21,6 +21,8 @@ import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { handleAgentSignal, isSignalProductPath } from "./agent-signal";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
+import { EditorAccess, editorOriginAllowed, editorSocket } from "./editor-access";
+import { editorResponse } from "./editor-proxy";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -47,6 +49,13 @@ const login = oidcSettings ? new OidcLogin(oidcSettings) : null;
 const privateNetwork = readPrivateNetwork();
 const sessions = new RouterSessions(login ? 8 * 60 * 60 * 1000 : undefined);
 const activeUsers = new Set<string>();
+const editors = new EditorAccess(sessions);
+function validateEditorOrigins(people: Person[]) {
+  const hosts = people.filter(person => person.editor).map(person => new URL(person.editor!.origin).host);
+  if (new Set(hosts).size !== hosts.length) throw new Error("Each person's editor requires a distinct origin");
+  if (login && hosts.includes(new URL(login.settings.publicUrl).host)) throw new Error("Editor origins must be distinct from the Pi Stack origin");
+}
+validateEditorOrigins(PEOPLE);
 const roomPeople = roomPersonUids(PEOPLE.map(person => person.user));
 
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
@@ -169,16 +178,18 @@ async function startPersonal(person: Person, key: string): Promise<StartResult> 
 async function forget(person: Person): Promise<{ ok: boolean; message: string }> {
   sessions.revoke(person.user);
   activeUsers.delete(person.user);
+  const editorStopped = person.editor ? await systemctl("stop", `pi-editor@${person.user}.service`) : { ok: true, message: "" };
   const stopped = await systemctl("stop", unit(person));
   await unlink(join(KEY_DIR, person.user)).catch((error) => { if (error.code !== "ENOENT") throw error; });
   await systemctl("reset-failed", unit(person));
-  return stopped;
+  return stopped.ok && editorStopped.ok ? stopped : { ok: false, message: stopped.message || editorStopped.message };
 }
 
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate", "te", "trailer"]);
 
 type RequestIdentity = {
   authenticated: { user: string; signal: AbortSignal } | null;
+  session?: string;
   asserted: string | undefined;
   person: Person | undefined;
   error?: Response;
@@ -220,7 +231,7 @@ function requestIdentity(req: Request, url: URL): RequestIdentity {
   }
   const asserted = names[0];
   const person = authenticated ? byUser.get(authenticated.user) : asserted ? byUser.get(asserted) : PEOPLE.length === 1 ? PEOPLE[0] : undefined;
-  return { authenticated, asserted, person };
+  return { authenticated, session: tokens[0], asserted, person };
 }
 
 function proxyDestination(person: Person, url: URL): ProxyDestination {
@@ -230,7 +241,7 @@ function proxyDestination(person: Person, url: URL): ProxyDestination {
     if (!match) return { error: Response.json({ error: "Unknown remote route" }, { status: 404 }) };
     const endpoint = grants.get(person.user)!.find((candidate) => candidate.id === match[1]);
     if (!endpoint?.upstreams?.[person.user]) return { error: Response.json({ error: "Endpoint access denied" }, { status: 403 }) };
-    if (/^\/v1\/(remotes|unlock|lock|lock-status|environments|router-health)(\/|$)/.test(match[2]!)) {
+    if (/^\/v1\/(remotes|unlock|lock|lock-status|environments|router-health|editor)(\/|$)/.test(match[2]!)) {
       return { error: Response.json({ error: "Use the identity router for this operation" }, { status: 403 }) };
     }
     const target = new URL(url);
@@ -249,11 +260,11 @@ function websocketUrl(origin: string, url: URL): string {
   return target.href;
 }
 
-async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal, environment?: string): Promise<WebSocket | null> {
+async function openUpstream(target: string, protocols: string[], user: string, signal: AbortSignal, environment?: string, editorRequestHeaders?: Headers): Promise<WebSocket | null> {
   const WebSocketClient = WebSocket as typeof WebSocket & { new(url: string, options: Bun.WebSocketOptions): WebSocket };
   const upstream = new WebSocketClient(target, {
     protocols,
-    headers: { "x-pi-remote-user": user, ...(environment ? { [UPSTREAM_CREDENTIAL_HEADER]: upstreamCredential(environment) } : {}) },
+    headers: editorRequestHeaders ? Object.fromEntries(editorRequestHeaders) : { "x-pi-remote-user": user, ...(environment ? { [UPSTREAM_CREDENTIAL_HEADER]: upstreamCredential(environment) } : {}) },
     perMessageDeflate: false,
   });
   upstream.binaryType = "arraybuffer";
@@ -281,6 +292,48 @@ async function openUpstream(target: string, protocols: string[], user: string, s
     signal.addEventListener("abort", aborted, { once: true });
     if (signal.aborted) aborted();
   });
+}
+
+async function editorRoute(person: Person, req: Request, url: URL, server: Bun.Server<ProxySocketData>): Promise<Response | undefined> {
+  const deny = (error: string, status: number) => Response.json({ error, code: "editor_access_denied" }, { status, headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  if (url.pathname.startsWith("/v1/")) return deny("Pi Stack APIs are not available on the editor origin", 403);
+  if (url.pathname === "/editor/open") {
+    if (req.method !== "POST" || req.headers.get("content-type")?.split(";", 1)[0] !== "application/x-www-form-urlencoded") return deny("Use the Files editor action", 400);
+    const reader = req.body?.getReader();
+    if (!reader) return deny("Editor handoff required", 400);
+    let text = "";
+    try {
+      const decoder = new TextDecoder();
+      let bytes = 0;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > 1024) { await reader.cancel(); return deny("Invalid editor handoff", 400); }
+        text += decoder.decode(chunk.value, { stream: true });
+      }
+      text += decoder.decode();
+    } catch { return deny("Invalid editor handoff", 400); }
+    const form = new URLSearchParams(text);
+    if (form.getAll("ticket").length !== 1) return deny("Editor handoff required", 400);
+    if (!await unitActive(person)) return deny("Your folder is locked", 423);
+    const handoff = editors.consume(person, form.get("ticket")!);
+    if (!handoff.ok) return deny(handoff.error, 403);
+    return new Response(null, { status: 303, headers: { location: handoff.location, "set-cookie": handoff.cookie, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  }
+  const identity = editors.authenticate(person, req);
+  if (!identity.ok) return deny(identity.error, identity.status);
+  if (!await unitActive(person)) { sessions.revoke(person.user); return deny("Your folder is locked", 423); }
+  const websocket = req.headers.get("upgrade")?.toLowerCase() === "websocket";
+  if ((websocket || !["GET", "HEAD"].includes(req.method)) && !editorOriginAllowed(req, person)) return deny("Editor origin does not match", 403);
+  if (!websocket) return editorResponse(person, req, url, identity.signal, editorSocket(person.user));
+  const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map(value => value.trim()).filter(Boolean);
+  const headers = new Headers({ host: new URL(person.editor!.origin).host, origin: person.editor!.origin });
+  const upstream = await openUpstream(`ws+unix://${editorSocket(person.user)}:${url.pathname}${url.search}`, protocols, person.user, identity.signal, undefined, headers);
+  if (!upstream) return deny(identity.signal.aborted ? "Editor session ended" : "Editor WebSocket unavailable", identity.signal.aborted ? 423 : 503);
+  const upgraded = server.upgrade(req, { ...(upstream.protocol ? { headers: { "sec-websocket-protocol": upstream.protocol } } : {}), data: { phone: false, lossless: true, upstream, signal: identity.signal, closed: false } });
+  if (!upgraded) upstream.close(1011, "Browser upgrade failed");
+  return upgraded ? undefined : deny("Editor WebSocket upgrade failed", 400);
 }
 
 async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySocketData>): Promise<Response | undefined> {
@@ -397,6 +450,7 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
       return failure("The host did not register an isolated OAuth account.", 503);
     }
     const allowed = personEnvironments(person, environments, ENVIRONMENT_ID);
+    validateEditorOrigins([...PEOPLE.filter(existing => existing.user !== person.user), person]);
     byUser.set(person.user, person);
     grants.set(person.user, allowed);
     const index = PEOPLE.findIndex(existing => existing.user === person.user);
@@ -481,6 +535,29 @@ async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Re
       return (await rootDebugResponse(req, { authenticatedUser: authenticated.user, persons: [], config: null }))!;
     }
   }
+  if (url.pathname === "/v1/editor/close" && req.method === "POST") {
+    editors.close(identity.session!);
+    return Response.json({ ok: true });
+  }
+  if (url.pathname === "/v1/editor" && req.method === "GET") {
+    return person.editor ? Response.json({ ok: true, origin: person.editor.origin, environmentId: ENVIRONMENT_ID }) : Response.json({ error: "Your editor has not been provisioned", code: "editor_unconfigured" }, { status: 503 });
+  }
+  if (url.pathname === "/v1/editor" && req.method === "POST") {
+    if (!person.editor) return Response.json({ error: "Your editor has not been provisioned", code: "editor_unconfigured" }, { status: 503 });
+    const body = await req.json().catch(() => null);
+    if (!body || !["file", "directory"].includes(body.kind) || (body.path !== null && (typeof body.path !== "string" || !body.path.startsWith("/") || body.path.length > 4096 || /[\\x00-\\x1f]/.test(body.path)))) return Response.json({ error: "An absolute path or null and a file/directory kind are required", code: "editor_invalid_path" }, { status: 400 });
+    return serialized(person, async () => {
+      if (authenticated.signal.aborted || !await unitActive(person)) return locked(person.user);
+      const result = await systemctl("start", `pi-editor@${person.user}.service`);
+      if (!result.ok) return Response.json({ error: "Your editor could not start", code: "editor_unavailable" }, { status: 503 });
+      if (authenticated.signal.aborted || !await unitActive(person)) {
+        await systemctl("stop", `pi-editor@${person.user}.service`);
+        return locked(person.user);
+      }
+      const handoff = editors.issue(person, identity.session!, body.path, body.kind);
+      return handoff.ok ? Response.json(handoff) : Response.json({ error: handoff.error, code: "editor_session_ended" }, { status: 423 });
+    });
+  }
   if (url.pathname === "/v1/lock-status") return Response.json({ user: person.user, unlocked: true });
   if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments: publicEnvironments(grants.get(person.user)!) });
   // The internal room owner API accepts only router-generated requests, never browser proxying.
@@ -495,6 +572,8 @@ Bun.serve<ProxySocketData>({
   hostname: HOST, port: PORT, idleTimeout: 60,
   async fetch(req, server) {
     const url = new URL(req.url);
+    const editorPerson = PEOPLE.find(person => person.editor && new URL(person.editor.origin).host === url.host);
+    if (editorPerson) return editorRoute(editorPerson, req, url, server);
     if (url.pathname.startsWith("/v1/auth/")) return oauthRoute(req, url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return preflight();
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);

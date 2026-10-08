@@ -74,6 +74,53 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void openEditor(PluginCall call) {
+        Object suppliedUrl = call.getData().opt("url");
+        Object suppliedTicket = call.getData().opt("ticket");
+        if (!(suppliedUrl instanceof String url) || url.length() > 2048
+            || !(suppliedTicket instanceof String ticket) || !ticket.matches("[A-Za-z0-9_-]{43}")) {
+            call.reject("An editor handoff URL and ticket are required", "invalid_args"); return;
+        }
+        RemoteSession state = NotificationIdentity.get(getContext());
+        RemoteSession.Identity identity = state.current();
+        if (identity == null) { call.reject("Unlock before opening the editor", "session_expired"); return; }
+        long issuedAt = android.os.SystemClock.elapsedRealtime();
+        updateExecutor.execute(() -> {
+            try {
+                org.json.JSONObject config = RemoteTransport.get(RouterConnection.routerUrl() + "/v1/editor", identity);
+                if (!Boolean.TRUE.equals(config.opt("ok")) || !(config.opt("origin") instanceof String origin)) {
+                    call.reject("Router returned an invalid editor configuration", "protocol_error"); return;
+                }
+                EditorHandoff.Validation checked = EditorHandoff.validate(url, ticket, origin,
+                    RouterConnection.routerUrl(), BuildConfig.ROUTER_URL, BuildConfig.PUBLIC_ROUTER_URL,
+                    getBridge().getServerUrl(), getBridge().getAppUrl(), "http://localhost", "https://localhost");
+                if (checked instanceof EditorHandoff.Rejected rejected) {
+                    call.reject("Invalid editor handoff: " + rejected.failure().name(), "invalid_args"); return;
+                }
+                EditorHandoff.Target target = ((EditorHandoff.Accepted) checked).target();
+                getActivity().runOnUiThread(() -> {
+                    synchronized (state) {
+                        if (!state.isCurrent(identity) || android.os.SystemClock.elapsedRealtime() - issuedAt >= 30_000) {
+                            call.reject("Editor handoff expired or the session changed", "session_expired"); return;
+                        }
+                        try {
+                            EditorActivity.launch(getActivity(), target, state, identity, issuedAt);
+                            call.resolve();
+                        } catch (RuntimeException unavailable) {
+                            call.reject("Could not open the editor view", "unavailable");
+                        }
+                    }
+                });
+            } catch (RemoteTransport.AccessDenied denied) {
+                synchronized (state) { if (state.isCurrent(identity)) NotificationIdentity.replace(getContext(), "", ""); }
+                call.reject("Editor session ended", "session_expired");
+            } catch (java.io.IOException unavailable) {
+                call.reject("Could not read your editor configuration", "disconnected");
+            }
+        });
+    }
+
+    @PluginMethod
     public void syncSession(PluginCall call) {
         try {
             if (NotificationIdentity.replace(getContext(), call.getString("user", ""), call.getString("session", ""))) {

@@ -23,12 +23,10 @@
     "test": "npm run build && node check.mjs"
   },
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.3.13"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",
-    "@headless-tree/core": "^1.7.0",
-    "@headless-tree/react": "^1.7.0",
     "@js-temporal/polyfill": "^0.5.1",
     "@tanstack/react-virtual": "^3.14.10",
     "emojibase-data": "^17.0.0",

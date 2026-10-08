@@ -1,0 +1,152 @@
+#!/usr/bin/python3
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import subprocess
+import sys
+import tempfile
+from urllib.parse import urlsplit
+
+
+class ProvisionError(Exception):
+    pass
+
+
+def require(condition, detail):
+    if not condition:
+        raise ProvisionError(detail)
+
+
+def origin(value):
+    require(not any(character.isspace() or ord(character) < 32 for character in value)
+            and "\\" not in value and "%" not in value,
+            "origin must not contain whitespace, escapes or backslashes")
+    parsed = urlsplit(value)
+    require(parsed.scheme in ("http", "https") and parsed.hostname
+            and parsed.username is None and parsed.password is None
+            and not parsed.path and not parsed.query and not parsed.fragment,
+            "origins must be canonical HTTP(S) origins without path, credentials, query or fragment")
+    require(value == f"{parsed.scheme}://{parsed.netloc.lower()}"
+            and parsed.port not in ({"http": 80, "https": 443}[parsed.scheme],)
+            and not value.endswith(":"), "origin must use canonical lowercase host and no default port")
+    return value
+
+
+def editor_config(person, user, workspace, editor_origin, app_origin):
+    require(isinstance(person, dict) and person.get("version") == 1 and person.get("user") == user,
+            "person identity/version mismatch")
+    unlock = person.get("unlock")
+    require(isinstance(unlock, dict) and isinstance(unlock.get("cipherDir"), str)
+            and unlock["cipherDir"].startswith("/") and isinstance(unlock.get("mountpoint"), str),
+            "editor requires an encrypted Person.unlock folder")
+    mount = Path(unlock["mountpoint"])
+    path = Path(workspace)
+    require(mount.is_absolute() and mount != Path("/") and path.is_absolute()
+            and unlock["mountpoint"] == os.path.normpath(unlock["mountpoint"])
+            and workspace == os.path.normpath(workspace) and not workspace.startswith("//")
+            and not unlock["mountpoint"].startswith("//") and "\x00" not in workspace
+            and "\x00" not in unlock["mountpoint"] and path.is_relative_to(mount), "workspace must be normalized and within unlock.mountpoint")
+    require(origin(editor_origin) != origin(app_origin), "editor and Pi app origins must be different")
+    return {"workspace": workspace, "origin": editor_origin}
+
+
+def command(arguments):
+    return subprocess.run(arguments, check=True, capture_output=True, text=True, timeout=10)
+
+
+def write_atomic(path, content, mode, uid, gid):
+    descriptor, temporary = tempfile.mkstemp(prefix=".editor-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            os.fchown(stream.fileno(), uid, gid)
+            os.fchmod(stream.fileno(), mode)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def install():
+    root = Path(__file__).resolve().parent.parent
+    sources = [root / "apps/remote/server/pi-editor-launch", root / "server/pi-editor-launch"]
+    sources = [path for path in sources if path.is_file()]
+    require(len(sources) == 1, "install must run from a source checkout or deployed Remote release")
+    unit = root / "deploy/systemd/pi-editor@.service"
+    require(unit.is_file(), "pi-editor@.service is missing from this release")
+    require(Path("/usr/bin/code-server").is_file(), "install code-server at /usr/bin/code-server first")
+    help_text = command(["/usr/bin/code-server", "--help"]).stdout
+    require(all(flag in help_text for flag in ("--socket", "--socket-mode", "--disable-proxy")),
+            "installed code-server lacks required private-socket flags")
+    version = command(["/usr/local/bin/bun", "--version"]).stdout.strip()
+    require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is not None
+            and tuple(map(int, version.split("."))) >= (1, 3, 13),
+            "router requires Bun >= 1.3.13 at /usr/local/bin/bun for Unix WebSockets")
+    for executable in ("/usr/bin/nsenter", "/usr/bin/setpriv", "/usr/bin/systemctl"):
+        require(os.access(executable, os.X_OK), f"required executable missing: {executable}")
+    launcher = Path("/usr/local/libexec/pi-editor-launch")
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(launcher, sources[0].read_bytes(), 0o755, 0, 0)
+    installed_unit = Path("/etc/systemd/system/pi-editor@.service")
+    content = unit.read_text().replace("/srv/pi/pi-remote/server/pi-editor-launch", str(launcher)).encode()
+    write_atomic(installed_unit, content, 0o644, 0, 0)
+    command(["/usr/bin/systemctl", "daemon-reload"])
+    print(json.dumps({"installed": str(installed_unit), "launcher": str(launcher), "started": False}))
+
+
+def provision(user, workspace, editor_origin, app_origin):
+    require(re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user) is not None, "invalid Unix person name")
+    require(pwd.getpwnam(user).pw_uid != 0, "editor cannot run as root")
+    registry = Path("/var/lib/pi-remote/persons")
+    with (registry / ".editor.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        path = registry / f"{user}.json"
+        person = json.loads(path.read_text())
+        configured = editor_config(person, user, workspace, editor_origin, app_origin)
+        for other in registry.glob("*.json"):
+            if other != path:
+                entry = json.loads(other.read_text())
+                require(not isinstance(entry.get("editor"), dict)
+                        or entry["editor"].get("origin") != editor_origin,
+                        f"editor origin is already assigned to {other.stem}")
+        person["editor"] = configured
+        previous = path.stat()
+        content = (json.dumps(person, indent=2) + "\n").encode()
+        write_atomic(path, content, 0o644, previous.st_uid, previous.st_gid)
+    print(json.dumps({"person": user, "editor": configured, "started": False}))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Install private editor artifacts or register an encrypted workspace; never starts services")
+    sub = parser.add_subparsers(dest="operation", required=True)
+    sub.add_parser("install")
+    person = sub.add_parser("person")
+    person.add_argument("user")
+    person.add_argument("workspace")
+    person.add_argument("origin")
+    person.add_argument("--app-origin", required=True)
+    arguments = parser.parse_args()
+    require(os.geteuid() == 0, "provisioning requires root")
+    if arguments.operation == "install":
+        install()
+    elif arguments.operation == "person":
+        provision(arguments.user, arguments.workspace, arguments.origin, arguments.app_origin)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ProvisionError, OSError, KeyError, ValueError, subprocess.SubprocessError) as error:
+        print(json.dumps({"error": "editor_provision_failed", "detail": str(error)}), file=sys.stderr)
+        sys.exit(78)

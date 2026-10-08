@@ -24,6 +24,24 @@ public class RemoteSessionTest {
         assertFalse(state.isCurrent(first));
     }
 
+    @Test public void observersClearOldContextOnReplacementAndReleaseTheirOwnership() {
+        RemoteSession state = new RemoteSession();
+        state.replace("one", "token-a");
+        var displayed = state.current();
+        java.util.List<Boolean> stillCurrent = new java.util.ArrayList<>();
+        Runnable release = state.observe(() -> stillCurrent.add(state.isCurrent(displayed)));
+        assertFalse(state.replace("one", "token-a"));
+        assertTrue(stillCurrent.isEmpty());
+        state.replace("two", "token-b");
+        state.replace("two", "token-c");
+        state.replace("", "");
+        assertEquals(java.util.List.of(false, false, false), stillCurrent);
+        release.run();
+        release.run();
+        state.replace("one", "token-a");
+        assertEquals(3, stillCurrent.size());
+    }
+
     @Test public void personHintAloneCannotCreateIdentity() {
         RemoteSession state = new RemoteSession();
         assertThrows(IllegalArgumentException.class, () -> state.replace("one", ""));
