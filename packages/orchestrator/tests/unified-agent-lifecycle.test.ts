@@ -119,14 +119,15 @@ it("endpoint reservations fence a concurrent cross-owner close after its graph s
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  const list = directory.list.bind(directory);
+  const graphOwner = b.service as unknown as { dependencyGraph(roots: string[]): Promise<Result<import("../src/threads/contracts.js").Thread[]>> };
+  const graph = graphOwner.dependencyGraph.bind(b.service);
   let release!: () => void, snapshotRead!: () => void;
   const read = new Promise<void>(resolve => { snapshotRead = resolve; });
   const barrier = new Promise<void>(resolve => { release = resolve; });
   let intercept = true;
-  directory.list = async input => {
-    const result = await list(input);
-    if (intercept && !input?.id) { intercept = false; snapshotRead(); await barrier; }
+  graphOwner.dependencyGraph = async roots => {
+    const result = await graph(roots);
+    if (intercept) { intercept = false; snapshotRead(); await barrier; }
     return result;
   };
   const closing = b.service.control({ action: "close", threadId: "b" });
@@ -240,6 +241,32 @@ it("an unrelated unavailable owner cannot prevent local native settlement", asyn
   await until(() => f.service.get("local")?.state === "idle");
   expect(f.service.latestSettlement("local")).toMatchObject({ outcome: "complete", finalMessage: { role: "assistant" } });
   expect(f.service.pending("local")).toEqual([]);
+});
+
+it("recovers local dependency claims and preserves both endpoints while an unrelated personal owner is locked", async () => {
+  const f = fixture(), locked = fixture();
+  let lockedReads = 0;
+  locked.service.list = async () => { lockedReads++; return { ok: false, error: { code: "unavailable", message: "Personal supervisor locked" } }; };
+  const directory = new ThreadDirectory({ id: "fleet", api: f.service }, [{ id: "person", api: locked.service }]);
+  f.service.setDirectory(directory);
+  value(await f.service.spawn({ requestId: "parent", id: "parent", cwd: f.root }));
+  value(await f.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: f.root }));
+  const db = openSqlite(f.options.databasePath);
+  db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json(?),'$.dependencyUpdate',json(?)) WHERE id='parent'")
+    .run(JSON.stringify(["child"]), JSON.stringify({ previous: [], desired: ["child"], phase: "claim" }));
+  db.close();
+  value(await f.service.start());
+  await until(() => !f.service.get("parent")?.metadata?.dependencyUpdate);
+  expect(f.service.get("parent")?.dependencies).toEqual(["child"]);
+  expect(f.service.get("child")?.metadata?.peerDependents).toEqual(["parent"]);
+  value(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "wait", reason: "Child result", threadIds: ["child"] }));
+  for (const id of ["parent", "child"]) expect(await f.service.control({ action: "close", threadId: id })).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
+  expect(await f.service.control({ action: "dependencies", threadId: "child", threadIds: ["parent"] })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(lockedReads).toBe(0);
+  expect(await f.service.control({ action: "dependencies", threadId: "child", threadIds: ["foreign"] })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  expect(lockedReads).toBeGreaterThan(0);
+  value(await f.service.agentWait({ action: "clear", threadId: "parent", requestId: "clear" }));
+  value(await f.service.control({ action: "close", threadId: "child" }));
 });
 
 it("historical holds and resume inputs reopen without replaying their discarded queue", async () => {

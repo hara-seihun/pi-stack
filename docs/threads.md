@@ -79,7 +79,12 @@ also inspect durable questions before declaring completion.
 `control({ action: "dependencies", threadId, threadIds })` replaces an agent's
 outgoing peer dependencies. Agent callers can change only their own edges.
 Dependencies reference accessible peers, not only agents they launched. Cycles
-and invalid/inaccessible targets are rejected.
+and invalid/inaccessible targets are rejected. Dependency checks and recovery read
+the connected peer graph by exact identity, including durable incoming endpoint
+reservations; they never enumerate unrelated owners. A locked personal supervisor
+cannot prevent fleet-local dependency custody. An inaccessible referenced endpoint
+remains an explicit error with its existing protection retained. Exact-identity and
+parent-child directory pages resolve their owner without listing unrelated stores.
 
 A dependency A → B exists so a result is not lost. It is **live** while A's
 current wait names B, or while B still owes a result (B is running, waiting or has
