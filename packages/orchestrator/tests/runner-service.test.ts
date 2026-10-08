@@ -18,13 +18,15 @@ async function until(check: () => boolean) {
   }
 }
 
-it.skipIf(!manager)("runner death removes orphan tools and permits the same boundary to restart", async () => {
+it.skipIf(!manager)("runner death removes orphan tools and restarts the same boundary while a scope pins the dead unit", async () => {
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
   const cache = join(repo, "node_modules/.cache"); mkdirSync(cache, { recursive: true });
   const compiled = mkdtempSync(join(cache, "runner-service-"));
   const dataDir = mkdtempSync(join(tmpdir(), "runner-service-"));
   let opener: ReturnType<typeof createSharedPiSessionOpener> | undefined;
-  let unit: string | undefined;
+  const units: string[] = [];
+  const pin = `pi-thread-tool-pin-${process.pid}-${Date.now()}.scope`;
+  let id: string | undefined;
   try {
     writeFileSync(join(compiled, "package.json"), '{"type":"module"}');
     await build({ entryPoints: [join(repo, "packages/orchestrator/src/threads/runner-transport.ts")], outdir: compiled,
@@ -34,14 +36,14 @@ it.skipIf(!manager)("runner death removes orphan tools and permits the same boun
       import {writeFileSync,rmSync} from 'node:fs';
       const control=process.argv[2]; rmSync(control,{force:true});
       const child=spawn('sleep',['300'],{detached:true,stdio:'ignore'}); child.unref();
-      writeFileSync(process.env.HOME+'/pids',JSON.stringify({runner:process.pid,child:child.pid,proof:process.env.RUNNER_TEST_PROOF}));
+      writeFileSync(process.env.HOME+'/pids',JSON.stringify({runner:process.pid,child:child.pid,proof:process.env.RUNNER_TEST_PROOF,unit:process.env.PI_THREAD_RUNNER_UNIT}));
       createServer(socket=>socket.on('data',bytes=>{
         const value=JSON.parse(bytes.toString());
         if(value.type==='open'){
           rmSync(value.options.socketPath,{force:true});
           createServer(channel=>channel.on('data',()=>channel.write('{"type":"attached"}\\n'))).listen(value.options.socketPath);
         }
-        socket.write(JSON.stringify({ok:true,pid:process.pid})+'\\n');
+        socket.write(JSON.stringify({ok:true,pid:process.pid,unit:process.env.PI_THREAD_RUNNER_UNIT})+'\\n');
       })).listen(control);
     `);
     const runtime = await import(pathToFileURL(join(compiled, "runner-transport.js")).href) as { createSharedPiSessionOpener: typeof createSharedPiSessionOpener };
@@ -50,23 +52,34 @@ it.skipIf(!manager)("runner death removes orphan tools and permits the same boun
       env: { HOME: dataDir, RUNNER_TEST_PROOF: "forwarded without argv", PI_THREAD_API_URL: "http://127.0.0.1:1" } };
     await opener.openSession(options, () => {}, () => {});
     const control = join(dataDir, "thread-runners", readdirSync(join(dataDir, "thread-runners")).find(name => name.endsWith(".sock"))!);
-    unit = `pi-thread-runner-${createHash("sha256").update(control).digest("hex").slice(0, 16)}.service`;
+    id = createHash("sha256").update(control).digest("hex").slice(0, 16);
     const first = JSON.parse(readFileSync(join(dataDir, "pids"), "utf8"));
+    expect(first.unit).toMatch(new RegExp(`^pi-thread-runner-${id}-[a-f0-9]{12}\\.service$`));
+    units.push(first.unit);
+    // A tool scope whose processes cannot die keeps a back-reference to the dead controller.
+    execFileSync("systemd-run", ["--user", "--scope", "--collect", "--quiet", `--unit=${pin}`, `--property=Wants=${first.unit}`,
+      "--", "bash", "-c", "sleep 300 </dev/null >/dev/null 2>&1 &"], { timeout: 5000 });
     expect(first.proof).toBe(options.env.RUNNER_TEST_PROOF);
     expect(alive(first.child)).toBe(true);
     process.kill(first.runner, "SIGKILL");
     await until(() => !alive(first.child));
     opener.detach();
-    await until(() => spawnSync("systemctl", ["--user", "is-active", unit!], { stdio: "ignore" }).status !== 0);
+    await until(() => spawnSync("systemctl", ["--user", "is-active", first.unit], { stdio: "ignore" }).status !== 0);
+    expect(execFileSync("systemctl", ["--user", "show", first.unit, "--property=LoadState", "--value"], { encoding: "utf8" }).trim()).toBe("loaded");
     await opener.openSession(options, () => {}, () => {});
     const second = JSON.parse(readFileSync(join(dataDir, "pids"), "utf8"));
+    units.push(second.unit);
+    expect(second.unit).not.toBe(first.unit);
     expect(second.runner).not.toBe(first.runner);
     expect(alive(second.runner)).toBe(true);
   } finally {
     opener?.detach();
-    if (unit) {
-      execFileSync("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
-      const id = unit.replace("pi-thread-runner-", "").replace(".service", "");
+    spawnSync("systemctl", ["--user", "stop", pin], { stdio: "ignore" });
+    for (const unit of units) {
+      spawnSync("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+      spawnSync("systemctl", ["--user", "reset-failed", unit], { stdio: "ignore" });
+    }
+    if (id) {
       for (const slice of [`pi-thread-${id}-tools.slice`, `pi-thread-${id}.slice`]) {
         execFileSync("systemctl", ["--user", "stop", slice], { stdio: "ignore" });
         execFileSync("systemctl", ["--user", "revert", slice], { stdio: "ignore" });

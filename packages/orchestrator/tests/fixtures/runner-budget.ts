@@ -34,7 +34,13 @@ export class RunnerBudgetFixture {
     const attempt = (effect: () => unknown) => { try { effect(); } catch (error) { errors.push(error); } };
     for (const id of this.ids) {
       const slices = runnerSlices(id);
-      for (const unit of [`pi-thread-runner-${id}.service`, slices.tools, slices.boundary]) {
+      // Every launch of this boundary owns a distinct controller unit name.
+      let runners: string[] = [];
+      attempt(() => {
+        runners = this.ctl("list-units", "--all", "--plain", "--no-legend", `pi-thread-runner-${id}-*.service`)
+          .split("\n").map(line => line.trim().split(/\s+/)[0]!).filter(Boolean);
+      });
+      for (const unit of [...runners, slices.tools, slices.boundary]) {
         attempt(() => {
           if (this.ctl("show", unit, "--property=LoadState", "--value").trim() === "not-found") return;
           if (unit.endsWith(".service")) {

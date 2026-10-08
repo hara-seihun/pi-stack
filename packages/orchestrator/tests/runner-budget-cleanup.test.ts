@@ -15,6 +15,7 @@ it("cleans every acquired boundary and directory even when a cleanup operation f
   const commands: string[][] = [];
   const fixture = new RunnerBudgetFixture(repo, "budget-cleanup-", (...args) => {
     commands.push(args);
+    if (args[0] === "list-units") return `${args.at(-1)!.replace("*", "0123456789ab")} loaded failed failed runner\n`;
     if (args[0] === "show") return args.includes("--property=LoadState") ? "loaded\n" : "active\n";
     if (args[0] === "stop" && args[1].endsWith(".service")) throw new Error("injected stop failure");
     return "";
@@ -45,7 +46,7 @@ it.skipIf(!manager)("failed session setup removes a runner and its child before 
       import {writeFileSync} from 'node:fs';
       const child=spawn('sleep',['300'],{stdio:'ignore'});
       writeFileSync(process.env.HOME+'/pids',JSON.stringify({runner:process.pid,child:child.pid}));
-      createServer(socket=>socket.on('data',()=>socket.end('{"ok":true}\\n'))).listen(process.argv[2]);
+      createServer(socket=>socket.on('data',()=>socket.end(JSON.stringify({ok:true,unit:process.env.PI_THREAD_RUNNER_UNIT})+'\\n'))).listen(process.argv[2]);
     `);
     const runtime = await import(pathToFileURL(join(compiled, "runner-transport.js")).href) as { createSharedPiSessionOpener: typeof createSharedPiSessionOpener };
     opener = runtime.createSharedPiSessionOpener({ dataDir: root, durable: true });

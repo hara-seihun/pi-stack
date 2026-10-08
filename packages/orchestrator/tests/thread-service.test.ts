@@ -920,6 +920,30 @@ it("persists a bounded startup retry budget across owner restart", async () => {
   } finally { db.close(); }
 });
 
+it("retains a startup-failed background owner across archive sweeps and restart until explicit close", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-startup-retention-")); roots.push(directory);
+  const openSession = vi.fn<OpenPiSession>(async () => { throw new Error("Compiled thread runner is missing: fixture"); });
+  const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession };
+  const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
+  const thread = value(await first.spawn({ requestId: "assignment", cwd: directory, message: "manage external resources" }));
+  value(await first.control({ threadId: thread.id, action: "placement", foreground: false }));
+  await first.start();
+  await waitFor(() => first.latestSettlement(thread.id)?.outcome === "failed");
+  await turn();
+  expect(first.get(thread.id)).toMatchObject({ state: "idle", held: true, pendingMessages: 0, metadata: { startupFailure: { attempts: 1 } } });
+  expect(first.get(thread.id)?.metadata?.archived).not.toBe(true);
+  await first.close();
+  const second = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(second);
+  await second.start(); await turn();
+  value(await second.control({ threadId: thread.id, action: "view" }));
+  value(await second.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: Date.now() }));
+  expect(second.get(thread.id)?.metadata?.archived).not.toBe(true);
+  expect(openSession).toHaveBeenCalledTimes(1);
+  value(await second.control({ threadId: thread.id, action: "close" }));
+  expect(second.get(thread.id)?.metadata?.archived).toBe(true);
+  expect(openSession).toHaveBeenCalledTimes(1);
+});
+
 it("stops even when the in-flight opening rejects", async () => {
   const directory = mkdtempSync(join(tmpdir(), "thread-stop-opening-")); roots.push(directory);
   let rejectOpen!: (error: Error) => void;

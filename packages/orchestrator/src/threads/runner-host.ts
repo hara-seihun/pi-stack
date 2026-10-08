@@ -153,7 +153,7 @@ const server = createServer(socket => {
       case "retain": drainWhenEmpty = false; reply(socket, { ok: true }); return;
       case "drain": drainWhenEmpty = true; reply(socket, { ok: true }); if (!sessions.size) void serial(stop); return;
       case "status":
-        reply(socket, { ok: true, pid: process.pid, sessions: sessions.size, activeSessions: activeCount(), availableSlots: availableSlots(true),
+        reply(socket, { ok: true, pid: process.pid, unit: process.env.PI_THREAD_RUNNER_UNIT ?? null, sessions: sessions.size, activeSessions: activeCount(), availableSlots: availableSlots(true),
           backgroundSlots: availableSlots(false), threadIds: [...sessions.values()].map(session => session.id),
           activeThreadIds: [...sessions.values()].filter(session => session.active).map(session => session.id), maxSessions, maxResident, rss: process.memoryUsage().rss }); return;
     }

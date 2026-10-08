@@ -93,7 +93,7 @@ it.skipIf(!manager || !nativeBrowser || !chrome)("native Chromium trees remain o
     }
     const chromeMain = browserPids.find(pid => !readFileSync(`/proc/${pid}/cmdline`, "utf8").includes("--type="))!;
     expect(readlinkSync(`/proc/${chromeMain}/ns/mnt`)).toBe(readlinkSync(`/proc/${before.pid}/ns/mnt`));
-    const controllerGroup = ctl("show", `pi-thread-runner-${id}.service`, "--property=ControlGroup", "--value").trim();
+    const controllerGroup = ctl("show", before.unit, "--property=ControlGroup", "--value").trim();
     expect(readFileSync(`/sys/fs/cgroup${controllerGroup}/cgroup.procs`, "utf8").trim()).toBe(String(before.pid));
     const oomBefore = Number(readFileSync(`/sys/fs/cgroup${toolGroup}/memory.events`, "utf8").match(/^oom_kill (\d+)$/m)![1]);
     ctl("set-property", "--runtime", slices.tools, "MemoryHigh=128M", "MemoryMax=128M", "MemorySwapMax=0");
