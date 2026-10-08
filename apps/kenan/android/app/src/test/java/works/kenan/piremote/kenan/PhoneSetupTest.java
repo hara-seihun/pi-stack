@@ -27,7 +27,9 @@ import java.util.List;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.android.controller.ServiceController;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
@@ -68,6 +70,11 @@ public class PhoneSetupTest {
         @Override public void resolve(JSObject data) { result = data; resolved = true; }
         @Override public void reject(String message, String code, Exception failure, JSObject data) { rejected = code; }
     }
+    private ServiceController<PhoneAccessibilityService> accessibilityService;
+    private void connectAccessibilityService() {
+        accessibilityService = Robolectric.buildService(PhoneAccessibilityService.class).create();
+        accessibilityService.get().onServiceConnected();
+    }
     private Context context() { return RuntimeEnvironment.getApplication(); }
     private KenanRemotePlugin plugin() {
         KenanRemotePlugin plugin = new KenanRemotePlugin();
@@ -90,6 +97,7 @@ public class PhoneSetupTest {
             java.util.Arrays.stream(enabled).map(this::service).toList());
     }
     @After public void clear() {
+        if (accessibilityService != null) accessibilityService.destroy();
         SettingsLauncher.intent = null;
         SettingsLauncher.callback = null;
         context().getSharedPreferences("notification-settings", 0).edit().clear().commit();
@@ -111,6 +119,7 @@ public class PhoneSetupTest {
         assertEquals("busy", overlapping.rejected);
         assertFalse(overlapping.resolved);
         accessibility(PhoneAccessibilityService.class);
+        connectAccessibilityService();
         ReflectionHelpers.callInstanceMethod(plugin, SettingsLauncher.callback,
             ReflectionHelpers.ClassParameter.from(PluginCall.class, call),
             ReflectionHelpers.ClassParameter.from(ActivityResult.class, new ActivityResult(android.app.Activity.RESULT_CANCELED, null)));
@@ -121,6 +130,20 @@ public class PhoneSetupTest {
         plugin.phoneSetup(granted);
         assertTrue(granted.resolved);
         assertNull(SettingsLauncher.intent);
+    }
+    @Test public void accessibilityCapabilityRequiresGrantAndLiveService() {
+        accessibility(PhoneAccessibilityService.class);
+        assertFalse("grant alone cannot execute phone actions", PhoneControlService.capabilities(context()).optBoolean("accessibility"));
+        connectAccessibilityService();
+        assertTrue(PhoneControlService.capabilities(context()).optBoolean("accessibility"));
+        accessibility();
+        assertSame(accessibilityService.get(), PhoneAccessibilityService.current);
+        assertFalse("revocation takes effect before service teardown", PhoneControlService.capabilities(context()).optBoolean("accessibility"));
+        accessibility(PhoneAccessibilityService.class);
+        assertTrue(PhoneControlService.capabilities(context()).optBoolean("accessibility"));
+        accessibilityService.destroy();
+        accessibilityService = null;
+        assertFalse("disconnection takes effect even while the grant remains", PhoneControlService.capabilities(context()).optBoolean("accessibility"));
     }
     @Test public void decliningAccessibilityReturnsMissingGrantAndAllowsRetry() {
         accessibility();
