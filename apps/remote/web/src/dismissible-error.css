@@ -1,6 +1,7 @@
 .dismissible-error {
-  display: flex;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: start;
   gap: 8px;
   min-width: 0;
   max-width: 100%;
@@ -8,14 +9,17 @@
   white-space: normal;
 }
 
-.dismissible-error .dismissible-error-message {
-  flex: 1;
+.dismissible-error .dismissible-error-message,
+.dismissible-error .dismissible-error-followup {
+  grid-column: 1;
   min-width: 0;
   align-self: center;
   overflow-wrap: anywhere;
 }
 
 .dismissible-error .dismissible-error-dismiss {
+  grid-column: 2;
+  grid-row: 1 / span 2;
   display: inline-flex;
   align-items: center;
   justify-content: center;

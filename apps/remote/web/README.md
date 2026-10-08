@@ -1,5 +1,7 @@
 # Shared Remote client
 
+The [typed UI state catalogue](src/ui-catalogue/README.md) owns synthetic rendered fixtures, actual visual review receipts and the remaining component/composition queue.
+
 Browser and native clients authenticate at the bootstrap router before discovering endpoints. The web client owns account sign-in, person selection on key-based hosts, router sessions, and endpoint selection.
 
 ## Browser mount path
@@ -56,7 +58,7 @@ API fetches reject redirects so custom session headers cannot follow a router re
 
 [`DismissibleError`](src/dismissible-error.tsx) imports its own [CSS](src/dismissible-error.css). Pass `message` as a string, or an empty/null/undefined value to remove feedback. Optional props are `dismissLabel`, `className`, `role`, `resetKey` for a new attempt with the same message, and `onDismiss` for server-owned errors. The default role is `alert`; background feedback uses `status`.
 
-Server-owned errors carry an occurrence ID. The client posts it to `POST /v1/errors/:errorId/dismiss` and hides the message after the server acknowledges it. While saving, the button is disabled. A failed save keeps the original error visible with a retryable dismissal error. Server synchronization removes dismissed errors from every client, including inbox and thread summaries. Browser reloads and supervisor restarts retain dismissal.
+Server-owned errors carry an occurrence ID. The client posts it to `POST /v1/errors/:errorId/dismiss` and hides the message after the server acknowledges it. While saving, the button is disabled and Dismissing is visible. A failed save keeps the original error visible with a retryable dismissal error. Server synchronization removes dismissed errors from every client, including inbox and thread summaries. Browser reloads and supervisor restarts retain dismissal.
 
 The supervisor's `error_feedback` table owns acknowledgements. Repeated reports of the same unresolved error keep their ID; recovery and changed messages create a new occurrence. A stale dismissal cannot acknowledge a newer occurrence or an error from another thread. Dismissal does not change execution state, retry policy, native history or work outcomes.
 
@@ -68,13 +70,13 @@ Client-only errors, such as upload and connection failures, still dismiss locall
 
 ## Toasts
 
-[`toasts.tsx`](src/toasts.tsx) exports `toast` for short app-wide notices and `ToastViewport`, mounted once in the authenticated shell. [`toasts.css`](src/toasts.css) owns their styling. Sonner dismisses a toast after 3 seconds by default, pauses its timer during interaction, and lets people dismiss it with the close button or a left/right swipe. Changing account or environment clears visible toasts. Toast dismissal never changes the operation or its recovery state.
+[`toasts.tsx`](src/toasts.tsx) exports `toast` for short app-wide notices and `ToastViewport`, mounted once in the authenticated shell. [`toasts.css`](src/toasts.css) owns their styling. Sonner dismisses a toast after 3 seconds by default, pauses its timer during interaction, and lets people dismiss it with the close button or a left/right swipe. Changing account or environment clears visible toasts. Long notice content scrolls within a viewport-bound panel while action and dismissal controls stay available. Toast dismissal never changes the operation or its recovery state.
 
 Import `toast` from `./toasts` in a client component or module. Use `toast("Saved")` or `toast.error("Upload failed")`. Pass an `id` to update an existing notice; `toast.dismiss(id)` removes it.
 
 ## Presentation
 
-Each visible fact has one owner in the current view. Recognizable navigation, provider and model icons carry accessible names and hover titles rather than adjacent labels. Text-only controls remain where an icon would be ambiguous. Status uses coloured text, not a second status dot. A meter may pair its shape with one exact number; descriptions do not repeat that number.
+Each visible fact has one owner in the current view. Navigation pairs its icons with short visible destination labels and accessible names; provider and model icons carry accessible names and hover titles rather than repeated adjacent labels. Text-only controls remain where an icon would be ambiguous. Status uses coloured text, not a second status dot. A meter may pair its shape with one exact number; descriptions do not repeat that number.
 
 Collapsed entries summarize their content. Opening an entry replaces its excerpt with the complete data rather than displaying both. Tool arguments, results, copy actions and original model context remain available. The inspector opens as a right sidebar, and the new-chat menu stays within the inbox column. Other modal sheets cover the underlying screen. Keyboard interaction, accessible names and distinct actions such as cancellation versus attachment remain separate from visual repetition.
 

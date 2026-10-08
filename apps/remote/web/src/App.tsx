@@ -1164,7 +1164,13 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   const list = (() => {
     switch (route.tab) {
-      case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
+      case "chats":
+        if (!state.bootstrap) return <section className="empty-state" aria-busy={!state.offline} aria-live="polite">
+          <strong>{state.offline ? "Chats unavailable" : "Connecting to your chats…"}</strong>
+          <span>{state.offline || "Waiting for the selected environment to return its conversation list."}</span>
+          {state.offline && <button type="button" className="accent" onClick={reconnect}>Reconnect</button>}
+        </section>;
+        return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
       case "agents": case "attention": case "machine": case "settings": case "files": return null;
     }
     return assertNever(route, "App list route");

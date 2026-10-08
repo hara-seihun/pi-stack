@@ -31,7 +31,7 @@ export function TabNav({ layout, active, badges, onSelect, onPrepare, update }: 
       const label = LABELS[tab];
       return <button key={tab} type="button" className={`tab${offeredUpdate ? " tab-update" : ""}`} aria-current={active === tab ? "page" : undefined} aria-label={showBadge ? `${label}, ${badge.count}` : label} title={offeredUpdate ? `${label}: ${update.status}` : label} onPointerDown={() => onPrepare?.(tab)} onFocus={() => onPrepare?.(tab)} onClick={() => onSelect(tab)}>
         <span className="tab-icon"><TabIcon tab={tab} />{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
-        {offeredUpdate && <span className="tab-update-label">Update</span>}
+        <span className={offeredUpdate ? "tab-update-label" : "tab-label"}>{offeredUpdate ? "Update" : label}</span>
       </button>;
     })}
   </nav>;

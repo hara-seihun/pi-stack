@@ -2,6 +2,8 @@
 
 A self-hosted web and Android controller for persistent [Pi](https://pi.dev) coding-agent threads.
 
+The [typed UI state catalogue](web/src/ui-catalogue/README.md) owns repeatable synthetic rendered review, judged coverage and the remaining owned-state/composition queue.
+
 [Settings](docs/settings.md) owns the central `#/settings` area, its typed registry, person/system authorization boundary, owning adapters and authoritative per-person IANA timezone.
 
 Pi Remote presents and controls persistent [unified threads](../../docs/threads.md). Orchestrator's `ThreadService` owns thread state, durable input, settings, cancellation and parent notifications. Pi owns each native session and its JSONL history. A front door starts one Remote supervisor per person, and a person's private directory is mounted only while she has unlocked it.
