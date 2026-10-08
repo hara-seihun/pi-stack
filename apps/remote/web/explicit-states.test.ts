@@ -3,7 +3,6 @@ import type { Session } from "../server/protocol";
 import { validateStreamSnapshot, validateThreadObservation } from "../shared/state-validation";
 import { threadStatus, attentionRank } from "./src/features/status/thread-status";
 import { parseRoute } from "./src/app/routes";
-import { parseWriteFrame } from "./src/write-wire";
 import { queueMessageStatus } from "./src/features/queue/QueueSheet";
 import { AppUpdater } from "./src/app-update-state";
 
@@ -50,11 +49,9 @@ test("route boundaries allow the empty entrance but reject malformed or undescri
   expect(parseRoute("#/chats/room/room-id/settings")).toEqual({ tab: "chats", chat: "room:room-id", panel: "settings" });
 });
 
-test("queue and Write boundaries do not turn unknowns into sent messages or dictation", () => {
+test("queue boundaries do not turn unknowns into sent messages", () => {
   expect(() => queueMessageStatus({ state: "new" as any, delivery: "queue" }, false)).toThrow("undescribed state");
   expect(() => queueMessageStatus({ state: "queued", delivery: "new" as any }, false)).toThrow("invalid state");
-  for (const value of [{ type: "future" }, { type: "final" }, { type: "final", text: "text", rewrite: { status: "new", reason: null } }]) expect(() => parseWriteFrame(JSON.stringify(value))).toThrow();
-  expect(parseWriteFrame('{"type":"final","text":"text","rewrite":null}')).toEqual({ type: "final", text: "text", rewrite: null });
 });
 
 test("unknown Android install acknowledgement is a retryable error, never Restarting", async () => {

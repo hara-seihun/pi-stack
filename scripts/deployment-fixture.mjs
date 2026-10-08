@@ -22,10 +22,6 @@ export function copyRemoteSources(root, checkout, resources) {
   }
 }
 
-export function copyWriteSources(root, checkout) {
-  // Write's production owner consumes its source directory, including new pins,
-  // converters and runtime installers. Fixtures replace only the exercised inputs.
-  for (const owner of ["engine", "rewrite-runtime"]) {
-    cpSync(join(root, "apps/write", owner), join(checkout, "apps/write", owner), { recursive: true });
-  }
+export function copyRecognitionSources(root, checkout) {
+  cpSync(join(root, "apps/meet-recognition"), join(checkout, "apps/meet-recognition"), { recursive: true });
 }

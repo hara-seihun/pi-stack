@@ -52,44 +52,14 @@ final class NativeState {
         public String wire() { return wire; }
     }
 
-    enum WriteSetup implements Value {
-        MICROPHONE("microphone"), NOTIFICATION("notification"), OVERLAY("overlay"), ACCESSIBILITY("accessibility"),
-        BATTERY("battery"), ENABLED("enabled"), KEYBOARD("keyboard");
-        private final String wire;
-        WriteSetup(String wire) { this.wire = wire; }
-        public String wire() { return wire; }
-    }
-
     enum PhoneSetup implements Value {
         CONTACTS("contacts"), CALENDAR("calendar"), LOCATION("location"), BACKGROUND_LOCATION("backgroundLocation"),
         SMS("sms"), CALL_LOG("callLog"), PHONE("phone"), CAMERA("camera"), MICROPHONE("microphone"), NOTIFICATIONS("notifications"),
-        ACCESSIBILITY("accessibility"), WRITE_ACCESSIBILITY("writeAccessibility"), NOTIFICATION_ACCESS("notificationAccess"),
+        ACCESSIBILITY("accessibility"), NOTIFICATION_ACCESS("notificationAccess"),
         OVERLAY("overlay"), BATTERY("battery"), ALL_FILES("allFiles"), USAGE("usage"), WRITE_SETTINGS("writeSettings"),
         INSTALL_PACKAGES("installPackages"), DEVICE_ADMIN("deviceAdmin"), DEVICE_OWNER("deviceOwner"), SECURE_SETTINGS("secureSettings");
         private final String wire;
         PhoneSetup(String wire) { this.wire = wire; }
-        public String wire() { return wire; }
-    }
-
-    enum WriteEvent implements Value {
-        PARTIAL("partial"), FINAL("final"), ERROR("error");
-        private final String wire;
-        WriteEvent(String wire) { this.wire = wire; }
-        public String wire() { return wire; }
-    }
-
-    enum RewriteStatus implements Value {
-        APPLIED("applied"), UNCHANGED("unchanged"), GUARDED("guarded"), UNAVAILABLE("unavailable");
-        private final String wire;
-        RewriteStatus(String wire) { this.wire = wire; }
-        public String wire() { return wire; }
-    }
-
-    enum UnavailableRewrite implements Value {
-        WARMING("warming"), WARMUP_FAILED("warmup_failed"), QUEUE_BUSY("queue_busy"),
-        RUNTIME_CLOSED("runtime_closed"), INFERENCE_FAILED("inference_failed");
-        private final String wire;
-        UnavailableRewrite(String wire) { this.wire = wire; }
         public String wire() { return wire; }
     }
 
@@ -186,32 +156,6 @@ final class NativeState {
         static CursorType require(int android) {
             for (CursorType type : values()) if (type.android == android) return type;
             throw new IllegalArgumentException("Invalid cursor field type: " + android);
-        }
-    }
-
-    enum WritePhase {
-        IDLE(false, false, false, false), CONNECTING(true, false, false, false),
-        BUFFERING(true, true, false, false), RECORDING(false, true, false, false),
-        FINISHING_CONNECTING(true, false, true, false), FINISHING(false, false, true, false),
-        CLIPBOARD_READY(false, false, false, true);
-        final boolean connecting, recording, finishing, clipboard;
-        WritePhase(boolean connecting, boolean recording, boolean finishing, boolean clipboard) {
-            this.connecting = connecting; this.recording = recording; this.finishing = finishing; this.clipboard = clipboard;
-        }
-        boolean busy() { return connecting || recording || finishing; }
-        WritePhase connected() {
-            return switch (this) {
-                case BUFFERING -> RECORDING;
-                case FINISHING_CONNECTING -> FINISHING;
-                case CONNECTING, IDLE, RECORDING, FINISHING, CLIPBOARD_READY -> throw new IllegalStateException("Unexpected Write connection in " + this);
-            };
-        }
-        WritePhase finish() {
-            return switch (this) {
-                case BUFFERING -> FINISHING_CONNECTING;
-                case RECORDING -> FINISHING;
-                case CONNECTING, IDLE, FINISHING_CONNECTING, FINISHING, CLIPBOARD_READY -> throw new IllegalStateException("Cannot finish Write capture in " + this);
-            };
         }
     }
 

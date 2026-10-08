@@ -256,7 +256,7 @@ function MeetPage() {
       if (!window.isSecureContext || !navigator.mediaDevices) throw new Error("Meet needs a secure WebView or the Tailscale HTTPS link for microphone and camera access");
       if (!inviteRoom) {
         const configuration = await meetRequest<{ transcriptionAvailable: boolean }>(meetPath(), owner);
-        if (!configuration.transcriptionAvailable) throw new Error("This host needs Pi Stack Write before it can save speaker-labelled meetings");
+        if (!configuration.transcriptionAvailable) throw new Error("This host does not have meeting transcription configured");
         media = new MeetMedia(); await media.audio.resume(); mixer.current = media; }
       const stream = microphone || camera ? await navigator.mediaDevices.getUserMedia({
         audio: microphone ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare everything deploy/host would otherwise build inside its 50-second
 # deadline: checkout dependencies, the Orchestrator, Remote and Root builds, the
-# production runtime tree and Write engine. Every step is
+# production runtime tree and Meet recognition service. Every step is
 # idempotent and receipt-cached, so deploy/host then reuses the results and
 # spends its whole budget on publishing, activation and smoke checks.
 #
@@ -27,10 +27,10 @@ started=$SECONDS
 "$root/deploy/retain" || echo 'Pi stack release retention failed; the release store was left as it was' >&2
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
-"$root/deploy/write-engine" &
-write_engine_pid=$!
+"$root/deploy/meet-recognition" &
+recognition_pid=$!
 failed=0
-# Runtime packages consume the declarations built above. Keep Write independent,
+# Runtime packages consume the declarations built above. Keep recognition independent,
 # but never install/compile that closure while checkout builds are still writing it.
 if wait "$builds_pid"; then
   if "$root/deploy/runtime"; then :; else
@@ -43,9 +43,9 @@ else
   printf 'Pi stack preparation builds exited %s\n' "$status" >&2
   failed=1
 fi
-if wait "$write_engine_pid"; then :; else
+if wait "$recognition_pid"; then :; else
   status=$?
-  printf 'Pi stack preparation write-engine exited %s\n' "$status" >&2
+  printf 'Pi stack preparation meet-recognition exited %s\n' "$status" >&2
   failed=1
 fi
 (( failed == 0 )) || { echo "Pi stack preparation failed" >&2; exit 1; }

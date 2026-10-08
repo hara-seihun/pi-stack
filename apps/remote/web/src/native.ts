@@ -14,7 +14,7 @@ export interface InstalledApp { revision: string; versionCode: number; applicati
 export interface AppUpdateCheck { update: AppUpdate | null; installed: InstalledApp }
 export interface AppUpdateInstall { status: "installer-opened" | "reloading"; revision?: string }
 export interface EnvironmentState extends Endpoint { environments: Endpoint[] }
-export type PhoneSetupStep = "accessibility" | "writeAccessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "overlay" | "writeSettings" | "deviceAdmin" | "installPackages";
+export type PhoneSetupStep = "accessibility" | "notificationAccess" | "notifications" | "battery" | "allFiles" | "contacts" | "calendar" | "location" | "backgroundLocation" | "sms" | "callLog" | "phone" | "camera" | "microphone" | "usage" | "overlay" | "writeSettings" | "deviceAdmin" | "installPackages";
 export interface PhoneStatus {
   enabled: boolean;
   connected: boolean;
@@ -29,9 +29,6 @@ export interface PhoneStatus {
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
-  writeStatus?(): Promise<{ microphone: boolean; notification: boolean; overlay: boolean; accessibility: boolean; battery: boolean; keyboardRequired: boolean; overlayEnabled?: boolean }>;
-  writeSetup?(options: { step: "microphone" | "notification" | "overlay" | "accessibility" | "battery" | "keyboard"; required?: boolean } | { step: "enabled"; enabled: boolean }): Promise<void>;
-  writeEnvironment?(options: { user: string; environment: string }): Promise<void>;
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
   phoneSetup?(options: { step: PhoneSetupStep; instruction?: string }): Promise<PhoneStatus>;
@@ -98,9 +95,6 @@ export const remote: RemoteBridge = !nativePlatform
     : {
         getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
         syncSession: (options) => capacitor.nativePromise("KenanRemote", "syncSession", options),
-        writeStatus: () => capacitor.nativePromise("KenanRemote", "writeStatus", {}),
-        writeSetup: (options) => capacitor.nativePromise("KenanRemote", "writeSetup", options),
-        writeEnvironment: (options) => capacitor.nativePromise("KenanRemote", "writeEnvironment", options),
         phoneStatus: () => capacitor.nativePromise("KenanRemote", "phoneStatus", {}),
         phoneConfigure: (options) => capacitor.nativePromise("KenanRemote", "phoneConfigure", options),
         phoneSetup: (options) => capacitor.nativePromise("KenanRemote", "phoneSetup", options),
@@ -278,13 +272,6 @@ async function verifiedState(selected: Endpoint, endpoints: Endpoint[], selectio
   if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
   if (health.environmentId !== selected.id) throw new Error(`${selected.name} environment identity mismatch`);
   if (selection !== selectionRevision) throw new DOMException("Endpoint selection superseded", "AbortError");
-  if (nativePlatform && remote.writeEnvironment) {
-    await nativeSessionReady();
-    if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
-    if (selection !== selectionRevision) throw new DOMException("Endpoint selection superseded", "AbortError");
-    await remote.writeEnvironment({ user: auth.user, environment: selected.id });
-  }
-  if (revision !== generation) throw new DOMException("Identity changed during endpoint selection", "AbortError");
   return { ...selected, environments: endpoints };
 }
 

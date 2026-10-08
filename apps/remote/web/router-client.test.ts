@@ -29,7 +29,6 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
   let wrongCloud = false;
   let healthFailure = true;
   let healthProbeGate: ((path: string) => Promise<void>) | null = null;
-  let writeEnvironmentGate: (() => Promise<void>) | null = null;
   const synced: Array<{ user: string; session: string }> = [];
   const publicIngress = process.env.PI_ROUTER_TEST_CASE === "android-public";
   let accessVersion = 1;
@@ -39,7 +38,6 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
       if (rejectAccess) { rejectAccess = false; accessVersion++; }
       return { routerUrl: bootstrap, ...(publicIngress ? { accessToken: `cf-token-${accessVersion}` } : {}) };
     },
-    writeEnvironment: async () => { await writeEnvironmentGate?.(); },
     syncSession: async (identity: { user: string; session: string }) => {
       if (Boolean(identity.user) !== Boolean(identity.session)) throw new Error("Native rejects incomplete identity");
       synced.push(identity);
@@ -153,21 +151,6 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
       healthProbeGate = null;
       await window.KenanRemote!.select({ id: "local", user: "sybil" });
       wrongCloud = true;
-    }
-    if (nativePlatform) {
-      let began!: () => void;
-      let release!: () => void;
-      const writing = new Promise<void>(resolve => { began = resolve; });
-      const gate = new Promise<void>(resolve => { release = resolve; });
-      writeEnvironmentGate = async () => { began(); await gate; };
-      window.dispatchEvent(new Event("pi-auth"));
-      const stale = window.KenanRemote!.getState();
-      await writing;
-      window.dispatchEvent(new Event("pi-auth"));
-      release();
-      await expect(stale).rejects.toThrow("Identity changed during endpoint selection");
-      writeEnvironmentGate = null;
-      expect((await window.KenanRemote!.getState()).id).toBe("local");
     }
     wrongCloud = false;
     await window.KenanRemote!.select({ id: "cloud", user: "sybil" });
