@@ -6,15 +6,18 @@ import { openSqlite } from "../sqlite.js";
 import { ThreadCapacityLedger } from "./capacity-ledger.js";
 import type { Result } from "./contracts.js";
 
-export interface NativeOwnerRecord { threadId: string; databasePath: string; unit: string; cgroup: string; bootId: string }
+export interface NativeOwnerRecord { threadId: string; databasePath: string; unit: string; cgroup: string; bootId: string; uid?: number }
 export type NativeOwnerAbsence = (owner: NativeOwnerRecord) => Promise<Result<boolean>>;
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
 export const nativeOwnerAbsent: NativeOwnerAbsence = async owner => {
   try {
-    if (!/^pi-native-[a-f0-9-]+\.service$/.test(owner.unit) || !owner.cgroup.startsWith("/user.slice/") || !owner.cgroup.endsWith(`/${owner.unit}`) || owner.cgroup.includes("..") || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner.bootId)) return failure("Invalid native managed owner identity");
+    if (!/^pi-native-[a-f0-9-]+\.(service|scope)$/.test(owner.unit) || (owner.uid !== undefined && owner.uid !== process.getuid!()) || !owner.cgroup.startsWith("/user.slice/") || !owner.cgroup.endsWith(`/${owner.unit}`) || owner.cgroup.includes("..") || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner.bootId)) return failure("Invalid native managed owner identity");
     if (readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() !== owner.bootId) return { ok: true, value: true };
-    const shown = execFileSync("systemctl", ["--user", "show", owner.unit, "--property=LoadState,ActiveState"], { encoding: "utf8", timeout: 5000 });
+    const uid = process.getuid!();
+    const shown = execFileSync("systemctl", ["--user", "show", owner.unit, "--property=LoadState,ActiveState"], {
+      encoding: "utf8", timeout: 5000, env: { ...process.env, XDG_RUNTIME_DIR: `/run/user/${uid}`, DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${uid}/bus` },
+    });
     const properties = Object.fromEntries(shown.trim().split("\n").map(line => line.split("=")));
     if (properties.LoadState !== "not-found" && !["inactive", "failed"].includes(properties.ActiveState)) return { ok: true, value: false };
     try {
@@ -45,7 +48,7 @@ export async function recoverNativeSessionOwners(directory: string, options: { c
     try {
       if (!entry.isFile()) return failure(`Native owner record must be an actual file: ${entry.name}`);
       owner = JSON.parse(readFileSync(join(directory, entry.name), "utf8"));
-      if (!owner || typeof owner.threadId !== "string" || typeof owner.databasePath !== "string" || owner.databasePath !== join(directory, entry.name.replace(/\.owner\.json$/, ".sqlite3")) || typeof owner.unit !== "string" || typeof owner.cgroup !== "string" || typeof owner.bootId !== "string" || !owner.cgroup.endsWith(`/${owner.unit}`) || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner.bootId)) return failure(`Invalid native owner record: ${entry.name}`);
+      if (!owner || typeof owner.threadId !== "string" || typeof owner.databasePath !== "string" || owner.databasePath !== join(directory, entry.name.replace(/\.owner\.json$/, ".sqlite3")) || typeof owner.unit !== "string" || typeof owner.cgroup !== "string" || typeof owner.bootId !== "string" || (owner.uid !== undefined && (!Number.isSafeInteger(owner.uid) || owner.uid !== process.getuid!())) || !owner.cgroup.endsWith(`/${owner.unit}`) || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner.bootId)) return failure(`Invalid native owner record: ${entry.name}`);
       if (options.unit && owner.unit !== options.unit) continue;
       if (!lstatSync(owner.databasePath).isFile()) return failure("Native owner database must be an actual file");
     } catch (error) { return failure(String(error)); }

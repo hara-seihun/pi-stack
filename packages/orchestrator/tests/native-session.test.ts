@@ -59,11 +59,13 @@ function nativeFixture() {
   });
   const agent = {
     state,
+    convertToLlm: vi.fn(async (messages: unknown[]) => messages),
     continue: vi.fn(async () => { await state.tools[0]!.execute("tool-call", {}); }),
     prompt: vi.fn(async (_text: string) => { await agent.continue(); }),
   };
   const session = {
     agent, messages: [], sessionFile: undefined, pendingMessageCount: 0,
+    sessionManager: { getBranch: () => [], appendCustomEntry: vi.fn() },
     isStreaming: false, isCompacting: false, isBashRunning: false,
     prompt: vi.fn(async (text: string) => {
       session.isStreaming = true;
@@ -224,12 +226,13 @@ it("keeps async close and custody pending until an abort-resistant detached tool
   expect(fixture.release).toHaveBeenCalledTimes(1);
 }, 3_000);
 
-it.each<{ label: string; proof: Result<boolean>; active: number; nested?: true }>([
+it.each<{ label: string; proof: Result<boolean>; active: number; nested?: true; scope?: true }>([
   { label: "positive native-owner absence", proof: { ok: true, value: true }, active: 0 },
   { label: "nested canonical native-owner database", proof: { ok: true, value: true }, active: 0, nested: true },
+  { label: "same-UID foreground scope owner", proof: { ok: true, value: true }, active: 0, scope: true },
   { label: "a still-present native owner", proof: { ok: true, value: false }, active: 1 },
   { label: "an unavailable absence proof", proof: { ok: false, error: { code: "unavailable", message: "fixture absence unknown" } }, active: 1 },
-])("recovers crash custody only on positive absence: $label", async ({ proof, active, nested }) => {
+])("recovers crash custody only on positive absence: $label", async ({ proof, active, nested, scope }) => {
   const fixture = capacityFixture();
   const paths = options(fixture.capacity);
   const directory = nested ? join(paths.cwd, "b941ac15-36b6-42f2-928f-17b98f71a937") : paths.cwd;
@@ -237,7 +240,8 @@ it.each<{ label: string; proof: Result<boolean>; active: number; nested?: true }
   if (nested) paths.databasePath = join(directory, "threads.sqlite3");
   const owner: NativeOwnerRecord = {
     threadId: "crashed-native-thread", databasePath: paths.databasePath,
-    unit: "pi-native-01234567.service", cgroup: "/user.slice/fixture/pi-native-01234567.service", bootId: "942aba85-5d69-45dc-a708-065084d6e4c4",
+    unit: `pi-native-01234567.${scope ? "scope" : "service"}`, cgroup: `/user.slice/fixture/pi-native-01234567.${scope ? "scope" : "service"}`, bootId: "942aba85-5d69-45dc-a708-065084d6e4c4",
+    ...(scope ? { uid: process.getuid!() } : {}),
   };
   const db = openSqlite(paths.databasePath);
   try {
@@ -290,6 +294,18 @@ it("rejects linked owner roots without reading the target or releasing custody",
   const absent = vi.fn(async () => ({ ok: true as const, value: true }));
   const result = await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent });
   expect(result).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("must not be a link") } });
+  expect(absent).not.toHaveBeenCalled();
+  expect(fixture.release).not.toHaveBeenCalled();
+});
+
+it("rejects another UID's scope before asking its manager or releasing custody", async () => {
+  const fixture = capacityFixture();
+  const paths = options(fixture.capacity);
+  writeFileSync(join(paths.cwd, "threads.owner.json"), JSON.stringify({ threadId: "another-uid", databasePath: paths.databasePath,
+    unit: "pi-native-01234567.scope", cgroup: "/user.slice/fixture/pi-native-01234567.scope", uid: process.getuid!() + 1,
+    bootId: "942aba85-5d69-45dc-a708-065084d6e4c4" }));
+  const absent = vi.fn(async () => ({ ok: true as const, value: true }));
+  expect(await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent })).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("Invalid native owner record") } });
   expect(absent).not.toHaveBeenCalled();
   expect(fixture.release).not.toHaveBeenCalled();
 });

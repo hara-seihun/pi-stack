@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Finite synthetic private-mount proof for foreground native user scopes.
+
+Run as the ordinary caller with passwordless sudo for mount setup. No SDK,
+private household mount, account switch, or detached worker is used.
+"""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+if len(sys.argv) != 1:
+    raise SystemExit("Usage: deploy/native-namespace-rehearse (ordinary caller; sudo mount setup)")
+if os.getuid() == 0:
+    raise SystemExit("Run as the originating ordinary user, not through sudo")
+node = shutil.which("node")
+if node is None:
+    raise SystemExit("node is required")
+uid, gid = os.getuid(), os.getgid()
+if not Path(f"/run/user/{uid}/bus").is_socket():
+    raise SystemExit("Originating user's systemd bus is unavailable")
+repo = Path(__file__).resolve().parent.parent
+started = time.monotonic()
+root = Path(tempfile.mkdtemp(prefix="pi-native-namespace-fixture-"))
+try:
+    for name in ("private", "view", "cwd", "managed"):
+        (root / name).mkdir()
+    (root / "fixture.mjs").write_text(r'''
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, readlinkSync, writeFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const [mode, root, repo, token, outerMount] = process.argv.slice(2);
+const { nativeOrigin, nativeManagerEnvironment } = await import(pathToFileURL(join(repo, "packages/runtime/native-recovery.mjs")));
+const env = nativeManagerEnvironment();
+const marker = join(root, "view/marker");
+const source = join(root, "private/marker");
+const read = path => JSON.parse(readFileSync(path, "utf8"));
+const save = (path, value) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
+const cgroup = () => readFileSync("/proc/self/cgroup", "utf8").trim().split("\n").find(line => line.startsWith("0::")).slice(3);
+function members(group) {
+  const path = join("/sys/fs/cgroup", group, "cgroup.procs");
+  return existsSync(path) ? readFileSync(path, "utf8").trim().split(/\s+/).filter(Boolean).map(Number) : [];
+}
+function boundary(origin) {
+  assert.deepEqual(nativeOrigin(), origin);
+  assert.equal(readFileSync(marker, "utf8"), process.env.PI_NATIVE_FIXTURE_TOKEN);
+  assert.equal(readFileSync(source, "utf8"), process.env.PI_NATIVE_FIXTURE_TOKEN);
+  assert.equal(process.env.XDG_RUNTIME_DIR, `/run/user/${origin.uid}`);
+  assert.equal(process.env.DBUS_SESSION_BUS_ADDRESS, `unix:path=/run/user/${origin.uid}/bus`);
+  const status = readFileSync("/proc/self/status", "utf8");
+  for (const cap of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) {
+    assert.match(status, new RegExp(`${cap}:\\s+0+\\n`));
+  }
+}
+function control(args) {
+  const result = spawnSync("systemctl", ["--user", ...args], { env, encoding: "utf8", timeout: 2500 });
+  assert.ifError(result.error);
+  return result;
+}
+function assertAbsent(unit, group) {
+  assert.deepEqual(members(group), [], `live native cgroup: ${unit}`);
+  const shown = control(["show", unit, "--property=ActiveState", "--value"]);
+  assert.ok(shown.status !== 0 || ["inactive", "failed", ""].includes(shown.stdout.trim()), `active scope after reclamation: ${unit}`);
+}
+if (mode === "outside") {
+  assert.equal(existsSync(marker), false, "manager-spawned service saw private marker");
+  assert.equal(existsSync(source), false, "private tmpfs leaked to manager");
+  assert.notEqual(nativeOrigin().mount, outerMount);
+  console.log(JSON.stringify({ outsideManagerCannotReadMarker: true }));
+} else if (mode === "tool") {
+  const manifest = read(token);
+  boundary(manifest.origin);
+  assert.ok(cgroup().endsWith(`/${manifest.unit}`));
+  save(join(root, "tool.json"), { pid: process.pid, group: cgroup(), origin: nativeOrigin() });
+  process.send({ ready: true });
+  // It deliberately outlives its host unless the real scope stop reclaims it.
+  setTimeout(() => process.exit(73), 6000);
+} else if (mode === "host") {
+  const manifest = read(token);
+  boundary(manifest.origin);
+  assert.equal(process.env.PI_NATIVE_FIXTURE_TOKEN, manifest.args[1]);
+  assert.ok(cgroup().endsWith(`/${manifest.unit}`));
+  save(join(root, `${manifest.args[0]}-host.json`), { pid: process.pid, group: cgroup(), origin: nativeOrigin() });
+  if (manifest.args[0] === "normal") process.exit(0);
+  assert.equal(manifest.args[0], "sigkill");
+  const child = spawn(process.execPath, [join(root, "fixture.mjs"), "tool", root, repo, token, outerMount], { env, stdio: ["ignore", "inherit", "inherit", "ipc"] });
+  child.once("error", error => { throw error; });
+  child.once("message", () => process.kill(process.pid, "SIGKILL"));
+} else if (mode === "runner") {
+  process.chdir(join(root, "cwd"));
+  const origin = nativeOrigin();
+  assert.equal(origin.uid, Number(process.env.PI_NATIVE_FIXTURE_UID));
+  assert.equal(origin.gid, Number(process.env.PI_NATIVE_FIXTURE_GID));
+  assert.equal(origin.user, process.env.PI_NATIVE_FIXTURE_USER_NS);
+  assert.notEqual(origin.mount, outerMount);
+  writeFileSync(source, token, { mode: 0o600 });
+  boundary(origin);
+  const outside = spawnSync("systemd-run", ["--user", "--wait", "--pipe", "--collect", "--quiet", `--unit=pi-native-fixture-${randomUUID()}.service`,
+    process.execPath, join(root, "fixture.mjs"), "outside", root, repo, token, origin.mount], { env, encoding: "utf8", timeout: 3500 });
+  assert.ifError(outside.error);
+  assert.equal(outside.status, 0, outside.stderr);
+  assert.equal(JSON.parse(outside.stdout.trim()).outsideManagerCannotReadMarker, true);
+  const { terminalLaunch } = await import(pathToFileURL(join(repo, "packages/runtime/stack-pi.mjs")));
+  const units = [];
+  for (const scenario of ["normal", "sigkill"]) {
+    const launch = terminalLaunch([scenario, token], join(root, "managed"));
+    units.push(launch.unit, launch.guardian);
+    save(join(root, "units.json"), units);
+    assert.equal(statSync(launch.manifest).mode & 0o777, 0o600);
+    const manifest = read(launch.manifest);
+    assert.deepEqual(manifest.origin, origin);
+    assert.deepEqual(manifest.args, [scenario, token]);
+    const nativeGuardian = join(repo, "packages/runtime/native-guardian.mjs");
+    const index = launch.args.indexOf(nativeGuardian);
+    assert.notEqual(index, -1);
+    launch.args[index] = join(root, "guardian.mjs");
+    const launched = spawnSync("systemd-run", launch.args, { env, encoding: "utf8", timeout: 4500 });
+    assert.ifError(launched.error);
+    assert.equal(launched.status, scenario === "normal" ? 0 : 137, launched.stderr);
+    const host = read(join(root, `${scenario}-host.json`));
+    const reclaimed = read(join(root, `${scenario}-recovery.json`));
+    assert.equal(reclaimed.stopped, true);
+    assert.equal(reclaimed.namespaceRetainedAfterHostExit, true);
+    assertAbsent(launch.unit, host.group);
+    assertAbsent(launch.guardian, reclaimed.guardianGroup);
+    assert.equal(existsSync(launch.manifest), false);
+    boundary(origin);
+    if (scenario === "sigkill") assert.equal(reclaimed.toolSurvivedHostKill, true);
+    console.log(JSON.stringify({ scenario, uid: origin.uid, gid: origin.gid, namespaceInherited: true, cwdInherited: true,
+      envInherited: true, capabilitiesEmpty: true, privateTmpfsAndBindVisible: true, outsideManagerCannotReadMarker: true,
+      nativeScopeReclaimed: true, guardianScopeReclaimed: true, guardianRetainedPrivateNamespace: true,
+      ...(scenario === "sigkill" ? { toolSurvivedHostKill: true, toolReclaimedByActualStop: true } : {}) }));
+  }
+} else {
+  throw new Error(`Unknown fixture mode: ${mode}`);
+}
+''')
+    # The guardian API is the only fixture-host injection point.
+    (root / "guardian.mjs").write_text(r'''
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const root = process.env.PI_NATIVE_FIXTURE_ROOT;
+const repo = process.env.PI_NATIVE_FIXTURE_REPO;
+const manifestPath = process.argv[2];
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const { runNativeGuardian } = await import(pathToFileURL(join(repo, "packages/runtime/native-guardian.mjs")));
+const { assertNativeOrigin } = await import(pathToFileURL(join(repo, "packages/runtime/native-recovery.mjs")));
+const marker = join(root, "view/marker");
+const guardianGroup = readFileSync("/proc/self/cgroup", "utf8").trim().split("\n").find(line => line.startsWith("0::")).slice(3);
+const code = await runNativeGuardian(manifestPath, {
+  host: join(root, "host.mjs"),
+  recover: async (_directory, unit, env) => {
+    assertNativeOrigin(manifest.origin);
+    assert.equal(readFileSync(marker, "utf8"), process.env.PI_NATIVE_FIXTURE_TOKEN);
+    const scenario = manifest.args[0];
+    const host = JSON.parse(readFileSync(join(root, `${scenario}-host.json`), "utf8"));
+    const procsPath = join("/sys/fs/cgroup", host.group, "cgroup.procs");
+    let toolSurvivedHostKill = false;
+    if (scenario === "sigkill") {
+      const tool = JSON.parse(readFileSync(join(root, "tool.json"), "utf8"));
+      assert.deepEqual(tool.origin, manifest.origin);
+      assert.equal(tool.group, host.group);
+      const members = readFileSync(procsPath, "utf8").trim().split(/\s+/).map(Number);
+      assert.ok(members.includes(tool.pid), "tool must still be alive when guardian reclaims the scope");
+      assert.ok(!members.includes(host.pid), "native host did not die");
+      toolSurvivedHostKill = true;
+    }
+    const stopped = spawnSync("systemctl", ["--user", "stop", unit], { env, encoding: "utf8", timeout: 2500 });
+    assert.ifError(stopped.error);
+    // Normal scopes can already be collected. An unsuccessful stop is accepted
+    // only when the kernel cgroup and manager both prove absence.
+    if (existsSync(procsPath)) assert.equal(readFileSync(procsPath, "utf8").trim(), "");
+    const shown = spawnSync("systemctl", ["--user", "show", unit, "--property=ActiveState", "--value"], { env, encoding: "utf8", timeout: 2500 });
+    assert.ifError(shown.error);
+    assert.ok(shown.status !== 0 || ["inactive", "failed", ""].includes(shown.stdout.trim()));
+    assertNativeOrigin(manifest.origin);
+    assert.equal(readFileSync(marker, "utf8"), process.env.PI_NATIVE_FIXTURE_TOKEN);
+    writeFileSync(join(root, `${scenario}-recovery.json`), JSON.stringify({ stopped: true, stopStatus: stopped.status,
+      toolSurvivedHostKill, namespaceRetainedAfterHostExit: true, guardianGroup }), { mode: 0o600 });
+  },
+});
+process.exitCode = code;
+''')
+    (root / "host.mjs").write_text(r'''
+process.argv = [process.execPath, process.env.PI_NATIVE_FIXTURE_ROOT + "/fixture.mjs", "host",
+  process.env.PI_NATIVE_FIXTURE_ROOT, process.env.PI_NATIVE_FIXTURE_REPO, process.argv[2],
+  process.env.PI_NATIVE_FIXTURE_OUTER_MOUNT];
+await import("./fixture.mjs");
+''')
+    token = "synthetic-" + os.urandom(12).hex()
+    outer_mount = os.readlink("/proc/self/ns/mnt")
+    user_ns = os.readlink("/proc/self/ns/user")
+    bootstrap = r'''
+set -eu
+root=$1; uid=$2; gid=$3; groups=$4; node=$5; repo=$6; token=$7; outer=$8; user_ns=$9
+mount -t tmpfs -o mode=700,uid="$uid",gid="$gid",size=1m pi-native-synthetic "$root/private"
+mount --bind "$root/private" "$root/view"
+exec setpriv --reuid="$uid" --regid="$gid" --groups="$groups" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+  env XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+  PI_NATIVE_FIXTURE_UID="$uid" PI_NATIVE_FIXTURE_GID="$gid" PI_NATIVE_FIXTURE_USER_NS="$user_ns" \
+  PI_NATIVE_FIXTURE_TOKEN="$token" PI_NATIVE_FIXTURE_ROOT="$root" PI_NATIVE_FIXTURE_REPO="$repo" PI_NATIVE_FIXTURE_OUTER_MOUNT="$outer" \
+  "$node" "$root/fixture.mjs" runner "$root" "$repo" "$token" "$outer"
+'''
+    result = subprocess.run(["sudo", "-n", "unshare", "--mount", "--propagation", "private", "sh", "-c", bootstrap,
+        "native-fixture", str(root), str(uid), str(gid), ",".join(map(str, os.getgroups())), node, str(repo), token,
+        outer_mount, user_ns], capture_output=True, text=True, timeout=14)
+    if result.returncode != 0:
+        raise RuntimeError("Native namespace rehearsal failed:\n" + result.stdout[-4000:] + result.stderr[-6000:])
+    if (root / "private/marker").exists() or (root / "view/marker").exists():
+        raise RuntimeError("Synthetic private mount leaked into the original namespace")
+    print(result.stdout, end="")
+    print(json.dumps({"ok": True, "elapsedSeconds": round(time.monotonic() - started, 3), "originatingMountUnchanged": True}))
+finally:
+    # Foreground guardians normally own cleanup; on any fixture failure stop
+    # every recorded fixture unit before removing its files or namespace.
+    units_path = root / "units.json"
+    units = json.loads(units_path.read_text()) if units_path.exists() else []
+    env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{uid}", "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus"}
+    for unit in units:
+        stopped = subprocess.run(["systemctl", "--user", "stop", unit], env=env, capture_output=True, text=True, timeout=4)
+        if stopped.returncode != 0 and "not loaded" not in stopped.stderr:
+            print(f"Fixture cleanup failed: {unit}: {stopped.stderr[-500:]}", file=sys.stderr)
+    shutil.rmtree(root)
