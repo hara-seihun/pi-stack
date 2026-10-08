@@ -17,7 +17,7 @@ function fixture(t) {
   put("persons/alice.json", JSON.stringify({ user: "alice", port: 1234 }));
   put("host.json", JSON.stringify({ version: 1, fleetUser: "alice" }));
   command("systemctl", 'printf "%s\\n" "${SUPERVISOR_STATE:-active}"');
-  command("curl", 'printf "probe\\n" >> "$PROBE_LOG"; [ "${PROBE_FAIL:-0}" = 0 ] || exit "${PROBE_STATUS:-7}"; case "$*" in */v1/health*) printf "%s\\n" "$HEALTH" ;; *) printf "%s\\n" "$ROOMS" ;; esac');
+  command("curl", 'printf "%s\\n" "$*" >> "$PROBE_LOG"; [ "${PROBE_FAIL:-0}" = 0 ] || exit "${PROBE_STATUS:-7}"; case "$*" in */v1/health*) printf "%s\\n" "$HEALTH" ;; *) [ "${ROOMS_FAIL:-0}" = 0 ] || exit "$ROOMS_FAIL"; printf "%s\\n" "$ROOMS" ;; esac');
   command("ssh", 'while [ "$#" -gt 0 ] && [ "$1" != bash ]; do shift; done; [ "$#" -gt 0 ] || exit 64; shift; exec bash "$@"');
   command("git", 'printf "unexpected deployment work\\n" >> "$GIT_LOG"; echo "fixture stops resumed checkout" >&2; exit 42');
   const env = { ...process.env, PATH: `${state}/bin:${process.env.PATH}`, PI_STACK_DEPLOY_NO_SUDO: "1",
@@ -51,7 +51,14 @@ test("restart admission permits independent meeting runtimes but protects the fi
   const census = extra => f.run("bash", [join(root, "deploy/meeting-census"), "--restart-blockers"], extra);
   const supported = JSON.stringify({ ok: true, meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } });
   assert.equal(census({ HEALTH: '{"ok":true}' }).stdout.trim(), "alice:1", "an old in-process room still blocks the first upgrade");
-  assert.equal(census({ HEALTH: supported }).stdout.trim(), "", "same live room with independent custody survives restart");
+  rmSync(f.env.PROBE_LOG);
+  const independent = census({ HEALTH: supported, ROOMS_FAIL: "28" });
+  assert.equal(independent.status, 0, independent.stderr);
+  assert.equal(independent.stdout.trim(), "", "independent custody needs no application room-list request");
+  assert.match(readFileSync(f.env.PROBE_LOG, "utf8"), /\/v1\/health/);
+  assert.doesNotMatch(readFileSync(f.env.PROBE_LOG, "utf8"), /\/v1\/meet/);
+  assert.notEqual(census({ HEALTH: '{"ok":true}', ROOMS_FAIL: "28" }).status, 0, "in-process rooms still require a successful room census");
+  assert.notEqual(f.run("bash", [join(root, "deploy/meeting-census"), "--all"], { HEALTH: supported, ROOMS_FAIL: "28" }).status, 0, "diagnostics still require the full census");
   assert.equal(census({ HEALTH: '{"ok":true,"meetingRuntime":{"protocol":"unknown","lifetime":"person-service"}}' }).stdout.trim(), "alice:1");
   for (const health of ["invalid", "{}", '{"ok":false}']) assert.notEqual(census({ HEALTH: health }).status, 0);
   writeFileSync(join(f.state, "bin", "host-census"), '#!/bin/sh\necho scheduler:live\n', { mode: 0o700 });

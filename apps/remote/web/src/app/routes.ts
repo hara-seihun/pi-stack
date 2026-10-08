@@ -6,19 +6,17 @@ import { startTransition, useEffect, useState } from "react";
 import type { ChatId } from "../chats";
 import { assertNever, requireState } from "../../../shared/explicit-state";
 
-export type Tab = "chats" | "agents" | "needs-you" | "notifications" | "files" | "calendar" | "machine";
+export type Tab = "chats" | "attention" | "agents" | "files" | "machine";
 export type Panel = "inspector" | "queue" | "settings";
 
 export type Route =
   | { tab: "chats"; chat: ChatId | null; panel: Panel | null; questionId?: string }
-  | { tab: "needs-you" }
+  | { tab: "attention" }
   | { tab: "agents" }
   | { tab: "files"; path: string | null }
-  | { tab: "calendar" }
-  | { tab: "notifications" }
   | { tab: "machine" };
 
-export const TABS: Tab[] = ["chats", "needs-you", "agents", "notifications", "calendar", "files", "machine"];
+export const TABS: Tab[] = ["chats", "attention", "agents", "files", "machine"];
 
 export function parseRoute(hash: string): Route {
   const [path, query] = hash.replace(/^#\/?/, "").split("?");
@@ -33,11 +31,15 @@ export function parseRoute(hash: string): Route {
     if (questionId !== null && !rest[0]) throw new Error("Question links require an agent chat");
     return rest[0] ? { tab: "chats", chat: `ai:${rest[0]}`, panel: panel(rest[1]), ...(questionId === null ? {} : { questionId }) } : { tab: "agents" };
   }
-  const tab = requireState(name, { chats: true, agents: true, "needs-you": true, notifications: true, files: true, calendar: true, machine: true } satisfies Record<Tab, true>, "Route tab");
+  if (name === "needs-you" || name === "notifications" || name === "calendar") {
+    if (rest.length || questionId !== null) throw new Error("Invalid attention route");
+    return { tab: "attention" };
+  }
+  const tab = requireState(name, { chats: true, attention: true, agents: true, files: true, machine: true } satisfies Record<Tab, true>, "Route tab");
   if (questionId !== null && tab !== "chats") throw new Error("Question links require a chat");
   switch (tab) {
     case "files": return { tab, path: rest.length ? `/${rest.filter(Boolean).join("/")}` : null };
-    case "agents": case "calendar": case "machine": case "notifications": case "needs-you": return { tab };
+    case "agents": case "machine": case "attention": return { tab };
     case "chats": {
       const kind = rest[0];
       const id = rest[1];
@@ -61,9 +63,7 @@ export function formatRoute(route: Route): string {
     }
     case "agents": return "#/agents";
     case "files": return route.path ? `#/files/${route.path.split("/").filter(Boolean).map(segment).join("/")}` : "#/files";
-    case "needs-you": return "#/needs-you";
-    case "notifications": return "#/notifications";
-    case "calendar": return "#/calendar";
+    case "attention": return "#/attention";
     case "machine": return "#/machine";
   }
   return assertNever(route, "Route formatting");
@@ -88,9 +88,7 @@ export function routeHome(route: Route): Route {
     case "chats": return { tab: "chats", chat: null, panel: null };
     case "agents": return { tab: "agents" };
     case "files": return { tab: "files", path: null };
-    case "needs-you": return { tab: "needs-you" };
-    case "notifications": return { tab: "notifications" };
-    case "calendar": return { tab: "calendar" };
+    case "attention": return { tab: "attention" };
     case "machine": return { tab: "machine" };
   }
   return assertNever(route, "Route home");
@@ -119,7 +117,7 @@ export function useRoute(): Route {
 export function routeThreadId(route: Route): string | null {
   switch (route.tab) {
     case "chats": return route.chat?.startsWith("ai:") ? route.chat.slice(3) : null;
-    case "agents": case "files": case "calendar": case "machine": case "notifications": case "needs-you": return null;
+    case "agents": case "files": case "machine": case "attention": return null;
   }
   return assertNever(route, "Route thread");
 }
@@ -127,7 +125,7 @@ export function routeThreadId(route: Route): string | null {
 export function routeChatId(route: Route): ChatId | null {
   switch (route.tab) {
     case "chats": return route.chat;
-    case "agents": case "files": case "calendar": case "machine": case "notifications": case "needs-you": return null;
+    case "agents": case "files": case "machine": case "attention": return null;
   }
   return assertNever(route, "Route chat");
 }

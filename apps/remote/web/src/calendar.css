@@ -1,4 +1,5 @@
 .calendar-screen { height: 100%; overflow-y: auto; padding: max(20px, env(safe-area-inset-top)) 20px 24px; max-width: 1000px; margin: auto; }
+.calendar-screen.calendar-embedded { height: auto; overflow: visible; padding: 0; max-width: none; margin: 0; }
 .calendar-screen h1 { margin: 0; flex: 1; }
 .calendar-screen h2 { font-size: 18px; margin: 8px 0; }
 .calendar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 16px; }
@@ -6,7 +7,7 @@
 .calendar-screen input, .calendar-screen select, .calendar-dialog input, .calendar-dialog textarea { min-width: 0; width: 100%; background: var(--surface-2); color: var(--text); padding: 10px; border: 1px solid var(--surface-3); border-radius: 8px; }
 .calendar-screen button, .calendar-dialog button { min-height: 40px; padding: 8px 14px; background: var(--surface-2); color: var(--text); border-radius: 8px; }
 .calendar-screen button.accent, .calendar-dialog button.accent { background: var(--accent); color: var(--bg); }
-.calendar-agenda article, .calendar-sync { padding: 16px; margin: 12px 0; border: 1px solid var(--surface-3); border-radius: 12px; background: var(--surface); overflow-wrap: anywhere; }
+.calendar-event, .calendar-sync { padding: 16px; margin: 12px 0; border: 1px solid var(--surface-3); border-radius: 12px; background: var(--surface); overflow-wrap: anywhere; }
 .calendar-time { color: var(--accent); font-weight: 600; }
 .calendar-notes { white-space: pre-wrap; }
 .calendar-screen [role=alert], .calendar-dialog [role=alert] { color: var(--danger); }

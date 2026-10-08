@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Temporal } from "@js-temporal/polyfill";
 import type { CalendarEvent, CalendarSnapshot } from "../../server/calendar-protocol";
 import { api } from "./client";
@@ -29,7 +29,13 @@ function EventEditor({ draft, onClose, onSave }: { draft: Draft; onClose(): void
     {error && <p role="alert">{error}</p>}<div className="calendar-actions"><button type="button" onClick={onClose}>Cancel</button><button className="accent" disabled={saving}>Save</button></div>
   </form></dialog>;
 }
-export function CalendarScreen() {
+export type CalendarAgenda = {
+  events: CalendarEvent[];
+  renderEvent(event: CalendarEvent): ReactNode;
+  zone: string;
+};
+
+export function CalendarScreen({ renderAgenda, refreshVersion }: { renderAgenda?: (agenda: CalendarAgenda) => ReactNode; refreshVersion?: string } = {}) {
   const [snapshot, setSnapshot] = useState<CalendarSnapshot | null>(null), [zone, setZone] = useState(localZone), [error, setError] = useState("");
   const preferenceLoaded = useRef(false);
   const [draft, setDraft] = useState<Draft | null>(null), [feed, setFeed] = useState(""), [sync, setSync] = useState(false), [busy, setBusy] = useState(false);
@@ -46,7 +52,7 @@ export function CalendarScreen() {
     void load(); const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 60000);
     const focus = () => void load(); window.addEventListener("focus", focus);
     return () => { current = false; clearInterval(timer); window.removeEventListener("focus", focus); };
-  }, [reload]);
+  }, [reload, refreshVersion]);
   async function action(work: () => Promise<unknown>) { setBusy(true); setError(""); try { await work(); await reload(); } catch (cause) { setError(String(cause)); } finally { setBusy(false); } }
   async function remove(path: string) {
     const result = await api("DELETE", path);
@@ -62,9 +68,12 @@ export function CalendarScreen() {
     const sameDay = Temporal.Instant.from(e.start).toZonedDateTimeISO(zone).toPlainDate().equals(Temporal.Instant.from(e.end).toZonedDateTimeISO(zone).toPlainDate());
     return `${format.format(new Date(e.start))} – ${sameDay ? new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(new Date(e.end)) : format.format(new Date(e.end))}`;
   }
-  return <section className="calendar-screen">
-    <header className="calendar-actions"><h1>Calendar</h1><button className="accent" onClick={() => setDraft(blank(zone))}>New event</button><button onClick={() => setSync(!sync)}>Sync</button></header>
-    <div className="calendar-actions"><label>Display time zone<select value={zone} onChange={e => { setZone(e.target.value); void action(() => api("PUT", "/v1/calendar/settings", { zone: e.target.value })); }}>{[...new Set([localZone(), "UTC", ...Intl.supportedValuesOf("timeZone")])].map(z => <option key={z} value={z}>{z}</option>)}</select></label><label>Month (optional)<input type="month" value={month} onChange={e => setMonth(e.target.value)} /></label><button onClick={() => setMonth("")}>Upcoming</button><button disabled={busy} onClick={() => void action(() => api("POST", "/v1/calendar/refresh", {}, 65000))}>Refresh</button></div>
+  function renderEvent(e: CalendarEvent): ReactNode {
+    return <article key={e.id} className="calendar-event"><p className="calendar-time">{when(e)}</p><h2>{e.title}</h2>{e.repeat && <p className="muted">Repeats {e.repeat}{e.repeatUntil ? ` · through ${e.repeatUntil}` : " · no end date"}</p>}{e.location && <p>{e.location}</p>}{e.notes && <p className="calendar-notes">{e.notes}</p>}{e.zone !== zone && !e.allDay && <p className="muted">Event zone: {e.zone} · {new Intl.DateTimeFormat(undefined, { timeZone: e.zone, hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(e.start))}</p>}{e.readOnly ? <p className="muted">{e.source} · Read-only</p> : <div className="calendar-actions"><button onClick={() => edit(e, e.seriesId ? "occurrence" : undefined)}>{e.seriesId ? "Edit this occurrence" : "Edit"}</button>{e.seriesId && <button disabled={busy} onClick={() => void action(async () => edit(await api("GET", `/v1/calendar/events/${encodeURIComponent(e.seriesId!)}`), "series"))}>Edit whole series</button>}<button disabled={busy} onClick={() => { if (confirm(e.seriesId ? `Delete only this occurrence of ${e.title} (${when(e)})? Other repeats will stay.` : `Delete ${e.title}?`)) void action(() => remove(`/v1/calendar/events/${encodeURIComponent(e.id)}`)); }}>{e.seriesId ? "Delete this occurrence" : "Delete"}</button>{e.seriesId && <button disabled={busy} onClick={() => { if (confirm(`Delete the ENTIRE repeating series “${e.title}”, including all past and future occurrences? This is not just ${when(e)}.`)) void action(() => remove(`/v1/calendar/events/${encodeURIComponent(e.seriesId!)}?scope=series`)); }}>Delete whole series…</button>}</div>}</article>;
+  }
+  return <section className={`calendar-screen${renderAgenda ? " calendar-embedded" : ""}`}>
+    <header className="calendar-actions">{!renderAgenda && <h1>Calendar</h1>}<button className="accent" onClick={() => setDraft(blank(zone))}>New event</button><button onClick={() => setSync(!sync)}>Sync</button></header>
+    <div className="calendar-actions"><label>Display time zone<select value={zone} onChange={e => { setZone(e.target.value); void action(() => api("PUT", "/v1/calendar/settings", { zone: e.target.value })); }}>{[...new Set([localZone(), "UTC", ...Intl.supportedValuesOf("timeZone")])].map(z => <option key={z} value={z}>{z}</option>)}</select></label><label>Month (optional)<input type="month" value={month} onChange={e => setMonth(e.target.value)} /></label><button onClick={() => setMonth("")}>Upcoming</button><button disabled={busy} onClick={() => void action(() => api("POST", "/v1/calendar/refresh", {}, 65000))}>Refresh calendars</button></div>
     {error && <p role="alert">{error}</p>}
     {sync && <section className="calendar-sync"><h2>Calendar sync</h2><p>Subscriptions are read-only. Two-way CalDAV sync is not supported.</p>
       <button disabled={busy} onClick={() => void action(async () => { const r = await api("GET", "/v1/calendar/feed"); setFeed(new URL(r.url, location.origin).href); })}>Show subscription link</button>
@@ -72,7 +81,8 @@ export function CalendarScreen() {
       <form onSubmit={e => { e.preventDefault(); void action(async () => { await api("POST", "/v1/calendar/subscriptions", { name, url, zone }, 65000); setName(""); setUrl(""); }); }}><h3>Add an ICS subscription</h3><label>Name<input required value={name} onChange={e => setName(e.target.value)} /></label><label>ICS URL<input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…" /></label><p>Floating times use {zone}. Imported events refresh every 15 minutes.</p><button disabled={busy}>Subscribe</button></form>
       {snapshot?.subscriptions.map(s => <article key={s.id}><strong>{s.name}</strong><p>{s.refreshed ? `Updated ${new Date(s.refreshed).toLocaleString()}` : "Not yet refreshed"}{s.error && ` · ${s.error}`}</p><button disabled={busy} onClick={() => { if (confirm(`Remove ${s.name}?`)) void action(() => api("DELETE", `/v1/calendar/subscriptions/${s.id}`)); }}>Remove subscription</button></article>)}
     </section>}
-    {!snapshot ? <p>Loading calendar…</p> : !snapshot.events.length ? <p>No events {month ? "this month" : "in the next six months"}.</p> : <div className="calendar-agenda">{snapshot.events.map(e => <article key={e.id}><p className="calendar-time">{when(e)}</p><h2>{e.title}</h2>{e.repeat && <p className="muted">Repeats {e.repeat}{e.repeatUntil ? ` · through ${e.repeatUntil}` : " · no end date"}</p>}{e.location && <p>{e.location}</p>}{e.notes && <p className="calendar-notes">{e.notes}</p>}{e.zone !== zone && !e.allDay && <p className="muted">Event zone: {e.zone} · {new Intl.DateTimeFormat(undefined, { timeZone: e.zone, hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(e.start))}</p>}{e.readOnly ? <p className="muted">{e.source} · Read-only</p> : <div className="calendar-actions"><button onClick={() => edit(e, e.seriesId ? "occurrence" : undefined)}>{e.seriesId ? "Edit this occurrence" : "Edit"}</button>{e.seriesId && <button disabled={busy} onClick={() => void action(async () => edit(await api("GET", `/v1/calendar/events/${encodeURIComponent(e.seriesId!)}`), "series"))}>Edit whole series</button>}<button disabled={busy} onClick={() => { if (confirm(e.seriesId ? `Delete only this occurrence of ${e.title} (${when(e)})? Other repeats will stay.` : `Delete ${e.title}?`)) void action(() => remove(`/v1/calendar/events/${encodeURIComponent(e.id)}`)); }}>{e.seriesId ? "Delete this occurrence" : "Delete"}</button>{e.seriesId && <button disabled={busy} onClick={() => { if (confirm(`Delete the ENTIRE repeating series “${e.title}”, including all past and future occurrences? This is not just ${when(e)}.`)) void action(() => remove(`/v1/calendar/events/${encodeURIComponent(e.seriesId!)}?scope=series`)); }}>Delete whole series…</button>}</div>}</article>)}</div>}
+    {!snapshot && !error && <p role="status">Loading calendar…</p>}
+    {renderAgenda ? renderAgenda({ events: snapshot ? snapshot.events : [], renderEvent, zone }) : snapshot && (!snapshot.events.length ? <p>No events {month ? "this month" : "in the next six months"}.</p> : <div className="calendar-agenda">{snapshot.events.map(renderEvent)}</div>)}
     {draft && <EventEditor draft={draft} onClose={() => setDraft(null)} onSave={async value => { await api(value.id ? "PATCH" : "POST", `/v1/calendar/events${value.id ? `/${encodeURIComponent(value.id)}${value.scope ? `?scope=${value.scope}` : ""}` : ""}`, { ...value, start: value.start === draft.start && value.zone === draft.zone && value.allDay === draft.allDay ? draft.instantStart ?? value.start : value.start, end: value.end === draft.end && value.zone === draft.zone && value.allDay === draft.allDay ? draft.instantEnd ?? value.end : value.end }); await reload(); }} />}
   </section>;
 }

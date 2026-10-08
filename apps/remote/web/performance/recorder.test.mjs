@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { matrixSteps } from "./matrix.mjs";
+import { summarize } from "./summarize.mjs";
 
 function recorder(entries = []) {
   const context = {
@@ -38,6 +39,13 @@ test("unset specs, missing input and overlapping measurements are explicit error
   assert.equal((await api.take()).state, "not-triggered");
   assert.equal(api.arm(spec).error, "measurement-active");
   assert.equal(api.dispose().state, "disposed");
+});
+
+test("historical samples without an input kind stay unset", () => {
+  const row = { name: "synthetic", cache: "warm", state: "settled", observationMs: 2, firstRenderMs: 1, usableMs: 1, settledMs: 2, longTasks: { totalMs: 0 }, frames: { maxGapMs: 1 }, requests: [], resources: [] };
+  const result = summarize([[{ result: { result: row } }, { result: { result: row } }]]);
+  assert.equal(result[0].samples, 1);
+  assert.deepEqual(result[0].triggerEvents, [null]);
 });
 
 test("native matrix rejects unknown coverage and verifies page target around eval", () => {

@@ -155,6 +155,11 @@ test("host lock, meeting and native-source waits retain the integration, while u
   assert.equal(meeting.request.attempt, 1);
   assert.deepEqual(meeting.request.hosts, request.hosts);
   assert.equal(meeting.request.integrationSha, f.commit);
+  const unavailable = run("meeting census unavailable on this host: see the census error above");
+  assert.equal(unavailable.result.kind, "host-lock-busy");
+  assert.equal(unavailable.request.waiting.kind, "live-meeting");
+  assert.equal(unavailable.request.attempt, 1);
+  assert.deepEqual(unavailable.request.hosts, request.hosts);
   const native = run(`native source prerequisite meeting-runtime requires ${"a".repeat(40)} before Pi Stack ${f.commit}; selected ${"b".repeat(40)}`);
   assert.equal(native.result.kind, "host-lock-busy");
   assert.equal(native.request.status, "queued");

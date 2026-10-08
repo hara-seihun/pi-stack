@@ -16,8 +16,8 @@ test("Agents is a navigable directory and old worker home links redirect there",
   expect(TABS).toContain("agents");
 });
 
-test("Notifications is a persistent top-level destination, not a worker hierarchy", () => {
-  expect(parseRoute("#/notifications")).toEqual({ tab: "notifications" });
-  expect(TABS).toContain("notifications");
+test("notifications enter Attention without reintroducing another destination", () => {
+  expect(parseRoute("#/notifications")).toEqual({ tab: "attention" });
+  expect(TABS).not.toContain("notifications");
   expect(TABS).not.toContain("workers");
 });

@@ -1,6 +1,6 @@
 # Personal calendar
 
-Open **Calendar** in Pi Remote's navigation rail / bottom bar (`#/calendar`). The default agenda shows the next six months; the month selector shows that month's agenda. **New event**, **Edit** and **Delete** manage owned events. Imported events are marked read-only. Event times carry their IANA zone; the display defaults to the device's local zone and can be changed. All-day dates are independent of display zone; their end date is exclusive.
+Open [**Attention**](attention.md) in Pi Remote's navigation rail / bottom bar (`#/attention`; `#/calendar` resolves there too). Calendar events join personal deadlines in the mixed feed: already-started events appear in Now and future events in Upcoming. The calendar window shows the next six months; the month selector selects that month's events without filtering other sources. **New event**, **Edit** and **Delete** manage owned events. Imported events are marked read-only. Event times carry their IANA zone; the display defaults to the device's local zone and can be changed. All-day dates are independent of display zone; their end date is exclusive.
 
 Each person's supervisor owns `PI_REMOTE_DATA/calendar.sqlite3` and its SQLite WAL/SHM. Use the person's encrypted state directory for `PI_REMOTE_DATA`, as with other Remote personal data. No shared calendar database, event logging or cross-person query exists. The API uses the same router-session / UID-bound caller authorization as phone control. It is independent of Android `calendar.*` phone commands.
 
@@ -48,7 +48,7 @@ Outbound ICS carries one VEVENT with local TZID DTSTART/DTEND, bundled IANA 2026
 
 ## Outbound subscription
 
-Calendar → **Sync → Show subscription link**. The link is a bearer secret: anyone who has it can read **owned events** (not inbound calendars). Shape: `https://HOST/calendar-feed/UNIX_PERSON/64_HEX_TOKEN.ics`. Tokens live only in the person's calendar state. **Rotate link** / `pi-calendar rotate-feed` revokes the previous URL immediately.
+Attention → **Sync → Show subscription link**. The link is a bearer secret: anyone who has it can read **owned events** (not inbound calendars). Shape: `https://HOST/calendar-feed/UNIX_PERSON/64_HEX_TOKEN.ics`. Tokens live only in the person's calendar state. **Rotate link** / `pi-calendar rotate-feed` revokes the previous URL immediately.
 
 Google Calendar (desktop web): **Other calendars → + → From URL**, paste the HTTPS feed URL and add it. Google fetches the URL from its own servers and controls refresh timing; a mesh-only URL does not work there. Apple Calendar uses **File → New Calendar Subscription**. Android ICS subscribers can use a mesh-only URL with the VPN connected. Proton can consume/import ICS according to its current client facilities; this feature isn't a two-way Proton integration.
 
@@ -56,9 +56,9 @@ By default the URL is on the current private entrance. An operator can set `PI_R
 
 ## Inbound subscriptions
 
-Calendar → **Sync → Add an ICS subscription**: name and subscription URL, then **Subscribe**. Use a Google secret iCal URL or a calendar provider's actual ICS subscription/share URL, not its HTML viewing page. Floating times and date-times without usable zone definitions use the zone selected when subscribing. UTC, IANA TZIDs, embedded VTIMEZONE definitions, all-day events, recurring events, exclusions and recurrence exceptions are supported.
+Attention → **Sync → Add an ICS subscription**: name and subscription URL, then **Subscribe**. Use a Google secret iCal URL or a calendar provider's actual ICS subscription/share URL, not its HTML viewing page. Floating times and date-times without usable zone definitions use the zone selected when subscribing. UTC, IANA TZIDs, embedded VTIMEZONE definitions, all-day events, recurring events, exclusions and recurrence exceptions are supported.
 
-Refresh runs on supervisor startup and every 15 minutes; **Refresh** forces it. Feeds are bounded to 4 MiB and 20-second requests. The last successful encrypted copy remains visible after a failure, with an explicit stale/error indicator. URLs, imported content and refresh status remain in that person's state. Subscription deletion removes its cache. No CalDAV or two-way sync is implemented.
+Refresh runs on supervisor startup and every 15 minutes; **Refresh calendars** forces it. Feeds are bounded to 4 MiB and 20-second requests. The last successful encrypted copy remains visible after a failure, with an explicit stale/error indicator. URLs, imported content and refresh status remain in that person's state. Subscription deletion removes its cache. No CalDAV or two-way sync is implemented.
 
 ## API
 

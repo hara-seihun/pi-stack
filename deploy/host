@@ -144,19 +144,20 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
       exit "$failed"
     ) &
     doctor_pid=$!
-    activation_failed=0; doctor_failed=0
+    activation_status=0; doctor_failed=0
     # Supervisors own a 90-second start and 10-second stop budget. Activation
     # overlaps the doctors; the shared generation wait must include both plus
     # the front door's 20-second readiness budget.
-    phase activation 120 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_failed=1
+    phase activation 120 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_status=$?
     wait "$doctor_pid" || doctor_failed=1
     if (( doctor_failed )); then
       echo 'runtime doctor failed' >&2
-      if (( ! activation_failed )); then
+      if (( activation_status == 0 )); then
         phase rollback 120 env PI_STACK_HOST_PHASE=activation PI_STACK_FORCE_ROLLBACK=1 "$0" "$@" || true
       fi
+      exit 1
     fi
-    (( ! activation_failed && ! doctor_failed )) || exit 1
+    (( activation_status == 0 )) || exit "$activation_status"
   fi
   echo "deployed Pi stack $(git -C "$root" rev-parse HEAD) for ${users[*]}"
   exit 0

@@ -1,6 +1,12 @@
-import type { LifeDue, LifeCoverage, LifePolicy } from "kenan-memory/life-contract";
+import type { LifeDue, LifeCoverage, LifePolicy, LifeError } from "kenan-memory/life-contract";
+
+export type NeedsYouDismissal =
+  | { kind: "life" | "commitment"; id: string; revision: number }
+  | { kind: "question"; threadId: string; questionId: string };
+export type NeedsYouDismissResult = { ok: true } | { ok: false; error: LifeError | "invalid-state" | "question-failed"; message: string; questionDismissed?: true };
 
 export type NeedsYouItem = {
+  dismissal: NeedsYouDismissal;
   id: string;
   kind: "question" | "decision" | "missing-fact" | "person-only-action" | "commitment";
   title: string;

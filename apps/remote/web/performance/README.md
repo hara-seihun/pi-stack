@@ -19,7 +19,7 @@ An explicit matrix configuration:
 {
   "cache": "warm-remount",
   "rounds": 2,
-  "names": ["chats-nav", "agents-nav", "notifications-nav", "needs-you-nav", "calendar-nav", "files-nav", "machine-nav"],
+  "names": ["chats-nav", "agents-nav", "attention-nav", "files-nav", "machine-nav"],
   "quietMs": 120,
   "timeoutMs": 12000,
   "toolTimeoutMs": 50000,
