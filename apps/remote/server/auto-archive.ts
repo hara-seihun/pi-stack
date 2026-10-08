@@ -1,4 +1,4 @@
-import { liveDependency, type Thread, type ThreadApi } from "pi-orchestrator/api";
+import { type Thread, type ThreadApi } from "pi-orchestrator/api";
 
 export function autoArchiveDelay(value: string | undefined): number {
   const delay = Number(value ?? 0);
@@ -30,13 +30,7 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
   const blocked = new Set<string>();
   for (const thread of threads.values()) {
     if (thread.metadata?.archived) continue;
-    const wait = thread.waitingOnAgents;
-    if (wait) {
-      blocked.add(thread.id);
-      if (wait.kind === "agents") for (const id of wait.threadIds) blocked.add(id);
-      if (wait.kind === "message") blocked.add(wait.fromThreadId);
-    }
-    for (const id of thread.dependencies ?? []) if (liveDependency(thread, id, threads.get(id))) { blocked.add(thread.id); blocked.add(id); }
+    if (thread.waitingOnAgents || thread.dependencies?.length) blocked.add(thread.id);
   }
   let archived = 0;
   for (const thread of threads.values()) {
@@ -45,7 +39,6 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
     if (blocked.has(thread.id) || !expired(thread) || thread.state !== "idle" || thread.pendingMessages > 0) continue;
     const result = await api.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: cutoff });
     if (!result.ok) {
-      if (result.error.code === "dependency_conflict") continue;
       throw new Error(result.error.message);
     }
     if (result.value.metadata?.archived) archived++;

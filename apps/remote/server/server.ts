@@ -801,8 +801,8 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
-function threadError(failure: { code: string; message: string; dependencies?: Array<{ threadId: string; dependsOn: string; ownerId?: string }> }) {
-  return json({ error: failure.message, code: failure.code, ...(failure.dependencies ? { dependencies: failure.dependencies } : {}) }, failure.code === "not_found" ? 404
+function threadError(failure: { code: string; message: string }) {
+  return json({ error: failure.message, code: failure.code }, failure.code === "not_found" ? 404
     : failure.code === "invalid_request" ? 400 : failure.code === "unavailable" ? 503 : 409);
 }
 

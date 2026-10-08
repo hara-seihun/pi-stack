@@ -95,58 +95,47 @@ it("close and historical recursive controls cancel only the selected agent; reop
   expect(f.service.pending("a").some(message => message.text.includes("Continue the interrupted"))).toBe(false);
 });
 
-it("explicit peer dependencies survive input/wakes, protect both owners, reject cycles and release explicitly", async () => {
+it("mutual subscriptions do not veto Close and a cancelled idle waiter durably resumes its subscriber", async () => {
   const a = fixture(), b = fixture();
   const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
   value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "a", reason: "Need peer", fromThreadId: "b" }));
-  expect(a.service.get("a")).toMatchObject({ state: "waiting", dependencies: ["b"] });
-  expect(b.service.get("b")?.metadata?.peerDependents).toEqual(["a"]);
-  for (const id of ["a", "b"]) expect(await directory.control({ action: "close", threadId: id })).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
-  value(await a.service.send({ requestId: "human", threadId: "a", text: "Discuss this" }));
-  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined(); expect(a.service.get("a")?.dependencies).toEqual(["b"]);
-  expect(await b.service.control({ action: "dependencies", threadId: "b", threadIds: ["a"] })).toMatchObject({ ok: false, error: { code: "conflict" } });
-  value(await a.service.agentWait({ action: "clear", threadId: "a", requestId: "release" }));
-  expect(a.service.get("a")?.dependencies).toEqual([]); expect(b.service.get("b")?.metadata?.peerDependents).toEqual([]);
+  value(await b.service.control({ action: "dependencies", threadId: "b", threadIds: ["a"] }));
   value(await directory.control({ action: "close", threadId: "b" }));
+  await until(() => a.service.pending("a").length === 1);
+  expect(b.service.get("b")).toMatchObject({ state: "idle", dependencies: [], metadata: { archived: true } });
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(JSON.parse(a.service.pending("a")[0]!.text)).toMatchObject({ outcome: "cancelled", finalText: null });
+  expect(value(await directory.await({ parentId: "a", threadIds: ["b"], timeoutMs: 0 })).settlement).toMatchObject({ outcome: "cancelled" });
 });
 
-it("endpoint reservations fence a concurrent cross-owner close after its graph snapshot", async () => {
+it("a subscription racing explicit Close receives one terminal cancellation without reopening the producer", async () => {
   const a = fixture(), b = fixture();
   const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  const graphOwner = b.service as unknown as { dependencyGraph(roots: string[]): Promise<Result<import("../src/threads/contracts.js").Thread[]>> };
-  const graph = graphOwner.dependencyGraph.bind(b.service);
-  let release!: () => void, snapshotRead!: () => void;
-  const read = new Promise<void>(resolve => { snapshotRead = resolve; });
-  const barrier = new Promise<void>(resolve => { release = resolve; });
-  let intercept = true;
-  graphOwner.dependencyGraph = async roots => {
-    const result = await graph(roots);
-    if (intercept) { intercept = false; snapshotRead(); await barrier; }
-    return result;
-  };
   const closing = b.service.control({ action: "close", threadId: "b" });
-  await read;
   value(await a.service.agentWait({ action: "set", kind: "message", requestId: "late-wait", threadId: "a", reason: "Need b", fromThreadId: "b" }));
-  release();
-  expect(await closing).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
-  expect(b.service.get("b")?.metadata?.archived).not.toBe(true);
-  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: [] }));
+  value(await closing);
+  await until(() => a.service.pending("a").length === 1);
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(b.service.get("b")?.metadata?.archived).toBe(true);
+  expect(JSON.parse(a.service.pending("a")[0]!.text).outcome).toBe("cancelled");
 });
 
-it("an inert dependency (settled target, dependent not waiting) shows idle, never blocks close and is released by it", async () => {
+it("closing a subscriber clears its subscriptions without closing the producer", async () => {
   const a = fixture(), b = fixture();
   const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
   value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
-  expect(a.service.get("a")).toMatchObject({ state: "idle", dependencies: ["b"] });
+  expect(a.service.get("a")).toMatchObject({ state: "waiting", dependencies: ["b"] });
   expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
   value(await directory.control({ action: "close", threadId: "a" }));
   expect(a.service.get("a")?.dependencies).toEqual([]);
@@ -154,7 +143,7 @@ it("an inert dependency (settled target, dependent not waiting) shows idle, neve
   value(await directory.control({ action: "close", threadId: "b" }));
 });
 
-it("closing the target of an inert dependency releases the dependent's edge across owners", async () => {
+it("closing an idle producer delivers cancellation and releases the subscriber across owners", async () => {
   const a = fixture(), b = fixture();
   const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
   a.service.setDirectory(directory); b.service.setDirectory(directory);
@@ -162,8 +151,30 @@ it("closing the target of an inert dependency releases the dependent's edge acro
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
   value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: ["b"] }));
   value(await directory.control({ action: "close", threadId: "b" }));
-  expect(a.service.get("a")?.dependencies).toEqual([]);
+  await until(() => a.service.get("a")?.dependencies?.length === 0);
   expect(b.service.get("b")?.metadata?.peerDependents).toEqual([]);
+  expect(a.service.pending("a")).toHaveLength(1);
+});
+
+it("result cursors survive subscriptions and do not replay a previously settled assignment", async () => {
+  const f = fixture(); value(await f.service.start());
+  value(await f.service.spawn({ requestId: "a", id: "a", cwd: f.root }));
+  value(await f.service.spawn({ requestId: "b", id: "b", cwd: f.root, message: "first", createdBy: { kind: "person", via: "router" } }));
+  await until(() => !!f.sessions.get("b")?.active);
+  f.sessions.get("b")!.settle("first result");
+  await until(() => f.service.get("b")?.state === "idle");
+  const after = f.service.latestSettlement("b")!.seq;
+  value(await f.service.agentWait({ action: "set", kind: "agents", requestId: "next-b", threadId: "a", reason: "Next result", threadIds: ["b"], after: { b: after } }));
+  expect(f.service.get("a")?.state).toBe("waiting");
+  expect(f.service.pending("a")).toHaveLength(0);
+  value(await f.service.send({ requestId: "second", threadId: "b", text: "second" }));
+  await until(() => !!f.sessions.get("b")?.active);
+  f.sessions.get("b")!.settle("second result");
+  await until(() => f.service.get("a")?.dependencies?.length === 0);
+  const result = f.service.pending("a")[0];
+  expect(result?.text).toContain("second result");
+  expect(f.service.pending("a")).toHaveLength(1);
+  expect(f.service.get("a")?.waitingOnAgents).toBeUndefined();
 });
 
 it("turn settlement while waiting or questioning is not an assignment result or ephemeral completion", async () => {
@@ -212,7 +223,7 @@ it("a later final turn discharges the original assignment reply exactly once wit
   expect(f.service.pending("requester").filter(message => message.senderId === "assigned")).toHaveLength(1);
 });
 
-it("accepted cross-owner reservations remain protected after controller replacement", async () => {
+it("accepted subscriptions survive producer replacement and Close delivers cancellation", async () => {
   const a = fixture(), b = fixture();
   let directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
   a.service.setDirectory(directory); b.service.setDirectory(directory);
@@ -224,9 +235,53 @@ it("accepted cross-owner reservations remain protected after controller replacem
   directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: replacement }]);
   a.service.setDirectory(directory); replacement.setDirectory(directory);
   expect(replacement.get("b")?.metadata?.peerDependents).toEqual(["a"]);
-  expect(await replacement.control({ action: "close", threadId: "b" })).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
-  value(await a.service.control({ action: "dependencies", threadId: "a", threadIds: [] }));
   value(await replacement.control({ action: "close", threadId: "b" }));
+  await until(() => a.service.pending("a").length === 1);
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
+  expect(JSON.parse(a.service.pending("a")[0]!.text).outcome).toBe("cancelled");
+});
+
+it("offline result delivery survives restart and acknowledges once without recreating a wait", async () => {
+  const a = fixture(), b = fixture();
+  let directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", reason: "Need b", fromThreadId: "b" }));
+  const send = a.service.send.bind(a.service);
+  a.service.send = async input => input.source === "notification" ? { ok: false, error: { code: "unavailable", message: "Recipient offline" } } : send(input);
+  value(await b.service.control({ action: "close", threadId: "b" }));
+  expect(a.service.get("a")?.state).toBe("waiting");
+  expect(b.service.pending("a")).toHaveLength(1);
+  value(await b.service.close()); services.splice(services.indexOf(b.service), 1);
+  const replacement = new ThreadService(b.options); services.push(replacement);
+  a.service.send = send;
+  directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: replacement }]);
+  a.service.setDirectory(directory); replacement.setDirectory(directory);
+  value(await replacement.start());
+  await until(() => a.service.pending("a").length === 1);
+  replacement.reconcile();
+  await until(() => replacement.pending("a").length === 0);
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
+  expect(a.service.get("a")?.dependencies).toEqual([]);
+  expect(a.service.pending("a")).toHaveLength(1);
+  expect(JSON.parse(a.service.pending("a")[0]!.text)).toMatchObject({ outcome: "cancelled", finalText: null });
+});
+
+it("closing a subscriber succeeds while its producer owner is unavailable", async () => {
+  const a = fixture(), b = fixture();
+  const directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: b.service }]);
+  a.service.setDirectory(directory); b.service.setDirectory(directory);
+  value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
+  value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", reason: "Need b", fromThreadId: "b" }));
+  b.service.list = async () => ({ ok: false, error: { code: "unavailable", message: "Producer offline" } });
+  value(await a.service.control({ action: "close", threadId: "a" }));
+  expect(a.service.get("a")).toMatchObject({ state: "idle", dependencies: [], metadata: { archived: true } });
+  expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
+  expect(a.service.get("a")?.metadata?.dependencyUpdate).toMatchObject({ desired: [] });
+  expect(b.service.get("b")?.metadata?.archived).not.toBe(true);
 });
 
 it("an unrelated unavailable owner cannot prevent local native settlement", async () => {
@@ -243,7 +298,7 @@ it("an unrelated unavailable owner cannot prevent local native settlement", asyn
   expect(f.service.pending("local")).toEqual([]);
 });
 
-it("recovers local dependency claims and preserves both endpoints while an unrelated personal owner is locked", async () => {
+it("recovers local subscriptions without graph reads while an unrelated personal owner is locked", async () => {
   const f = fixture(), locked = fixture();
   let lockedReads = 0;
   locked.service.list = async () => { lockedReads++; return { ok: false, error: { code: "unavailable", message: "Personal supervisor locked" } }; };
@@ -260,8 +315,7 @@ it("recovers local dependency claims and preserves both endpoints while an unrel
   expect(f.service.get("parent")?.dependencies).toEqual(["child"]);
   expect(f.service.get("child")?.metadata?.peerDependents).toEqual(["parent"]);
   value(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "wait", reason: "Child result", threadIds: ["child"] }));
-  for (const id of ["parent", "child"]) expect(await f.service.control({ action: "close", threadId: id })).toMatchObject({ ok: false, error: { code: "dependency_conflict" } });
-  expect(await f.service.control({ action: "dependencies", threadId: "child", threadIds: ["parent"] })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  value(await f.service.control({ action: "dependencies", threadId: "child", threadIds: ["parent"] }));
   expect(lockedReads).toBe(0);
   expect(await f.service.control({ action: "dependencies", threadId: "child", threadIds: ["foreign"] })).toMatchObject({ ok: false, error: { code: "unavailable" } });
   expect(lockedReads).toBeGreaterThan(0);
@@ -326,7 +380,7 @@ it("caller identity protects human placement and another agent's dependency owne
   const caller = { kind: "thread", threadId: "a" } as const;
   for (const action of ["open", "placement", "view"]) expect(await resolver.admit("control", { action, threadId: "a", foreground: true }, caller)).toMatchObject({ ok: false, status: 403 });
   expect(await resolver.admit("control", { action: "dependencies", threadId: "b", threadIds: [] }, caller)).toMatchObject({ ok: false, status: 403 });
-  expect(await resolver.admit("control", { action: "dependencyClaim", threadId: "b", dependentId: "a", active: false }, caller)).toMatchObject({ ok: false, status: 403 });
+  expect(await resolver.admit("control", { action: "resultSubscribe", threadId: "b", dependentId: "a", active: false }, caller)).toMatchObject({ ok: false, status: 403 });
   expect(await resolver.admit("control", { action: "dependencies", threadId: "a", threadIds: [] }, caller)).toMatchObject({ ok: true });
   expect(await resolver.admit("spawn", { requestId: "launch", cwd: "/work" }, caller)).toMatchObject({ ok: true, input: { parentId: "a", createdBy: { kind: "thread", threadId: "a" } } });
 });

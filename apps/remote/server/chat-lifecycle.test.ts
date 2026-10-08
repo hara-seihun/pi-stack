@@ -9,9 +9,9 @@ test("closing delegates one selected agent to its owner", async () => {
   expect(calls).toEqual([{ threadId: "root", action: "close" }]);
 });
 
-test("a dependency refusal keeps the agent visible and retains owner links", async () => {
+test("unconfirmed native cancellation keeps the agent visible", async () => {
   const calls: unknown[] = [];
-  const result = { ok: false as const, error: { code: "dependency_conflict" as const, message: "Explicit dependency", dependencies: [{ threadId: "owner", dependsOn: "root", ownerId: "owner" }] } };
+  const result = { ok: false as const, error: { code: "cancellation_failed" as const, message: "Native cancellation unconfirmed" } };
   const api: Pick<ThreadApi, "control"> = { async control(input) { calls.push(input); return result; } };
   expect(await closeAiChat(api, "root")).toEqual(result);
   expect(calls).toHaveLength(1);

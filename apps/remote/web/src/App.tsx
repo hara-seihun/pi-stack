@@ -282,7 +282,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [closeDependencies, setCloseDependencies] = useState<Array<{ threadId: string; dependsOn: string; ownerId?: string }>>([]);
   const [notificationVersion, setNotificationVersion] = useState(0);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
   const [pendingQuestions, setPendingQuestions] = useState<({ sessionId: string } & QuestionsResource) | null>(null);
@@ -913,13 +912,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [kick, openChat, patch, roomDirectory.refresh]);
   const closeChat = useCallback(async (chat: Chat) => {
     if (undoCloses.isBusy(chat.id)) return;
-    setCloseDependencies([]);
     setClosing(current => withClose(current, chat.id));
     const result = await undoCloses.close(chat, () => chat.kind === "ai"
-      ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id })).catch(cause => {
-          if (cause instanceof ApiError && cause.code === "dependency_conflict") setCloseDependencies(cause.dependencies ?? []);
-          throw cause;
-        })
+      ? api(API.archiveSession.method, API.archiveSession.path({ sessionId: chat.session.id }))
       : chat.kind === "room" ? api("POST", `/v1/rooms/${chat.room.id}/close`, {})
       : api(API.messagingClose.method, API.messagingClose.path({ conversationId: chat.conversation.id })));
     if (result?.ok) {
@@ -1267,7 +1262,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         <SpeechBar />
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && !messagingActive && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
-        {closeDependencies.length > 0 && <div className="dependency-close-error" role="alert"><strong>Close is protected by an explicit dependency.</strong>{closeDependencies.map((dependency, index) => <button key={index} type="button" onClick={() => { setCloseDependencies([]); openThreadId(dependency.threadId); }}>Open dependency owner · {knownSessions.find(item => item.id === dependency.threadId)?.name ?? dependency.threadId}</button>)}<button type="button" onClick={() => setCloseDependencies([])}>Dismiss</button></div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
         {selected && !messagingActive && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {

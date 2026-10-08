@@ -36,7 +36,7 @@ People send with `queue`, `steer` or `hardSteer`, and the composer defaults to `
 - Steer waits for the current local tools without cancelling them.
 - Hard steer confirms cancellation of current local execution before sending the selected message first. Other pending messages retain their order.
 - **Cancel work** uses owner control `cancel` for the selected agent only, without archiving it or holding work for later continuation.
-- **Close agent** uses `close`: confirm selected cancellation, discard its pending work and archive it. Launch descendants are never recursively closed. Explicit incoming and outgoing dependencies refuse close with `dependency_conflict` and dependency-owner thread links.
+- **Close agent** uses `close`: confirm selected cancellation, discard its pending work and archive it. Launch descendants are never recursively closed. Dependencies subscribe to durable results; explicit Close wins and subscribers receive cancellation. Closing a dependent releases its subscriptions without cancelling its peers.
 - Human reopening uses `open`: unarchive/promote the original agent, without replaying cancelled work. Undo has the same selected-only behavior.
 
 The owner also handles pending-message cancellation/promotion, settings and native session commands. Editing a user message forks through the owner, then Remote replaces its display-event projection and returns the original text to the composer. Sending is a separate operation.
