@@ -20,6 +20,8 @@ Vite binds loopback only. HMR is deliberately disabled: concurrent source/receip
 
 `transport.ts` replaces fetch before production modules initialize. Each case explicitly declares its method plus exact path or validating URL matcher and a typed response producer. Synthetic authentication/environment bootstrap routes are shared; case routes take precedence. Undeclared API requests return HTTP501 and appear in the report. WebSockets and cross-origin fetches cannot reach live services. Native bridge fixtures install before the native module and reject unavailable/unknown methods.
 
+Cases may declare typed fixture actions for source transitions without adding controls to the production surface. Invoke `window.PiUiCatalogue.invokeAction(CASE_ID, ACTION_ID)` only after mounting that case; unknown cases/actions and unmounted owners return explicit errors. The selected-App compositions exercise actual inbox selection, cold history loading/failure and retained-history disconnect/repair; use the real Reconnect button after repairing the synthetic source.
+
 The Vite owner also rejects native `/v1/` requests not covered by its exact synthetic image route. The synthetic `/editor/open` POST target accepts only the declared fixture tickets; it proves handoff, expiry and return behavior, **not code-server's UI**. No private live data or real phone is used.
 
 ## Review loop
@@ -37,6 +39,6 @@ Toasts use the actual production owner. Standalone toast fixtures explicitly hol
 
 ## Evidence and scope
 
-The first review's external artifacts live at `/home/kenan/data/pi-ui-review-20261009/`; source receipts are `*-reviews.json`. Native evidence lives in `native/` and `native-editor/`, with their own rendered/visually-judged and lifecycle-absence distinctions. PNGs are not committed into this source catalogue.
+The first review's external artifacts live at `/home/kenan/data/pi-ui-review-20261009/`; source receipts are `*-reviews.json`. Native evidence lives in `native/`, `native-editor/` and `native-editor-layout/`, with their own rendered/visually-judged and lifecycle-absence distinctions. PNGs are not committed into this source catalogue.
 
 `*-remaining.json` is the current owned-state/composition queue. The report also includes the native catalogue's unviewed boundaries. Android OS installer/permission/compositor surfaces and third-party editor/sign-in content are distinguished from owned native request/loading/failure/Close presentation. A full registered matrix means only the declared cases were judged, **not that all owned product compositions are complete**. Continue from the queue and source inventory rather than declaring finite strings or arbitrary cross-products exhaustive.
