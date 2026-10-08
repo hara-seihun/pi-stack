@@ -5,6 +5,7 @@ import { KENAN_ROOT_DEFAULT_PORT } from "kenan-memory/contract";
 import { rootService, type RootReleaseState } from "./service.js";
 import { RootRequestStore } from "./requests.js";
 import { createRootExecutor, readRootConfig } from "./root-runtime.js";
+import { recoverRootOwners } from "./managed-session.js";
 import { awaitPrivateMount } from "kenan-memory/private-store";
 import { RootConsentManager, createConsentBridge, rootMemoryRpc } from "./consent.js";
 
@@ -20,7 +21,11 @@ const credential = (env: string, name: string) => readFileSync(process.env[env] 
 const memoryRootToken = credential("PI_KENAN_MEMORY_ROOT_TOKEN_FILE", "kenan-memory-root");
 const adminCapability = credential("PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE", "kenan-root-admin");
 const consentCapability = credential("PI_KENAN_ROOT_CONSENT_TOKEN_FILE", "kenan-root-consent");
-for (const path of [config.cwd, config.agentDir, config.sessionsDir]) mkdirSync(path, { recursive: true, mode: 0o700 });
+for (const path of [config.cwd, config.agentDir, config.sessionsDir]) {
+  if (!resolve(path).startsWith(resolve(privateDir) + sep)) throw new Error("Root execution must remain inside the mounted encrypted private store");
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+}
+await recoverRootOwners(config);
 const memoryUrl = process.env.PI_KENAN_MEMORY_URL ?? "http://127.0.0.1:18820";
 let consent: RootConsentManager;
 const executor = createRootExecutor(config, { consent: (admission, request, input) => consent.request(admission, request, input),
