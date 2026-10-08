@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, standaloneRecordPath } from "../../runtime/standalone-agent.mjs";
+import { createManagedAgentSession } from "../../runtime/managed-agent.mjs";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -17,9 +17,7 @@ assert.ok(["enabled", "disabled"].includes(values.expect));
 const routing = resolve(values.routing);
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi/agent");
 const cwd = process.cwd();
-const executionId = randomUUID();
-const capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `image-probe:${executionId}`, executionId });
-let session;
+let session, managed;
 try {
 const settingsManager = SettingsManager.inMemory();
 const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
@@ -28,7 +26,8 @@ const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManage
   additionalExtensionPaths: [routing],
 });
 await resourceLoader.reload();
-({ session } = await createAgentSession({ cwd, agentDir, modelRuntime, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd) }));
+managed = await createManagedAgentSession(() => createAgentSession({ cwd, agentDir, modelRuntime, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd) }), { cwd });
+({ session } = managed);
   const errors = [];
   await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
   assert.deepEqual(errors, []);
@@ -37,11 +36,12 @@ await resourceLoader.reload();
   const result = { enabled, routing };
   if (values.output) {
     assert.ok(enabled);
-    const tool = session.extensionRunner.getAllRegisteredTools().find(tool => tool.definition.name === "image_generation").definition;
-    const generated = await tool.execute(crypto.randomUUID(), {
+    const tool = session.agent.state.tools.find(tool => tool.name === "image_generation");
+    assert.ok(tool, "Image probe requires the active managed tool");
+    const generated = await tool.execute(randomUUID(), {
       prompt: "A solid blue circle centered on a white background, no text.",
       outputPath: resolve(values.output), model: values.model, quality: "low", size: "1024x1024",
-    }, AbortSignal.timeout(45000), undefined, session.extensionRunner.createContext());
+    }, AbortSignal.timeout(45000));
     assert.equal(generated.content[1].type, "image");
     Object.assign(result, generated.details);
   }
@@ -49,6 +49,6 @@ await resourceLoader.reload();
 } finally {
   if (session) {
     await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-    await abortAndSettleStandaloneSession(session, capacity);
-  } else await settleStandaloneAgent(capacity);
+  }
+  if (managed) await managed.close();
 }

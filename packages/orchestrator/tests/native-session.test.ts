@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -224,24 +224,31 @@ it("keeps async close and custody pending until an abort-resistant detached tool
   expect(fixture.release).toHaveBeenCalledTimes(1);
 }, 3_000);
 
-it.each<{ label: string; proof: Result<boolean>; active: number }>([
+it.each<{ label: string; proof: Result<boolean>; active: number; nested?: true }>([
   { label: "positive native-owner absence", proof: { ok: true, value: true }, active: 0 },
+  { label: "nested canonical native-owner database", proof: { ok: true, value: true }, active: 0, nested: true },
   { label: "a still-present native owner", proof: { ok: true, value: false }, active: 1 },
   { label: "an unavailable absence proof", proof: { ok: false, error: { code: "unavailable", message: "fixture absence unknown" } }, active: 1 },
-])("recovers crash custody only on positive absence: $label", async ({ proof, active }) => {
+])("recovers crash custody only on positive absence: $label", async ({ proof, active, nested }) => {
   const fixture = capacityFixture();
   const paths = options(fixture.capacity);
+  const directory = nested ? join(paths.cwd, "b941ac15-36b6-42f2-928f-17b98f71a937") : paths.cwd;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (nested) paths.databasePath = join(directory, "threads.sqlite3");
   const owner: NativeOwnerRecord = {
     threadId: "crashed-native-thread", databasePath: paths.databasePath,
-    unit: "pi-native-01234567.service", cgroup: "/user.slice/fixture-native-owner", bootId: "fixture-boot-id",
+    unit: "pi-native-01234567.service", cgroup: "/user.slice/fixture/pi-native-01234567.service", bootId: "942aba85-5d69-45dc-a708-065084d6e4c4",
   };
   const db = openSqlite(paths.databasePath);
   try {
+    db.exec("CREATE TABLE thread(id TEXT PRIMARY KEY,state TEXT,held INTEGER,metadata TEXT); CREATE TABLE thread_request(id TEXT PRIMARY KEY,kind TEXT,target TEXT,response TEXT)");
+    db.prepare("INSERT INTO thread VALUES(?,'running',0,?)").run(owner.threadId, JSON.stringify({ runnerReference: { control: "stopped-unit" } }));
+    db.prepare("INSERT INTO thread_request VALUES(?,'command',?,NULL)").run("crashed-command", owner.threadId);
     const ledger = new ThreadCapacityLedger(db, fixture.capacity);
     value(await ledger.acquire(owner.threadId, "crashed-execution", "crashed-command", "command"));
     ledger.entered(owner.threadId, "crashed-execution");
   } finally { db.close(); }
-  writeFileSync(join(paths.cwd, "threads.owner.json"), JSON.stringify(owner));
+  writeFileSync(join(directory, "threads.owner.json"), JSON.stringify(owner));
   const absent = vi.fn(async () => proof);
   const recovery = await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent });
   expect(absent).toHaveBeenCalledExactlyOnceWith(owner);
@@ -252,7 +259,19 @@ it.each<{ label: string; proof: Result<boolean>; active: number }>([
   try {
     const ledger = new ThreadCapacityLedger(reopened, fixture.capacity);
     expect(ledger.current(owner.threadId)).toHaveLength(active);
-    if (active) expect(ledger.current(owner.threadId)[0]).toMatchObject({ state: "held", entered_native: 1 });
+    const thread = reopened.prepare("SELECT state,metadata FROM thread WHERE id=?").get(owner.threadId) as { state: string; metadata: string };
+    const command = reopened.prepare("SELECT response FROM thread_request WHERE id='crashed-command'").get() as { response: string | null };
+    if (active) {
+      expect(ledger.current(owner.threadId)[0]).toMatchObject({ state: "held", entered_native: 1 });
+      expect(thread.state).toBe("running");
+      expect(command.response).toBeNull();
+      expect(JSON.parse(thread.metadata).runnerReference).toBeDefined();
+    } else {
+      expect(thread.state).toBe("idle");
+      expect(JSON.parse(command.response!)).toMatchObject({ ok: false, error: { code: "unavailable" } });
+      expect(JSON.parse(thread.metadata).runnerReference).toBeUndefined();
+      expect(JSON.parse(thread.metadata).commandError).toMatch(/cannot be replayed/);
+    }
   } finally { reopened.close(); }
   if (active === 0) {
     expect(await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent })).toEqual({ ok: true, value: undefined });
@@ -260,3 +279,28 @@ it.each<{ label: string; proof: Result<boolean>; active: number }>([
     expect(fixture.release).toHaveBeenCalledTimes(1);
   }
 }, 3_000);
+
+it("rejects linked owner roots without reading the target or releasing custody", async () => {
+  const fixture = capacityFixture();
+  const paths = options(fixture.capacity);
+  const target = join(paths.cwd, "private-target");
+  mkdirSync(target);
+  writeFileSync(join(target, "threads.owner.json"), "not readable owner metadata");
+  symlinkSync(target, join(paths.cwd, "b941ac15-36b6-42f2-928f-17b98f71a937"));
+  const absent = vi.fn(async () => ({ ok: true as const, value: true }));
+  const result = await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent });
+  expect(result).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("must not be a link") } });
+  expect(absent).not.toHaveBeenCalled();
+  expect(fixture.release).not.toHaveBeenCalled();
+});
+
+it("rejects a cgroup belonging to another unit before considering absence", async () => {
+  const fixture = capacityFixture();
+  const paths = options(fixture.capacity);
+  writeFileSync(join(paths.cwd, "threads.owner.json"), JSON.stringify({ threadId: "invalid-owner", databasePath: paths.databasePath,
+    unit: "pi-native-01234567.service", cgroup: "/user.slice/another.service", bootId: "942aba85-5d69-45dc-a708-065084d6e4c4" }));
+  const absent = vi.fn(async () => ({ ok: true as const, value: true }));
+  expect(await recoverNativeSessionOwners(paths.cwd, { capacity: fixture.capacity, absent })).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("Invalid native owner record") } });
+  expect(absent).not.toHaveBeenCalled();
+  expect(fixture.release).not.toHaveBeenCalled();
+});

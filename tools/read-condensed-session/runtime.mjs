@@ -15,7 +15,6 @@ process.env.PI_CURSOR_ACTIVE_BRIDGE_TTL_MS ??= "1000";
 
 let apiPromise;
 let runtimePromise;
-let bootstrapSession;
 
 function runtimeRoots() {
   const roots = [];
@@ -51,34 +50,13 @@ function agentDir() {
 async function modelRuntime() {
   if (runtimePromise) return runtimePromise;
   runtimePromise = (async () => {
-    const { createAgentSession, SessionManager } = await codingAgent();
-    if (!createAgentSession || !SessionManager) throw new Error("deployed Pi runtime lacks session bootstrap APIs");
-    const cwd = process.cwd();
-    const { session } = await createAgentSession({
-      cwd,
-      agentDir: agentDir(),
-      tools: [],
-      sessionManager: SessionManager.inMemory(cwd),
-    });
-    try {
-      await session.bindExtensions({
-        mode: "print",
-        onError: ({ extensionPath, error }) => {
-          throw new Error(`Pi extension ${extensionPath} failed while loading model providers: ${error?.message ?? error}`);
-        },
-      });
-      // Native providers start their availability refresh without awaiting it.
-      // Finish one pass so shared-custody aliases are visible on the first job.
-      await session.modelRuntime.refresh({ allowNetwork: false });
-      bootstrapSession = session;
-      // The bootstrap session loads extension-registered provider aliases and
-      // their credentials. Summaries bypass session.prompt and call this
-      // runtime directly with one user message.
-      return session.modelRuntime;
-    } catch (error) {
-      session.dispose();
-      throw error;
-    }
+    const { createAgentSessionServices } = await codingAgent();
+    if (!createAgentSessionServices) throw new Error("deployed Pi runtime lacks provider service APIs");
+    const services = await createAgentSessionServices({ cwd: process.cwd(), agentDir: agentDir() });
+    const errors = [...services.diagnostics.filter(item => item.type === "error"), ...services.resourceLoader.getExtensions().errors];
+    if (errors.length) throw new Error(`Pi model provider initialization failed: ${JSON.stringify(errors)}`);
+    await services.modelRuntime.refresh({ allowNetwork: false });
+    return services.modelRuntime;
   })();
   return runtimePromise;
 }
@@ -152,18 +130,12 @@ export async function summarizeWithRuntime(runtime, prompt, options = {}) {
 }
 
 export async function summarizeDirect(prompt, options = {}) {
-  const { requireStandaloneAgent, settleStandaloneAgent, standaloneRecordPath } = await import("pi-orchestrator/standalone-agent");
-  const id = randomUUID();
-  const custody = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `condenser:${id}`, executionId: id });
-  try { return await summarizeWithRuntime(await modelRuntime(), prompt, options); }
-  finally { await settleStandaloneAgent(custody); }
+  return summarizeWithRuntime(await modelRuntime(), prompt, options);
 }
 
 export async function disposeModelRuntime() {
   if (runtimePromise) {
     try { await runtimePromise; } catch {}
   }
-  bootstrapSession?.dispose();
-  bootstrapSession = undefined;
   runtimePromise = undefined;
 }
