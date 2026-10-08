@@ -49,7 +49,7 @@ For example:
 
 ## Answering
 
-Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with the remaining count, suggestion chips, a free-text answer and **Dismiss question**. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Cancel work** remains available in the header while the agent is running.
+Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with a quiet remaining count, formatted answer choices, a free-text answer and **Dismiss question**. Personal and room composers share the same question presentation: Markdown paragraphs, emphasis, lists, links, tables and code render in both the question and suggested answers. Choices appear before the free-text field; the recommendation is a separate quiet label. Attention cards and question history use the same rich text, with a separate original-conversation link so Markdown links remain usable. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Cancel work** remains available in the header while the agent is running.
 
 - Select any number of suggestions, including none.
 - Add text whether or not suggestions are selected.
@@ -58,7 +58,7 @@ Pending questions replace the normal message composer in an AI conversation. The
 - Switching conversations does not submit an answer. Failed submissions retain the answer draft for retry.
 - **Dismiss question** durably settles that question without selecting or authorizing a suggestion. The agent receives a correlated human steer beginning `Dismissed question QUESTION_ID: PROMPT`, explicitly saying the user skipped it. Dismissal retries are idempotent; an accepted dismissal cannot later be replaced with an answer.
 
-On phones the question composer never takes more than 60dvh; its body scrolls internally while dictation, dismissal and submission stay outside the scrolling body. Suggestion chips and dismissal have at least 48px tap targets. The answer field uses the same Write dictation and phone newline behavior as ordinary messages. Nothing is sent merely by finishing dictation.
+On phones the question composer never takes more than 60dvh; its body scrolls internally while dictation, dismissal and submission stay outside the scrolling body. Suggested answers and dismissal have at least 48px tap targets. Short questions keep the answer field visible when it fits; long text, tables and code scroll without widening the page. Formatting is presentation only: question text, suggestion IDs and durable answer semantics are unchanged. Raw HTML stays literal and question rendering never resolves private session-file/image tags. The answer field uses the same Write dictation and phone newline behavior as ordinary messages. Nothing is sent merely by finishing dictation.
 
 Questions survive the agent's turn ending and owner restarts. Answering removes a question from the pending list only after durable acceptance. Repeated delivery of the same answer does not send another message. Questions remain associated with their original thread, including when accessed through an authorized peer owner; an account cannot answer another person's private thread.
 
