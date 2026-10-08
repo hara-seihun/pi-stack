@@ -35,7 +35,7 @@ npm run android:test --workspace=kenan
 
 ## Deployments
 
-The maintained fleet uses an Ubuntu local server and a Debian remote VM, both CPU-only for Write. Linux hosts supply systemd services and their own package provisioning; NixOS support remains available without making it the current publishing platform. See [host platforms](docs/deployment.md#host-platforms) for the migration boundary and historical GPU report.
+The maintained fleet uses an Ubuntu local server and a Debian remote VM. Hosts can declare the CPU-only [Meet recognition service](apps/meet-recognition/README.md) for external meeting transcripts. Linux hosts supply systemd services and their own package provisioning; see [host platforms](docs/deployment.md#host-platforms).
 
 `deploy/publication submit SHA` hands a reviewed source commit to the durable worker for one checked integration and independent delivery to every configured target. Each ready host receives its matching Android/web artifact before server activation, retains durable delivery proof and releases its reservation immediately. Meetings, native prerequisites, locks or failure on another host do not hold it back. Newer checked requests can advance ready hosts while older deliveries wait; older requests accept checked descendant proofs without downgrading source or artifacts. Full completion still requires valid source and artifact delivery on every target.
 

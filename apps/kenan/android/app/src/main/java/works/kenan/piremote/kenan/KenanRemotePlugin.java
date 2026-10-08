@@ -77,7 +77,6 @@ public final class KenanRemotePlugin extends Plugin {
     public void syncSession(PluginCall call) {
         try {
             if (NotificationIdentity.replace(getContext(), call.getString("user", ""), call.getString("session", ""))) {
-                getContext().getSharedPreferences("write-settings", 0).edit().remove("environment").apply();
                 for (String key : new String[] { "environment", "sessionId", "user" }) getActivity().getIntent().removeExtra(key);
                 if (NotificationIdentity.get(getContext()).current() != null
                     && getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)) {
@@ -100,78 +99,6 @@ public final class KenanRemotePlugin extends Plugin {
             case GRANTED, DENIED -> true;
             case PROMPT, PROMPT_WITH_RATIONALE -> false;
         };
-    }
-
-    @PluginMethod
-    public void writeStatus(PluginCall call) {
-        call.resolve(new JSObject()
-            .put("microphone", granted(getPermissionState("microphone")))
-            .put("notification", NativeAccess.notifications(getContext()))
-            .put("overlay", Settings.canDrawOverlays(getContext()))
-            .put("accessibility", NativeAccess.accessibility(getContext(), WriteAccessibilityService.class))
-            .put("battery", ((android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE))
-                .isIgnoringBatteryOptimizations(getContext().getPackageName()))
-            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true))
-            .put("overlayEnabled", getContext().getSharedPreferences("write-settings", 0).getBoolean("overlayEnabled", true)));
-    }
-
-    @PluginMethod
-    public void writeSetup(PluginCall call) {
-        NativeState.WriteSetup step;
-        try { step = NativeState.require(NativeState.WriteSetup.class, call.getString("step", "")); }
-        catch (IllegalArgumentException invalid) { call.reject(invalid.getMessage(), "invalid_args"); return; }
-        Runnable setup = switch (step) {
-            case MICROPHONE -> () -> {
-                if (granted(getPermissionState("microphone"))) call.resolve();
-                else requestPermissionForAlias("microphone", call, "writeMicrophonePermission");
-            };
-            case NOTIFICATION -> () -> {
-                if (Build.VERSION.SDK_INT < 33 || granted(getPermissionState("notifications"))) call.resolve();
-                else requestPermissionForAlias("notifications", call, "writeMicrophonePermission");
-            };
-            case OVERLAY -> () -> {
-                getContext().startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getContext().getPackageName())).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                call.resolve();
-            };
-            case ACCESSIBILITY -> () -> {
-                getContext().startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                call.resolve();
-            };
-            case BATTERY -> () -> {
-                getContext().startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                call.resolve();
-            };
-            case ENABLED -> () -> {
-                Object enabled = call.getData().opt("enabled");
-                if (!(enabled instanceof Boolean)) { call.reject("Write enabled must be a boolean"); return; }
-                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("overlayEnabled", (Boolean) enabled).apply();
-                WriteAccessibilityService.settingsChanged();
-                call.resolve();
-            };
-            case KEYBOARD -> () -> {
-                boolean required = Boolean.TRUE.equals(call.getBoolean("required", true));
-                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", required).apply();
-                WriteAccessibilityService.settingsChanged();
-                call.resolve();
-            };
-        };
-        setup.run();
-    }
-
-    @PermissionCallback
-    private void writeMicrophonePermission(PluginCall call) { call.resolve(); }
-
-    @PluginMethod
-    public void writeEnvironment(PluginCall call) {
-        String user = call.getString("user", "");
-        String environment = call.getString("environment", "");
-        RemoteSession.Identity identity = NotificationIdentity.get(getContext()).current();
-        if (identity == null || !identity.user.equals(user) || environment.isBlank()) {
-            call.reject("Write environment needs an authenticated selection"); return;
-        }
-        getContext().getSharedPreferences("write-settings", 0).edit().putString("environment", environment).apply();
-        call.resolve();
     }
 
     @PluginMethod
@@ -261,9 +188,9 @@ public final class KenanRemotePlugin extends Plugin {
                     } else requestPermissionForAlias(step, call, "phonePermission");
                     return;
                 };
-                case ACCESSIBILITY, WRITE_ACCESSIBILITY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                case ACCESSIBILITY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                     .putExtra(Intent.EXTRA_COMPONENT_NAME, new android.content.ComponentName(getContext(),
-                        step.equals("writeAccessibility") ? WriteAccessibilityService.class : PhoneAccessibilityService.class).flattenToString()));
+                        PhoneAccessibilityService.class).flattenToString()));
                 case NOTIFICATION_ACCESS -> () -> openPhoneSettings(call, new Intent(Build.VERSION.SDK_INT >= 30 ? Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS : Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
                     .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneNotificationService.class).flattenToString()));
                 case OVERLAY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,

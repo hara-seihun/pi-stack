@@ -159,8 +159,6 @@ div.math-pending { display: block; padding: .2em 0; }
 .composer-prompt { width: 100%; height: 44px; min-height: 44px; max-height: min(180px, 30dvh); align-self: start; resize: none; border: 0; border-radius: 0; padding: 10px 11px; color: var(--text); background: transparent; line-height: 1.4; }
 .composer-actions { display: flex; align-items: center; min-width: 0; background: var(--surface); }
 .composer-spacer { flex: 1; }
-.write-tail { padding: 0 11px 5px; color: var(--muted); font-style: italic; overflow-wrap: anywhere; }
-.write-error { padding: 0 11px 5px; color: var(--danger); }
 .composer-icon { width: 40px; height: 40px; display: grid; place-items: center; padding: 0; color: var(--text); background: transparent; }
 .composer-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .composer-icon.send { border-radius: var(--radius-2); color: var(--bg); background: var(--accent); }

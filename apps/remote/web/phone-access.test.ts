@@ -69,7 +69,7 @@ test("unmount, stop or identity change while settings is open prevents any furth
   expect(f.requests).toEqual(["accessibility"]);
 });
 
-test("readiness requires every app grant including both accessibility services", async () => {
+test("readiness requires every phone grant including app-control accessibility", async () => {
   const f = fixture([]);
   expect(allPermissionsGranted(f.status)).toBe(true);
   for (const { step } of phoneGrants) {
@@ -77,26 +77,9 @@ test("readiness requires every app grant including both accessibility services",
     expect(allPermissionsGranted(f.status)).toBe(false);
     f.status.capabilities[step] = true;
   }
-  delete f.status.capabilities.writeAccessibility;
+  delete f.status.capabilities.accessibility;
   expect(allPermissionsGranted(f.status)).toBe(false);
-  f.status.capabilities.writeAccessibility = true;
+  f.status.capabilities.accessibility = true;
   expect((await requestPhoneAccess(f.driver)).granted).toBe(true);
   expect(f.requests).toEqual([]);
-});
-
-test("Write settings return is awaited and denied Write access never becomes ready", async () => {
-  const f = fixture(["writeAccessibility", "notifications"]);
-  let returned!: () => void;
-  f.driver.request = async step => {
-    f.requests.push(step);
-    if (step === "writeAccessibility") await new Promise<void>(resolve => { returned = resolve; });
-    else f.status.capabilities[step] = true;
-  };
-  const result = requestPhoneAccess(f.driver);
-  await Promise.resolve(); await Promise.resolve();
-  expect(f.requests).toEqual(["writeAccessibility"]);
-  returned();
-  expect((await result).completed).toBe(true);
-  expect((await result).granted).toBe(false);
-  expect(f.requests).toEqual(["writeAccessibility", "notifications"]);
 });

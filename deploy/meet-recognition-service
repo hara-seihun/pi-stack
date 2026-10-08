@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+base=${PI_STACK_MEET_RECOGNITION_URL:-ws://127.0.0.1:8797/}
+unit=pi-stack-meet-recognition.service
+case ${1:---activate} in
+  --check)
+    [[ $(systemctl show "$unit" -p LoadState --value) == loaded ]] || {
+      echo 'Install the host pi-stack-meet-recognition.service declaration before deploying local meeting recognition.' >&2
+      exit 66
+    }
+    ;;
+  --activate)
+    port=$(printf '%s' "$base" | cut -d: -f3 | cut -d/ -f1)
+    [[ $port =~ ^[0-9]+$ ]] || { echo "Invalid Meet recognition endpoint: $base" >&2; exit 64; }
+    fail() {
+      echo "$1" >&2
+      pi_stack_as_root systemctl status "$unit" --no-pager --full >&2 || true
+      exit 1
+    }
+    pi_stack_as_root systemctl enable "$unit"
+    pi_stack_as_root systemctl reset-failed "$unit"
+    pi_stack_as_root systemctl restart "$unit" || fail 'Meet recognition restart failed'
+    readiness_seconds=40
+    deadline=$((SECONDS + readiness_seconds))
+    while :; do
+      systemctl is-active --quiet "$unit" || fail 'Meet recognition stopped before its listener was ready'
+      if pi_stack_as_root bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then break; fi
+      (( SECONDS < deadline )) || fail "Meet recognition did not bind its listener within $readiness_seconds seconds"
+      sleep 0.1
+    done
+    ;;
+  *) echo 'usage: deploy/meet-recognition-service [--check|--activate]' >&2; exit 64 ;;
+esac

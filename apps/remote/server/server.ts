@@ -99,7 +99,6 @@ import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones"
 import { CalendarStore } from "./calendar";
 import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
-import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
 import { FeatureUsage } from "./feature-usage";
 import { createHash } from "node:crypto";
@@ -347,7 +346,6 @@ function trackFeature(feature: Feature, actor: FeatureActor, id: string = crypto
 }
 const promptAdmissions = new PromptAdmissions(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
-const writeDictionary = new WriteDictionary(db);
 const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 /** Assigned once the phone broker exists; thread events can arrive earlier. */
@@ -1814,7 +1812,7 @@ const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? proc
 calendar.start();
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
-type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
+type SocketData = AudioSocketData | PhoneSocketData;
 const phones = new PhoneBroker({
   commandUsed: () => { trackFeature("phone", "agent"); },
   overlayMessage: async (device, message) => {
@@ -1848,7 +1846,6 @@ phoneOverlay = new PhoneOverlay({
   save: (deviceId, threadId) => { db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`phone-overlay:${deviceId}`, threadId); },
   log: message => console.warn(message),
 });
-const writeEndpoint = writeEngineEndpoint();
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({
   hostname: HOST,
@@ -2013,26 +2010,6 @@ const server = Bun.serve<SocketData>({
       }
       httpServer.timeout(req, 65);
       return await phones.handle(req) ?? error("Not found", 404);
-    }
-    if (API.writeStream.match(req.method, url.pathname) && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      return httpServer.upgrade(req, { data: { kind: "write", started: false, finished: false } })
-        ? undefined : error("WebSocket upgrade failed", 400);
-    }
-    if (API.writeDictionary.match(req.method, url.pathname)) return json(writeDictionary.get());
-    if (API.updateWriteDictionary.match(req.method, url.pathname)) {
-      const dictionary = parseDictionary(await readBody(req));
-      return dictionary ? json(writeDictionary.put(dictionary)) : error("Invalid Write dictionary", 400);
-    }
-    if (API.writeLearn.match(req.method, url.pathname)) {
-      const body = await readBody(req);
-      if (typeof body?.inserted !== "string" || typeof body?.final !== "string" || body.inserted.length > 4000 || body.final.length > 4000) return error("Invalid Write correction", 400);
-      return json(writeDictionary.learn(body.inserted, body.final));
-    }
-    if (API.writeUndo.match(req.method, url.pathname)) {
-      const body = await readBody(req);
-      if (typeof body?.undoId !== "string") return error("Invalid Write undo receipt", 400);
-      const dictionary = writeDictionary.undo(body.undoId);
-      return dictionary ? json({ dictionary }) : error("Write undo receipt not found", 404);
     }
     const callAudio = req.method === "GET" && req.headers.get("upgrade")?.toLowerCase() === "websocket"
       ? /^\/v1\/messaging\/calls\/([^/]+)\/audio$/.exec(url.pathname)
@@ -2796,7 +2773,6 @@ const server = Bun.serve<SocketData>({
     closeOnBackpressureLimit: false,
     open(socket) {
       if (socket.data.kind === "phone") { socket.data.connection = phones.open({ send: frame => socket.send(frame), close: (code, reason) => socket.close(code, reason) }); return; }
-      if (socket.data.kind === "write") { socket.data.receive = connectWrite(socket as Bun.ServerWebSocket<WriteSocketData>, writeEndpoint, writeDictionary); return; }
       if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
       const audio = openCallAudio(socket.data.callId);
       if (!audio) {
@@ -2815,11 +2791,6 @@ const server = Bun.serve<SocketData>({
     },
     message(socket, message) {
       if (socket.data.kind === "phone") { if (socket.data.connection) phones.receive(socket.data.connection, message); return; }
-      if (socket.data.kind === "write") {
-        const write = socket as Bun.ServerWebSocket<WriteSocketData>;
-        write.data.receive?.(message);
-        return;
-      }
       if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
       if (typeof message === "string") { socket.close(1008, "Call audio must be binary"); return; }
       const frame = message instanceof Uint8Array ? message : new Uint8Array(message);
@@ -2827,12 +2798,6 @@ const server = Bun.serve<SocketData>({
     },
     close(socket) {
       if (socket.data.kind === "phone") { if (socket.data.connection) phones.disconnected(socket.data.connection); return; }
-      if (socket.data.kind === "write") {
-        const write = socket as Bun.ServerWebSocket<WriteSocketData>;
-        if (!write.data.finished && write.data.upstream?.readyState === WebSocket.OPEN) write.data.upstream.send(JSON.stringify({ type: "cancel" }));
-        write.data.upstream?.close();
-        return;
-      }
       if (socket.data.kind !== "call") throw new Error("Unsupported WebSocket kind at close");
       socket.data.audio?.detach();
       socket.data.audio = undefined;

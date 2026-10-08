@@ -62,21 +62,6 @@ def main():
         for endpoint in endpoints:
             request(endpoint["baseUrl"] + "/v1/notifications?after=0", auth)
         request("/v1/environments", {**auth, "x-pi-remote-session": "invalid-test-session"}, expected=423)
-        import base64
-        import http.client
-        import os
-        from urllib.parse import quote
-        for cookie_transport in [False, True]:
-            connection = http.client.HTTPSConnection(host, timeout=10)
-            headers = {"User-Agent": "okhttp/4.12.0", "Upgrade": "websocket", "Connection": "Upgrade",
-                       "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": base64.b64encode(os.urandom(16)).decode(),
-                       "Origin": "http://localhost", "x-pi-remote-user": args.user, "x-pi-remote-session": session}
-            headers.update({"Cookie": "CF_Authorization=" + token} if cookie_transport else {"cf-access-token": token})
-            connection.request("GET", urlparse(origin).path + "/v1/write/stream?session=" + quote(session), headers=headers)
-            response = connection.getresponse()
-            proof.append({"path": "/v1/write/stream", "transport": "cookie" if cookie_transport else "cf-access-token", "status": response.status})
-            assert response.status == 101, f"Write handshake: HTTP {response.status}"
-            connection.close()
     print(json.dumps({"origin": origin, "requests": proof, "apk": {k: release.get(k) for k in ("revision", "versionCode", "fileName")}}, indent=2))
 
 

@@ -32,7 +32,7 @@ Pending questions replace the normal message composer in an AI conversation. The
 - Switching conversations does not submit an answer. Failed submissions retain the answer draft for retry.
 - **Dismiss question** durably settles that question without selecting or authorizing a suggestion. The agent receives a correlated human steer beginning `Dismissed question QUESTION_ID: PROMPT`, explicitly saying the user skipped it. Dismissal retries are idempotent; an accepted dismissal cannot later be replaced with an answer.
 
-On phones the question composer never takes more than 60dvh; its body scrolls internally while dictation, dismissal and submission stay outside the scrolling body. Suggestion chips and dismissal have at least 48px tap targets. The answer field uses the same Write dictation and phone newline behavior as ordinary messages. Nothing is sent merely by finishing dictation.
+On phones the question composer never takes more than 60dvh; its body scrolls internally while dismissal and submission stay outside the scrolling body. Suggestion chips and dismissal have at least 48px tap targets. The answer field uses the same phone newline behavior as ordinary messages.
 
 Questions survive the agent's turn ending and owner restarts. Answering removes a question from the pending list only after durable acceptance. Repeated delivery of the same answer does not send another message. Questions remain associated with their original thread, including when accessed through an authorized peer owner; an account cannot answer another person's private thread.
 

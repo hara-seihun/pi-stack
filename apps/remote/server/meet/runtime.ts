@@ -25,7 +25,7 @@ export function runtimeRevision(): string {
   for (const name of readdirSync(import.meta.dir).filter(name => name.endsWith(".ts") && !name.endsWith(".test.ts")).sort()) {
     hash.update(name).update(readFileSync(join(import.meta.dir, name)));
   }
-  for (const name of ["config.ts", "write.ts", "cors.ts"]) hash.update(name).update(readFileSync(join(import.meta.dir, "..", name)));
+  for (const name of ["config.ts", "cors.ts"]) hash.update(name).update(readFileSync(join(import.meta.dir, "..", name)));
   return hash.digest("hex");
 }
 

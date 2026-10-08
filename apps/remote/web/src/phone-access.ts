@@ -2,7 +2,6 @@ import type { PhoneSetupStep, PhoneStatus } from "./native";
 
 export const phoneGrants: readonly { step: PhoneSetupStep; label: string; help: string }[] = [
   { step: "accessibility", label: "App control and screenshots", help: "Enable Kenan Phone control, then return to Kenan." },
-  { step: "writeAccessibility", label: "Dictation in other apps", help: "Enable Pi Stack Write, then return to Kenan." },
   { step: "notificationAccess", label: "Notification access", help: "Allow Kenan to read notifications and use their actions and replies." },
   { step: "notifications", label: "Show notifications", help: "Allow the ongoing phone-control notification." },
   { step: "sms", label: "SMS", help: "Allow reading and sending SMS. Setup never sends a message." },

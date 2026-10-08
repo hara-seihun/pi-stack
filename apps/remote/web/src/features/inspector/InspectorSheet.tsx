@@ -10,7 +10,6 @@ import { StatusPill } from "../status/StatusPill";
 import { StatusIcon } from "../status/StatusIcon";
 import { agentName } from "../../agent-name";
 import { threadStatus } from "../status/thread-status";
-import { WriteSettings } from "./WriteSettings";
 import "./inspector.css";
 import { assertNever } from "../../../../shared/explicit-state";
 import { validateSession, stateArray } from "../../../../shared/state-validation";
@@ -213,7 +212,6 @@ export function InspectorSheet({ session, sessions, open, pending, autoCollapse,
       <DismissibleError message={saveFailure} />
       {settings ? <SettingsFields session={session} settings={settings} saving={saving} onUpdate={(field, body) => void update(field, body)} />
         : !loadFailure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div>}
-      <WriteSettings />
     </div>}
     {tab === "timeline" && <div className="inspector-panel">
       <p className="muted inspector-hint">Execution events recorded by the supervisor. This is operational metadata, not part of what the agent sees.</p>

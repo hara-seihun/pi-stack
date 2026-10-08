@@ -13,7 +13,7 @@ public class RouterConnectionTest {
     @Test public void ingressScopeIncludesSocketsButNotOtherHostsOrPaths() {
         String root = "https://router.test/pi-stack";
         assertTrue(RouterConnection.sameRouter("https://router.test/pi-stack/v1/environments", root));
-        assertTrue(RouterConnection.sameRouter("wss://router.test/pi-stack/v1/write/stream", root));
+        assertTrue(RouterConnection.sameRouter("wss://router.test/pi-stack/v1/phones/connect", root));
         for (String url : new String[] { "https://outside.test/pi-stack/v1/files", "https://router.test/other/v1/files",
             "http://router.test/pi-stack/v1/files", "https://person@router.test/pi-stack/v1/files",
             "https://router.test/pi-stack-extra/v1/files" }) assertFalse(RouterConnection.sameRouter(url, root));
