@@ -15,5 +15,6 @@ export type UiReview = {
   theme: "light" | "dark";
   status: "passed" | "fixed" | "needs-fix";
   evidence: string;
+  additionalEvidence?: string[];
   judgment: string;
 };
