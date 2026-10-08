@@ -101,6 +101,9 @@ import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
+import { FeatureUsage } from "./feature-usage";
+import { createHash } from "node:crypto";
+import { parseFeatureEvent, type Feature, type FeatureActor } from "../shared/feature-usage";
 import { idleNotifications, notificationHistory, resolveNotificationQuestions } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
@@ -336,6 +339,12 @@ const threads = new ThreadService({
 unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "threads"),
   resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
 ensureSupervisorSchema(db);
+const featureUsage = new FeatureUsage(db);
+function trackFeature(feature: Feature, actor: FeatureActor, id: string = crypto.randomUUID()) {
+  const result = featureUsage.record({ id: createHash("sha256").update(`${feature}:${actor}:${id}`).digest("hex"), feature, kind: "use" }, actor);
+  if (!result.ok) observeError(db, "feature-usage", result.error.message);
+  return result;
+}
 const promptAdmissions = new PromptAdmissions(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const writeDictionary = new WriteDictionary(db);
@@ -1807,8 +1816,20 @@ const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
 type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
 const phones = new PhoneBroker({
-  overlayMessage: (device, message) => phoneOverlay!.message(device, message),
-  ready: device => phoneOverlay?.ready(device),
+  commandUsed: () => { trackFeature("phone", "agent"); },
+  overlayMessage: async (device, message) => {
+    const result = await phoneOverlay!.message(device, message);
+    if (result.ok) trackFeature("overlay", "phone", message.id);
+    return result;
+  },
+  ready: device => {
+    const enabled = device.capabilities.overlayEnabled;
+    if (typeof enabled === "boolean") {
+      const result = featureUsage.record({ id: crypto.randomUUID(), feature: "overlay", kind: "state", state: enabled ? "enabled" : "disabled" }, "phone");
+      if (!result.ok) observeError(db, "feature-usage", result.error.message);
+    }
+    phoneOverlay?.ready(device);
+  },
 });
 phoneOverlay = new PhoneOverlay({
   thread: id => { const row = sessionRow.get(id) as any; return row ? { archived: Boolean(row.archived_at) } : null; },
@@ -1848,6 +1869,20 @@ const server = Bun.serve<SocketData>({
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
+    if (API.featureUsage.match(req.method, url.pathname) || API.recordFeatureUsage.match(req.method, url.pathname)) {
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Feature usage requires this person's authorized caller", 403);
+      if (req.method === "GET") {
+        const result = featureUsage.summary();
+        return json(result, result.ok ? 200 : 503);
+      }
+      let input: unknown;
+      try { input = await readBody(req); } catch { return error("Expected feature event JSON", 400); }
+      const parsed = parseFeatureEvent(input);
+      if (!parsed.ok) return json(parsed, 400);
+      const result = featureUsage.record(parsed.value, resolved.kind === "person" ? "human" : "agent");
+      return json(result, result.ok ? 200 : 503);
+    }
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);
       if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
@@ -1964,7 +1999,9 @@ const server = Bun.serve<SocketData>({
         if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Calendar access requires this person's authorized router or local caller", 403);
       }
       httpServer.timeout(req, 65);
-      return await calendar.handle(req);
+      const response = await calendar.handle(req);
+      if (!feed && response.ok && (req.method !== "GET" || !humanCaller())) trackFeature("calendar", humanCaller() ? "human" : "agent");
+      return response;
     }
     if (url.pathname === "/v1/phones" || url.pathname.startsWith("/v1/phones/")) {
       const connecting = !!API.phoneConnect.match(req.method, url.pathname);
@@ -2033,7 +2070,10 @@ const server = Bun.serve<SocketData>({
     const messagingResponse = await messaging.handle(req);
     if (messagingResponse) return messagingResponse;
     const speechResponse = speech ? await speech.handle(req) : null;
-    if (speechResponse) return speechResponse;
+    if (speechResponse) {
+      if (speechResponse.ok && API.speechUtterances.match(req.method, url.pathname)) trackFeature("speech", humanCaller() ? "human" : "agent");
+      return speechResponse;
+    }
     const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner", admissionFor(callers, caller));
     if (ownedThreadResponse) return ownedThreadResponse;
     const threadResponse = await threadHttp(directory, req, "/v1/threads", admissionFor(callers, caller));
@@ -2061,7 +2101,10 @@ const server = Bun.serve<SocketData>({
       },
       warn: message => console.warn(message),
     }));
-    if (externalResponse) return externalResponse;
+    if (externalResponse) {
+      if (externalResponse.ok && req.method === "POST" && url.pathname === "/v1/meet/external") trackFeature("meet", humanCaller() ? "human" : "agent");
+      return externalResponse;
+    }
     const meetingResponse = await meet.handle(req);
     if (meetingResponse) return meetingResponse;
     const agentMeetingRequest = [API.sessionMeeting, API.sessionMeetingVoice, API.sessionMeetingShare, API.sessionMeetingStop, API.sessionMeetingFrame]
@@ -2187,6 +2230,7 @@ const server = Bun.serve<SocketData>({
       if (!row) return error("Session not found", 404);
       if (row.archived_at) return error("Thread is archived", 409);
       const result = await voice.negotiate(row.id, await req.text(), voiceInstructions(row));
+      if (result.ok) trackFeature("voice", humanCaller() ? "human" : "agent");
       return result.ok ? json(result.value, 201) : error(result.error, result.status);
     }
     const voiceSessionUpdate = API.voiceSessionUpdate.match(req.method, url.pathname);
@@ -2317,6 +2361,7 @@ const server = Bun.serve<SocketData>({
             .run(file.path, transfer.session_id, now());
           db.query("DELETE FROM upload_transfers WHERE id=?").run(transfer.id);
         })();
+        trackFeature("attachment", humanCaller() ? "human" : "agent", transfer.id);
         return json({ file: { ...file, sha256: fileHash, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Could not complete upload", 400); }
     }
@@ -2329,6 +2374,7 @@ const server = Bun.serve<SocketData>({
         const file = await storeUpload(req, name, INGESTION);
         if (uploadSession) db.query("INSERT OR REPLACE INTO uploads(path,session_id,created_at) VALUES(?,?,?)")
           .run(file.path, uploadSessionId, now());
+        trackFeature("attachment", humanCaller() ? "human" : "agent");
         return json({ file: { ...file, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Upload failed", 400); }
     }
@@ -2472,6 +2518,7 @@ const server = Bun.serve<SocketData>({
           contextFiles.value, creator.input.createdBy, meetingSettings ? MEETING_MODE : undefined);
         const response = { session: publicSession(threadRow(thread)) };
         saveRequest(requestId, id, "create", 201, response);
+        trackFeature("agents", humanCaller() ? "human" : "agent", requestId);
         return json(response, 201);
       } catch (cause: any) { return error(cause.message); }
     }
@@ -2559,6 +2606,7 @@ const server = Bun.serve<SocketData>({
           return directory.send({ threadId, requestId, ...prepared });
         },
       });
+      if (result.body.outcome === "accepted" && body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") trackFeature("chat", humanCaller() ? "human" : "agent", body.requestId);
       return json(result.body.outcome === "accepted" && row ? { ...result.body, session: publicSession(row) } : result.body, result.status);
     }
     if (ROOMS_ENABLED && roomMetadata(row?.metadata?.room) && ["prompt", "fork", "command"].includes(action ?? "")) return error("Use the room API for room messages", 403);

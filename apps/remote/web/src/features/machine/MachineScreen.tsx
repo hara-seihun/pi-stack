@@ -20,6 +20,7 @@ export type MachineScreenProps = {
   onDismissOwnerError(id: string): void;
   onReconnect(): void;
   environment: ReactNode;
+  features: ReactNode;
   permissions: ReactNode;
   clientRevision: string;
 };
@@ -237,6 +238,7 @@ export function MachineScreen(props: MachineScreenProps) {
         })}
       </div></Card>}
       <Host machine={dashboard?.machine ?? null} />
+      {props.features}
       <Card title="Environment">{props.environment}</Card>
       <Card title="Permissions">{props.permissions}</Card>
       <Card title="App"><dl className="machine-app-detail"><dt>Revision</dt><dd title={props.clientRevision}>{props.clientRevision.slice(0, 12)}</dd><dt>Connection</dt><dd>{props.offline ? <><span>{props.offline}</span><button type="button" onClick={props.onReconnect}>Reconnect</button></> : props.syncing ? "Syncing" : "Connected"}</dd></dl></Card>

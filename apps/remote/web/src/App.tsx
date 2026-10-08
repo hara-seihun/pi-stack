@@ -52,6 +52,7 @@ import { toast, ToastViewport } from "./toasts";
 import { NotificationProvider } from "./notification-control";
 import { useSystemBack } from "./app/system-back";
 import { back, currentRoute, navigate, routeChatId, routeHome, routeThreadId, useRoute, withoutPanel, type Panel, type Route, type Tab } from "./app/routes";
+import { observeArtifactActions, recordFeatureUsage, resetFeatureCollection } from "./feature-usage";
 import { Inbox } from "./features/chats/Inbox";
 import { ConversationHeader, ConversationScreen, type Delivery } from "./features/conversation/ConversationScreen";
 import { ItemBodies, ItemBodiesContext } from "./features/conversation/item-bodies";
@@ -262,6 +263,16 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const layout = useLayout();
   const route = useRoute();
   const routeChat = routeChatId(route);
+  useEffect(() => { resetFeatureCollection(); const stop = observeArtifactActions(); return () => { stop(); resetFeatureCollection(); }; }, []);
+  useEffect(() => {
+    if (!bootstrapped || document.visibilityState !== "visible") return;
+    const feature = route.tab === "chats" ? "chat" : route.tab === "files" ? null : route.tab;
+    if (feature !== null) recordFeatureUsage(feature);
+  }, [bootstrapped, route.tab, routeChat]);
+  const inspectingContext = "panel" in route && route.panel === "inspector";
+  useEffect(() => {
+    if (bootstrapped && inspectingContext && document.visibilityState === "visible") recordFeatureUsage("context");
+  }, [bootstrapped, inspectingContext]);
   const selectionKey = `${route.tab}:${routeChat ?? ""}`;
   const [listSelection, setListSelection] = useState({ key: "", visible: false });
   const onSelectedVisibleChange = useCallback((visible: boolean) => {

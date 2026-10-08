@@ -6,11 +6,13 @@ import { NotificationControl } from "../../notification-control";
 import { PermissionsSetup } from "../../permissions-setup";
 import { nativePlatform } from "../../native";
 import { MachineScreen, type MachineScreenProps } from "./MachineScreen";
+import { FeatureUsagePanel } from "./FeatureUsage";
 
-export type MachineTabProps = Omit<MachineScreenProps, "environment" | "permissions" | "clientRevision">;
+export type MachineTabProps = Omit<MachineScreenProps, "environment" | "permissions" | "clientRevision" | "features">;
 
 export function MachineTab(screen: MachineTabProps) {
   return <MachineScreen {...screen}
+    features={<FeatureUsagePanel />}
     environment={<EnvironmentControl />}
     permissions={nativePlatform ? <PermissionsSetup /> : <NotificationControl />}
     clientRevision={__PI_REMOTE_REVISION__} />;

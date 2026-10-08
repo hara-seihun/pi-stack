@@ -4,7 +4,7 @@ import { PhoneOverlay, spokenText, type OverlayHost } from "./phone-overlay";
 import { validatePhoneCommand } from "./phone-commands";
 import { parsePhoneArgs } from "./phone-cli";
 
-const device: PhoneDevice = { id: "pixel", name: "Pixel 7", model: "Pixel 7", android: "16", capabilities: {} };
+const device: PhoneDevice = { id: "pixel", name: "Pixel 7", model: "Pixel 7", android: "16", capabilities: { overlayEnabled: true } };
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
 function host(overrides: Partial<OverlayHost> = {}) {
@@ -27,7 +27,7 @@ function host(overrides: Partial<OverlayHost> = {}) {
 
 describe("phone overlay conversation", () => {
   test("first message briefs a new thread, later ones steer it, and replies come back as bubbles", async () => {
-    const h = host(); const overlay = new PhoneOverlay(h.value);
+    const h = host(); const overlay = new PhoneOverlay(h.value); overlay.ready(device);
     const first = await overlay.message(device, { id: "m1", text: "what's this button?", context: { package: "com.example", label: "Example" } });
     expect(first).toEqual({ ok: true, threadId: "thread-1" });
     expect(h.created[0]).toContain("pi-phone point");
@@ -46,7 +46,7 @@ describe("phone overlay conversation", () => {
 
   test("an archived thread is replaced and a reply to an offline phone waits for reconnect", async () => {
     const h = host(); h.saved.set("pixel", "old"); h.threads.set("old", { archived: true });
-    const overlay = new PhoneOverlay(h.value);
+    const overlay = new PhoneOverlay(h.value); overlay.ready(device);
     expect(await overlay.message(device, { id: "m", text: "hi", context: { package: null, label: null } })).toEqual({ ok: true, threadId: "thread-1" });
     h.offline();
     overlay.event("thread-1", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "later" }] } });
@@ -67,6 +67,23 @@ describe("phone overlay conversation", () => {
       { type: "overlay.ack", id: "a1", ok: true, threadId: "t-hello" }]);
     expect(closes).toEqual([]);
     broker.stop();
+  });
+
+  test("disabled chat creates no execution and forwards no replies or reconnect backlog", async () => {
+    const h = host(); const overlay = new PhoneOverlay(h.value);
+    const disabled = { ...device, capabilities: { overlayEnabled: false } };
+    overlay.ready(disabled);
+    expect((await overlay.message(disabled, { id: "m", text: "hi", context: { package: null, label: null } })).ok).toBe(false);
+    expect(h.created).toEqual([]);
+    overlay.ready(device);
+    await overlay.message(device, { id: "m2", text: "hi", context: { package: null, label: null } });
+    h.offline();
+    overlay.event("thread-1", { type: "message_end", message: { role: "assistant", content: "old reply" } });
+    overlay.ready(disabled);
+    overlay.event("thread-1", { type: "tool_execution_start" });
+    h.online(); overlay.ready(device);
+    await tick();
+    expect(h.sent.filter(([command]) => command === "overlay.say")).toEqual([]);
   });
 
   test("catalogue and CLI shapes", () => {

@@ -12,7 +12,7 @@ type Registered = { device: PhoneDevice; lastSeen: number; connection?: PhoneCon
 /** A person typed to Kenan in the phone overlay. */
 export type OverlayMessage = { id: string; text: string; context: { package: string | null; label: string | null } };
 export type OverlayAck = { ok: true; threadId: string } | { ok: false; error: { code: string; message: string } };
-export type PhoneHooks = { overlayMessage?(device: PhoneDevice, message: OverlayMessage): Promise<OverlayAck>; ready?(device: PhoneDevice): void; journal?: Pick<ActionJournal, "begin" | "finish"> };
+export type PhoneHooks = { overlayMessage?(device: PhoneDevice, message: OverlayMessage): Promise<OverlayAck>; ready?(device: PhoneDevice): void; commandUsed?(command: string): void; journal?: Pick<ActionJournal, "begin" | "finish"> };
 const failure = (id: string, code: string, message: string): PhoneResult => ({ type: "result", id, ok: false, error: { code, message } });
 const object = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
 
@@ -134,6 +134,7 @@ export class PhoneBroker {
         clearTimeout(pending.timer);
         if (pending.abort) signal?.removeEventListener("abort", pending.abort);
         const warning = journalWarning((this.hooks.journal ?? actionJournal).finish(ticket, result.ok ? "confirmed" : result.error.code === "unconfirmed" ? "unconfirmed" : "failed", result.ok ? `${command} accepted by Android; not proof of carrier delivery or connected call` : result.error.message));
+        if (result.ok && !command.startsWith("overlay.")) this.hooks.commandUsed?.(command);
         resolve(warning ? { ...result, journalWarning: warning } : result);
       };
       const pending: Pending = { settle, timer: setTimeout(() => settle(failure(id, "unconfirmed", "Phone did not confirm before the deadline; execution may have happened. Nothing was retried.")), timeoutMs) };
