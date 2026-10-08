@@ -20,7 +20,7 @@ export const remoteResources = [
   { source: "apps/remote/data-contract.json", destination: "data-contract.json", kind: "file" },
   {
     source: "apps/remote/server", destination: "server", kind: "tree",
-    required: ["voice/delegation-policy.md", "meet/transcriber.ts", "write.ts", "file-edit.py"],
+    required: ["voice/delegation-policy.md", "meet/transcriber.ts", "write.ts", "file-edit.py", "phone/dist/retell-sdk.js"],
     entrypoints: ["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts", "meet/runtime-main.ts"],
     executables: ["pi-remote", "pi-phone", "pi-room", "pi-calendar", "pi-remote-launch", "pi-remote-supervise"],
   },

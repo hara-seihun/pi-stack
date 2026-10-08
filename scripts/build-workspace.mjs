@@ -7,7 +7,7 @@ const root = resolve(import.meta.dirname, "..");
 const name = process.argv[2];
 const builds = {
   orchestrator: { workspace: "pi-orchestrator", sources: ["packages/orchestrator", "packages/kenan-memory"], output: "packages/orchestrator/dist" },
-  remote: { workspace: "pi-remote", sources: ["apps/remote", "packages/orchestrator/src", "packages/kenan-memory", "packages/kenan-root"], output: "apps/remote/web/dist" },
+  remote: { workspace: "pi-remote", sources: ["apps/remote", "packages/orchestrator/src", "packages/kenan-memory", "packages/kenan-root"], output: "apps/remote/web/dist", extraOutputs: ["apps/remote/server/phone/dist"] },
   "kenan-root": { workspace: "kenan-root", sources: ["packages/kenan-root", "packages/kenan-memory", "packages/orchestrator"], output: "packages/kenan-root/dist" },
 };
 const build = builds[name];
@@ -40,8 +40,12 @@ function outputDigest() {
       else files.push(path);
     }
   }
-  visit(build.output);
-  return files.length ? digestFiles(files.sort()) : null;
+  for (const output of [build.output, ...(build.extraOutputs ?? [])]) {
+    const before = files.length;
+    visit(output);
+    if (files.length === before) return null;
+  }
+  return digestFiles(files.sort());
 }
 
 const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...build.sources], { cwd: root, encoding: "utf8" });
@@ -49,7 +53,8 @@ if (listed.status !== 0) {
   console.error(listed.error?.message ?? listed.stderr);
   process.exit(1);
 }
-const sources = listed.stdout.split("\0").filter(file => file && !file.startsWith(`${build.output}/`));
+const outputs = [build.output, ...(build.extraOutputs ?? [])];
+const sources = listed.stdout.split("\0").filter(file => file && !outputs.some(output => file.startsWith(`${output}/`)));
 const inputFiles = [...new Set([
   ...sources, "package.json", "package-lock.json", "node_modules/.package-lock.json", "scripts/build-workspace.mjs",
 ])].sort();
@@ -62,7 +67,7 @@ if (receipt?.inputs === inputs && receipt.node === process.version && receipt.ou
 }
 
 rmSync(receiptPath, { force: true });
-rmSync(join(root, build.output), { recursive: true, force: true });
+for (const output of [build.output, ...(build.extraOutputs ?? [])]) rmSync(join(root, output), { recursive: true, force: true });
 const result = spawnSync("npm", ["run", "build", `--workspace=${build.workspace}`], { cwd: root, stdio: "inherit" });
 if (result.status !== 0) {
   console.error(`Pi ${name} build failed: ${result.error?.message ?? result.signal ?? result.status}`);
