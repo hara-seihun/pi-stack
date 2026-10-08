@@ -5,6 +5,19 @@ source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 # Telephone credentials and the personal encrypted state are host-owned.
 [[ $(systemctl show pi-stack-phone.service -p LoadState --value) == loaded ]] || exit 0
+reset_phone_failure() {
+  local phone_state
+  phone_state=$(systemctl show pi-stack-phone.service -p ActiveState --value)
+  case $phone_state in
+    failed) pi_stack_as_root systemctl reset-failed pi-stack-phone.service ;;
+    active|inactive) ;;
+    activating|deactivating|reloading|refreshing)
+      echo "Phone unit is transitioning: $phone_state" >&2
+      return 75
+      ;;
+    *) echo "Unknown phone unit state: $phone_state" >&2; return 66 ;;
+  esac
+}
 case ${1:---activate} in
   --check)
     pi_stack_as_root test -s /etc/pi-stack/phone.json
@@ -26,13 +39,13 @@ case ${1:---activate} in
     state=$(systemctl show "$supervisor" -p ActiveState --value)
     case $state in
       active)
-        pi_stack_as_root systemctl reset-failed pi-stack-phone.service
+        reset_phone_failure
         pi_stack_as_root systemctl restart pi-stack-phone.service
         systemctl is-active --quiet pi-stack-phone.service
         ;;
       inactive)
+        reset_phone_failure
         pi_stack_as_root systemctl stop pi-stack-phone.service
-        pi_stack_as_root systemctl reset-failed pi-stack-phone.service
         echo "Phone remains stopped with $supervisor"
         ;;
       failed)
