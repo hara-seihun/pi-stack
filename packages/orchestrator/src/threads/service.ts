@@ -508,9 +508,19 @@ export class ThreadService implements ThreadApi {
     this.nativeContexts.set(thread.id, key, metadata, bytes);
     return metadata;
   }
+  private unstartedContextSource(thread: Thread): ThreadContextWindow["source"] {
+    const generation = digest({ unstarted: thread.id, path: thread.sessionFile });
+    return { kind: "unstarted", context: "native-history", path: thread.sessionFile,
+      generation, revision: generation, size: 0, leafId: null };
+  }
   private nativeContextRecords(thread: Thread, request: NonNullable<InspectOptions["contextRecords"]>): Result<ThreadContextRecords> {
     const indexed = indexedThreadHistory(thread.sessionFile);
-    if (!indexed.ok) return historyFailure(indexed.error);
+    if (!indexed.ok) {
+      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true) return historyFailure(indexed.error);
+      const source = this.unstartedContextSource(thread);
+      if (request.revision !== undefined && request.revision !== source.revision) return bad("conflict", "Native context source revision changed; restart the context export");
+      return good({ source, total: 0, records: [] });
+    }
     const history = indexed.value;
     const includeEntries = request.includeEntries === true;
     const metadata = this.nativeContextMetadata(thread, history);
@@ -615,7 +625,12 @@ export class ThreadService implements ThreadApi {
   }
   private nativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>): Result<ThreadContextWindow> {
     const indexed = indexedThreadHistory(thread.sessionFile);
-    if (!indexed.ok) return historyFailure(indexed.error);
+    if (!indexed.ok) {
+      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true) return historyFailure(indexed.error);
+      const source = this.unstartedContextSource(thread);
+      if (request.generation !== undefined && request.generation !== source.generation) return bad("conflict", "Context source generation changed; reopen the transcript window");
+      return good({ source, total: 0, records: [], knownToolCallIds: [] });
+    }
     const history = indexed.value;
     const metadata = this.nativeContextMetadata(thread, history);
     const window = this.nativeWindowMetadata(thread, history, metadata);
