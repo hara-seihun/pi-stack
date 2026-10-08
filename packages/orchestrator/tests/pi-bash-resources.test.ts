@@ -5,18 +5,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { scopedBashOperations } from "../src/threads/pi-bash-resources.js";
-import { prepareRunnerSlices } from "../src/threads/runner-resources.js";
+import { newRunnerUnit, prepareRunnerSlices } from "../src/threads/runner-resources.js";
 
 const manager = spawnSync("systemctl", ["--user", "show-environment"], { stdio: "ignore" }).status === 0;
 const alive = (pid: number) => { try { return !readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z"); } catch { return false; } };
 const ctl = (...args: string[]) => execFileSync("systemctl", ["--user", ...args], { encoding: "utf8", timeout: 5000 });
 
 it("keeps unmanaged SDK shells local", () => expect(scopedBashOperations({})).toBeUndefined());
+it("binds tools only to the controller unit of their own boundary", () => {
+  const id = randomBytes(8).toString("hex"), other = randomBytes(8).toString("hex");
+  expect(newRunnerUnit(id)).not.toBe(newRunnerUnit(id));
+  expect(() => scopedBashOperations({ PI_THREAD_RESOURCE_BOUNDARY: id })).toThrow("does not belong");
+  expect(() => scopedBashOperations({ PI_THREAD_RESOURCE_BOUNDARY: id, PI_THREAD_RUNNER_UNIT: `pi-thread-runner-${id}.service` })).toThrow("does not belong");
+  expect(() => scopedBashOperations({ PI_THREAD_RESOURCE_BOUNDARY: id, PI_THREAD_RUNNER_UNIT: newRunnerUnit(other) })).toThrow("does not belong");
+  expect(scopedBashOperations({ PI_THREAD_RESOURCE_BOUNDARY: id, PI_THREAD_RUNNER_UNIT: newRunnerUnit(id) })).toBeDefined();
+});
+it("returns from a timed-out or aborted tool whose killed processes cannot exit", async () => {
+  const id = randomBytes(8).toString("hex");
+  const env = { PATH: process.env.PATH, PI_THREAD_RESOURCE_BOUNDARY: id, PI_THREAD_RUNNER_UNIT: newRunnerUnit(id) };
+  const uninterruptible = { exec: () => new Promise<never>(() => {}) };
+  const ops = scopedBashOperations(env, uninterruptible, "96M", 50)!;
+  await expect(ops.exec("wedged-io", tmpdir(), { timeout: 0.1, onData: () => {} })).rejects.toThrow(/Tool timeout after 0.1s: its processes did not exit/);
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(), 50);
+  await expect(ops.exec("wedged-io", tmpdir(), { signal: abort.signal, onData: () => {} })).rejects.toThrow(/Tool abort: its processes did not exit/);
+});
 it.skipIf(!manager)("isolates tool OOM and cleans escaped descendants while its controller remains usable", async () => {
   const id = randomBytes(8).toString("hex"), root = mkdtempSync(join(tmpdir(), "pi-tool-scope-"));
-  const env = { ...process.env, PI_THREAD_RESOURCE_BOUNDARY: id, SCOPE_TEST_VALUE: "session-only" };
+  const runner = newRunnerUnit(id);
+  const env = { ...process.env, PI_THREAD_RESOURCE_BOUNDARY: id, PI_THREAD_RUNNER_UNIT: runner, SCOPE_TEST_VALUE: "session-only" };
   const slices = await prepareRunnerSlices(id, env, true);
-  const runner = `pi-thread-runner-${id}.service`;
   execFileSync("systemd-run", ["--user", "--collect", "--quiet", `--unit=${runner}`, `--slice=${slices.boundary}`,
     "--property=OOMPolicy=continue", process.execPath, "-e", "setInterval(()=>{},1000)"], { env, timeout: 5000 });
   const pid = Number(ctl("show", runner, "--property=MainPID", "--value").trim());

@@ -61,8 +61,9 @@ it.skipIf(!manager)("twenty native sessions retain accepted work and progress af
     const before = await status(control), slices = runnerSlices(id);
     expect(before).toMatchObject({ sessions: 20, activeSessions: 20 });
     expect(ctl("show", slices.boundary, "--property=MemoryMax", "--value").trim()).toBe("8589934592");
-    expect(ctl("show", `pi-thread-runner-${id}.service`, "--property=MemoryMax", "--value").trim()).toBe("4294967296");
-    const ops = scopedBashOperations({ ...process.env, PI_THREAD_RESOURCE_BOUNDARY: id }, undefined, "96M")!;
+    expect(before.unit).toMatch(new RegExp(`^pi-thread-runner-${id}-[a-f0-9]{12}\\.service$`));
+    expect(ctl("show", before.unit, "--property=MemoryMax", "--value").trim()).toBe("4294967296");
+    const ops = scopedBashOperations({ ...process.env, PI_THREAD_RESOURCE_BOUNDARY: id, PI_THREAD_RUNNER_UNIT: before.unit }, undefined, "96M")!;
     expect((await ops.exec("python3 -c 'x=bytearray(512*1024*1024)'", root, { timeout: 5, onData: () => {} })).exitCode).not.toBe(0);
     expect((await status(control)).pid).toBe(before.pid);
     await Promise.all(sessions.map(async (_session, i) => {
