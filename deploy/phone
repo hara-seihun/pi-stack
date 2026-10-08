@@ -25,7 +25,6 @@ case ${1:---activate} in
     if systemctl is-active --quiet pi-stack-phone.service; then
       status=$(bun "$root/apps/remote/server/pi-call" status) || { echo 'Phone census unavailable' >&2; exit 75; }
       [[ $(jq -r '.activeCalls' <<<"$status") == 0 ]] || { echo 'Live telephone calls; defer deployment' >&2; exit 75; }
-      [[ $(jq -r '[(.simGateways // [])[] | select(.callId != null)] | length' <<<"$status") == 0 ]] || { echo 'SIM modem hangup remains unconfirmed; defer deployment' >&2; exit 75; }
     fi
     ;;
   --activate)

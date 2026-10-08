@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+[[ $# == 0 || ( $# == 1 && ( $1 == --select || $1 == --retain ) ) ]] || { echo 'usage: deploy/meet-recognition [--select|--retain]' >&2; exit 64; }
+mode=${1:-prepare}
+base=${PI_STACK_MEET_RECOGNITION_DEST:-/srv/pi/meet-recognition}
+if [[ $mode == --retain ]]; then
+  pi_stack_as_root python3 "$root/deploy/meet-recognition-retain" "$base" "${PI_STACK_MEET_RECOGNITION_PROC_ROOT:-/proc}"
+  exit
+fi
+if [[ $mode == prepare && ${PI_STACK_MEET_RECOGNITION_FORCE:-0} != 1 ]] && [[ $(systemctl show pi-stack-meet-recognition.service -p LoadState --value 2>/dev/null) != loaded ]]; then
+  echo 'Meet recognition: no host service declaration; nothing to prepare'
+  exit 0
+fi
+source_dir="$root/apps/meet-recognition"
+mapfile -t sources < <(cd "$source_dir" && find . -name '*.py' ! -name 'test_*' | LC_ALL=C sort)
+venv_key=$( { printf 'public-copy-v1\n'; cat "$source_dir/requirements.lock"; } | sha256sum | cut -d' ' -f1)
+weights_key=$(cat "$source_dir/model.json" "$source_dir/convert_fp32.py" | sha256sum | cut -d' ' -f1)
+key=$( { echo "$venv_key"; echo "$weights_key"; for file in "${sources[@]}"; do echo "$file"; cat "$source_dir/$file"; done; } | sha256sum | cut -d' ' -f1)
+store="$(dirname "$base")/.pi-meet-recognition"
+environment="$store/venv-$venv_key"
+weights="$store/weights-$weights_key"
+tree="$store/$key"
+if [[ ! -f "$tree/ready" && $mode == --select ]]; then
+  echo "Meet recognition is not prepared at $tree; run deploy/prepare first" >&2
+  exit 66
+fi
+fetch() {
+  local url=$1 digest=$2 destination=$3 existing
+  [[ -f "$destination" && $(sha256sum "$destination" | cut -d' ' -f1) == "$digest" ]] && return
+  install -d "$(dirname "$destination")"
+  for existing in "$store"/weights-*/"${destination#"$weights"/}"; do
+    [[ -f "$existing" && "$existing" != "$destination" ]] || continue
+    if [[ $(sha256sum "$existing" | cut -d' ' -f1) == "$digest" ]]; then
+      cp --reflink=auto "$existing" "$destination.part" && mv "$destination.part" "$destination"
+      return
+    fi
+  done
+  pi_stack_download_artifact "$url" "$destination" "$digest"
+}
+if [[ ! -f "$environment/ready" ]]; then
+  command -v uv >/dev/null || { echo 'Meet recognition requires uv' >&2; exit 1; }
+  pi_stack_as_root install -d -m 0755 "$store" "$environment"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$environment"
+  export UV_PYTHON_INSTALL_DIR="$environment/python"
+  [[ -x "$environment/venv/bin/python" ]] || uv venv --managed-python --python 3.12 "$environment/venv"
+  uv pip sync --link-mode copy --python "$environment/venv/bin/python" --require-hashes "$source_dir/requirements.lock"
+  chmod -R a+rX "$environment"
+  touch "$environment/ready"
+fi
+if [[ ! -f "$weights/ready" ]]; then
+  pi_stack_as_root install -d -m 0755 "$weights"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$weights"
+  "$environment/venv/bin/python" - "$source_dir/model.json" > "$weights/files.tsv" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+for path,digest in m['files'].items():
+    print(path,m['repository'],m['revision'],digest,sep='\t')
+PY
+  while IFS=$'\t' read -r file repository revision digest; do
+    fetch "https://huggingface.co/$repository/resolve/$revision/$file" "$digest" "$weights/$file"
+  done < "$weights/files.tsv"
+  "$environment/venv/bin/python" "$source_dir/convert_fp32.py" "$weights"
+  chmod -R a+rX "$weights"
+  touch "$weights/ready"
+fi
+if [[ ! -f "$tree/ready" ]]; then
+  pi_stack_as_root install -d -m 0755 "$tree"
+  pi_stack_as_root chown "$(id -u):$(id -g)" "$tree"
+  ln -sfn "$environment/venv" "$tree/venv"
+  ln -sfn "$weights" "$tree/model"
+  for file in "${sources[@]}"; do install -D -m 0644 "$source_dir/$file" "$tree/$file"; done
+  chmod -R a+rX "$tree"
+  touch "$tree/ready"
+fi
+[[ -x "$tree/venv/bin/python" && -f "$tree/server.py" && -d "$tree/model" ]] || { echo "Incomplete Meet recognition runtime: $tree" >&2; exit 66; }
+echo "Meet recognition prepared: $key"
+[[ $mode == --select ]] || exit 0
+next="$base.next.$$"
+trap 'pi_stack_as_root rm -f "$next"' EXIT
+previous=$(readlink -f "$base" 2>/dev/null || true)
+if [[ $previous != "$tree" && -d $previous ]]; then
+  pi_stack_as_root ln -s "$previous" "$next"
+  pi_stack_as_root mv -Tf "$next" "$base.previous"
+fi
+pi_stack_as_root ln -s "$tree" "$next"
+pi_stack_as_root mv -Tf "$next" "$base"
+echo "Meet recognition selected: $key"

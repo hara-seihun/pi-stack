@@ -3,7 +3,7 @@
 .inspector-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
 .inspector-panel { display: grid; gap: var(--space-5); }
 .inspector-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.inspector-controls button { min-height: var(--touch); padding: 0 var(--space-4); border-radius: var(--radius-2); color: var(--text); background: var(--surface-2); font-weight: 700; }
+.inspector-controls button, .inspector-panel > button { min-height: var(--touch); padding: 0 var(--space-4); border-radius: var(--radius-2); color: var(--text); background: var(--surface-2); font-weight: 700; }
 .inspector-facts { margin: 0; display: grid; gap: var(--space-2); }
 .inspector-row { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: var(--space-3); font-size: var(--text-sm); line-height: 1.5; }
 .inspector-row dt { color: var(--muted); }

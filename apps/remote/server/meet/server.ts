@@ -4,17 +4,14 @@ import { MeetTranscriptStore, transcriptText } from "./transcript";
 import { MeetTranscriber } from "./transcriber";
 import { API_CORS_HEADERS } from "../cors";
 import { MeetBrowser } from "./browser";
-import { meetIceServers } from "./config";
 import { addressesAgent } from "./mention";
 import { TranscriptHook } from "./transcript-hook";
-import type { MeetEnvelope, MeetParticipant, MeetSignal, MeetSnapshot, MeetThreadState, MeetJoined, MeetVoiceWake } from "./protocol";
+import type { MeetParticipant, MeetSnapshot, MeetThreadState, MeetJoined, MeetVoiceWake } from "./protocol";
 
-type Member = { participant: MeetParticipant; seen: number; messages: MeetEnvelope[]; frame: Buffer | null; frameAt: number;
-  acceptedSignals: Map<string, { payload: string; at: number }> };
+type Member = { participant: MeetParticipant; seen: number; frame: Buffer | null; frameAt: number };
 type PendingFlush = { resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 type Room = {
-  id: string; sessionId: string; apiUrl: string; members: Map<string, Member>; speakers: Map<string, MeetParticipant>; seq: number;
-  kind: "peer-to-peer" | "external";
+  id: string; sessionId: string; apiUrl: string; members: Map<string, Member>;
   browser: MeetBrowser | null; opening: Promise<void> | null; closed: boolean;
   voiceMuted: boolean; voiceRevision: number; threads(): MeetThreadState[];
   /** Latest transcript line naming Kenan, and the platform turns that already produced one, so partial updates wake Voice once. */
@@ -30,22 +27,12 @@ const fail = (error: string, status = 400) => json({ error }, status);
 const image = (bytes: Buffer | null) => bytes
   ? new Response(new Uint8Array(bytes), { headers: { ...API_CORS_HEADERS, "content-type": "image/jpeg", "cache-control": "no-store" } })
   : fail("No video frame is available", 404);
-const iceServers = meetIceServers();
 const snapshot = (room: Room): MeetSnapshot => ({
   voiceMuted: room.voiceMuted, voiceRevision: room.voiceRevision, voiceWake: room.voiceWake, threads: room.threads(), transcriptFlushRevision: room.transcriptFlushRevision,
   platformTranscript: room.platformTranscript,
-  id: room.id, sessionId: room.sessionId, apiUrl: room.apiUrl, iceServers, participants: [...room.members.values()].map((member) => member.participant),
+  id: room.id, sessionId: room.sessionId, apiUrl: room.apiUrl, participants: [...room.members.values()].map((member) => member.participant),
   browser: room.browser ? { endpoint: room.browser.endpoint, url: room.browser.page.url(), error: room.browser.error, watchPath: room.browser.watchPath, watchError: room.browser.watchError } : null,
 });
-
-function signalValue(value: unknown): MeetSignal | null {
-  if (!value || typeof value !== "object") return null;
-  const signal = value as MeetSignal;
-  if (signal.description && (!["offer", "answer"].includes(signal.description.type) || typeof signal.description.sdp !== "string" || !signal.description.sdp.startsWith("v=0"))) return null;
-  if (signal.candidate && typeof signal.candidate.candidate !== "string") return null;
-  if (signal.streams && (typeof signal.streams !== "object" || Object.entries(signal.streams).some(([id, kind]) => id.length > 128 || !["camera", "screen", "pi-camera", "pi-screen"].includes(kind)))) return null;
-  return signal.description || signal.candidate || signal.streams ? signal : null;
-}
 
 export class MeetServer {
   private readonly rooms = new Map<string, Room>();
@@ -66,14 +53,12 @@ export class MeetServer {
     this.timer.unref();
   }
 
-  private createRoom(id: string, sessionId: string, apiUrl: string, name: string, kind: Room["kind"] = "peer-to-peer", platformTranscript = false): MeetJoined {
-    const participantId = kind === "external" ? "external-host" : crypto.randomUUID();
-    const room: Room = { id, sessionId, apiUrl, kind, members: new Map(), speakers: new Map(), seq: 0,
+  private createRoom(id: string, sessionId: string, apiUrl: string, platformTranscript: boolean): MeetJoined {
+    const room: Room = { id, sessionId, apiUrl, members: new Map(),
       browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0, voiceWake: null, wokenTurns: new Set(), hookedTurns: new Set(),
       transcriptFlushRevision: 0, flushes: new Map(), platformTranscript, threads: () => this.threadActivity(id, sessionId) };
-    const participant: MeetParticipant = { id: participantId, name: name.slice(0, 80), host: true };
-    room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0, acceptedSignals: new Map() });
-    room.speakers.set(participant.id, participant);
+    const participant: MeetParticipant = { id: "external-host", name: "Mixed meeting audio", host: true };
+    room.members.set(participant.id, { participant, seen: Date.now(), frame: null, frameAt: 0 });
     this.transcripts.db.transaction(() => {
       if (this.transcripts.has(id)) this.transcripts.resume(id);
       else this.transcripts.create(id, sessionId);
@@ -84,15 +69,17 @@ export class MeetServer {
   }
 
   openExternal(id: string, sessionId: string, apiUrl: string, platformTranscript = false): MeetJoined {
+    if (!this.sessionExists(sessionId)) throw new Error("The external meeting's Pi Remote thread is unavailable");
     const room = this.rooms.get(id);
     if (room) {
+      if (room.sessionId !== sessionId) throw new Error("Meeting belongs to another thread");
       const host = [...room.members.values()].find((member) => member.participant.host)!;
       host.seen = Date.now();
       room.platformTranscript = platformTranscript;
       return { room: snapshot(room), participant: host.participant };
     }
     if (this.rooms.size >= 16) throw new Error("This supervisor already has 16 meetings");
-    return this.createRoom(id, sessionId, apiUrl, "Mixed meeting audio", "external", platformTranscript);
+    return this.createRoom(id, sessionId, apiUrl, platformTranscript);
   }
 
   liveRooms(): Array<{ id: string; sessionId: string }> {
@@ -214,21 +201,7 @@ export class MeetServer {
   private async route(req: Request, url: URL): Promise<Response> {
     const parts = url.pathname.split("/").filter(Boolean);
     const roomId = parts[2];
-    if (!roomId && req.method === "POST") {
-      const body = await this.body(req);
-      if (!body || typeof body.sessionId !== "string" || !this.sessionExists(body.sessionId)) return fail("The meeting's new Pi Remote thread is unavailable");
-      if (typeof body.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.requestId)) return fail("A meeting creation request ID is required");
-      const id = body.requestId;
-      const existing = this.rooms.get(id);
-      if (existing) {
-        if (existing.sessionId !== body.sessionId) return fail("Meeting creation request belongs to another thread", 409);
-        const participant = [...existing.members.values()].find((member) => member.participant.host)!.participant;
-        return json({ room: snapshot(existing), participant }, 201);
-      }
-      if (this.transcripts.has(id)) return fail("This meeting has ended; start a new meeting", 409);
-      if (this.rooms.size >= 16) return fail("This supervisor already has 16 meetings", 409);
-      return json(this.createRoom(id, body.sessionId, `${url.origin}/v1/meet/${id}`, String(body.name || "Host")), 201);
-    }
+    if (!roomId && req.method === "POST") return fail("Unknown Meet operation", 404);
     if (!roomId && req.method === "GET") return json({ rooms: [...this.rooms.values()].map(snapshot), meetings: this.transcripts.meetings(url.searchParams.get("sessionId") || undefined), transcriptionAvailable: this.transcriber.available() });
     if (roomId && parts[3] === "transcript" && parts.length === 4 && req.method === "GET") {
       if (!this.transcripts.has(roomId)) return fail("Meeting transcript not found", 404);
@@ -248,13 +221,9 @@ export class MeetServer {
     if (parts[3] === "join" && req.method === "POST") {
       const body = await this.body(req);
       if (!body || typeof body.name !== "string" || !body.name.trim()) return fail("Your name is required");
-      const capacity = room.kind === "external" ? 33 : 12;
-      if (room.members.size >= capacity) return fail(room.kind === "external"
-        ? "This external room is full, maximum 32 camera sources plus the host"
-        : "This peer-to-peer room is full, maximum 12 people", 409);
+      if (room.members.size >= 33) return fail("This external room is full, maximum 32 camera sources plus the host", 409);
       const participant: MeetParticipant = { id: crypto.randomUUID(), name: body.name.trim().slice(0, 80), host: false };
-      room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0, acceptedSignals: new Map() });
-      room.speakers.set(participant.id, participant);
+      room.members.set(participant.id, { participant, seen: Date.now(), frame: null, frameAt: 0 });
       return json({ room: snapshot(room), participant }, 201);
     }
     if (parts[3] === "browser" && req.method === "GET") return parts[4] === "frame" ? image(room.browser?.frame ?? null) : json(snapshot(room).browser);
@@ -262,12 +231,7 @@ export class MeetServer {
     const member = room.members.get(url.searchParams.get("participant") ?? "");
     if (!member) return fail("Join the meeting first", 403);
     member.seen = Date.now();
-    if (parts[3] === "poll" && req.method === "GET") {
-      const after = Number(url.searchParams.get("after") || 0);
-      if (!Number.isSafeInteger(after) || after < 0) return fail("Invalid signal cursor");
-      member.messages = member.messages.filter((message) => message.seq > after);
-      return json({ ...snapshot(room), messages: member.messages });
-    }
+    if (parts[3] === "poll" && req.method === "GET") return json(snapshot(room));
     if (parts[3] === "transcript" && parts[4] === "flushed" && req.method === "POST") {
       if (!member.participant.host) return fail("Only the host can acknowledge microphone flushes", 403);
       const body = await this.body(req);
@@ -281,10 +245,12 @@ export class MeetServer {
       return json({ ok: true });
     }
     if (parts[3] === "transcript" && parts[4] === "audio" && req.method === "POST") {
-      if (!this.transcriber.available()) return fail("PiStack Write recognition is not installed on this host", 503);
+      if (!member.participant.host) return fail("Only the external host supplies mixed meeting audio", 403);
+      if (room.platformTranscript) return fail("This meeting uses the platform transcript", 409);
       const speakerId = url.searchParams.get("speaker") || member.participant.id;
-      const speaker = room.speakers.get(speakerId);
-      if (!speaker || (speakerId !== member.participant.id && !member.participant.host)) return fail("Unknown microphone source", 403);
+      if (speakerId !== member.participant.id) return fail("Unknown mixed meeting audio source", 403);
+      if (!this.transcriber.available()) return fail("Meeting recognition is not installed on this host", 503);
+      const speaker = member.participant;
       const id = url.searchParams.get("id") || "";
       const startedAt = Number(url.searchParams.get("startedAt"));
       if (!/^[0-9a-f-]{36}$/.test(id) || !Number.isFinite(startedAt) || startedAt < 0) return fail("Invalid utterance identity or timestamp");
@@ -345,26 +311,6 @@ export class MeetServer {
       return json({ muted: room.voiceMuted, revision: room.voiceRevision });
     }
     if (parts[3] === "leave" && req.method === "POST") { this.leave(room, member.participant.id); return json({ ok: true }); }
-    if (parts[3] === "signal" && req.method === "POST") {
-      const body = await this.body(req);
-      const signal = body && signalValue(body.signal);
-      if (body?.requestId !== undefined && (typeof body.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.requestId))) return fail("Invalid signal request identity");
-      const payload = JSON.stringify([body?.to, body?.signal]);
-      const accepted = body?.requestId && member.acceptedSignals.get(body.requestId);
-      if (accepted) return accepted.payload === payload ? json({ ok: true }) : fail("Signal request identity reused with a different payload");
-      const target = body && room.members.get(body.to);
-      if (!target) return fail("Participant has left the meeting", 410);
-      if (!signal || target === member) return fail("Invalid signaling message or recipient");
-      if (!member.participant.host && Object.values(signal.streams ?? {}).some((kind) => kind.startsWith("pi-"))) return fail("Only the host publishes PiStack streams", 403);
-      if (target.messages.length >= 256) return fail("The recipient stopped consuming signaling messages", 409);
-      if (body.requestId) {
-        for (const [id, previous] of member.acceptedSignals) if (Date.now() - previous.at > 60_000) member.acceptedSignals.delete(id);
-        if (member.acceptedSignals.size >= 2048) return fail("Signal request identity window is full", 429);
-        member.acceptedSignals.set(body.requestId, { payload, at: Date.now() });
-      }
-      target.messages.push({ seq: ++room.seq, from: member.participant.id, signal });
-      return json({ ok: true });
-    }
     if (parts[3] === "frame" && req.method === "DELETE") {
       member.frame = null; member.frameAt = 0;
       return json({ ok: true });

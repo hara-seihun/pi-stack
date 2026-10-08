@@ -29,7 +29,7 @@ test("every API request leaves through the fetch override that reports it", () =
 });
 
 test("every page mounts the indicator and installs the door before anything can request", () => {
-  for (const [page, native, indicator] of [["main.tsx", '"./native"', "App"], ["meet/page.tsx", '"../native"', "RequestIndicator"], ["voice-page.ts", '"./native"', "RequestIndicator"]] as const) {
+  for (const [page, native, indicator] of [["main.tsx", '"./native"', "App"], ["voice-page.ts", '"./native"', "RequestIndicator"]] as const) {
     const text = source.get(page)!;
     expect(text).toMatch(new RegExp(`import (\\{[^}]*\\} from )?${native.replace(/[./]/g, "\\$&")}`));
     expect(text).toContain(indicator);

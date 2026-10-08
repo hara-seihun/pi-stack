@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { navigate } from "./app/routes";
 import { Temporal } from "@js-temporal/polyfill";
 import type { CalendarEvent, CalendarSnapshot } from "../../server/calendar-protocol";
 import { api } from "./client";
@@ -10,12 +11,12 @@ const blank = (zone: string) => {
   const now = Temporal.Now.zonedDateTimeISO(zone).round({ smallestUnit: "hour", roundingMode: "ceil" });
   return { title: "", start: now.toPlainDateTime().toString().slice(0, 16), end: now.add({ hours: 1 }).toPlainDateTime().toString().slice(0, 16), zone, allDay: false, location: "", notes: "" };
 };
-type Draft = ReturnType<typeof blank> & { id?: string; instantStart?: string; instantEnd?: string; repeat?: CalendarEvent["repeat"]; repeatUntil?: string | null; scope?: "occurrence" | "series" };
-function EventEditor({ draft, onClose, onSave }: { draft: Draft; onClose(): void; onSave(draft: Draft): Promise<void> }) {
+export type CalendarDraft = ReturnType<typeof blank> & { id?: string; instantStart?: string; instantEnd?: string; repeat?: CalendarEvent["repeat"]; repeatUntil?: string | null; scope?: "occurrence" | "series" };
+export function EventEditor({ draft, onClose, onSave }: { draft: CalendarDraft; onClose(): void; onSave(draft: CalendarDraft): Promise<void> }) {
   const [value, setValue] = useState(draft), [error, setError] = useState(""), [saving, setSaving] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
-  return <dialog ref={dialog} className="calendar-dialog" onCancel={onClose}><form onSubmit={async e => { e.preventDefault(); setSaving(true); setError(""); try { await onSave(value); onClose(); } catch (cause) { setError(String(cause)); } finally { setSaving(false); } }}>
+  return <dialog ref={dialog} className="calendar-dialog" onCancel={onClose}><form aria-busy={saving} onSubmit={async e => { e.preventDefault(); setSaving(true); setError(""); try { await onSave(value); onClose(); } catch (cause) { setError(String(cause)); } finally { setSaving(false); } }}>
     <h2>{value.scope === "occurrence" ? "Edit this occurrence" : value.scope === "series" ? "Edit whole series" : value.id ? "Edit event" : "New event"}</h2>
     {value.scope && <p>{value.scope === "occurrence" ? "Only this occurrence changes. The other repeats stay unchanged." : "Changes apply to the whole series, including past occurrences."}</p>}
     <label>Title<input required maxLength={500} value={value.title} onChange={e => setValue({ ...value, title: e.target.value })} /></label>
@@ -26,7 +27,7 @@ function EventEditor({ draft, onClose, onSave }: { draft: Draft; onClose(): void
     {value.scope !== "occurrence" && <><label>Repeat<select value={value.repeat ?? "none"} onChange={e => setValue({ ...value, repeat: e.target.value === "none" ? null : e.target.value as "daily" | "weekly" })}><option value="none">Does not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly on the start weekday</option></select></label>{value.repeat && <><label>Repeat until (optional)<input type="date" min={value.start.slice(0, 10)} value={value.repeatUntil ?? ""} onChange={e => setValue({ ...value, repeatUntil: e.target.value || null })} /></label><p>Repeats at this local time in the event zone, including after daylight-saving changes. Leave the end blank to repeat indefinitely.</p></>}</>}
     <label>Location<input value={value.location} onChange={e => setValue({ ...value, location: e.target.value })} /></label>
     <label>Notes<textarea rows={3} value={value.notes} onChange={e => setValue({ ...value, notes: e.target.value })} /></label>
-    {error && <p role="alert">{error}</p>}<div className="calendar-actions"><button type="button" onClick={onClose}>Cancel</button><button className="accent" disabled={saving}>Save</button></div>
+    {error && <p role="alert">{error}</p>}<div className="calendar-actions"><button type="button" onClick={onClose}>Cancel</button><button className="accent" disabled={saving}>{saving ? "Saving…" : "Save"}</button></div>
   </form></dialog>;
 }
 export type CalendarAgenda = {
@@ -37,14 +38,13 @@ export type CalendarAgenda = {
 
 export function CalendarScreen({ renderAgenda, refreshVersion }: { renderAgenda?: (agenda: CalendarAgenda) => ReactNode; refreshVersion?: string } = {}) {
   const [snapshot, setSnapshot] = useState<CalendarSnapshot | null>(null), [zone, setZone] = useState(localZone), [error, setError] = useState("");
-  const preferenceLoaded = useRef(false);
-  const [draft, setDraft] = useState<Draft | null>(null), [feed, setFeed] = useState(""), [sync, setSync] = useState(false), [busy, setBusy] = useState(false);
-  const [name, setName] = useState(""), [url, setUrl] = useState(""), [month, setMonth] = useState("");
+  const [draft, setDraft] = useState<CalendarDraft | null>(null), [busy, setBusy] = useState(false);
+  const [month, setMonth] = useState("");
   const reload = useCallback(async () => {
     const from = month ? Temporal.PlainDate.from(month + "-01").toZonedDateTime(zone).toInstant().toString() : new Date().toISOString();
     const to = month ? Temporal.PlainDate.from(month + "-01").add({ months: 1 }).toZonedDateTime(zone).toInstant().toString() : new Date(Date.now() + 180 * 86400000).toISOString();
     const next: CalendarSnapshot = await api("GET", `/v1/calendar?${new URLSearchParams({ from, to })}`); setSnapshot(next);
-    if (!preferenceLoaded.current) { preferenceLoaded.current = true; if (next.zone) setZone(next.zone); }
+    if (next.zone) setZone(next.zone);
   }, [month, zone]);
   useEffect(() => {
     let current = true;
@@ -75,21 +75,15 @@ export function CalendarScreen({ renderAgenda, refreshVersion }: { renderAgenda?
       </details></article>;
   }
   const controls = <>
-    <header className="calendar-actions">{!renderAgenda && <h1>Calendar</h1>}<button className="accent" onClick={() => setDraft(blank(zone))}>New event</button><button onClick={() => setSync(!sync)}>Sync</button></header>
-    <div className="calendar-actions"><label>Display time zone<select value={zone} onChange={e => { setZone(e.target.value); void action(() => api("PUT", "/v1/calendar/settings", { zone: e.target.value })); }}>{[...new Set([localZone(), "UTC", ...Intl.supportedValuesOf("timeZone")])].map(z => <option key={z} value={z}>{z}</option>)}</select></label><label>Month (optional)<input type="month" value={month} onChange={e => setMonth(e.target.value)} /></label><button onClick={() => setMonth("")}>Upcoming</button><button disabled={busy} onClick={() => void action(() => api("POST", "/v1/calendar/refresh", {}, 65000))}>Refresh calendars</button></div>
-    {sync && <section className="calendar-sync"><h2>Calendar sync</h2><p>Subscriptions are read-only. Two-way CalDAV sync is not supported.</p>
-      <button disabled={busy} onClick={() => void action(async () => { const r = await api("GET", "/v1/calendar/feed"); setFeed(new URL(r.url, location.origin).href); })}>Show subscription link</button>
-      {feed && <><label>Private feed URL<input readOnly value={feed} onFocus={e => e.target.select()} /></label><p>Anyone with this link can read your events. Google Calendar: Other calendars → + → From URL. Refresh timing is controlled by Google. The feed works while your folder is unlocked.</p><button disabled={busy} onClick={() => { if (confirm("Revoke the current link? Existing subscribers will stop receiving updates.")) void action(async () => { const r = await api("POST", "/v1/calendar/feed", {}); setFeed(new URL(r.url, location.origin).href); }); }}>Rotate link</button></>}
-      <form onSubmit={e => { e.preventDefault(); void action(async () => { await api("POST", "/v1/calendar/subscriptions", { name, url, zone }, 65000); setName(""); setUrl(""); }); }}><h3>Add an ICS subscription</h3><label>Name<input required value={name} onChange={e => setName(e.target.value)} /></label><label>ICS URL<input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…" /></label><p>Floating times use {zone}. Imported events refresh every 15 minutes.</p><button disabled={busy}>Subscribe</button></form>
-      {snapshot?.subscriptions.map(s => <article key={s.id}><strong>{s.name}</strong><p>{s.refreshed ? `Updated ${new Date(s.refreshed).toLocaleString()}` : "Not yet refreshed"}{s.error && ` · ${s.error}`}</p><button disabled={busy} onClick={() => { if (confirm(`Remove ${s.name}?`)) void action(() => api("DELETE", `/v1/calendar/subscriptions/${s.id}`)); }}>Remove subscription</button></article>)}
-    </section>}
+    <header className="calendar-actions">{!renderAgenda && <h1>Calendar</h1>}<button className="accent" onClick={() => setDraft(blank(zone))}>New event</button><button onClick={() => navigate({ tab: "settings" })}>Calendar settings</button></header>
+    <div className="calendar-actions"><span>{zone}</span><label>Month (optional)<input type="month" value={month} onChange={e => setMonth(e.target.value)} /></label><button onClick={() => setMonth("")}>Upcoming</button></div>
   </>;
   return <section className={`calendar-screen${renderAgenda ? " calendar-embedded" : ""}`}>
     {!renderAgenda && controls}
     {error && <p role="alert">Could not load calendar: {error}. <button type="button" disabled={busy} onClick={() => void action(reload)}>Retry</button></p>}
     {!snapshot && !error && <p role="status">Loading calendar…</p>}
     {renderAgenda ? renderAgenda({ events: snapshot ? snapshot.events : [], renderEvent, zone }) : snapshot && (!snapshot.events.length ? <p>No events {month ? "this month" : "in the next six months"}.</p> : <div className="calendar-agenda">{snapshot.events.map(renderEvent)}</div>)}
-    {renderAgenda && <details className="attention-calendar-settings"><summary>Calendar</summary>{controls}</details>}
+    {renderAgenda && <div className="attention-calendar-controls">{controls}</div>}
     {draft && <EventEditor draft={draft} onClose={() => setDraft(null)} onSave={async value => { await api(value.id ? "PATCH" : "POST", `/v1/calendar/events${value.id ? `/${encodeURIComponent(value.id)}${value.scope ? `?scope=${value.scope}` : ""}` : ""}`, { ...value, start: value.start === draft.start && value.zone === draft.zone && value.allDay === draft.allDay ? draft.instantStart ?? value.start : value.start, end: value.end === draft.end && value.zone === draft.zone && value.allDay === draft.allDay ? draft.instantEnd ?? value.end : value.end }); await reload(); }} />}
   </section>;
 }

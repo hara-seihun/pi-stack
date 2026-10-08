@@ -50,6 +50,7 @@ export class PhoneOverlay {
   private readonly deviceFor = new Map<string, string>();
   private readonly threadFor = new Map<string, string>();
   private readonly dot = new Map<string, DotState>();
+  private readonly enabled = new Set<string>();
   /** Last unspoken reply per phone, delivered when it reconnects. */
   private readonly unspoken = new Map<string, string>();
 
@@ -65,6 +66,7 @@ export class PhoneOverlay {
   }
 
   async message(device: PhoneDevice, message: OverlayMessage): Promise<OverlayAck> {
+    if (device.capabilities.overlayEnabled !== true || !this.enabled.has(device.id)) return { ok: false, error: { code: "disabled", message: "Overlay chat is disabled on this phone" } };
     const text = `${overlayContext(message)}\n${message.text}`;
     const existing = this.threadFor.get(device.id);
     const live = existing ? this.host.thread(existing) : null;
@@ -87,7 +89,7 @@ export class PhoneOverlay {
   /** Orchestrator thread events, for every thread; only overlay threads matter. */
   event(threadId: string, event: any): void {
     const deviceId = this.deviceFor.get(threadId);
-    if (!deviceId || !event || typeof event !== "object") return;
+    if (!deviceId || !this.enabled.has(deviceId) || !event || typeof event !== "object") return;
     if (event.type === "thread_message_inserted") this.state(deviceId, "thinking");
     else if (event.type === "tool_execution_start") this.state(deviceId, "working");
     else if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -100,22 +102,30 @@ export class PhoneOverlay {
   }
 
   ready(device: PhoneDevice): void {
+    if (device.capabilities.overlayEnabled !== true) {
+      this.enabled.delete(device.id);
+      this.dot.delete(device.id);
+      this.unspoken.delete(device.id);
+      return;
+    }
+    this.enabled.add(device.id);
     const text = this.unspoken.get(device.id);
     this.dot.delete(device.id);
     if (text) { this.unspoken.delete(device.id); this.say(device.id, text); }
   }
 
   private say(deviceId: string, text: string): void {
+    if (!this.enabled.has(deviceId)) return;
     if (!this.host.online(deviceId)) { this.unspoken.set(deviceId, text); return; }
     void this.host.send(deviceId, "overlay.say", { text }).then(result => {
       if (result.ok) return;
-      if (result.error.code === "disconnected") this.unspoken.set(deviceId, text);
+      if (result.error.code === "disconnected" && this.enabled.has(deviceId)) this.unspoken.set(deviceId, text);
       this.host.log(`overlay.say to ${deviceId} failed: ${result.error.code} ${result.error.message}`);
     });
   }
 
   private state(deviceId: string, state: DotState): void {
-    if (this.dot.get(deviceId) === state || !this.host.online(deviceId)) return;
+    if (!this.enabled.has(deviceId) || this.dot.get(deviceId) === state || !this.host.online(deviceId)) return;
     this.dot.set(deviceId, state);
     void this.host.send(deviceId, "overlay.state", { state }).then(result => {
       if (!result.ok) { this.dot.delete(deviceId); this.host.log(`overlay.state to ${deviceId} failed: ${result.error.code}`); }

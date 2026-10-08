@@ -31,4 +31,7 @@ done
 "$root/deploy/tools" --links-only "$user"
 "$root/deploy/skills" --links-only "$user"
 "$root/deploy/settings" "$user"
+if [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+  pi_stack_as_root python3 "$root/apps/remote/server/pi-timezone-provision" --configure --user "$user"
+fi
 printf 'linked Pi stack %s for %s without changing shared releases\n' "$commit" "$user"

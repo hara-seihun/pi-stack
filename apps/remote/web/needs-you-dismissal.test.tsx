@@ -15,7 +15,7 @@ test("dismissal posts only the owner's mutation target and preserves reported pa
   const fetchBefore = globalThis.fetch, windowBefore = globalThis.window;
   const requests: Array<{ url: string; method: string; body: unknown }> = [];
   try {
-    globalThis.window = { PiRemotePerson: { session: () => "test-session" } } as any;
+    globalThis.window = { PiRemotePerson: { get: () => "test-person", session: () => "test-session" } } as any;
     globalThis.fetch = (async (input, init) => {
       requests.push({ url: String(input), method: init!.method!, body: JSON.parse(String(init!.body)) });
       return Response.json({ ok: true });

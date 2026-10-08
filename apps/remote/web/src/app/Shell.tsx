@@ -4,7 +4,7 @@ import { TABS, type Tab } from "./routes";
 import "./shell.css";
 import { assertNever } from "../../../shared/explicit-state";
 
-const LABELS: Record<Tab, string> = { chats: "Chats", attention: "Attention", agents: "Agents", files: "Files", machine: "Machine" };
+const LABELS: Record<Tab, string> = { chats: "Chats", attention: "Attention", agents: "Agents", files: "Files", machine: "Machine", settings: "Settings" };
 
 function TabIcon({ tab }: { tab: Tab }) {
   switch (tab) {
@@ -13,6 +13,7 @@ function TabIcon({ tab }: { tab: Tab }) {
     case "attention": return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 6v7m0 4v1" /></svg>;
     case "files": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3v-12Z" /></svg>;
     case "machine": return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8m-4-4v4" /></svg>;
+    case "settings": return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="9" cy="6" r="2" /><circle cx="15" cy="12" r="2" /><circle cx="9" cy="18" r="2" /></svg>;
   }
   return assertNever(tab, "Tab icon");
 }
@@ -25,12 +26,12 @@ export function TabNav({ layout, active, badges, onSelect, onPrepare, update }: 
   return <nav className={layout === "phone" ? "tabbar" : "rail"} aria-label="Sections">
     {TABS.map(tab => {
       const badge = badges[tab];
-      const updating = tab === "machine" && update?.visible;
-      const showBadge = !updating && active !== tab && badge && badge.count > 0;
-      const label = updating ? "Update" : LABELS[tab];
-      return <button key={tab} type="button" className={`tab${updating ? " tab-update" : ""}`} aria-current={!updating && active === tab ? "page" : undefined} aria-label={showBadge ? `${label}, ${badge.count}` : label} aria-busy={updating ? update.busy : undefined} disabled={updating && update.busy} title={updating ? update.status : label} onPointerDown={() => { if (!updating) onPrepare?.(tab); }} onFocus={() => { if (!updating) onPrepare?.(tab); }} onClick={() => updating ? update.onClick() : onSelect(tab)}>
-        <span className="tab-icon">{updating ? <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" /></svg> : <TabIcon tab={tab} />}{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
-        {updating && <span className="tab-update-label">Update</span>}
+      const offeredUpdate = tab === "settings" && update?.visible;
+      const showBadge = active !== tab && badge && badge.count > 0;
+      const label = LABELS[tab];
+      return <button key={tab} type="button" className={`tab${offeredUpdate ? " tab-update" : ""}`} aria-current={active === tab ? "page" : undefined} aria-label={showBadge ? `${label}, ${badge.count}` : label} title={offeredUpdate ? `${label}: ${update.status}` : label} onPointerDown={() => onPrepare?.(tab)} onFocus={() => onPrepare?.(tab)} onClick={() => onSelect(tab)}>
+        <span className="tab-icon"><TabIcon tab={tab} />{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
+        <span className={offeredUpdate ? "tab-update-label" : "tab-label"}>{offeredUpdate ? "Update" : label}</span>
       </button>;
     })}
   </nav>;

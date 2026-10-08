@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, recordIdleNotification, setThreadColor } from "./database";
+import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, nativeHistorySchemaReady, recordIdleNotification, setThreadColor } from "./database";
 import { API } from "./api";
 import { isThreadColor } from "./protocol";
 
@@ -11,10 +11,22 @@ test("Remote has no execution tables and a new supervisor preserves its presenta
   const db = new Database(":memory:");
   ensureSupervisorSchema(db);
   ensureThreadView(db, "parent");
-  db.query("INSERT INTO session_contexts VALUES(?,?,?)").run("parent", 1, '{"messages":[]}');
+  setThreadColor(db, "parent", "purple");
   beginSupervisorGeneration(db, "next");
-  expect(db.query("SELECT context FROM session_contexts").get()).toEqual({ context: '{"messages":[]}' });
+  expect(db.query("SELECT color FROM thread_views WHERE id='parent'").get()).toEqual({ color: 'purple' });
+  expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%context%'").all()).toEqual([]);
   expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','work_items','subagents','thread_delegations','delegation_results','core_agents','core_dispatches')").all()).toEqual([]);
+  db.close();
+});
+
+test("unmigrated personal history requires maintenance before startup can mutate it", () => {
+  const db = new Database(":memory:");
+  db.exec("CREATE TABLE session_contexts(session_id TEXT PRIMARY KEY,context TEXT NOT NULL)");
+  db.query("INSERT INTO session_contexts VALUES('person','irreplaceable')").run();
+  expect(nativeHistorySchemaReady(db)).toMatchObject({ ok: false, error: { code: 'migration_required' } });
+  expect(() => ensureSupervisorSchema(db)).toThrow('Native history maintenance is required');
+  expect(db.query("SELECT context FROM session_contexts").get()).toEqual({ context: 'irreplaceable' });
+  expect(db.query("SELECT name FROM sqlite_master WHERE name='thread_views'").get()).toBeNull();
   db.close();
 });
 

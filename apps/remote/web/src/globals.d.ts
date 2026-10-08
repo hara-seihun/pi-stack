@@ -51,6 +51,7 @@ interface Window {
     getState(): Promise<any>;
     select(options: { id: string; user: string }): Promise<any>;
     resolveApiUrl(path: string): string;
+    openEditor?(options: { url: string; ticket: string }): Promise<void>;
   };
   Capacitor?: any;
 }

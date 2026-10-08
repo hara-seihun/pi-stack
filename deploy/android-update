@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, renameSync, symlinkSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, renameSync, symlinkSync, rmSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { APP_UPDATE_DIRECTORY, isAppRelease, isWebRelease } from "../apps/remote/server/app-update.ts";
@@ -38,13 +38,17 @@ function checkedBytes(directory, release, label) {
   if (bytes.length !== release.size || digest(bytes) !== release.sha256) throw new Error(`${label} does not match its manifest in ${directory}`);
   return bytes;
 }
-// The APK and, when published, the web bundle it was built with. The bundle is the shared web
-// client alone; an installed app with the same shellId applies it without Android's installer.
+function compatible(release, web) {
+  return web.applicationId === release.applicationId && web.shellId === release.shellId
+    && web.versionCode >= release.versionCode
+    && (web.versionCode !== release.versionCode || web.revision === release.revision);
+}
+const generation = prepared => prepared.web?.release ?? prepared.release;
 function artifact(directory) {
   const release = manifest(directory);
   const bytes = checkedBytes(directory, release, "App package");
   const web = webManifest(directory);
-  if (web && (web.revision !== release.revision || web.versionCode !== release.versionCode || web.shellId !== release.shellId)) {
+  if (web && !compatible(release, web)) {
     throw new Error(`Web bundle does not belong to the app release in ${directory}`);
   }
   return { release, bytes, web: web ? { release: web, bytes: checkedBytes(directory, web, "Web bundle") } : null };
@@ -60,15 +64,37 @@ function writeArtifact(directory, { release, bytes, web }) {
 }
 // Zips the web client exactly as packaged in the APK's assets/public, so the bundle an installed
 // app downloads is byte-for-byte the client a fresh install of the same release would run.
-function webBundle(apk, identity) {
-  const bytes = webBundleBytes(apk);
+function webBundle(input, identity, kind = "apk") {
+  const bytes = webBundleBytes(input, kind);
   const release = { revision: identity.revision, versionCode: identity.versionCode, applicationId: identity.applicationId, shellId: identity.shellId,
     sha256: digest(bytes), size: bytes.length, fileName: `${identity.revision}.web.zip` };
   if (!isWebRelease(release)) throw new Error("Web bundle release metadata is invalid");
   return { release, bytes };
 }
+function sourceIdentity() {
+  return JSON.parse(command("node", ["apps/kenan/release-info.mjs"]));
+}
+function plan() {
+  const identity = sourceIdentity();
+  const current = join(destination, "current");
+  if (!existsSync(current)) return { kind: "native", identity };
+  const nativeDirectory = realpathSync(current);
+  const { release } = artifact(nativeDirectory);
+  if (release.shellId !== identity.shellId) return { kind: "native", identity };
+  if (!compatible(release, identity)) throw new Error("Selected native artifact is newer than or conflicts with the candidate web release");
+  command("git", ["merge-base", "--is-ancestor", release.revision, identity.revision]);
+  const changedTests = command("git", ["diff", "--name-only", release.revision, identity.revision, "--", "apps/kenan/android/app/src/test"]);
+  return changedTests ? { kind: "native", identity } : { kind: "web", identity, nativeDirectory, release };
+}
+function prepareWeb(output, nativeDirectory) {
+  const identity = sourceIdentity();
+  const { release, bytes } = artifact(nativeDirectory);
+  if (!compatible(release, identity)) throw new Error("Native artifact is incompatible with the candidate web release");
+  command("git", ["merge-base", "--is-ancestor", release.revision, identity.revision]);
+  return prepareArtifact(output, { release, bytes, web: webBundle(join(repository, "apps/remote/web/dist"), identity, "directory") });
+}
 function prepare(output) {
-  const identity = JSON.parse(command("node", ["apps/kenan/release-info.mjs"]));
+  const identity = sourceIdentity();
   const apk = join(repository, "apps/kenan/android/app/build/outputs/apk/debug/app-debug.apk");
   const embedded = JSON.parse(command("unzip", ["-p", apk, "assets/app-release.json"]));
   if (["revision", "versionCode", "applicationId", "shellId"].some(key => embedded[key] !== identity[key])) throw new Error("APK build identity does not match the source commit");
@@ -77,22 +103,26 @@ function prepare(output) {
   const bytes = readFileSync(apk);
   const release = { ...identity, sha256: digest(bytes), size: bytes.length, fileName: `${identity.revision}.apk` };
   if (!isAppRelease(release)) throw new Error("APK release metadata is invalid");
+  return prepareArtifact(output, { release, bytes, web: webBundle(apk, identity) });
+}
+function prepareArtifact(output, prepared) {
   if (existsSync(output)) {
     const existing = artifact(output);
-    if (existing.release.revision !== release.revision) throw new Error("App artifact directory belongs to another source revision");
+    if (generation(existing).revision !== generation(prepared).revision) throw new Error("App artifact directory belongs to another source revision");
     if (!existing.web) throw new Error("App artifact directory has no web bundle; remove it and prepare again");
+    if (Object.keys(prepared.release).some(key => existing.release[key] !== prepared.release[key])
+      || Object.keys(prepared.web.release).some(key => existing.web.release[key] !== prepared.web.release[key])) throw new Error("Prepared artifact bytes or identity cannot change for an existing revision");
     return existing.release;
   }
-  const web = webBundle(apk, identity);
   mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
   const stage = `${output}.${randomUUID()}.tmp`;
   mkdirSync(stage, { mode: 0o700 });
   try {
-    writeArtifact(stage, { release, bytes, web });
+    writeArtifact(stage, prepared);
     renameSync(stage, output);
     syncDirectory(dirname(output));
   } finally { rmSync(stage, { recursive: true, force: true }); }
-  return release;
+  return prepared.release;
 }
 function install(source) {
   mkdirSync(destination, { recursive: true, mode: 0o755 });
@@ -101,18 +131,35 @@ function install(source) {
 function installLocked(source) {
   const prepared = artifact(source);
   const { release } = prepared;
+  const selectedGeneration = generation(prepared);
   const releases = join(destination, "releases");
   mkdirSync(releases, { recursive: true, mode: 0o755 });
   const current = join(destination, "current");
   if (existsSync(current)) {
-    const selected = manifest(current);
-    if (selected.versionCode > release.versionCode || selected.versionCode === release.versionCode && selected.revision !== release.revision) throw new Error("Refusing to replace a newer or conflicting app version");
+    const selected = generation(artifact(current));
+    if (selected.versionCode > selectedGeneration.versionCode || selected.versionCode === selectedGeneration.versionCode && selected.revision !== selectedGeneration.revision) throw new Error("Refusing to replace a newer or conflicting app version");
   }
-  const final = join(releases, release.revision);
+  if (selectedGeneration.revision !== release.revision) {
+    const nativeDirectory = join(releases, release.revision);
+    if (existsSync(nativeDirectory)) {
+      const native = artifact(nativeDirectory);
+      if (Object.keys(release).some(key => native.release[key] !== release[key])) throw new Error("Published native artifact cannot change");
+    } else {
+      const stage = join(releases, `.${randomUUID()}.tmp`);
+      mkdirSync(stage, { mode: 0o755 });
+      try {
+        writeArtifact(stage, { release, bytes: prepared.bytes, web: null });
+        renameSync(stage, nativeDirectory);
+        syncDirectory(releases);
+      } finally { rmSync(stage, { recursive: true, force: true }); }
+    }
+  }
+  const final = join(releases, selectedGeneration.revision);
   if (existsSync(final)) {
     const existing = artifact(final);
-    if (existing.release.sha256 !== release.sha256) throw new Error("Published APK bytes cannot change for an existing revision");
-    if (existing.web && prepared.web && existing.web.release.sha256 !== prepared.web.release.sha256) throw new Error("Published web bundle bytes cannot change for an existing revision");
+    if (Object.keys(release).some(key => existing.release[key] !== release[key])) throw new Error("Published APK bytes or identity cannot change for an existing revision");
+    if (existing.web && prepared.web && Object.keys(prepared.web.release).some(key => existing.web.release[key] !== prepared.web.release[key])) throw new Error("Published web bundle bytes cannot change for an existing revision or identity");
+    if (existing.web && !prepared.web) throw new Error("Published web bundle cannot be withdrawn from an existing revision");
     if (!existing.web && prepared.web) {
       const stage = join(releases, `.${randomUUID()}.tmp`);
       mkdirSync(stage, { mode: 0o755 });
@@ -135,13 +182,14 @@ function installLocked(source) {
     } finally { rmSync(stage, { recursive: true, force: true }); }
   }
   const link = join(destination, `.current-${randomUUID()}`);
-  try { symlinkSync(`releases/${release.revision}`, link); renameSync(link, current); syncDirectory(destination); }
+  try { symlinkSync(`releases/${selectedGeneration.revision}`, link); renameSync(link, current); syncDirectory(destination); }
   finally { rmSync(link, { force: true }); }
   const generations = readdirSync(releases).filter(name => /^[a-f0-9]{40}$/.test(name))
-    .map(name => ({ path: join(releases, name), release: manifest(join(releases, name)) }))
-    .sort((left, right) => right.release.versionCode - left.release.versionCode);
-  for (const generation of process.env.PI_REMOTE_APP_UPDATES_KEEP_ALL === "1" ? [] : generations.slice(3)) {
-    if (generation.release.revision !== release.revision) rmSync(generation.path, { recursive: true });
+    .map(name => ({ name, path: join(releases, name), prepared: artifact(join(releases, name)) }))
+    .sort((left, right) => generation(right.prepared).versionCode - generation(left.prepared).versionCode);
+  const kept = new Set(generations.slice(0, 3).flatMap(entry => [entry.name, entry.prepared.release.revision]));
+  for (const entry of process.env.PI_REMOTE_APP_UPDATES_KEEP_ALL === "1" ? [] : generations) {
+    if (!kept.has(entry.name)) rmSync(entry.path, { recursive: true });
   }
   return { ...release, web: prepared.web ? prepared.web.release : null };
 }
@@ -159,7 +207,7 @@ async function verify(expectedPath) {
   if (!response.ok) throw new Error(`App update manifest returned HTTP ${response.status}`);
   const { release, web } = await response.json();
   if (!isAppRelease(release) || Object.keys(expected).some(key => release[key] !== expected[key])) throw new Error("Served app manifest differs from the publication");
-  if (expectedWeb && (!isWebRelease(web) || Object.keys(expectedWeb).some(key => web[key] !== expectedWeb[key]))) throw new Error("Served web manifest differs from the publication");
+  if (expectedWeb && (!isWebRelease(web) || !compatible(release, web) || Object.keys(expectedWeb).some(key => web[key] !== expectedWeb[key]))) throw new Error("Served web manifest differs from the publication");
   await fetchChecked(expected.fileName, expected, 15_000);
   if (expectedWeb) await fetchChecked(expectedWeb.fileName, expectedWeb, 15_000);
   return { ...release, web: expectedWeb ? web : null, verifiedAt: new Date().toISOString() };
@@ -179,11 +227,22 @@ async function bundle(output) {
 }
 
 try {
-  const [operation, argument, ...extra] = process.argv.slice(2);
-  if (!argument || extra.length || !["prepare", "install", "install-locked", "verify", "bundle"].includes(operation)) throw new Error("usage: deploy/android-update prepare OUTPUT_DIRECTORY | install ARTIFACT_DIRECTORY | verify MANIFEST_PATH | bundle OUTPUT_FILE");
+  const [operation, argument, nativeDirectory, ...extra] = process.argv.slice(2);
+  if (extra.length || !["plan", "prepare", "prepare-web", "install", "install-locked", "verify", "bundle"].includes(operation)
+    || (operation === "plan" ? argument !== undefined : !argument)
+    || (operation === "prepare-web" ? !nativeDirectory : nativeDirectory !== undefined)) throw new Error("usage: deploy/android-update plan | prepare OUTPUT_DIRECTORY | prepare-web OUTPUT_DIRECTORY NATIVE_DIRECTORY | install ARTIFACT_DIRECTORY | verify MANIFEST_PATH | bundle OUTPUT_FILE");
   // Published releases are public downloads read by unprivileged mirrors; the caller's umask must not narrow them.
   process.umask(0o022);
-  const result = operation === "bundle" ? await bundle(resolve(argument)) : operation === "prepare" ? prepare(resolve(argument)) : operation === "install" ? install(resolve(argument)) : operation === "install-locked" ? installLocked(resolve(argument)) : await verify(resolve(argument));
+  let result;
+  switch (operation) {
+    case "plan": result = plan(); break;
+    case "prepare": result = prepare(resolve(argument)); break;
+    case "prepare-web": result = prepareWeb(resolve(argument), resolve(nativeDirectory)); break;
+    case "bundle": result = await bundle(resolve(argument)); break;
+    case "install": result = install(resolve(argument)); break;
+    case "install-locked": result = installLocked(resolve(argument)); break;
+    case "verify": result = await verify(resolve(argument)); break;
+  }
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

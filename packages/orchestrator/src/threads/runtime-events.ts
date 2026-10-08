@@ -19,7 +19,7 @@ export const RUNTIME_EVENT_TYPES = {
   response: true, extension_ui_request: true, extension_error: true, user_bash: true,
   auto_compaction_start: true, auto_compaction_end: true,
   owner_execution_phase: true, model_request_start: true,
-  context_update: true, session_changed: true, conversation_replaced: true,
+  session_changed: true,
   command_settled: true, runner_attached: true,
   thread_settled: true, thread_error: true, thread_message_inserted: true,
 } as const;

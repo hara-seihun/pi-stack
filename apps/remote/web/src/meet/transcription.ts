@@ -1,7 +1,7 @@
 import type { MeetTranscriptTurn } from "../../../server/meet/protocol";
 import { meetPath } from "../../../server/meet/protocol";
 import type { MeetMediaSource } from "./media";
-import { type MeetRoom, post } from "./room";
+import { type ExternalMeetRoom, post } from "./external-room";
 import pcmWorklet from "./pcm.worklet.js?raw";
 
 type Capture = { stream: MediaStream; source: MediaStreamAudioSourceNode; node: AudioWorkletNode };
@@ -20,7 +20,7 @@ export class MeetTranscription {
   private acknowledgedFlush = 0;
   private flushing: Promise<void> | null = null;
   private suspending: Promise<void> | null = null;
-  constructor(private readonly room: MeetRoom, private readonly onError: (message: string) => void) {
+  constructor(private readonly room: ExternalMeetRoom, private readonly onError: (message: string) => void) {
     const url = URL.createObjectURL(new Blob([pcmWorklet], { type: "text/javascript" }));
     this.ready = Promise.all([this.audio.resume(), this.audio.audioWorklet.addModule(url)])
       .then(() => {}).finally(() => URL.revokeObjectURL(url));
@@ -66,7 +66,7 @@ export class MeetTranscription {
     }
   }
   attach(source: MeetMediaSource) {
-    if (source.kind !== "camera" || !source.stream.getAudioTracks().length) return;
+    if (!source.stream.getAudioTracks().length) return;
     const existing = this.captures.get(source.participant.id);
     if (existing?.stream === source.stream) return;
     if (existing) this.detach(source.participant.id);

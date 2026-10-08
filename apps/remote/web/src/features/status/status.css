@@ -9,7 +9,7 @@
 [data-glyph="working"] { --status-color: var(--status-running); }
 [data-glyph="working"][data-status="thinking"] { --status-color: var(--status-thinking); }
 [data-glyph="working"][data-status="tool"] { --status-color: var(--status-tool); }
-[data-glyph="agents"], [data-glyph="job"], [data-glyph="deployment"], [data-glyph="message"] { --status-color: var(--status-awaiting); }
+[data-glyph="waiting"] { --status-color: var(--status-awaiting); }
 [data-glyph="held"], [data-glyph="stopping"] { --status-color: var(--status-held); }
 [data-glyph="done"], [data-glyph="archived"] { --status-color: var(--status-idle); }
 [data-glyph="unread"] { --status-color: var(--status-unread); }

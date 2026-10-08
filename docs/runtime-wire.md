@@ -12,7 +12,7 @@ The [explicit state contract](state-dispatch.md) applies at every first-party ru
 
 Lifecycle and outcome remain separate. Unknown terminal outcomes and assistant stop reasons cannot become successful completion; `pending` and `deferred` are explicitly nonterminal. Native completion receipts can settle a turn that produced no assistant message. Known tool-only turns remain supported.
 
-An idle parent never inherits a worker's activity or waiting state. A typed durable wait names the thread's own [dependency](threads.md#durable-dependency-waits-and-own-thread-wakes); an observed live `thread_await` tool reports an execution wait. Worker discovery does not manufacture either. An idle lifecycle paired with a running phase is an instrumentation error, not an alternate spelling of idle.
+Each agent owns its activity. Launch provenance never supplies a worker's activity to its parent. The owner projects an inactive agent with a typed durable wait or unresolved result subscriptions as `waiting`; active execution takes precedence. Remote's [`projectThreadActivity`](../apps/remote/server/live-projection.ts) normalizes that owned state into one Waiting activity for browser, Android and meeting views. Typed wait identities and reasons remain durable, while clients do not infer liveness from peer IDs. An observed live `thread_await` tool likewise presents Waiting. An idle lifecycle paired with a running phase is an instrumentation error.
 
 Unknown transcript roles/content blocks preserve their content in an unsupported notice; they are not reclassified as ordinary assistant or tool messages. Open-ended provider content stays evidence, with explicit unsupported diagnostics when it is outside the presentation contract.
 

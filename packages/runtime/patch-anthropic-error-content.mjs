@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,10 +18,7 @@ export function patchAnthropicErrorContent(source) {
 
 export function patchAnthropicProviders(nodeModules) {
   const sdk = join(nodeModules, "@earendil-works/pi-ai/dist/api/anthropic-messages.js");
-  const chunks = join(nodeModules, "@earendil-works/pi-coding-agent/dist/bundle/chunks");
-  const bundles = readdirSync(chunks).filter(name => /^anthropic-messages-[^.]+\.js$/u.test(name));
-  if (bundles.length !== 1) throw new Error(`Expected one bundled Anthropic provider, found ${bundles.length}`);
-  for (const path of [sdk, ...bundles.map(name => join(chunks, name))]) {
+  for (const path of [sdk]) {
     const source = readFileSync(path, "utf8");
     const patched = patchAnthropicErrorContent(source);
     if (patched !== source) writeFileSync(path, patched);

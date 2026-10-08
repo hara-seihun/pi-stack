@@ -33,7 +33,7 @@ test("every owned machine boundary has a distinct interpretable status", () => {
 
 test("durable waiting names its dependency without pretending it is silent model execution", () => {
   const status = threadStatus(running({ state: "idle", activity: "awaiting", waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Publication worker", since: 1000 }, activitySince: 1000, activityDetail: "Publication worker", lastActivityAt: 1000 }));
-  expect(status).toMatchObject({ key: "waiting_for_deployment", label: "Waiting for deployment", title: "Publication worker", since: 1000 });
+  expect(status).toMatchObject({ key: "waiting", label: "Waiting", title: "Publication worker", since: 1000 });
   expect(activityTiming(status, 80000)).toEqual({ elapsed: "1m 19s" });
   expect(threadStatus(running({ state: "idle", activity: "awaiting", held: true })).key).toBe("idle");
   expect(threadStatus(running({ state: "idle", activity: "awaiting", archivedAt: "2026-10-05" })).key).toBe("archived");

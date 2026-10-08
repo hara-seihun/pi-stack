@@ -1,0 +1,40 @@
+[
+  {
+    "id": "ami-1040",
+    "audio": "ami-1040.wav",
+    "sha256": "d325a717abe73c687e59fdf0591c861183d4d222161b8bd05f6e97aec6d1b02b",
+    "source": {
+      "dataset": "edinburghcstr/ami",
+      "config": "ihm",
+      "split": "test",
+      "row": 1040,
+      "audio_id": "AMI_EN2002a_H03_MEE071_0068460_0068785",
+      "meeting_id": "EN2002a",
+      "speaker_id": "MEE071",
+      "begin_time": 684.5999755859375,
+      "end_time": 687.8499755859375,
+      "transcript": "IT'S A BIT OF A CRIPPLE WITH JAVA'S WINDOWING TOOL KIT",
+      "sha256": "ae483859d2c13755b433f1025524af766254781e63fb89c54d36a6abb8d0eb95"
+    },
+    "license": "CC-BY-4.0"
+  },
+  {
+    "id": "ami-4062",
+    "audio": "ami-4062.wav",
+    "sha256": "420da3dd2aa85dfb2e2be7705a1158fa342b6b5e446d916e6685487312edf14c",
+    "source": {
+      "dataset": "edinburghcstr/ami",
+      "config": "ihm",
+      "split": "test",
+      "row": 4062,
+      "audio_id": "AMI_EN2002d_H00_FEO070_0154016_0154252",
+      "meeting_id": "EN2002d",
+      "speaker_id": "FEO070",
+      "begin_time": 1540.1600341796875,
+      "end_time": 1542.52001953125,
+      "transcript": "WE'RE PLANNING ON HAVING A BIG PARTY ON THE TWENTY FOURTH",
+      "sha256": "7fdfff1759c1fc8f36f92f5664fc7fc28a23532b5a12dca7060de47b65b941b2"
+    },
+    "license": "CC-BY-4.0"
+  }
+]

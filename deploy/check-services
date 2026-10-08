@@ -37,7 +37,7 @@ other_failed=()
 while IFS= read -r unit; do
   case "$unit" in
     '') ;;
-    pi-orchestrator@*.service|pi-remote@*.service|pi-remote-router.service|pi-stack-voice.service|pi-stack-write.service|pi-model-broker.service|pi-stack-model-broker@*.service)
+    pi-orchestrator@*.service|pi-remote@*.service|pi-remote-router.service|pi-stack-voice.service|pi-stack-meet-recognition.service|pi-model-broker.service|pi-stack-model-broker@*.service)
       release_failed+=("$unit");;
     *) other_failed+=("$unit");;
   esac

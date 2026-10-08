@@ -80,7 +80,7 @@ test("an all-locked host still requires shared services and valid router health"
 test("failed runtime units and failed unit enumeration remain errors", (t) => {
   const { run } = fixture(t);
   for (const unit of ["pi-remote@kenan.service", "pi-orchestrator@sybil.service",
-    "pi-remote-router.service", "pi-stack-voice.service", "pi-stack-write.service",
+    "pi-remote-router.service", "pi-stack-voice.service", "pi-stack-meet-recognition.service",
     "pi-model-broker.service", "pi-stack-model-broker@sybil.service"]) {
     const result = run({ FAILED: `${unit} loaded failed failed Runtime\npi-claude-reset-read.service loaded failed failed Collector` });
     assert.equal(result.status, 1);

@@ -74,10 +74,56 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void openEditor(PluginCall call) {
+        Object suppliedUrl = call.getData().opt("url");
+        Object suppliedTicket = call.getData().opt("ticket");
+        if (!(suppliedUrl instanceof String url) || url.length() > 2048
+            || !(suppliedTicket instanceof String ticket) || !ticket.matches("[A-Za-z0-9_-]{43}")) {
+            call.reject("An editor handoff URL and ticket are required", "invalid_args"); return;
+        }
+        RemoteSession state = NotificationIdentity.get(getContext());
+        RemoteSession.Identity identity = state.current();
+        if (identity == null) { call.reject("Unlock before opening the editor", "session_expired"); return; }
+        long issuedAt = android.os.SystemClock.elapsedRealtime();
+        updateExecutor.execute(() -> {
+            try {
+                org.json.JSONObject config = RemoteTransport.get(RouterConnection.routerUrl() + "/v1/editor", identity);
+                if (!Boolean.TRUE.equals(config.opt("ok")) || !(config.opt("origin") instanceof String origin)) {
+                    call.reject("Router returned an invalid editor configuration", "protocol_error"); return;
+                }
+                EditorHandoff.Validation checked = EditorHandoff.validate(url, ticket, origin,
+                    RouterConnection.routerUrl(), BuildConfig.ROUTER_URL, BuildConfig.PUBLIC_ROUTER_URL,
+                    getBridge().getServerUrl(), getBridge().getAppUrl(), "http://localhost", "https://localhost");
+                if (checked instanceof EditorHandoff.Rejected rejected) {
+                    call.reject("Invalid editor handoff: " + rejected.failure().name(), "invalid_args"); return;
+                }
+                EditorHandoff.Target target = ((EditorHandoff.Accepted) checked).target();
+                getActivity().runOnUiThread(() -> {
+                    synchronized (state) {
+                        if (!state.isCurrent(identity) || android.os.SystemClock.elapsedRealtime() - issuedAt >= 30_000) {
+                            call.reject("Editor handoff expired or the session changed", "session_expired"); return;
+                        }
+                        try {
+                            EditorActivity.launch(getActivity(), target, state, identity, issuedAt);
+                            call.resolve();
+                        } catch (RuntimeException unavailable) {
+                            call.reject("Could not open the editor view", "unavailable");
+                        }
+                    }
+                });
+            } catch (RemoteTransport.AccessDenied denied) {
+                synchronized (state) { if (state.isCurrent(identity)) NotificationIdentity.replace(getContext(), "", ""); }
+                call.reject("Editor session ended", "session_expired");
+            } catch (java.io.IOException unavailable) {
+                call.reject("Could not read your editor configuration", "disconnected");
+            }
+        });
+    }
+
+    @PluginMethod
     public void syncSession(PluginCall call) {
         try {
             if (NotificationIdentity.replace(getContext(), call.getString("user", ""), call.getString("session", ""))) {
-                getContext().getSharedPreferences("write-settings", 0).edit().remove("environment").apply();
                 for (String key : new String[] { "environment", "sessionId", "user" }) getActivity().getIntent().removeExtra(key);
                 if (NotificationIdentity.get(getContext()).current() != null
                     && getContext().getSharedPreferences("notification-settings", 0).getBoolean("enabled", false)) {
@@ -100,78 +146,6 @@ public final class KenanRemotePlugin extends Plugin {
             case GRANTED, DENIED -> true;
             case PROMPT, PROMPT_WITH_RATIONALE -> false;
         };
-    }
-
-    @PluginMethod
-    public void writeStatus(PluginCall call) {
-        call.resolve(new JSObject()
-            .put("microphone", granted(getPermissionState("microphone")))
-            .put("notification", NativeAccess.notifications(getContext()))
-            .put("overlay", Settings.canDrawOverlays(getContext()))
-            .put("accessibility", NativeAccess.accessibility(getContext(), WriteAccessibilityService.class))
-            .put("battery", ((android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE))
-                .isIgnoringBatteryOptimizations(getContext().getPackageName()))
-            .put("keyboardRequired", getContext().getSharedPreferences("write-settings", 0).getBoolean("keyboardRequired", true))
-            .put("overlayEnabled", getContext().getSharedPreferences("write-settings", 0).getBoolean("overlayEnabled", true)));
-    }
-
-    @PluginMethod
-    public void writeSetup(PluginCall call) {
-        NativeState.WriteSetup step;
-        try { step = NativeState.require(NativeState.WriteSetup.class, call.getString("step", "")); }
-        catch (IllegalArgumentException invalid) { call.reject(invalid.getMessage(), "invalid_args"); return; }
-        Runnable setup = switch (step) {
-            case MICROPHONE -> () -> {
-                if (granted(getPermissionState("microphone"))) call.resolve();
-                else requestPermissionForAlias("microphone", call, "writeMicrophonePermission");
-            };
-            case NOTIFICATION -> () -> {
-                if (Build.VERSION.SDK_INT < 33 || granted(getPermissionState("notifications"))) call.resolve();
-                else requestPermissionForAlias("notifications", call, "writeMicrophonePermission");
-            };
-            case OVERLAY -> () -> {
-                getContext().startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getContext().getPackageName())).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                call.resolve();
-            };
-            case ACCESSIBILITY -> () -> {
-                getContext().startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                call.resolve();
-            };
-            case BATTERY -> () -> {
-                getContext().startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                call.resolve();
-            };
-            case ENABLED -> () -> {
-                Object enabled = call.getData().opt("enabled");
-                if (!(enabled instanceof Boolean)) { call.reject("Write enabled must be a boolean"); return; }
-                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("overlayEnabled", (Boolean) enabled).apply();
-                WriteAccessibilityService.settingsChanged();
-                call.resolve();
-            };
-            case KEYBOARD -> () -> {
-                boolean required = Boolean.TRUE.equals(call.getBoolean("required", true));
-                getContext().getSharedPreferences("write-settings", 0).edit().putBoolean("keyboardRequired", required).apply();
-                WriteAccessibilityService.settingsChanged();
-                call.resolve();
-            };
-        };
-        setup.run();
-    }
-
-    @PermissionCallback
-    private void writeMicrophonePermission(PluginCall call) { call.resolve(); }
-
-    @PluginMethod
-    public void writeEnvironment(PluginCall call) {
-        String user = call.getString("user", "");
-        String environment = call.getString("environment", "");
-        RemoteSession.Identity identity = NotificationIdentity.get(getContext()).current();
-        if (identity == null || !identity.user.equals(user) || environment.isBlank()) {
-            call.reject("Write environment needs an authenticated selection"); return;
-        }
-        getContext().getSharedPreferences("write-settings", 0).edit().putString("environment", environment).apply();
-        call.resolve();
     }
 
     @PluginMethod
@@ -261,9 +235,9 @@ public final class KenanRemotePlugin extends Plugin {
                     } else requestPermissionForAlias(step, call, "phonePermission");
                     return;
                 };
-                case ACCESSIBILITY, WRITE_ACCESSIBILITY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                case ACCESSIBILITY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                     .putExtra(Intent.EXTRA_COMPONENT_NAME, new android.content.ComponentName(getContext(),
-                        step.equals("writeAccessibility") ? WriteAccessibilityService.class : PhoneAccessibilityService.class).flattenToString()));
+                        PhoneAccessibilityService.class).flattenToString()));
                 case NOTIFICATION_ACCESS -> () -> openPhoneSettings(call, new Intent(Build.VERSION.SDK_INT >= 30 ? Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS : Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
                     .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneNotificationService.class).flattenToString()));
                 case OVERLAY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,

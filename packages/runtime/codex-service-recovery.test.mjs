@@ -10,8 +10,6 @@ import { patchCodexSse } from "./patch-codex-sse.mjs";
 import { compactionObserver } from "./extensions/codex-compaction/native.mjs";
 
 const sdk = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/api/openai-codex-responses"));
-const chunks = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "bundle/chunks");
-const bundle = join(chunks, readdirSync(chunks).find(name => /^openai-codex-responses-[^.]+\.js$/u.test(name)));
 const model = { api: "openai-codex-responses", provider: "openai-codex-11", id: "gpt-6-astra", baseUrl: "https://example.test/backend-api", reasoning: true, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } };
 const token = `a.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64url")}.c`;
 const checkpoint = { type: "compaction", encrypted_content: "fixture-checkpoint" };
@@ -22,7 +20,6 @@ const completed = { type: "response.completed", response: { id: "resp_success", 
 
 for (const [name, path, packageRoot] of [
   ["SDK", sdk, dirname(dirname(dirname(sdk)))],
-  ["bundled CLI", bundle, dirname(dirname(dirname(chunks)))],
 ]) test(`${name} bounded Codex service recovery`, async (t) => {
   const installedSource = readFileSync(path, "utf8");
   const installedFiles = readdirSync(dirname(path));

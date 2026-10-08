@@ -1,8 +1,0 @@
-{
-  "release": "https://github.com/hara-seihun/pi-stack/releases/download/write-cleanup-model-v1",
-  "license": "Apache-2.0",
-  "files": {
-    "joint-f32.onnx": "ee896e59644b2a939278be4fa0cdb3f23477e42f597e7971c4342dcf0d7e6df1",
-    "tokenizer.json": "5b3360be30cdf39081153cf9d30bfb0503c011462fc9f77f097127c83ef0f4d9"
-  }
-}

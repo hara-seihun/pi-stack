@@ -1,5 +1,5 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { memoryClient } from "./client.js";
@@ -42,12 +42,27 @@ export function actionJournalDirectory(env: NodeJS.ProcessEnv = process.env, uid
 
 export function journalDrainDirectories(env: NodeJS.ProcessEnv = process.env, mounted = (path: string) => spawnSync("mountpoint", ["-q", "--", path], { timeout: 1000 }).status === 0): string[] {
   const directories = [actionJournalDirectory(env)];
+  const signalJournal = (privateDir: unknown, data: unknown): string | null => {
+    if (typeof privateDir !== "string" || typeof data !== "string" || !isAbsolute(privateDir) || !isAbsolute(data) || !mounted(privateDir) || !existsSync(data)) return null;
+    const suffix = relative(realpathSync(privateDir), realpathSync(data));
+    if (isAbsolute(suffix) || suffix === ".." || suffix.startsWith("../")) return null;
+    const path = join(data, "messaging", "action-journal");
+    if (existsSync(path)) {
+      const scope = relative(realpathSync(privateDir), realpathSync(path));
+      if (isAbsolute(scope) || scope === ".." || scope.startsWith("../")) return null;
+    }
+    return path;
+  };
+  const ownSignal = signalJournal(env.PI_REMOTE_PRIVATE_DIR, env.PI_REMOTE_DATA);
+  if (ownSignal) directories.push(ownSignal);
   const registry = env.PI_REMOTE_PERSONS_DIR ?? "/var/lib/pi-remote/persons";
   if (existsSync(registry)) for (const file of readdirSync(registry).filter(name => name.endsWith(".json")).sort()) {
     const person = JSON.parse(readFileSync(join(registry, file), "utf8"));
     const mountpoint = person.unlock?.mountpoint;
     if (person.version !== 1 || typeof mountpoint !== "string" || !isAbsolute(mountpoint) || !mounted(mountpoint)) continue;
     directories.push(join(mountpoint, ".kenan-actions"));
+    const signal = signalJournal(mountpoint, person.environment?.PI_REMOTE_DATA);
+    if (signal) directories.push(signal);
   }
   return [...new Set(directories)];
 }

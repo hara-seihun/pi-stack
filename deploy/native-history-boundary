@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 3 || $# == 4 ]] || { echo 'usage: native-history-boundary HOST_FILE REPOSITORY CANDIDATE [--probe|--restore]' >&2; exit 64; }
+host=$1 repository=$2 candidate=$3 action=${4:-}
+[[ $candidate =~ ^[0-9a-f]{40}$ && $host == /* && $repository == /* ]] || { echo 'invalid native history boundary source' >&2; exit 64; }
+[[ -z $action || $action == --probe || $action == --restore ]] || exit 64
+if (( EUID != 0 )); then
+  exec sudo -n bash -s -- "$@" < <(git -C "$repository" show "$candidate:deploy/native-history-boundary")
+fi
+umask 022
+source_root="${PI_NATIVE_HISTORY_STATE_ROOT:-/srv/pi/.pi-stack-maintenance/native-history}/$candidate/source"
+files=(deploy/native-history-coordinator.mjs deploy/native-history-bridge.mjs deploy/native-history-root-boundary deploy/one-kenan-activate scripts/migrate-native-history.mjs)
+if [[ $action == --probe && ! -f $source_root/deploy/native-history-coordinator.mjs ]]; then
+  echo 'native history boundary waiting: selected legacy source has not entered maintenance' >&2
+  exit 75
+fi
+if [[ $action == --restore && ! -f $source_root/deploy/native-history-coordinator.mjs ]]; then exit 0; fi
+for file in "${files[@]}"; do
+  expected=$(git -C "$repository" rev-parse "$candidate:$file")
+  if [[ ! -f $source_root/$file ]]; then
+    [[ $action != --probe ]] || { echo 'native history boundary waiting: maintenance source is incomplete' >&2; exit 75; }
+    mkdir -p "$(dirname "$source_root/$file")"
+    git -C "$repository" show "$candidate:$file" > "$source_root/$file.tmp"
+    chmod 644 "$source_root/$file.tmp"
+    mv "$source_root/$file.tmp" "$source_root/$file"
+  fi
+  [[ $(git -C "$repository" hash-object "$source_root/$file") == "$expected" ]] || { echo 'native history boundary source custody mismatch' >&2; exit 1; }
+done
+exec /usr/local/bin/node "$source_root/deploy/native-history-coordinator.mjs" "$host" "$source_root" "$candidate" ${action:+"$action"}

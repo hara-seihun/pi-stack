@@ -2,107 +2,20 @@
 <meta charset="utf-8">
 <title>Pi telephone media</title>
 <p id="status">Connecting</p>
-<script id="telephone-worklet" type="text/plain">
-class TelephoneAudio extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    if (sampleRate !== 48000) throw new Error('Telephone audio requires a 48 kHz AudioContext');
-    this.ring = new Float32Array(3200);
-    this.read = 0;
-    this.count = 0;
-    this.phase = 0;
-    this.waiting = true;
-    this.history = new Float32Array(63);
-    this.head = 0;
-    this.decimation = 0;
-    this.packet = new ArrayBuffer(640);
-    this.packetView = new DataView(this.packet);
-    this.packetSamples = 0;
-    this.filter = new Float64Array(63);
-    let sum = 0;
-    for (let i = 0; i < this.filter.length; i++) {
-      const x = i - 31;
-      const sinc = x === 0 ? 0.3 : Math.sin(Math.PI * 0.3 * x) / (Math.PI * x);
-      const window = 0.42 - 0.5 * Math.cos(2 * Math.PI * i / 62) + 0.08 * Math.cos(4 * Math.PI * i / 62);
-      sum += this.filter[i] = sinc * window;
-    }
-    for (let i = 0; i < this.filter.length; i++) this.filter[i] /= sum;
-    this.port.onmessage = ({ data }) => {
-      const pcm = new DataView(data);
-      for (let i = 0; i < pcm.byteLength; i += 2) {
-        if (this.count === this.ring.length) {
-          this.read = (this.read + 1) % this.ring.length;
-          this.count--;
-        }
-        this.ring[(this.read + this.count) % this.ring.length] = pcm.getInt16(i, true) / 32768;
-        this.count++;
-      }
-    };
-  }
-  inputSample() {
-    if (this.waiting && this.count < 640) return 0;
-    this.waiting = false;
-    if (this.count < 2) {
-      this.waiting = true;
-      this.phase = 0;
-      return 0;
-    }
-    const a = this.ring[this.read];
-    const b = this.ring[(this.read + 1) % this.ring.length];
-    const value = a + (b - a) * this.phase / 3;
-    if (++this.phase === 3) {
-      this.phase = 0;
-      this.read = (this.read + 1) % this.ring.length;
-      this.count--;
-    }
-    return value;
-  }
-  captureSample(value) {
-    this.history[this.head] = value;
-    this.head = (this.head + 1) % this.history.length;
-    if (++this.decimation !== 3) return;
-    this.decimation = 0;
-    let filtered = 0;
-    for (let i = 0; i < this.filter.length; i++) {
-      filtered += this.filter[i] * this.history[(this.head + this.history.length - 1 - i) % this.history.length];
-    }
-    const clipped = Math.max(-1, Math.min(1, filtered));
-    this.packetView.setInt16(this.packetSamples++ * 2, Math.round(clipped * (clipped < 0 ? 32768 : 32767)), true);
-    if (this.packetSamples === 320) {
-      this.port.postMessage({ pcm: this.packet, time: currentFrame / sampleRate }, [this.packet]);
-      this.packet = new ArrayBuffer(640);
-      this.packetView = new DataView(this.packet);
-      this.packetSamples = 0;
-    }
-  }
-  process(inputs, outputs) {
-    const output = outputs[0][0];
-    const channels = inputs[0];
-    for (let i = 0; i < output.length; i++) {
-      output[i] = this.inputSample();
-      let remote = 0;
-      for (const channel of channels) remote += channel[i] || 0;
-      this.captureSample(channels.length ? remote / channels.length : 0);
-    }
-    return true;
-  }
-}
-registerProcessor('telephone-audio', TelephoneAudio);
-</script>
 <script type="module">
+import { RetellClient, RoomEvent, Track } from '/media/retell-sdk.js';
+
 const status = document.getElementById('status');
 const token = decodeURIComponent(location.hash.slice(1));
 history.replaceState(null, '', location.pathname + location.search);
-let socket, audio, bridge, destination, peer, channel, remoteSource, renderSink, remotePlayback;
-const diagnostics = { packetsCaptured: 0, packetsSent: 0, peak: 0, audioState: 'none', remoteTrack: 'none' };
-window.telephoneMediaDiagnostics = () => ({ ...diagnostics, audioState: audio?.state || 'none', audioTime: audio?.currentTime || 0, connectionState: peer?.connectionState || 'none', queue: outgoing.length });
-let closed = false;
-let started = false;
-let outputTimer, startupTimer;
-const outgoing = [];
-const pendingEvents = [];
-let pendingBytes = 0;
 const abort = new AbortController();
+const pendingEvents = [];
+const incoming = new Map();
+let socket, audio, destination, inputGate, renderSink, peer, channel, monitor, room;
+let gptStream, gptPlayback, grant, restoreCapture, startupTimer, proofFrame, outputSource, outputAnalyser;
+let closed = false, started = false, takenOver = false, ready = false, preflight = false, transportCallId, pendingBytes = 0;
+const diagnostics = { phase: 'connecting', remoteTrack: 'none', captureRequests: 0 };
+window.telephoneMediaDiagnostics = () => ({ ...diagnostics, audioState: audio?.state || 'none', connectionState: peer?.connectionState || 'none', retellState: monitor?.status || 'none', incomingTracks: incoming.size, takenOver, ready });
 
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -110,21 +23,28 @@ function send(message) {
 function close() {
   if (closed) return;
   closed = true;
+  diagnostics.phase = 'closed';
   abort.abort();
-  clearInterval(outputTimer);
   clearTimeout(startupTimer);
+  cancelAnimationFrame(proofFrame);
+  restoreCapture?.();
   if (channel?.readyState === 'open' && started) channel.send(JSON.stringify({ type: 'session.close', event_id: crypto.randomUUID() }));
   channel?.close();
   peer?.close();
-  remoteSource?.disconnect();
-  if (remotePlayback) { remotePlayback.pause(); remotePlayback.srcObject = null; }
-  bridge?.disconnect();
+  room?.off(RoomEvent.TrackSubscribed, attachIncoming);
+  room?.off(RoomEvent.TrackUnsubscribed, detachIncoming);
+  monitor?.disconnect();
+  for (const entry of incoming.values()) entry.source.disconnect();
+  incoming.clear();
+  inputGate?.disconnect();
+  outputSource?.disconnect();
+  outputAnalyser?.disconnect();
   renderSink?.disconnect();
-  if (bridge) bridge.port.close();
+  if (gptPlayback) { gptPlayback.pause(); gptPlayback.srcObject = null; }
   for (const track of destination?.stream.getTracks() || []) track.stop();
-  if (audio && audio.state !== 'closed') void audio.close();
+  if (audio && audio.state !== 'closed') void audio.close().catch(error => { status.textContent = 'Audio cleanup error: ' + String(error); });
   socket?.close();
-  outgoing.length = pendingEvents.length = 0;
+  pendingEvents.length = pendingBytes = 0;
   status.textContent = 'Closed';
 }
 function fail(error) {
@@ -132,6 +52,7 @@ function fail(error) {
   const message = String(error?.message || error);
   send({ type: 'error', error: message });
   close();
+  diagnostics.phase = 'failed';
   status.textContent = 'Error: ' + message;
 }
 function ensureOpen() {
@@ -139,29 +60,85 @@ function ensureOpen() {
 }
 function sendLive(event) {
   const payload = JSON.stringify(event);
-  if (started && channel?.readyState === 'open') channel.send(payload);
+  if (started && (takenOver || preflight) && channel?.readyState === 'open') channel.send(payload);
   else {
     if (pendingEvents.length >= 64 || pendingBytes + payload.length > 128 * 1024) throw new Error('Live event queue overflow');
     pendingEvents.push(payload);
     pendingBytes += payload.length;
   }
 }
-function gatherIce() {
-  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+function flushLive() {
+  for (const payload of pendingEvents.splice(0)) channel.send(payload);
+  pendingBytes = 0;
+}
+function announceReady() {
+  if (closed || ready || !started || !gptStream) return;
+  ready = true;
+  clearTimeout(startupTimer);
+  diagnostics.phase = 'voice-ready';
+  send({ type: 'ready' });
+  status.textContent = 'Voice ready; waiting for telephone';
+}
+function observeOutput() {
+  if (closed) return;
+  const samples = new Float32Array(outputAnalyser.fftSize);
+  outputAnalyser.getFloatTimeDomainData(samples);
+  const peak = samples.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0);
+  diagnostics.outputPeak = peak;
+  if ((preflight || takenOver) && peak > 0.01) {
+    send({ type: 'audio-proof', bytes: samples.byteLength });
+    return;
+  }
+  proofFrame = requestAnimationFrame(observeOutput);
+}
+async function request(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body), signal: abort.signal,
+  });
+  ensureOpen();
+  if (!response.ok) throw new Error(path + ' failed (' + response.status + ')');
+  return response;
+}
+function validateGrant(value) {
+  if (!value || typeof value.callId !== 'string' || !value.callId || typeof value.accessToken !== 'string' || !value.accessToken || typeof value.participantId !== 'string' || !value.participantId || value.transport !== 'livekit' || typeof value.url !== 'string') throw new Error('Invalid Retell monitor grant');
+  const url = new URL(value.url);
+  if (url.protocol !== 'wss:') throw new Error('Retell transport must be secure WebRTC signaling');
+  if (value.iceServers !== undefined && !Array.isArray(value.iceServers)) throw new Error('Invalid Retell ICE servers');
+  return value;
+}
+function attachIncoming(track, publication) {
+  if (closed || track.kind !== Track.Kind.Audio || publication.trackName === 'agent_audio' || incoming.has(track.sid)) return;
+  if (!track.mediaStreamTrack || track.mediaStreamTrack.readyState !== 'live') { fail(new Error('Retell incoming track is not live')); return; }
+  track.setVolume(0);
+  const source = audio.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
+  source.connect(inputGate);
+  incoming.set(track.sid, { source });
+}
+function detachIncoming(track) {
+  const entry = incoming.get(track.sid);
+  if (!entry) return;
+  entry.source.disconnect();
+  incoming.delete(track.sid);
+}
+function waitFor(predicate, target, event, message) {
+  if (predicate()) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer);
-      peer.removeEventListener('icegatheringstatechange', changed);
+      if (target?.removeEventListener) target.removeEventListener(event, changed);
+      else target?.off(event, changed);
       abort.signal.removeEventListener('abort', cancelled);
     };
-    const changed = () => {
-      if (peer.iceGatheringState === 'complete') { cleanup(); resolve(); }
-    };
-    const cancelled = () => { cleanup(); reject(new Error('ICE gathering cancelled')); };
-    const timer = setTimeout(() => { cleanup(); reject(new Error('ICE gathering timed out')); }, 10000);
-    peer.addEventListener('icegatheringstatechange', changed);
+    const changed = () => { if (predicate()) { cleanup(); resolve(); } };
+    const cancelled = () => { cleanup(); reject(new Error(message + ' cancelled')); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error(message + ' timed out')); }, 10000);
+    if (target?.addEventListener) target.addEventListener(event, changed);
+    else target?.on(event, changed);
     abort.signal.addEventListener('abort', cancelled, { once: true });
-    changed();
+    if (abort.signal.aborted) cancelled();
+    else changed();
   });
 }
 async function connectLive() {
@@ -172,19 +149,21 @@ async function connectLive() {
   }
   peer.ontrack = ({ track }) => {
     if (closed || track.kind !== 'audio') return;
-    remoteSource?.disconnect();
+    if (gptStream) { fail(new Error('GPT Live returned multiple audio tracks')); return; }
     diagnostics.remoteTrack = track.readyState;
-    const stream = new MediaStream([track]);
-    if (remotePlayback) { remotePlayback.pause(); remotePlayback.srcObject = null; }
-    // Chromium does not feed a WebRTC MediaStreamAudioSourceNode until an HTMLMediaElement plays the stream.
-    remotePlayback = new Audio();
-    remotePlayback.volume = 0;
-    remotePlayback.srcObject = stream;
-    void remotePlayback.play().catch(fail);
-    remoteSource = audio.createMediaStreamSource(stream);
-    // This input is captured only; the worklet's output contains telephone PCM, never remote audio.
-    remoteSource.connect(bridge);
+    gptStream = new MediaStream([track]);
+    // Chromium needs a playing media element to pull WebRTC receive audio. It is never audible locally.
+    gptPlayback = new Audio();
+    gptPlayback.volume = 0;
+    gptPlayback.srcObject = gptStream;
+    void gptPlayback.play().catch(fail);
+    outputSource = audio.createMediaStreamSource(gptStream);
+    outputAnalyser = audio.createAnalyser();
+    outputSource.connect(outputAnalyser);
+    outputAnalyser.connect(renderSink);
+    proofFrame = requestAnimationFrame(observeOutput);
     track.onended = () => fail(new Error('GPT Live audio track ended'));
+    announceReady();
   };
   peer.onconnectionstatechange = () => {
     if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) fail(new Error('GPT Live WebRTC ' + peer.connectionState));
@@ -197,96 +176,133 @@ async function connectLive() {
       const event = JSON.parse(data);
       if (!event || typeof event.type !== 'string') throw new Error('Invalid GPT Live event');
       send({ type: 'live-event', event });
-      if (event.type === 'session.started' && !started) {
-        started = true;
-        clearTimeout(startupTimer);
-        outgoing.length = 0;
-        for (const payload of pendingEvents.splice(0)) channel.send(payload);
-        pendingBytes = 0;
-        send({ type: 'ready' });
-        status.textContent = 'Ready';
-      } else if (event.type === 'error') {
-        fail(new Error(event.error?.message || 'GPT Live protocol error'));
-      } else if (event.type === 'session.closed') close();
+      if (event.type === 'session.started') { started = true; announceReady(); }
+      else if (event.type === 'error') fail(new Error(event.error?.message || 'GPT Live protocol error'));
+      else if (event.type === 'session.closed') close();
     } catch (error) { fail(error); }
   };
   await peer.setLocalDescription(await peer.createOffer());
   ensureOpen();
-  await gatherIce();
-  ensureOpen();
-  const response = await fetch('/media/offer', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sdp: peer.localDescription.sdp }),
-    signal: abort.signal,
-  });
-  if (!response.ok) throw new Error('GPT Live offer failed (' + response.status + ')');
+  await waitFor(() => peer.iceGatheringState === 'complete', peer, 'icegatheringstatechange', 'GPT Live ICE gathering');
+  const response = await request('/media/offer', { sdp: peer.localDescription.sdp });
   const connection = await response.json();
   ensureOpen();
   if (!connection.session?.id || !connection.transport?.sdp) throw new Error('GPT Live offer returned no session or SDP');
   await peer.setRemoteDescription({ type: 'answer', sdp: connection.transport.sdp });
+  await waitFor(() => gptStream?.getAudioTracks()[0]?.readyState === 'live', peer, 'track', 'GPT Live remote audio');
+}
+async function sdkFetch(input, options) {
+  ensureOpen();
+  const path = new URL(String(input)).pathname;
+  if (options?.method !== 'POST') throw new Error('Unsupported Retell control method');
+  if (path === '/v2/listen-live-call/' + encodeURIComponent(grant.callId)) {
+    return Response.json({ access_token: grant.accessToken, participant_id: grant.participantId, url: grant.url, transport: grant.transport, ice_servers: grant.iceServers });
+  }
+  if (path === '/v2/take-over-live-call/' + encodeURIComponent(grant.callId)) {
+    const body = JSON.parse(options.body);
+    if (body.participant_id !== grant.participantId || Object.keys(body).length !== 1) throw new Error('Retell takeover participant mismatch');
+    return request('/media/takeover', { callId: grant.callId, participantId: grant.participantId });
+  }
+  throw new Error('Unsupported Retell control route');
+}
+async function takeOver() {
+  const devices = navigator.mediaDevices;
+  if (!devices || typeof devices.getUserMedia !== 'function') throw new Error('WebRTC capture API unavailable');
+  const descriptor = Object.getOwnPropertyDescriptor(devices, 'getUserMedia');
+  const capture = async constraints => {
+    ensureOpen();
+    if (!constraints?.audio || constraints.video) throw new Error('Unexpected capture request during Retell takeover');
+    const track = gptStream?.getAudioTracks()[0];
+    if (track?.readyState !== 'live') throw new Error('GPT Live output is not available for Retell takeover');
+    diagnostics.captureRequests++;
+    return new MediaStream([track.clone()]);
+  };
+  // SDK 3.0.2 has no custom capture input. Both its disposable probe and published mic get independent GPT track clones.
+  Object.defineProperty(devices, 'getUserMedia', { configurable: true, writable: true, value: capture });
+  restoreCapture = () => {
+    if (devices.getUserMedia !== capture) return;
+    if (descriptor) Object.defineProperty(devices, 'getUserMedia', descriptor);
+    else delete devices.getUserMedia;
+    restoreCapture = undefined;
+  };
+  try { await monitor.takeOver(); }
+  finally { restoreCapture?.(); }
+  ensureOpen();
+  if (monitor.status !== 'taken_over') throw new Error('Retell takeover did not publish audio');
+  takenOver = true;
+  inputGate.gain.value = 1;
+  diagnostics.phase = 'taken_over';
+  clearTimeout(startupTimer);
+  send({ type: 'transport-ready', callId: grant.callId, participantId: grant.participantId });
+  flushLive();
+  status.textContent = 'Connected';
+}
+async function connectTransport(callId) {
+  if (!ready || preflight || transportCallId) throw new Error('Telephone transport is not available in this state');
+  transportCallId = callId;
+  startupTimer = setTimeout(() => fail(new Error('Retell takeover startup timed out')), 20000);
+  grant = validateGrant(await (await request('/media/transport', {})).json());
+  ensureOpen();
+  if (grant.callId !== callId) throw new Error('Retell call identity mismatch');
+  const client = new RetellClient({ key: token, baseURL: location.origin, fetch: sdkFetch });
+  monitor = client.monitorCall({ call_id: grant.callId, transcript: false, hooks: { onError: fail, onEnd: close } });
+  await monitor.ready;
+  await monitor.listen();
+  ensureOpen();
+  // Pinned SDK 3.0.2 does not expose incoming tracks. The same LiveKit room owns subscriptions and teardown.
+  room = monitor.transport?.room;
+  if (!room?.remoteParticipants || typeof room.on !== 'function') throw new Error('Retell SDK LiveKit room unavailable');
+  room.on(RoomEvent.TrackSubscribed, attachIncoming);
+  room.on(RoomEvent.TrackUnsubscribed, detachIncoming);
+  for (const participant of room.remoteParticipants.values()) {
+    for (const publication of participant.trackPublications.values()) if (publication.track) attachIncoming(publication.track, publication);
+  }
+  diagnostics.phase = 'listening';
+  await waitFor(() => incoming.size > 0, room, RoomEvent.TrackSubscribed, 'Retell caller audio');
+  await takeOver();
 }
 async function start() {
   if (!token) throw new Error('Missing telephone media token');
-  startupTimer = setTimeout(() => fail(new Error('GPT Live session startup timed out')), 30000);
+  startupTimer = setTimeout(() => fail(new Error('Telephone WebRTC startup timed out')), 40000);
   audio = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
-  const workletUrl = URL.createObjectURL(new Blob([document.getElementById('telephone-worklet').textContent], { type: 'text/javascript' }));
-  try { await audio.audioWorklet.addModule(workletUrl); } finally { URL.revokeObjectURL(workletUrl); }
-  ensureOpen();
-  bridge = new AudioWorkletNode(audio, 'telephone-audio', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
-  bridge.onprocessorerror = () => fail(new Error('Telephone audio worklet failed'));
   destination = audio.createMediaStreamDestination();
-  bridge.connect(destination);
-  // Chromium's realtime rendering must be driven by an AudioDestinationNode, even headlessly.
+  inputGate = audio.createGain();
+  inputGate.gain.value = 0;
+  inputGate.connect(destination);
   renderSink = audio.createGain();
   renderSink.gain.value = 0;
-  bridge.connect(renderSink);
+  inputGate.connect(renderSink);
   renderSink.connect(audio.destination);
-  bridge.port.onmessage = ({ data }) => {
-    diagnostics.packetsCaptured++;
-    const samples = new DataView(data.pcm);
-    for (let i = 0; i < samples.byteLength; i += 2) diagnostics.peak = Math.max(diagnostics.peak, Math.abs(samples.getInt16(i, true)));
-    if (closed || !started || audio.currentTime - data.time > 0.1) return;
-    if (outgoing.length === 5) outgoing.shift();
-    outgoing.push(data);
-  };
   await audio.resume();
   ensureOpen();
   if (audio.state !== 'running') throw new Error('Chromium must permit autoplay for telephone media');
-  audio.onstatechange = () => { if (audio.state === 'suspended') fail(new Error('Telephone AudioContext suspended')); };
+  audio.onstatechange = () => { if (!closed && audio.state === 'suspended') fail(new Error('Telephone AudioContext suspended')); };
   const url = new URL('/browser-media', location.href);
   url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   socket = new WebSocket(url);
-  socket.binaryType = 'arraybuffer';
-  socket.onopen = () => {
-    send({ type: 'authenticate', token });
-    void connectLive().catch(fail);
-  };
+  socket.onopen = () => { send({ type: 'authenticate', token }); void connectLive().catch(fail); };
   socket.onmessage = ({ data }) => {
     try {
-      if (data instanceof ArrayBuffer) {
-        if (data.byteLength !== 640) throw new Error('Telephone PCM packet must contain 320 signed 16-bit samples');
-        bridge.port.postMessage(data, [data]);
-        return;
-      }
+      if (typeof data !== 'string') throw new Error('Binary telephone media is not supported');
       const message = JSON.parse(data);
       if (message.type === 'context' && typeof message.text === 'string') {
         sendLive({ type: 'session.commentary.append', event_id: crypto.randomUUID(), delegation_id: null, content: message.text });
       } else if (message.type === 'live-event' && typeof message.event?.type === 'string') sendLive(message.event);
+      else if (message.type === 'transport' && typeof message.callId === 'string' && message.callId) void connectTransport(message.callId).catch(fail);
+      else if (message.type === 'preflight' && typeof message.text === 'string' && message.text.trim()) {
+        if (!ready || preflight || transportCallId) throw new Error('Audio preflight is not available in this state');
+        preflight = true;
+        diagnostics.phase = 'preflight';
+        flushLive();
+        sendLive({ type: 'session.commentary.append', event_id: crypto.randomUUID(), delegation_id: null, content: message.text });
+      }
       else if (message.type === 'close') close();
       else if (message.type === 'error') fail(new Error(String(message.error || 'Telephone service error')));
+      else throw new Error('Unsupported telephone control message');
     } catch (error) { fail(error); }
   };
   socket.onerror = () => fail(new Error('Telephone media websocket failed'));
   socket.onclose = () => { if (!closed) fail(new Error('Telephone media websocket closed')); };
-  outputTimer = setInterval(() => {
-    while (outgoing.length && audio.currentTime - outgoing[0].time > 0.1) outgoing.shift();
-    const packet = outgoing.shift();
-    if (!packet || socket.readyState !== WebSocket.OPEN) return;
-    if (socket.bufferedAmount > 640 * 5) { fail(new Error('Telephone media websocket audio backpressure')); return; }
-    socket.send(packet.pcm);
-    diagnostics.packetsSent++;
-  }, 20);
 }
 window.addEventListener('pagehide', close);
 void start().catch(fail);

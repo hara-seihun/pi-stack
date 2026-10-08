@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootDebugConfig, rootDebugResponse } from "./root-debug";
 import { ROOT_ADMIN_HEADER, isMachineAdministrator, rootAdminAdmission, rootReplyResponse } from "../../../packages/kenan-root/src/visibility";
-import { displayContextDocument } from "./context-display";
+import { displayContextMessage } from "./context-display";
 import { deriveTranscriptItems } from "./transcript-items";
 
 const root = mkdtempSync(join(tmpdir(), "root-debug-"));
@@ -88,7 +88,7 @@ describe("root is a private owner, not a hidden trace in a person's thread", () 
       { role: "assistant", content: [{ type: "thinking", thinking: "OWN_THINK" }, { type: "toolCall", name: "ask_kenan", id: "call", arguments: { request: "ASK_REQUEST" } }] },
       { role: "toolResult", toolCallId: "call", content: [{ type: "text", text: "Chosen reply" }] },
     ] };
-    const display = displayContextDocument(JSON.stringify(context));
+    const display = JSON.stringify({ ...context, messages: context.messages.map(message => displayContextMessage(message)) });
     for (const text of ["OWN_SYSTEM", "DELEGATED_PROMPT", "OWN_THINK", "ASK_REQUEST", "Chosen reply"]) expect(display).toContain(text);
     const items = deriveTranscriptItems(JSON.parse(display));
     expect(items.some(item => item.head.kind === "thinking")).toBe(true);

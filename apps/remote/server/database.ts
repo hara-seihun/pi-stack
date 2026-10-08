@@ -1,14 +1,22 @@
 import type { Database } from "bun:sqlite";
 import type { ThreadColor } from "./protocol";
 
-export function ensureContextSourceSchema(db: Database): void {
-  db.exec("CREATE TABLE IF NOT EXISTS captured_context_unavailable (session_id TEXT PRIMARY KEY,reason TEXT NOT NULL)");
+export function nativeHistorySchemaReady(db: Database): { ok: true } | { ok: false; error: { code: "migration_required"; message: string } } {
+  const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map(row => row.name));
+  const captured = ["session_contexts", "session_context_patches", "captured_context_unavailable", "captured_context_usage", "captured_transcript_generations"];
+  const oldThinking = tables.has("message_facts") && (db.query("PRAGMA table_info(message_facts)").all() as Array<{ name: string }>).some(column => column.name === "thinking");
+  const migrated = tables.has("metadata") && (db.query("SELECT value FROM metadata WHERE key='native_history_contract'").get() as { value: string } | null)?.value === "native-history-v1";
+  const oldEvents = !migrated && tables.has("events") && Boolean(db.query("SELECT 1 FROM events WHERE type='thinking' LIMIT 1").get());
+  return captured.some(name => tables.has(name)) || oldThinking || oldEvents
+    ? { ok: false, error: { code: "migration_required", message: "Native history maintenance is required before startup. Stop and drain this owner's writers, then run scripts/migrate-native-history.mjs with explicit supervisor/thread databases and private output directory; see docs/native-history-migration.md." } }
+    : { ok: true };
 }
 
 /** Remote stores presentation and attachments. ThreadService owns identity and execution. */
 export function ensureSupervisorSchema(db: Database): void {
+  const ready = nativeHistorySchemaReady(db);
+  if (!ready.ok) throw Object.assign(new Error(ready.error.message), { code: ready.error.code });
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;");
-  ensureContextSourceSchema(db);
   db.exec(`
 CREATE TABLE IF NOT EXISTS thread_views (
   id TEXT PRIMARY KEY,
@@ -44,32 +52,13 @@ CREATE TABLE IF NOT EXISTS message_annotations (
   created_at TEXT,
   meeting_transcript TEXT NOT NULL
 );
--- What the supervisor measured about one finished assistant message: the
--- thinking it streamed and how fast the response arrived. Both join to the
--- message they finalize, which is how the transcript puts them back.
+-- Response timing joins the exact finalized native message.
 CREATE TABLE IF NOT EXISTS message_facts (
   session_id TEXT NOT NULL REFERENCES thread_views(id) ON DELETE CASCADE,
   finalizes_message TEXT NOT NULL,
-  thinking TEXT,
   metrics TEXT,
   PRIMARY KEY (session_id, finalizes_message)
 );
-CREATE TABLE IF NOT EXISTS session_contexts (
-  session_id TEXT PRIMARY KEY REFERENCES thread_views(id) ON DELETE CASCADE,
-  captured_at INTEGER NOT NULL,
-  context TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS session_context_patches (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL REFERENCES thread_views(id) ON DELETE CASCADE,
-  captured_at INTEGER NOT NULL,
-  base_hash TEXT NOT NULL,
-  target_hash TEXT NOT NULL,
-  prefix_bytes INTEGER NOT NULL,
-  delete_bytes INTEGER NOT NULL,
-  insert_base64 TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS session_context_patches_session_seq ON session_context_patches(session_id, seq);
 CREATE TABLE IF NOT EXISTS thread_creation_names (
   request_id TEXT PRIMARY KEY,
   title TEXT NOT NULL
@@ -149,14 +138,13 @@ function retireEventJournal(db: Database): void {
   const done = db.query("SELECT value FROM metadata WHERE key='events_retired'").get() as { value: string } | null;
   if (!present || done) return;
   db.transaction(() => {
-    db.exec(`INSERT OR REPLACE INTO message_facts(session_id,finalizes_message,thinking,metrics)
+    db.exec(`INSERT OR REPLACE INTO message_facts(session_id,finalizes_message,metrics)
       SELECT session_id, json_extract(payload,'$.finalizesMessage') AS finalized,
-        MAX(CASE WHEN type='thinking' THEN json_extract(payload,'$.text') END),
-        MAX(CASE WHEN type='metrics' THEN json_extract(payload,'$.metrics') END)
+        MAX(json_extract(payload,'$.metrics'))
       FROM events
-      WHERE type IN ('thinking','metrics') AND json_extract(payload,'$.finalizesMessage') IS NOT NULL
+      WHERE type='metrics' AND json_extract(payload,'$.finalizesMessage') IS NOT NULL
       GROUP BY session_id, finalized`);
-    db.exec("DELETE FROM message_facts WHERE thinking IS NULL AND metrics IS NULL");
+    db.exec("DELETE FROM message_facts WHERE metrics IS NULL");
     db.exec(`CREATE TEMP TABLE work_origin AS
       SELECT json_extract(payload,'$.workId') AS work_id, session_id, MIN(time) AS time FROM events
       WHERE type='user' AND json_extract(payload,'$.workId') IS NOT NULL GROUP BY work_id`);

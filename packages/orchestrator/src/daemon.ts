@@ -346,6 +346,7 @@ export class Daemon {
   }
   private threadEnvironment(thread:Thread):Record<string,string|undefined>{
     const shared={HOME:process.env.HOME??homedir(),PI_CODING_AGENT_DIR:this.config.agentDir,PI_ORCHESTRATOR_LEDGER:this.ledgerPath,
+      PI_PERSON_TIMEZONE_FILE:process.env.PI_PERSON_TIMEZONE_FILE,
       PI_BASH_TIMEOUT_MAX_SECONDS:"55",PI_ORCHESTRATOR_EXECUTION:String(thread.metadata?.execution??"user"),
       PI_THREAD_API_URL:`http://127.0.0.1:${this.port}/v1/threads`,PI_THREAD_ADMISSION:thread.admission};
     return this.config.modelBrokerUrl?{...shared,PI_MODEL_BROKER_URL:this.config.modelBrokerUrl,PI_ORCHESTRATOR_ASSIGNED:"0"}
@@ -459,7 +460,8 @@ export class Daemon {
       }
       if(method==="POST"&&url.pathname==="/v1/accounts"){
         const input=await body(req);
-        this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true,concurrency:Number(input.concurrency??this.config.defaultAccountConcurrency)});
+        if(Object.keys(input).some(key=>!["id","provider","label"].includes(key)))return json(res,400,{error:"account import accepts only id, provider and label"});
+        this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true});
         return json(res,201,{ok:true});
       }
       // Suspending an account keeps its credential and its usage history: a
@@ -514,7 +516,11 @@ export class Daemon {
         }
         return json(res,201,{threads});
       }
-      if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
+      if(method==="POST"&&url.pathname==="/v1/control"){
+        const input=await body(req);
+        if(!["launches","ordinary-launches"].includes(input.key)||!["paused","enabled"].includes(input.value))return json(res,400,{error:"control requires launches or ordinary-launches and paused or enabled"});
+        this.store.setControl(input.key,input.value);return json(res,200,{ok:true});
+      }
       json(res,404,{error:"not found"});
     }catch(error){json(res,500,{error:String(error)});}
   }

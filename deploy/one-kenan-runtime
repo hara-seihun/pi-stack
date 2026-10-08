@@ -71,7 +71,12 @@ def launch(role,config,pid,environment):
     source=os.path.realpath(source)
     if environment.get('PI_KENAN_ROOM_AUDIENCE_MODULE'):
         environment['PI_KENAN_ROOM_AUDIENCE_MODULE']=os.path.realpath(environment['PI_KENAN_ROOM_AUDIENCE_MODULE'])
-    os.initgroups(user.pw_name,user.pw_gid); os.setgid(user.pw_gid); os.setuid(user.pw_uid)
+    os.initgroups(user.pw_name,user.pw_gid)
+    if role == 'memory' and config.get('memoryTimezoneGroup'):
+        import grp
+        if config['memoryTimezoneGroup'] != 'pi-timezones-readers': raise RuntimeError('Unknown timezone service-reader grant')
+        os.setgroups(sorted(set(os.getgroups()) | {grp.getgrnam(config['memoryTimezoneGroup']).gr_gid}))
+    os.setgid(user.pw_gid); os.setuid(user.pw_uid)
     if os.getuid()==0 or os.geteuid()==0: raise RuntimeError('Runtime privilege drop failed')
     environment.update(USER=user.pw_name,LOGNAME=user.pw_name)
     os.execve(bun,[bun,source,*(['drain','--all'] if role=='journal' else [])],environment)

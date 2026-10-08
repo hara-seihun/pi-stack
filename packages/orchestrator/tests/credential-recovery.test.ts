@@ -47,7 +47,7 @@ test.each(["definitive", "network", "unchanged"] as const)("failed repair exclud
   const store = Store.open(":memory:"); stores.push(store); store.upsertAccount({ id: alias, provider: "openai-codex" });
   const config = { ...loadConfig(), authPath: f.path };
   expect(eligibleInteractiveAccounts(store, auth, "openai-codex")).toHaveLength(0);
-  expect(accountCapacity(store, alias, "live", config).sessions).toBe(0);
+  expect(accountCapacity(store, alias, "live", config).state).toBe("unavailable");
   expect(assignCompletion(store, "blocked-completion", "luna", config).refusals).toContainEqual(expect.objectContaining({ accountId: alias, reason: expect.stringMatching(/shared OAuth credential/) }));
   f.advance();
   f.refresh.mockResolvedValue({ ...f.credential, access: "recovered", refresh: "new" });

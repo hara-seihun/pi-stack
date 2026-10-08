@@ -26,9 +26,10 @@ function fixture(resources) {
     mkdirSync(dirname(join(repo, file)), { recursive: true });
     cpSync(join(root, file), join(repo, file));
   }
-  put(join(bin, "npm"), '#!/bin/sh\nif [ "$3" = --workspace=kenan-root ]; then mkdir -p packages/kenan-root/dist; printf "export {};\\n" > packages/kenan-root/dist/main.js; else mkdir -p apps/remote/web/dist; cp "$BUILD_ASSETS"/* apps/remote/web/dist/; fi\n', 0o755);
+  put(join(bin, "npm"), '#!/bin/sh\nif [ "$3" = --workspace=kenan-root ]; then mkdir -p packages/kenan-root/dist; printf "export {};\\n" > packages/kenan-root/dist/main.js; else mkdir -p apps/remote/web/dist apps/remote/server/phone/dist; cp "$BUILD_ASSETS"/* apps/remote/web/dist/; cp "$BUILD_PHONE_SDK" apps/remote/server/phone/dist/retell-sdk.js; fi\n', 0o755);
   put(join(repo, "apps/remote/package.json"), JSON.stringify({type: "module", dependencies: {"pi-orchestrator": "1.0.0", "playwright-core": "1.0.0"}}));
   cpSync(join(repo, "apps/remote/web/dist"), join(dir, "build-assets"), { recursive: true });
+  put(join(dir, "build-phone-sdk.js"), "export {};\n");
   for (const entrypoint of remoteEntrypoints) {
     const source = entrypoint.startsWith("server/") ? join(repo, "apps/remote", entrypoint) : join(repo, "packages", entrypoint);
     put(source, "export {};");
@@ -43,7 +44,6 @@ function fixture(resources) {
 
   put(join(orchestrator, "package.json"), JSON.stringify({name: "pi-orchestrator", exports: {"./api": "./src/api.ts"}}));
   put(join(orchestrator, "src/api.ts"), "export const ok = true;");
-  put(join(orchestrator, "src/boost.ts"), "export {};");
   put(join(dependencies, "playwright-core/package.json"), JSON.stringify({name: "playwright-core", main: "index.js"}));
   // An optional dependency must not be eagerly bundled or executed by the check.
   put(join(dependencies, "playwright-core/index.js"), 'exports.chromium = true; if (false) require("optional-electron");');
@@ -54,7 +54,7 @@ function fixture(resources) {
   const commit = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], {encoding: "utf8"}).trim();
   put(join(orchestrator, ".pi-stack-commit"), commit + "\n");
   const run = () => spawnSync("bash", [join(repo, "deploy/remote")], {encoding: "utf8", env: {
-    ...process.env, PATH: `${bin}:${process.env.PATH}`, BUILD_ASSETS: join(dir, "build-assets"), PI_STACK_DEPLOY_NO_SUDO: "1",
+    ...process.env, PATH: `${bin}:${process.env.PATH}`, BUILD_ASSETS: join(dir, "build-assets"), BUILD_PHONE_SDK: join(dir, "build-phone-sdk.js"), PI_STACK_DEPLOY_NO_SUDO: "1",
     PI_STACK_HOST_LOCK_PATH: join(dir, "host.lock"),
     PI_STACK_ALLOW_DIRTY: "1", PI_STACK_REMOTE_DEST: dest, PI_STACK_ORCHESTRATOR_DEST: orchestrator,
   }});
@@ -106,7 +106,7 @@ test("Remote rejects an incomplete release even on unchanged redeploy", () => {
 
 test("one new owner declaration extends fixture construction, staging and unchanged-release rejection", () => {
   const resource = {
-    source: "apps/remote/server/file-edit.py", destination: "server/additional-editor.py", kind: "file",
+    source: "apps/remote/server/pi-editor-launch", destination: "server/additional-launcher", kind: "file",
   };
   const f = fixture([...remoteResources, resource]);
   try {
@@ -116,7 +116,7 @@ test("one new owner declaration extends fixture construction, staging and unchan
     rmSync(join(f.dest, resource.destination));
     const incomplete = f.run();
     assert.notEqual(incomplete.status, 0);
-    assert.match(incomplete.stderr, /Missing Pi Remote release resource: server\/additional-editor.py/);
+    assert.match(incomplete.stderr, /Missing Pi Remote release resource: server\/additional-launcher/);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
@@ -132,7 +132,7 @@ test("Remote prefers workspace-local dependencies", () => {
 });
 
 test("Remote rejects missing source and generated resources before publication", () => {
-  for (const source of ["repo/apps/remote/server/file-edit.py", "build-assets/meet-adapter.js"]) {
+  for (const source of ["repo/apps/remote/server/pi-editor-launch", "build-assets/meet-adapter.js"]) {
     const f = fixture(remoteResources);
     try {
       rmSync(join(f.dir, source));

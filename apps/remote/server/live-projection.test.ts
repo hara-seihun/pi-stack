@@ -17,9 +17,21 @@ test("a settled parent remains idle without inheriting its worker's activity", (
 
 test("idle dependency evidence survives owner replacement but holds and archives override waiting", () => {
   const metadata = { agentWait: { kind: "deployment", reason: "Publication", publicationId: "pub-1", since: 1000 } };
-  expect(projectThreadActivity("idle", undefined, undefined, metadata)).toMatchObject({ activity: "awaiting", activitySince: 1000, activityDetail: "Waiting for deployment · Publication" });
+  expect(projectThreadActivity("idle", undefined, undefined, metadata)).toMatchObject({ activity: "awaiting", activitySince: 1000, activityDetail: "Publication" });
   expect(projectThreadActivity("idle", undefined, undefined, metadata, true).activity).toBe("idle");
   expect(projectThreadActivity("idle", undefined, undefined, { ...metadata, archived: true }).activity).toBe("idle");
+});
+
+test("owned unresolved subscriptions share waiting activity; execution, Stop and Close take precedence", () => {
+  const subscriptions = { peerDependencies: ["producer"] };
+  expect(projectThreadActivity("waiting", undefined, undefined, subscriptions)).toMatchObject({
+    activity: "awaiting", activityDetail: "Waiting for agent results", activeTools: [],
+  });
+  expect(projectThreadActivity("idle", undefined, undefined, subscriptions).activity).toBe("idle");
+  const snapshot = { activity: "thinking" as const, activitySince: 10, lastActivityAt: 20, activeTools: [] };
+  expect(projectThreadActivity("running", undefined, snapshot, subscriptions)).toMatchObject(snapshot);
+  expect(projectThreadActivity("waiting", undefined, snapshot, subscriptions, true).activity).toBe("idle");
+  expect(projectThreadActivity("waiting", undefined, snapshot, { ...subscriptions, archived: true }).activity).toBe("idle");
 });
 
 test("launch provenance cannot contribute activity or dependency evidence", () => {
@@ -30,7 +42,7 @@ test("launch provenance cannot contribute activity or dependency evidence", () =
   }
   expect(projectThreadActivity("running", undefined, snapshot, metadata).activity).toBe("thinking");
   const dependency = { agentWait: { kind: "message", fromThreadId: "billing-owner", reason: "Rental custody release", since: 10 } };
-  expect(projectThreadActivity("idle", undefined, undefined, dependency)).toMatchObject({ activity: "awaiting", activityDetail: "Waiting for message · Rental custody release" });
+  expect(projectThreadActivity("idle", undefined, undefined, dependency)).toMatchObject({ activity: "awaiting", activityDetail: "Rental custody release" });
 });
 
 test("local and fleet phase evidence survives reconnect without aging from reads", () => {
@@ -64,15 +76,13 @@ test("known waits carry evidence, suppress recovering startup errors but preserv
   expect(projectThreadActivity("idle", undefined, undefined, { executionError: "actual failure" }).executionError).toBe("actual failure");
 });
 
-test("settlement keeps final output until canonical context acknowledges it", () => {
+test("settlement clears disposable output and tools; native history owns final messages", () => {
   const live = createLiveProjection("thread");
   live.liveText = "Final output";
-  live.pendingContextFinalization = "message-id";
+  live.liveThinking = "Thinking";
   live.activeTools.set("tool", "bash");
   settleLiveProjection(live);
-  expect(live.liveText).toBe("Final output");
-  expect(live.activeTools.size).toBe(0);
-  live.pendingContextFinalization = null;
-  settleLiveProjection(live);
   expect(live.liveText).toBe("");
+  expect(live.liveThinking).toBe("");
+  expect(live.activeTools.size).toBe(0);
 });

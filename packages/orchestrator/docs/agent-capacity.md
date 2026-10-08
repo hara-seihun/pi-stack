@@ -1,6 +1,6 @@
 # Global agent execution capacity
 
-Pi Stack has one durable admission authority and a hard limit of **100 executing agents**, across every host, person, foreground/background placement, application, peer and root agent. Account spending urgency, subscription pacing and native memory/residency limits are separate controls. None grants an execution-slot exemption. Dependency waits and settled warm sessions do not hold slots.
+Pi Stack has one durable admission authority and a hard limit of **100 executing agents**, across every host, person, foreground/background placement, application, peer and root agent. Provider availability, explicit spending controls and native memory/residency limits are separate controls. None grants an execution-slot exemption. Dependency waits and settled warm sessions do not hold slots.
 
 [`agent-capacity.ts`](../src/agent-capacity.ts) supplies the typed client. [`agent-capacity-authority.ts`](../src/agent-capacity-authority.ts) owns the SQLite ledger and HTTP server. The shared native runner continues hosting many sessions in one process; capacity does not create a process per agent.
 
@@ -53,8 +53,8 @@ The client selects the actual Unix UID. `PI_AGENT_CAPACITY_CONFIG` explicitly se
 
 An empty authority starts **uninitialized** and refuses fresh admission. Before accepting its census:
 
-1. Hold dispatch/intake on every old ungated owner, including direct SDK/CLI producers. Existing native work continues under its existing custody; do not kill it to activate capacity.
-2. Capture each configured host's execution receipts inside each person's authorized namespace. Include root, ordinary person, application and standalone execution sources. A paused owner and an idle retained runtime are not automatically absent execution. The scanner counts unfinished durable execution receipts and uncertain retained native custody, not `thread.state='running'`.
+1. Hold dispatch/intake on every old ungated owner and select managed launchers. Existing native work continues under its existing custody; do not kill it to activate capacity.
+2. Capture each configured host's ThreadService execution receipts inside each person's authorized namespace. Include root, ordinary person and application owners. A paused owner and an idle retained runtime are not automatically absent execution. The scanner counts unfinished durable execution receipts and uncertain retained native custody, not `thread.state='running'`.
 3. Merge all host receipts under the same barrier identity. Initialization requires every configured owner/host pair and rejects overlapping agent identities. A census above100 returns an explicit overcapacity error and leaves the authority uninitialized. Retain existing work and recapture after positive natural settlements.
 4. Initialize once, activate shared-gated sources/clients on every owner, then release the old intake barrier. New publication doctors and repair agents acquire ordinary slots too. They cannot use an initialization bypass.
 
@@ -67,13 +67,12 @@ A census plan names exact authorized sources:
   "owners": [{
     "ownerId": "host-a/alice",
     "threadDatabases": ["/home/alice/.pi-remote/threads.sqlite3", "/var/lib/pi-orchestrator/alice/threads.sqlite3"],
-    "standaloneDirectories": ["/home/alice/.local/state/pi-stack-agent-executions"],
-    "standaloneRecords": []
+    "threadDatabaseDirectories": ["/home/alice/private/root-sessions"]
   }]
 }
 ```
 
-Named missing/unreadable sources are errors, not empty censuses. Empty arrays explicitly describe known inactive sources. Standalone directories are scanned for the direct guard's `capacity.json` records; settled-but-unacknowledged releases remain conservatively counted. Old native control versions without per-agent status remain uncertain when any session is active. Do not infer a stopped tool tree from a process ID alone.
+Named missing/unreadable sources are errors, not empty censuses. Empty arrays explicitly describe known inactive sources. `threadDatabaseDirectories` recursively discovers exact `threads.sqlite3` filenames without following symbolic links. Root's private per-request owner database is `config.sessionsDir/<request-uuid>/threads.sqlite3`; inventory its configured session root in its authorized mount namespace. Files with other names, including native JSONL traces, are never read. Explicit paths and discovered databases are deduplicated. ThreadService's settled-but-unacknowledged capacity releases remain conservatively counted. Old native control versions without per-agent status remain uncertain when any session is active. Do not infer a stopped tool tree from a process ID alone. Tool-free inference creates no agent execution and contributes no census entry.
 
 ```
 pi-agent-capacity census HOST_A_PLAN > HOST_A_CENSUS

@@ -6,8 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { findCheckpoint } from "./native.mjs";
-import { randomUUID } from "node:crypto";
-import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, standaloneRecordPath } from "../../standalone-agent.mjs";
+import { createManagedAgentSession } from "../../managed-agent.mjs";
 
 const { values } = parseArgs({ options: { "history-file": { type: "string" }, "continuation-file": { type: "string" }, "routing-entry": { type: "string" }, "switch-account": { type: "boolean", default: false } } });
 for (const key of ["history-file", "continuation-file", "routing-entry"]) if (!values[key]) throw new Error(`Required: --${key}`);
@@ -17,9 +16,7 @@ if (!history.trim() || !continuation.trim()) throw new Error("Smoke input files 
 for (const key of Object.keys(process.env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_ORCHESTRATOR_RUN_ID$|^PI_SUBAGENT_MODEL$|^PI_PROVIDER$|^PI_MODEL$|^PI_REASONING_LEVEL$/u.test(key)) delete process.env[key];
 process.env.PI_ORCHESTRATOR_ASSIGNED = "0";
 const root = await mkdtemp(join(tmpdir(), "pi-codex-compaction-smoke-"));
-let session, deadline;
-const executionId = randomUUID();
-const capacity = await requireStandaloneAgent({ recordPath: standaloneRecordPath(), agentId: `compaction-smoke:${executionId}`, executionId });
+let session, managed, deadline;
 try {
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 2048 } });
   const modelRuntime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: join(root, "models.json") });
@@ -27,7 +24,8 @@ try {
   await resourceLoader.reload();
   assert.deepEqual(resourceLoader.getExtensions().errors, []);
   const sessionManager = SessionManager.create(root, join(root, "sessions"));
-  ({ session } = await createAgentSession({ cwd: root, agentDir: root, modelRuntime, settingsManager, resourceLoader, sessionManager, model: modelRuntime.getModel("openai-codex", "gpt-5.6-luna"), thinkingLevel: "minimal", tools: [] }));
+  managed = await createManagedAgentSession(() => createAgentSession({ cwd: root, agentDir: root, modelRuntime, settingsManager, resourceLoader, sessionManager, model: modelRuntime.getModel("openai-codex", "gpt-5.6-luna"), thinkingLevel: "minimal", tools: [] }), { cwd: root });
+  ({ session } = managed);
   const errors = [];
   await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
   assert.deepEqual(errors, []);
@@ -63,7 +61,7 @@ try {
   clearTimeout(deadline);
   if (session) {
     await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-    await abortAndSettleStandaloneSession(session, capacity);
-  } else await settleStandaloneAgent(capacity);
+  }
+  if (managed) await managed.close();
   await rm(root, { recursive: true, force: true });
 }

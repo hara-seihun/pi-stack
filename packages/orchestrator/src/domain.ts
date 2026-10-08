@@ -125,8 +125,6 @@ export interface OrchestratorConfig {
   readonly listenHost?: string;
   readonly peers: Readonly<Record<string, PeerHost>>;
   readonly profiles: Readonly<Record<string, readonly ModelCandidate[]>>;
-  readonly backgroundSpendFraction: number;
-  readonly defaultAccountConcurrency: number;
   readonly meterMaxAgeMs: number;
   readonly reconcileIntervalMs: number;
   readonly stallAfterMs: number;

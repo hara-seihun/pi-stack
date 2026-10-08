@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import type { MeetJoined } from "../server/meet/protocol";
-import { MeetRoom } from "./src/meet/room";
+import { ExternalMeetRoom } from "./src/meet/external-room";
 import { meetJson, type MeetRequest } from "./src/meet/transport";
 
 const participant = { id: "host", name: "Mixed meeting audio", host: true };
 const joined: MeetJoined = {
   participant,
-  room: { id: "room", sessionId: "thread", apiUrl: "/v1/meet/room", iceServers: [], participants: [participant],
+  room: { id: "room", sessionId: "thread", apiUrl: "/v1/meet/room", participants: [participant],
     browser: null, threads: [], voiceMuted: true, voiceRevision: 0, voiceWake: null, platformTranscript: false, transcriptFlushRevision: 3 },
 };
 
@@ -15,14 +15,14 @@ test("injected room transport preserves bytes and serves polling without person/
   const jpeg = new Uint8Array([255, 216, 255, 217]);
   const request: MeetRequest = async (path, init) => {
     calls.push({ path, init });
-    if (path.includes("/poll")) return Response.json({ ...joined.room, messages: [] });
+    if (path.includes("/poll")) return Response.json(joined.room);
     if (path.endsWith("/jpeg")) return new Response(jpeg, { headers: { "content-type": "image/jpeg" } });
     return Response.json({ saved: true });
   };
-  const room = new MeetRoom(joined, "must-not-be-an-injected-header", (snapshot) => {
+  const room = new ExternalMeetRoom(joined, (snapshot) => {
     expect(snapshot.transcriptFlushRevision).toBe(3);
-    room.close(false);
-  }, () => {}, () => {}, (message) => { throw new Error(message); }, request);
+    room.close();
+  }, (message) => { throw new Error(message); }, request);
   const pcm = new Int16Array([123, -456]).buffer;
   await room.json(room.path("/transcript/audio"), { method: "POST", headers: { "content-type": "audio/pcm" }, body: pcm });
   expect(calls[0]!.init.body).toBe(pcm);
@@ -31,7 +31,7 @@ test("injected room transport preserves bytes and serves polling without person/
   const frame = await room.request("/jpeg", {});
   expect(new Uint8Array(await frame.arrayBuffer())).toEqual(jpeg);
   await room.poll();
-  expect(calls.at(-1)!.path).toBe("/v1/meet/room/poll?participant=host&after=0");
+  expect(calls.at(-1)!.path).toBe("/v1/meet/room/poll?participant=host");
   expect(calls.some(({ path }) => path.includes("/leave"))).toBe(false);
 });
 

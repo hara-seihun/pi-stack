@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# != 2 ]]; then echo 'usage: apps/kenan/native-ui/render ABSOLUTE_OUTPUT_DIRECTORY EXISTING_CORDOVA_PLUGIN_DIRECTORY' >&2; exit 2; fi
+output=$1
+plugins=$2
+[[ $output = /* && $plugins = /* && -f $plugins/build.gradle && -f $plugins/cordova.variables.gradle ]] || { echo 'Expected absolute output and existing generated Capacitor Cordova plugin directory' >&2; exit 2; }
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+android=$root/apps/kenan/android
+mkdir -p "$output"
+rm -f "$output/manifest.json" "$output/index.html"
+[[ -f $android/local.properties ]] || printf 'sdk.dir=/opt/android-sdk\npiRemoteRouterUrl=http://127.0.0.1:8788\n' > "$android/local.properties"
+[[ -e $android/capacitor-cordova-android-plugins ]] || ln -s "$plugins" "$android/capacitor-cordova-android-plugins"
+cat > "$output/render.init.gradle" <<'GRADLE'
+allprojects {
+    layout.buildDirectory.set(new File(System.getenv('PI_NATIVE_BUILD'), name))
+    tasks.withType(Test).configureEach {
+        maxHeapSize = '512m'
+        maxParallelForks = 1
+        outputs.upToDateWhen { false }
+        systemProperty 'pi.native.catalogue.output', System.getenv('PI_NATIVE_OUTPUT')
+    }
+}
+GRADLE
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+export PI_NATIVE_OUTPUT=$output PI_NATIVE_BUILD=$output/build
+cd "$android"
+./gradlew --offline --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx512m -I "$output/render.init.gradle" --project-cache-dir "$output/project-cache" testDebugUnitTest --tests '*NativeUiCatalogueTest'
+python3 "$root/apps/kenan/native-ui/gallery.py" "$output"

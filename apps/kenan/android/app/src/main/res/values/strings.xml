@@ -2,7 +2,6 @@
 <resources>
     <string name="app_name">Kenan</string>
     <string name="title_activity_main">Kenan</string>
-    <string name="write_accessibility_description">Shows a dictation bubble in editable fields and inserts your finished speech at the cursor. Password, number and phone fields are excluded.</string>
     <string name="phone_control_name">Kenan Phone control</string>
     <string name="phone_accessibility_description">Allows your authenticated Pi Remote session to inspect the screen, tap, swipe, edit non-password fields and capture screenshots. Protected content and authenticated unlock remain unavailable. Disable the connection in Kenan or its ongoing notification.</string>
     <string name="package_name">works.kenan.piremote.kenan</string>

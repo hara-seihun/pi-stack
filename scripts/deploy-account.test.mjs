@@ -103,7 +103,7 @@ test("settings resolves exact npm pins and rejects mismatches without changing t
   try {
     mkdirSync(join(source, "deploy"), { recursive: true });
     for (const script of ["settings", "lib", "release-checkout"]) copyFileSync(join(root, "deploy", script), join(source, "deploy", script));
-    file(join(source, "config/packages.json"), JSON.stringify({ version: 2, contextObserver: "remote", packages: [
+    file(join(source, "config/packages.json"), JSON.stringify({ version: 2, packages: [
       { id: "external", source: `npm:${name}@${version}` },
       { id: "remote", source: "apps/remote", deployed: "/srv/pi/pi-remote" },
     ] }));

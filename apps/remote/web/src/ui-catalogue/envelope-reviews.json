@@ -1,0 +1,258 @@
+[
+  {
+    "caseId": "app-empty",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-app-empty.png",
+    "judgment": "Actually viewed final rendered surface. Empty source is settled, distinct from pending/failure; create/archive guidance and navigation visible."
+  },
+  {
+    "caseId": "app-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-app-loading.png",
+    "judgment": "Actually viewed final rendered surface. Actual root source pending now says Connecting to your chats, not a false empty list; selected environment wait is explained."
+  },
+  {
+    "caseId": "app-failure",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-app-failure.png",
+    "judgment": "Actually viewed final rendered surface. Failed root source shows Chats unavailable, owned reconnecting explanation and Reconnect without pretending empty success."
+  },
+  {
+    "caseId": "app-waiting-close",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-app-waiting-close.png",
+    "judgment": "Actually viewed final rendered surface. Typed waiting parent with active worker renders actual waiting glyph. Close remains available; actual Close removes only parent and keyboard Undo restores it."
+  },
+  {
+    "caseId": "app-close-failure",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-app-close-failure.png",
+    "judgment": "Actually viewed final rendered surface. Actual failed Close retains waiting parent and exposes dismissible failure beside the owning list; controls remain usable."
+  },
+  {
+    "caseId": "app-undo-failure",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-app-undo-failure.png",
+    "judgment": "Actually viewed final rendered surface. Actual Close then Ctrl+Z failure preserves undo history; settled toast explains failure and Retry Undo is visible above navigation."
+  },
+  {
+    "caseId": "error-plain",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-error-plain.png",
+    "judgment": "Actually viewed final rendered surface. Original error wraps and the explicit 44px dismiss target is readable."
+  },
+  {
+    "caseId": "error-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-error-long.png",
+    "judgment": "Actually viewed final rendered surface. Unicode/unbroken content wraps within available width; owning scroll container retains the rest of long content."
+  },
+  {
+    "caseId": "error-pending",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-error-pending.png",
+    "judgment": "Actually viewed final rendered surface. Clicked producer keeps original error, disables duplicate dismiss and visibly explains Dismissing while acknowledgement is pending."
+  },
+  {
+    "caseId": "error-failed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-error-failed.png",
+    "judgment": "Actually viewed final rendered surface. Clicked producer failure appears below the retained original message; fixed grid avoids one-letter original-message collapse."
+  },
+  {
+    "caseId": "error-renewed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-error-renewed.png",
+    "judgment": "Actually viewed final rendered surface. Successful dismissal followed by new occurrence restores original error and usable dismiss action."
+  },
+  {
+    "caseId": "readiness-ready",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-readiness-ready.png",
+    "judgment": "Actually viewed final rendered surface. No readiness line when the owned section load is released; ready label/action are readable."
+  },
+  {
+    "caseId": "readiness-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-readiness-loading.png",
+    "judgment": "Actually viewed final rendered surface. Owned load exposes progress line with explicit loading explanation; release action is visible."
+  },
+  {
+    "caseId": "toast-update",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-toast-update.png",
+    "judgment": "Actually viewed final rendered surface. Actual notice has readable title/description with separate 44px action and dismissal; content is not squeezed beside actions."
+  },
+  {
+    "caseId": "toast-undo-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-toast-undo-error.png",
+    "judgment": "Actually viewed final rendered surface. Recoverable failure is readable, bounded and offers visible retry/dismiss actions."
+  },
+  {
+    "caseId": "toast-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/phone-toast-long.png",
+    "judgment": "Actually viewed final rendered surface. Actual long Unicode notice is viewport-bounded with scrollable content; action and dismiss remain visible rather than clipping beyond the top."
+  },
+  {
+    "caseId": "app-empty",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-app-empty.png",
+    "judgment": "Actually viewed final rendered surface. Empty source is settled, distinct from pending/failure; create/archive guidance and navigation visible."
+  },
+  {
+    "caseId": "app-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-app-loading.png",
+    "judgment": "Actually viewed final rendered surface. Actual root source pending now says Connecting to your chats, not a false empty list; selected environment wait is explained."
+  },
+  {
+    "caseId": "app-failure",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-app-failure.png",
+    "judgment": "Actually viewed final rendered surface. Failed root source shows Chats unavailable, owned reconnecting explanation and Reconnect without pretending empty success."
+  },
+  {
+    "caseId": "app-waiting-close",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-app-waiting-close.png",
+    "judgment": "Actually viewed final rendered surface. Typed waiting parent with active worker renders actual waiting glyph. Close remains available; actual Close removes only parent and keyboard Undo restores it."
+  },
+  {
+    "caseId": "app-close-failure",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-app-close-failure.png",
+    "judgment": "Actually viewed final rendered surface. Actual failed Close retains waiting parent and exposes dismissible failure beside the owning list; controls remain usable."
+  },
+  {
+    "caseId": "app-undo-failure",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-app-undo-failure.png",
+    "judgment": "Actually viewed final rendered surface. Actual Close then Ctrl+Z failure preserves undo history; settled toast explains failure and Retry Undo is visible above navigation."
+  },
+  {
+    "caseId": "error-plain",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-error-plain.png",
+    "judgment": "Actually viewed final rendered surface. Original error wraps and the explicit 44px dismiss target is readable."
+  },
+  {
+    "caseId": "error-long",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-error-long.png",
+    "judgment": "Actually viewed final rendered surface. Unicode/unbroken content wraps within available width; owning scroll container retains the rest of long content."
+  },
+  {
+    "caseId": "error-pending",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-error-pending.png",
+    "judgment": "Actually viewed final rendered surface. Clicked producer keeps original error, disables duplicate dismiss and visibly explains Dismissing while acknowledgement is pending."
+  },
+  {
+    "caseId": "error-failed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-error-failed.png",
+    "judgment": "Actually viewed final rendered surface. Clicked producer failure appears below the retained original message; fixed grid avoids one-letter original-message collapse."
+  },
+  {
+    "caseId": "error-renewed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-error-renewed.png",
+    "judgment": "Actually viewed final rendered surface. Successful dismissal followed by new occurrence restores original error and usable dismiss action."
+  },
+  {
+    "caseId": "readiness-ready",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-readiness-ready.png",
+    "judgment": "Actually viewed final rendered surface. No readiness line when the owned section load is released; ready label/action are readable."
+  },
+  {
+    "caseId": "readiness-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-readiness-loading.png",
+    "judgment": "Actually viewed final rendered surface. Owned load exposes progress line with explicit loading explanation; release action is visible."
+  },
+  {
+    "caseId": "toast-update",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-toast-update.png",
+    "judgment": "Actually viewed final rendered surface. Actual notice has readable title/description with separate 44px action and dismissal; content is not squeezed beside actions."
+  },
+  {
+    "caseId": "toast-undo-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-toast-undo-error.png",
+    "judgment": "Actually viewed final rendered surface. Recoverable failure is readable, bounded and offers visible retry/dismiss actions."
+  },
+  {
+    "caseId": "toast-long",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/tablet-toast-long.png",
+    "judgment": "Actually viewed final rendered surface. Actual long Unicode notice is viewport-bounded with scrollable content; action and dismiss remain visible rather than clipping beyond the top."
+  }
+]

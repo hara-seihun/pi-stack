@@ -27,11 +27,15 @@ export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, Th
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
 export { ThreadService } from "./threads/service.js";
+export { createManagedAgentSession, type NativeSessionOptions, type ManagedSession } from "./threads/native-session.js";
+export { recoverNativeSessionOwners, nativeOwnerAbsent, type NativeOwnerRecord, type NativeOwnerAbsence } from "./threads/native-owner-recovery.js";
 export { validateWaitDependency } from "./threads/contracts.js";
 export type { AgentWait, AgentWaitRequest, WaitDependency, WaitKind, ThreadWakeSchedule, ThreadWakeRequest, ThreadAttentionRequest, ThreadAttentionReceipt, ThreadAttentionEvents } from "./threads/contracts.js";
 export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";
 export { parseRuntimeEvent, requireRuntimeEvent, requireAssistantStopReason, assertNever, RUNTIME_EVENT_TYPES, type RuntimeEvent, type RuntimeEventType } from "./threads/runtime-events.js";
 export { ModelAvailabilityStore, modelAvailabilityPath, modelAvailabilityKey } from "./threads/model-availability.js";
+export { readPersonSettings, readPersonTimezone, writePersonSetting, personSettingsPath, reconcilePersonTimezoneProjection } from "./person-settings.js";
+export type { PersonTimezone, PersonSettings, SettingsResult } from "./person-settings-contract.js";
 export { threadSettingsMetadata } from "./threads/settings-metadata.js";
 export { THREAD_MODES, threadMode, conversationModeSpeed, type ThreadMode, type ThreadModeName } from "./threads/modes.js";
 export { loadThreadModelCatalog, type ThreadModelCatalog, type ThreadModelMetadata } from "./threads/model-catalog.js";
@@ -40,6 +44,8 @@ export { admissionFor, callerResolver, hostIdentityConfig, threadCapability, THR
 export type { CallerResolver, CallerSource, ThreadCaller, ThreadCapability, ThreadCreator } from "./threads/caller.js";
 export { loopbackPeer } from "./threads/caller.js";
 export { openPiSession } from "./threads/pi-session.js";
+export { installMessageDelivery, createMessageDeliveryProjection, deliveryPrefix, MESSAGE_DELIVERY_RECEIPT,
+  type DeliveryResult, type DeliveryError, type DeliveryTimezone, type MessageDeliveryReceipt } from "./threads/message-delivery.js";
 export { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 export { WatchList, watchInterval, watchSettings, DEFAULT_WATCH_INTERVAL_MS, type WatchRequest, type WatchResponse, type WatchItem } from "./threads/watch-list.js";
 export { archivedAcrossOwners } from "./threads/archived.js";
@@ -76,4 +82,3 @@ export {
   type PlanUsage,
   type PlanUsageSnapshot,
 } from "./client.js";
-export { liveDependency, owesResult, waitsOn } from "./threads/dependency-liveness.js";

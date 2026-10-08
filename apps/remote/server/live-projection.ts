@@ -3,7 +3,8 @@ import type { ToolProgress } from "./tool-progress";
 import type { Activity, Session } from "./protocol";
 
 export function threadActivity(state: ThreadState, live?: LiveProjection): Activity {
-  if (state === "idle" || state === "waiting") return "idle";
+  if (state === "idle") return "idle";
+  if (state === "waiting") return "awaiting";
   if (state === "running") return live?.compacting ? "compacting" : live?.retrying ? "retrying"
     : live?.activeTools.size ? "waiting_on_tool" : live?.activity ?? (live?.thinkingActive ? "thinking" : "status_error");
   state satisfies never;
@@ -14,22 +15,26 @@ export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
   snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
   const dependency = metadata?.agentWait as import("pi-orchestrator/api").AgentWait | undefined;
   if ((state === "idle" || state === "waiting") && !held && !metadata?.archived && dependency) {
-    const labels = { agents: "Waiting on agents", job: "Waiting for job", deployment: "Waiting for deployment", message: "Waiting for message" } as const;
     const parsed = validateWaitDependency(dependency);
     if (!parsed.ok || typeof dependency.reason !== "string" || !dependency.reason.trim() || !Number.isFinite(dependency.since)) {
       const detail = "Wait reporting defect: missing, unsupported or invalid dependency";
       return { activity: "status_error", activitySince: dependency.since, activityDetail: detail, activeTools: [], executionError: detail };
     }
     return {
-      activity: "awaiting", activitySince: dependency.since, activityDetail: `${labels[parsed.value.kind]} · ${dependency.reason}`,
+      activity: "awaiting", activitySince: dependency.since, activityDetail: dependency.reason,
       activeTools: [], executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
     };
   }
+  if (state === "waiting" && !held && !metadata?.archived) return {
+    activity: "awaiting", activityDetail: "Waiting for agent results", activeTools: [],
+    executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
+  };
   const wait = state === "running" ? executionWaitActivity(metadata) : undefined;
   const resuming = snapshot?.activity && !["waiting_for_capacity", "waiting_to_retry"].includes(snapshot.activity)
     && (snapshot.lastActivityAt ?? 0) > (wait?.lastActivityAt ?? wait?.activitySince ?? Infinity);
   if (wait && !resuming) snapshot = { ...wait, activeTools: [] };
-  const activity = snapshot ? state !== "running" ? threadActivity(state) : snapshot.activity ?? "status_error"
+  const activity = state !== "running" && (held || metadata?.archived) ? "idle"
+    : snapshot ? state !== "running" ? threadActivity(state) : snapshot.activity ?? "status_error"
     : threadActivity(state, live);
   const evidence = snapshot ?? live;
   return { activity,
@@ -44,34 +49,29 @@ export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
 export interface LiveProjection extends ExecutionActivity {
   sessionId: string;
   compacting: boolean;
-  compactionContextHash: string | null;
   retrying: boolean;
   liveText: string;
   liveThinking: string;
   thinkingBlockStart: number;
   thinkingActive: boolean;
   toolProgress: Map<string, ToolProgress>;
-  pendingContextTextLength: number;
-  pendingContextThinkingLength: number;
-  pendingContextFinalization: string | null;
   activeTools: Map<string, string>;
 }
 
 export function createLiveProjection(sessionId: string): LiveProjection {
-  return { ...createExecutionActivity(), sessionId, compacting: false, compactionContextHash: null, retrying: false,
+  return { ...createExecutionActivity(), sessionId, compacting: false, retrying: false,
     liveText: "", liveThinking: "", thinkingBlockStart: 0, thinkingActive: false,
-    toolProgress: new Map(), pendingContextTextLength: 0, pendingContextThinkingLength: 0,
-    pendingContextFinalization: null, activeTools: new Map() };
+    toolProgress: new Map(), activeTools: new Map() };
 }
 
 export function restoreLiveProjection(live: LiveProjection, snapshot: Record<string, any>): void {
   restoreExecutionActivity(live, snapshot);
   live.compacting = live.activity === "compacting";
   live.retrying = live.activity === "retrying";
-  if (typeof snapshot.text === "string") live.liveText = live.liveText.slice(0, live.pendingContextTextLength) + snapshot.text;
-  if (typeof snapshot.thinking === "string") live.liveThinking = live.liveThinking.slice(0, live.pendingContextThinkingLength) + snapshot.thinking;
+  if (typeof snapshot.text === "string") live.liveText = snapshot.text;
+  if (typeof snapshot.thinking === "string") live.liveThinking = snapshot.thinking;
   live.thinkingActive = live.activity === "thinking";
-  live.thinkingBlockStart = live.pendingContextThinkingLength;
+  live.thinkingBlockStart = 0;
   const tools = Array.isArray(snapshot.tools) ? snapshot.tools : [];
   live.activeTools = new Map(tools.map(tool => [String(tool.toolCallId), String(tool.toolName)]));
   for (const [id, tool] of live.toolProgress) if (!tool.result && !live.activeTools.has(id)) live.toolProgress.delete(id);
@@ -90,11 +90,7 @@ export function settleLiveProjection(live: LiveProjection): void {
   live.thinkingActive = false;
   live.activeTools.clear();
   for (const [id, tool] of live.toolProgress) if (!tool.result) live.toolProgress.delete(id);
-  if (!live.pendingContextFinalization) {
-    live.liveText = "";
-    live.liveThinking = "";
-    live.thinkingBlockStart = 0;
-    live.pendingContextTextLength = 0;
-    live.pendingContextThinkingLength = 0;
-  }
+  live.liveText = "";
+  live.liveThinking = "";
+  live.thinkingBlockStart = 0;
 }

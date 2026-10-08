@@ -6,10 +6,7 @@ import "./status.css";
 function glyphPaths(glyph: StatusGlyph): ReactNode {
   switch (glyph) {
     case "working": return <><circle className="status-icon-track" cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 8 8" /></>;
-    case "agents": return <><circle cx="12" cy="5.5" r="2.5" /><circle cx="5.5" cy="18.5" r="2.5" /><circle cx="18.5" cy="18.5" r="2.5" /><path d="M12 8v4m0 0-5 4.5m5-4.5 5 4.5" /></>;
-    case "job": return <path d="M6 3.5h12M6 20.5h12M8 3.5V7l4 5 4-5V3.5M8 20.5V17l4-5 4 5v3.5" />;
-    case "deployment": return <path d="M12 16V4m-5 5 5-5 5 5M5 20h14" />;
-    case "message": return <path d="M4 5h16v11H10l-6 4z" />;
+    case "waiting": return <path d="M6 3.5h12M6 20.5h12M8 3.5V7l4 5 4-5V3.5M8 20.5V17l4-5 4 5v3.5" />;
     case "held": return <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>;
     case "stopping": return <rect className="status-icon-solid" x="6.5" y="6.5" width="11" height="11" rx="2" />;
     case "done": return <path d="m5 12.5 4.5 4.5L19 7.5" />;

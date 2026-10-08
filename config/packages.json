@@ -10,6 +10,5 @@
     { "id": "local-models", "source": "packages/runtime/extensions/local-models", "deployed": "/srv/pi/runtime/extensions/local-models" },
     { "id": "web-search", "source": "packages/runtime/extensions/web-search", "deployed": "/srv/pi/runtime/extensions/web-search" },
     { "id": "remote", "source": "apps/remote", "deployed": "/srv/pi/pi-remote" }
-  ],
-  "contextObserver": "remote"
+  ]
 }

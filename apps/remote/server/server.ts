@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { telephoneDispatcher } from "./phone/dispatcher";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -6,7 +7,6 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path
 import { configuredOrchestratorThreadUrl } from "./thread-owners";
 import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
-import { capturedContextUsage } from "./context-usage";
 import { startThreadRefresh } from "./thread-refresh";
 import { readLivePeers, readPeerAncestors, readPeerSession } from "./peer-directory";
 import {
@@ -56,18 +56,14 @@ import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
-import { displayAssistantMessage } from "./context-display";
-import { readRecentContextMessages } from "./recent-context-messages";
-import { CapturedTranscriptSource } from "./captured-transcript-source";
+import { readRecentHistoryMessages } from "./recent-history-messages";
 import { ThreadTranscriptSource } from "./thread-transcript-source";
 import { contextResponse } from "./context-response";
 import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { ResponseTiming, type ResponseMetrics } from "./response-metrics";
-import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
-import { questionAnswerContext } from "./question-answer-context";
+import { messageFinalizationKey, sha256 } from "./sync";
 import { QuestionFeed } from "./question-feed";
-import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { lifeClient } from "kenan-memory/life-client";
@@ -85,39 +81,41 @@ import { VoiceClient } from "./voice/client";
 import { MeetGateway } from "./meet/gateway";
 import { meetingActivity } from "./meet/activity";
 import { SessionActivity } from "./session-activity";
-import { observeExecutionActivity } from "pi-orchestrator/api";
+import { observeExecutionActivity, reconcilePersonTimezoneProjection } from "pi-orchestrator/api";
 import { meetingHandoffText, prepareMeetingHandoff, type HandoffHistory } from "./meet/handoff";
 import { voiceMeetingContext } from "./meet/mention";
 import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
-import { ensureExternalMeetingThread, MEETING_MODE, MEETING_SETTINGS } from "./meet/threads";
+import { ensureExternalMeetingThread } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
 import { API } from "./api";
+import { SettingsService, type OwnedSettingAdapter } from "./settings-store";
+import { machineActionDefinition, modelAvailabilityDefinition } from "../shared/settings";
+import { settingsError } from "pi-orchestrator/person-settings-contract";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
 import { CalendarStore } from "./calendar";
 import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
-import { WriteDictionary, connectWrite, parseDictionary, writeEngineEndpoint, type WriteSocketData } from "./write";
 import { jsonHttp } from "./json-http";
+import { FeatureUsage } from "./feature-usage";
+import { createHash } from "node:crypto";
+import { parseFeatureEvent, type Feature, type FeatureActor } from "../shared/feature-usage";
 import { idleNotifications, notificationHistory, resolveNotificationQuestions } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
-import { fileBrowserError, inspectPath, listDirectory, localFileResponse, webResponse } from "./files";
-import { fileEditResponse } from "./file-edit";
-import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
+import { fileBrowserError, inspectPath, localFileResponse, webResponse } from "./files";
 import { formatProfile, measureLoopLag, profileMainThread } from "./profiler";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Bootstrap, type Dashboard, type PeopleUsage, type QueuedMessage, type Session, isThreadColor, type StreamSubscription, type StreamWireEvent, type SupervisorState } from "./protocol";
 import { fleetSessions, streamSessions } from "./stream-sessions";
-import { ClientStream, inboxMessaging, PING_INTERVAL_MS, readSubscription } from "./stream";
+import { ClientStream, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
-import { ResourceCache } from "../shared/resource-cache";
 import { SourceTranscripts, type SourceResult } from "./source-transcripts";
 import { MachineActions } from "./machine-actions";
-import { createMessagingService, openCallAudio } from "./messaging";
+import { createMessagingService } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
 import { parseMessageReference } from "./message-protocol";
 import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
@@ -139,6 +137,7 @@ const HOME = homedir();
 const MESSAGE_OWNER = { id: process.env.PI_REMOTE_SENDER_ID || userInfo().username, name: process.env.PI_REMOTE_SENDER_NAME || process.env.PI_REMOTE_SENDER_ID || userInfo().username };
 const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
+process.env.PI_PERSON_SETTINGS_DATA = DATA;
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const AUTO_ARCHIVE_AFTER_MS = autoArchiveDelay(process.env.PI_REMOTE_AUTO_ARCHIVE_AFTER_MS);
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
@@ -160,36 +159,6 @@ function bashTimeoutSeconds(value: unknown): BashTimeoutSeconds {
     ? seconds as BashTimeoutSeconds
     : DEFAULT_BASH_TIMEOUT_SECONDS;
 }
-
-function configuredPackageSource(entry: unknown): string | null {
-  if (typeof entry === "string") return entry;
-  if (!entry || typeof entry !== "object" || !("source" in entry)) return null;
-  return typeof entry.source === "string" ? entry.source : null;
-}
-
-function assertContextMirrorLoadsLast() {
-  const settingsPath = join(AGENT_DIR, "settings.json");
-  let settings: { packages?: unknown[] };
-  try {
-    settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  } catch (error) {
-    throw new Error(`Pi Remote requires its context capture package to be installed last. Could not read ${settingsPath}: ${error instanceof Error ? error.message : error}`);
-  }
-  const source = configuredPackageSource(settings.packages?.at(-1));
-  let configuredRoot: string | null = null;
-  if (source && !source.startsWith("npm:") && !source.startsWith("git:") && !source.includes("://")) {
-    try {
-      configuredRoot = realpathSync(isAbsolute(source) ? source : resolve(AGENT_DIR, source));
-    } catch {
-      configuredRoot = null;
-    }
-  }
-  if (configuredRoot !== PACKAGE_ROOT) {
-    throw new Error(`Pi Remote's package must be the final entry in ${settingsPath} so context-mirror.ts observes every context transformation. Run: pi remove ${PACKAGE_ROOT}; pi install ${PACKAGE_ROOT}`);
-  }
-}
-
-if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1") assertContextMirrorLoadsLast();
 
 const THREAD_MODEL_CATALOG = await loadThreadModelCatalog(AGENT_DIR);
 const THREAD_MODELS = threadModelOptions(THREAD_MODEL_CATALOG.configuredModels);
@@ -292,9 +261,7 @@ for (const destination of THREAD_DESTINATIONS.values()) {
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
-const capturedTranscripts = new CapturedTranscriptSource(db, id => threads.questionAnswerSource(id),
-  (id, entryId) => threads.questionAnswerSourceMessage(id, entryId));
-const transcriptSource = new ThreadTranscriptSource(db, capturedTranscripts, (id, options) => directory.inspect(id, options),
+const transcriptSource = new ThreadTranscriptSource(db, (id, options) => directory.inspect(id, options),
   id => liveProjections.get(id)?.toolProgress, identity => piReactions.list(identity));
 const transcripts = new SourceTranscripts(db, transcriptSource.read, transcriptSource.project,
   (sessionId, hash) => API.sessionImage.path({ sessionId, hash }), id => {
@@ -311,7 +278,6 @@ const liveProjections = new Map<string, LiveProjection>();
 /** Live timing of the response each session is streaming right now. */
 const responseTiming = new ResponseTiming();
 const activity = new SessionActivity(() => now());
-const contextFinalizedMessages = new Map<string, string>();
 const forkingSessions = new Set<string>();
 let shuttingDown = false;
 const runner = createSharedPiSessionOpener({ dataDir: DATA });
@@ -336,9 +302,14 @@ const threads = new ThreadService({
 unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "threads"),
   resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
 ensureSupervisorSchema(db);
+const featureUsage = new FeatureUsage(db);
+function trackFeature(feature: Feature, actor: FeatureActor, id: string = crypto.randomUUID()) {
+  const result = featureUsage.record({ id: createHash("sha256").update(`${feature}:${actor}:${id}`).digest("hex"), feature, kind: "use" }, actor);
+  if (!result.ok) observeError(db, "feature-usage", result.error.message);
+  return result;
+}
 const promptAdmissions = new PromptAdmissions(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
-const writeDictionary = new WriteDictionary(db);
 const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 /** Assigned once the phone broker exists; thread events can arrive earlier. */
@@ -464,7 +435,6 @@ async function refreshThreadInspection(id: string, fresh = false) {
   const pending = inspectingThreads.get(id);
   if (pending) return pending;
   const local = threads.get(id);
-  if (local && !peerInspections.has(id) && hasCapturedContext(id)) return;
   const known = peerInspections.get(id);
   const listed = peerThreads.get(id);
   if (!fresh && !local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
@@ -508,6 +478,43 @@ const now = () => new Date().toISOString();
 let planUsage: PlanUsageSnapshot | null = null;
 /** Everyone's relative usage, computed only for the host's administrator. */
 const HOST_ADMINISTRATOR = isHostAdministrator();
+const settingsService = new SettingsService(DATA, HOST_ADMINISTRATOR, () => {
+  if (!HOST_ADMINISTRATOR) return [];
+  const adapters: OwnedSettingAdapter[] = availableThreadModels().map(option => ({
+    definition: modelAvailabilityDefinition(option.id, option.label, modelAvailability.path),
+    read: async () => {
+      const policy = modelAvailability.disabled();
+      const model = THREAD_MODELS.get(option.id);
+      if (!policy.ok) return settingsError("unavailable", policy.error.message);
+      if (!model) return settingsError("unknown-setting", "Model no longer configured");
+      return { ok: true, value: !policy.value.has(modelAvailabilityKey(`${model.provider}/${model.modelId}`)) };
+    },
+    write: async value => {
+      if (typeof value !== "boolean") return settingsError("invalid", "Model availability requires a boolean");
+      const model = THREAD_MODELS.get(option.id);
+      if (!model) return settingsError("unknown-setting", "Model no longer configured");
+      const saved = modelAvailability.set(`${model.provider}/${model.modelId}`, value);
+      if (!saved.ok) return settingsError("unavailable", saved.error.message);
+      signalSync(); pushBootstrap(); await refreshDashboard();
+      return { ok: true, value };
+    },
+  }));
+  for (const action of machineActions.actions) adapters.push({
+    definition: machineActionDefinition(action.id, action.label),
+    read: async () => {
+      try { return { ok: true, value: (await machineActions.status(action)).active }; }
+      catch (cause) { return settingsError("unavailable", String(cause)); }
+    },
+    write: async value => {
+      if (typeof value !== "boolean") return settingsError("invalid", "Machine action requires a boolean");
+      try {
+        const state = await machineActions.set(action, value);
+        await refreshDashboard(); return { ok: true, value: state.active };
+      } catch (cause) { return settingsError("unavailable", String(cause)); }
+    },
+  });
+  return adapters;
+});
 let peopleUsage: PeopleUsage | null = null;
 /** The viewer's own spending per plan; null when nothing attributes usage to her. */
 let ownUsage: PersonalUsage | null = null;
@@ -607,12 +614,10 @@ async function buildDashboard(): Promise<Dashboard> {
   const [agents, actions] = await Promise.all([activeAgents(), machineActions.refresh()]);
   return {
     plans: planCards(planUsage, ownUsage),
-    governors: governorControls(orchestrator),
-    actions,
+    actions: HOST_ADMINISTRATOR ? actions : [],
     machine: readMachineUsage(),
     modelCounts: agents.models,
-    modelAvailability: availableThreadModels(),
-    canManageModels: HOST_ADMINISTRATOR,
+    ...(HOST_ADMINISTRATOR ? { modelAvailability: availableThreadModels(), canManageModels: true } : {}),
     people: peopleUsage,
     allowance,
   };
@@ -673,138 +678,18 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-type StoredContext = { capturedAt: number; document: string; hash: string };
-const contextCacheLimits = { entries: 32, bytes: 64 * 1024 * 1024 };
-const storedContextCache = new ResourceCache<StoredContext | null>(contextCacheLimits);
-
-/** The newest user and assistant messages of this thread, from the context the
- * agent actually holds. Voice reads the conversation from the captured context,
- * which is where the conversation is. */
-function recentContextMessages(sessionId: string, limit: number): Array<{ role: "user" | "assistant"; text: string }> {
-  const read = readRecentContextMessages(db, sessionId, limit, contentText);
-  if (!read.ok) throw new Error(`${read.error.code}: ${read.error.detail}`);
-  return read.value;
-}
-
-function hasCapturedContext(sessionId: string): boolean {
-  return Boolean(db.query("SELECT 1 FROM session_contexts WHERE session_id=?").get(sessionId));
-}
-
-function boundedContextUsage(sessionId: string, model: string) {
-  const row = db.query("SELECT captured_at,document FROM captured_context_usage WHERE session_id=?").get(sessionId) as { captured_at: number; document: string } | null;
-  return capturedContextUsage(row ? { document: row.document } : null, model);
-}
-
 function sourceValue<T>(result: SourceResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
   return result.value;
-}
-
-function cacheStoredContext(sessionId: string, stored: { capturedAt: number; document: string; hash: string } | null, captured?: any) {
-  if (stored && threads.get(sessionId)) peerInspections.delete(sessionId);
-  const known = storedContextCache.get(sessionId) ?? null;
-  const context = stored ? captured ?? JSON.parse(stored.document) : null;
-  if (stored) {
-    db.query("DELETE FROM captured_context_unavailable WHERE session_id=?").run(sessionId);
-    db.query("INSERT OR REPLACE INTO captured_context_usage VALUES(?,?,?)")
-      .run(sessionId, stored.capturedAt, JSON.stringify({ contextUsage: context.contextUsage, contextModel: context.contextModel }));
-  } else db.query("DELETE FROM captured_context_usage WHERE session_id=?").run(sessionId);
-  const progress = liveProjections.get(sessionId)?.toolProgress;
-  if (progress?.size && stored && known?.hash !== stored.hash) {
-    for (const message of context.messages ?? []) {
-      if (message?.role === "toolResult") progress.delete(message.toolCallId);
-    }
-  }
-  storedContextCache.set(sessionId, stored, stored ? stored.document.length * 2 : 4);
-  if (known?.hash !== stored?.hash) signalTranscript(sessionId);
 }
 
 function invalidateDisplayContext(sessionId: string) {
   signalTranscript(sessionId);
 }
 
-function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
-  return questionAnswerContext(threads, sessionId, baseStoredContext(sessionId));
-}
-
-function baseStoredContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
-  const cached = storedContextCache.get(sessionId);
-  if (cached !== undefined) return cached;
-  const stored = readContext(db, sessionId);
-  cacheStoredContext(sessionId, stored);
-  return stored;
-}
-
-function clearStoredContext(sessionId: string) {
-  db.transaction(() => {
-    db.query("DELETE FROM session_context_patches WHERE session_id=?").run(sessionId);
-    db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
-    db.query("INSERT OR REPLACE INTO captured_context_unavailable VALUES(?,?)")
-      .run(sessionId, "The current model context is unavailable because compaction did not acknowledge its replacement");
-  })();
-  cacheStoredContext(sessionId, null);
-  transcripts.forget(sessionId);
-  invalidateDisplayContext(sessionId);
-  signalSync();
-}
-
-function storeContextCapture(id: string, body: any) {
-  const capturedAt = Number(body.capturedAt);
-  const context = body.context;
-  if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0) throw new Error("Valid context capture time required");
-  if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
-    || !Array.isArray(context.tools) || !Array.isArray(context.messages)) throw new Error("Valid context required");
-  const document = JSON.stringify(context);
-  const runtime = liveProjections.get(id);
-  const compactionReplacement = body.replacement === "compaction" && runtime?.compacting === true;
-  let changed = false;
-  let hash = sha256(document);
-  let time = capturedAt;
-  db.transaction(() => {
-    const current = storedContext(id);
-    if (current && capturedAt <= current.capturedAt) {
-      if (!compactionReplacement) { hash = current.hash; time = current.capturedAt; return; }
-      time = current.capturedAt + 1;
-    }
-    db.query(`INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
-      ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context`).run(id, time, document);
-    db.query("DELETE FROM session_context_patches WHERE session_id=?").run(id);
-    inlineImages.acceptContext(id, document);
-    changed = true;
-  })();
-  if (changed) {
-    cacheStoredContext(id, { capturedAt: time, document, hash }, context);
-    if (compactionReplacement && runtime) runtime.compactionContextHash = hash;
-    signalSync();
-  }
-  if (hash === sha256(document)) acknowledgeMessageContext(id, body.finalizesMessage);
-  return { ok: true, capturedAt: time, hash };
-}
-
-function requireCompactionContext(sessionId: string, rt: LiveProjection) {
-  const stored = storedContext(sessionId);
-  if (!rt.compactionContextHash || stored?.hash !== rt.compactionContextHash) clearStoredContext(sessionId);
-  rt.compactionContextHash = null;
-}
-
-function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown) {
-  if (typeof finalizesMessage !== "string" || !finalizesMessage) return;
-  contextFinalizedMessages.set(sessionId, finalizesMessage);
-  const rt = liveProjections.get(sessionId);
-  if (!rt || rt.pendingContextFinalization !== finalizesMessage) return;
-  rt.pendingContextFinalization = null;
-  rt.liveText = rt.liveText.slice(Math.min(rt.pendingContextTextLength, rt.liveText.length));
-  const removedThinkingLength = Math.min(rt.pendingContextThinkingLength, rt.liveThinking.length);
-  rt.liveThinking = rt.liveThinking.slice(removedThinkingLength);
-  rt.thinkingBlockStart = Math.max(0, rt.thinkingBlockStart - removedThinkingLength);
-  rt.pendingContextTextLength = 0;
-  rt.pendingContextThinkingLength = 0;
-  signalLiveSync();
-}
-
 const error = (message: string, status = 400) => json({ error: message }, status);
-function threadError(failure: { code: string; message: string; dependencies?: Array<{ threadId: string; dependsOn: string; ownerId?: string }> }) {
-  return json({ error: failure.message, code: failure.code, ...(failure.dependencies ? { dependencies: failure.dependencies } : {}) }, failure.code === "not_found" ? 404
+function threadError(failure: { code: string; message: string }) {
+  return json({ error: failure.message, code: failure.code }, failure.code === "not_found" ? 404
     : failure.code === "invalid_request" ? 400 : failure.code === "unavailable" ? 503 : 409);
 }
 
@@ -847,8 +732,8 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
   ].filter(Boolean).join("\n\n");
 }
 
-function voiceInstructions(row: any): string {
-  const history = recentContextMessages(row.id, 8)
+async function voiceInstructions(row: any): Promise<string> {
+  const history = sourceValue(await readRecentHistoryMessages(directory.inspect, row.id, 8, contentText))
     .map((message) => `${message.role === "user" ? "User" : "Agent"}: ${message.text.slice(0, 1_500)}`)
     .join("\n");
   const policy = readFileSync(new URL("./voice/delegation-policy.md", import.meta.url), "utf8").trim();
@@ -954,8 +839,7 @@ function ownsSupervisorLease(): boolean {
 }
 
 // One step of visible work. Voice and the meeting panel watch this window;
-// nothing here is conversation history, which the native transcript and the
-// captured context own.
+// Conversation history belongs to the native transcript.
 function emit(sessionId: string, type: string, payload: Record<string, unknown> = {}, receiptId: string | null = null): number {
   if (!ownsSupervisorLease()) return 0;
   const seq = activity.add(sessionId, type, payload, receiptId);
@@ -967,18 +851,11 @@ function emit(sessionId: string, type: string, payload: Record<string, unknown> 
   return seq;
 }
 
-function recordMessageFact(sessionId: string, finalizesMessage: string, column: "thinking" | "metrics", value: string) {
+function recordMessageFact(sessionId: string, finalizesMessage: string, column: "metrics", value: string) {
   ensureThreadView(db, sessionId);
   db.query(`INSERT INTO message_facts(session_id,finalizes_message,${column}) VALUES(?,?,?)
     ON CONFLICT(session_id,finalizes_message) DO UPDATE SET ${column}=excluded.${column}`)
     .run(sessionId, finalizesMessage, value);
-}
-
-function recordThinkingEvent(sessionId: string, text: string, finalizesMessage: string) {
-  if (!ownsSupervisorLease() || !text) return;
-  invalidateDisplayContext(sessionId);
-  recordMessageFact(sessionId, finalizesMessage, "thinking", text);
-  signalSync();
 }
 
 function recordResponseMetrics(sessionId: string, metrics: ResponseMetrics | null, finalizesMessage: string) {
@@ -1098,7 +975,6 @@ function publicSession(row: any,
     waitingOnAgents: row.waitingOnAgents,
     wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
-    ...(queued ? { contextUsage: boundedContextUsage(row.id, (row.effectiveSettings ?? row.settings).model) } : {}),
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
     ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held)),
@@ -1115,7 +991,7 @@ function publicSession(row: any,
 // The event stream
 //
 // Shared work happens once: the inbox projection is built and encoded per
-// version, the dashboard once per refresh, the transcript once per capture.
+// version, the dashboard once per refresh, the transcript at native message boundaries.
 // Each stream then sends its client only what that client does not already
 // hold, which it remembers on the ClientStream.
 
@@ -1147,7 +1023,6 @@ function refreshState(): void {
   }
   projectState();
   for (const stream of streams.values()) sendState(stream);
-  pushMessaging();
   pushBootstrap();
   for (const stream of streams.values()) { sendImages(stream); void sendQuestions(stream); }
 }
@@ -1166,18 +1041,9 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected), contextUsage: boundedContextUsage(selected, session.model) } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
-}
-
-let messagingVersion = -1;
-function pushMessaging(target?: ClientStream): void {
-  const snapshot = inboxMessaging(messaging.snapshot());
-  if (target) { target.publish({ type: "messaging", snapshot }); return; }
-  if (snapshot.version === messagingVersion) return;
-  messagingVersion = snapshot.version;
-  for (const stream of streams.values()) stream.publish({ type: "messaging", snapshot });
 }
 
 function sendImages(stream: ClientStream): void {
@@ -1261,8 +1127,6 @@ async function sendTranscript(stream: ClientStream): Promise<void> {
   if (!sessionId) return;
   const revision = stream.revision;
   const loaded = await transcripts.page(sessionId, undefined, 60);
-  if (!loaded.ok && loaded.error.code === "captured_context_unavailable" && !stream.closed && stream.revision === revision)
-    stream.publish({ type: "transcript", sessionId, generation: `unavailable:${sessionId}`, total: 0, items: [] });
   let page = sourceValue(loaded);
   const from = stream.subscription.transcriptFrom;
   const limit = from == null ? 60 : Math.min(600, Math.max(60, page.total - from));
@@ -1303,7 +1167,6 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     projectState();
     sendState(stream);
   }
-  pushMessaging(stream);
   stream.publish({ type: "bootstrap", bootstrap: bootstrap() });
   if (patch.notificationsAfter !== undefined) pushNotifications(stream);
   if (stream.subscription.dashboard) {
@@ -1326,14 +1189,6 @@ function contentText(content: unknown): string {
 
 function textFromMessage(message: any): string {
   return message?.role === "assistant" ? contentText(message.content) : "";
-}
-
-function thinkingFromMessage(message: any): string {
-  if (message?.role !== "assistant" || !Array.isArray(message.content)) return "";
-  return message.content
-    .filter((block: any) => block?.type === "thinking")
-    .map((block: any) => String(block.thinking ?? ""))
-    .join("");
 }
 
 function activeSessionEntries(entries: any[], leafId: unknown): any[] {
@@ -1408,6 +1263,7 @@ function handlePiEvent(sessionId: string, event: any) {
     signalSync();
     signalLiveSync();
   }
+  if (event.type === "entry_appended" || event.type === "session_changed" || event.type === "command_settled") signalTranscript(sessionId);
   if (event.type === "agent_end" || event.type === "agent_settled") settleLiveProjection(rt);
   if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
     restoreLiveProjection(rt, event.data.live);
@@ -1418,15 +1274,6 @@ function handlePiEvent(sessionId: string, event: any) {
   }
   if (event.type === "thread_error") {
     emit(sessionId, "notice", { text: String(event.error) });
-    return;
-  }
-  if (event.type === "context_update") {
-    if (event.contextOwner === "remote-mirror") return;
-    const last = event.context?.messages?.findLast((message: any) => message.role === "assistant");
-    storeContextCapture(sessionId, { context: event.context,
-      capturedAt: Math.max(Date.now(), (storedContext(sessionId)?.capturedAt ?? 0) + 1),
-      replacement: rt.compacting ? "compaction" : undefined,
-      finalizesMessage: event.finalizesMessage ?? messageFinalizationKey(last) });
     return;
   }
   if (event.type === "thread_message_inserted") {
@@ -1480,33 +1327,16 @@ function handlePiEvent(sessionId: string, event: any) {
     if (block && rt.liveThinking.length === rt.thinkingBlockStart) rt.liveThinking += block;
     touchSession(sessionId);
   } else if (event.type === "message_end") {
+    signalTranscript(sessionId);
     if (rt.thinkingActive) { rt.thinkingActive = false; touchSession(sessionId); }
     const text = textFromMessage(event.message);
     if (event.message?.role === "assistant") {
       inlineImages.accept(sessionId, sha256(text), text);
-      const textPrefix = rt.liveText.slice(0, Math.min(rt.pendingContextTextLength, rt.liveText.length));
-      const displayText = textFromMessage(displayAssistantMessage(event.message));
-      if (displayText) rt.liveText = textPrefix + displayText;
-      const thinkingPrefix = rt.liveThinking.slice(0, Math.min(rt.pendingContextThinkingLength, rt.liveThinking.length));
-      const streamedThinking = rt.liveThinking.slice(thinkingPrefix.length);
-      const completedThinking = thinkingFromMessage(event.message) || streamedThinking;
-      if (completedThinking) rt.liveThinking = thinkingPrefix + completedThinking;
-      const finalization = messageFinalizationKey(event.message);
-      recordThinkingEvent(sessionId, completedThinking, finalization);
-      recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), finalization);
-      if (contextFinalizedMessages.get(sessionId) === finalization) {
-        rt.pendingContextFinalization = null;
-        rt.liveText = "";
-        rt.liveThinking = "";
-        rt.thinkingBlockStart = 0;
-        rt.pendingContextTextLength = 0;
-        rt.pendingContextThinkingLength = 0;
-      } else {
-        rt.pendingContextFinalization = finalization;
-        rt.pendingContextTextLength = rt.liveText.length;
-        rt.pendingContextThinkingLength = rt.liveThinking.length;
-        rt.thinkingBlockStart = rt.liveThinking.length;
-      }
+      recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), messageFinalizationKey(event.message));
+      rt.liveText = "";
+      rt.liveThinking = "";
+      rt.thinkingBlockStart = 0;
+      signalTranscript(sessionId);
       signalLiveSync();
     }
     if (text && event.message?.role === "assistant") {
@@ -1560,15 +1390,11 @@ function handlePiEvent(sessionId: string, event: any) {
     if (!event.success && event.finalError) emit(sessionId, "notice", { text: `Retry failed: ${String(event.finalError)}` });
   } else if (event.type === "compaction_start") {
     rt.compacting = true;
-    rt.compactionContextHash = null;
     touchSession(sessionId);
     emit(sessionId, "notice", { text: "Compacting context…" });
   } else if (event.type === "compaction_end") {
     rt.compacting = false;
-    if (event.result) requireCompactionContext(sessionId, rt);
-    else {
-      rt.compactionContextHash = null;
-    }
+    signalTranscript(sessionId);
     touchSession(sessionId);
     const text = event.aborted
       ? "Context compaction cancelled"
@@ -1592,13 +1418,13 @@ function handlePiEvent(sessionId: string, event: any) {
 
 function threadEnvironment(thread: Thread) {
   const meta = remotePlacement(thread);
-  return { ...process.env, HOME,
+  return { ...process.env, HOME, PI_PERSON_SETTINGS_DATA: DATA,
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
     PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
     ...(ROOMS_ENABLED && roomMetadata(thread.metadata?.room) ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
-    PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
+    PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""),
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
     PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`, PI_CODING_AGENT_DIR: AGENT_DIR,
   };
@@ -1701,21 +1527,27 @@ function saveRequest(requestId: string, sessionId: string, kind: string, status:
     .run(requestId, sessionId, kind, status, JSON.stringify(response), now());
 }
 
-// A turn counts as delivered when this thread's own context contains it. The
-// annotations say what was attached; the context says what arrived.
 const handoffHistory: HandoffHistory = {
-  receipts(sessionId) {
-    return (db.query("SELECT meeting_transcript,created_at FROM message_annotations WHERE session_id=? ORDER BY created_at")
-      .all(sessionId) as Array<{ meeting_transcript: string; created_at: string | null }>)
-      .map(row => ({ transcript: row.meeting_transcript, time: row.created_at ?? "" }));
-  },
-  messages(sessionId) {
-    const stored = storedContext(sessionId);
-    if (!stored) return [];
-    let messages: any[];
-    try { messages = JSON.parse(stored.document).messages ?? []; } catch { return []; }
-    return messages.filter((message: any) => message?.role === "user")
-      .map((message: any) => ({ text: contentText(message.content), time: Number(message.timestamp) || stored.capturedAt }));
+  async *receipts(sessionId) {
+    let after = 0;
+    while (true) {
+      const rows = db.query("SELECT rowid,work_id,octet_length(meeting_transcript) AS bytes FROM message_annotations WHERE session_id=? AND rowid>? ORDER BY rowid LIMIT 64")
+        .all(sessionId, after) as Array<{ rowid: number; work_id: string; bytes: number }>;
+      if (!rows.length) return;
+      const inspected = await directory.inspect(sessionId, { inputReceipts: { workIds: rows.map(row => row.work_id) } });
+      if (!inspected.ok) throw new Error(`${inspected.error.code}: ${inspected.error.message}`);
+      if (!inspected.value.inputReceipts) throw new Error("Native handoff delivery receipts are unavailable");
+      const landed = new Set(inspected.value.inputReceipts.filter(receipt => receipt.landedAt !== null).map(receipt => receipt.workId));
+      for (const row of rows) {
+        if (row.bytes > 8 * 1024 * 1024) throw new Error("oversized: Meeting handoff receipt exceeds the 8 MiB record limit");
+        if (!landed.has(row.work_id)) continue;
+        const receipt = db.query("SELECT meeting_transcript FROM message_annotations WHERE rowid=? AND session_id=?")
+          .get(row.rowid, sessionId) as { meeting_transcript: string } | null;
+        if (!receipt) throw new Error("stale_source: Meeting handoff annotation disappeared");
+        yield { transcript: receipt.meeting_transcript, delivered: true };
+      }
+      after = rows.at(-1)!.rowid;
+    }
   },
 };
 
@@ -1731,7 +1563,7 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
   if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
     await meet.flushTranscript(meetingId);
-    const transcript = await prepareMeetingHandoff(db, meet.transcripts, meetingId, thread.id, handoffHistory);
+    const transcript = await prepareMeetingHandoff(meet.transcripts, meetingId, thread.id, handoffHistory);
     db.query("INSERT OR REPLACE INTO message_annotations(work_id,session_id,created_at,meeting_transcript) VALUES(?,?,?,?)")
       .run(message.id, thread.id, now(), JSON.stringify(transcript));
     const handoff = meetingHandoffText(transcript);
@@ -1800,15 +1632,31 @@ if (!meetingRuntime.ok) throw new Error(`Meeting runtime unavailable: ${meetingR
 const meet = meetingRuntime.value;
 
 
-const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
+const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, () => { trackFeature("signal", "agent"); });
 const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
+if (process.env.PI_PERSON_TIMEZONE_FILE) {
+  if (!calendar.timezoneMigration.ok) throw new Error(`Owner timezone migration unavailable: ${calendar.timezoneMigration.error.message}`);
+  const timezone = reconcilePersonTimezoneProjection(DATA, process.env.PI_PERSON_TIMEZONE_FILE);
+  if (!timezone.ok) throw new Error(`Owner timezone projection unavailable: ${timezone.error.message}`);
+}
+observeError(db, "settings-migration", calendar.timezoneMigration.ok ? null : calendar.timezoneMigration.error.message);
 calendar.start();
-const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
-type AudioSocketData = { kind: "call"; callId: string; audio?: ReturnType<typeof openCallAudio> };
-type SocketData = AudioSocketData | WriteSocketData | PhoneSocketData;
+type SocketData = PhoneSocketData;
 const phones = new PhoneBroker({
-  overlayMessage: (device, message) => phoneOverlay!.message(device, message),
-  ready: device => phoneOverlay?.ready(device),
+  commandUsed: () => { trackFeature("phone", "agent"); },
+  overlayMessage: async (device, message) => {
+    const result = await phoneOverlay!.message(device, message);
+    if (result.ok) trackFeature("overlay", "phone", message.id);
+    return result;
+  },
+  ready: device => {
+    const enabled = device.capabilities.overlayEnabled;
+    if (typeof enabled === "boolean") {
+      const result = featureUsage.record({ id: crypto.randomUUID(), feature: "overlay", kind: "state", state: enabled ? "enabled" : "disabled" }, "phone");
+      if (!result.ok) observeError(db, "feature-usage", result.error.message);
+    }
+    phoneOverlay?.ready(device);
+  },
 });
 phoneOverlay = new PhoneOverlay({
   thread: id => { const row = sessionRow.get(id) as any; return row ? { archived: Boolean(row.archived_at) } : null; },
@@ -1827,7 +1675,6 @@ phoneOverlay = new PhoneOverlay({
   save: (deviceId, threadId) => { db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`phone-overlay:${deviceId}`, threadId); },
   log: message => console.warn(message),
 });
-const writeEndpoint = writeEngineEndpoint();
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({
   hostname: HOST,
@@ -1848,6 +1695,38 @@ const server = Bun.serve<SocketData>({
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
+    if (API.featureUsage.match(req.method, url.pathname) || API.recordFeatureUsage.match(req.method, url.pathname)) {
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Feature usage requires this person's authorized caller", 403);
+      if (req.method === "GET") {
+        const result = featureUsage.summary();
+        return json(result, result.ok ? 200 : 503);
+      }
+      let input: unknown;
+      try { input = await readBody(req); } catch { return error("Expected feature event JSON", 400); }
+      const parsed = parseFeatureEvent(input);
+      if (!parsed.ok) return json(parsed, 400);
+      const result = featureUsage.record(parsed.value, resolved.kind === "person" ? "human" : "agent");
+      return json(result, result.ok ? 200 : 503);
+    }
+    if (url.pathname.startsWith("/v1/telephone/")) {
+      const destination = meetingDestination();
+      const admitted = workspaceAdmission.resolve(destination.workspaceId);
+      if (!admitted.ok) return error(admitted.error.message, 503);
+      return telephoneDispatcher(req, { threads, owner: MESSAGE_OWNER.id, cwd: admitted.value.cwd,
+        model: destination.defaultModel, loopback: peer?.address === "127.0.0.1" || peer?.address === "::1",
+        onApproved: callId => { trackFeature("telephone", "agent", callId); } });
+    }
+    if (API.settings.match(req.method, url.pathname)) return json(await settingsService.snapshot());
+    const settingUpdate = API.updateSetting.match(req.method, url.pathname);
+    if (settingUpdate) {
+      let body: unknown;
+      try { body = await readBody(req); } catch { return json({ error: "Expected JSON setting value", code: "invalid" }, 400); }
+      const saved = await settingsService.update(settingUpdate.id, body);
+      if (saved.ok) return json({ entry: saved.value });
+      const status = saved.error.code === "forbidden" ? 403 : saved.error.code === "unknown-setting" ? 404 : saved.error.code === "unavailable" ? 503 : 400;
+      return json({ error: saved.error.message, code: saved.error.code }, status);
+    }
     if (url.pathname.startsWith("/v1/room-owner/")) {
       if (!ROOMS_ENABLED) return error("Not found", 404);
       if (process.env.PI_REMOTE_ROOMS_RUNTIME !== "1" && !url.pathname.endsWith("/notify")) return error("Room execution requires the unprivileged room supervisor", 403);
@@ -1964,7 +1843,9 @@ const server = Bun.serve<SocketData>({
         if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Calendar access requires this person's authorized router or local caller", 403);
       }
       httpServer.timeout(req, 65);
-      return await calendar.handle(req);
+      const response = await calendar.handle(req);
+      if (!feed && response.ok && (req.method !== "GET" || !humanCaller())) trackFeature("calendar", humanCaller() ? "human" : "agent");
+      return response;
     }
     if (url.pathname === "/v1/phones" || url.pathname.startsWith("/v1/phones/")) {
       const connecting = !!API.phoneConnect.match(req.method, url.pathname);
@@ -1976,37 +1857,6 @@ const server = Bun.serve<SocketData>({
       }
       httpServer.timeout(req, 65);
       return await phones.handle(req) ?? error("Not found", 404);
-    }
-    if (API.writeStream.match(req.method, url.pathname) && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      return httpServer.upgrade(req, { data: { kind: "write", started: false, finished: false } })
-        ? undefined : error("WebSocket upgrade failed", 400);
-    }
-    if (API.writeDictionary.match(req.method, url.pathname)) return json(writeDictionary.get());
-    if (API.updateWriteDictionary.match(req.method, url.pathname)) {
-      const dictionary = parseDictionary(await readBody(req));
-      return dictionary ? json(writeDictionary.put(dictionary)) : error("Invalid Write dictionary", 400);
-    }
-    if (API.writeLearn.match(req.method, url.pathname)) {
-      const body = await readBody(req);
-      if (typeof body?.inserted !== "string" || typeof body?.final !== "string" || body.inserted.length > 4000 || body.final.length > 4000) return error("Invalid Write correction", 400);
-      return json(writeDictionary.learn(body.inserted, body.final));
-    }
-    if (API.writeUndo.match(req.method, url.pathname)) {
-      const body = await readBody(req);
-      if (typeof body?.undoId !== "string") return error("Invalid Write undo receipt", 400);
-      const dictionary = writeDictionary.undo(body.undoId);
-      return dictionary ? json({ dictionary }) : error("Write undo receipt not found", 404);
-    }
-    const callAudio = req.method === "GET" && req.headers.get("upgrade")?.toLowerCase() === "websocket"
-      ? /^\/v1\/messaging\/calls\/([^/]+)\/audio$/.exec(url.pathname)
-      : null;
-    if (callAudio) {
-      let callId: string;
-      try { callId = decodeURIComponent(callAudio[1]!); }
-      catch { return error("Invalid call id", 400); }
-      return httpServer.upgrade(req, { data: { kind: "call", callId } })
-        ? undefined
-        : error("WebSocket upgrade failed", 400);
     }
     const agentReaction = API.sessionReaction.match(req.method, url.pathname);
     if (agentReaction || API.messageReaction.match(req.method, url.pathname)) {
@@ -2025,15 +1875,22 @@ const server = Bun.serve<SocketData>({
           invalidateDisplayContext(target.sessionId);
           return { ok: true, value: reactions };
         },
-        messaging: (id, emoji, remove) => messaging.react(id, emoji, remove),
+        messaging: async () => ({ ok: false, error: { code: "agent_signal_required", message: "Use pi-signal react with a durable request ID" } }),
         slack: (target, emoji, remove) => slackReactions.react(target, emoji, remove),
       });
       return result.ok ? json({ ok: true, reactions: result.value }) : json(result, ["not_found", "message_not_found"].includes(result.error.code) ? 404 : 400);
     }
-    const messagingResponse = await messaging.handle(req);
-    if (messagingResponse) return messagingResponse;
+    if (/^\/v1\/agent-signal(?:\/|$)/.test(url.pathname)) {
+      const resolved = callers.resolve(caller);
+      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Signal tools require this person's authorized local caller", 403);
+      httpServer.timeout(req, 65);
+      return await messaging.handle(req) ?? error("Unknown Signal tool operation", 404);
+    }
     const speechResponse = speech ? await speech.handle(req) : null;
-    if (speechResponse) return speechResponse;
+    if (speechResponse) {
+      if (speechResponse.ok && API.speechUtterances.match(req.method, url.pathname)) trackFeature("speech", humanCaller() ? "human" : "agent");
+      return speechResponse;
+    }
     const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner", admissionFor(callers, caller));
     if (ownedThreadResponse) return ownedThreadResponse;
     const threadResponse = await threadHttp(directory, req, "/v1/threads", admissionFor(callers, caller));
@@ -2061,7 +1918,10 @@ const server = Bun.serve<SocketData>({
       },
       warn: message => console.warn(message),
     }));
-    if (externalResponse) return externalResponse;
+    if (externalResponse) {
+      if (externalResponse.ok && req.method === "POST" && url.pathname === "/v1/meet/external") trackFeature("meet", humanCaller() ? "human" : "agent");
+      return externalResponse;
+    }
     const meetingResponse = await meet.handle(req);
     if (meetingResponse) return meetingResponse;
     const agentMeetingRequest = [API.sessionMeeting, API.sessionMeetingVoice, API.sessionMeetingShare, API.sessionMeetingStop, API.sessionMeetingFrame]
@@ -2157,8 +2017,6 @@ const server = Bun.serve<SocketData>({
     if (API.loopLag.match(req.method, url.pathname)) return json(await measureLoopLag(Math.min(60, Math.max(1, Number(url.searchParams.get("seconds")) || 5)) * 1000));
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
     if (API.environments.match(req.method, url.pathname)) return json({ environments: [ownEnvironment()] });
-    if (API.fileEdit.match(req.method, url.pathname) || API.fileSave.match(req.method, url.pathname))
-      return fileEditResponse(req, join(DATA, "file-edit-backups"));
     if (API.fileInfo.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute path required");
@@ -2166,15 +2024,6 @@ const server = Bun.serve<SocketData>({
       catch (cause) {
         const failure = fileBrowserError(cause);
         return error(failure.status === 404 ? "Path not found" : failure.message, failure.status);
-      }
-    }
-    if (API.files.match(req.method, url.pathname)) {
-      const requested = url.searchParams.get("path") ?? "";
-      if (!isAbsolute(requested)) return error("Valid absolute folder path required");
-      try { return json({ directory: listDirectory(requested) }); }
-      catch (cause: any) {
-        const failure = fileBrowserError(cause);
-        return error(failure.message, failure.status);
       }
     }
     if (API.voice.match(req.method, url.pathname)) {
@@ -2186,7 +2035,8 @@ const server = Bun.serve<SocketData>({
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
       if (row.archived_at) return error("Thread is archived", 409);
-      const result = await voice.negotiate(row.id, await req.text(), voiceInstructions(row));
+      const result = await voice.negotiate(row.id, await req.text(), await voiceInstructions(row));
+      if (result.ok) trackFeature("voice", humanCaller() ? "human" : "agent");
       return result.ok ? json(result.value, 201) : error(result.error, result.status);
     }
     const voiceSessionUpdate = API.voiceSessionUpdate.match(req.method, url.pathname);
@@ -2206,36 +2056,25 @@ const server = Bun.serve<SocketData>({
       const result = await voice.close(sessionId, voiceId);
       return result.ok ? json(result.value) : error(result.error, result.status);
     }
-    const governorToggle = API.governorToggle.match(req.method, url.pathname);
-    if (governorToggle && isGovernorProvider(governorToggle.provider)) {
-      try {
-        const governors = toggleGovernor(orchestrator, governorToggle.provider);
-        await refreshDashboard();
-        return json({ governors });
-      } catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
-    }
     const modelAvailabilityUpdate = API.setModelAvailability.match(req.method, url.pathname);
     if (modelAvailabilityUpdate) {
       if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change global model availability", 403);
-      const model = THREAD_MODELS.get(modelAvailabilityUpdate.id);
-      if (!model || !availableThreadModels().some(option => option.id === model.id)) return error("Unknown offered model", 404);
       let body: unknown;
       try { body = await readBody(req); }
       catch { return error("Expected JSON with an enabled boolean", 400); }
       if (!body || typeof body !== "object" || !("enabled" in body) || typeof body.enabled !== "boolean") return error("enabled must be a boolean", 400);
-      const saved = modelAvailability.set(`${model.provider}/${model.modelId}`, body.enabled);
-      if (!saved.ok) return threadError(saved.error);
-      signalSync();
-      pushBootstrap();
-      await refreshDashboard();
+      const saved = await settingsService.update(`model.available:${modelAvailabilityUpdate.id}`, { value: body.enabled });
+      if (!saved.ok) return error(saved.error.message, saved.error.code === "unavailable" ? 503 : saved.error.code === "unknown-setting" ? 404 : 400);
       return json({ models: availableThreadModels() });
     }
     if (API.actions.match(req.method, url.pathname)) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can read system actions", 403);
       try { return json({ actions: await machineActions.refresh() }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read machine actions", 503); }
     }
     const actionToggle = API.actionToggle.match(req.method, url.pathname);
     if (actionToggle) {
+      if (!HOST_ADMINISTRATOR) return error("Only the machine administrator can change system actions", 403);
       const action = machineActions.find(actionToggle.id);
       if (!action) return error("Unknown machine action", 404);
       try {
@@ -2317,6 +2156,7 @@ const server = Bun.serve<SocketData>({
             .run(file.path, transfer.session_id, now());
           db.query("DELETE FROM upload_transfers WHERE id=?").run(transfer.id);
         })();
+        trackFeature("attachment", humanCaller() ? "human" : "agent", transfer.id);
         return json({ file: { ...file, sha256: fileHash, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Could not complete upload", 400); }
     }
@@ -2329,6 +2169,7 @@ const server = Bun.serve<SocketData>({
         const file = await storeUpload(req, name, INGESTION);
         if (uploadSession) db.query("INSERT OR REPLACE INTO uploads(path,session_id,created_at) VALUES(?,?,?)")
           .run(file.path, uploadSessionId, now());
+        trackFeature("attachment", humanCaller() ? "human" : "agent");
         return json({ file: { ...file, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Upload failed", 400); }
     }
@@ -2459,19 +2300,20 @@ const server = Bun.serve<SocketData>({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? "home"));
         if (!destination) return error("Unknown destination");
-        const meetingSettings = body.meetingId ? MEETING_SETTINGS : undefined;
-        const model = String(body.model ?? meetingSettings?.model ?? destination.defaultModel);
+        if (body.meetingId !== undefined) return error("Use external meeting participation to create a meeting thread");
+        const model = String(body.model ?? destination.defaultModel);
         if (!destination.models.includes(model)) return error("Model not available at this destination");
         const id = String(body.sessionId ?? requestId);
         const contextFiles = selectContextFiles(destinationContextSources(destination), body.contextFiles);
         if (!contextFiles.ok) return error(contextFiles.error);
         const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
         if (!creator.ok) return error(creator.message, creator.status);
-        const thread = await insertThread(id, creationName(requestId), destination, model, body.meetingId ?? null, body.message, body.parentId,
-          { thinkingLevel: body.thinkingLevel ?? meetingSettings?.thinkingLevel, speed: body.speedMode ?? meetingSettings?.speed },
-          contextFiles.value, creator.input.createdBy, meetingSettings ? MEETING_MODE : undefined);
+        const thread = await insertThread(id, creationName(requestId), destination, model, null, body.message, body.parentId,
+          { thinkingLevel: body.thinkingLevel, speed: body.speedMode },
+          contextFiles.value, creator.input.createdBy);
         const response = { session: publicSession(threadRow(thread)) };
         saveRequest(requestId, id, "create", 201, response);
+        trackFeature("agents", humanCaller() ? "human" : "agent", requestId);
         return json(response, 201);
       } catch (cause: any) { return error(cause.message); }
     }
@@ -2517,8 +2359,7 @@ const server = Bun.serve<SocketData>({
     const sessionRoutes: Array<[string | undefined, (typeof API)[keyof typeof API]]> = [
       [undefined, API.session], [undefined, API.archiveSession], [undefined, API.rejectSessionEdit],
       ["unarchive", API.unarchiveSession], ["placement", API.sessionPlacement], ["color", API.sessionColor], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort], ["resume", API.sessionResume],
-      ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
-      ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
+      ["events", API.sessionEvents], ["context", API.sessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
       ["commands", API.sessionCommands], ["command", API.sessionCommand], ["admission", API.sessionAdmission],
     ];
     const sessionMatch = sessionRoutes.map(([action, route]) => ({ action, params: route.match(req.method, url.pathname) }))
@@ -2559,6 +2400,7 @@ const server = Bun.serve<SocketData>({
           return directory.send({ threadId, requestId, ...prepared });
         },
       });
+      if (result.body.outcome === "accepted" && body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") trackFeature("chat", humanCaller() ? "human" : "agent", body.requestId);
       return json(result.body.outcome === "accepted" && row ? { ...result.body, session: publicSession(row) } : result.body, result.status);
     }
     if (ROOMS_ENABLED && roomMetadata(row?.metadata?.room) && ["prompt", "fork", "command"].includes(action ?? "")) return error("Use the room API for room messages", 403);
@@ -2594,42 +2436,23 @@ const server = Bun.serve<SocketData>({
     if (action === "admission" && req.method === "PUT") return error("Admission belongs to Orchestrator", 405);
 
     if (action === "context" && req.method === "GET") {
-      return contextResponse(db, id, publicSession(sessionRow.get(id)), req, async (after, limit, revision) => {
-        const inspected = await directory.inspect(id, { contextRecords: { ...(after === undefined ? {} : { after }), limit,
-          ...(revision === undefined ? {} : { revision }) } });
+      const view = url.searchParams.get("view");
+      if (view !== null && view !== "current") return error("Unknown context view", 400);
+      if (view === "current") {
+        if (url.searchParams.has("leafId")) return error("Current runtime context cannot select a historical branch", 400);
+        if (row.state !== "running") return error("Current context requires an active runtime", 409);
+        const inspected = await directory.inspect(id, { context: "full" });
+        if (!inspected.ok) return threadError(inspected.error);
+        return json({ context: inspected.value.context, session: publicSession(sessionRow.get(id)) });
+      }
+      return contextResponse(publicSession(sessionRow.get(id)), req, async (after, limit, revision) => {
+        const inspected = await directory.inspect(id, { contextRecords: { ...(after === undefined ? {} : { after }), limit, includeEntries: true,
+          ...(revision === undefined ? {} : { revision }),
+          ...(url.searchParams.has("leafId") ? { leafId: url.searchParams.get("leafId")! } : {}) } });
         if (!inspected.ok) return inspected;
         return inspected.value.contextRecords ? { ok: true, value: inspected.value.contextRecords }
           : { ok: false, error: { code: "invalid_source", message: "The thread owner did not return native records" } };
       }, API_CORS_HEADERS);
-    }
-    if (action === "context" && req.method === "PATCH") {
-      try {
-        const body = await readBody(req);
-        const capturedAt = Number(body.capturedAt);
-        const splice = body.splice as ContextSplice;
-        if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0 || !splice) return error("Valid context patch required");
-        const current = storedContext(id);
-        if (!current) return error("Context base is missing", 409);
-        if (capturedAt <= current.capturedAt || current.hash === splice.targetHash) {
-          if (current.hash === splice.targetHash) acknowledgeMessageContext(id, body.finalizesMessage);
-          return json({ ok: true, capturedAt: current.capturedAt, hash: current.hash });
-        }
-        const appended = db.transaction(() => {
-          const result = appendContextPatch(db, id, current, capturedAt, splice);
-          if (result.ok) inlineImages.acceptContext(id, result.value.document);
-          return result;
-        })();
-        if (!appended.ok) return error(appended.error, 409);
-        cacheStoredContext(id, appended.value);
-        acknowledgeMessageContext(id, body.finalizesMessage);
-        signalSync();
-        return json({ ok: true, capturedAt, hash: splice.targetHash });
-      } catch (cause: any) { return error(cause?.message ?? "Could not patch model context", 409); }
-    }
-    if (action === "context" && req.method === "PUT") {
-      try {
-        return json(storeContextCapture(id, await readBody(req)));
-      } catch (cause: any) { return error(cause?.message ?? "Could not store model context", 400); }
     }
     if (action === "events" && req.method === "GET") {
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
@@ -2705,9 +2528,6 @@ const server = Bun.serve<SocketData>({
           rt.liveText = "";
           rt.liveThinking = "";
           rt.thinkingBlockStart = 0;
-          rt.pendingContextTextLength = 0;
-          rt.pendingContextThinkingLength = 0;
-          rt.pendingContextFinalization = null;
           rt.activeTools.clear();
           rt.thinkingActive = false;
           rt.toolProgress.clear();
@@ -2748,46 +2568,13 @@ const server = Bun.serve<SocketData>({
     closeOnBackpressureLimit: false,
     open(socket) {
       if (socket.data.kind === "phone") { socket.data.connection = phones.open({ send: frame => socket.send(frame), close: (code, reason) => socket.close(code, reason) }); return; }
-      if (socket.data.kind === "write") { socket.data.receive = connectWrite(socket as Bun.ServerWebSocket<WriteSocketData>, writeEndpoint, writeDictionary); return; }
-      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
-      const audio = openCallAudio(socket.data.callId);
-      if (!audio) {
-        socket.close(1008, "Call is unavailable");
-        return;
-      }
-      socket.data.audio = audio;
-      if (!audio.attach((frame: Uint8Array) => {
-        if (socket.readyState !== WebSocket.OPEN || socket.getBufferedAmount() >= AUDIO_SOCKET_BACKPRESSURE_BYTES) return;
-        socket.sendBinary(frame, false);
-      }, () => socket.close(1000))) {
-        socket.data.audio = undefined;
-        audio.detach();
-        socket.close(1008, "Call is unavailable");
-      }
+      socket.close(1008, "Unsupported WebSocket kind");
     },
     message(socket, message) {
-      if (socket.data.kind === "phone") { if (socket.data.connection) phones.receive(socket.data.connection, message); return; }
-      if (socket.data.kind === "write") {
-        const write = socket as Bun.ServerWebSocket<WriteSocketData>;
-        write.data.receive?.(message);
-        return;
-      }
-      if (socket.data.kind !== "call") { socket.close(1008, "Unsupported WebSocket kind"); return; }
-      if (typeof message === "string") { socket.close(1008, "Call audio must be binary"); return; }
-      const frame = message instanceof Uint8Array ? message : new Uint8Array(message);
-      socket.data.audio?.receive(frame);
+      if (socket.data.connection) phones.receive(socket.data.connection, message);
     },
     close(socket) {
-      if (socket.data.kind === "phone") { if (socket.data.connection) phones.disconnected(socket.data.connection); return; }
-      if (socket.data.kind === "write") {
-        const write = socket as Bun.ServerWebSocket<WriteSocketData>;
-        if (!write.data.finished && write.data.upstream?.readyState === WebSocket.OPEN) write.data.upstream.send(JSON.stringify({ type: "cancel" }));
-        write.data.upstream?.close();
-        return;
-      }
-      if (socket.data.kind !== "call") throw new Error("Unsupported WebSocket kind at close");
-      socket.data.audio?.detach();
-      socket.data.audio = undefined;
+      if (socket.data.connection) phones.disconnected(socket.data.connection);
     },
   },
 });
@@ -2897,7 +2684,7 @@ const supervisorRelease = new SupervisorRelease({
 });
 async function releaseSupervisor(exitCode: number) {
   const result = await supervisorRelease.release(exitCode);
-  if (!result.ok) console.error("Supervisor handoff failed; context ingestion remains available for recovery:", result.error);
+  if (!result.ok) console.error("Supervisor handoff failed:", result.error);
 }
 
 process.on("SIGTERM", () => void releaseSupervisor(0));

@@ -172,14 +172,8 @@ export class ThreadDirectory implements ThreadApi {
       }
     }
     if (input.parentId) {
-      const owner = await this.owner(input.parentId);
-      if (!owner.ok) return owner;
-      const index = this.owners.indexOf(owner.value);
-      if (input.cursor && position.owner !== index) return error("invalid_request", "Cursor does not match the parent owner");
-      const page = await owner.value.api.list({ ...input, cursor: position.cursor });
-      if (!page.ok) return page;
-      return { ok: true, value: { threads: page.value.threads.map(thread => ({ ...thread, ownerId: owner.value.id })),
-        ...(page.value.nextCursor ? { nextCursor: Buffer.from(JSON.stringify({ owner: index, cursor: page.value.nextCursor, query })).toString("base64url") } : {}) } };
+      const parent = await this.owner(input.parentId);
+      if (!parent.ok) return parent;
     }
     const threads: Thread[] = [];
     while (position.owner < this.owners.length && threads.length < limit) {

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
-import { assign, commitMeterAdmission } from "../src/policy.js";
+import { assign } from "../src/policy.js";
 import { allowsAccountUse, type OrchestratorConfig } from "../src/domain.js";
 import { transactSharedCredential } from "../src/auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -15,7 +15,7 @@ import { ACCOUNT_USAGE, dispatch } from "../src/commands.js";
 import { CACHE_WINDOW_MS, OrchestratorClient } from "../src/client.js";
 import { outputLimitContinuation } from "../src/host/continuations.js";
 
-const config:OrchestratorConfig={peers:{},profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]},backgroundSpendFraction:.8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
+const config:OrchestratorConfig={peers:{},profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]},meterMaxAgeMs:60_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
 
 describe("current orchestrator state",()=>{
@@ -170,25 +170,17 @@ describe("current orchestrator state",()=>{
     }
   });
 
-  it("permits one calibration probe, then requires new meter evidence",()=>{const store=Store.open(":memory:");account(store);const first=assign(store,"standard","background",config);expect(first.assignment?.accountId).toBe("openai-codex-1");const [runId]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"background"});store.assignRun(runId!,{...first.assignment!,unit:"u",releasePath:"/release/a"});store.updateRun(runId!,{state:"done"});expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.recordMeter("openai-codex-1","codex-5h",10,Date.now()+3_600_000);const next=assign(store,"standard","background",config);expect(next.assignment).toBeDefined();commitMeterAdmission(store,next.assignment!);expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.close();});
-
-  it("admits operator-requested work through reserves and 0× without bypassing hard stops",()=>{
+  it.each(["background","force","live"] as const)("admits %s work through available quota without bypassing hard stops",budget=>{
     const store=Store.open(":memory:");account(store);
     const now=Date.now();
     store.recordMeter("openai-codex-1","codex-5h",85,now+3_600_000,now);
-    expect(assign(store,"standard","background",config,now).refusals[0]?.reason).toContain("reserve");
-    expect(assign(store,"standard","force",config,now).assignment).toBeDefined();
-    store.setControl("boost:openai-codex","0");
-    const forced=assign(store,"standard","force",config,now);
-    expect(forced.assignment?.accountId).toBe("openai-codex-1");
-    commitMeterAdmission(store,forced.assignment!);
-    expect(assign(store,"standard","force",config,now+config.meterMaxAgeMs+1).assignment).toBeDefined();
-    expect(assign(store,"standard","background",config,now).refusals[0]?.reason).toContain("background launches halted");
+    expect(assign(store,"standard",budget,config,now).assignment?.accountId).toBe("openai-codex-1");
+    expect(assign(store,"standard",budget,config,now+config.meterMaxAgeMs+1).assignment).toBeDefined();
     store.setControl("launches","paused");
-    expect(assign(store,"standard","force",config,now).refusals[0]?.reason).toBe("emergency halt");
+    expect(assign(store,"standard",budget,config,now).refusals[0]?.reason).toBe("emergency halt");
     store.setControl("launches","enabled");
     store.recordMeter("openai-codex-1","codex-5h",100,now+3_600_000,now+1);
-    expect(assign(store,"standard","force",config,now+1).refusals[0]?.reason).toContain("provider quota exhausted");
+    expect(assign(store,"standard",budget,config,now+1).refusals[0]?.reason).toContain("provider quota exhausted");
     store.close();
   });
 

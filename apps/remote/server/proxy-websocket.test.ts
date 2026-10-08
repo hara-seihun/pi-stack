@@ -86,8 +86,8 @@ test.each(["browser", "upstream"] as const)("phone proxy forwards beyond audio p
   target.bufferedAmount = PHONE_MAX_FRAME_BYTES;
   deliver();
   expect(target.send).toHaveBeenCalledTimes(2);
-  expect(browser.close).toHaveBeenCalledWith(1011, "Phone backpressure exceeded");
-  expect(upstream.close).toHaveBeenCalledWith(1011, "Phone backpressure exceeded");
+  expect(browser.close).toHaveBeenCalledWith(1011, "Proxy backpressure exceeded");
+  expect(upstream.close).toHaveBeenCalledWith(1011, "Proxy backpressure exceeded");
 });
 
 test.each([0, -1])("phone proxy distinguishes failed send (%i) from queued delivery", (sent) => {
@@ -100,7 +100,7 @@ test.each([0, -1])("phone proxy distinguishes failed send (%i) from queued deliv
   upstream.dispatchEvent(new MessageEvent("message", { data: "result" }));
   expect(browser.send).toHaveBeenCalledWith("result", false);
   for (const target of [browser, upstream]) {
-    if (sent === 0) expect(target.close).toHaveBeenCalledWith(1011, "Phone forwarding failed");
+    if (sent === 0) expect(target.close).toHaveBeenCalledWith(1011, "Proxy forwarding failed");
     else expect(target.close).not.toHaveBeenCalled();
   }
 });

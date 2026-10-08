@@ -126,13 +126,13 @@ public final class PhoneControlService extends Service {
             JSONObject caps = PhoneData.capabilities(context);
             boolean accessibility = PhoneAccessibilityService.current != null && NativeAccess.accessibility(context, PhoneAccessibilityService.class);
             caps.put("accessibility", accessibility)
-                .put("writeAccessibility", NativeAccess.accessibility(context, WriteAccessibilityService.class))
                 .put("screenshots", accessibility && Build.VERSION.SDK_INT >= 30)
                 .put("notificationAccess", androidx.core.app.NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.getPackageName()))
                 .put("notificationListenerConnected", PhoneNotificationService.current != null)
                 .put("notifications", NativeAccess.notifications(context))
                 .put("battery", ((PowerManager) context.getSystemService(POWER_SERVICE)).isIgnoringBatteryOptimizations(context.getPackageName()))
                 .put("overlay", android.provider.Settings.canDrawOverlays(context))
+                .put("overlayEnabled", KenanOverlay.isVisible(context))
                 .put("installPackages", Build.VERSION.SDK_INT < 26 || context.getPackageManager().canRequestPackageInstalls())
                 .put("camera", ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                 .put("microphone", ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)

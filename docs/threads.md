@@ -1,6 +1,6 @@
 # Persistent agents and threads
 
-[First global-capacity cutover](agent-capacity-cutover.md) owns the durable all-owner admission barrier, custody census and initialization before model doctors. [Standalone ingress](standalone-agent-capacity.md) owns direct SDK/CLI capacity custody.
+[First global-capacity cutover](agent-capacity-cutover.md) owns the durable all-owner admission barrier, ThreadService custody census and initialization before managed model doctors.
 
 [The kena model](agents.md) owns the product contract. One agent has one stable
 thread ID, native Pi conversation, workspace, complete model settings and storage
@@ -34,7 +34,7 @@ regardless of unread results or attention notices. Startup also reconciles alrea
 completed background tasks. Transcripts, results, assignment receipts and notification
 history remain accessible; opening a notification restores and promotes the original
 thread. Foreground Chats keep their unread behavior. Pending input/questions, typed
-waits, wake schedules, live dependency protection and persistent watch threads remain
+waits, wake schedules, outstanding result subscriptions and persistent watch threads remain
 open because their work is not complete. Startup-failed agents also remain visible,
 including after their bounded retry budget settles an assignment as failed: losing
 native startup is not proof that external resources have been released. Automatic
@@ -59,8 +59,8 @@ Only creation/control override requests resolve partial preferences.
 Native execution and assignment completion are distinct. `running` includes
 accepted runnable input, admission, startup, execution and cancellation until
 confirmed. `waiting` describes an agent with a current `thread_wait` (agent, job,
-deployment or message) but no local execution. Holding a dependency edge without a
-wait is not waiting. `idle` is genuinely available with no current work. Archived agents
+deployment or message) or unresolved outgoing result subscriptions, but no local
+execution. Active execution wins over either waiting reason. `idle` is genuinely available with no current work. Archived agents
 retain history but accept no automatic execution. There is no persistent Stopped
 product state. An inactive or stopped agent with no explicit dependencies is
 idle even if agents it previously launched are still active. Launch provenance
@@ -84,28 +84,25 @@ owner rechecks native idleness after dependency reconciliation before committing
 
 `control({ action: "dependencies", threadId, threadIds })` replaces an agent's
 outgoing peer dependencies. Agent callers can change only their own edges.
-Dependencies reference accessible peers, not only agents they launched. Cycles
-and invalid/inaccessible targets are rejected. Dependency checks and recovery read
-the connected peer graph by exact identity, including durable incoming endpoint
-reservations; they never enumerate unrelated owners. A locked personal supervisor
-cannot prevent fleet-local dependency custody. An inaccessible referenced endpoint
-remains an explicit error with its existing protection retained. Exact-identity and
-parent-child directory pages resolve their owner without listing unrelated stores.
+Dependencies reference accessible peers, not only agents they launched. Invalid,
+self and inaccessible targets are rejected. Registration reads only named peers;
+it does not walk a graph or forbid mutual subscriptions. Exact-identity directory
+pages resolve their owner without listing unrelated stores.
 
-A dependency A → B exists so a result is not lost. It is **live** while A's
-current wait names B, or while B still owes a result (B is running, waiting or has
-queued input). A live edge protects **both A and B** from close/archive; a refusal
-uses `dependency_conflict` with the actual edges, so the person can visit A and ask
-it to resolve or release the dependency. Once B has settled and A is not waiting on
-it, the edge is **inert**: it protects nothing, does not make either endpoint
-`waiting`, does not keep A's assignment pending, and closing either endpoint
-releases it on both owners (`dependencyRelease`/`dependencyClaim` owner-to-owner
-controls). At the end of each of A's turns, inert outgoing edges are released; a
-settled background B archives once its last dependent releases it. Creator
-provenance alone protects neither endpoint. Dependency liveness and close must be
-enforced at the owner (`threads/dependency-liveness.ts`), not just in a client's
-confirmation dialog. Hara's October 7 ruling: idle dependencies must not block
-closing.
+A dependency A → B is a durable result subscription. B records A as a recipient;
+its terminal result is committed with a stable delivery receipt before delivery.
+The receiving owner clears the subscription and resumes a matching wait in the
+same transaction as accepting the result. A settled result remains accessible even
+when B automatically archives. Registration against an already-settled peer delivers
+its saved result; an explicitly closed peer delivers cancellation, not success.
+
+Explicit Close wins on either endpoint. Closing B confirms native cancellation and
+publishes a cancelled terminal settlement, even if B was idle with a dependency
+wait rather than executing. Closing A clears its wait and outgoing subscriptions
+without closing B. Owner-to-owner `resultSubscribe` updates and terminal deliveries
+retry from durable state across outages and controller restart. An unavailable
+peer never vetoes closing the local agent. Automatic retention keeps A while it
+still awaits a result, but subscribers do not prevent a completed B from archiving.
 
 `thread_wait` sets a scheduling wait and ends the native turn without polling:
 
@@ -121,7 +118,7 @@ assignment: an older settlement or its parked notification cannot satisfy a peer
 that has newer queued/running work or an unfinished dependency wait. Delayed
 result notifications retain their execution identity; only a matching current
 assignment result clears an agent wait. Cross-owner delivery obtains bounded
-owner evidence, and an unavailable owner leaves the wait protected with a typed
+owner evidence, and an unavailable owner leaves the result subscription pending with a typed
 error. Historical notifications are still delivered, without releasing the wait.
 Bounded
 `thread_await` still reads historical results according to its explicit cursors.
@@ -135,8 +132,8 @@ Only a still-active `registered` wait terminates the native turn. An already-arr
 result or resuming input remains available for the agent to handle; success without
 an explanation for an absent wait is not a valid registration outcome.
 
-`clear` releases the caller's wait and outgoing dependency protection. Explicit
-dependencies can also be managed without suspending current execution.
+`clear` releases the caller's wait and outgoing result subscriptions. Explicit
+subscriptions can also be managed without suspending current execution.
 
 `thread_await` is a bounded wait of at most 25 seconds on accessible peers. It
 returns the first completed assignment, cursors and remaining agent IDs. Timeout
@@ -174,8 +171,8 @@ promoting the recipient. Merely inspecting an agent is not a human view.
 
 ## Controls
 
-- `close`: cancel and archive only the selected agent. Live dependencies veto it;
-  inert ones are released.
+- `close`: cancel and archive only the selected agent. Result subscribers receive
+  durable cancellation; its own outgoing subscriptions are released.
   Failed cancellation leaves visible custody and never permits overlapping work.
 - `reopen`: restore the conversation without resuming interrupted or queued work.
 - `open`: human opening also promotes foreground placement.
@@ -209,10 +206,10 @@ recreate it. An explicit answer to a retained question reopens the thread with
 that answer, not the cancelled queue.
 
 Ephemeral creation is retention policy, not another kind of agent. It may archive
-only after the assignment really settles: no active work, live dependencies, waits,
+only after the assignment really settles: no active work, outstanding subscriptions, waits,
 wakes, attention awaiting the person or unanswered questions. Foreground and
-unread human attention remain discoverable. Automatic retention cannot bypass
-explicit dependency protection.
+unread human attention remain discoverable. Automatic retention preserves unfinished subscriptions; explicit Close overrides
+retention without losing durable terminal results.
 
 ## Questions and attention
 
@@ -264,7 +261,7 @@ wait grants permission to launch an overlapping occurrence.
 All owners share the [global 100-agent budget](agents.md#execution-budget).
 Admission queues when the budget is full. Foreground/background placement,
 creator provenance, forced model admission and live meeting mode never bypass
-that limit. Model quota pacing and execution slots are distinct policies.
+that limit. Actual provider capacity and execution slots are distinct constraints.
 
 Model settings resolve centrally. New delegated agents use Sol/high/standard
 unless explicitly configured; Luna uses max thinking. Models are not prohibited
@@ -308,6 +305,51 @@ Human [rooms](../apps/remote/docs/rooms.md) remain audience boundaries with an
 unprivileged `pi-rooms` conversation and only root-request/public-question tools.
 They are not agent organization groups. Room membership never grants access to
 private agents, histories or encrypted folders.
+
+## Incoming model delivery time
+
+[`message-delivery.ts`](../packages/orchestrator/src/threads/message-delivery.ts)
+owns `installMessageDelivery(session, env)`. The common native session boundary
+installs it once. It projects the final `convertToLlm` output, after request-only
+labels, custom/summary/bash conversion and forced application/telephone prompts.
+Every incoming system, user and tool-result message receives a leading timestamp;
+assistant output is unchanged. Roles, tool IDs, sender labels and external-callee
+boundaries are retained. Ingress routes do not prepend their own timestamps.
+
+Delivery time is sampled when a message first enters a prepared model request,
+not when a queued receipt was accepted or a runner launched. The prefix contains
+local ISO calendar date, millisecond time, numeric UTC offset and IANA zone.
+Native message/entry timestamps keep their original provenance. The non-context
+`model_message_delivery_v1` receipt stores source identity, original timestamp,
+delivery instant and timezone provenance, never message content or a transformed
+context snapshot. Subsequent requests, resume and retained compaction history
+reuse that delivery record, without another prefix or receipt. Newly generated
+compaction/branch messages receive their own delivery records.
+
+The trusted owner launcher declares `PI_PERSON_TIMEZONE_FILE` as
+`/var/lib/pi-timezones/USER/timezone.json`. The owning Remote publishes this
+narrow projection from its canonical `settings.json` after CalendarStore migration,
+then fences every timezone setting write with `state: "updating"` before publishing
+`state: "ready"`. Projection files are own-UID, reader-group mode0640 even under
+UMask0077; directories inherit the host-owned `pi-timezones-readers` group. Host
+provisioning creates directories, never timezone values. Fleet/terminal sessions
+read this projection without acquiring the encrypted personal settings directory.
+
+Ready projection schema is exactly `{version:1,state:"ready",timezone:null|{zone,
+source,observedAt}}`; source is `configured` or `client-observed`. A declared null
+means genuinely unobserved/unset and renders `UTC +00:00; timezone-unconfigured`.
+Missing, updating, unreadable or malformed authority rejects delivery. A queued
+receipt waits before capacity/native custody and remains queued until authority
+recovers; it is not failed or replayed. Owner Remote may also explicitly supply
+its resolved `PI_PERSON_SETTINGS_DATA`/`PI_REMOTE_DATA` when no projection is
+installed. Shared runners discard another session's inherited paths and metadata.
+
+Root admission/resumption receives only authenticated asking-person timezone
+metadata from the memory broker's host-declared `supervisors[].timezoneFile`.
+Only the memory service has reader-group access; Root clears settings/projection
+paths and consumes `PI_MODEL_DELIVERY_TIMEZONE`, not personal files. Subject names
+in the request and caller-supplied metadata never select timezone authority.
+Server TZ and another person's settings are never consulted.
 
 ## Cutover
 

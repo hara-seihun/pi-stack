@@ -33,7 +33,7 @@ test("new incoming agent words retain immutable sender routes in toggle-controll
   expect(incoming.identity?.id).toBe("incoming");
   for (const autoCollapse of [true, false]) {
     const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
-    expect(html).toMatch(/<span class="agent-route incoming"><span class="agent-route-name">Kelana<\/span><svg[^>]*aria-label="to".*?<span class="agent-route-name self">Kenan<\/span>/);
+    expect(html).toMatch(/<span class="agent-route incoming"><span class="agent-route-name self">Kenan<\/span><svg[^>]*aria-label="from"><path d="M20 12H5m5-5-5 5 5 5"><\/path><\/svg><span class="agent-route-name peer">Kelana<\/span>/);
     expect(html).toContain('class="message-label">KENAN</span>');
     const disclosures = html.match(/<details class="conversation-step agent-message-step"[^>]*>/g) ?? [];
     expect(disclosures).toHaveLength(1);
@@ -129,7 +129,7 @@ test("sends and spawns read as this agent's own messages, routed to their recipi
   expect(html.match(/class="message assistant agent-outgoing"/g)).toHaveLength(3);
   expect(entries.filter(entry => entry.kind === "toolCall").map(entry => outgoingAgentMessage(entry)?.text)).toEqual([words.slice(0, 120) + "…", words.slice(0, 120) + "…", "Closed?"]);
   expect(html.match(/<footer class="message-expansion"><button type="button" class="message-expand-action">Load more<\/button><button[^>]*aria-label="Copy full message"/g)).toHaveLength(2);
-  expect(html).toMatch(/<span class="agent-route outgoing"><span class="agent-route-name self">Kenan<\/span><svg[^>]*><path[^>]*><\/path><\/svg><span class="agent-route-name">Thread 7c925d87<\/span>/);
+  expect(html).toMatch(/<span class="agent-route outgoing"><span class="agent-route-name self">Kenan<\/span><svg[^>]*><path[^>]*><\/path><\/svg><span class="agent-route-name peer">Thread 7c925d87<\/span>/);
   expect(html).toContain('class="agent-route-name new" title="Review">New agent</span>');
   expect(html).toContain('class="message-status failed">failed · Thread is closed</footer>');
   expect(html).not.toContain("tool-step");
@@ -193,7 +193,7 @@ test("all three native user-role envelopes collapse without requiring explicit s
         const opening = html.match(/<details class="conversation-step agent-message-step"[^>]*>/)?.[0];
         expect(opening).toBeDefined();
         expect(opening!.includes('open=""')).toBe(!autoCollapse);
-        expect(html).toContain(`agent-route-name">${label}</span>`);
+        expect(html).toContain(`agent-route-name peer">${label}</span>`);
         expect(html).not.toContain("work-card");
       }
     }

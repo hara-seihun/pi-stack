@@ -1,30 +1,16 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { TranscriptItemBody, TranscriptItemHead } from "../server/protocol";
-import type { MessagingHistory, MessagingHistoryChanges, MessagingMessage, MessagingResult, MessagingSnapshot } from "../server/messaging/protocol";
 import { ClientCache } from "./src/client-cache";
 import { ItemBodies } from "./src/features/conversation/item-bodies";
 import { appendLiveThinking, buildStableTranscript } from "./src/features/conversation/transcript-model";
 import { applyTranscriptEvent, boundTranscriptHeads, hasEarlier, hasNewer, loadEarlier, loadLatest, loadNewer, TRANSCRIPT_HEAD_BUDGET, TRANSCRIPT_HEAD_BYTES } from "./src/features/conversation/transcript-store";
 import { transcriptRange, TRANSCRIPT_DOM_BUDGET, VirtualTranscript } from "./src/features/conversation/VirtualTranscript";
-import { MessagingHistoryCache, trimMessagingHistory } from "./src/messaging-history";
 import type { ContextEntry } from "./src/types";
 
 const head = (seq: number): TranscriptItemHead => ({ seq, id: `head-${seq}`, kind: "user", size: 3, text: `message ${seq}` });
 const page = (from: number, count: number, total = from + count) => ({ generation: "g", total, items: Array.from({ length: count }, (_, n) => head(from + n)) });
 const flush = async () => { for (let n = 0; n < 12; n++) await Promise.resolve(); };
-const message = (seq: number): MessagingMessage => ({ seq, id: `m${seq}`, requestId: null, conversationId: "chat", externalId: `m${seq}`, direction: "incoming", sender: "friend", text: `${seq}`, timestamp: seq, status: "received", error: null, attachments: [] });
-const messages = (from: number, count: number) => Array.from({ length: count }, (_, n) => message(from + n));
-
-function messaging(budget = { conversations: 32, messages: 2_000, bytes: 16 * 1024 * 1024, perConversation: 200 }) {
-  const windows: Array<{ id: string; resolve(value: MessagingResult<MessagingHistory>): void }> = [];
-  const changes: Array<{ from: number; resolve(value: MessagingResult<MessagingHistoryChanges>): void }> = [];
-  const cache = new MessagingHistoryCache({
-    window: id => new Promise(resolve => windows.push({ id, resolve })),
-    changes: (_id, _signal, _after, from) => new Promise(resolve => changes.push({ from, resolve })),
-  }, budget);
-  return { cache, windows, changes };
-}
 
 test("automatic tail remains bounded through long-open appends; an older displayed head is never evicted", () => {
   let held = applyTranscriptEvent(null, page(0, 60));
@@ -119,53 +105,4 @@ test("locking fences late body results from the next cache lifetime", async () =
   finish({ kind: "thinking", text: "late" });
   await old;
   expect(cache.getBody("late")).toBeUndefined();
-});
-
-test("messaging trimming uses database sequence, advances the older cursor and refuses missing cursors", () => {
-  const source = { messages: messages(1, 300).map(item => ({ ...item, timestamp: 301 - item.seq! })), before: null, revision: 300 };
-  const trimmed = trimMessagingHistory(source, 200, "newer")!;
-  expect(trimmed.messages).toHaveLength(200);
-  expect(trimmed.before).toBe(101);
-  expect(Math.min(...trimmed.messages.map(item => item.seq!))).toBe(101);
-  expect(trimMessagingHistory({ ...source, messages: source.messages.map(({ seq, ...item }) => item) }, 200, "newer")).toBeNull();
-});
-
-test("displayed messaging pages freeze rather than vanish, and earlier/latest paging remain bounded", async () => {
-  const { cache, windows, changes } = messaging();
-  cache.ensure("chat");
-  windows[0].resolve({ ok: true, value: { messages: messages(1, 600), before: 1, revision: 600 } });
-  await flush();
-  cache.protect("chat", { from: 1, to: 4 });
-  cache.refresh("chat");
-  changes[0].resolve({ ok: true, value: { messages: messages(601, 60), removed: [], revision: 660 } });
-  await flush();
-  expect(cache.get("chat").history?.messages).toHaveLength(600);
-  expect(cache.get("chat").history?.messages[0].seq).toBe(1);
-  expect(cache.get("chat").newer).toBe(true);
-  cache.acceptPage("chat", { messages: messages(611, 50), before: 611, revision: 660 }, "latest");
-  expect(cache.get("chat").newer).toBe(false);
-  cache.acceptPage("chat", { messages: messages(1, 610), before: 1, revision: 660 }, "older");
-  expect(cache.get("chat").history?.messages).toHaveLength(600);
-  expect(cache.get("chat").newer).toBe(true);
-  cache.select(null);
-  expect(cache.get("chat").history?.messages).toHaveLength(200);
-  expect(cache.get("chat").history?.before).toBe(401);
-  cache.dispose();
-});
-
-test("preloading is capped and evicted payloads do not reload on an unchanged directory", async () => {
-  const { cache, windows } = messaging({ conversations: 2, messages: 1, bytes: 1_024, perConversation: 1 });
-  const snapshot: MessagingSnapshot = { version: 1, backends: [], calls: [], conversations: Array.from({ length: 10_000 }, (_, n) => ({ id: `c${n}`, backendId: "signal", externalId: `c${n}`, title: `c${n}`, kind: "direct", updatedAt: n, unread: 0, current: true, avatar: null, revision: 1 })) };
-  cache.reconcile(snapshot);
-  expect(windows.map(call => call.id)).toEqual(["c9999", "c9998"]);
-  for (const call of windows) call.resolve({ ok: true, value: { messages: [message(1)], before: null, revision: 1 } });
-  await flush();
-  const retained = snapshot.conversations.filter(item => cache.get(item.id).history);
-  expect(retained).toHaveLength(1);
-  cache.reconcile(snapshot);
-  await flush();
-  expect(windows).toHaveLength(2);
-  cache.ensure("c9999");
-  if (!cache.get("c9999").history) expect(windows).toHaveLength(3);
-  cache.dispose();
 });

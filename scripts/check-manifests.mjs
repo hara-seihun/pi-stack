@@ -16,7 +16,6 @@ for (const entry of packages.packages) {
   if (!(await stat(new URL(`${entry.source}/package.json`, root))).isFile()) throw new Error(`${entry.id} source has no package.json`);
   if (!entry.deployed?.startsWith("/")) throw new Error(`${entry.id} needs an absolute deployed path`);
 }
-if (packages.packages.at(-1)?.id !== packages.contextObserver) throw new Error(`${packages.contextObserver} must be the last package`);
 
 const skills = await read("config/skills.json");
 if (skills.version !== 2) throw new Error("Unknown skills manifest version");

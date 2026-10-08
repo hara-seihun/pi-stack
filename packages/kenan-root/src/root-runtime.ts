@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { installMessageDelivery, type AgentCapacity, type PiEvent } from "pi-orchestrator/api";
+import { managedRootSession, RootCapacityUnavailable, RootReplyUnavailable } from "./managed-session.js";
 import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION } from "pi-orchestrator/question-policy";
-import { requireStandaloneAgent, settleStandaloneAgent, abortAndSettleStandaloneSession, nextStandaloneExecutionId, StandaloneAdmissionError } from "pi-orchestrator/standalone-agent";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
 import { join, isAbsolute } from "node:path";
@@ -23,8 +24,8 @@ export interface RootConfig {
   brokerUrl: string;
   people?: { person: string; displayName: string }[];
 }
-export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest; onExecution?: () => void }
-export interface RootSession { prompt(text: string): Promise<void>; reply(): string | undefined; subjects?(): string[]; dispose(): void | Promise<void> }
+export interface RootSessionSpec { id: string; person: string; recipients: string[]; prompt: string; request: string; config: RootConfig; directory: string; sessionFile: string; env: NodeJS.ProcessEnv; requestConsent?: ConsentRequest; notify?: NotificationRequest; onExecution?: () => void }
+export interface RootSession { prompt(text: string): Promise<void>; reply(): string | undefined; subjects?(): string[]; observe?(listener: (event: PiEvent) => void): () => void; abort?(): Promise<void>; dispose(): void | Promise<void> }
 export type RootSessionFactory = (spec: RootSessionSpec) => Promise<RootSession>;
 export type RootExecution = { reply: string; subjects: string[] };
 export type RootExecutionResult = MemoryResult<RootExecution> | { ok: false; error: "capacity-unavailable"; message: string; retryAt: number };
@@ -42,7 +43,7 @@ export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/
   return config;
 }
 
-export function createRootExecutor(config: RootConfig, options: { factory?: RootSessionFactory; env?: NodeJS.ProcessEnv; prompt?: string; report?: InfrastructureReporter; consent?: (admission: RootAdmission, request: string, input: ConsentInput) => ReturnType<ConsentRequest>; notify?: (admission: RootAdmission, toolCallId: string, input: NotificationInput) => ReturnType<NotificationRequest> } = {}): RootExecutor {
+export function createRootExecutor(config: RootConfig, options: { factory?: RootSessionFactory; capacity?: AgentCapacity | { mode: "unmanaged" }; env?: NodeJS.ProcessEnv; prompt?: string; report?: InfrastructureReporter; consent?: (admission: RootAdmission, request: string, input: ConsentInput) => ReturnType<ConsentRequest>; notify?: (admission: RootAdmission, toolCallId: string, input: NotificationInput) => ReturnType<NotificationRequest> } = {}): RootExecutor {
   const hostPrompt = options.prompt ?? readFileSync(config.promptFile, "utf8");
   const factory = options.factory ?? createFixedSession;
   const baseEnv = { ...process.env, ...options.env };
@@ -60,7 +61,10 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
         if (prior.person !== admission.person || prior.threadId !== admission.threadId || JSON.stringify(prior.recipients) !== JSON.stringify(admission.recipients)) throw new Error("Root admission changed during recovery");
         if (existsSync(join(directory, "reply.json"))) return { ok: true, value: JSON.parse(readFileSync(join(directory, "reply.json"), "utf8")) };
       } else mkdirSync(directory, { recursive: false, mode: 0o700 });
-      const env = { ...baseEnv, PI_MODEL_BROKER_URL: config.brokerUrl, PI_THREAD_ID: admission.rootSessionId,
+      const env = { ...baseEnv,
+        PI_PERSON_SETTINGS_DATA: undefined, PI_REMOTE_DATA: undefined, PI_PERSON_TIMEZONE_FILE: undefined,
+        PI_MODEL_DELIVERY_TIMEZONE: Object.hasOwn(admission, "timezone") ? JSON.stringify(admission.timezone) : undefined,
+        PI_MODEL_BROKER_URL: config.brokerUrl, PI_CODING_AGENT_DIR: config.agentDir, PI_THREAD_ID: admission.rootSessionId,
         PI_REMOTE_SENDER_ID: admission.person, PI_KENAN_MEMORY_PERSON: admission.person,
         PI_KENAN_MEMORY_TOKEN: admission.memoryToken, PI_KENAN_MEMORY_ROLE: "root",
         PI_KENAN_MEMORY_ROOM_ID: admission.roomId ?? "" };
@@ -70,11 +74,9 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
       writeFileSync(join(directory, "admission.json"), JSON.stringify({ person: admission.person, threadId: admission.threadId,
         rootSessionId: admission.rootSessionId, recipients: admission.recipients, roomId: admission.roomId, createdAt: new Date().toISOString() })+'\n', { mode: 0o600 });
       stage = "create-session";
-      session = await factory({ id: admission.rootSessionId, person: admission.person, recipients: [...admission.recipients], prompt,
+      session = managedRootSession({ id: admission.rootSessionId, person: admission.person, recipients: [...admission.recipients], prompt,
         request, config, directory, env, onExecution, requestConsent: options.consent ? input => options.consent!(admission, request, input) : undefined,
-        notify: options.notify ? (toolCallId, input) => options.notify!(admission, toolCallId, input) : undefined });
-      onExecution?.();
-      stage = "model-turn";
+        notify: options.notify ? (toolCallId, input) => options.notify!(admission, toolCallId, input) : undefined }, async spec => { const native = await factory(spec); stage = "model-turn"; return native; }, options.capacity);
       await session.prompt(`A person asked Kenan the following. Consider it on its merits and answer only what you choose to disclose.\n\n${JSON.stringify({ request })}`);
       const reply = session.reply();
       if (typeof reply !== "string" || !reply.trim()) {
@@ -87,8 +89,8 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
       report({ component: "root-executor", stage, outcome: "ok", durationMs: Math.round(performance.now() - started) });
       return { ok: true, value: { reply, subjects } };
     } catch (error) {
-      if (error instanceof StandaloneAdmissionError) return { ok: false, error: "capacity-unavailable", message: "Waiting for the shared global 100-agent capacity", retryAt: error.admissionError.retryAt ?? Date.now() + 5_000 };
-      report({ component: "root-executor", stage, outcome: "failed", reason: error instanceof RootInitializationError ? error.reason : infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
+      if (error instanceof RootCapacityUnavailable) return { ok: false, error: "capacity-unavailable", message: error.message, retryAt: error.retryAt };
+      report({ component: "root-executor", stage, outcome: "failed", reason: error instanceof RootReplyUnavailable ? "no-reply" : error instanceof RootInitializationError ? error.reason : infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
       return { ok: false, error: "unavailable", message: "Root Kenan could not complete this request" };
     } finally {
       try { await session?.dispose(); }
@@ -97,7 +99,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
   };
 }
 
-export async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
+async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
   const { createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager, createBashTool, defineTool } = await import("@earendil-works/pi-coding-agent");
   const { Type } = await import("typebox");
   const { memoryExtension } = await import("kenan-memory/tools");
@@ -105,12 +107,8 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
   const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
   const scope = globals[scopeKey] ??= new AsyncLocalStorage<NodeJS.ProcessEnv>();
   return scope.run(spec.env, async () => {
-    const recordPath = join(spec.directory, "capacity.json");
-    const capacity = await requireStandaloneAgent({ recordPath,
-      agentId: `root:${spec.id}`, executionId: nextStandaloneExecutionId(recordPath), env: spec.env });
     let native: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
     try {
-    spec.onExecution?.();
     const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 }, compaction: { enabled: true } });
     const routing = new URL("./extension/routing.ts", import.meta.resolve("pi-orchestrator/api")).pathname;
     const services = await createAgentSessionServices({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,
@@ -135,9 +133,13 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
       execute: async (id, input) => { const result = spec.notify ? await spec.notify(id, input) : { ok: false, message: "Notification delivery is unavailable; nothing was queued" };
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} }; } });
     const { session } = await createAgentSessionFromServices({ services,
-      sessionManager: SessionManager.create(spec.config.cwd, spec.directory), model,
+      sessionManager: (() => {
+        if (!existsSync(spec.sessionFile)) writeFileSync(spec.sessionFile, JSON.stringify(SessionManager.inMemory(spec.config.cwd).getHeader()) + "\n", { mode: 0o600 });
+        return SessionManager.open(spec.sessionFile, undefined, spec.config.cwd);
+      })(), model,
       thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, consentTool, notificationTool, replyTool] });
     native = session;
+    installMessageDelivery(session, spec.env);
     const resources = services.resourceLoader;
     const names = session.agent.state.tools.map(tool => tool.name);
     if (resources.getSystemPrompt() !== spec.prompt || resources.getAgentsFiles().agentsFiles.length || resources.getSkills().skills.length || resources.getAppendSystemPrompt().length) {
@@ -146,10 +148,11 @@ export async function createFixedSession(spec: RootSessionSpec): Promise<RootSes
     if (names.length !== ROOT_TOOLS.length || names.some(name => !ROOT_TOOLS.includes(name))) { throw new RootInitializationError("toolset-invariant"); }
     return { prompt: async text => scope.run(spec.env, () => session.prompt(text)),
       reply: () => chosen?.reply, subjects: () => chosen?.subjects ?? [],
-      dispose: () => scope.run(spec.env, () => abortAndSettleStandaloneSession(session, capacity)) };
+      observe: listener => session.subscribe(event => listener(event as unknown as PiEvent)),
+      abort: () => scope.run(spec.env, () => session.abort()),
+      dispose: () => scope.run(spec.env, async () => { await session.abort(); session.dispose(); }) };
     } catch (error) {
-      if (native) await abortAndSettleStandaloneSession(native, capacity);
-      else await settleStandaloneAgent(capacity);
+      if (native) { await native.abort(); native.dispose(); }
       throw error;
     }
   });

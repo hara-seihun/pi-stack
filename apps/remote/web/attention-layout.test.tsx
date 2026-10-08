@@ -13,13 +13,14 @@ const item: NeedsYouItem = {
   dismissal: { kind: "question", threadId: "thread", questionId: "q" },
 };
 
-test("Attention puts the feed before calendar controls and keeps utilities collapsed", () => {
+test("Attention puts the feed before calendar controls and routes utilities to Settings", () => {
   const html = renderToStaticMarkup(<AttentionScreen version={0} />);
   const feedStart = html.indexOf('<section aria-label="Now">');
   expect(feedStart).toBeGreaterThan(0);
   expect(html.slice(0, feedStart)).not.toMatch(/<button|<input|<select|<header/);
-  expect(html.indexOf('class="attention-calendar-settings"')).toBeGreaterThan(feedStart);
-  expect(html).not.toContain('<details class="attention-calendar-settings" open');
+  expect(html.indexOf('class="attention-calendar-controls"')).toBeGreaterThan(feedStart);
+  expect(html).toContain('>Calendar settings</button>');
+  expect(html).not.toContain('type="password"');
 });
 
 function questionSources(node: ReactNode): string[] {

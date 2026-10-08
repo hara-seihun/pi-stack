@@ -1,0 +1,11 @@
+# Feature use
+
+Remote records bounded, metadata-only feature usage in each person's encrypted `supervisor.sqlite3`. Machine → Feature use shows that person's counts, last use, observed enabled/disabled/unavailable state, and collection start. Other accounts do not share this store or readout.
+
+The closed catalog and wire validation live in `apps/remote/shared/feature-usage.ts`. `server/feature-usage.ts` owns totals, 90 UTC daily aggregates and 90-day deduplication receipts. Totals/last-use survive daily retention. Accepted actions use stable request identities where the operation has one; the server hashes internal identifiers before storage. No message text, contacts, file paths, URLs, thread identities or arbitrary event properties are collected.
+
+The own-person authenticated `/v1/feature-usage` endpoint reads summaries or accepts a strictly validated UUID feature event. The caller supplies neither a principal nor an actor. Native overlay state and accepted chat messages enter through the phone's existing authenticated connection. Repeated unchanged state observations do not create usage or receipts. Background polls, connection refreshes, preloads, transcripts and received Signal traffic do not count as feature use.
+
+Coverage is explicit in the catalog: screen opens; accepted conversation prompts/launches, uploads, Voice connections, telephone errands, Signal tool actions, phone commands, calendar operations and read-aloud requests; explicit drawing/editor/artifact interactions. Counts measure accepted feature actions, not successful real-world delivery of a call, message or other external effect. Retrying an existing prompt admission does not increment it twice.
+
+A zero count means no recorded use since collection began; it makes no claim about earlier use. Unobserved configuration is represented as unknown, not disabled or enabled. Comparing the last seven UTC days with the preceding thirty days exposes features that stop being used without pretending to infer why. Collection failures return typed errors; frontend delivery failures are shown in the readout, while server-side failures enter the existing owner diagnostics. There is no remote analytics service and no content sampling.

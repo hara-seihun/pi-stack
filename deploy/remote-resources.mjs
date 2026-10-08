@@ -12,23 +12,27 @@ import { pathToFileURL } from "node:url";
 // Paths inside each copied resource are relative to its release destination.
 /** @type {RemoteResource[]} */
 export const remoteResources = [
-  ...["lib", "release-checkout", "meeting-census", "smoke", "one-kenan-activate"].map(name => ({
+  ...["lib", "release-checkout", "meeting-census", "smoke", "one-kenan-activate", "editor"].map(name => ({
     source: `deploy/${name}`, destination: `deploy/${name}`, kind: "file",
   })),
+  { source: "deploy/systemd/pi-editor@.service", destination: "deploy/systemd/pi-editor@.service", kind: "file" },
+  { source: "docs/editor.md", destination: "docs/editor.md", kind: "file" },
+  { source: "docs/native-history-migration.md", destination: "docs/native-history-migration.md", kind: "file" },
+  { source: "scripts/migrate-native-history.mjs", destination: "scripts/migrate-native-history.mjs", kind: "file" },
   { source: "apps/remote/package.json", destination: "package.json", kind: "file" },
   { source: "apps/remote/meeting-runtime.json", destination: "meeting-runtime.json", kind: "file" },
   { source: "apps/remote/data-contract.json", destination: "data-contract.json", kind: "file" },
   {
     source: "apps/remote/server", destination: "server", kind: "tree",
-    required: ["voice/delegation-policy.md", "meet/transcriber.ts", "write.ts", "file-edit.py"],
+    required: ["voice/delegation-policy.md", "meet/transcriber.ts", "pi-editor-launch", "phone/dist/retell-sdk.js", "native-history-startup.mjs", "native-history-startup-legacy.mjs"],
     entrypoints: ["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts", "meet/runtime-main.ts"],
-    executables: ["pi-remote", "pi-phone", "pi-room", "pi-calendar", "pi-remote-launch", "pi-remote-supervise"],
+    executables: ["pi-remote", "pi-phone", "pi-room", "pi-signal", "pi-calendar", "pi-remote-launch", "pi-remote-supervise", "pi-editor-launch", "pi-timezone-provision"],
   },
   { source: "apps/remote/shared", destination: "shared", kind: "tree" },
   { source: "apps/remote/skills", destination: "skills", kind: "tree", dereference: true, required: ["livedev/SKILL.md"] },
   {
     source: "apps/remote/web/dist", destination: "web/dist", kind: "tree", generated: true,
-    required: ["index.html", "meet.html", "meet-adapter.js", "voice.html", "kenan.png"],
+    required: ["index.html", "meet-adapter.js", "voice.html", "kenan.png"],
   },
   { source: "packages/kenan-root/src", destination: "kenan-root/src", kind: "tree", entrypoints: ["main.ts"] },
   { source: "packages/kenan-root/dist", destination: "kenan-root/dist", kind: "tree", generated: true },

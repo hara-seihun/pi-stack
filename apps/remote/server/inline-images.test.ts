@@ -37,7 +37,7 @@ test("sandbox replies cannot submit image generation through inline tags or cont
   await f.service.start();
   const tag = '<pi-remote-image id="escape" prompt="draw" />';
   f.service.accept("thread", "message", tag);
-  f.service.acceptContext("thread", JSON.stringify({ messages: [{ role: "assistant", content: tag }] }));
+  f.service.accept("thread", "message-1", tag);
   expect(f.service.snapshot("thread").images).toEqual([]);
 });
 
@@ -140,35 +140,18 @@ test("missing dependencies, cycles, failed parents and display-only tags never c
   expect(f.service.snapshot("other").images).toEqual([]);
 });
 
-test("persisted context accepts assistant text only and replay reuses its completed image", async () => {
+test("native message replay reuses its completed image and ignores code examples", async () => {
   const calls: string[] = [];
   const f = await fixture(async input => { calls.push(input.prompt); return success(); });
   const tag = (id: string) => `<pi-remote-image id="${id}" prompt="${id}" />`;
   const assistantText = tag("accepted");
-  const context = JSON.stringify({
-    systemPrompt: tag("systemPrompt"), tools: [{ description: tag("schema") }],
-    messages: [
-      { role: "system", content: tag("system") },
-      { role: "user", content: [{ type: "text", text: tag("user") }] },
-      { role: "toolResult", content: [{ type: "text", text: tag("result") }] },
-      { role: "assistant", content: [
-        { type: "thinking", thinking: tag("thinking") },
-        { type: "toolCall", name: "example", arguments: { text: tag("arguments") } },
-        { type: "text", text: '```xml\n' + tag("code") + '\n```\n' + assistantText.slice(0, 30) },
-        { type: "text", text: assistantText.slice(30) },
-      ] },
-    ],
-  });
-  f.db.exec("CREATE TABLE persisted_context(document TEXT NOT NULL)");
-  f.db.query("INSERT INTO persisted_context VALUES(?)").run(context);
-  const saved = () => (f.db.query("SELECT document FROM persisted_context").get() as { document: string }).document;
   expect(f.service.snapshot("thread")).toEqual({ version: 0, images: [] });
-  f.service.acceptContext("thread", saved());
+  f.service.accept("thread", "message-accepted", '```xml\n' + tag("code") + '\n```\n' + assistantText);
   expect(f.service.snapshot("thread").images.map(image => [image.id, image.state])).toEqual([["accepted", "queued"]]);
   await f.service.start();
   await f.until(() => f.service.snapshot("thread").images[0]?.state === "complete");
   const completed = f.service.snapshot("thread");
-  f.service.acceptContext("thread", saved());
+  f.service.accept("thread", "message-accepted", assistantText);
   expect(f.service.snapshot("thread")).toEqual(completed);
   expect(calls).toEqual(["accepted"]);
   expect(await readFile(completed.images[0].path!)).toEqual(png);

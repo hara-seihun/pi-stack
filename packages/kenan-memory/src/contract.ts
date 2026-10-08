@@ -65,6 +65,8 @@ export const MEMORY_TOKEN_HEADER = "x-kenan-memory-session";
 /** A shared-UID runner uses a supervisor-issued session credential, not a claimed person name. */
 export interface MemorySession { person: PersonId; threadId: string; token: string; role: MemoryRole }
 export interface RootAdmission {
+  /** Supplied only by the authenticated memory-service timezone resolver. */
+  timezone?: import("pi-orchestrator/person-timezone").PersonTimezone | null;
   person: PersonId;
   threadId: string;
   rootSessionId: string;

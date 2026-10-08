@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import { chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { listPersons, parsePerson, personPath, writePerson, type Person } from "./persons";
 import { defaultThreadDestinations } from "./thread-model-defaults";
 
@@ -68,6 +69,7 @@ function defaultEnvironment(person: Omit<Person, "environment">, folder: string,
     PI_REMOTE_OPERATOR_NAME: person.displayName,
     PI_REMOTE_PRIVATE_DIR: privateDir,
     PI_REMOTE_DATA: join(privateDir, ".pi-remote"),
+    PI_PERSON_TIMEZONE_FILE: `/var/lib/pi-timezones/${person.user}/timezone.json`,
     PI_REMOTE_INGESTION: join(privateDir, ".ingestion"),
     PI_REMOTE_PORT: person.port,
     PI_REMOTE_DESTINATIONS: "personal,home,raw,sandbox",
@@ -136,6 +138,8 @@ function add(args: string[]): void {
   const homeName = named.get("home-name") ?? user.charAt(0).toUpperCase() + user.slice(1);
   const person: Person = { ...base, environment: defaultEnvironment(base, folder, home, homeName, environmentId, environmentName) };
   writePerson(person);
+  const provision = Bun.spawnSync(["python3", fileURLToPath(new URL("./pi-timezone-provision", import.meta.url)), "--configure", "--user", user], { stdout: "ignore", stderr: "inherit" });
+  if (provision.exitCode !== 0) throw new Error(`Timezone ownership preparation failed for ${user}; registry is retained for repair`);
   console.log(`added ${user} (${displayName}) on port ${port}; registry file ${personPath(user)}`);
   console.log(`use pi-remote person update ${user} with JSON on stdin to change this file; the front door reads it on restart`);
   if (key && !keyFile) {

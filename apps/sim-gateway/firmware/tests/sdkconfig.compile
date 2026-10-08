@@ -1,6 +1,0 @@
-# Non-secret link-test inputs only. Never flash this configuration.
-CONFIG_SIM_WIFI_SSID="COMPILE_TEST_NOT_A_NETWORK"
-CONFIG_SIM_WIFI_PASSWORD="COMPILE_TEST_NOT_A_PASSWORD"
-CONFIG_SIM_PHONE_BDA="02:00:00:00:00:01"
-CONFIG_SIM_GATEWAY_ID="compile-test-not-a-device"
-CONFIG_SIM_DEVICE_TOKEN="compile-test-not-an-auth-token"

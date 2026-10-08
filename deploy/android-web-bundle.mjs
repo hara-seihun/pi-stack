@@ -1,15 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export function webBundleBytes(apk) {
+export function webBundleBytes(input, kind = "apk") {
   const scratch = mkdtempSync(join(tmpdir(), "kenan-web-bundle-"));
   const options = { env: { ...process.env, TZ: "UTC" }, encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024 };
   try {
-    execFileSync("unzip", ["-q", "-o", apk, "assets/public/*", "-d", scratch], options);
     const root = join(scratch, "assets/public");
-    if (!existsSync(join(root, "index.html"))) throw new Error("APK has no packaged web client");
+    if (kind === "apk") execFileSync("unzip", ["-q", "-o", input, "assets/public/*", "-d", scratch], options);
+    else if (kind === "directory") cpSync(input, root, { recursive: true, dereference: false });
+    else throw new Error(`Unknown web bundle input kind: ${kind}`);
+    if (!existsSync(join(root, "index.html"))) throw new Error("Artifact has no built web client");
     const files = [];
     const collect = (directory, prefix = "") => {
       for (const entry of readdirSync(directory, { withFileTypes: true })) {

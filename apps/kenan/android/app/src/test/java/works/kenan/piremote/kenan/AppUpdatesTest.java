@@ -62,6 +62,18 @@ public class AppUpdatesTest {
         assertEquals(NativeState.UpdateKind.WEB, decide(null, web(next, BuildConfig.SHELL_ID), BuildConfig.VERSION_CODE).kind);
     }
 
+    @Test public void aNewerWebGenerationReusesTheNativeApk() throws Exception {
+        int nativeVersion = BuildConfig.VERSION_CODE + 1;
+        int webVersion = nativeVersion + 1;
+        JSONObject bundle = web(webVersion, BuildConfig.SHELL_ID)
+            .put("revision", "d".repeat(40)).put("fileName", "d".repeat(40) + ".web.zip");
+        assertEquals(NativeState.UpdateKind.WEB, decide(release(nativeVersion, BuildConfig.SHELL_ID), bundle, BuildConfig.VERSION_CODE).kind);
+        assertNull(decide(release(nativeVersion, BuildConfig.SHELL_ID), bundle, webVersion));
+        AppUpdates.Manifest rejected = parse(release(nativeVersion, BuildConfig.SHELL_ID), bundle);
+        assertNull(AppUpdates.decide(rejected, BuildConfig.VERSION_CODE, BuildConfig.SHELL_ID, BuildConfig.VERSION_CODE, revision -> true));
+        assertEquals(NativeState.UpdateKind.APK, decide(release(nativeVersion, OTHER_SHELL), bundle, webVersion).kind);
+    }
+
     @Test public void nativeChangesRequireTheApk() throws Exception {
         int next = BuildConfig.VERSION_CODE + 1;
         assertEquals(NativeState.UpdateKind.APK, decide(release(next, OTHER_SHELL), web(next, OTHER_SHELL), BuildConfig.VERSION_CODE).kind);

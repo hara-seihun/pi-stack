@@ -12,6 +12,7 @@ import { API } from "../../server/api";
 import { fileKind } from "./features/files/file-kind";
 import { resourceUrl } from "./resource-url";
 import { assertNever } from "../../shared/explicit-state";
+import { recordFeatureUsage } from "./feature-usage";
 
 const FILE_TAG_AT = /^<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/i;
 /** Image formats every client can draw; HEIC and TIFF stay links. */
@@ -123,6 +124,7 @@ button { font: inherit; color: var(--accent, inherit); background: none; border:
       const pre = this.#root.querySelector("pre")!;
       const button = this.#root.querySelector("button")!;
       button.addEventListener("click", () => {
+        recordFeatureUsage("artifact");
         const expanded = pre.classList.toggle("expanded");
         button.textContent = expanded ? "Collapse" : "Expand";
       });

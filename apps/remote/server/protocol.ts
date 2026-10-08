@@ -4,11 +4,9 @@
 // the other instead of silently reading undefined at runtime.
 
 import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, Delivery as ThreadDelivery } from "pi-orchestrator/api";
-import type { MessagingSnapshot } from "./messaging/protocol.js";
 import type { ReconcileFrame } from "../shared/reconcile.js";
-export type ChatId = `ai:${string}` | `human:${string}` | `room:${string}`;
+export type ChatId = `ai:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
-export type FileEditSnapshot = { path: string; content: string; revision: string };
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
 
@@ -24,14 +22,6 @@ export interface EnvironmentEndpoint {
   icon?: string;
   baseUrl: string;
 }
-
-export type ContextSplice = {
-  baseHash: string;
-  targetHash: string;
-  prefixBytes: number;
-  deleteBytes: number;
-  insertBase64: string;
-};
 
 export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
@@ -163,19 +153,6 @@ export interface PlanCard {
    * cannot attribute usage to her. */
   spent: { day: number; week: number } | null;
 }
-
-export type GovernorProvider = "openai" | "anthropic";
-/** The drawer button's four states, in cycle order: normal pace, 3× (green),
- * 10× (blue), and background halted (red). Forced runs bypass these controls;
- * running sessions finish naturally. */
-export type GovernorState = "off" | "green" | "blue" | "red";
-export interface Governor {
-  state: GovernorState;
-  boosted: boolean;
-  multiplier: number;
-  boostedMultiplier: number;
-}
-export type GovernorControls = Record<GovernorProvider, Governor>;
 
 export interface MachineActionState {
   id: string;
@@ -320,7 +297,6 @@ export interface PeopleUsage {
  * lifecycles) and travels only to streams that subscribed to it. */
 export interface Dashboard {
   plans: PlanCard[];
-  governors: GovernorControls | null;
   actions: MachineActionState[];
   /** Host-global availability for everyone's new threads; existing threads are unaffected. */
   modelAvailability?: ModelAvailability[];
@@ -516,7 +492,6 @@ import type { ThreadQuestion } from "pi-orchestrator/api";
 export type StreamSnapshot =
   | { type: "bootstrap"; bootstrap: Bootstrap }
   | ({ type: "state" } & SupervisorState)
-  | { type: "messaging"; snapshot: MessagingSnapshot }
   | { type: "dashboard"; dashboard: Dashboard }
   | { type: "workers"; sessions: Session[] }
   | ({ type: "transcript" } & TranscriptPage)

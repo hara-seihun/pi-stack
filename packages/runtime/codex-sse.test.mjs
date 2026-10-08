@@ -1,14 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import { patchCodexSse } from "./patch-codex-sse.mjs";
 
 const sdk = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/api/openai-codex-responses"));
-const chunks = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "bundle/chunks");
-const bundle = join(chunks, readdirSync(chunks).find(name => /^openai-codex-responses-[^.]+\.js$/u.test(name)));
-for (const path of [sdk, bundle]) test(`Codex SSE framing in ${path.includes("chunks") ? "bundled CLI" : "SDK"}`, async () => {
+for (const path of [sdk]) test("Codex SSE framing in SDK", async () => {
   const source = patchCodexSse(readFileSync(path, "utf8"));
   assert.equal(patchCodexSse(source), source);
   const start = source.search(/async function\*\s*parseSSE\(/u);

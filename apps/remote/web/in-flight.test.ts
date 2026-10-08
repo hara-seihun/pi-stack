@@ -16,20 +16,19 @@ class FakeControl {
   }
 }
 
-test("top-level requests and actions show; descendant media, read receipts and stream maintenance do not", () => {
+test("top-level requests and actions show; descendant media and stream maintenance do not", () => {
   expect(requestVisibility("POST", "/v1/sessions", null)).toBe("shown");
   expect(requestVisibility("DELETE", "/pi-stack/v1/sessions/x", 10_000)).toBe("shown");
   expect(requestVisibility("GET", "/v1/sessions", null)).toBe("background");
   expect(requestVisibility("GET", "/v1/remotes/other/v1/sessions", ACTIVATION_WINDOW_MS)).toBe("shown");
   expect(requestVisibility("GET", "/v1/sessions", ACTIVATION_WINDOW_MS + 1)).toBe("background");
-  for (const path of ["/v1/sessions/x/items/a", "/v1/sessions/x/images/hash", "/v1/sessions/x/transcript", "/v1/messaging/attachments/file", "/v1/messaging/backends/signal/avatars/person", "/v1/speech/utterances/id/audio", "/v1/files/download"]) {
+  for (const path of ["/v1/sessions/x/items/a", "/v1/sessions/x/images/hash", "/v1/sessions/x/transcript", "/v1/speech/utterances/id/audio", "/v1/files/download"]) {
     expect(requestVisibility("GET", path, 5)).toBe("background");
   }
   expect(requestVisibility("POST", "/v1/reconcile", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/remotes/other/v1/reconcile", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/stream", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/stream/abc", 5)).toBe("background");
-  expect(requestVisibility("POST", "/v1/remotes/other/v1/messaging/conversations/id/read", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/diagnostics/requests", 5)).toBe("background");
   expect(requestVisibility(NATIVE_METHOD, "native:getState", 5)).toBe("background");
   expect(requestVisibility(NATIVE_METHOD, "native:installAppUpdate", 50)).toBe("shown");
@@ -105,7 +104,7 @@ test("requests retain attribution without changing the pressed control", () => {
   unsubscribe();
 
   // A write with no press behind it still shows on the page, attributed to nothing.
-  const late = beginRequest("POST", "/v1/messaging/conversations", 1_000 + ACTIVATION_WINDOW_MS + 500);
+  const late = beginRequest("POST", "/v1/rooms", 1_000 + ACTIVATION_WINDOW_MS + 500);
   expect(inFlight.count()).toBe(1);
   expect(inFlight.list()[0]?.origin).toBeNull();
   late();
@@ -122,11 +121,11 @@ test("slow nested requests retain latency diagnostics without owning global prog
   const reported: RequestTiming[] = [];
   setRequestTimingReporter(timing => reported.push(timing));
   try {
-    const settle = beginRequest("GET", "/v1/messaging/conversations/chat/messages?private=value", performance.now() - SLOW_REQUEST_MS - 1);
+    const settle = beginRequest("GET", "/v1/sessions/chat/transcript?private=value", performance.now() - SLOW_REQUEST_MS - 1);
     expect(inFlight.count()).toBe(0);
     settle();
     expect(reported.map(timing => timing.state)).toEqual(["pending", "settled"]);
-    expect(reported.every(timing => timing.path === "/v1/messaging/conversations/chat/messages")).toBe(true);
+    expect(reported.every(timing => timing.path === "/v1/sessions/chat/transcript")).toBe(true);
     expect(inFlight.count()).toBe(0);
   } finally { setRequestTimingReporter(null); }
 });

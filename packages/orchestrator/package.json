@@ -19,10 +19,21 @@
       "bun": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./person-settings-contract": {
+      "types": "./src/person-settings-contract.ts",
+      "browser": "./src/person-settings-contract.ts",
+      "bun": "./src/person-settings-contract.ts",
+      "default": "./dist/person-settings-contract.js"
+    },
     "./question-policy": {
       "types": "./src/threads/question-policy.ts",
       "bun": "./src/threads/question-policy.ts",
       "default": "./dist/threads/question-policy.js"
+    },
+    "./person-timezone": {
+      "types": "./src/person-timezone.ts",
+      "bun": "./src/person-timezone.ts",
+      "default": "./dist/person-timezone.js"
     },
     "./message-format": {
       "types": "./src/threads/message-format.ts",
@@ -43,16 +54,6 @@
       "types": "./src/agent-capacity.ts",
       "bun": "./src/agent-capacity.ts",
       "default": "./dist/agent-capacity.js"
-    },
-    "./standalone-agent": {
-      "types": "./src/standalone-agent.ts",
-      "bun": "./src/standalone-agent.ts",
-      "default": "./dist/standalone-agent.js"
-    },
-    "./boost": {
-      "types": "./src/boost.ts",
-      "bun": "./src/boost.ts",
-      "default": "./dist/boost.js"
     }
   },
   "pi": {

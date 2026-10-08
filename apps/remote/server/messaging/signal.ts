@@ -1,12 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
+import { basename, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendReply, MessagingCallSupport, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
-import type { MessagingBackendConfig, MessagingCallState, MessagingCapabilities, MessagingLink, MessagingResult } from "./protocol";
-import { qrSvg } from "./qr";
-import { openSignalCallAudio } from "./signal-call-audio";
+import type { BackendAttachment, BackendConversation, BackendReply, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
+import type { MessagingBackendConfig, MessagingCapabilities, MessagingLink, MessagingResult } from "./protocol";
 
 /** signal-cli's own provisioning deadline is shorter than this; it reports the expiry. */
 const LINK_SCAN_MS = 10 * 60_000;
@@ -26,23 +23,6 @@ const failure = (code: string, message: string) => ({ ok: false as const, error:
 const success = <T>(value: T): MessagingResult<T> => ({ ok: true, value });
 const detail = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-function executable(command: string): string | null {
-  const candidates = command.includes("/")
-    ? [isAbsolute(command) ? command : resolve(command)]
-    : (process.env.PATH ?? "").split(delimiter).filter(Boolean).map(directory => join(directory, command));
-  for (const candidate of candidates) {
-    try { accessSync(candidate, constants.X_OK); return candidate; }
-    catch { /* keep looking */ }
-  }
-  return null;
-}
-
-/** Preserve unsigned 64-bit call ids before JavaScript can round them. */
-export function parseSignalRpcLine(line: string): ObjectValue {
-  const callIdsAsStrings = line.replace(/(?<!\\)("callId"\s*:\s*)(\d+)(?=\s*[,}])/g, "$1\"$2\"");
-  return object(JSON.parse(callIdsAsStrings));
-}
-
 const rejectionTypes = new Set(["UNREGISTERED_FAILURE", "IDENTITY_FAILURE", "RATE_LIMIT_FAILURE", "INVALID_PRE_KEY_FAILURE"]);
 function deliverySummary(results: ObjectValue[]): string {
   const counts = new Map<string, number>();
@@ -54,9 +34,9 @@ function deliverySummary(results: ObjectValue[]): string {
   return [...counts].map(([type, count]) => `${type}: ${count}`).join(", ");
 }
 
-function rpcFailure(error: ObjectValue, sending: boolean): MessagingResult<never> {
+function rpcFailure(error: ObjectValue, outgoing: boolean): MessagingResult<never> {
   const message = text(error.message) || "Signal request failed";
-  if (!sending) return failure(`signal_${error.code ?? "error"}`, message);
+  if (!outgoing) return failure(`signal_${error.code ?? "error"}`, message);
   const results = list(object(object(error.data).response).results).map(object);
   const rejected = results.length > 0
     ? results.every(result => rejectionTypes.has(text(result.type)))
@@ -64,10 +44,10 @@ function rpcFailure(error: ObjectValue, sending: boolean): MessagingResult<never
       || (error.code === -1 && /^(?:No recipients given|Sending empty message is not allowed|The user .+ is not registered\.)/.test(message));
   return rejected
     ? failure(`signal_${error.code}`, message)
-    : failure("unknown", `${message}${results.length ? `; ${deliverySummary(results)}` : ""}; send outcome unknown. Do not retry automatically.`);
+    : failure("unknown", `${message}${results.length ? `; ${deliverySummary(results)}` : ""}; outgoing operation outcome unknown. Do not retry automatically.`);
 }
 
-type Pending = { finish: (result: MessagingResult<unknown>) => void; timer: ReturnType<typeof setTimeout>; send: boolean };
+type Pending = { finish: (result: MessagingResult<unknown>) => void; timer: ReturnType<typeof setTimeout>; outgoing: boolean };
 
 class SignalRpc {
   private pending = new Map<number, Pending>();
@@ -80,9 +60,9 @@ class SignalRpc {
   private input?: Writable;
   private exited?: Promise<void>;
 
-  constructor(private notify: (method: string, value: ObjectValue) => void, private failed: (message: string, code: string) => void, private timeout: number, private log: (message: string) => void = () => {}) {}
+  constructor(private notify: (value: ObjectValue) => void, private failed: (message: string, code: string) => void, private timeout: number, private log: (message: string) => void = () => {}) {}
 
-  async connect(options: { binary: string; dataDir: string; callTunnelBinary: string; callSocketDir: string }): Promise<MessagingResult<void>> {
+  async connect(options: { binary: string; dataDir: string }): Promise<MessagingResult<void>> {
     try {
       const scratch = join(options.dataDir, "tmp");
       const environment = { ...process.env };
@@ -96,9 +76,6 @@ class SignalRpc {
           XDG_CACHE_HOME: join(options.dataDir, "cache"),
           TMPDIR: scratch, TMP: scratch, TEMP: scratch,
           JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS ?? ""} -Djava.io.tmpdir=${JSON.stringify(scratch)}`.trim(),
-          SIGNAL_CALL_TUNNEL_BIN: options.callTunnelBinary,
-          SIGNAL_CALL_TUNNEL_AUDIO_MODE: "pipe",
-          SIGNAL_CALL_TUNNEL_SOCKET_DIR: options.callSocketDir,
         },
       });
       this.input = this.child.stdin;
@@ -157,16 +134,16 @@ class SignalRpc {
         this.buffer = this.buffer.slice(newline + 1);
         if (!line.trim()) continue;
         let frame: ObjectValue;
-        try { frame = parseSignalRpcLine(line); }
+        try { frame = object(JSON.parse(line)); }
         catch { this.abort("Invalid JSON from signal-cli"); return; }
-        if (frame.method === "receive" || frame.method === "callEvent") this.notify(frame.method, object(frame.params));
+        if (frame.method === "receive") this.notify(object(frame.params));
         else if (typeof frame.id === "number") {
           const pending = this.pending.get(frame.id);
           if (!pending) continue;
           this.pending.delete(frame.id);
           clearTimeout(pending.timer);
           const error = object(frame.error);
-          pending.finish(frame.error ? rpcFailure(error, pending.send) : success(frame.result));
+          pending.finish(frame.error ? rpcFailure(error, pending.outgoing) : success(frame.result));
         }
       }
     });
@@ -177,12 +154,13 @@ class SignalRpc {
   call(method: string, params: ObjectValue = {}, timeout = this.timeout): Promise<MessagingResult<unknown>> {
     if (this.stopped || !this.input || this.input.destroyed) return Promise.resolve(failure("disconnected", "Signal is not connected"));
     const id = ++this.sequence;
+    const outgoing = method === "send" || method === "sendReaction";
     return new Promise(resolve => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        resolve(failure(method === "send" ? "unknown" : "timeout", `Signal ${method} timed out${method === "send" ? "; it may have been delivered. Do not retry automatically." : ""}`));
+        resolve(failure(outgoing ? "unknown" : "timeout", `Signal ${method} timed out${outgoing ? "; it may have been delivered. Do not retry automatically." : ""}`));
       }, timeout);
-      this.pending.set(id, { finish: resolve, timer, send: method === "send" });
+      this.pending.set(id, { finish: resolve, timer, outgoing });
       try {
         this.input!.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n", error => {
           if (error) this.abort(detail(error));
@@ -191,12 +169,12 @@ class SignalRpc {
     });
   }
 
-  settleSends(): void {
+  settleOutgoing(): void {
     for (const [id, pending] of this.pending) {
-      if (!pending.send) continue;
+      if (!pending.outgoing) continue;
       clearTimeout(pending.timer);
       this.pending.delete(id);
-      pending.finish(failure("unknown", "Signal profile is closing; send outcome unknown. Do not retry automatically."));
+      pending.finish(failure("unknown", "Signal profile is closing; outgoing operation outcome unknown. Do not retry automatically."));
     }
   }
 
@@ -205,7 +183,7 @@ class SignalRpc {
     this.stopped = true;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.finish(failure(pending.send ? "unknown" : code, pending.send ? `${message}; send outcome unknown. Do not retry automatically.` : message));
+      pending.finish(failure(pending.outgoing ? "unknown" : code, pending.outgoing ? `${message}; outgoing operation outcome unknown. Do not retry automatically.` : message));
     }
     this.pending.clear();
     this.child?.kill("SIGTERM");
@@ -224,29 +202,9 @@ class SignalRpc {
 
 export const SIGNAL_ICON = "signal";
 
-interface SignalCallRecord {
-  call: BackendCall;
-  inputDeviceName: string;
-  outputDeviceName: string;
-}
-
-function callState(value: string): MessagingResult<MessagingCallState> {
-  switch (value) {
-    case "RINGING_INCOMING": return success("ringing_incoming");
-    case "RINGING_OUTGOING": return success("ringing_outgoing");
-    case "CONNECTING": return success("connecting");
-    case "CONNECTED": return success("connected");
-    case "RECONNECTING": return success("reconnecting");
-    case "ENDED":
-    case "IDLE": return success("ended");
-  }
-  return failure("protocol", `Unsupported Signal call state: ${value || "(missing)"}`);
-}
-
 class SignalPlugin implements MessagingPlugin {
   readonly icon = SIGNAL_ICON;
-  readonly capabilities: MessagingCapabilities;
-  readonly calls?: MessagingCallSupport;
+  readonly capabilities: MessagingCapabilities = { attachments: true, groups: true };
   readonly linkable = true;
   private link?: MessagingLink;
   private linkRpc?: SignalRpc;
@@ -260,7 +218,6 @@ class SignalPlugin implements MessagingPlugin {
   private receiveStopped = false;
   private closeTask?: Promise<void>;
   private subscription?: number;
-  private callSubscription?: number;
   private watchdog?: ReturnType<typeof setInterval>;
   private lastEvent = 0;
   private rebuilding = false;
@@ -270,47 +227,8 @@ class SignalPlugin implements MessagingPlugin {
   private events: Promise<void> = Promise.resolve();
   private conversations = new Map<string, BackendConversation>();
   private aliases = new Map<string, string>();
-  private avatarDir = "";
-  private readonly callTunnelCommand: string;
-  private readonly callTunnelBinary: string | null;
-  private readonly callRecords = new Map<string, SignalCallRecord>();
-  private readonly callAudio = new Map<string, BackendCallAudio>();
 
-  constructor(private config: MessagingBackendConfig) {
-    this.callTunnelCommand = text(config.options?.callTunnelBinary) || "signal-call-tunnel";
-    this.callTunnelBinary = executable(this.callTunnelCommand);
-    this.capabilities = { attachments: true, groups: true, calls: this.callTunnelBinary !== null };
-    if (this.callTunnelBinary) {
-      this.calls = {
-        start: peer => this.startCall(peer),
-        accept: externalId => this.acceptCall(externalId),
-        hangup: externalId => this.hangupCall(externalId),
-        audio: externalId => this.openCallAudio(externalId),
-      };
-    }
-  }
-
-  /**
-   * signal-cli keeps the pictures it has fetched under `avatars/`, named
-   * `profile-<uuid>` or `profile-<number>` for people and `group-<id>` for
-   * groups, with no extension. The first present, non-empty file wins.
-   */
-  private avatar(keys: string[]): BackendAvatar | null {
-    if (!this.avatarDir) return null;
-    for (const key of keys) {
-      if (!key) continue;
-      const path = join(this.avatarDir, key);
-      try {
-        const stat = statSync(path);
-        if (stat.isFile() && stat.size > 0) return { path, updatedAt: Math.floor(stat.mtimeMs) };
-      } catch { /* not this name */ }
-    }
-    return null;
-  }
-
-  private personAvatar(ids: string[]): BackendAvatar | null {
-    return this.avatar(ids.filter(id => id && !id.startsWith("u:")).flatMap(id => [`profile-${id}`, `contact-${id}`]));
-  }
+  constructor(private config: MessagingBackendConfig) {}
 
   async start(context: MessagingPluginContext): Promise<MessagingResult<void>> {
     if (this.rpc) return failure("started", "Signal plugin is already started");
@@ -322,7 +240,6 @@ class SignalPlugin implements MessagingPlugin {
     if (options.socket !== undefined || options.dataDir !== undefined) return failure("configuration", "Signal state must use this account's encrypted profile directory; external sockets and data directories are not supported");
     const binary = text(options.binary) || "signal-cli";
     const dataDir = join(context.dataDir, "signal-cli");
-    this.avatarDir = join(dataDir, "avatars");
     const timeout = positive(options.timeoutMs, 30_000);
     this.probeMs = positive(options.probeMs, PROBE_MS);
     this.silenceMs = positive(options.silenceMs, SILENCE_MS);
@@ -334,12 +251,12 @@ class SignalPlugin implements MessagingPlugin {
     } catch (error) { return failure("storage", detail(error)); }
     if (this.closing) return failure("closed", "Signal profile closed during startup");
     context.status("connecting", "Connecting to signal-cli");
-    this.rpc = new SignalRpc((method, value) => method === "callEvent" ? this.receiveCallEvent(value) : this.enqueue(value), (message, code) => {
+    this.rpc = new SignalRpc(value => this.enqueue(value), (message, code) => {
       this.ready = false;
       this.stopWatchdog();
       if (!this.closing) context.status(code === "unconfigured" ? "unconfigured" : "error", message);
     }, timeout, message => context.log(message));
-    const connected = await this.rpc.connect({ binary, dataDir, callTunnelBinary: this.callTunnelBinary ?? this.callTunnelCommand, callSocketDir: join(dataDir, "tmp") });
+    const connected = await this.rpc.connect({ binary, dataDir });
     if (!connected.ok) return this.startFailure(connected);
     if (this.closing) return failure("closed", "Signal profile closed during startup");
     const accounts = await this.rpc.call("listAccounts");
@@ -348,7 +265,7 @@ class SignalPlugin implements MessagingPlugin {
     const numbers = list(accounts.value).map(value => text(object(value).number)).filter(Boolean);
     this.account = text(options.account) || (numbers.length === 1 ? numbers[0]! : "");
     if (!this.account || !numbers.includes(this.account)) {
-      // Keep this profile closable: linking from the app starts its own child
+      // Keep this profile closable: provisioning starts its own child
       // later, and a memoized close would orphan it at supervisor handoff.
       await this.stopConnection();
       context.status("unconfigured", numbers.length > 1 ? "Set options.account to choose a linked Signal account" : "Signal is not linked yet. Link this profile to your phone to start using it.");
@@ -369,16 +286,10 @@ class SignalPlugin implements MessagingPlugin {
     if (this.closing) return failure("closed", "Signal profile closed during startup");
     if (typeof subscribed.value !== "number") return this.startFailure(failure("protocol", "Signal returned an invalid receive subscription"));
     this.subscription = subscribed.value;
-    if (this.calls) {
-      const callSubscribed = await this.rpc.call("subscribeCallEvents", { account: this.account });
-      if (!callSubscribed.ok) return this.startFailure(callSubscribed);
-      if (typeof callSubscribed.value !== "number") return this.startFailure(failure("protocol", "Signal returned an invalid call subscription"));
-      this.callSubscription = callSubscribed.value;
-    }
     this.ready = true;
     this.lastEvent = Date.now();
     this.startWatchdog();
-    context.log(`receive subscription ${this.subscription} is live for ${this.account}${this.callSubscription === undefined ? "" : `; call subscription ${this.callSubscription} is live`}`);
+    context.log(`receive subscription ${this.subscription} is live for ${this.account}`);
     context.status("ready", `Signal linked as ${this.account}. History starts when this plugin receives messages.`);
     return success(undefined);
   }
@@ -412,24 +323,17 @@ class SignalPlugin implements MessagingPlugin {
     try {
       this.context?.log(`no Signal receive events for ${Math.round(quiet / 60_000)} minutes; rebuilding subscription ${this.subscription}`);
       if (this.subscription !== undefined) await rpc.call("unsubscribeReceive", { account: this.account, subscription: this.subscription }, this.probeTimeout);
-      if (this.callSubscription !== undefined) await rpc.call("unsubscribeCallEvents", { account: this.account, subscription: this.callSubscription }, this.probeTimeout);
       const subscribed = await rpc.call("subscribeReceive", { account: this.account }, this.probeTimeout);
       if (!subscribed.ok) { rpc.abort(`Signal receive subscription could not be rebuilt: ${subscribed.error.message}`); return; }
       if (typeof subscribed.value !== "number") { rpc.abort("Signal returned an invalid receive subscription while rebuilding"); return; }
       this.subscription = subscribed.value;
-      if (this.calls) {
-        const callSubscribed = await rpc.call("subscribeCallEvents", { account: this.account }, this.probeTimeout);
-        if (!callSubscribed.ok) { rpc.abort(`Signal call subscription could not be rebuilt: ${callSubscribed.error.message}`); return; }
-        if (typeof callSubscribed.value !== "number") { rpc.abort("Signal returned an invalid call subscription while rebuilding"); return; }
-        this.callSubscription = callSubscribed.value;
-      }
       this.lastEvent = Date.now();
       this.context?.log(`receive subscription rebuilt as ${this.subscription}`);
     } finally { this.rebuilding = false; }
   }
 
   /**
-   * Ask signal-cli for a device-link URI and return once it can be displayed.
+   * Ask signal-cli for a device-link URI and return it to the provisioning agent.
    * The wait for the phone to scan it continues in the background: this needs
    * its own child because an unlinked profile has no running connection, and a
    * second process must never share a live profile's data directory.
@@ -451,14 +355,14 @@ class SignalPlugin implements MessagingPlugin {
     } catch (error) { return failure("storage", detail(error)); }
     this.linkCancelled = false;
     const rpc = new SignalRpc(() => {}, () => {}, LINK_START_MS, message => context.log(message));
-    const connected = await rpc.connect({ binary, dataDir, callTunnelBinary: this.callTunnelBinary ?? this.callTunnelCommand, callSocketDir: join(dataDir, "tmp") });
+    const connected = await rpc.connect({ binary, dataDir });
     if (!connected.ok) { await rpc.close(); return connected; }
     const started = await rpc.call("startLink", {}, LINK_START_MS);
     if (!started.ok) { await rpc.close(); return started; }
     const uri = text(object(started.value).deviceLinkUri);
     if (!uri) { await rpc.close(); return failure("protocol", "signal-cli returned no device link URI"); }
     this.linkRpc = rpc;
-    this.setLink({ status: "waiting", uri, qr: await qrSvg(uri), deviceName: name, account: null, error: null, updatedAt: Date.now() });
+    this.setLink({ status: "waiting", uri, deviceName: name, account: null, error: null, updatedAt: Date.now() });
     this.linkTask = this.awaitScan(rpc, uri, name);
     return success(this.link!);
   }
@@ -468,22 +372,22 @@ class SignalPlugin implements MessagingPlugin {
     await rpc.close();
     if (this.linkRpc === rpc) this.linkRpc = undefined;
     if (this.linkCancelled) {
-      this.setLink({ status: "cancelled", uri: null, qr: null, deviceName, account: null, error: null, updatedAt: Date.now() });
+      this.setLink({ status: "cancelled", uri: null, deviceName, account: null, error: null, updatedAt: Date.now() });
       return;
     }
     if (!finished.ok) {
-      this.setLink({ status: "failed", uri: null, qr: null, deviceName, account: null, error: `${finished.error.message}. Start the link again to get a fresh code.`, updatedAt: Date.now() });
+      this.setLink({ status: "failed", uri: null, deviceName, account: null, error: `${finished.error.message}. Start the link again to get a fresh code.`, updatedAt: Date.now() });
       return;
     }
     const account = text(object(finished.value).number);
     this.setLink(account
-      ? { status: "linked", uri: null, qr: null, deviceName, account, error: null, updatedAt: Date.now() }
-      : { status: "failed", uri: null, qr: null, deviceName, account: null, error: "Signal completed the link without naming the account. Start the link again.", updatedAt: Date.now() });
+      ? { status: "linked", uri: null, deviceName, account, error: null, updatedAt: Date.now() }
+      : { status: "failed", uri: null, deviceName, account: null, error: "Signal completed the link without naming the account. Start the link again.", updatedAt: Date.now() });
   }
 
   async cancelLink(): Promise<MessagingLink> {
     const deviceName = this.link?.deviceName ?? "PiStack";
-    const cancelled: MessagingLink = { status: "cancelled", uri: null, qr: null, deviceName, account: null, error: null, updatedAt: Date.now() };
+    const cancelled: MessagingLink = { status: "cancelled", uri: null, deviceName, account: null, error: null, updatedAt: Date.now() };
     if (this.link?.status !== "waiting") return this.link ?? cancelled;
     this.linkCancelled = true;
     this.linkRpc?.abort("Device linking was cancelled");
@@ -520,10 +424,9 @@ class SignalPlugin implements MessagingPlugin {
     const profile = object(contact.profile);
     const name = text(contact.nickName).trim() || text(contact.name).trim()
       || [text(profile.givenName).trim(), text(profile.familyName).trim()].filter(Boolean).join(" ");
-    const avatar = this.personAvatar([uuid, number]);
-    this.context!.sender({ id, aliases, name: name || null, avatar });
+    this.context!.sender({ id, aliases, name: name || null });
     if (contact.isBlocked || contact.isHidden || contact.unregistered) return;
-    this.remember({ id, title: name || number || id, kind: "direct", avatar });
+    this.remember({ id, title: name || number || id, kind: "direct" });
   }
 
   private async refreshDirectories(): Promise<MessagingResult<void>> {
@@ -537,7 +440,7 @@ class SignalPlugin implements MessagingPlugin {
     for (const value of list(groups.value)) {
       const group = object(value);
       const id = text(group.id);
-      if (id && group.isMember !== false && !group.isBlocked) this.remember({ id: `group:${id}`, title: text(group.name) || id, kind: "group", avatar: this.avatar([`group-${id}`]) });
+      if (id && group.isMember !== false && !group.isBlocked) this.remember({ id: `group:${id}`, title: text(group.name) || id, kind: "group" });
     }
     return success(undefined);
   }
@@ -554,85 +457,6 @@ class SignalPlugin implements MessagingPlugin {
     for (const contact of list(contacts.value)) this.contact(contact);
     const id = this.aliases.get(target) ?? target;
     return success(this.conversations.get(id) ?? this.remember({ id, title: target, kind: "direct" }));
-  }
-
-  private parseCall(value: unknown, fallback?: { peer?: string; direction?: "incoming" | "outgoing" }): MessagingResult<BackendCall> {
-    const raw = object(value);
-    const externalId = text(raw.callId);
-    const previous = this.callRecords.get(externalId);
-    const state = callState(text(raw.state));
-    const peer = text(raw.uuid) || text(raw.number) || fallback?.peer || previous?.call.peer || "";
-    const direction = typeof raw.isOutgoing === "boolean"
-      ? (raw.isOutgoing ? "outgoing" : "incoming")
-      : fallback?.direction ?? previous?.call.direction;
-    if (!state.ok) return state;
-    if (!externalId || !peer || !direction) return failure("protocol", "Signal returned an invalid call state");
-    const call: BackendCall = { externalId, peer, direction, state: state.value, reason: text(raw.reason) || null };
-    this.callRecords.set(externalId, {
-      call,
-      inputDeviceName: text(raw.inputDeviceName) || previous?.inputDeviceName || "",
-      outputDeviceName: text(raw.outputDeviceName) || previous?.outputDeviceName || "",
-    });
-    return success(call);
-  }
-
-  private receiveCallEvent(notification: ObjectValue): void {
-    this.lastEvent = Date.now();
-    const value = "result" in notification ? object(notification.result) : notification;
-    if ((notification.account && notification.account !== this.account) || (value.account && value.account !== this.account)) return;
-    const call = this.parseCall(value);
-    if (!call.ok) {
-      this.context?.status("error", call.error.message);
-      return;
-    }
-    this.context?.call(call.value);
-    if (call.value.state === "ended") this.callRecords.delete(call.value.externalId);
-  }
-
-  private async startCall(peer: string): Promise<MessagingResult<BackendCall>> {
-    const rpc = this.rpc;
-    if (!this.ready || !rpc || !this.calls) return failure("unconfigured", "Signal calling is unavailable");
-    const result = await rpc.call("startCall", { account: this.account, recipient: peer });
-    return result.ok ? this.parseCall(result.value, { peer, direction: "outgoing" }) : result;
-  }
-
-  private async acceptCall(externalId: string): Promise<MessagingResult<BackendCall>> {
-    const rpc = this.rpc;
-    const previous = this.callRecords.get(externalId);
-    if (!this.ready || !rpc || !this.calls) return failure("unconfigured", "Signal calling is unavailable");
-    if (!previous) return failure("call_not_found", "Signal no longer has this call");
-    const result = await rpc.call("acceptCall", { account: this.account, callId: externalId });
-    return result.ok ? this.parseCall(result.value, { peer: previous.call.peer, direction: previous.call.direction }) : result;
-  }
-
-  private async hangupCall(externalId: string): Promise<MessagingResult<void>> {
-    const rpc = this.rpc;
-    if (!this.ready || !rpc || !this.calls) return failure("unconfigured", "Signal calling is unavailable");
-    const method = this.callRecords.get(externalId)?.call.state === "ringing_incoming" ? "rejectCall" : "hangupCall";
-    const result = await rpc.call(method, { account: this.account, callId: externalId });
-    return result.ok ? success(undefined) : result;
-  }
-
-  private async openCallAudio(externalId: string): Promise<MessagingResult<BackendCallAudio>> {
-    const existing = this.callAudio.get(externalId);
-    if (existing) return success(existing);
-    const record = this.callRecords.get(externalId);
-    if (!record?.inputDeviceName || !record.outputDeviceName) return failure("call_audio", "Signal has not provided the call audio socket yet");
-    const opened = await openSignalCallAudio(record.inputDeviceName, record.outputDeviceName, message => {
-      if (!this.closing) this.context?.status("error", message);
-    });
-    if (!opened.ok) return opened;
-    const transport = opened.value;
-    const managed: BackendCallAudio = {
-      onRemote: handler => transport.onRemote(handler),
-      write: frame => transport.write(frame),
-      close: async () => {
-        if (this.callAudio.get(externalId) === managed) this.callAudio.delete(externalId);
-        await transport.close();
-      },
-    };
-    this.callAudio.set(externalId, managed);
-    return success(managed);
   }
 
   async send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[]; reply?: BackendReply }): Promise<MessagingResult<{ externalId: string; timestamp: number }>> {
@@ -716,7 +540,7 @@ class SignalPlugin implements MessagingPlugin {
     const senderName = text(envelope.sourceName).trim();
     if (sender && senderName) {
       const aliases = [...new Set([sender, text(envelope.sourceNumber), text(envelope.source)].filter(Boolean))];
-      this.context!.sender({ id: this.aliases.get(sender) ?? sender, aliases, name: senderName, avatar: this.personAvatar([text(envelope.sourceUuid), text(envelope.sourceNumber)]) });
+      this.context!.sender({ id: this.aliases.get(sender) ?? sender, aliases, name: senderName });
     }
     const sync = object(envelope.syncMessage);
     if (sync.sentMessage && text(envelope.sourceUuid)) {
@@ -808,7 +632,6 @@ class SignalPlugin implements MessagingPlugin {
     this.stopWatchdog();
     this.rpc = undefined;
     this.subscription = undefined;
-    this.callSubscription = undefined;
     await rpc?.close();
   }
 
@@ -820,23 +643,15 @@ class SignalPlugin implements MessagingPlugin {
     this.linkRpc?.abort("Signal profile is closing");
     await this.linkTask;
     const rpc = this.rpc;
-    rpc?.settleSends();
+    rpc?.settleOutgoing();
     if (rpc && this.subscription !== undefined) {
       const stopped = await rpc.call("unsubscribeReceive", { account: this.account, subscription: this.subscription }, 1000);
       if (!stopped.ok) rpc.abort(`Unable to stop Signal receive: ${stopped.error.message}`);
     }
-    if (rpc && this.callSubscription !== undefined) {
-      const stopped = await rpc.call("unsubscribeCallEvents", { account: this.account, subscription: this.callSubscription }, 1000);
-      if (!stopped.ok) rpc.abort(`Unable to stop Signal call events: ${stopped.error.message}`);
-    }
     this.receiveStopped = true;
     await this.events;
-    await Promise.allSettled([...this.callAudio.values()].map(audio => audio.close()));
-    this.callAudio.clear();
-    this.callRecords.clear();
     await rpc?.close();
     this.subscription = undefined;
-    this.callSubscription = undefined;
     this.rpc = undefined;
   }
 }

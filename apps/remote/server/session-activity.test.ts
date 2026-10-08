@@ -27,7 +27,7 @@ test("the activity window opens on the tail, follows a cursor and forgets a thre
   expect(activity.since("b", 0)).toHaveLength(1);
 });
 
-test("retiring the event journal keeps the thinking and measurements it held", () => {
+test("retiring the preserved event journal retains response metrics and annotation identities", () => {
   const db = new Database(":memory:");
   try {
     db.exec(`CREATE TABLE thread_views (id TEXT PRIMARY KEY, idle_unread INTEGER NOT NULL DEFAULT 0, named_at_message_count INTEGER NOT NULL DEFAULT 0);
@@ -35,7 +35,6 @@ test("retiring the event journal keeps the thinking and measurements it held", (
       CREATE TABLE message_annotations (work_id TEXT PRIMARY KEY, meeting_transcript TEXT NOT NULL);`);
     db.query("INSERT INTO thread_views(id) VALUES('a')").run();
     const event = db.query("INSERT INTO events(session_id,time,type,payload) VALUES('a',?,?,?)");
-    event.run("t", "thinking", JSON.stringify({ text: "weighing it", finalizesMessage: "m1" }));
     event.run("t", "metrics", JSON.stringify({ metrics: { ttftMs: 10, generationMs: 1_000, outputTokens: 50, tokensPerSecond: 50 }, finalizesMessage: "m1" }));
     event.run("t", "user", JSON.stringify({ text: "do it", workId: "work" }));
     event.run("t", "assistant", JSON.stringify({ text: "done" }));
@@ -46,17 +45,16 @@ test("retiring the event journal keeps the thinking and measurements it held", (
     // Startup moves the facts; the rows go in slices once the supervisor serves.
     expect(db.query("SELECT name FROM sqlite_master WHERE name='events'").get()).not.toBeNull();
     expect(removeEventJournal(db, 2)).toBe("removing");
-    expect((db.query("SELECT count(*) AS left FROM events").get() as { left: number }).left).toBe(2);
+    expect((db.query("SELECT count(*) AS left FROM events").get() as { left: number }).left).toBe(1);
     expect(removeEventJournal(db, 2)).toBe("removing");
     expect(removeEventJournal(db, 2)).toBe("removed"); // the emptied table goes
     expect(db.query("SELECT name FROM sqlite_master WHERE name='events'").get()).toBeNull();
     expect(removeEventJournal(db)).toBe("removed");
-    const fact = db.query("SELECT thinking,metrics FROM message_facts WHERE session_id='a' AND finalizes_message='m1'").get() as { thinking: string; metrics: string };
-    expect(fact.thinking).toBe("weighing it");
+    const fact = db.query("SELECT metrics FROM message_facts WHERE session_id='a' AND finalizes_message='m1'").get() as { metrics: string };
     expect(JSON.parse(fact.metrics).tokensPerSecond).toBe(50);
     expect((db.query("SELECT session_id FROM message_annotations WHERE work_id='work'").get() as { session_id: string }).session_id).toBe("a");
 
     ensureSupervisorSchema(db); // opening again changes nothing
-    expect((db.query("SELECT thinking FROM message_facts WHERE session_id='a'").get() as { thinking: string }).thinking).toBe("weighing it");
+    expect((db.query("SELECT metrics FROM message_facts WHERE session_id='a'").get() as { metrics: string }).metrics).toBe(fact.metrics);
   } finally { db.close(); }
 });

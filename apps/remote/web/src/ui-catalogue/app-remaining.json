@@ -1,0 +1,59 @@
+{
+  "scope": "Owned App/native compositions not established by the registered isolated component matrix; current iterative queue, not a claim that source discovery exhausts every reachable state.",
+  "queue": [
+    {
+      "component": "App RemoteApp Shell",
+      "boundary": "composition",
+      "states": [
+        "selection-ready generation replacement and late replies",
+        "cached transcript remount followed by fresh resource acknowledgement",
+        "all hash-route and Android Back return compositions",
+        "lock/person/environment change while an overlay or mutation is pending"
+      ],
+      "next": "Extend reviewed root selection/readiness/retained failure/Reconnect compositions to late-generation and cached-remount races, hash routes/Back and identity changes with validated scoped history/storage."
+    },
+    {
+      "component": "UnlockDialog",
+      "boundary": "finite-variant",
+      "states": [
+        "auth-unlock at phone/tablet/desktop",
+        "auth-custody at phone/tablet/desktop",
+        "auth-unlock-error at phone/tablet/desktop"
+      ],
+      "next": "Restore a permitted native browser screenshot capability for synthetic password fixtures. The current sensitive-output guard rejects these rendered screenshots; do not count DOM checks or bypass the guard as visual review."
+    },
+    {
+      "component": "ConversationView PromptComposer InspectorSheet",
+      "boundary": "composition",
+      "states": [
+        "drag/drop attachments and destination overlay",
+        "slash-command suggestion keyboard navigation",
+        "image preview/edit/download gesture lifecycle",
+        "inspector child/settings/timeline mutation success and rollback",
+        "virtualized transcript anchor retention during concurrent streaming and pagination"
+      ],
+      "next": "Extend the real owning container fixtures with validated transition responses; isolated message/drawing/queue/status matrices do not prove these data-dependent interactions."
+    },
+    {
+      "component": "PermissionsSetup PhoneControl NativeAppUpdate",
+      "boundary": "composition",
+      "states": [
+        "native request cancelled then returning to the same Settings screen",
+        "permission request unavailable and retry after capabilities change",
+        "installer cancellation followed by retry",
+        "media-held update released on final explicit media close"
+      ],
+      "next": "Render owned request/return states with a closed synthetic bridge and actual native shells. Classify Android system prompts/installer chrome separately from the app's response to their result."
+    },
+    {
+      "component": "EditorActivity AccessSignIn KenanOverlay",
+      "boundary": "content-boundary",
+      "states": [
+        "other editor failure/replay variants at compact/landscape/large-font profiles",
+        "sign-in responsive cancel/error/retry Activity lifecycle",
+        "native keyboard/inset interaction around owned overlay/editor controls"
+      ],
+      "next": "Continue the native catalogue’s explicit omitted failure/profile combinations; opening/ready/connection-failed/session-unavailable were reviewed at five layout/font profiles. Use only isolated actual Views and synthetic origins."
+    }
+  ]
+}

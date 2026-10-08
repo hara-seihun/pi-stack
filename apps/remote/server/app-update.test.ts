@@ -104,6 +104,29 @@ test("publication installs immutable packages with their web bundles, rejects ro
   expect(install().stderr).toContain("does not match its manifest");
 });
 
+test("web-first generations serve the retained native APK through its original immutable URL", async () => {
+  const { root, release, bytes, web, webBytes } = await fixture();
+  const source = join(root, "source");
+  await mkdir(source);
+  await writeFile(join(source, "manifest.json"), JSON.stringify(release));
+  await writeFile(join(source, release.fileName), bytes);
+  let latest = web;
+  for (let index = 1; index <= 4; index++) {
+    const revision = String(index).repeat(40);
+    latest = { ...web, revision, versionCode: web.versionCode + index, fileName: `${revision}.web.zip` };
+    await writeFile(join(source, "web-manifest.json"), JSON.stringify(latest));
+    await writeFile(join(source, latest.fileName), webBytes);
+    const result = spawnSync(process.execPath, [join(import.meta.dir, "../../../deploy/android-update"), "install", source], {
+      env: { ...process.env, PI_REMOTE_APP_UPDATES_DIR: root }, encoding: "utf8", timeout: 5_000,
+    });
+    expect(result.status).toBe(0);
+  }
+  expect(await (await appUpdateResponse(request("/v1/app-update"), root))!.json()).toEqual({ release, web: latest });
+  expect(Buffer.from(await (await appUpdateResponse(request(`/v1/app-update/${release.fileName}`), root))!.arrayBuffer())).toEqual(bytes);
+  expect(Buffer.from(await (await appUpdateResponse(request(`/v1/app-update/${latest.fileName}`), root))!.arrayBuffer())).toEqual(webBytes);
+  expect((await appUpdateResponse(request(`/v1/app-update/${"1".repeat(40)}.web.zip`), root))!.status).toBe(404);
+});
+
 test("release manifests cannot name arbitrary files or invalid versions", async () => {
   const { release, web } = await fixture();
   expect(isAppRelease(release)).toBe(true);
