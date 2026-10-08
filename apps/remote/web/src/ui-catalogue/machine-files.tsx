@@ -9,7 +9,7 @@ import { configureFixtureTransport } from "./transport";
 import type { UiCase } from "./contract";
 
 const noop = () => {};
-const longName = "Research-workspace-with-a-very-long-unbroken-name-".repeat(3);
+const longName = "ResearchWorkspaceWithAVeryLongUnbrokenName".repeat(4);
 const at = "2026-10-09T12:00:00Z";
 const accounts: PlanAccountRow[] = [
   { accountId: "account-01", accountLabel: "Primary account", state: "ready", percentLeft: 72, usedPercent: 28, meterId: "weekly", windowHours: 168, readingAt: at, resetAt: "2026-10-12T00:00:00Z", bankedResets: 2, bankedResetsAt: at, bankedResetExpiresAt: "2026-10-31T00:00:00Z" },
@@ -37,7 +37,7 @@ const emptySummary: FeatureUsageSummary = { since: Date.parse(at), asOf: Date.pa
 const manySummary: FeatureUsageSummary = {
   ...emptySummary,
   features: (Object.keys(FEATURES) as Feature[]).map((id, index) => ({ id, observations: [
-    { actor: "human", uses: index * 31, lastUsedAt: index === 0 ? null : Date.parse(at), last7Days: index * 4, previous30Days: index * 22, state: index % 2 === 0 ? { value: "enabled", observedAt: Date.parse(at) } : null },
+    { actor: "human", uses: index * 31, lastUsedAt: index === 0 ? null : Date.parse(at), last7Days: index * 4, previous30Days: index * 22, state: index % 3 === 0 ? { value: "enabled", observedAt: Date.parse(at) } : index % 3 === 1 ? { value: "disabled", observedAt: Date.parse(at) } : null },
     { actor: "agent", uses: index * 89, lastUsedAt: Date.parse(at), last7Days: index * 11, previous30Days: index * 64, state: { value: "unavailable", observedAt: Date.parse(at) } },
   ] })),
 };
@@ -75,6 +75,19 @@ function fileCase(id: string, title: string, fixture: FileFixture, many = false)
   } };
 }
 
+type EditorFixtureState = "config-loading" | "grant-loading" | "unconfigured" | "grant-error" | "invalid-handoff" | "ready" | "expired" | "window-closed";
+function editorCase(state: EditorFixtureState): UiCase {
+  return { id: `files-editor-${state}`, title: `Files · editor ${state}`, component: "FilesScreen / openPersonEditor", contract: "Click Open VS Code to inspect the production editor launch transition; only known synthetic configuration and grants are served. Ready/expired handoffs use the local synthetic editor origin, never a real code-server.", boundary: "composition", render() {
+    let resume: (() => void) | null = null;
+    configureFixtureTransport([
+      { method: "GET", path: API.editorInfo.path(), reply: () => state === "window-closed" ? new Promise<Response>(resolve => { resume = () => resolve(Response.json({ environmentId: "synthetic" })); }) : state === "config-loading" ? new Promise<Response>(() => {}) : state === "unconfigured" ? Response.json({ error: "No editor is configured for this synthetic person" }, { status: 404 }) : Response.json({ environmentId: "synthetic" }) },
+      { method: "POST", path: API.editor.path(), reply: () => state === "grant-loading" ? new Promise<Response>(() => {}) : state === "grant-error" ? Response.json({ error: "The synthetic editor service could not issue a handoff. Retry the launch." }, { status: 503 }) : state === "invalid-handoff" ? Response.json({ ok: true, url: "not-an-editor-origin", ticket: "invalid" }) : Response.json({ ok: true, url: `${location.origin}/editor/open`, ticket: (state === "expired" ? "e" : "s").repeat(43) }) },
+      { method: "POST", path: API.recordFeatureUsage.path(), reply: () => Response.json({ ok: true, value: null }) },
+    ]);
+    return <><FilesScreen layout="stack" selectedPath={null} onSelect={noop} shortcuts={[]} />{state === "window-closed" && <button type="button" className="machine-action" onClick={() => { if (!resume) throw new Error("Launch the synthetic editor before completing configuration"); resume(); }}>Complete synthetic editor configuration</button>}</>; 
+  } };
+}
+
 export const machineFilesCases: UiCase[] = [
   machineCase("populated", "Machine · populated subscriptions and host", {}),
   machineCase("unmeasured", "Machine · dashboard absent / host not measured", { dashboard: null }),
@@ -94,4 +107,5 @@ export const machineFilesCases: UiCase[] = [
   fileCase("file", "Files · attachment ready", { state: "ready", entry: { name: "notes.md", path: "/synthetic/notes.md", kind: "file" } }),
   fileCase("other", "Files · irregular path", { state: "ready", entry: { name: "socket", path: "/synthetic/socket", kind: "other" } }),
   fileCase("many-long", "Files · long path and many workspaces", { state: "ready", entry: { name: "long.md", path: `/synthetic/${longName}/${longName}.md`, kind: "file" } }, true),
+  ...(["config-loading", "grant-loading", "unconfigured", "grant-error", "invalid-handoff", "ready", "expired", "window-closed"] as const).map(editorCase),
 ];
