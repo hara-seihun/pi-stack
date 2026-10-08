@@ -29,8 +29,8 @@
 .step-outcome { flex: 0 0 auto; color: var(--muted); font-size: var(--text-xs); white-space: nowrap; }
 
 /* The threads a step is about, as buttons that open them. */
-.thread-chips { display: flex; flex: 0 1 auto; gap: var(--space-1); min-width: 0; overflow: hidden; }
-.thread-chip { flex: 0 1 auto; max-width: 14ch; padding: 0 var(--space-2); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-pill, 999px); background: var(--surface); color: var(--text); font-size: var(--text-xs); line-height: 1.7; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.thread-chips { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: var(--space-1); min-width: 0; max-width: 100%; }
+.thread-chip { flex: 0 1 auto; min-width: min(100%, 16ch); max-width: min(100%, 24ch); min-height: var(--touch); padding: var(--space-2); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-pill, 999px); background: var(--surface); color: var(--text); font-size: var(--text-xs); line-height: 1.7; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .thread-chip:hover, .thread-chip:focus-visible { border-color: var(--accent, var(--text)); color: var(--accent, var(--text)); }
 .thread-chip.busy::before { content: ""; display: inline-block; width: .5em; height: .5em; margin-inline-end: .4em; border-radius: 50%; background: var(--step-running); vertical-align: baseline; }
 .step-outcome[data-status="running"] { color: var(--step-running); }
@@ -57,13 +57,12 @@
 @media (max-width: 420px) {
   .work-steps, .work-latest { padding-left: 0; }
   .step-duration { display: none; }
-  .thread-chip { max-width: 10ch; }
 }
 @media (prefers-reduced-motion: reduce) { .work-chevron { transition: none; } }
 .agent-route { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .agent-route-name { min-width: 0; padding: 0; overflow: hidden; border: 0; background: transparent; color: inherit; font: inherit; text-overflow: ellipsis; }
 .agent-route-name.peer, button.agent-route-name { color: var(--accent); }
-button.agent-route-name { cursor: pointer; }
+button.agent-route-name { min-width: var(--touch); min-height: var(--touch); cursor: pointer; }
 button.agent-route-name:hover, button.agent-route-name:focus-visible { text-decoration: underline; }
 .agent-route-name.self { color: var(--success); }
 .agent-route-name.new { font-style: italic; font-weight: 600; }
