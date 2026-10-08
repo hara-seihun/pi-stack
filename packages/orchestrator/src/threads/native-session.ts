@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentCapacity } from "../agent-capacity.js";
 import { ThreadService } from "./service.js";
+import { installMessageDelivery } from "./message-delivery.js";
 import type { PiEvent, Result, ThreadSettings } from "./contracts.js";
 export { recoverNativeSessionOwners, nativeOwnerAbsent } from "./native-owner-recovery.js";
 
@@ -165,6 +166,7 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
     await run("create_session", async () => {
       created = await factory();
       const session = created.session;
+      installMessageDelivery(session, process.env);
       nativeDispose = session.dispose.bind(session);
       unsubscribe = session.subscribe(event => output?.(event as PiEvent));
       bind(session as any, ["prompt", "steer", "followUp", "sendCustomMessage", "sendUserMessage", "compact", "navigateTree", "executeBash", "bindExtensions"]);

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AgentCapacity, PiEvent } from "pi-orchestrator/api";
+import { installMessageDelivery, type AgentCapacity, type PiEvent } from "pi-orchestrator/api";
 import { managedRootSession, RootCapacityUnavailable } from "./managed-session.js";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
@@ -135,6 +135,7 @@ async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
       })(), model,
       thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, consentTool, notificationTool, replyTool] });
     native = session;
+    installMessageDelivery(session, spec.env);
     const resources = services.resourceLoader;
     const names = session.agent.state.tools.map(tool => tool.name);
     if (resources.getSystemPrompt() !== spec.prompt || resources.getAgentsFiles().agentsFiles.length || resources.getSkills().skills.length || resources.getAppendSystemPrompt().length) {

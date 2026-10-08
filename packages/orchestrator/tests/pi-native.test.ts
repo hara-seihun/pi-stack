@@ -30,9 +30,17 @@ it("does not inherit another thread's restore flag, but still refuses lost requi
   const cwd = directory();
   const options: PiSessionOptions = { cwd, args: [], env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1" }, threadId: "fresh", sessionFile: join(cwd, "fresh.jsonl") };
   vi.stubEnv("PI_THREAD_REQUIRE_SESSION", "1");
+  writeFileSync(join(cwd, "settings.json"), JSON.stringify({ version: 1, timezone: { zone: "Asia/Tokyo", source: "configured", observedAt: "2026-10-08T00:00:00Z" }, autoCollapse: null }));
+  vi.stubEnv("PI_PERSON_SETTINGS_DATA", cwd);
+  vi.stubEnv("PI_REMOTE_DATA", cwd);
   try {
     const session = await openPiSession(JSON.parse(JSON.stringify(options)), () => {}, () => {});
-    try { expect(existsSync(options.sessionFile)).toBe(true); }
+    try {
+      expect(existsSync(options.sessionFile)).toBe(true);
+      const projected = await captured.session!.agent.convertToLlm([{ role: "user", content: "own input", timestamp: 1 }]);
+      expect(JSON.stringify(projected)).toContain("timezone-unconfigured");
+      expect(JSON.stringify(projected)).not.toContain("Asia/Tokyo");
+    }
     finally { await session.close(); }
     const missing = join(cwd, "missing.jsonl");
     await expect(openPiSession({ ...options, threadId: "lost", sessionFile: missing, env: { ...options.env, PI_THREAD_REQUIRE_SESSION: "1" } }, () => {}, () => {})).rejects.toThrow("Native Pi session is missing");

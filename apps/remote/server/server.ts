@@ -1378,7 +1378,7 @@ function handlePiEvent(sessionId: string, event: any) {
 
 function threadEnvironment(thread: Thread) {
   const meta = remotePlacement(thread);
-  return { ...process.env, HOME,
+  return { ...process.env, HOME, PI_PERSON_SETTINGS_DATA: DATA,
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
     PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
