@@ -1,6 +1,6 @@
 # Native history retirement: explicit maintenance migration
 
-Owner: release maintenance, not Remote or Orchestrator runtime startup.
+Owner: release maintenance and the owner-local unlock gate, before Remote or Orchestrator runtime startup.
 Implementation: [`scripts/migrate-native-history.mjs`](../scripts/migrate-native-history.mjs).
 Requires Node 24 with `node:sqlite`. Run separately for each person's owning Unix user and database pair.
 
@@ -21,6 +21,36 @@ node scripts/migrate-native-history.mjs \
 The output directory must be owned by the invoking user, mode `0700`, outside both input databases and native sources. Both databases and native files must belong to that user. The explicit flag asserts actual writer shutdown; it does not stop processes. Do not run another person's migration as an administrator identity. The release owner runs the command under that person's Unix user with their decrypted state mounted.
 
 On large databases, submit this exact foreground command to the host's durable maintenance-job service, which owns its log and exit receipt. The migration uses page-wise SQLite backup, streaming file copies/hashes and record-wise JSONL processing, rather than reconstructing captured contexts. Native records and individual thinking bodies have an explicit 64 MiB ceiling; exceeding it returns an error after preserving the source. Total historical input size is not held in JavaScript memory.
+
+## First unlock
+
+[`pi-remote-launch`](../apps/remote/server/pi-remote-launch) runs the shipped Node 24 [`native-history-startup.mjs`](../apps/remote/server/native-history-startup.mjs) after mounting the person's encrypted folder and before starting its supervisor. This gate runs under the owning UID inside that same private mount namespace. `PI_REMOTE_CONFIG` must be an absolute version-1 person config; `PI_REMOTE_DATA` must explicitly name a normalized absolute owner data directory. An existing environment value takes precedence over the person config, matching Remote's config application. Unset, empty, relative or non-string values are configuration errors.
+
+A fresh owner with no supervisor database needs no migration or artifacts. A native schema or completed marker needs no migration; the gate still checks retained producer generations. Current runners reporting control status `historySource: "native-jsonl-v1"` retain their normal output/reattachment custody. An old schema requires positive absence of every owner-scoped native/supervisor process and listening old control/session socket, and empty retained `.events` files. A stopped runner's nonempty spool is not treated as acknowledged. The gate does not stop writers, consume old frames, delete spools, or infer readiness from the migrated marker. Data files, mapping databases, retained references and socket directories are checked against the invoking owner. Long configured data paths use the runner's hashed `/run/user/UID/pi/HASH` socket directory too.
+
+Maintenance may write `PI_REMOTE_DATA/native-history-readiness.json`:
+
+```json
+{"version":1,"contract":"native-history-v1","uid":1000,"dataDir":"/absolute/owner/data","state":"ready","writersStopped":true,"retainedOutput":"acknowledged"}
+```
+
+The receipt must bind the actual UID/data directory. Additional `candidate`, `legacySource` and `migratedAt` fields preserve publication provenance. A present incomplete, corrupt or differently bound receipt refuses startup. A locked owner without a receipt may proceed only after its own positive writer/output census. Even a valid receipt cannot override a live old writer or nonempty old output.
+
+Once ready, the gate invokes the shipped migrator with explicit `supervisor.sqlite3`, `threads.sqlite3`, `native-history-retirement` and `--writers-stopped`. It gives the migration 45 seconds. A timeout is retryable; durable snapshots, preimages and prepared replacements remain owned by the migrator and are replayed on the next startup. Use the explicit durable maintenance invocation above when a database requires a longer uninterrupted snapshot. Source/mapping corruption and missing mapped native files are the migrator's preserving typed errors, not reasons to start an empty supervisor.
+
+### Retained old producers at a locked owner's unlock
+
+An old schema with live legacy writers or unacknowledged legacy output can select the shipped [`native-history-startup-legacy.mjs`](../apps/remote/server/native-history-startup-legacy.mjs) bootstrap only when publication has staged `/srv/pi/.pi-stack-maintenance/native-history/CANDIDATE/legacy.json`. Its version-1 manifest binds `candidate`, `legacySource`, `legacyRemote`, `legacyOrchestrator`, `bridgeModule`, `migrator`, and `node`; candidate must equal the installed Remote `.pi-stack-commit`, and both old release stamps must equal `legacySource`. These are source-only trusted deployment assets, not another person's state. The old API resolves through old Remote's own `node_modules/pi-orchestrator/src/api.ts`, preserving its module identity.
+
+The launcher retains the decrypted mount namespace, starts that source-bound old controller with `installLegacyMaintenance({mode:"remote",autoAdvance:true,...})`, and lets its old capture listener consume/acknowledge its own frames. The bridge fences new admission, waits for old accepted work, closes old owners and their databases, migrates, and exits 75. The supervised bootstrap then reruns the startup gate before launching the original candidate command. Missing/corrupt mapped native sources, invalid config/ownership, an unbound manifest or legacy output beside an already migrated schema never select this bootstrap.
+
+Startup emits one JSON result. Exit 75 means unresolved producer/output custody, an unready receipt, or a bounded migration timeout; source is retained. Exit 76 is the internal source-bound `legacy-required` transition handled by the launcher. Exit 78 means a configuration, ownership, schema or preserving migration failure requiring repair. Remote releases require the gate, bootstrap, migrator and this document as assets; no source checkout is needed at unlock.
+
+Sparse first-unlock contracts, including the real namespace launcher's ordering:
+
+```sh
+node --test apps/remote/server/native-history-startup.test.mjs
+```
 
 ## Durable output
 

@@ -37,4 +37,15 @@ if [[ -n $cipher_dir ]]; then
   fi
 fi
 
+# The migration runs as this owner, after unlock, inside this private namespace.
+# Exit 75 leaves old producers and their retained output for maintenance to drain.
+set +e
+node "$(dirname "$0")/native-history-startup.mjs"
+history_status=$?
+set -e
+if [[ $history_status -eq 76 ]]; then
+  exec "$(dirname "$0")/pi-remote-supervise" /usr/local/bin/bun "$(dirname "$0")/native-history-startup-legacy.mjs" "$@"
+fi
+[[ $history_status -eq 0 ]] || exit "$history_status"
+
 exec "$(dirname "$0")/pi-remote-supervise" "$@"
