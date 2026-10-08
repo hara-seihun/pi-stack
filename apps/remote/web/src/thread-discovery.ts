@@ -10,6 +10,7 @@ export class ThreadDiscovery<T> {
   private states = new Map<string, DiscoveryState>();
   private queue: string[] = [];
   private active = 0;
+  private lifecycle: "active" | "disposed" = "active";
 
   constructor(private options: {
     known(id: string): boolean;
@@ -24,7 +25,14 @@ export class ThreadDiscovery<T> {
     return state?.kind === "failed" ? state.error.message : null;
   }
 
+  dispose(): void {
+    this.lifecycle = "disposed";
+    this.queue = [];
+    this.states.clear();
+  }
+
   discover(ids: string[]): void {
+    if (this.lifecycle === "disposed") return;
     for (const id of ids) {
       if (this.options.known(id)) continue;
       const state = this.states.get(id);
@@ -36,7 +44,7 @@ export class ThreadDiscovery<T> {
   }
 
   private pump(): void {
-    while (this.active < 4 && this.queue.length) {
+    while (this.lifecycle === "active" && this.active < 4 && this.queue.length) {
       const id = this.queue.shift()!;
       if (this.options.known(id)) {
         this.states.set(id, { kind: "resolved" });
@@ -52,14 +60,15 @@ export class ThreadDiscovery<T> {
     let result: DiscoveryResult<T>;
     try {
       result = await this.options.load(id);
-      if (result.ok) this.options.accept(result.value);
+      if (this.lifecycle === "active" && result.ok) this.options.accept(result.value);
     } catch (cause) {
       result = { ok: false, error: { code: "request_failed", message: cause instanceof Error ? cause.message : String(cause) } };
     }
+    this.active--;
+    if (this.lifecycle === "disposed") return;
     this.states.set(id, result.ok ? { kind: "resolved" } : {
       kind: "failed", error: result.error, retryAt: this.options.now() + 30_000,
     });
-    this.active--;
     this.pump();
     this.options.changed();
   }

@@ -1171,7 +1171,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     machine: { count: state.ownerErrors.length + (state.offline ? 1 : 0), attention: true },
   };
   const [discoveryRevision, setDiscoveryRevision] = useState(0);
-  const discovery = useMemo(() => new ThreadDiscovery<Session>({
+  const discoveryRef = useRef<ThreadDiscovery<Session> | null>(null);
+  const getDiscovery = useCallback(() => discoveryRef.current ??= new ThreadDiscovery<Session>({
     known: id => {
       const current = stateRef.current;
       return [...current.sessions, ...current.fleet, ...current.discovered].some(session => session.id === id);
@@ -1193,15 +1194,19 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     changed: () => setDiscoveryRevision(value => value + 1),
     now: Date.now,
   }), [patch, stateRef]);
-  const discoverThreads = useCallback((ids: string[]) => discovery.discover(ids), [discovery]);
+  useEffect(() => () => {
+    discoveryRef.current?.dispose();
+    discoveryRef.current = null;
+  }, [getDiscovery]);
+  const discoverThreads = useCallback((ids: string[]) => getDiscovery().discover(ids), [getDiscovery]);
   const threadDirectory = useMemo<ThreadDirectory>(() => ({
     name: id => knownSessions.find(session => session.id === id)?.name || null,
     agentName: id => { const session = knownSessions.find(item => item.id === id); return session ? agentName(session) : null; },
     busy: id => { const session = knownSessions.find(item => item.id === id); return session ? working(session) : false; },
     open: id => openThreadId(id),
     discover: discoverThreads,
-    lookupError: id => knownSessions.some(session => session.id === id) ? null : discovery.error(id),
-  }), [knownSessions, openThreadId, discoverThreads, discovery, discoveryRevision]);
+    lookupError: id => knownSessions.some(session => session.id === id) ? null : discoveryRef.current?.error(id) ?? null,
+  }), [knownSessions, openThreadId, discoverThreads, discoveryRevision]);
 
   const panel = "panel" in route ? route.panel : null;
   const showDetail = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;

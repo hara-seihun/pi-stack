@@ -60,6 +60,26 @@ test("long historical transcripts bound lookup fanout and recheck queued fleet a
   await drain();
 });
 
+test("disposing an auth lifetime discards queued and late results", async () => {
+  const pending = new Map<string, (result: DiscoveryResult<string>) => void>();
+  const accepted: string[] = [];
+  let changes = 0;
+  const discovery = new ThreadDiscovery<string>({
+    known: () => false, now: () => 0, changed: () => { changes++; },
+    accept: id => { accepted.push(id); },
+    load: id => new Promise(resolve => pending.set(id, resolve)),
+  });
+  discovery.discover(["a", "b", "c", "d", "queued"]);
+  discovery.dispose();
+  discovery.discover(["after-unmount"]);
+  for (const [id, resolve] of pending) resolve({ ok: true, value: id });
+  await drain();
+  expect([...pending.keys()]).toEqual(["a", "b", "c", "d"]);
+  expect(accepted).toEqual([]);
+  expect(changes).toBe(0);
+  expect(discovery.error("a")).toBeNull();
+});
+
 test("foreign failures and invalid response acceptance become local typed failures", async () => {
   const discovery = new ThreadDiscovery<string>({
     known: () => false, now: () => 0, changed: () => {},
