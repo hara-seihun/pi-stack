@@ -70,10 +70,8 @@ const PasteTextDialog = lazy(() => import("./PasteTextDialog").then(module => ({
 const InspectorSheet = lazy(() => import("./features/inspector/InspectorSheet").then(module => ({ default: module.InspectorSheet })));
 const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
 const AgentsScreen = lazy(() => import("./features/agents/AgentsScreen").then(module => ({ default: module.AgentsScreen })));
-const NotificationsScreen = lazy(() => import("./features/notifications/NotificationsScreen").then(module => ({ default: module.NotificationsScreen })));
+const AttentionScreen = lazy(() => import("./attention").then(module => ({ default: module.AttentionScreen })));
 const FilesScreen = lazy(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
-const NeedsYouScreen = lazy(() => import("./needs-you").then(module => ({ default: module.NeedsYouScreen })));
-const CalendarScreen = lazy(() => import("./calendar").then(module => ({ default: module.CalendarScreen })));
 const MachineTab = lazy(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
 
 function Loading({ label }: { label: string }) {
@@ -1122,7 +1120,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const attentionCount = rows.filter(row => row.section === "attention").length;
   const badges = {
     chats: { count: attentionCount || rows.length, attention: attentionCount > 0 },
-    notifications: { count: attentionCount, attention: attentionCount > 0 },
+    attention: { count: attentionCount, attention: attentionCount > 0 },
     machine: { count: state.ownerErrors.length + (state.offline ? 1 : 0), attention: true },
   };
   // A thread tool call names threads by id. The transcript shows what they are
@@ -1154,7 +1152,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }), [knownSessions, openThreadId, discoverThreads]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "files" || route.tab === "notifications" || !!routeChat;
+  const showDetail = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || route.tab === "files" || !!routeChat;
 
   const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} messaging={state.messaging} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
     [threadStarts, state.messaging, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
@@ -1183,7 +1181,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const list = (() => {
     switch (route.tab) {
       case "chats": return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
-      case "agents": case "needs-you": case "notifications": case "calendar": case "machine": case "files": return null;
+      case "agents": case "attention": case "machine": case "files": return null;
     }
     return assertNever(route, "App list route");
   })();
@@ -1201,9 +1199,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const detail = (() => {
     switch (route.tab) {
       case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
-      case "notifications": return <Suspense fallback={<Loading label="Loading notifications…" />}><NotificationsScreen version={notificationVersion} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
-      case "needs-you": return <Suspense fallback={<Loading label="Loading Needs you…" />}><NeedsYouScreen version={notificationVersion} /></Suspense>;
-      case "calendar": return <Suspense fallback={<Loading label="Loading calendar…" />}><CalendarScreen /></Suspense>;
+      case "attention": return <Suspense fallback={<Loading label="Loading attention…" />}><AttentionScreen version={notificationVersion} /></Suspense>;
       case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} pendingAction={pendingAction} onToggleAction={id => void toggleAction(id)} onToggleGovernor={provider => void toggleGovernor(provider)} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
       case "chats": return <ThreadDirectoryProvider value={threadDirectory}>{conversation}</ThreadDirectoryProvider>;
@@ -1211,7 +1207,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     return assertNever(route, "App detail route");
   })();
 
-  const showTabs = route.tab === "agents" || route.tab === "needs-you" || route.tab === "calendar" || route.tab === "machine" || route.tab === "notifications" || (route.tab === "files" && !route.path) || !showDetail;
+  const showTabs = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}><MessagingCallProvider snapshot={state.messaging}>
     <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>

@@ -3,10 +3,11 @@ import type { ThreadQuestion } from "../server/protocol";
 import { formatRoute, parseRoute, routeThreadId, TABS } from "./src/app/routes";
 import { prioritizeQuestion } from "./src/features/conversation/question-drafts";
 
-test("Needs you has a main navigation route, not a notification filter", () => {
-  expect(TABS).toContain("needs-you");
-  expect(parseRoute(formatRoute({ tab: "needs-you" }))).toEqual({ tab: "needs-you" });
-  expect(routeThreadId({ tab: "needs-you" })).toBeNull();
+test("one Attention destination replaces the three entrances and retains existing links", () => {
+  expect(TABS).toEqual(["chats", "attention", "agents", "files", "machine"]);
+  expect(parseRoute(formatRoute({ tab: "attention" }))).toEqual({ tab: "attention" });
+  expect(routeThreadId({ tab: "attention" })).toBeNull();
+  for (const hash of ["#/needs-you", "#/notifications", "#/calendar"]) expect(parseRoute(hash)).toEqual({ tab: "attention" });
 });
 
 test("question links reach the existing owner and select the intended question without changing state", () => {
