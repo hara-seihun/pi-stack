@@ -40,6 +40,8 @@ export { admissionFor, callerResolver, hostIdentityConfig, threadCapability, THR
 export type { CallerResolver, CallerSource, ThreadCaller, ThreadCapability, ThreadCreator } from "./threads/caller.js";
 export { loopbackPeer } from "./threads/caller.js";
 export { openPiSession } from "./threads/pi-session.js";
+export { installMessageDelivery, createMessageDeliveryProjection, deliveryPrefix, MESSAGE_DELIVERY_RECEIPT,
+  type DeliveryResult, type DeliveryError, type DeliveryTimezone, type MessageDeliveryReceipt } from "./threads/message-delivery.js";
 export { createSharedPiSessionOpener } from "./threads/runner-transport.js";
 export { WatchList, watchInterval, watchSettings, DEFAULT_WATCH_INTERVAL_MS, type WatchRequest, type WatchResponse, type WatchItem } from "./threads/watch-list.js";
 export { archivedAcrossOwners } from "./threads/archived.js";

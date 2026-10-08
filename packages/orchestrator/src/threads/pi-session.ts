@@ -17,6 +17,7 @@ import { scopedBashOperations } from "./pi-bash-resources.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
+import { installMessageDelivery } from "./message-delivery.js";
 import { inputReceipts } from "./pi-input-receipts.js";
 import { isRawSession, rawModelContext, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, type SandboxPolicy } from "./pi-raw.js";
 import { createSandboxTools } from "./pi-sandbox.js";
@@ -80,6 +81,9 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
     PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1",
     PI_THREAD_RESOURCE_BOUNDARY: process.env.PI_THREAD_RESOURCE_BOUNDARY, PI_THREAD_RUNNER_UNIT: process.env.PI_THREAD_RUNNER_UNIT };
+  for (const key of ["PI_PERSON_SETTINGS_DATA", "PI_REMOTE_DATA"]) {
+    if (options.env[key] === undefined) delete env[key];
+  }
   // A shared runner inherits its first session's launch environment. Account
   // custody belongs to this open, not to whichever session started the runner.
   for (const key of ["PI_ORCHESTRATOR_ASSIGNED", "PI_ORCHESTRATOR_ACCOUNT_ID", "PI_ORCHESTRATOR_RUN_ID", "PI_ORCHESTRATOR_PROVIDER", "PI_SUBAGENT_MODEL"])
@@ -189,6 +193,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         customTools: room ? threadTools({ ...options, cwd, env }).filter(tool => tool.name === "request_user_input_async")
           : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
       if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
+      installMessageDelivery(created.session, env);
       observeProviderRequests(created.session, output);
       execution.bind(created.session);
       const session = created.session, agent = session.agent;

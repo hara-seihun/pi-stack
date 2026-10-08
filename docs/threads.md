@@ -280,6 +280,34 @@ unprivileged `pi-rooms` conversation and only root-request/public-question tools
 They are not agent organization groups. Room membership never grants access to
 private agents, histories or encrypted folders.
 
+## Incoming model delivery time
+
+[`message-delivery.ts`](../packages/orchestrator/src/threads/message-delivery.ts)
+owns `installMessageDelivery(session, env)`. The common native session boundary
+installs it once. It projects the final `convertToLlm` output, after request-only
+labels, custom/summary/bash conversion and forced application/telephone prompts.
+Every incoming system, user and tool-result message receives a leading timestamp;
+assistant output is unchanged. Roles, tool IDs, sender labels and external-callee
+boundaries are retained. Ingress routes do not prepend their own timestamps.
+
+Delivery time is sampled when a message first enters a prepared model request,
+not when a queued receipt was accepted or a runner launched. The prefix contains
+local ISO calendar date, millisecond time, numeric UTC offset and IANA zone.
+Native message/entry timestamps keep their original provenance. The non-context
+`model_message_delivery_v1` receipt stores source identity, original timestamp,
+delivery instant and timezone provenance, never message content or a transformed
+context snapshot. Subsequent requests, resume and retained compaction history
+reuse that delivery record, without another prefix or receipt. Newly generated
+compaction/branch messages receive their own delivery records.
+
+The trusted owner launcher supplies `PI_PERSON_SETTINGS_DATA`, or its explicit
+`PI_REMOTE_DATA`, to the authoritative person-settings reader at delivery time.
+Remote passes its resolved own data directory; shared runners discard another
+session's inherited path. Missing configuration is explicitly rendered as
+`UTC +00:00; timezone-unconfigured`, not a guessed user timezone. Invalid or
+unavailable settings reject the request. No sender-claimed user ID, server TZ or
+another person's settings are consulted.
+
 ## Cutover
 
 Preserve IDs, native histories, accepted settings, pending receipts, executions

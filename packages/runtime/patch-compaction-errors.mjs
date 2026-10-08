@@ -39,24 +39,28 @@ export function patchCompactionErrors(source) {
 }
 
 export function patchContextErrors(source) {
-  if (source.includes("Pi Stack context rejection result")) return source;
+  if (source.includes("Pi Stack two-phase context rejection result")) return source;
   const start = source.indexOf("async emitContext(messages)");
   const end = source.indexOf("async emitBeforeProviderRequest(", start);
   if (start < 0 || end < 0 || !source.slice(start, end).includes("return currentMessages")) throw new Error("Pinned Pi context handler boundary changed");
   const method = `async emitContext(messages) {
-    /* Pi Stack context rejection result */
+    /* Pi Stack two-phase context rejection result */
     const ctx = this.createContext();
     let currentMessages = structuredClone(messages);
-    for (const ext of this.extensions) {
-      for (const handler of ext.handlers.get("context") ?? []) {
-        let result;
-        try { result = await handler({ type: "context", messages: currentMessages }, ctx); }
-        catch (error) {
-          this.emitError({ extensionPath: ext.path, event: "context", error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
-          continue;
+    for (const event of ["context", "context_with_system"]) {
+      for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event)) {
+        for (const handler of handlers) {
+          const visible = event === "context" ? currentMessages.filter(message => message.role !== "system") : currentMessages;
+          let result;
+          try { result = await handler({ type: event, messages: visible }, ctx); }
+          catch (error) {
+            this.emitError({ extensionPath: ext.path, event, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
+            throw new Error(\`Context rejected: \${error instanceof Error ? error.message : String(error)}\`);
+          }
+          if (result?.error) throw new Error(\`Context rejected: \${result.error}\`);
+          if (result?.messages) currentMessages = event === "context"
+            ? restoreSystemMessages(currentMessages, visible, result.messages) : result.messages;
         }
-        if (result?.error) throw new Error(\`Context rejected: \${result.error}\`);
-        if (result?.messages) currentMessages = result.messages;
       }
     }
     return currentMessages;
