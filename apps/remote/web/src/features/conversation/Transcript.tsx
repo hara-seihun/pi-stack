@@ -141,12 +141,12 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
     menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: edit }] : []}
   />
-    {partial && <div className="step-copy">
-      <button type="button" className="message-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
-        {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load full message"}
+    {partial && <footer className="message-expansion">
+      <button type="button" className="message-expand-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
+        {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load more"}
       </button>
       <CopyButton text={copy} label="Copy full message" />
-    </div>}
+    </footer>}
     {(body.error || loaded && !loaded.ok || actionError) && <p className="step-loading step-failed" role="status">{actionError || body.error || loaded && !loaded.ok && loaded.error.message}</p>}
   </>;
   return <div data-transcript-seq={entry.seq}>{sender
@@ -183,12 +183,12 @@ const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId, autoCollap
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} assistant />}
   />
-    {(partial || message.tool === "spawn" && message.delivery.state === "delivered" && !created) && <div className="step-copy">
-      <button type="button" className="message-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
-        {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load full message"}
+    {(partial || message.tool === "spawn" && message.delivery.state === "delivered" && !created) && <footer className="message-expansion">
+      <button type="button" className="message-expand-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
+        {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load more"}
       </button>
       <CopyButton text={copy} label="Copy full message" />
-    </div>}
+    </footer>}
     {body.error && <p className="step-loading step-failed" role="status">{body.error}</p>}
     {(expanded || open) && body.body && !complete && <p className="step-loading step-failed" role="status">The full outgoing message is invalid.</p>}
   </AgentDisclosure></div>;
