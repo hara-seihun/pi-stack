@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fixedModelSystem } from "./pi-raw.js";
 
 export const TELEPHONE_CONTEXT_ARGUMENT = "--telephone-context";
 export type TelephoneContext = { callId: string; instructions: string };
@@ -11,6 +12,7 @@ export function isTelephoneContext(value: unknown): value is TelephoneContext {
 export function telephoneModelContext(context: TelephoneContext) {
   return (pi: ExtensionAPI) => {
     pi.on("before_agent_start", () => ({ systemPrompt: context.instructions }));
+    pi.on("context_with_system", event => ({ messages: fixedModelSystem(event.messages, context.instructions) }));
     pi.on("tool_call", () => ({ block: true, reason: "External telephone conversations have no host or operator capabilities" }));
   };
 }

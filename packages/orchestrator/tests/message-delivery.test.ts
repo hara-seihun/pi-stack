@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { convertToLlm, createAgentSession, DefaultResourceLoader, ModelRuntime, SettingsManager, SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { createMessageDeliveryProjection, deliveryPrefix, installMessageDelivery, MESSAGE_DELIVERY_RECEIPT } from "../src/threads/message-delivery.js";
+import { createMessageDeliveryProjection, deliveryPrefix, installMessageDelivery, MESSAGE_DELIVERY_RECEIPT, previewMessageDelivery } from "../src/threads/message-delivery.js";
 import { writePersonSetting } from "../src/person-settings.js";
 
 const directories: string[] = [];
@@ -31,7 +31,7 @@ it("distinguishes both sides of DST folds and exact non-hour offsets", () => {
 });
 it("timestamps queued/human/collaborator/scheduled/system/tool messages at delivery, retaining original receipt identity and raw history", () => {
   const manager = SessionManager.inMemory();
-  const incoming: AgentMessage[] = [
+  const incoming: Parameters<SessionManager["appendMessage"]>[0][] = [
     { role: "system", content: "system event", sections: { prompt: "trusted" }, timestamp: 1 },
     { role: "user", content: "human queued", timestamp: 2 },
     { role: "user", content: '<agent_message>{"receipt":"unchanged"}</agent_message>', timestamp: 3 },
@@ -67,6 +67,31 @@ it("reconstructs delivery once on resume, respects new timezone for new messages
   expect(text(next[0])).toBe(text(first[0])); expect(text(next[1])).toContain("Asia/Tokyo");
   expect(value(resumed(next)).map(text)).toEqual(next.map(text));
   expect(manager.getBranch().filter(entry => entry.type === "custom")).toHaveLength(2);
+});
+it("preview replays only real delivery stamps without clock/metadata writes or affecting concurrent real delivery", async () => {
+  const manager = SessionManager.inMemory();
+  const delivered: AgentMessage = { role: "user", content: "already sent", timestamp: 1 };
+  const pending: AgentMessage = { role: "user", content: "not yet sent", timestamp: 2 };
+  manager.appendMessage(delivered);
+  const project = createMessageDeliveryProjection(manager, {}, () => 1000);
+  const original = value(project([delivered]));
+  manager.appendMessage(pending);
+  const before = JSON.stringify(manager.getBranch()), leaf = manager.getLeafId();
+  const previewProject = createMessageDeliveryProjection(manager, {}, () => { throw new Error("Inspection must not sample delivery time"); });
+  let resume!: () => void;
+  const pause = new Promise<void>(resolve => { resume = resolve; });
+  const preview = previewMessageDelivery(async () => {
+    const projected = value(previewProject([delivered, pending]));
+    expect(text(projected[0])).toBe(text(original[0]));
+    expect(projected[1]).toBe(pending);
+    expect(JSON.stringify(manager.getBranch())).toBe(before);
+    expect(manager.getLeafId()).toBe(leaf);
+    await pause;
+  });
+  const actual = value(project([pending]));
+  expect(text(actual[0])).toMatch(/^\[Model delivery:/);
+  expect(manager.getBranch().filter(entry => entry.type === "custom")).toHaveLength(2);
+  resume(); await preview;
 });
 it("unknown zones are labeled honestly and invalid/unavailable settings refuse delivery without storing a receipt", () => {
   const manager = SessionManager.inMemory();
