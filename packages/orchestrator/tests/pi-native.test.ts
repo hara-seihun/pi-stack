@@ -169,7 +169,7 @@ it.each([undefined, { callId: "4208e41f-cafe-4bc5-991f-02dcb8f0f723", instructio
   }`);
   const output: PiEvent[] = [];
   const options: PiSessionOptions = { cwd, args: ["--raw", "--extension", join(cwd, "extension.mjs"), ...(telephone ? ["--telephone-context", JSON.stringify(telephone)] : [])],
-    env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", PI_REMOTE_SESSION_ID: "raw-thread", PI_REMOTE_SERVER_URL: "http://127.0.0.1:1",
+    env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", PI_MODEL_DELIVERY_TIMEZONE: "null", PI_REMOTE_SESSION_ID: "raw-thread", PI_REMOTE_SERVER_URL: "http://127.0.0.1:1",
       PI_ORCHESTRATOR_CONFIG: join(cwd, "config.json"), PI_ORCHESTRATOR_LEDGER: join(cwd, "ledger.sqlite3"), PI_ORCHESTRATOR_AUTH: join(cwd, "auth.json"),
       PI_MODEL_BROKER_URL: undefined, PI_ORCHESTRATOR_ASSIGNED: "0", PI_SUBAGENT_MODEL: undefined },
     threadId: "raw-thread", sessionFile: join(cwd, "raw.jsonl") };

@@ -83,7 +83,7 @@ async def ready():
     while True:
         try:
             async with connect(sys.argv[2], open_timeout=1, close_timeout=1) as socket:
-                await socket.send(json.dumps({'type': 'start'}))
+                await socket.send(json.dumps({'type': 'start', 'turn': 'deployment-preflight'}))
                 await socket.send(bytes(3200))
                 partial = json.loads(await asyncio.wait_for(socket.recv(), 3))
                 assert partial['type'] == 'partial'

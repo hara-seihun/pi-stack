@@ -30,7 +30,7 @@ test("handoff cancels every queued projection before either database closes", ()
     const pushLive = read;
     const removeEventJournal = () => { read(); return "pending"; };
     ${section("const STATE_COALESCE_MS =", "// The Machine screen")}
-    ${section("const LIVE_SYNC_INTERVAL_MS =", "type StoredContext =")}
+    ${section("const LIVE_SYNC_INTERVAL_MS =", "function sourceValue<T>")}
     ${section("const journalRemoval =", "// A rejected promise")}
     const modelAvailability = { path: "policy" };
     const unwatchFile = () => {};

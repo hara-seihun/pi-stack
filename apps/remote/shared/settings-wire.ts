@@ -8,7 +8,7 @@ export function parseSettingsEntry(value: unknown): Parsed<SettingEntry> {
   const definition = value.definition;
   if (typeof definition.id !== "string" || !definition.id || typeof definition.label !== "string" || typeof definition.description !== "string" || typeof definition.activation !== "string" || (definition.scope !== "person" && definition.scope !== "system") || (definition.kind !== "timezone" && definition.kind !== "boolean" && definition.kind !== "owner") || !object(definition.owner) || typeof definition.owner.component !== "string" || typeof definition.owner.location !== "string" || (definition.owner.command !== null && typeof definition.owner.command !== "string")) return { ok: false, error: "Invalid settings definition" };
   const setting = value.value;
-  let settingValue: SettingValue;
+  let settingValue: SettingValue | undefined;
   switch (setting.state) {
     case "set": {
       if (!Object.hasOwn(setting, "value")) return { ok: false, error: "Setting value is missing" };
@@ -25,8 +25,8 @@ export function parseSettingsEntry(value: unknown): Parsed<SettingEntry> {
     case "unavailable":
       if (typeof setting.message !== "string") return { ok: false, error: "Unavailable setting has no reason" };
       settingValue = { state: "unavailable", message: setting.message }; break;
-    default: return { ok: false, error: "Unknown settings value state" };
   }
+  if (settingValue === undefined) return { ok: false, error: "Unknown settings value state" };
   return { ok: true, value: { definition: { id: definition.id, label: definition.label, description: definition.description, scope: definition.scope, kind: definition.kind, activation: definition.activation, owner: { component: definition.owner.component, location: definition.owner.location, command: definition.owner.command } }, value: settingValue, editable: value.editable } };
 }
 

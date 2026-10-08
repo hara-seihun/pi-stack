@@ -48,6 +48,12 @@ if (!process.env.PI_OAUTH_CLIENT_CASE) {
       expect(request.headers.has("x-pi-remote-session")).toBe(false);
       return Response.json(cookieSession, { status: cookieStatus });
     }
+    if (path === "/v1/editor/close") {
+      expect(request.method).toBe("POST");
+      expect(request.headers.get("x-pi-remote-user")).toBe("previous");
+      expect(request.headers.get("x-pi-remote-session")).toBe("stale-session");
+      return Response.json({ ok: true });
+    }
     expect(path).not.toBe("/v1/unlock");
     expect(request.headers.get("x-pi-remote-user")).toBe("employee");
     expect(request.headers.get("x-pi-remote-session")).toBe("oauth-session");
@@ -69,7 +75,7 @@ if (!process.env.PI_OAUTH_CLIENT_CASE) {
       await expect(client.ensureUnlocked()).rejects.toThrow("Sign in to continue");
       expect(window.PiRemotePerson.session()).toBe("");
       expect(signInMessages).toEqual([""]);
-      expect(calls.map(request => new URL(request.url).pathname)).toEqual([`${prefix}/v1/environment`, `${prefix}/v1/auth/session`]);
+      expect(calls.map(request => new URL(request.url).pathname)).toEqual([`${prefix}/v1/environment`, `${prefix}/v1/auth/session`, `${prefix}/v1/editor/close`]);
       cookieStatus = 200;
       signInMessages.length = 0;
     }

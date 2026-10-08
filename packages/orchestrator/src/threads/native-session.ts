@@ -85,8 +85,8 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
               if (session) { session.clearQueue(); session.abortCompaction(); session.abortBash(); await session.abort(); }
               if (active) while (active.pending.size) await Promise.allSettled(active.pending);
               reply(null); return;
-            default: emit({ type: "response", command: command.type, id: command.id, success: false, error: `Unsupported native owner command: ${command.type}` });
           }
+          emit({ type: "response", command: command.type, id: command.id, success: false, error: `Unsupported native owner command: ${command.type}` });
         },
         close: async () => { unsubscribe?.(); if (!disposed) { disposed = true; nativeDispose?.(); } },
       };

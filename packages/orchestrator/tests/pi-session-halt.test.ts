@@ -46,7 +46,7 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     args.push("--extension", path);
   }
   const waiters = new Set<() => void>();
-  const options = { cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", ...env }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") };
+  const options = { cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", PI_MODEL_DELIVERY_TIMEZONE: "null", ...env }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") };
   const output = (event: PiEvent) => { events.push(event); for (const notify of waiters) notify(); };
   let session = await openPiSession(options, output, () => {});
   cleanups.push(async () => { await session.command({ type: "abort", id: "cleanup" }); await session.close(); rmSync(cwd, { recursive: true, force: true }); });

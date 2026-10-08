@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { installMessageDelivery, type AgentCapacity, type PiEvent } from "pi-orchestrator/api";
-import { managedRootSession, RootCapacityUnavailable } from "./managed-session.js";
+import { managedRootSession, RootCapacityUnavailable, RootReplyUnavailable } from "./managed-session.js";
 import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION } from "pi-orchestrator/question-policy";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
@@ -90,7 +90,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
       return { ok: true, value: { reply, subjects } };
     } catch (error) {
       if (error instanceof RootCapacityUnavailable) return { ok: false, error: "capacity-unavailable", message: error.message, retryAt: error.retryAt };
-      report({ component: "root-executor", stage, outcome: "failed", reason: error instanceof RootInitializationError ? error.reason : infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
+      report({ component: "root-executor", stage, outcome: "failed", reason: error instanceof RootReplyUnavailable ? "no-reply" : error instanceof RootInitializationError ? error.reason : infrastructureReason(error), durationMs: Math.round(performance.now() - started) });
       return { ok: false, error: "unavailable", message: "Root Kenan could not complete this request" };
     } finally {
       try { await session?.dispose(); }

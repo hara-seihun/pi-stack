@@ -53,8 +53,8 @@ export function silentReply(value: unknown): Result<SilentResponse | null> {
     case "update_only":
       if (!Array.isArray(value.transcript)) return { ok: false, error: "Invalid silent transcript event" };
       return { ok: true, value: null };
-    default: return { ok: false, error: "Unknown silent transport event" };
   }
+  return { ok: false, error: "Unknown silent transport event" };
 }
 export function silentAgent(settings: RetellSettings): Record<string, unknown> {
   return { agent_name: "Kenan GPT Live silent carrier", response_engine: { type: "custom-llm", llm_websocket_url: settings.silentUrl }, voice_id: "retell-Cimo", ambient_sound: null, enable_backchannel: false, reminder_max_count: 0, voicemail_option: null, ivr_option: null, contact_memory_config: { enable_read: false, enable_update: false }, max_call_duration_ms: 600_000, data_storage_setting: "basic_attributes_only" };

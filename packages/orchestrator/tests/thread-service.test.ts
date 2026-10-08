@@ -959,7 +959,7 @@ it("stops even when the in-flight opening rejects", async () => {
   expect(value(await stopped)).toMatchObject({ held: false, state: "idle", metadata: { archived: true } });
   expect(attachSession).toHaveBeenCalledTimes(1);
   expect(service.pending(thread.id)).toEqual([]);
-  expect(service.latestSettlement(thread.id)).toBeNull();
+  expect(service.latestSettlement(thread.id)).toMatchObject({ outcome: "cancelled", finalMessage: null });
 });
 
 it("records why a capacity refusal is waiting, keeps the work queued, and clears the reason once admitted", async () => {

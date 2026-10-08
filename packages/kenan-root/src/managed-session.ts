@@ -26,6 +26,10 @@ export class RootCapacityUnavailable extends Error {
   constructor(readonly retryAt: number) { super("Waiting for the shared global 100-agent capacity"); }
 }
 
+export class RootReplyUnavailable extends Error {
+  constructor() { super("Root execution did not choose a reply"); }
+}
+
 /** This owner is private: it is never registered with a person or application thread directory. */
 export function managedRootSession(spec: Omit<RootSessionSpec, "sessionFile">, factory: RootSessionFactory,
   capacity?: AgentCapacity | { mode: "unmanaged" }): RootSession {
@@ -67,7 +71,9 @@ export function managedRootSession(spec: Omit<RootSessionSpec, "sessionFile">, f
                 let outcome: "complete" | "failed" = "complete";
                 try {
                   await native!.prompt(command.message as string);
-                  lastAssistantMessage = { role: "assistant", content: [{ type: "text", text: native!.reply() ?? "" }], stopReason: "stop" };
+                  const reply = native!.reply();
+                  if (typeof reply !== "string" || !reply.trim()) throw new RootReplyUnavailable();
+                  lastAssistantMessage = { role: "assistant", content: [{ type: "text", text: reply }], stopReason: "stop" };
                 } catch (error) {
                   outcome = "failed";
                   turnFailure = error;
@@ -80,8 +86,8 @@ export function managedRootSession(spec: Omit<RootSessionSpec, "sessionFile">, f
               })();
               return;
             }
-            default: output({ type: "response", id: command.id, command: command.type, success: false, error: `Unsupported private root command ${command.type}` }); return;
           }
+          output({ type: "response", id: command.id, command: command.type, success: false, error: `Unsupported private root command ${command.type}` });
         },
         close: async () => { await native!.abort?.(); await task; unsubscribe?.(); await native!.dispose(); native = undefined; },
       };

@@ -81,7 +81,7 @@ esac
 exit 0
 `, { mode: 0o755 });
   writeFileSync(join(dir, 'bin/curl'), '#!/bin/sh\necho \'{"people":[]}\'\n', { mode: 0o755 });
-  const env = { ...process.env, PATH: `${dir}/bin:${process.env.PATH}`, TRACE: join(dir, 'trace'), WARM_STARTED: join(dir, 'warming'), VOICE_ACTIVATED: join(dir, 'voice-activated'), RECOGNITION_SELECTED: join(dir, 'recognition-selected'), ACCOUNTS_DONE: join(dir, 'accounts'), OLD_RECOGNITION: join(dir, 'old'), NEW_RECOGNITION: join(dir, 'new'), PI_STACK_MEET_RECOGNITION_DEST: join(dir, 'meet-recognition'), PI_STACK_SERVICES: '1', PI_STACK_ALLOW_LIVE_MEETING_RESTART: '1' };
+  const env = { ...process.env, PATH: `${dir}/bin:${process.env.PATH}`, TRACE: join(dir, 'trace'), WARM_STARTED: join(dir, 'warming'), VOICE_ACTIVATED: join(dir, 'voice-activated'), RECOGNITION_SELECTED: join(dir, 'recognition-selected'), ACCOUNTS_DONE: join(dir, 'accounts'), OLD_RECOGNITION: join(dir, 'old'), NEW_RECOGNITION: join(dir, 'new'), PI_STACK_MEET_RECOGNITION_DEST: join(dir, 'meet-recognition'), PI_STACK_SERVICES: '1', PI_STACK_DEPLOY_NO_SUDO: '1', PI_STACK_ALLOW_LIVE_MEETING_RESTART: '1' };
   for (const name of ['RUNTIME', 'ORCHESTRATOR', 'REMOTE', 'TOOLS', 'SKILLS']) env[`PI_STACK_${name}_DEST`] = join(dir, name.toLowerCase());
   mkdirSync(env.OLD_RECOGNITION); mkdirSync(env.NEW_RECOGNITION);
   symlinkSync(env.OLD_RECOGNITION, env.PI_STACK_MEET_RECOGNITION_DEST);

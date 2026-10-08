@@ -33,7 +33,7 @@ test("historical cancellation holds never create a persistent Resume composer st
 test("cancel transport carries selected-only scope and retains dependency refusal data", async () => {
   const descriptors = new Map(["window", "fetch"].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   try {
-    Object.defineProperty(globalThis, "window", { configurable: true, value: { PiRemotePerson: { session: () => "session" } } });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { PiRemotePerson: { get: () => "person", session: () => "session" } } });
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init: RequestInit) => {
       expect(url).toBe("/v1/sessions/parent/abort");
       expect(JSON.parse(String(init.body))).toEqual({ descendants: false });

@@ -26,6 +26,8 @@ Environment/dependency keys and weight keys are independent: source or dependenc
 
 ## Focused checks
 
+Deployment lifecycle and readiness tests run with `node --test scripts/meet-recognition-service.test.mjs`. They require system Python with `websockets` (Ubuntu package `python3-websockets`) and exercise the deployment probe against the authoritative start protocol, PCM acknowledgement and final-result contract. The decoder and service manager are fixture-owned; no host service changes occur.
+
 Protocol tests need only Python:
 
 ```sh

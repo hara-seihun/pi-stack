@@ -8,7 +8,7 @@ test("dismissal posts the occurrence ID and reports transport failures instead o
   const requests: Request[] = [];
   let fail = true;
   try {
-    Object.defineProperty(globalThis, "window", { configurable: true, value: { PiRemotePerson: { session: () => "person-session" } } });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { PiRemotePerson: { get: () => "person", session: () => "person-session" } } });
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init: RequestInit) => {
       const request = new Request(`http://localhost${url}`, init);
       requests.push(request);

@@ -30,7 +30,7 @@ it.each(["refused", "accepted", "clear", "ordinary"] as const)("real retained le
   const root = mkdtempSync(join(tmpdir(), "wait-legacy-native-"));
   let modelCalls = 0;
   const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"),
-    environment: () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1" }),
+    environment: () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_MODEL_DELIVERY_TIMEZONE: "null" }),
     openSession: (options, output, exit) => openPiSession({ ...options, args: [] }, output, exit),
   });
   native.prepare = session => {
@@ -111,7 +111,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const client = createThreadClient(`${origin}/v1/threads`, fetch, { token: capability.issue("self"), timeoutMs: 3000 });
   const createOwner = () => new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), capability,
-    environment: () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: `${origin}/v1/threads` }),
+    environment: () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_MODEL_DELIVERY_TIMEZONE: "null", PI_THREAD_API_URL: `${origin}/v1/threads` }),
     openSession: (options, output, exit) => openPiSession({ ...options, threads: undefined, args: [] }, output, exit),
   });
   const observe = async (name: string) => {
@@ -139,7 +139,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
     unwrap(await client.wakeSchedule({ action: "set", threadId: "self", requestId: "timer", reason: "Recovery check", cadenceMs: 60000, nextDueAt: now + 60000 }));
     unwrap(await owner.start()); unwrap(await owner.send({ requestId: "first-turn", threadId: "self", text: "Wait for the durable job" }));
     await until(() => owner.get("self")?.state === "waiting" && !!owner.get("self")?.waitingOnAgents).catch(error => { throw new Error(`${error.message}: ${JSON.stringify(owner.get("self"))}; calls=${modelCalls}`); });
-    const waiting = await observe("waiting"); expect(waiting.sessionFile).toBe(created.sessionFile); expect(rendered.waiting).toContain("Waiting for job"); expect(modelCalls).toBe(1);
+    const waiting = await observe("waiting"); expect(waiting.sessionFile).toBe(created.sessionFile); expect(rendered.waiting).toContain('data-status="waiting"'); expect(rendered.waiting).toContain("Await synthetic durable job"); expect(modelCalls).toBe(1);
     owner.reconcile(); unwrap(await watch.tick(now)); await boundary(); expect(modelCalls).toBe(1); expect(unwrap(await watch.watch({ threadId: "self", action: "list" }))).toEqual({ items: [] });
     // Native history and the wake survive replacing the scheduler/controller connection.
     unwrap(await owner.detach()); owner = createOwner(); now += 60001; unwrap(await owner.start());
