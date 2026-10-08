@@ -8,12 +8,13 @@ import { Inbox } from "../features/chats/Inbox";
 import { AgentsDirectory, type AgentDirectoryState } from "../features/agents/AgentsScreen";
 import { inboxRows, type ChatId } from "../chats";
 import { AttentionScreen } from "../attention";
-import { CalendarScreen } from "../calendar";
+import { CalendarScreen, EventEditor, type CalendarDraft } from "../calendar";
 import { NeedsYouCard, NeedsYouDetails } from "../needs-you";
 import { configureFixtureTransport } from "./transport";
 import type { UiCase } from "./contract";
 import { machineFilesCases } from "./machine-files";
 import { settingsAuthCases } from "./settings-auth";
+import "../chat-picker-trigger.css";
 
 const now = Date.now();
 const iso = (offset: number) => new Date(now + offset).toISOString();
@@ -76,6 +77,9 @@ function ApiFixture({ mode, children }: { mode: FixtureMode; children: ReactNode
   const populated = mode === "populated" || mode === "partial";
   const snapshot: CalendarSnapshot = { zone: "UTC", events: populated ? events : [], subscriptions: [] };
   configureFixtureTransport([
+    { method: "GET", path: "/v1/environments", reply: () => Response.json({ environments: [{ id: "synthetic", name: "Synthetic environment", baseUrl: "" }] }) },
+    { method: "GET", path: "/v1/health", reply: () => Response.json({ environmentId: "synthetic" }) },
+    { method: "POST", path: "/v1/diagnostics/requests", reply: () => Response.json({ ok: true }) },
     { method: "GET", path: "/v1/needs-you", reply: () => response(mode, projection(populated ? needs : [], mode === "partial")) },
     { method: "GET", path: "/v1/notifications?history=1", reply: () => response(mode, { notifications: populated ? updates : [], before: null }) },
     { method: "GET", match: calendarMatch, reply: () => response(mode, snapshot) },
@@ -85,6 +89,17 @@ function ApiFixture({ mode, children }: { mode: FixtureMode; children: ReactNode
 }
 function NeedsFixture({ busy = false }: { busy?: boolean }) {
   return <section className="attention-screen"><ol className="attention-feed">{needs.map(item => <li key={item.id}><NeedsYouCard item={item} busy={busy} onDismiss={noop} /></li>)}</ol><NeedsYouDetails view={projection([], true)} /></section>;
+}
+const draft: CalendarDraft = { title: "Synthetic calendar review", start: "2026-10-10T09:00", end: "2026-10-10T10:00", zone: "UTC", allDay: false, location: "Synthetic studio", notes: "Review the valid interface states." };
+const editorDrafts: Record<string, CalendarDraft> = {
+  new: { ...draft, title: "", location: "", notes: "" },
+  timed: { ...draft, id: "synthetic-event" },
+  "all-day": { ...draft, id: "synthetic-event", allDay: true, start: "2026-10-10", end: "2026-10-12", title: long },
+  occurrence: { ...draft, id: "synthetic-occurrence", scope: "occurrence", repeat: "weekly" },
+  series: { ...draft, id: "synthetic-series", scope: "series", repeat: "weekly", repeatUntil: "2027-01-01", title: long.repeat(3), notes: unbroken + "\n" + long.repeat(4), location: unbroken },
+};
+function SavingEditor({ mode }: { mode: "pending" | "failed" }) {
+  return <EventEditor draft={draft} onClose={noop} onSave={() => mode === "pending" ? new Promise<void>(() => {}) : Promise.reject(new Error("Synthetic calendar owner is offline. The event has not been saved."))} />;
 }
 export const screenCases: UiCase[] = [
   { id: "inbox-empty", title: "Inbox · empty", component: "Inbox", contract: "InboxRow[] empty, selectedId null", boundary: "content-boundary", render: () => <InboxFixture values={[]} /> },
@@ -102,6 +117,8 @@ export const screenCases: UiCase[] = [
   ...(["empty", "populated", "failed", "loading"] as const).map((mode): UiCase => ({ id: `calendar-${mode}`, title: `Calendar · ${mode}`, component: "CalendarScreen", contract: "CalendarSnapshot explicit UTC zone; timed/all-day/read-only/repeating fixtures", boundary: "finite-variant", render: () => <ApiFixture mode={mode}><CalendarScreen /></ApiFixture> })),
   { id: "needs-kinds", title: "Needs you · all kinds and source failures", component: "NeedsYouCard / NeedsYouDetails", contract: "NeedsYouItem kind union; deadline set/unset; typed dismissal; failed source coverage", boundary: "finite-variant", render: () => <NeedsFixture /> },
   { id: "needs-busy", title: "Needs you · dismissal pending", component: "NeedsYouCard", contract: "Busy dismissal disables actions without hiding content", boundary: "finite-variant", render: () => <NeedsFixture busy /> },
+  ...Object.entries(editorDrafts).map(([kind, value]): UiCase => ({ id: `calendar-editor-${kind}`, title: `Calendar editor · ${kind}`, component: "EventEditor", contract: "CalendarDraft new/timed/all-day/occurrence/series; synthetic modal editor", boundary: "finite-variant", render: () => <EventEditor draft={value} onClose={noop} onSave={async () => {}} /> })),
+  ...(["pending", "failed"] as const).map((mode): UiCase => ({ id: `calendar-editor-save-${mode}`, title: `Calendar editor · save ${mode}`, component: "EventEditor", contract: "After Save: owned pending promise or explicit rejected synthetic save; entered draft retained", boundary: "finite-variant", render: () => <SavingEditor mode={mode} /> })),
   ...machineFilesCases,
   ...settingsAuthCases,
 ];
