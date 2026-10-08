@@ -896,6 +896,22 @@
     "judgment": "Viewed actual 390\u00d7844 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success."
   },
   {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success."
+  },
+  {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success."
+  },
+  {
     "caseId": "files-editor-unconfigured",
     "viewport": "phone",
     "theme": "dark",
@@ -974,5 +990,69 @@
     "status": "passed",
     "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-phone-dark.png",
     "judgment": "Viewed actual 390\u00d7844 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI."
   }
 ]
