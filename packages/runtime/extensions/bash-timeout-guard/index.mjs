@@ -12,7 +12,7 @@ function describeSeconds(seconds) {
 
 function policyRule(maxTimeoutSeconds, context) {
   const reason = context ? ` ${context.trim()}` : "";
-  return `Every bash tool call must pass an explicit timeout of at most ${describeSeconds(maxTimeoutSeconds)}. Commands that detach work from the session are blocked; keep the work in the foreground.${reason}`;
+  return `Every bash tool call must pass an explicit timeout of at most ${describeSeconds(maxTimeoutSeconds)}. Commands that detach work from the session are blocked; keep the work in the foreground. If bash returns a running session_id, the process is still owned by this session: continue useful work and use bash_session for bounded inspection, stdin or cancellation.${reason}`;
 }
 
 const detachmentRefusal = (found, policy) =>

@@ -20,6 +20,12 @@ vi.mock("@earendil-works/pi-coding-agent", async importOriginal => {
   } };
 });
 
+vi.mock("../src/threads/async-shell.js", async importOriginal => {
+  const shell = await importOriginal<typeof import("../src/threads/async-shell.js")>();
+  return { ...shell, asynchronousShellTools: async (options: Parameters<typeof shell.asynchronousShellTools>[0]) =>
+    shell.asynchronousShellTools({ ...options, backend: await shell.ownedPipeShellOperations(join(process.cwd(), "../runtime/pi-shell-owner.mjs")) }) };
+});
+
 vi.mock("../src/threads/pi-sandbox.js", async () => {
   const sdk = await import("@earendil-works/pi-coding-agent");
   return { createSandboxTools: vi.fn(async () => [sdk.createReadTool("/workspace"), sdk.createWriteTool("/workspace"), sdk.createEditTool("/workspace"), sdk.createBashTool("/workspace")]
@@ -701,6 +707,36 @@ it("halts a real shell inside a native prompt and acknowledges after one cancell
   const settledAt = f.events.findIndex(event => event.type === "agent_settled");
   expect(f.events.slice(settledAt + 1)).toContainEqual(expect.objectContaining({ type: "response", command: "abort", success: true }));
   expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, cancellationFailed: false, localTools: 0 } });
+}, 3000);
+
+it("continues model work after Bash yields while retaining shell custody until completion", async () => {
+  const f = await fixture();
+  let calls = 0;
+  f.native.agent.streamFunction = () => f.reply(calls++ === 0
+    ? f.message([{ type: "toolCall", id: "async-shell", name: "bash", arguments: { command: "sleep .6; printf finished", timeout: 2, yield_time_ms: 10 } }], "toolUse")
+    : f.message([{ type: "text", text: "Other useful work completed" }], "stop"));
+  await f.command("prompt", { workId: "yielding", message: "start and continue" });
+  await f.waitFor(event => event.type === "message_end" && (event.message as any)?.role === "assistant" && JSON.stringify((event.message as any).content).includes("Other useful work completed"));
+  expect(calls).toBe(2);
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: true, localTools: 1 } });
+  expect(f.events.some(event => event.type === "agent_settled")).toBe(false);
+  await f.waitFor(event => event.type === "agent_settled" && (event.workIds as string[])?.includes("yielding"));
+  expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, localTools: 0 } });
+  const receipt = f.native.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType === "thread_shell_session_v1").at(-1)!;
+  expect(receipt).toMatchObject({ data: { status: "completed", exit_code: 0 } });
+}, 3000);
+
+it("preserves Bash authorization hooks before any asynchronous launch", async () => {
+  const guard = join(process.cwd(), "../runtime/extensions/bash-timeout-guard/index.mjs");
+  const f = await fixture(undefined, `import guard from ${JSON.stringify(guard)}; export default guard;`);
+  let calls = 0;
+  f.native.agent.streamFunction = () => f.reply(calls++ === 0
+    ? f.message([{ type: "toolCall", id: "refused-shell", name: "bash", arguments: { command: "sleep .4 &", timeout: 2, yield_time_ms: 0 } }], "toolUse")
+    : f.message([{ type: "text", text: "refusal handled" }], "stop"));
+  await f.command("prompt", { workId: "refused", message: "guarded launch" });
+  await f.waitFor(event => event.type === "agent_settled");
+  expect(f.native.sessionManager.getBranch().some(entry => entry.type === "custom" && entry.customType === "thread_shell_session_v1")).toBe(false);
+  expect(f.native.messages.find(message => message.role === "toolResult")).toMatchObject({ isError: true });
 }, 3000);
 
 it("rejects overlap during preflight and waits for that preflight before acknowledging halt", async () => {

@@ -107,6 +107,15 @@ it("fences callbacks from a cancelled run after a new run is admitted", async ()
   await rejected;
 });
 
+it("keeps Stop and new execution fenced when descendant cleanup is unconfirmed", async () => {
+  const { execution, session } = fixture();
+  execution.cleanupUnconfirmed(new Error("Shell descendants remain in their owning scope"));
+  expect(execution.blocked).toBe(true);
+  await expect(execution.halt(session, 1000)).rejects.toThrow("descendants remain");
+  expect(() => execution.run(() => 1)).toThrow("cancelled");
+  await expect(execution.halt(session, 1000)).rejects.toThrow("descendants remain");
+});
+
 it("rejects a halt from inside the prompt it would have to await", async () => {
   const { execution, session } = fixture(undefined, { prompt: async () => {
     await expect(execution.halt(session, 1000)).rejects.toThrow("from its own callback");

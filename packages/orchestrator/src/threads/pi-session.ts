@@ -16,6 +16,7 @@ import { argument, assertPiSessionFile, checkpointPiBranch, checkpointPiSession,
 import { PiExecution } from "./pi-execution.js";
 import { threadSpeed, updateThreadSpeed } from "./pi-speed.js";
 import { scopedBashOperations } from "./pi-bash-resources.js";
+import { asynchronousShellTools } from "./async-shell.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
@@ -164,11 +165,13 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       if (selection && !selection.ok) throw new Error(selection.error);
       const bash = createBashTool(cwd, { operations: scopedBashOperations(env), spawnHook: context => ({ ...context, env: { ...context.env, ...env,
         PI_SESSION_FILE: sessionManager.getSessionFile() } }) });
+      const shellTools = !room && !sandbox && !raw && (!isolated || isolated.tools.includes("bash"))
+        ? await asynchronousShellTools({ cwd, env, owner: `${options.threadId}:${sessionManager.getSessionId()}`, manager: sessionManager, execution }) : [];
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
-        tools: room ? ROOM_TOOLS : sandboxTools?.map(tool => tool.name) ?? isolated?.tools ?? (raw ? [] : undefined),
+        tools: room ? ROOM_TOOLS : sandboxTools?.map(tool => tool.name) ?? (isolated ? [...isolated.tools, ...(shellTools.length ? ["bash_session"] : [])] : raw ? [] : undefined),
         customTools: room ? threadTools({ ...options, cwd, env }).filter(tool => tool.name === "request_user_input_async")
-          : sandboxTools ?? (raw ? [] : [bash, ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
+          : sandboxTools ?? (raw ? [] : [...(shellTools.length ? shellTools : [bash]), ...threadTools({ ...options, cwd, env }), ...(isolated ? [] : convergeTools(env))]) });
       if (room) assertRoomTools(created.session.agent.state.tools.map(tool => tool.name));
       if (telephone && created.session.agent.state.tools.length !== 0) throw new RunnerStartupError("Telephone sessions cannot expose host tools");
       retainNativeThinking(created.session);

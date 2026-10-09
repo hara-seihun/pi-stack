@@ -184,6 +184,10 @@ and propagates other filesystem errors. Focused cleanup checks:
 Active turns retain their original runtime until
 settlement; reopen a shell/CLI session to select the new tree.
 
+## Bounded asynchronous shell execution
+
+Managed Linux Remote/fleet sessions use [bounded asynchronous Bash](../../docs/asynchronous-shell.md): start returns a terminal result or running session ID within at most one second, with elapsed/deadline metadata. `bash_session` provides bounded inspection, pipe stdin/EOF and named cancellation. The underlying command stays in the existing PiExecution/resource/subreaper owner after the launching tool yields; Stop still awaits descendant cleanup. Native receipts prevent duplicate launches/input and preserve unknown restart outcomes without replay. Terminal SDK/direct RPC, raw, sandbox and room loadouts are unchanged.
+
 ## Shell descendant ownership
 
 [`patch-bash-cancellation.mjs`](patch-bash-cancellation.mjs) gives every Linux

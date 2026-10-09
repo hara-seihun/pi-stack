@@ -60,10 +60,10 @@ export function scopedBashOperations(env: NodeJS.ProcessEnv, local: BashOperatio
       }
       // The scope stays loaded while its processes cannot die. It binds only this
       // launch's uniquely named controller, so it never blocks a later runner.
-      if (abandoned) throw new Error(`Tool ${abandoned.reason === "aborted" ? "abort" : `timeout after ${options.timeout}s`}: ` +
+      if (abandoned) throw Object.assign(new Error(`Tool ${abandoned.reason === "aborted" ? "abort" : `timeout after ${options.timeout}s`}: ` +
         `its processes did not exit ${grace / 1000}s after SIGKILL (uninterruptible I/O or another user's process) and remain in ${unit}; ` +
-        "the call was abandoned. Do not retry the same operation until the stuck I/O is resolved.", { cause: cleanup });
-      if (cleanup) throw new Error(`Tool scope cleanup unconfirmed for ${unit}`, { cause: cleanup });
+        "the call was abandoned. Do not retry the same operation until the stuck I/O is resolved.", { cause: cleanup }), { code: "tool_cleanup_unconfirmed" });
+      if (cleanup) throw Object.assign(new Error(`Tool scope cleanup unconfirmed for ${unit}`, { cause: cleanup }), { code: "tool_cleanup_unconfirmed" });
     }
   } };
 }

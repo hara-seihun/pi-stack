@@ -7,6 +7,10 @@ thread ID, native Pi conversation, workspace, complete model settings and storag
 owner. Foreground/background is placement, not a class of agent. Orchestrator,
 Remote, schedules, tools and the CLI use the same ThreadService operations.
 
+[Bounded asynchronous shell execution](asynchronous-shell.md) owns managed Linux
+Remote/fleet Bash start/yield, session inspection/stdin/cancel, execution retention
+and non-replayed restart receipts.
+
 ## Identity, custody and placement
 
 New threads receive an immutable Nebulani `agentName`, separate from the mutable

@@ -8,6 +8,7 @@ export class PiExecution {
   private readonly pending = new Map<Promise<unknown>, Work>();
   private controller = new AbortController();
   private halting?: Promise<void>;
+  private cleanupFailure?: Error;
 
   constructor(private readonly onIdle: () => void = () => {}) {}
 
@@ -28,6 +29,15 @@ export class PiExecution {
     };
     void pending.then(release, release);
     return pending;
+  }
+
+  cleanupUnconfirmed(error: Error): void {
+    this.cleanupFailure = error;
+    this.controller.abort();
+  }
+
+  retainTool<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    return this.track("tool", () => operation(this.runs.getStore()!));
   }
 
   bind(session: AgentSession): void {
@@ -82,6 +92,7 @@ export class PiExecution {
       await session.abort();
       while (this.active) await Promise.allSettled(this.pending.keys());
       await session.agent.waitForIdle();
+      if (this.cleanupFailure) throw this.cleanupFailure;
       if (!session.isIdle || session.isBashRunning) throw new Error("Local Pi execution is still active");
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
