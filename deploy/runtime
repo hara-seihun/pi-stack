@@ -163,6 +163,14 @@ JS
   runtime_required_pattern 'mandatory native ThreadService owner' "$release/node_modules/@earendil-works/pi-coding-agent/dist/main.js" 'PiStack native ThreadService owner'
   node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/main.js"
   [[ -f $release/capacity/native-session.js ]] || { echo 'native ThreadService owner is missing' >&2; exit 1; }
+  timeout 8s node --input-type=module - "$release" <<'NODE' || { echo 'managed SDK/CLI owner import closure cannot load' >&2; return 66; }
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+const root = process.argv[2];
+const sdk = await import(pathToFileURL(join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href);
+const owner = await import(pathToFileURL(join(root, 'managed-agent.mjs')).href);
+if (typeof sdk.main !== 'function' || typeof owner.createManagedAgentSession !== 'function' || typeof owner.recoverNativeSessionOwners !== 'function') throw Error('Managed SDK/CLI exports are incomplete');
+NODE
   local doctor command
   for doctor in browser model-selection; do
     command=pi-agent-browser-doctor

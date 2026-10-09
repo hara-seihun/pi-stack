@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -57,5 +58,45 @@ test("managed CLI factory patch owns initial and replacement sessions, fails cha
   const managed = managedCliSource(source);
   assert.match(managed, /createManagedAgentSession\(\(\) => createAgentSessionFromServices/);
   assert.equal(managedCliSource(managed), managed);
+  const eager = 'import { createManagedAgentSession } from "../../../../managed-agent.mjs"; // PiStack native ThreadService owner\n' + source.replace('const created = await createAgentSessionFromServices({', 'const created = await createManagedAgentSession(() => createAgentSessionFromServices({').replace('        });', '        }), { cwd });');
+  assert.equal(managedCliSource(eager), managed);
   assert.throws(() => managedCliSource("changed upstream"), /no longer matches Pi/);
+});
+
+test("SDK barrel and managed owner load in either order without a CLI-owner import cycle", t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-managed-cli-graph-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dist = join(dir, 'node_modules/@earendil-works/pi-coding-agent/dist');
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
+  writeFileSync(join(dist, '../package.json'), JSON.stringify({ type: 'module', exports: './dist/index.js' }));
+  writeFileSync(join(dist, 'index.js'), 'export { main } from "./main.js"; export const sdkReady = true;');
+  writeFileSync(join(dir, 'managed-agent.mjs'), readFileSync(new URL('./managed-agent.mjs', import.meta.url)));
+  mkdirSync(join(dir, 'capacity'));
+  writeFileSync(join(dir, 'capacity/native-session.js'), `import { sdkReady } from '@earendil-works/pi-coding-agent';
+export let owned = 0;
+export async function createManagedAgentSession(factory) { if (!sdkReady) throw Error('SDK unavailable'); owned++; return factory(); }
+export function recoverNativeSessionOwners() {}`);
+  const upstream = `export async function main(help = false) {
+if (help) return 'help';
+const cwd = '/fixture', sessionOptions = { customTools: [] };
+const createAgentSessionFromServices = async () => ({ session: {} });
+const created = await createAgentSessionFromServices({
+            customTools: sessionOptions.customTools,
+        });
+return created;
+}`;
+  writeFileSync(join(dist, 'main.js'), managedCliSource(upstream));
+  for (const first of ['sdk', 'owner']) {
+    const code = `const paths = { sdk: './node_modules/@earendil-works/pi-coding-agent/dist/index.js', owner: './managed-agent.mjs' };
+await import(paths['${first}']);
+const { main } = await import(paths.sdk);
+if (await main(true) !== 'help') throw Error('help failed');
+const owner = await import('./capacity/native-session.js');
+if (owner.owned !== 0) throw Error('help created session');
+await main(); await main();
+if (owner.owned !== 2) throw Error('session escaped ownership');`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: dir, encoding: 'utf8', timeout: 3000 });
+    assert.equal(result.status, 0, `${first}: ${result.stderr}`);
+  }
 });

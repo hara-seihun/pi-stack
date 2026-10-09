@@ -11,6 +11,9 @@ if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain)
 fi
 commit=$(git -C "$root" rev-parse HEAD)
 export PI_STACK_RELEASES_ROOT=$(pi_stack_component_releases_root)
+prepared_root="$(dirname "$PI_STACK_RELEASES_ROOT")/.pi-stack-prepared"
+prepared="$prepared_root/$commit"
+pi_stack_as_root install -d -m755 "$prepared_root" "$prepared"
 if pi_stack_as_root test -f "$PI_STACK_RELEASES_ROOT/.prepared/$commit.json"; then
   pi_stack_as_root node "$root/deploy/prepared-components.mjs" "$PI_STACK_RELEASES_ROOT" "$commit" verify
   "$root/deploy/meet-recognition"
@@ -36,11 +39,9 @@ if wait "$recognition_pid"; then :; else
 fi
 (( failed == 0 )) || exit 1
 # Scratch selectors are never referenced by a service or an account command.
-prepared="$(dirname "$PI_STACK_RELEASES_ROOT")/.pi-stack-prepared/$commit"
 export PI_STACK_PREPARE_ONLY=1 PI_STACK_SKIP_TOOL_LINKS=1
 export PI_STACK_RUNTIME_DEST="$PI_STACK_RELEASES_ROOT/runtime/$commit"
 export PI_STACK_ORCHESTRATOR_DEST="$prepared/orchestrator" PI_STACK_REMOTE_DEST="$prepared/remote" PI_STACK_TOOLS_DEST="$prepared/tools"
-pi_stack_as_root install -d -m755 "$prepared"
 "$root/deploy/orchestrator"
 "$root/deploy/remote" &
 remote_pid=$!
