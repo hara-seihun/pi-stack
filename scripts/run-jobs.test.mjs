@@ -75,6 +75,32 @@ test("the Node test driver expands file patterns and propagates failures without
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("publication partitions deployment checks without dropping or repeating contracts", async () => {
+  const jobs = checkJobs.filter(([name]) => name === "deploy lock" || name.startsWith("deploy host guest "));
+  assert.equal(jobs.length, 3);
+  const root = mkdtempSync(join(tmpdir(), "pi-deploy-check-plan-"));
+  try {
+    const files = [...new Set(jobs.flatMap(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))))];
+    const names = files.flatMap(file => file === "scripts/deploy-lock.test.mjs" ? [
+      "one host deployment installs its shared dependency tree once",
+      ...["disabled", "enabled"].map(guest => `host deployment activates Pi Remote and reconciles daemons with guest ${guest}`),
+    ] : [file]);
+    for (const file of files) {
+      const contracts = file === "scripts/deploy-lock.test.mjs" ? names.slice(0, 3) : [file];
+      writeFileSync(join(root, file.split("/").at(-1)), `import test from 'node:test';\n${contracts.map(name =>
+        `test(${JSON.stringify(name)}, () => console.log(${JSON.stringify(`CONTRACT:${name}`)}));`).join("\n")}\n`);
+    }
+    let output = "";
+    const results = await runJobs(jobs.map(([name, command, args, options]) => [name, command,
+      args.map(arg => arg.endsWith(".test.mjs") ? join(root, arg.split("/").at(-1)) : arg), options]), {
+      concurrency: 2, write(text) { output += text; },
+    });
+    assert.deepEqual(results.map(result => result.code), [0, 0, 0], output);
+    const executed = [...output.matchAll(/CONTRACT:([^\n\r]+)/g)].map(match => match[1]);
+    assert.deepEqual(executed.sort(), names.sort(), output);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("publication schedules every workspace shard directly under the shared budget", async () => {
   const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
   assert.equal(shards.length, 6);
