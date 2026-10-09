@@ -421,6 +421,10 @@ function retry(requestId) {
   if (Object.values(request.nativeHistory?.hosts ?? {}).some(host => host.state === "repair-required")) {
     throw new Error("Native history custody remains repair-held; recover-native-history must establish safe restoration before unchanged-source retry");
   }
+  recoverOutstandingCustody(request);
+  if (repair.outcome.ownerSourceSha && Object.values(request.nativeHistory?.hosts ?? {}).some(host => host.state === "resume-required")) {
+    throw new Error("Preserved native history requires its original integration; finish that candidate before integrating owner source");
+  }
   if (request.repairedRetry) request.repairedRetries = [...(request.repairedRetries ?? []), request.repairedRetry];
   request.repairedRetry = { failureAt: request.failure.at, failedAttempt: request.failure.attempt, repairId: repair.id, at: new Date().toISOString(), evidence: repair.outcome.evidence };
   if (repair.outcome.ownerSourceSha) {
@@ -518,6 +522,24 @@ function logTail(path, start = 0) {
     const buffer = Buffer.alloc(Math.min(Math.max(0, size - start), 8000));
     readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
     return buffer.toString("utf8");
+  } finally { closeSync(fd); }
+}
+
+export function logMatches(path, start, pattern) {
+  const fd = openSync(path, "r");
+  try {
+    const end = fstatSync(fd).size;
+    const buffer = Buffer.alloc(65536);
+    let pending = "";
+    for (let position = start; position < end;) {
+      const size = readSync(fd, buffer, 0, Math.min(buffer.length, end - position), position);
+      if (size === 0) break;
+      position += size;
+      const lines = (pending + buffer.toString("utf8", 0, size)).split("\n");
+      pending = lines.pop();
+      if (lines.some(line => pattern.test(line))) return true;
+    }
+    return pattern.test(pending);
   } finally { closeSync(fd); }
 }
 
@@ -1058,12 +1080,12 @@ export function deployTarget(request, target, logPath) {
   const result = target.sshHost
     ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "env", ...env, target.releaseCommand, request.integrationSha], 420, logPath)
     : runLogged(request, `deploy-${target.id}`, "env", [...env, target.releaseCommand, request.integrationSha], 420, logPath);
-  const tail = result.status === 75 ? logTail(logPath, start) : "";
-  if (/^another Pi stack deployment owns \/[^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy" };
-  if (/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
-  if (/^native source prerequisite [^\r\n]+ requires [0-9a-f]{40} before Pi Stack [0-9a-f]{40}; selected [0-9a-f]{40}$/m.test(tail)) return { ...result, kind: "host-lock-busy", nativePrerequisite: true };
-  if (/^native history boundary waiting: [^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy", nativeHistory: true };
-  if (/^executor replacement waiting: [^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy", executorReplacement: true };
+  const waiting = pattern => result.status === 75 && logMatches(logPath, start, pattern);
+  if (waiting(/^another Pi stack deployment owns \/[^\r\n]+$/)) return { ...result, kind: "host-lock-busy" };
+  if (waiting(/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
+  if (waiting(/^native source prerequisite [^\r\n]+ requires [0-9a-f]{40} before Pi Stack [0-9a-f]{40}; selected [0-9a-f]{40}$/)) return { ...result, kind: "host-lock-busy", nativePrerequisite: true };
+  if (waiting(/^native history boundary waiting: [^\r\n]+$/)) return { ...result, kind: "host-lock-busy", nativeHistory: true };
+  if (waiting(/^executor replacement waiting: [^\r\n]+$/)) return { ...result, kind: "host-lock-busy", executorReplacement: true };
   return result;
 }
 
@@ -1218,7 +1240,13 @@ export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
     ? runLogged(request, `native-history-${target.id}`, command, commandArgs, 45, logPath, { input: script })
     : commandResult(command, commandArgs, { input: script, timeoutSeconds: 45 });
   const detail = mode === "advance" ? logTail(logPath, start) : result.stderr;
-  if (!result.ok && !(mode !== "restore" && result.status === 75 && /^native history boundary waiting: [^\r\n]+$/m.test(detail))) {
+  if (mode === "restore" && result.status === 1 && result.stderr.trim() === "native history boundary error: Native history is already preserved/migrated; prior capture source restoration is not allowed. Resume the candidate.") {
+    return { ...result, kind: "native-history-resume-required" };
+  }
+  const waiting = mode !== "restore" && result.status === 75 && (mode === "advance"
+    ? logMatches(logPath, start, /^native history boundary waiting: [^\r\n]+$/)
+    : /^native history boundary waiting: [^\r\n]+$/m.test(detail));
+  if (!result.ok && !waiting) {
     throw Object.assign(new Error(detail.trim() || `native history boundary ${mode} exited ${result.status}`), {
       probeFailure: { kind: "native-history", mode, host: target.id, status: result.status, command: [command, ...commandArgs] },
     });
@@ -1235,9 +1263,14 @@ function restoreNativeHistory(request, target, explicit = false) {
   if (!explicit && nativeHistoryRepairHeld(request)) return;
   const host = request.nativeHistory?.hosts?.[target.id];
   if (!custodyNeedsRestore(host) && !(explicit && host?.state === "repair-required")) return;
-  nativeHistoryBoundaryTarget({ ...request, integrationSha: host.integrationSha }, target, "restore");
-  host.state = "restored";
-  host.restoredAt = new Date().toISOString();
+  const result = nativeHistoryBoundaryTarget({ ...request, integrationSha: host.integrationSha }, target, "restore");
+  if (result.kind === "native-history-resume-required") {
+    host.state = "resume-required";
+    host.resumeRequiredAt = new Date().toISOString();
+  } else {
+    host.state = "restored";
+    host.restoredAt = new Date().toISOString();
+  }
   writeRequest(request);
 }
 
@@ -1254,7 +1287,7 @@ export function recoverNativeHistoryCustody(request, hostId) {
   try {
     restoreNativeHistory(request, target, true);
     recovery.hosts.push(target.id);
-    recovery.status = "restored";
+    recovery.status = request.nativeHistory.hosts[target.id].state;
   } catch (error) {
     recovery.status = "failed";
     recovery.error = error instanceof Error ? error.message : String(error);
@@ -1754,7 +1787,7 @@ export function outstandingHostCustody(request) {
   return Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
     || Object.values(request.reservations ?? {}).some(custodyNeedsRestore)
     || Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state))
-    || Object.values(request.nativeHistory?.hosts ?? {}).some(host => custodyNeedsRestore(host) || host.state === "repair-required");
+    || Object.values(request.nativeHistory?.hosts ?? {}).some(host => custodyNeedsRestore(host) || ["repair-required", "resume-required"].includes(host.state));
 }
 
 export function nativeHistoryRepairHeld(request) {
