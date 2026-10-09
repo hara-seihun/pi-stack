@@ -182,7 +182,8 @@ test('old owner drains existing work/output, closes before private migration, an
     constructor(path){this.options={databasePath:path};this.db=new DatabaseSync(path);this.runtimes=new Map();this.operations=new Map();this.opening=new Map();this.halts=new Map();this.dependencyOperations=new Map();this.directory={list:async({id})=>({ok:true,value:{threads:id==='remote-parent'?[{id,createdAt:0}]:id==='remote-child'?[{id,createdAt:Date.now()+100000,parentId:'remote-parent'}]:[]}})};}
     sql(sql){return this.db.prepare(sql)} async start(){return {ok:true}}
     async attach(id){const runtime={waiters:new Map(),busy:true};this.runtimes.set(id,runtime);return runtime}
-    async rpc(){if(existsSync(this.options.databasePath+'.race')&&!this.raced){this.raced=true;console.log('STATUS_WAITING');await new Promise(resolve=>setTimeout(resolve,100));}return {isStreaming:false,isCompacting:false,localTools:0,pendingCommandCount:0}}
+    execution(){return this.sql('SELECT id FROM thread_execution WHERE ended_at IS NULL').get()}
+    async rpc(){if(existsSync(this.options.databasePath+'.failure')&&!this.probeFailed){this.probeFailed=true;throw new Error('Status acknowledgement unavailable');}if(existsSync(this.options.databasePath+'.race')&&!this.raced){this.raced=true;console.log('STATUS_WAITING');await new Promise(resolve=>setTimeout(resolve,100));}return {isStreaming:false,isCompacting:false,localTools:0,pendingCommandCount:0}}
     busy(state){return state.isStreaming||state.isCompacting||state.localTools>0||state.pendingCommandCount>0} adoptReference(){} wake(){}
     async send(){return {ok:true}} async spawn(){return {ok:true}} deliverScheduledWakes(){}
     async close(){console.log('CLOSE_WAITING');await new Promise(resolve=>setTimeout(resolve,40));this.db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference')");this.db.close();this.closed=true;return {ok:true}}
@@ -207,7 +208,14 @@ test('old owner drains existing work/output, closes before private migration, an
   const busy = await control(socket, 'GET', '/status');
   assert.equal(busy.ready, false); assert.equal(busy.owners[0].busy.executions, 1);
   const settled = new DatabaseSync(threadPath); settled.exec("UPDATE thread_work SET status='done'; UPDATE thread_execution SET ended_at=1;"); settled.close();
+  writeFileSync(threadPath+'.failure', 'fail one status proof');
+  const failedProbe = await control(socket, 'GET', '/status');
+  assert.match(failedProbe.error, /Status acknowledgement unavailable/);
+  assert.equal(JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8')).errorOperation, 'status');
   const unacknowledged = await control(socket, 'GET', '/status');
+  assert.equal(unacknowledged.error, undefined);
+  assert.equal(unacknowledged.errorOperation, undefined);
+  assert.equal(JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8')).error, undefined);
   assert.equal(unacknowledged.ready, false); assert.equal(unacknowledged.owners[0].unacknowledgedSpools, 1);
   truncateSync(spool, 0); // The fixture's OLD decoder has now ACKed the retained output.
   const ready = await control(socket, 'GET', '/status'); assert.equal(ready.ready, true);
@@ -247,7 +255,7 @@ for (const [retainedHandle, startupFailure] of [[false, false], [true, false], [
   writeFileSync(oldApi, `import {DatabaseSync} from 'node:sqlite'; export class ThreadService {
     constructor(path){this.options={databasePath:path};this.db=new DatabaseSync(path);this.closed=false;this.runtimes=new Map();this.operations=new Map();this.opening=new Map();this.halts=new Map();this.dependencyOperations=new Map();}
     sql(sql){return this.db.prepare(sql)} async start(){return {ok:true}} close(){throw new Error('Shutdown must preserve old producer custody, not close native sessions')}
-    attach(){} send(){} spawn(){} deliverScheduledWakes(){} rpc(){} busy(){} adoptReference(){} wake(){}
+    attach(){} execution(){} send(){} spawn(){} deliverScheduledWakes(){} rpc(){} busy(){} adoptReference(){} wake(){}
     async detach(){this.closed=true;this.db.close();return {ok:true}}
   }`);
   writeFileSync(join(root, 'daemon.js'), `import {once} from 'node:events';import {ThreadService} from './api.js'; export class Daemon {
@@ -329,7 +337,7 @@ test('interrupted fleet closure releases its durable fences and locked bootstrap
   await legacyFleetLedger(ledgerPath, { candidate, legacySource: old });
   writeFileSync(join(root, 'native-history-maintenance.json'), JSON.stringify({ version: 1, protocol: 'native-history-maintenance-v1', uid: process.getuid(), dataDir: root, candidate, legacySource: old, phase: 'owners-closed', databases: [threadPath], ledgerPath }));
   const oldApi = join(root, 'api.mjs'), transportModule = join(root, 'transport.mjs');
-  writeFileSync(oldApi, 'export class ThreadService {start(){} close(){} attach(){} send(){} spawn(){} deliverScheduledWakes(){} rpc(){} busy(){} adoptReference(){} wake(){}}');
+  writeFileSync(oldApi, 'export class ThreadService {start(){} close(){} attach(){} execution(){} send(){} spawn(){} deliverScheduledWakes(){} rpc(){} busy(){} adoptReference(){} wake(){}}');
   writeFileSync(transportModule, 'export const runnerSocketDirectory = data => data;');
   const harness = join(root, 'resume.mjs');
   writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(resolve('deploy/native-history-bridge.mjs')).href)}; await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi, transportModule, mode: 'fleet', ledgerPath, autoAdvance: true, node: process.execPath })}); throw new Error('Old work must not reopen');`);

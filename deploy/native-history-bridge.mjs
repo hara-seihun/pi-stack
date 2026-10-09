@@ -172,8 +172,10 @@ export async function attachLegacyRuntime(service, original, id, recoverMissing 
 }
 
 export async function reconcileLegacyRuntime(service, id) {
-  if (service.opening.has(id) || service.operations.has(id) || service.halts.has(id)) return;
+  const owned = () => service.execution(id) || service.opening.has(id) || service.operations.has(id) || service.halts.has(id);
+  if (owned()) return;
   const runtime = await service.attach(id);
+  if (owned()) return;
   if (!runtime) {
     if (service.get(id)?.metadata?.runnerReference) throw new Error('Legacy attachment has not proven producer absence');
     return;
@@ -210,9 +212,22 @@ export async function installLegacyMaintenance(options) {
   let handingOff = false;
   let controlServer, autoTimer;
   let ownerQueue = Promise.resolve();
-  const ownerOperation = action => {
-    const operation = ownerQueue.then(action);
-    ownerQueue = operation.then(() => undefined, error => { receipt.error = String(error); save(receipt.phase); });
+  const ownerOperation = (action, kind) => {
+    const operation = ownerQueue.then(async () => {
+      const value = await action();
+      if (kind === 'status' && Array.isArray(value?.owners) && receipt.errorOperation === kind) {
+        delete receipt.error; delete receipt.errorOperation; save(receipt.phase);
+        const { error, errorOperation, ...proof } = value;
+        return proof;
+      }
+      return value;
+    });
+    ownerQueue = operation.then(() => undefined, error => {
+      if (!receipt.error || receipt.errorOperation === 'status' || receipt.errorOperation === kind) {
+        receipt.error = String(error); receipt.errorOperation = kind;
+      }
+      save(receipt.phase);
+    });
     return operation;
   };
   const awaitingReplacement = () => ({ ...receipt, ready: false, reason: 'Legacy thread controller is awaiting startup or replacement; preserved producer custody is not ready' });
@@ -256,7 +271,7 @@ export async function installLegacyMaintenance(options) {
   const originalExit = process.exit.bind(process);
   const api = await import(pathToFileURL(options.oldApi).href);
   const prototype = api.ThreadService?.prototype;
-  if (!prototype || !['start','close','attach','send','spawn','deliverScheduledWakes','rpc','busy','adoptReference','wake'].every(key => typeof prototype[key] === 'function')) throw new Error('Selected legacy ThreadService has no supported maintenance seam');
+  if (!prototype || !['start','close','attach','execution','send','spawn','deliverScheduledWakes','rpc','busy','adoptReference','wake'].every(key => typeof prototype[key] === 'function')) throw new Error('Selected legacy ThreadService has no supported maintenance seam');
   const originalStart = prototype.start, originalAttach = prototype.attach, originalDetach = prototype.detach;
   const originalWake = prototype.wake, originalDrain = prototype.drain;
   prototype.wake = function(...args) { if (!dispatchPaused.has(this)) return originalWake.apply(this, args); };
@@ -414,6 +429,9 @@ export async function installLegacyMaintenance(options) {
       delete receipt.error; save('restored'); value = receipt;
     }
     else { response.writeHead(404); response.end(); return; }
+    return value;
+  }, request.method === 'GET' && request.url === '/status' ? 'status' : `${request.method} ${request.url}`).then(value => {
+    if (response.writableEnded) return;
     response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(value));
   }).catch(error => { response.writeHead(503); response.end(JSON.stringify({ ...receipt, error: String(error) })); }); });
   controlServer = server;
@@ -438,9 +456,8 @@ export async function installLegacyMaintenance(options) {
     autoTimer = setInterval(() => {
       if (checking || receipt.phase !== 'draining') return;
       checking = true;
-      void ownerOperation(async () => {
-        const value = await status();
-        if (value.ready) await closeOwners();
+      void ownerOperation(status, 'status').then(value => {
+        if (value.ready) return ownerOperation(closeOwners, 'close');
       }).catch(error => {
         console.error(`Native history maintenance: ${error}`);
       }).finally(() => { checking = false; });
