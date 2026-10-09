@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, readlinkSync, symlinkSync, renameSync, writeFileSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { atomicJson, bridgeSocket, BRIDGE_PROTOCOL, MAINTENANCE_INTAKE } from './native-history-bridge.mjs';
 import { stageLegacyRemoteIdentity } from './native-history-package-identity.mjs';
@@ -65,15 +65,22 @@ function owner(user, dataDir, unit, mode) {
   if (!Number.isSafeInteger(uid)) throw new Error('Invalid native history owner UID');
   return { user, uid, dataDir, unit, mode, socket: bridgeSocket(uid, dataDir) };
 }
-function ownerStatus(item, method = 'GET', path = '/status') {
-  const pid = command('systemctl', ['show', item.unit, '-p', 'MainPID', '--value']);
+function captureCommand(binary, args, timeout) {
+  return new Promise(resolve => execFile(binary, args, { encoding: 'utf8', timeout, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 },
+    (error, stdout, stderr) => resolve({ error, stdout, stderr })));
+}
+async function ownerStatus(item, method = 'GET', path = '/status') {
+  const inspected = await captureCommand('systemctl', ['show', item.unit, '-p', 'MainPID', '--value'], 3000);
+  if (inspected.error) throw new Error(`Owner namespace inspection failed for ${item.unit}: ${inspected.stderr.trim() || inspected.error.message}`);
+  const pid = inspected.stdout.trim();
   if (!/^[1-9][0-9]*$/.test(pid)) return { available: false, error: 'Owning namespace launcher is not active' };
-  const result = spawnSync('nsenter', ['--target', pid, '--mount', '--', 'runuser', '-u', item.user, '--', 'curl', '-sS', '--max-time', '5', '--unix-socket', item.socket, '-X', method, `http://localhost${path}`], { encoding: 'utf8', timeout: 7000 });
-  if (result.status !== 0) return { available: false, error: result.stderr?.trim() ?? result.error?.message ?? 'Maintenance controller not yet available' };
+  const result = await captureCommand('nsenter', ['--target', pid, '--mount', '--', 'runuser', '-u', item.user, '--', 'curl', '-sS', '--max-time', '5', '--unix-socket', item.socket, '-X', method, `http://localhost${path}`], 7000);
+  if (result.error) return { available: false, error: result.stderr.trim() || result.error.message };
   const value = JSON.parse(result.stdout);
   if (value.protocol !== BRIDGE_PROTOCOL || value.uid !== item.uid || value.dataDir !== resolve(item.dataDir)) throw new Error(`Maintenance owner identity mismatch: ${item.user}`);
   return { available: true, pid, value };
 }
+export function ownerStatuses(owners) { return Promise.all(owners.map(item => ownerStatus(item))); }
 function ownerRestorationProof(item, root, hostFile, identity, allowMutation = true) {
   const pid = command('systemctl', ['show', item.unit, '-p', 'MainPID', '--value']);
   const alive = /^[1-9][0-9]*$/.test(pid);
@@ -243,7 +250,7 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
       }
       state.phase = 'released'; atomicJson(statePath, state); return { ready: true, state: 'candidate-selected' };
     }
-    const statuses = state.owners.map(item => ownerStatus(item));
+    const statuses = await ownerStatuses(state.owners);
     if (statuses.some(item => item.available && ['closing','migrated','owners-closed','migration-pending'].includes(item.value.phase)) || state.phase === 'ready') throw new Error('Native history is already preserved/migrated; prior capture source restoration is not allowed. Resume the candidate.');
     state.phase = 'restoring'; atomicJson(statePath, state);
     if (realpathSync(remotePointer) === state.remoteStage) selectPointer(remotePointer, state.legacyRemote);
@@ -253,13 +260,13 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
         if (item.mode === 'fleet') fleetAdmission(item, root, { candidate, legacySource: state.legacySource }, 'restore-owned');
         continue;
       }
-      const before = ownerStatus(item);
+      const before = await ownerStatus(item);
       if (before.available && (before.value.candidate !== candidate || before.value.legacySource !== state.legacySource)) {
         if (before.value.phase !== 'restored' || before.value.legacySource !== state.legacySource) throw new Error('Another publication owns this maintenance controller; restoration cannot alter its fences');
         ownerRestorationProof(item, root, hostFile, { candidate, legacySource: state.legacySource });
         continue;
       }
-      const status = ownerStatus(item, 'POST', '/restore');
+      const status = await ownerStatus(item, 'POST', '/restore');
       if (!status.available && state.adopted.includes(item.unit)) ownerRestorationProof(item, root, hostFile, { candidate, legacySource: state.legacySource });
       else if (status.available && (status.value.error || status.value.phase !== 'restored')) throw new Error(`Cannot restore admission for ${item.unit}: ${status.value?.error ?? 'owner did not acknowledge restoration'}`);
     }
@@ -275,8 +282,9 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     return { ready: true, state: 'awaiting-adoption', reason: 'The publication can adopt the preserved old native owners' };
   }
   const restoredControllers = new Map();
-  for (const item of state.owners) {
-    const observed = ownerStatus(item);
+  const observations = await ownerStatuses(state.owners);
+  for (const [index, item] of state.owners.entries()) {
+    const observed = observations[index];
     maintenanceStatus(observed, state, prior => {
       ownerRestorationProof(item, root, hostFile, prior, false);
       restoredControllers.set(item.unit, { pid: observed.pid, candidate: prior.candidate });
@@ -304,8 +312,9 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
       state.adopted.push(item.unit); atomicJson(statePath, state);
     }
   }
-  const statuses = state.owners.map(item => {
-    const observed = ownerStatus(item), proven = restoredControllers.get(item.unit);
+  const refreshed = await ownerStatuses(state.owners);
+  const statuses = state.owners.map((item, index) => {
+    const observed = refreshed[index], proven = restoredControllers.get(item.unit);
     return maintenanceStatus(observed, state, prior => {
       if (proven?.pid !== observed.pid || proven?.candidate !== prior.candidate) ownerRestorationProof(item, root, hostFile, prior, false);
     });
@@ -319,14 +328,14 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
   if (!privileged.ready) return privileged;
   if (mode === 'probe') return { ready: true, state: 'drained', reason: 'Owners are drained; the publication can perform close/migration' };
   for (const item of state.owners) {
-    const status = ownerStatus(item);
+    const status = await ownerStatus(item);
     if (status.value.phase !== 'migrated') {
-      const closed = ownerStatus(item, 'POST', '/close');
+      const closed = await ownerStatus(item, 'POST', '/close');
       if (!closed.available || closed.value.phase !== 'migrated') return { ready: false, state: 'closing', reason: 'Old owner closure/private migration is acknowledged and still settling' };
     }
   }
   // A final invocation observes the restart-safe owner receipts after old DB closure/migration.
-  const complete = state.owners.map(item => ownerStatus(item));
+  const complete = await ownerStatuses(state.owners);
   if (!complete.every(item => item.available && item.value.phase === 'migrated')) return { ready: false, state: 'migrating', reason: 'Private native history migration is pending' };
   if (state.prerequisites !== undefined) {
     if (typeof state.prerequisites !== 'string' || !state.prerequisites.startsWith('/')) throw new Error('Native history prerequisites must name an explicit absolute executable');
