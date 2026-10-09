@@ -67,6 +67,11 @@ export class ReadingAnchor {
 
   afterResize(scroller: HTMLElement) {
     if (!this.reading || !this.latest) return;
+    // Compositor scrolling can arrive before its scroll event.
+    if (scroller.scrollTop !== this.latest.top) {
+      this.latest = capture(scroller);
+      return;
+    }
     this.latest = restoreReadingPosition(scroller, this.latest);
   }
 }
