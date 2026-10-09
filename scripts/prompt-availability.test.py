@@ -68,6 +68,16 @@ class AdmissionProof(unittest.TestCase):
     def test_obsolete_draining_phase_without_a_fence_is_not_restoration(self):
         self.assertEqual(self.inspect()['action'], 'none')
 
+    def test_unset_observer_is_disabled_but_explicit_null_is_a_typed_error(self):
+        config = self.data / 'host.json'
+        config.write_text('{}')
+        result = subprocess.run(['/usr/bin/python3', '-B', watchdog.__file__, str(config)], capture_output=True, text=True, timeout=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config.write_text('{"nativeHistoryAvailabilityOwner":null}')
+        result = subprocess.run(['/usr/bin/python3', '-B', watchdog.__file__, str(config)], capture_output=True, text=True, timeout=2)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stderr)['error']['code'], 'availability-proof-failed')
+
     def test_actual_closure_within_budget_waits(self):
         self.fence()
         self.receipt['admittedAt'] = NOW - 59_999
@@ -95,7 +105,7 @@ class AdmissionProof(unittest.TestCase):
         self.db.commit()
         with self.assertRaisesRegex(ValueError, 'identity'):
             self.inspect()
-        for key, value in (('uid', -1), ('admittedAt', None), ('phase', 'unknown')):
+        for key, value in (('uid', -1), ('legacySource', None), ('admittedAt', None), ('phase', 'unknown')):
             with self.subTest(key=key):
                 prior = self.receipt[key]
                 self.receipt[key] = value
