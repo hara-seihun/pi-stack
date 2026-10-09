@@ -4,6 +4,8 @@ Owner: release maintenance and the owner-local unlock gate, before Remote or Orc
 Implementation: [`scripts/migrate-native-history.mjs`](../scripts/migrate-native-history.mjs).
 Requires Node 24 with `node:sqlite`. The [publication boundary](native-history-boundary.md) invokes it separately for each person's owning Unix user and database pair after the old decoder has acknowledged output and closed writers. The explicit invocation below is also available for maintenance recovery.
 
+[Historical application admission restoration](native-history-application-restoration.md) separately owns positive restoration of isolated application fences left by a previously restored publication. A main fleet receipt alone is not proof for its ledger-declared application databases.
+
 ## Invocation
 
 Stop **all** controllers, supervisors, runners, Voice/Meet participants and other writers of the selected supervisor DB, thread DB and native JSONL files. Keep them stopped until this command returns `ok:true`. Run before the new supervisor's startup/event-journal retirement; startup must not remove source thinking before maintenance sees it.
