@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof, publishedSourceProof } from '../deploy/native-history-closed-owner.mjs';
+import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof, publishedSourceProof, isNativeExecutable } from '../deploy/native-history-closed-owner.mjs';
 import { stageLegacyRemoteIdentity, isLegacyCapturePackage } from '../deploy/native-history-package-identity.mjs';
 const candidate = 'a'.repeat(40), legacySource = 'b'.repeat(40);
 const closed = () => ({ ok: true, value: { LoadState: 'loaded', ActiveState: 'failed', MainPID: '0', ControlGroup: '' } });
@@ -89,6 +89,34 @@ test('live old fleet removes only its fences while accepted provider state conti
   assert.equal(result.value.restorationProof.owner, 'live-old-unit'); assert.equal(result.value.restorationProof.pendingCompletions, 1);
   const after = new DatabaseSync(input.ledgerPath, { readOnly: true }); assert.equal(after.prepare('SELECT state FROM run').get().state, 'running'); after.close();
   assert.equal(readRestoredOwner(input).ok, true); assert.deepEqual(readThread(input).map(row => row.body), ['preserve-me']);
+});
+test('live health observes unlocked databases while kernel identity is checked under the fence transaction', t => {
+  const input = fixture(t, 'fleet'); fence(input);
+  let healthChecks = 0, lockedChecks = 0;
+  const full = () => {
+    const threads = new DatabaseSync(join(input.dataDir, 'threads.sqlite3'));
+    const ledger = new DatabaseSync(input.ledgerPath);
+    try {
+      threads.exec('BEGIN IMMEDIATE; ROLLBACK'); ledger.exec('BEGIN IMMEDIATE; ROLLBACK');
+      healthChecks++; return live(input);
+    } finally { threads.close(); ledger.close(); }
+  };
+  const kernel = () => {
+    const ledger = new DatabaseSync(input.ledgerPath);
+    try { assert.throws(() => ledger.exec('BEGIN IMMEDIATE'), /locked/); lockedChecks++; return live(input); }
+    finally { ledger.close(); }
+  };
+  const restored = restoreLiveOwner(input, full, kernel);
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.equal(healthChecks, 2); assert.equal(lockedChecks, 1);
+  assert.equal(readRestoredOwner(input).ok, true);
+});
+test('serving executable recognizes the installed Bun real binary, not arbitrary launcher names', () => {
+  assert.equal(isNativeExecutable('/usr/local/bin/bun.real'), true);
+  assert.equal(isNativeExecutable('/usr/local/bin/bun'), true);
+  assert.equal(isNativeExecutable('/usr/local/bin/node'), true);
+  assert.equal(isNativeExecutable('/bin/bash'), false);
+  assert.equal(isNativeExecutable('/tmp/not-bun.real'), false);
 });
 test('live source/PID drift before fence release rolls back; postcommit drift is an explicit committed-effect error', t => {
   const input = fixture(t); fence(input); let count = 0;

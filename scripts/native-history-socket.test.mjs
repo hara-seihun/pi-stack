@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { mkdtempSync, lstatSync, existsSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,16 @@ import { join } from 'node:path';
 import { prepareBridgeSocket, probeBridgeSocket } from '../deploy/native-history-bridge.mjs';
 function directory(t) { const root = mkdtempSync(join(tmpdir(), 'history-socket-')); t.after(() => rmSync(root, { recursive: true, force: true })); return root; }
 
+test('Node eval library import does not run the socket probe CLI even when argv names the module', () => {
+  const module = fileURLToPath(new URL('../deploy/native-history-bridge.mjs', import.meta.url));
+  const loaded = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `const m=await import(process.argv[1]); if(typeof m.legacyFleetLedger!=='function')process.exit(1); console.log('imported');`, module],
+    { encoding: 'utf8', timeout: 2000 });
+  assert.equal(loaded.status, 0, loaded.stderr);
+  assert.equal(loaded.stdout.trim(), 'imported');
+  const cli = spawnSync(process.execPath, [module, '--probe-socket', '/tmp/pi-history-definitely-absent.sock'], { encoding: 'utf8', timeout: 2000 });
+  assert.equal(cli.status, 0, cli.stderr); assert.equal(JSON.parse(cli.stdout).value.kind, 'absent');
+});
 test('a second controller cannot unlink or orphan the live maintenance owner', async t => {
   const path = join(directory(t), 'owner.sock');
   const server = createServer((req, res) => res.end('same-owner'));

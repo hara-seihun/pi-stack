@@ -21,6 +21,7 @@ function processStartTicks(pid) {
   if (!/^[0-9]+$/.test(ticks)) throw new Error('Live actor has no stable process generation');
   return ticks;
 }
+export function isNativeExecutable(path) { return ['node', 'bun', 'bun.real'].includes(basename(path)); }
 export function originalEntryProof(input, source, cgroup, namespace) {
   const expectedEntry = join(source, input.mode === 'fleet' ? 'dist/cli.js' : input.mode === 'rooms' ? 'server/rooms-main.ts' : 'server/main.ts');
   const matches = [];
@@ -29,8 +30,7 @@ export function originalEntryProof(input, source, cgroup, namespace) {
     if (!/^[1-9][0-9]*$/.test(pid)) continue;
     try {
       if (statSync(`/proc/${pid}`).uid !== input.uid) continue;
-      const executable = basename(readlinkSync(`/proc/${pid}/exe`));
-      if (executable !== 'node' && executable !== 'bun') continue;
+      if (!isNativeExecutable(readlinkSync(`/proc/${pid}/exe`))) continue;
       const args = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
       const entry = args.find(arg => arg.startsWith('/') && arg.endsWith(`/${input.mode === 'fleet' ? 'dist/cli.js' : input.mode === 'rooms' ? 'server/rooms-main.ts' : 'server/main.ts'}`));
       if (!entry || realpathSync(entry) !== expectedEntry) continue;
@@ -63,7 +63,7 @@ export function publishedSourceProof(path, legacySource, publisherUid) {
     return { ok: true, value: { source, publisherUid } };
   } catch (error) { return failure('source-proof-failed', error instanceof Error ? error.message : String(error)); }
 }
-export function liveUnitProof(input) {
+export function liveUnitIdentityProof(input) {
   try {
     if (!Number.isSafeInteger(input.ownerPid) || input.ownerPid <= 0 || !Number.isSafeInteger(input.healthPort)
       || input.healthPort <= 0 || input.healthPort >= 65536 || typeof input.selectedSource !== 'string'
@@ -92,14 +92,22 @@ export function liveUnitProof(input) {
       if (observed.value.kind === 'live') return failure('bridge-present', 'Live maintenance controller exists; restore through its owning bridge');
       if (observed.value.kind !== 'absent' && observed.value.kind !== 'stale') return failure('bridge-unavailable', 'Unknown maintenance endpoint connection-state proof');
     }
+    return { ok: true, value: { unit: input.unit, pid: input.ownerPid, startTicks, cgroup: fields.ControlGroup,
+      source, publisherUid, healthPort: input.healthPort, namespace, servingEntry } };
+  } catch (error) { return failure('live-proof-failed', error instanceof Error ? error.message : String(error)); }
+}
+export function liveUnitProof(input) {
+  const identity = liveUnitIdentityProof(input);
+  if (!identity.ok) return identity;
+  try {
     const health = spawnSync('curl', ['-fsS', '--max-time', '2', `http://127.0.0.1:${input.healthPort}/v1/health`], { encoding: 'utf8', timeout: 3000, maxBuffer: 16384 });
     if (health.status !== 0) return failure('health-unavailable', 'Actual own-UID old-owner health is unavailable');
     const value = JSON.parse(health.stdout);
     if (value.ok !== true || value.releaseCommit !== input.legacySource) return failure('health-source', 'Live owner is not serving the exact immutable old source');
-    return { ok: true, value: { unit: input.unit, pid: input.ownerPid, startTicks, cgroup: fields.ControlGroup,
-      source, publisherUid, healthPort: input.healthPort, releaseCommit: value.releaseCommit, namespace, servingEntry } };
-  } catch (error) { return failure('live-proof-failed', error instanceof Error ? error.message : String(error)); }
+    return { ok: true, value: { ...identity.value, releaseCommit: value.releaseCommit } };
+  } catch (error) { return failure('health-proof-failed', error instanceof Error ? error.message : String(error)); }
 }
+function kernelIdentity(value) { const { releaseCommit, ...identity } = value; return identity; }
 function sameIdentity(record, identity) { return record?.candidate === identity.candidate && record?.legacySource === identity.legacySource; }
 function ownedFile(path, uid) {
   const info = statSync(path);
@@ -166,8 +174,8 @@ export function readRestoredOwner(input) {
 export function restoreClosedOwner(input, inspectUnit = closedUnitProof) {
   return restoreOwner(input, { kind: 'closed-unit', inspect: () => inspectUnit(input.unit) });
 }
-export function restoreLiveOwner(input, inspectOwner = liveUnitProof) {
-  return restoreOwner(input, { kind: 'live-old-unit', inspect: () => inspectOwner(input) });
+export function restoreLiveOwner(input, inspectOwner = liveUnitProof, inspectIdentity = inspectOwner === liveUnitProof ? liveUnitIdentityProof : inspectOwner) {
+  return restoreOwner(input, { kind: 'live-old-unit', inspect: () => inspectOwner(input), inspectLocked: () => inspectIdentity(input) });
 }
 function restoreOwner(input, route) {
   const databases = [];
@@ -210,9 +218,9 @@ function restoreOwner(input, route) {
       fleet = fleetFence(ledger, identity);
       if (route.kind === 'closed-unit' && fleet.pendingCompletions !== 0) return failure('accepted-completions', `Accepted fleet completions remain pending: ${fleet.pendingCompletions}`);
     }
-    const current = route.inspect();
+    const current = route.kind === 'live-old-unit' ? route.inspectLocked() : route.inspect();
     if (!current.ok) return current;
-    if (route.kind === 'live-old-unit' && JSON.stringify(current.value) !== JSON.stringify(initial.value)) return failure('owner-generation-changed', 'Live owner source/PID/namespace changed before fence release');
+    if (route.kind === 'live-old-unit' && JSON.stringify(kernelIdentity(current.value)) !== JSON.stringify(kernelIdentity(initial.value))) return failure('owner-generation-changed', 'Live owner source/PID/namespace changed before fence release');
     if (thread === 'identity-bound') threads.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE pi_history_bridge;');
     if (ledger) {
       if (fleet.fence === 'identity-bound') {

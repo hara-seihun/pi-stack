@@ -404,7 +404,8 @@ export async function installLegacyMaintenance(options) {
   return true;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const evalInvocation = process.execArgv.some(arg => ['-e', '--eval', '-p', '--print'].includes(arg) || arg.startsWith('--eval=') || arg.startsWith('--print='));
+if (!evalInvocation && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv.length !== 4 || process.argv[2] !== '--probe-socket') {
     console.error('Expected --probe-socket PATH'); process.exitCode = 64;
   } else {
