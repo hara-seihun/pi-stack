@@ -305,7 +305,7 @@ for (const [retainedHandle, startupFailure] of [[false, false], [true, false], [
     async detach(){this.closed=true;this.db.close();return {ok:true}}
   }`);
   writeFileSync(join(root, 'daemon.js'), `import {once} from 'node:events';import {ThreadService} from './api.js'; export class Daemon {
-    constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0};this.reconciling=false;} loadManifest(){} fillCapacity(){} reconcile(){}
+    constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0,start(){}};this.reconciling=false;} loadManifest(){} fillCapacity(){} reconcile(){}
     async start(){const resume=once(process,'SIGUSR1');console.log('CONSTRUCTED');await resume;${startupFailure ? "throw new Error('Another publication owns the native history observation');" : "await this.threads.start();console.log('STARTED');await once(process,'SIGTERM');await this.threads.detach();"}}
   }`);
   const harness = join(root, 'shutdown.mjs');

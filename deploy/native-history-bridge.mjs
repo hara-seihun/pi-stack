@@ -231,7 +231,6 @@ export async function installLegacyMaintenance(options) {
   if (receipt.phase === 'closing') save('draining');
   const services = new Set(), controls = new Set(), daemons = new Set(), detaching = new WeakSet(), startedServices = new WeakSet();
   const dispatchPaused = new WeakSet(), daemonDispatchPaused = new WeakSet();
-  let handingOff = false;
   let controlServer, autoTimer;
   let ownerQueue = Promise.resolve();
   const ownerOperation = (action, kind) => {
@@ -264,6 +263,7 @@ export async function installLegacyMaintenance(options) {
     controlServer?.unref(); controlServer?.closeIdleConnections();
   }
   let restoreDaemonDispatch = () => {};
+  const restoreCompletionDispatch = new Map();
   if (options.mode === 'fleet' && receipt.phase === 'draining') {
     if (typeof options.ledgerPath !== 'string' || !options.ledgerPath.startsWith('/')) throw new Error('Fleet maintenance needs its exact owner ledger');
     receipt.ledgerPath = options.ledgerPath;
@@ -279,7 +279,15 @@ export async function installLegacyMaintenance(options) {
         || !this.threads.options.databasePath.startsWith('/')) throw new Error('Legacy daemon uses an uninstrumented or unbound thread service');
       services.add(this.threads);
       daemons.add(this);
-      releaseFleetLedger();
+      daemonDispatchPaused.add(this);
+      // The predecessor's provider cohort is already empty before adoption.
+      // Its ordinary startup loop must not restart queued receipts into the
+      // retiring generation. Intake stays in the original request handlers.
+      const pool = this.completionPool, daemon = this;
+      if (typeof pool?.start !== 'function') throw new Error('Legacy completion owner has no finite dispatch seam');
+      const completionStart = pool.start;
+      pool.start = function(...input) { if (!daemonDispatchPaused.has(daemon)) return completionStart.apply(this, input); };
+      restoreCompletionDispatch.set(this, () => { pool.start = completionStart; daemonDispatchPaused.delete(daemon); });
       try { return await start.apply(this, args); }
       catch (error) { receipt.error = `Legacy daemon startup failed: ${String(error)}`; throw error; }
       finally {
@@ -307,7 +315,10 @@ export async function installLegacyMaintenance(options) {
   prototype.start = async function(...args) {
     services.add(this);
     installObservation(this, identity);
-    if (handingOff) dispatchPaused.add(this);
+    // Freeze execution dispatch, not request admission, before startup can
+    // reconcile queued work. Existing runners are attached with their exact
+    // source decoder and allowed to finish; accepted inputs stay in the ledger.
+    dispatchPaused.add(this);
     const result = await originalStart.apply(this, args);
     if (result?.ok === true) {
       startedServices.add(this);
@@ -382,16 +393,12 @@ export async function installLegacyMaintenance(options) {
       const current = await status(); if (!current.ready) return current;
       const active = activeServices();
       if (active === null || !active.length) return awaitingReplacement();
-      handingOff = true;
       for (const service of active) dispatchPaused.add(service);
       for (const daemon of daemons) daemonDispatchPaused.add(daemon);
       const raced = active.some(service => Object.entries(serviceBusy(service)).some(([key, count]) => key !== 'work' && count !== 0))
         || [...daemons].some(daemon => daemon.completionPool.size || daemon.reconciling);
       if (raced) {
-        handingOff = false;
-        for (const service of active) dispatchPaused.delete(service);
-        for (const daemon of daemons) daemonDispatchPaused.delete(daemon);
-        return { ...receipt, ready: false, reason: 'In-flight dispatch raced the short controller replacement; intake remains open' };
+        return { ...receipt, ready: false, reason: 'A retiring cohort operation is still settling; intake remains open and successor dispatch stays queued' };
       }
       save('closing');
       for (const service of active) { const result = await service.close(); if (!result.ok) throw new Error(`Legacy owner close refused: ${result.error.message}`); }
@@ -453,6 +460,8 @@ export async function installLegacyMaintenance(options) {
       for (const service of services) if (!service.closed) removeFence(service, identity);
       if (options.mode === 'fleet') releaseFleetLedger();
       restoreDaemonDispatch();
+      for (const restore of restoreCompletionDispatch.values()) restore();
+      for (const service of services) dispatchPaused.delete(service);
       prototype.start = originalStart; prototype.attach = originalAttach; prototype.wake = originalWake;
       if (originalDrain) prototype.drain = originalDrain;
       if (originalDetach) prototype.detach = originalDetach;

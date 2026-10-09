@@ -178,6 +178,15 @@ export function maintenanceStatus(status, identity, proveRestored) {
 }
 export function allOwnersReady(owners) { return owners.every(item => item.available && (item.value.phase === 'migrated' || item.value.ready === true)); }
 
+/** Every ready owner advances independently; a busy neighbour cannot retain its custody. */
+export async function closeReadyOwners(owners, statuses, close) {
+  return Promise.all(owners.map(async (owner, index) => {
+    const status = statuses[index];
+    if (!status?.available || status.value.phase === 'migrated' || status.value.ready !== true) return status;
+    return close(owner);
+  }));
+}
+
 export async function boundary({ hostFile, root, candidate, mode = 'advance', stateRoot = '/srv/pi/.pi-stack-maintenance/native-history', remotePointer = '/srv/pi/pi-remote', orchestratorPointer = '/srv/pi/pi-orchestrator', personsDir = '/var/lib/pi-remote/persons' }) {
   if (process.getuid() !== 0) throw new Error('Native history boundary requires the host deployment administrator');
   if (!/^[0-9a-f]{40}$/.test(candidate)) throw new Error('Invalid native history candidate');
@@ -277,9 +286,7 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
   if (state.phase === 'restored' || state.phase === 'restoring') throw new Error('Restoring native history attempt cannot advance; finish restoration before a new publication identity');
   if (state.phase === 'ready' || state.phase === 'released') return { ready: true, state: state.phase };
   if (mode === 'probe' && state.phase === 'planned') {
-    const admission = fleetCompletionBarrier(state.owners.filter(item => item.mode === 'fleet'), item => fleetAdmission(item, root, { candidate, legacySource: state.legacySource }, 'probe'));
-    if (!admission.ready) return { ...admission, state: 'fleet-completions', reason: 'Accepted old fleet completions are still running' };
-    return { ready: true, state: 'awaiting-adoption', reason: 'The publication can adopt the preserved old native owners' };
+    return { ready: true, state: 'awaiting-adoption', reason: 'The publication can establish finite retiring dispatch cohorts while intake stays open' };
   }
   const restoredControllers = new Map();
   const observations = await ownerStatuses(state.owners);
@@ -293,12 +300,13 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
   if (mode !== 'probe') {
     const fleets = state.owners.filter(item => item.mode === 'fleet' && !state.adopted.includes(item.unit));
     const identity = { candidate, legacySource: state.legacySource };
-    const natural = fleetCompletionBarrier(fleets, item => fleetAdmission(item, root, identity, 'probe'));
-    if (!natural.ready) return { ...natural, state: 'fleet-completions', reason: 'Old provider work is running; ordinary intake and dispatch remain open' };
-    const dispatch = fleetCompletionBarrier(fleets, item => fleetAdmission(item, root, identity));
-    if (!dispatch.ready) {
-      for (const item of fleets) fleetAdmission(item, root, identity, 'restore');
-      return { ...dispatch, state: 'fleet-completions', reason: 'Provider dispatch raced the short replacement; normal dispatch has resumed' };
+    // Establish a finite retiring generation BEFORE observing idleness. New
+    // submissions stay accepted in the ledger, but cannot enlarge this cohort.
+    const fleetReady = new Set();
+    for (const item of fleets) {
+      const proof = fleetAdmission(item, root, identity, 'prepare');
+      if (proof.prepared !== true) throw new Error(`Fleet dispatch cohort was not established for ${item.unit}`);
+      if (proof.ready === true) fleetReady.add(item.unit);
     }
     stageRemote(state.legacyRemote, state.remoteStage, state.manifestPath);
     stageFleet(state.legacyOrchestrator, state.fleetStage, state.manifestPath);
@@ -307,7 +315,7 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
       selectPointer(remotePointer, state.remoteStage); selectPointer(orchestratorPointer, state.fleetStage);
       state.phase = 'adopting'; atomicJson(statePath, state);
     }
-    for (const item of state.owners) if (!state.adopted.includes(item.unit)) {
+    for (const item of state.owners) if (!state.adopted.includes(item.unit) && (item.mode !== 'fleet' || fleetReady.has(item.unit))) {
       command('systemctl', [item.mode === 'fleet' ? 'restart' : 'reload', '--no-block', item.unit]);
       state.adopted.push(item.unit); atomicJson(statePath, state);
     }
@@ -323,20 +331,26 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     if (item.value.error) throw new Error(`Private native history maintenance failed: ${item.value.error}`);
     if (item.value.phase === 'restored') throw new Error('An owner restored its admission; restore the whole publication boundary before another candidate');
   }
-  if (!allOwnersReady(statuses)) return { ready: false, state: state.phase, owners: statuses, reason: 'Old accepted work or output remains with its legacy owner' };
-  const privileged = rootBoundary('--probe');
-  if (!privileged.ready) return privileged;
-  if (mode === 'probe') return { ready: true, state: 'drained', reason: 'Owners are drained; the publication can perform close/migration' };
-  for (const item of state.owners) {
-    const status = await ownerStatus(item);
-    if (status.value.phase !== 'migrated') {
-      const closed = await ownerStatus(item, 'POST', '/close');
-      if (!closed.available || closed.value.phase !== 'migrated') return { ready: false, state: 'closing', reason: 'Old owner closure/private migration is acknowledged and still settling' };
+  if (mode === 'probe') {
+    const identity = { candidate, legacySource: state.legacySource };
+    const adoptable = state.owners.some(item => item.mode === 'fleet' && !state.adopted.includes(item.unit)
+      && fleetAdmission(item, root, identity, 'probe').ready === true);
+    const closable = statuses.some(item => item.available && item.value.phase !== 'migrated' && item.value.ready === true);
+    if (adoptable || closable) return { ready: true, state: 'owner-progress', reason: 'An individual retiring owner is ready to advance' };
+    if (!statuses.every(item => item.available && item.value.phase === 'migrated')) {
+      return { ready: false, state: state.phase, owners: statuses, reason: 'Finite retiring execution cohorts are settling; newly accepted work stays queued for the successor' };
     }
+    const privileged = rootBoundary('--probe');
+    return privileged.ready ? { ready: true, state: 'drained' } : privileged;
   }
+  await closeReadyOwners(state.owners, statuses, item => ownerStatus(item, 'POST', '/close'));
+  // No owner's native inode is replaced while its writer lives. Other owners
+  // may still be busy; that does not postpone the ready owner's migration.
   // A final invocation observes the restart-safe owner receipts after old DB closure/migration.
   const complete = await ownerStatuses(state.owners);
-  if (!complete.every(item => item.available && item.value.phase === 'migrated')) return { ready: false, state: 'migrating', reason: 'Private native history migration is pending' };
+  if (!complete.every(item => item.available && item.value.phase === 'migrated')) return { ready: false, state: 'migrating', owners: complete, reason: 'Finite retiring owner cohorts are settling; ready owners have already advanced' };
+  const privileged = rootBoundary('--probe');
+  if (!privileged.ready) return privileged;
   if (state.prerequisites !== undefined) {
     if (typeof state.prerequisites !== 'string' || !state.prerequisites.startsWith('/')) throw new Error('Native history prerequisites must name an explicit absolute executable');
     const info = statSync(state.prerequisites);
