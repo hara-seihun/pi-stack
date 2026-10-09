@@ -224,7 +224,7 @@ function hasCapacityLedger(database) {
 }
 
 function hasCapacityMeasurements(database) {
-  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_capacity_measurement'").get() !== undefined;
+  return database.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('workspace_capacity_measurement','workspace_capacity_repricing')").get().count === 2;
 }
 
 function hasReassignmentLedger(database) {
@@ -247,6 +247,9 @@ function initializeRegistry(database) {
   ); CREATE INDEX IF NOT EXISTS workspace_capacity_device ON workspace_capacity(device_id)`);
   database.exec(`CREATE TABLE IF NOT EXISTS workspace_capacity_measurement (
     workspace_id TEXT PRIMARY KEY, measurement_json TEXT NOT NULL
+  ); CREATE TABLE IF NOT EXISTS workspace_capacity_repricing (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+    old_plan_json TEXT NOT NULL, new_plan_json TEXT NOT NULL, measurement_json TEXT NOT NULL
   )`);
   if (database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
     database.exec("PRAGMA journal_mode = WAL");
@@ -914,7 +917,7 @@ function gitStatusExcludingNested(record, args, nestedWorkspaces = []) {
 function gitDisposition(record, nestedWorkspaces = []) {
   const lines = gitStatusExcludingNested(record, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=normal"], nestedWorkspaces).split("\n");
   const changed = lines.filter((line) => line && !line.startsWith("!! "));
-  if (changed.length > 0) return { safe: false, reason: `working tree has changes: ${changed.slice(0, 8).join(" | ")}` };
+  if (changed.length > 0) return { safe: false, sourceRetention: true, reason: `working tree has changes: ${changed.slice(0, 8).join(" | ")}` };
   const nestedRelativePaths = nestedWorkspaces.map((workspace) => path.relative(record.path, workspace));
   const ignored = lines
     .filter((line) => line.startsWith("!! "))
@@ -923,7 +926,6 @@ function gitDisposition(record, nestedWorkspaces = []) {
       const candidate = path.resolve(record.path, line.slice(3).replace(/\/$/u, ""));
       try { return existsSync(candidate) && directoryHasEntries(candidate); } catch { return true; }
     });
-  if (ignored.length > 0) return { safe: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}` };
   const head = git(record.path, ["rev-parse", "HEAD"]);
   const refs = record.checkoutType === "clone"
     ? git(record.path, ["for-each-ref", "--format=%(refname)", "refs/heads"])
@@ -937,9 +939,10 @@ function gitDisposition(record, nestedWorkspaces = []) {
     const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes", ...durableSource]));
     if (count > 0) local.push(`${ref}:${count}`);
   }
-  if (local.length > 0) return { safe: false, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
-  if (head === record.durableSourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };
-  return { safe: true, reason: "every local branch commit exists on a remote ref or in durable source ancestry", head };
+  if (local.length > 0) return { safe: false, sourceRetention: true, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
+  if (ignored.length > 0) return { safe: false, sourceRetention: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}`, head };
+  if (head === record.durableSourceCommit) return { safe: true, sourceRetention: false, reason: "checkout remains at its durable source commit", head };
+  return { safe: true, sourceRetention: false, reason: "every local branch commit exists on a remote ref or in durable source ancestry", head };
 }
 
 function gcDestination(statePath, record, suffix) {
@@ -1185,6 +1188,7 @@ function inspectRecord(record, options = {}) {
   return {
     classification: disposition.safe ? "reclaimable" : "repair-required",
     reason: disposition.reason,
+    sourceRetention: disposition.sourceRetention,
     processes,
     containers: docker.references,
     systemdUnits: systemd.references,
@@ -1215,6 +1219,11 @@ function reconcileRecord(database, record, options) {
   }
   if (inspection.classification === "referenced" || inspection.classification === "blocked") {
     if (options.execute) updateState(database, record, inspection.classification, inspection.reason);
+    return { record, inspection, action: "none" };
+  }
+  if (options.execute && options.reapExpired && options.preserveRuntime
+    && inspection.classification === "repair-required" && inspection.sourceRetention) {
+    updateState(database, record, "repair-required", inspection.reason);
     return { record, inspection, action: "none" };
   }
   let removedCaches = [];
@@ -1294,13 +1303,15 @@ function groupReconciliation(database, records, options) {
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
   }
 
+  const preserveKnownSource = options.reapExpired && options.preserveRuntime
+    && inspections.some((inspection) => inspection.classification === "repair-required" && inspection.sourceRetention);
   const removedCaches = new Map();
-  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
   }
-  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     records.forEach((record, index) => {
       if (inspections[index].classification !== "missing") {
         removedCaches.set(record.id, stripCaches(record, options.statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id)));
@@ -1310,7 +1321,7 @@ function groupReconciliation(database, records, options) {
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
   }
 
-  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
@@ -2543,6 +2554,49 @@ function pruneReleased(database, now = Date.now(), root) {
   return pruned;
 }
 
+function repriceCapacityCommand(database, args, statePath) {
+  assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "json"]);
+  const intent = capacityIntent(args);
+  if (intent === null) fail("reprice-capacity requires explicit intent, headroom and remaining growth");
+  const selected = recordBy(database, selectorFrom(args));
+  return withWorkspaceLock(database, selected.path, () => {
+    const record = recordBy(database, { id: selected.id });
+    if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) fail(`workspace cannot reprice capacity from state ${record.state}`);
+    const row = database.prepare("SELECT device_id,plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
+    if (row === undefined) fail("capacity repricing requires an existing unestimated plan");
+    const oldPlan = JSON.parse(row.plan_json);
+    if (oldPlan.intent !== "unestimated") fail("capacity repricing only accepts unestimated plans; an existing priced budget is immutable");
+    capacityRequirement(oldPlan, []);
+    const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
+    if (!measurement.ok) fail(`capacity repricing requires a fresh allocated-block sample: ${measurement.error}; run measure-capacity first`);
+    if (record.sourceCommit === null) fail("capacity repricing requires immutable source custody");
+    const sourceDirectory = git(record.path, ["rev-parse", "--absolute-git-dir"]);
+    const plan = sourceCapacityPlan(record.path, record.sourceCommit, intent, statfsSync(record.path).bsize, sourceDirectory);
+    const sample = JSON.parse(database.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id).measurement_json);
+    const sampledGrowthBytes = Math.max(0, sample.bytes - plan.constructionBytes);
+    plan.completedAllocationBytes = plan.constructionBytes;
+    plan.growthBytes += sampledGrowthBytes;
+    capacityRequirement(plan, []);
+    plan.repricing = { priorIntent: oldPlan.intent, sampledGrowthBytes, remainingGrowthBytes: intent.growthBytes,
+      measurementStartedAt: sample.startedAt, measurementCompletedAt: sample.completedAt, marginBytes: measurement.marginBytes };
+    withResourceLock(statePath, `capacity:${row.device_id}`, () => {
+      plan.admission = assertCapacity(record.root, args, database, record.path, {
+        ...plan, constructionBytes: 0, growthBytes: remainingCapacityBytes(plan, record.state, measurement),
+      });
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const changed = database.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=? AND plan_json=?")
+          .run(JSON.stringify(plan), record.id, row.plan_json).changes;
+        if (changed !== 1) fail("capacity repricing conflicts with another plan change");
+        database.prepare("INSERT INTO workspace_capacity_repricing(workspace_id,occurred_at,old_plan_json,new_plan_json,measurement_json) VALUES(?,?,?,?,?)")
+          .run(record.id, Date.now(), row.plan_json, JSON.stringify(plan), JSON.stringify(sample));
+        database.exec("COMMIT");
+      } catch (error) { database.exec("ROLLBACK"); throw error; }
+    });
+    print(creationRecord(database, record.id), bool(args, "json"));
+  }, selected.groupId);
+}
+
 function measureCapacityCommand(database, args, statePath) {
   assertOnly(args, ["root", "path", "id", "budget-ms", "json"]);
   const budgetMs = numberFlag(args, "budget-ms", 40_000);
@@ -2559,7 +2613,7 @@ function measureCapacityCommand(database, args, statePath) {
     const results = [];
     for (const row of rows) {
       const plan = JSON.parse(row.plan_json);
-      if (plan.growthBytes === 0 && row.state !== "creating") continue;
+      if (plan.intent !== "unestimated" && plan.growthBytes === 0 && row.state !== "creating") continue;
       if (Date.now() >= deadline) { results.push({ path: row.path, status: "deferred" }); continue; }
       const store = sample => {
         database.prepare(`INSERT OR REPLACE INTO workspace_capacity_measurement(workspace_id,measurement_json)
@@ -2734,6 +2788,7 @@ function help() {
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace measure-capacity [--root PATH | --path PATH | --id ID] [--budget-ms 40000] [--json]
+  agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
   agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
   agent-workspace list ...                    alias for status
@@ -2810,6 +2865,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     }
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
     else if (commandName === "measure-capacity") measureCapacityCommand(database, args, statePath);
+    else if (commandName === "reprice-capacity") repriceCapacityCommand(database, args, statePath);
     else if (commandName === "maintain") maintainCommand(database, args);
     else if (commandName === "status" || commandName === "list") statusCommand(database, args);
     else {
